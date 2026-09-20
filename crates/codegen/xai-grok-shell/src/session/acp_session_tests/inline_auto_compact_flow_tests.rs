@@ -1804,6 +1804,42 @@ async fn test_compact_on_error_uses_session_window_without_model_metadata() {
         })
         .await;
 }
+/// Thought/output hit max_tokens: compact (or stop thought) before stranding
+/// L1 in "Try asking for a shorter answer", even when context is not full.
+#[tokio::test(flavor = "current_thread")]
+async fn test_compact_on_error_max_tokens_truncation_compacts_when_window_has_room() {
+    let operator_chrome =
+        "Response truncated – The model hit its output limit. Try asking for a shorter answer.";
+    assert!(operator_chrome.contains(
+        "Response truncated – The model hit its output limit. Try asking for a shorter answer."
+    ));
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (gateway_tx, _) = mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
+            let (persistence_tx, _) = mpsc::unbounded_channel::<PersistenceMsg>();
+            let actor = create_test_actor(150_000, 1_000_000, 85, gateway_tx, persistence_tx).await;
+            let err = xai_grok_sampler::SamplingErrorInfo {
+                kind: xai_grok_sampler::SamplingErrorKind::MaxTokensTruncation,
+                status_code: None,
+                message: "response truncated by max_tokens".into(),
+                is_retryable: false,
+                retry_after_secs: None,
+                should_retry: None,
+                error_code: None,
+                model_metadata: None,
+                empty_response_context: None,
+                doom_loop_triggers: None,
+                doom_loop_aborted_at_chunk: None,
+                credential: xai_grok_sampling_types::SentCredential::Unknown,
+            };
+            assert!(
+                actor.should_compact_on_error(&err).await,
+                "max_tokens truncation must compact thought before the output cap strands L1"
+            );
+        })
+        .await;
+}
 /// A fresh session emits `x-compactions-remaining: 1`; once the chat-state
 /// reflects a compaction, the next reconstructed config emits `0`.
 #[tokio::test(flavor = "current_thread")]

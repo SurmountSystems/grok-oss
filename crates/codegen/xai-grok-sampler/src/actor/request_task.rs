@@ -736,7 +736,8 @@ async fn apply_retry_decision(
                 | SamplingError::IdleTimeout { .. }
                 | SamplingError::EmptyResponse { .. }
                 | SamplingError::MaxTokensTruncation
-                | SamplingError::DoomLoopDetected { .. } => StripReason::PayloadHeuristic,
+                | SamplingError::DoomLoopDetected { .. }
+                | SamplingError::RepetitiveGeneration { .. } => StripReason::PayloadHeuristic,
             };
             tracing::warn!(
                 stripped = stripped_urls.len(),
@@ -1143,6 +1144,10 @@ fn synthesize_from_info(info: &SamplingErrorInfo) -> SamplingError {
         SamplingErrorKind::DoomLoopDetected => SamplingError::DoomLoopDetected {
             triggers: info.doom_loop_triggers.clone().unwrap_or_default(),
             aborted_at_chunk: info.doom_loop_aborted_at_chunk,
+        },
+        SamplingErrorKind::RepetitiveGeneration => SamplingError::RepetitiveGeneration {
+            channel: String::new(),
+            aborted_at_chunk: None,
         },
     }
 }

@@ -23,6 +23,7 @@ pub(crate) enum WireErrorType {
     Serialization,
     RateLimited,
     MaxTokensTruncation,
+    RepetitiveGeneration,
     Other,
 }
 
@@ -44,6 +45,7 @@ impl WireErrorType {
             Some("serialization") => Self::Serialization,
             Some("rate_limited") => Self::RateLimited,
             Some("max_tokens_truncation") => Self::MaxTokensTruncation,
+            Some("repetitive_generation") => Self::RepetitiveGeneration,
             _ => Self::Other,
         }
     }
@@ -269,8 +271,13 @@ fn classify(status: Option<u16>, wire: WireErrorType) -> Classified {
         ),
         WireErrorType::MaxTokensTruncation => (
             "Response truncated",
-            Some("Try asking for a shorter answer."),
+            None,
             Some("The model hit its output limit."),
+        ),
+        WireErrorType::RepetitiveGeneration => (
+            "Stopped: repeating sentence",
+            None,
+            Some("The reply was repeating the same sentence."),
         ),
         WireErrorType::RateLimited => (
             "Rate limited",
@@ -435,6 +442,33 @@ pub(crate) fn is_image_transcription_transport_miss(raw: &str) -> bool {
 /// Not billing.
 pub(crate) fn is_transport_send_miss(raw: &str) -> bool {
     raw.to_ascii_lowercase().contains("error sending request")
+}
+
+/// Output-cap truncation (`max_tokens_truncation` / `response truncated by
+/// max_tokens`). Thought dumps hit this; it is not the Operator writing a
+/// long prompt.
+pub(crate) fn is_max_tokens_truncation(error_type: Option<&str>, raw: &str) -> bool {
+    if WireErrorType::parse(error_type) == WireErrorType::MaxTokensTruncation {
+        return true;
+    }
+    let lower = raw.to_ascii_lowercase();
+    lower.contains("max_tokens")
+        || lower.contains("try asking for a shorter answer")
+        || lower.contains("the model hit its output limit")
+        || lower.contains("response truncated")
+}
+
+/// Dest/resume report already written and nested implementors still running:
+/// a safety refusal or thought output-cap is not a failed Operator request.
+pub(crate) fn written_report_with_nested_running_is_not_turn_failure(
+    nested_implementers_running: bool,
+    had_output: bool,
+    error_type: Option<&str>,
+    message: &str,
+) -> bool {
+    nested_implementers_running
+        && had_output
+        && (is_safety_refusal_message(message) || is_max_tokens_truncation(error_type, message))
 }
 
 /// Model-host safety refusal, not HTTP 403 endpoint forbid and not a tool
@@ -1117,8 +1151,77 @@ mod tests {
             WireErrorType::parse(Some("rate_limited")),
             WireErrorType::RateLimited
         );
+        assert_eq!(
+            WireErrorType::parse(Some("max_tokens_truncation")),
+            WireErrorType::MaxTokensTruncation
+        );
+        assert_eq!(
+            WireErrorType::parse(Some("repetitive_generation")),
+            WireErrorType::RepetitiveGeneration
+        );
         assert_eq!(WireErrorType::parse(Some("nope")), WireErrorType::Other);
         assert_eq!(WireErrorType::parse(None), WireErrorType::Other);
+    }
+
+    /// Operator screenshot 2026-09-20: after dest completeOk (Worked for 48s),
+    /// L1 thought 29m26s then yellow
+    /// `Response truncated – The model hit its output limit. Try asking for a shorter answer.`
+    /// The Operator did not write a long prompt. Do not tell them to ask for a
+    /// shorter answer.
+    #[test]
+    fn max_tokens_truncation_must_not_tell_operator_to_ask_for_a_shorter_answer() {
+        let operator_chrome =
+            "Response truncated – The model hit its output limit. Try asking for a shorter answer.";
+        assert!(operator_chrome.contains(
+            "Response truncated – The model hit its output limit. Try asking for a shorter answer."
+        ));
+        assert!(operator_chrome.contains("Try asking for a shorter answer"));
+        let formatted = format_request_failure(
+            None,
+            Some("max_tokens_truncation"),
+            "response truncated by max_tokens",
+        );
+        let msg = formatted.message();
+        assert!(
+            !msg.contains("Try asking for a shorter answer"),
+            "must not blame the Operator for a long prompt, got {msg}"
+        );
+        assert!(
+            !msg.contains(operator_chrome),
+            "must not paint the Operator-blaming screenshot chrome, got {msg}"
+        );
+        assert!(
+            is_max_tokens_truncation(
+                Some("max_tokens_truncation"),
+                "response truncated by max_tokens"
+            ),
+            "wire type max_tokens_truncation must classify as output-cap truncation"
+        );
+    }
+
+    /// Isolated Preview 2026-09-20 looped
+    /// `Spawn dests of dest encoder skip. I'll spawn dests of dest encoder skip.`
+    /// The stop must not paint Request denied (403).
+    #[test]
+    fn dest_encoder_skip_repetitive_generation_is_not_request_denied_403() {
+        assert!(
+            "Spawn dests of dest encoder skip. I'll spawn dests of dest encoder skip."
+                .contains("Spawn dests of dest encoder skip")
+        );
+        let formatted = format_request_failure(
+            None,
+            Some("repetitive_generation"),
+            "Stopped: the reply was repeating the same sentence.",
+        );
+        let msg = formatted.message();
+        assert!(
+            !msg.contains("403") && !msg.contains("Request denied"),
+            "must not look like HTTP 403, got {msg}"
+        );
+        assert!(
+            msg.contains("repeating") || msg.contains("sentence"),
+            "must name the repeating-sentence stop, got {msg}"
+        );
     }
 
     #[test]

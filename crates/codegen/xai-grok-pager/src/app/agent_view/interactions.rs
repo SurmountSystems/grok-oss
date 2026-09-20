@@ -325,6 +325,7 @@ impl AgentView {
             qv.focus = QuestionFocus::Navigation;
         }
         self.last_prompt_click_ms = None;
+        self.prompt.clear_paste_chip_double_click();
     }
     /// Handle key input when the question view is active.
     ///
@@ -357,6 +358,7 @@ impl AgentView {
                     }
                     qv.focus = QuestionFocus::Navigation;
                     self.last_prompt_click_ms = None;
+                    self.prompt.clear_paste_chip_double_click();
                     return InputOutcome::Changed;
                 }
                 match self.prompt.route_enter(key) {
@@ -1250,7 +1252,7 @@ impl AgentView {
         self.hit_question_scrollbar.clear();
         self.inline_prompt_area = None;
         self.last_question_click = None;
-        self.last_prompt_click_ms = None;
+        self.clear_prompt_double_click_pairing();
     }
     /// Answer the ACTIVE question of this agent's pending
     /// `AskUserQuestion` from the dashboard peek panel.

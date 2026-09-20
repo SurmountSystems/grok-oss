@@ -71,5 +71,7 @@ pub use retry::{
     retry_backoff_with_jitter,
 };
 pub use sampling_log::AuthInfo;
-pub use stream::{collect_response, stream_chat_completions, stream_messages, stream_responses};
+pub use stream::{
+    collect_response, first_token_wait, stream_chat_completions, stream_messages, stream_responses,
+};
 pub use types::RequestId;

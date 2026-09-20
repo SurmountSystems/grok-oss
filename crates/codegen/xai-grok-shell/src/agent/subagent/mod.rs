@@ -47,6 +47,95 @@ use xai_grok_workspace::file_system::AsyncFileSystem;
 use xai_hunk_tracker::HunkTrackerHandle;
 mod handle_request;
 mod nested_spawn_prompt;
+/// Nested implementor fail-open for a transient HTTP 500 during token generation.
+///
+/// Sampler retries that 500 with the transport cap. After the turn still
+/// fails, do not Shutdown / finish-as-dead the nested session. Leave it live
+/// so the same specialist can resume. Idle timeout and context-length 500s
+/// still complete the nested run as failed.
+///
+/// Lives in this already-tracked file so the flake NAR includes it. Do not
+/// split it back into an untracked sibling `.rs`.
+mod token_generation_fail_open {
+    use xai_grok_sampling_types::is_token_generation_internal_error;
+
+    /// Chrome after a nested turn error. Fail-open for token-generation 500:
+    /// `pending_kill` false, `finished` false, no session Shutdown.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(crate) struct NestedSessionAfterError {
+        pub pending_kill: bool,
+        pub finished: bool,
+        pub shutdown: bool,
+    }
+
+    /// Named contract: `API error (status 500 Internal Server Error): error: Internal error during token generation`
+    /// must not kill the nested implementor session.
+    pub(crate) fn nested_session_after_turn_error(error: &str) -> NestedSessionAfterError {
+        if is_token_generation_internal_error(error) {
+            NestedSessionAfterError {
+                pending_kill: false,
+                finished: false,
+                shutdown: false,
+            }
+        } else {
+            NestedSessionAfterError {
+                pending_kill: false,
+                finished: true,
+                shutdown: true,
+            }
+        }
+    }
+
+    pub(crate) fn keep_nested_session_after_turn_error(error: Option<&str>) -> bool {
+        error.is_some_and(|e| !nested_session_after_turn_error(e).shutdown)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn http_500_token_generation_does_not_kill_nested_implementor_session() {
+            let quoted = "API error (status 500 Internal Server Error): error: Internal error during token generation";
+            let chrome = nested_session_after_turn_error(quoted);
+            assert!(
+                !chrome.pending_kill,
+                "token-generation 500 must not pending_kill the nested session"
+            );
+            assert!(
+                !chrome.finished,
+                "nested session must not finish-as-dead from this 500 alone"
+            );
+            assert!(
+                !chrome.shutdown,
+                "must not Shutdown the nested session on token-generation 500"
+            );
+            assert!(keep_nested_session_after_turn_error(Some(quoted)));
+            assert!(keep_nested_session_after_turn_error(Some(
+                "Session error: Internal error: error: Internal error during token generation"
+            )));
+        }
+
+        #[test]
+        fn context_length_500_and_idle_timeout_still_complete_nested_as_failed() {
+            let too_long = "API error (status 500 Internal Server Error): the prompt is too long for this model's context window";
+            let chrome = nested_session_after_turn_error(too_long);
+            assert!(!chrome.pending_kill);
+            assert!(
+                chrome.finished && chrome.shutdown,
+                "context-length 500 is deterministic; nested run still completes failed"
+            );
+            let idle = nested_session_after_turn_error(
+                "No response from model for 300s, the model may be stuck",
+            );
+            assert!(idle.finished && idle.shutdown);
+            assert!(!keep_nested_session_after_turn_error(None));
+            assert!(!keep_nested_session_after_turn_error(Some(
+                "structured output validation failed"
+            )));
+        }
+    }
+}
 pub(crate) use handle_request::run_shell_child;
 /// How the child session's initial context was bootstrapped.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -583,7 +672,9 @@ pub(crate) fn present_child_completion(
             .load(std::sync::atomic::Ordering::Relaxed),
         parent_channel_open,
     ) && disposition.should_surface;
-    if completion_data.spawned_notification_emitted || request.run_in_background {
+    let keep_nested =
+        token_generation_fail_open::keep_nested_session_after_turn_error(result.error.as_deref());
+    if !keep_nested && (completion_data.spawned_notification_emitted || request.run_in_background) {
         emit_subagent_notification(
             gateway,
             &request.parent_session_id,

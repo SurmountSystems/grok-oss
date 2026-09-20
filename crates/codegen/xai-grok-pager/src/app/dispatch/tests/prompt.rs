@@ -2008,6 +2008,128 @@ fn prompt_response_safety_refusal_after_resume_report_suppresses_turn_failed_and
     );
 }
 
+/// Dest completeOk already written + nested implementors still running:
+/// PromptResponse Err for max_tokens truncation must not push TurnFailed
+/// or tell the Operator to ask for a shorter answer.
+#[test]
+fn prompt_response_dest_complete_then_truncated_thought_suppresses_turn_failed_and_shorter_answer()
+{
+    let operator_chrome =
+        "Response truncated – The model hit its output limit. Try asking for a shorter answer.";
+    assert!(operator_chrome.contains(
+        "Response truncated – The model hit its output limit. Try asking for a shorter answer."
+    ));
+    let formatted = crate::app::error_display::format_request_failure(
+        None,
+        Some("max_tokens_truncation"),
+        "response truncated by max_tokens",
+    );
+    let err = formatted.message();
+    assert!(
+        !err.contains("Try asking for a shorter answer"),
+        "formatter must not blame the Operator, got {err}"
+    );
+
+    fn run(nested_and_output: bool, err: String) -> (bool, bool, Vec<String>, bool) {
+        let mut app = test_app_with_agent();
+        let id = AgentId(0);
+        {
+            let agent = app.agents.get_mut(&id).unwrap();
+            agent.session.state = AgentState::TurnRunning;
+            agent.turn_started_at = Some(std::time::Instant::now());
+            if nested_and_output {
+                agent.subagent_sessions.insert(
+                    "nested-still-running".into(),
+                    make_test_subagent("nested-still-running", "sa-nested-still-running"),
+                );
+                assert!(
+                    agent
+                        .subagent_sessions
+                        .values()
+                        .any(|info| info.is_running()),
+                    "nested implementor must still be running"
+                );
+                let chunk = acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(
+                    acp::ContentBlock::Text(acp::TextContent::new(
+                        "dest report completeOk Worked for 48s".to_string(),
+                    )),
+                ));
+                let meta = crate::acp::meta::NotificationMeta::default();
+                let (session, scrollback) = (&mut agent.session, &mut agent.scrollback);
+                session.handle_update(chunk, &meta, scrollback);
+                assert!(
+                    session.tracker.output_since_last_finish(),
+                    "dest report must count as output"
+                );
+            }
+        }
+        dispatch(
+            Action::TaskComplete(TaskResult::PromptResponse {
+                agent_id: id,
+                result: Err(err),
+                http_status: None,
+                prompt_id: None,
+            }),
+            &mut app,
+        );
+        let painted: Vec<String> = (0..app.agents[&id].scrollback.len())
+            .filter_map(|idx| app.agents[&id].scrollback.entry(idx))
+            .filter_map(|e| match &e.block {
+                RenderBlock::SessionEvent(ev) => Some(ev.event.message()),
+                _ => None,
+            })
+            .collect();
+        let has_turn_failed = (0..app.agents[&id].scrollback.len()).any(|idx| {
+            matches!(
+                app.agents[&id].scrollback.entry(idx).map(|e| &e.block),
+                Some(RenderBlock::SessionEvent(ev))
+                    if matches!(ev.event, SessionEvent::TurnFailed { .. })
+            )
+        });
+        let nested_still_running = app.agents[&id]
+            .subagent_sessions
+            .values()
+            .any(|info| info.is_running());
+        (
+            has_turn_failed,
+            app.deferred_notification.is_some(),
+            painted,
+            nested_still_running,
+        )
+    }
+
+    let (failed_block, toast, painted, _) = run(false, err.clone());
+    assert!(failed_block, "baseline: a failed turn pushes TurnFailed");
+    assert!(toast, "baseline: a failed turn emits an error toast");
+    assert!(
+        painted
+            .iter()
+            .all(|msg| !msg.contains("Try asking for a shorter answer")),
+        "must not tell the Operator to ask for a shorter answer, got {painted:?}"
+    );
+
+    let (failed_block, toast, painted, nested_still_running) = run(true, err);
+    assert!(
+        !failed_block,
+        "dest completeOk + nested implementors must not push TurnFailed, got {painted:?}"
+    );
+    assert!(
+        !toast,
+        "dest completeOk + nested implementors must not emit an error toast"
+    );
+    assert!(
+        painted
+            .iter()
+            .all(|msg| !msg.contains("Try asking for a shorter answer")
+                && !msg.contains(operator_chrome)),
+        "must not paint Operator-blaming truncation chrome, got {painted:?}"
+    );
+    assert!(
+        nested_still_running,
+        "nested implementors must keep running"
+    );
+}
+
 /// Operator: "Connection failed – request error stream: error sending request."
 /// Transport miss chrome must not wipe the Human image line.
 #[test]

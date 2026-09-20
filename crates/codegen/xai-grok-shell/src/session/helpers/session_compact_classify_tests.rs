@@ -39,6 +39,12 @@ fn sampling_non_api_variants_classify_correctly() {
     assert!(is_det(&classify_sampling_error(
         SamplingError::IdleTimeout { elapsed_secs: 60 }
     )));
+    assert!(is_det(&classify_sampling_error(
+        SamplingError::RepetitiveGeneration {
+            channel: "text".into(),
+            aborted_at_chunk: Some(3),
+        }
+    )));
     assert!(!is_det(&classify_sampling_error(
         SamplingError::EventStreamError("conn reset".into())
     )));

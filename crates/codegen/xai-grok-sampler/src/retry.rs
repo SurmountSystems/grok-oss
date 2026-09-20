@@ -28,6 +28,7 @@
 //! - `IdleTimeout` (model stuck, retry would stall again)
 //! - `Serialization` (response parsing failure)
 //! - `MaxTokensTruncation` (by design)
+//! - `RepetitiveGeneration` (client-side sentence loop; stop the turn)
 //!
 //! **Server hint** (`x-should-retry` header from CCP):
 //! - `false` → Fatal immediately, regardless of status code
@@ -477,6 +478,13 @@ pub fn format_sampling_error(err: &SamplingError, retry_count: Option<u32>) -> S
                 triggers.join(", ")
             )
         }
+        SamplingError::RepetitiveGeneration { .. } => {
+            format!(
+                "{}{}",
+                retry_prefix,
+                xai_grok_sampling_types::REPETITIVE_GENERATION_USER_MESSAGE
+            )
+        }
     }
 }
 
@@ -549,6 +557,13 @@ pub(crate) fn clone_error(err: &SamplingError) -> SamplingError {
             aborted_at_chunk,
         } => SamplingError::DoomLoopDetected {
             triggers: triggers.clone(),
+            aborted_at_chunk: *aborted_at_chunk,
+        },
+        SamplingError::RepetitiveGeneration {
+            channel,
+            aborted_at_chunk,
+        } => SamplingError::RepetitiveGeneration {
+            channel: channel.clone(),
             aborted_at_chunk: *aborted_at_chunk,
         },
     }
@@ -1326,6 +1341,21 @@ mod tests {
     }
 
     #[test]
+    fn classify_repetitive_generation_is_fatal() {
+        let err = SamplingError::RepetitiveGeneration {
+            channel: "text".into(),
+            aborted_at_chunk: Some(3),
+        };
+        match classify_error(&err, 0, 15, RATE_LIMIT_RETRY_THRESHOLD) {
+            RetryDecision::Fatal(fatal) => {
+                assert!(!fatal.is_retryable());
+                assert!(fatal.to_string().contains("repeating the same sentence"));
+            }
+            other => panic!("expected Fatal, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn classify_doom_loop_detected_is_retry_with_immediate_backoff() {
         let err = SamplingError::DoomLoopDetected {
             triggers: vec!["tail_repetition:8@thinking".into()],
@@ -1493,6 +1523,71 @@ mod tests {
         ) {
             RetryDecision::Fatal(_) => {}
             other => panic!("over-window timeout must not Retrying, got {other:?}"),
+        }
+    }
+
+    /// Named contract: HTTP 500 `Internal error during token generation` retries
+    /// with the transport cap, not unlimited 429, not context-length Fatal, not
+    /// idle/serialization. Attempt 2 must not sit on an unbounded wait.
+    #[test]
+    fn classify_500_token_generation_retries_with_transport_cap() {
+        let body = "error: Internal error during token generation";
+        let err = api_err(StatusCode::INTERNAL_SERVER_ERROR, body);
+        assert!(
+            err.to_string()
+                .contains("API error (status 500 Internal Server Error): error: Internal error during token generation"),
+            "Display must quote the operator 500: {}",
+            err
+        );
+        assert!(err.is_retryable());
+        assert!(err.is_token_generation_internal_error());
+        assert!(!err.is_context_length_error());
+        assert!(!err.is_rate_limited());
+        assert!(!matches!(err, SamplingError::IdleTimeout { .. }));
+        assert!(!matches!(err, SamplingError::Serialization(_)));
+        match classify_error(&err, 0, u32::MAX, RATE_LIMIT_RETRY_THRESHOLD) {
+            RetryDecision::RetryWithClientRebuild { backoff } => {
+                assert!(
+                    backoff < Duration::from_secs(60),
+                    "first token-generation 500 backoff must stay under a minute, got {backoff:?}"
+                );
+            }
+            other => panic!("first token-generation 500 must retry, got {other:?}"),
+        }
+        match classify_error(&err, 1, u32::MAX, RATE_LIMIT_RETRY_THRESHOLD) {
+            RetryDecision::Retry { backoff } => {
+                assert!(
+                    backoff < Duration::from_secs(120),
+                    "attempt 2 token-generation 500 must not sit ~11 minutes, got {backoff:?}"
+                );
+            }
+            other => panic!("attempt 2 token-generation 500 must Retry, got {other:?}"),
+        }
+        match classify_error(
+            &err,
+            DEFAULT_TRANSPORT_MAX_RETRIES.saturating_sub(1),
+            u32::MAX,
+            RATE_LIMIT_RETRY_THRESHOLD,
+        ) {
+            RetryDecision::Fatal(SamplingError::Api {
+                status, message, ..
+            }) => {
+                assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+                assert!(
+                    message.contains("Internal error during token generation"),
+                    "exhausted 500 must keep the named cause, got {message}"
+                );
+            }
+            other => panic!(
+                "unlimited budget must still stop token-generation 500 after the transport cap, got {other:?}"
+            ),
+        }
+        if let RetryDecision::RetryWithBackoff {
+            is_rate_limited: true,
+            ..
+        } = classify_error(&err, 0, u32::MAX, RATE_LIMIT_RETRY_THRESHOLD)
+        {
+            panic!("token-generation 500 must not take the unlimited 429 path");
         }
     }
 }

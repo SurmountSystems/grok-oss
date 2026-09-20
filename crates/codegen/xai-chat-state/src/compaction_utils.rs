@@ -5,6 +5,10 @@
 //! this crate and `xai-grok-shell` can share them without duplication.
 use std::collections::BTreeSet;
 use xai_grok_sampling_types::{ContentPart, ConversationItem, ToolResultItem};
+
+pub use crate::compaction_repetition::{
+    REPETITIVE_ASSISTANT_OMITTED, is_repetitive_generation, strip_repetitive_generation,
+};
 /// Drops tool results and flattens assistant `tool_calls` into
 /// `[Called tools: ...]` text annotations.
 ///
@@ -95,14 +99,16 @@ pub fn prepare_conversation_for_summarization(
     conversation: Vec<ConversationItem>,
 ) -> Vec<ConversationItem> {
     strip_images(strip_reasoning_blocks(
-        strip_tool_messages_for_conversation_item(conversation),
+        strip_tool_messages_for_conversation_item(strip_repetitive_generation(conversation)),
     ))
 }
 /// Segment-store prep (`segments` mode): keep tool I/O verbatim, strip only images + reasoning.
 pub fn prepare_conversation_for_segment(
     conversation: Vec<ConversationItem>,
 ) -> Vec<ConversationItem> {
-    strip_images(strip_reasoning_blocks(conversation))
+    strip_images(strip_reasoning_blocks(strip_repetitive_generation(
+        conversation,
+    )))
 }
 /// Drop a trailing assistant turn whose `tool_calls` lack a `ToolResult` (else strict backends reject the dangling `tool_use`).
 pub fn truncate_trailing_incomplete_tool_call(
@@ -125,12 +131,33 @@ pub fn prepare_conversation_for_verbatim_summarization(
     conversation: Vec<ConversationItem>,
     strip_reasoning: bool,
 ) -> Vec<ConversationItem> {
+    let conversation = strip_repetitive_generation(conversation);
     let conversation = if strip_reasoning {
         strip_reasoning_blocks(conversation)
     } else {
         conversation
     };
     strip_images(truncate_trailing_incomplete_tool_call(conversation))
+}
+
+/// Bytes/4 estimate of looping assistant and reasoning items still in
+/// `conversation`. Compaction reseed subtracts this so dest-encoder-skip
+/// walls are not treated as provider overhead (`75.2k → 75.2k`).
+pub fn looping_generation_token_estimate(conversation: &[ConversationItem]) -> u64 {
+    conversation
+        .iter()
+        .map(|item| match item {
+            ConversationItem::Assistant(a) if is_repetitive_generation(&a.content) => {
+                estimate_item_tokens(item)
+            }
+            ConversationItem::Reasoning(r)
+                if is_repetitive_generation(&xai_grok_sampling_types::reasoning_item_text(r)) =>
+            {
+                estimate_item_tokens(item)
+            }
+            _ => 0,
+        })
+        .sum()
 }
 /// Per-item token estimate via the trigger-side estimator, so `fit`'s budget matches what fired the compaction (counts images + encrypted reasoning).
 fn estimate_item_tokens(item: &ConversationItem) -> u64 {
@@ -468,7 +495,11 @@ pub fn extract_messages_since_last_real_user(
     conversation[start..]
         .iter()
         .filter_map(|item| match item {
-            ConversationItem::Assistant(a) => Some(ConversationItem::Assistant(a.clone())),
+            ConversationItem::Assistant(a) => Some(
+                crate::compaction_repetition::stub_looping_conversation_item(
+                    ConversationItem::Assistant(a.clone()),
+                ),
+            ),
             ConversationItem::ToolResult(t) => Some(ConversationItem::ToolResult(ToolResultItem {
                 tool_call_id: t.tool_call_id.clone(),
                 content: std::sync::Arc::<str>::from("Tool call omitted..."),
@@ -685,7 +716,23 @@ pub fn format_compact_summary(summary: &str) -> String {
     while result.contains("\n\n\n") {
         result = result.replace("\n\n\n", "\n\n");
     }
-    result.trim().to_string()
+    let result = result.trim().to_string();
+    if is_repetitive_generation(&result) {
+        REPETITIVE_ASSISTANT_OMITTED.to_string()
+    } else {
+        bound_summary_to_compact_budget(&result)
+    }
+}
+/// Prefix-clip a unique (non-looping) compact summary so compacted history
+/// cannot be a 75k dump of the sampling window. Looping walls are stubbed
+/// before this runs.
+fn bound_summary_to_compact_budget(text: &str) -> String {
+    let max_bytes = (COMPACT_SUMMARY_MAX_TOKENS as usize)
+        .saturating_mul(xai_token_estimation::BYTES_PER_TOKEN as usize);
+    match truncate_text_to_bytes(text, max_bytes) {
+        Some(s) => s.as_ref().to_string(),
+        None => text.to_string(),
+    }
 }
 /// Peel leading drafting scratchpad off an extracted `<summary>` block.
 ///
@@ -739,11 +786,30 @@ const MIN_SUMMARY_SEED_CHARS: usize = 500;
 /// task state of the conversation it would replace. Callers should
 /// retry like a transient failure.
 pub fn is_degenerate_summary(raw_summary: &str) -> bool {
-    format_compact_summary(raw_summary).chars().count() < MIN_SUMMARY_SEED_CHARS
+    let cleaned = format_compact_summary(raw_summary);
+    if cleaned == REPETITIVE_ASSISTANT_OMITTED {
+        return false;
+    }
+    cleaned.chars().count() < MIN_SUMMARY_SEED_CHARS
 }
 /// Cap (in `char`s) for the rejected-summary text captured on
 /// [`CompactionAttempt::summary`].
 pub const MAX_CAPTURED_SUMMARY_CHARS: usize = 8_192;
+/// Compact summarizer output budget in tokens (bytes/4).
+///
+/// The compact prompt asks the model to aim for at most a few thousand
+/// words. At [`xai_token_estimation::BYTES_PER_TOKEN`] that band is about
+/// 8_192 tokens (a few thousand words, not a 75k window). The same 8_192
+/// figure is the captured-attempt char cap above; here it is a token budget
+/// for the live summary seed.
+pub const COMPACT_SUMMARY_MAX_TOKENS: u64 = 8_192;
+/// After compact, `get_total_tokens` must stay in this band unless the
+/// compacted items themselves are larger (kept Operator prompts / dest
+/// reports). Four times [`COMPACT_SUMMARY_MAX_TOKENS`] is 32_768, the
+/// reserve `run_compact_inner` subtracts from the sampling window for
+/// compact output (`SUMMARY_BUDGET_RESERVE_TOKENS`). A 75k post-compact
+/// context is wasteful.
+pub const COMPACT_RESEED_MAX_TOKENS: u64 = COMPACT_SUMMARY_MAX_TOKENS.saturating_mul(4);
 /// Bound captured text for the request artifact: whole when within `max_chars`,
 /// else head + tail around an elision marker. Splits on `char` boundaries.
 pub fn bound_captured_output(s: &str, max_chars: usize) -> String {
@@ -856,7 +922,9 @@ pub fn build_compacted_history(input: CompactedHistoryInput<'_>) -> Vec<Conversa
     let summary_first = carrier.is_some();
     let summary_item = carrier.map(ConversationItem::user_meta).unwrap_or_else(|| {
         let mut formatted_summary = format_compact_summary_content(&input.compaction_summary);
-        if let Some(ref hint) = input.transcript_hint {
+        if let Some(ref hint) = input.transcript_hint
+            && !is_repetitive_generation(hint)
+        {
             formatted_summary.push_str(hint);
         }
         ConversationItem::user_meta(formatted_summary)
@@ -877,15 +945,20 @@ pub fn build_compacted_history(input: CompactedHistoryInput<'_>) -> Vec<Conversa
         compacted.push(ConversationItem::project_instructions(reminder.clone()));
     }
     if let Some(ref last_query) = input.state_context.last_user_query {
-        compacted.push(ConversationItem::user(wrap_user_query(last_query)));
+        let query = if is_repetitive_generation(last_query) {
+            REPETITIVE_ASSISTANT_OMITTED.to_string()
+        } else {
+            last_query.clone()
+        };
+        compacted.push(ConversationItem::user(wrap_user_query(query)));
     }
     if summary_first {
         compacted.push(summary_item);
-        for msg in input.state_context.recent_messages.iter().cloned() {
+        for msg in strip_repetitive_generation(input.state_context.recent_messages.clone()) {
             compacted.push(msg);
         }
     } else {
-        for msg in input.state_context.recent_messages.iter().cloned() {
+        for msg in strip_repetitive_generation(input.state_context.recent_messages.clone()) {
             compacted.push(msg);
         }
         compacted.push(summary_item);

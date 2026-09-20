@@ -579,7 +579,11 @@ fn hold_parked_plan_review_comments(agent: &mut AgentView, text: &str) -> bool {
         // Builtins stay commands even when Isolated Preview is docked.
         // `/plan queue --soft` must hold on the prompt queue; `--soft` is
         // not the queue hold token and is not a parked-plan comment.
-        if reg.get_for_dispatch(invocation.token).is_some() || reg.is_builtin(invocation.token) {
+        // Typed `/implement` is a skill slash, not a parked comment.
+        if reg.get_for_dispatch(invocation.token).is_some()
+            || reg.is_builtin(invocation.token)
+            || crate::app::auto_implement::is_implement_command_sentence(trimmed)
+        {
             return false;
         }
     }
@@ -1895,18 +1899,20 @@ pub(super) fn handle_prompt_response(
             .subagent_sessions
             .values()
             .any(|info| info.is_running());
-        let safety_refusal_after_resume_report = nested_implementers_running
-            && had_output
-            && result
-                .as_ref()
-                .err()
-                .is_some_and(|e| crate::app::error_display::is_safety_refusal_message(e));
+        let written_report_not_turn_failure = result.as_ref().err().is_some_and(|e| {
+            crate::app::error_display::written_report_with_nested_running_is_not_turn_failure(
+                nested_implementers_running,
+                had_output,
+                None,
+                e,
+            )
+        });
         // A dedicated prompt/modal/banner replaces the generic TurnFailed
         // marker and error toast (rate limit, free-usage paywall, model
         // incompatibility, credit 402/403, 401 re-auth, context overflow,
         // disk-full, a formatted RequestFailed banner from RetryState, or a
-        // safety-refusal PromptResponse after a resume report while nested
-        // implementers are still running).
+        // dest/resume report PromptResponse while nested implementors are
+        // still running: safety refusal or thought output-cap).
         let dedicated_ux_shown = rate_limited
             || free_usage_blocked
             || model_incompatible
@@ -1915,7 +1921,7 @@ pub(super) fn handle_prompt_response(
             || context_overflow
             || disk_full
             || request_failed_shown
-            || safety_refusal_after_resume_report;
+            || written_report_not_turn_failure;
         let elapsed = agent.turn_elapsed();
 
         {

@@ -18,8 +18,9 @@
 //! The accent line (┃) and selection box are rendered by the caller.
 
 use std::path::Path;
+use std::time::Instant;
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind};
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
@@ -47,6 +48,10 @@ pub const KIND_IMAGE: ElementKind = ElementKind(3);
 
 /// Byte size at which a single-line paste is chipped (display only — not an offload threshold).
 const PASTE_CHIP_DISPLAY_BYTES: usize = 10_000;
+/// Double-click window for expanding a `[Pasted: N lines]` chip. Matches
+/// the textarea multi-click tracker. Enter on the chip submits; expand is
+/// paste-again or double-click.
+const PASTE_CHIP_DOUBLE_CLICK_MS: u128 = 500;
 
 pub use crate::prompt_images::PROMPT_IMAGES_TRACING_TARGET;
 
@@ -604,6 +609,10 @@ pub struct PromptWidget {
     voice_recording_grow: bool,
     /// Live interim used only to size the recording box (not committed text).
     voice_recording_interim: Option<String>,
+
+    /// Last left-click on a paste chip. A second click on that chip inside
+    /// [`PASTE_CHIP_DOUBLE_CLICK_MS`] expands it. Enter still submits.
+    last_paste_chip_click: Option<(ElementId, Instant)>,
 }
 
 /// Prefix display width (`"❯ "` or `"> "` — both 2 columns).
@@ -655,6 +664,7 @@ impl PromptWidget {
             completion_accepted: false,
             voice_recording_grow: false,
             voice_recording_interim: None,
+            last_paste_chip_click: None,
         }
     }
 
@@ -2274,12 +2284,20 @@ impl PromptWidget {
         true
     }
 
+    /// Drop a half-finished paste-chip double-click. Leaving Isolated
+    /// Preview or question InputMode must not pair with the next click.
+    pub fn clear_paste_chip_double_click(&mut self) {
+        self.last_paste_chip_click = None;
+    }
+
     /// Handle a mouse event.
     ///
     /// Forwards to TextArea which handles click-to-place, drag-to-select,
-    /// double/triple click, and element interactions. The caller should forward
-    /// ALL mouse events (not just those in the prompt area) because TextArea
-    /// tracks drag state internally and handles drag-beyond-edge.
+    /// double/triple click, and element interactions. Double-click on a
+    /// paste chip expands it here (the textarea only snaps; Enter submits).
+    /// The caller should forward ALL mouse events (not just those in the
+    /// prompt area) because TextArea tracks drag state internally and
+    /// handles drag-beyond-edge.
     pub fn handle_mouse(&mut self, mouse: &crossterm::event::MouseEvent) -> PromptEvent {
         use xai_ratatui_textarea::{MouseAction, TextElementEventKind};
 
@@ -2288,6 +2306,7 @@ impl PromptWidget {
             .textarea
             .handle_mouse(*mouse, self.textarea_area, self.textarea_state);
 
+        let mut paste_click_id = None;
         while let Some(event) = self.textarea.poll_element_event() {
             match event.kind {
                 TextElementEventKind::HoverEnter => {
@@ -2305,8 +2324,32 @@ impl PromptWidget {
                         self.hovered_image_element_id = None;
                     }
                 }
-                TextElementEventKind::Click => {}
+                TextElementEventKind::Click => {
+                    if self
+                        .textarea
+                        .elements()
+                        .iter()
+                        .any(|e| e.id == event.id && e.kind == KIND_PASTE)
+                    {
+                        paste_click_id = Some(event.id);
+                    }
+                }
             }
+        }
+
+        if let Some(id) = paste_click_id {
+            let now = Instant::now();
+            let is_double = self.last_paste_chip_click.is_some_and(|(prev_id, t)| {
+                prev_id == id && now.duration_since(t).as_millis() < PASTE_CHIP_DOUBLE_CLICK_MS
+            });
+            if is_double {
+                self.expand_element(id);
+                self.last_paste_chip_click = None;
+            } else {
+                self.last_paste_chip_click = Some((id, now));
+            }
+        } else if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+            self.last_paste_chip_click = None;
         }
 
         match action {

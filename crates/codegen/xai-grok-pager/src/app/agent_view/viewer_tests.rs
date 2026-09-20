@@ -1787,6 +1787,376 @@ fn isolated_preview_idle_non_empty_operator_paste_enter_approves_with_notes_not_
     );
 }
 
+/// Isolated Preview present plus `[Pasted: 13 lines]` whose first line is
+/// `/implement --effort 3` plus Enter is Approve-with-comment. It is not
+/// Plan Exit and must not leave the chip sitting. Empty Enter never
+/// Approves. Typed `/implement` without a paste chip is still a slash.
+fn pasted_13_lines_implement_chip_body() -> String {
+    let mut lines = vec!["/implement --effort 3".to_string()];
+    lines.extend((2..=13).map(|i| format!("line {i} of the pasted review")));
+    lines.join("\n")
+}
+
+fn pasted_13_lines_chip_label(agent: &AgentView) -> String {
+    use crate::views::prompt_widget::KIND_PASTE;
+    agent
+        .prompt
+        .textarea
+        .elements()
+        .iter()
+        .find(|e| e.kind == KIND_PASTE)
+        .and_then(|e| e.display.as_ref())
+        .map(|line| line.spans.iter().map(|s| s.content.as_ref()).collect())
+        .unwrap_or_default()
+}
+
+fn arm_isolated_preview_exit_marked(agent: &mut AgentView) {
+    {
+        let pav = agent.plan_approval_view.as_mut().unwrap();
+        pav.focus = PlanApprovalFocus::Preview;
+    }
+    agent.prompt.set_text("");
+    {
+        let viewer = agent.line_viewer.as_mut().expect("plan pane");
+        viewer.plan_mut().selected_cta =
+            Some(crate::views::file_search::line_viewer::SelectedPlanCta::Exit);
+    }
+}
+
+fn paste_isolated_preview_13_line_implement_chip(agent: &mut AgentView) -> String {
+    use crate::views::prompt_widget::KIND_PASTE;
+    let paste = pasted_13_lines_implement_chip_body();
+    let _ = agent.handle_input(&Event::Paste(paste.clone()), &ActionRegistry::defaults());
+    assert!(
+        agent.prompt.text().starts_with("/implement --effort 3"),
+        "13-line paste must land in the Operator box, got {:?}",
+        agent.prompt.text()
+    );
+    assert!(
+        agent
+            .prompt
+            .textarea
+            .elements()
+            .iter()
+            .any(|e| e.kind == KIND_PASTE),
+        "13-line paste must fold into a [Pasted: 13 lines] chip"
+    );
+    assert_eq!(
+        pasted_13_lines_chip_label(agent),
+        "[Pasted: 13 lines]",
+        "folded chip must paint [Pasted: 13 lines]"
+    );
+    agent.prompt.set_cursor(0);
+    assert!(
+        agent.prompt.paste_element_at_cursor().is_some(),
+        "caret on the [Pasted: 13 lines] chip must still Approve with those notes"
+    );
+    paste
+}
+
+#[test]
+fn isolated_preview_pasted_13_lines_implement_chip_enter_approves_with_comment_not_plan_exit() {
+    use crate::app::actions::Action;
+    use crate::app::app_view::InputOutcome;
+
+    let mut typed_slash = agent_with_scrollable_plan();
+    arm_isolated_preview_exit_marked(&mut typed_slash);
+    typed_slash.prompt.set_text("/implement --effort 3");
+    assert!(
+        !typed_slash.isolated_preview_idle_enter_approves_with_notes(),
+        "typed /implement without a [Pasted: 13 lines] chip is still a slash, not Approve-with-comment"
+    );
+
+    let mut agent = agent_with_scrollable_plan();
+    arm_isolated_preview_exit_marked(&mut agent);
+    let paste = paste_isolated_preview_13_line_implement_chip(&mut agent);
+    assert!(
+        agent.isolated_preview_idle_enter_approves_with_notes(),
+        "Isolated Preview plus [Pasted: 13 lines] must Approve-with-comment even when the body starts with /implement"
+    );
+
+    let send = agent.handle_input(
+        &Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        &ActionRegistry::defaults(),
+    );
+    match send {
+        InputOutcome::Action(Action::Interject { text, .. })
+        | InputOutcome::ActionThenForward(Action::Interject { text, .. }) => {
+            assert!(
+                text.contains("/implement --effort 3")
+                    && text.contains("line 13 of the pasted review"),
+                "Enter on [Pasted: 13 lines] must Approve with the paste body, got {text:?}"
+            );
+            assert!(
+                text.contains(PLAN_APPROVED_REVIEW_COMMENTS_LEAD),
+                "Isolated Preview [Pasted: 13 lines] Enter is Approve-with-comment, not Plan Exit, got {text:?}"
+            );
+        }
+        other => panic!(
+            "Isolated Preview plus [Pasted: 13 lines] plus Enter must Approve-with-comment, not Plan Exit; got {other:?}"
+        ),
+    }
+    assert!(
+        agent.plan_approval_view.is_none() || agent.plan_decision_resolved,
+        "Enter on [Pasted: 13 lines] must Approve, not Plan Exit"
+    );
+    assert!(
+        agent.prompt.text().trim().is_empty(),
+        "composer clears only after Approve-with-comment lands, got {:?}",
+        agent.prompt.text()
+    );
+    assert!(
+        agent.prompt.textarea.elements().is_empty(),
+        "[Pasted: 13 lines] must leave because Approve landed, not because Enter expanded the chip"
+    );
+    let _ = paste;
+
+    let mut empty = agent_with_scrollable_plan();
+    empty.prompt.set_text("");
+    let empty_enter = empty.handle_input(
+        &Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        &ActionRegistry::defaults(),
+    );
+    assert!(
+        !matches!(
+            empty_enter,
+            InputOutcome::Action(Action::SendPrompt(_))
+                | InputOutcome::Action(Action::SendPromptNow { .. })
+                | InputOutcome::Action(Action::Interject { .. })
+        ),
+        "empty Enter never Approves and must not send; got {empty_enter:?}"
+    );
+    assert!(
+        empty.plan_approval_view.is_some() && !empty.plan_decision_resolved,
+        "empty Enter never Approves"
+    );
+}
+
+/// Isolated Preview present plus `[Pasted: 13 lines]` plus click Approve
+/// is Approve-with-comment. It must not Approve empty and leave the chip,
+/// and it must not Plan Exit.
+#[test]
+fn isolated_preview_pasted_13_lines_implement_chip_click_approve_is_approve_with_comment_not_plan_exit()
+ {
+    use crate::app::actions::Action;
+    use crate::app::app_view::InputOutcome;
+
+    let mut agent = agent_with_scrollable_plan();
+    arm_isolated_preview_exit_marked(&mut agent);
+    let paste = paste_isolated_preview_13_line_implement_chip(&mut agent);
+    {
+        let viewer = agent.line_viewer.as_mut().expect("plan pane");
+        viewer.plan_mut().approve_button_area = Some(Rect::new(10, 11, 8, 1));
+        viewer.last_modal_area = Some(Rect::new(0, 0, 80, 12));
+    }
+    let click = agent.handle_input(
+        &mouse(MouseEventKind::Down(MouseButton::Left), 12, 11),
+        &ActionRegistry::defaults(),
+    );
+    match click {
+        InputOutcome::Action(Action::Interject { text, .. })
+        | InputOutcome::ActionThenForward(Action::Interject { text, .. }) => {
+            assert!(
+                text.contains("/implement --effort 3")
+                    && text.contains("line 13 of the pasted review"),
+                "click Approve on [Pasted: 13 lines] must carry the paste body, got {text:?}"
+            );
+            assert!(
+                text.contains(PLAN_APPROVED_REVIEW_COMMENTS_LEAD),
+                "click Approve on [Pasted: 13 lines] is Approve-with-comment, not Plan Exit, got {text:?}"
+            );
+        }
+        other => panic!(
+            "Isolated Preview plus [Pasted: 13 lines] plus click Approve must Approve-with-comment; got {other:?}"
+        ),
+    }
+    assert!(
+        agent.plan_approval_view.is_none() || agent.plan_decision_resolved,
+        "click Approve on [Pasted: 13 lines] must Approve, not Plan Exit"
+    );
+    assert!(
+        agent.prompt.text().trim().is_empty(),
+        "composer clears only after Approve-with-comment lands, got {:?}",
+        agent.prompt.text()
+    );
+    assert!(
+        agent.prompt.textarea.elements().is_empty(),
+        "[Pasted: 13 lines] must not sit after click Approve"
+    );
+    let _ = paste;
+}
+
+/// Expand on `[Pasted: 13 lines]` stays paste-again or double-click.
+/// Enter on the chip is Isolated Preview Approve-with-comment, not expand.
+#[test]
+fn isolated_preview_pasted_13_lines_expand_stays_paste_again_or_double_click_enter_approves() {
+    use crate::app::actions::Action;
+    use crate::app::app_view::InputOutcome;
+    use crate::views::prompt_widget::{KIND_PASTE, PromptStyle};
+    use ratatui::buffer::Buffer;
+
+    let paste = pasted_13_lines_implement_chip_body();
+
+    let mut paste_again = agent_with_scrollable_plan();
+    arm_isolated_preview_exit_marked(&mut paste_again);
+    let _ = paste_isolated_preview_13_line_implement_chip(&mut paste_again);
+    let again = paste_again.handle_input(&Event::Paste(paste.clone()), &ActionRegistry::defaults());
+    assert!(
+        !matches!(
+            again,
+            InputOutcome::Action(_)
+                | InputOutcome::ActionThenForward(_)
+                | InputOutcome::ActionPair(_, _)
+        ),
+        "paste-again on [Pasted: 13 lines] must expand, not Approve or Plan Exit; got {again:?}"
+    );
+    assert!(
+        paste_again
+            .prompt
+            .textarea
+            .elements()
+            .iter()
+            .all(|e| e.kind != KIND_PASTE),
+        "paste-again must expand [Pasted: 13 lines] into plain text"
+    );
+    assert!(
+        paste_again
+            .prompt
+            .text()
+            .starts_with("/implement --effort 3")
+            && paste_again
+                .prompt
+                .text()
+                .contains("line 13 of the pasted review"),
+        "paste-again must keep the 13-line body, got {:?}",
+        paste_again.prompt.text()
+    );
+    assert!(
+        paste_again.plan_approval_view.is_some() && !paste_again.plan_decision_resolved,
+        "paste-again must not Plan Exit Isolated Preview"
+    );
+
+    let mut double = agent_with_scrollable_plan();
+    arm_isolated_preview_exit_marked(&mut double);
+    let _ = paste_isolated_preview_13_line_implement_chip(&mut double);
+    let area = Rect::new(0, 22, 40, 4);
+    double.pane_areas.prompt = area;
+    let mut buf = Buffer::empty(area);
+    let style = PromptStyle {
+        chrome: false,
+        vpad_top: 0,
+        ..Default::default()
+    };
+    double.prompt.draw(&mut buf, area, None, &style, None, None);
+    let ta = double.prompt.textarea_area();
+    let click = crossterm::event::MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: ta.x + 1,
+        row: ta.y,
+        modifiers: KeyModifiers::empty(),
+    };
+    double.prompt.handle_mouse(&click);
+    assert!(
+        double
+            .prompt
+            .textarea
+            .elements()
+            .iter()
+            .any(|e| e.kind == KIND_PASTE),
+        "single click must not expand [Pasted: 13 lines]"
+    );
+    double.prompt.handle_mouse(&click);
+    assert!(
+        double
+            .prompt
+            .textarea
+            .elements()
+            .iter()
+            .all(|e| e.kind != KIND_PASTE),
+        "double-click must expand [Pasted: 13 lines]"
+    );
+    assert!(
+        double.prompt.text().starts_with("/implement --effort 3"),
+        "double-click expand must keep the paste body, got {:?}",
+        double.prompt.text()
+    );
+
+    let mut enter = agent_with_scrollable_plan();
+    arm_isolated_preview_exit_marked(&mut enter);
+    let _ = paste_isolated_preview_13_line_implement_chip(&mut enter);
+    let send = enter.handle_input(
+        &Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        &ActionRegistry::defaults(),
+    );
+    match send {
+        InputOutcome::Action(Action::Interject { text, .. })
+        | InputOutcome::ActionThenForward(Action::Interject { text, .. }) => {
+            assert!(
+                text.contains(PLAN_APPROVED_REVIEW_COMMENTS_LEAD)
+                    && text.contains("/implement --effort 3"),
+                "Enter on [Pasted: 13 lines] is Approve-with-comment, not expand, got {text:?}"
+            );
+        }
+        other => panic!(
+            "Enter on [Pasted: 13 lines] must Approve-with-comment, not only expand; got {other:?}"
+        ),
+    }
+    assert!(
+        enter.prompt.text().trim().is_empty(),
+        "Enter must not only expand [Pasted: 13 lines]; composer after Approve={:?}",
+        enter.prompt.text()
+    );
+}
+
+/// Keep-draft after closing Isolated Preview and typing a later prompt is
+/// the next SendPrompt. It is not `[Pasted: 13 lines]` review notes.
+#[test]
+fn isolated_preview_keep_draft_after_close_later_prompt_is_send_prompt_not_pasted_13_lines_notes() {
+    use crate::app::actions::Action;
+    use crate::app::app_view::InputOutcome;
+
+    const LATER: &str = "later operator prompt after Isolated Preview closed";
+    let mut agent = agent_with_scrollable_plan();
+    arm_isolated_preview_exit_marked(&mut agent);
+    agent.cancel_line_viewer();
+    assert!(
+        agent.line_viewer.is_none(),
+        "fixture: Isolated Preview pane closed"
+    );
+    agent.prompt.set_text(LATER);
+    agent.reopen_plan_approval();
+    assert!(
+        agent
+            .plan_approval_view
+            .as_ref()
+            .is_some_and(|pav| pav.keep_draft_is_next_operator_turn),
+        "text typed while Isolated Preview was closed is keep-draft for the next Operator turn"
+    );
+    let outcome = agent.handle_input(
+        &Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        &ActionRegistry::defaults(),
+    );
+    match outcome {
+        InputOutcome::Action(Action::SendPrompt(text)) => {
+            assert!(
+                text.contains(LATER),
+                "keep-draft after close must SendPrompt the later prompt, got {text:?}"
+            );
+            assert!(
+                !text.contains(PLAN_APPROVED_REVIEW_COMMENTS_LEAD),
+                "keep-draft after close is not [Pasted: 13 lines] review notes, got {text:?}"
+            );
+        }
+        other => panic!(
+            "keep-draft after closing Isolated Preview and typing a later prompt must SendPrompt, not Approve-with-comment; got {other:?}"
+        ),
+    }
+    assert!(
+        agent.plan_approval_view.is_some() && !agent.plan_decision_resolved,
+        "keep-draft Enter must not Approve or Plan Exit"
+    );
+}
+
 /// Operator: "Also approve with comment STILL does not work on the latest
 /// commit and build you gave me yesterday." Isolated Preview idle: leftover
 /// slash-palette `/` plus Operator notes plus Enter Approves with those

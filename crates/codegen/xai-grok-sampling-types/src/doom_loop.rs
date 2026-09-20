@@ -79,8 +79,10 @@ fn default_window_tokens() -> u32 {
     DoomLoopRecoveryPolicy::DEFAULT_RECOVERY_WINDOW_TOKENS
 }
 
-/// Channel label of the model's thinking stream — the only channel recovery
-/// acts on (loops in visible output are the user's to judge).
+/// Channel label of the model's thinking stream — the only channel server
+/// doom-loop *resample* acts on. Visible assistant and thought text that
+/// loops the same short sentence is stopped on the client stream path
+/// (`RepetitiveGeneration`), not resampled here.
 pub const THINKING_CHANNEL: &str = "thinking";
 
 impl DoomLoopRecoveryPolicy {

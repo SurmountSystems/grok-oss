@@ -226,9 +226,14 @@ pub(super) fn format_acp_error(err: &acp::Error, is_api_key_auth: bool) -> Strin
         .and_then(error_detail_from_data)
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| err.to_string());
+    let error_kind = err
+        .data
+        .as_ref()
+        .and_then(|d| d.get("error_kind"))
+        .and_then(|v| v.as_str());
     crate::app::error_display::format_request_failure(
             http_status_from_error(err),
-            None,
+            error_kind,
             &raw,
         )
         .message()

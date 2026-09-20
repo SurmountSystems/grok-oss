@@ -2103,8 +2103,12 @@ before canonicalize or any write. Existing-file edits and new-file
 - `search_replace_succeeds_when_a_sibling_only_has_a_soft_write_paths_assignment`
 - `soft_lock_reminder_is_observable_on_a_sibling_tool_call`
 - `spawn_write_paths_overlap_is_a_soft_assignment_not_a_spawn_error`
+- `cow_snapshot_read_is_ephemeral_many_readers_one_writer`
+- `read_file_uses_cow_snapshot_and_does_not_take_the_exclusive_write_lock`
 
 Spawn `write_paths` on `task` / `spawn_subagent` is a **soft assignment**. Other nested agents get a reminder (`L2 X is assigned these paths`). Spawn and later sequential edits do not fail for the child's lifetime. The hard exclusive lock lasts only for one `search_replace` / `write` / `apply_patch` call. Two agents still cannot write the same file at the same instant.
+
+The path table is a reader-writer lock, not write-only. [`try_acquire_read`](crates/codegen/xai-grok-tools/src/implementations/editor_infra/per_path_write_lock.rs) is a CoW snapshot read: ephemeral, many concurrent readers, snapshot at a point in time. It does not take the exclusive write lock, does not block a writer, and is not blocked by a writer for the snapshot itself. `read_file` uses that published snapshot while a writer holds the path. Soft `write_paths` assignment stays a writer reminder.
 
 ```bash
 cargo test -p xai-grok-tools --lib per_path_write_lock

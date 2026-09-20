@@ -535,6 +535,11 @@ impl ChatStateActor {
             cap.compaction_occurred = true;
         }
         let pre_replace_total = self.state.total_tokens;
+        let loop_garbage_tokens = if is_compaction {
+            crate::compaction_utils::looping_generation_token_estimate(&self.state.conversation)
+        } else {
+            0
+        };
         // `harness_trace_buffer` / `harness_trace_turns` intentionally untouched:
         // the planner/verifier subagents ran, so their sealed trace turns survive
         // a conversation replace (same intent as the `TruncateToPromptIndex` arm).
@@ -545,14 +550,33 @@ impl ChatStateActor {
         let base_estimate = super::state::estimate_conversation_tokens(&items);
         let mut estimated_tokens =
             if is_compaction && pre_replace_total > 0 && self.state.estimate_at_last_response > 0 {
-                let ratio = pre_replace_total as f64 / self.state.estimate_at_last_response as f64;
-                (base_estimate as f64 * ratio).round() as u64
+                let frozen = self
+                    .state
+                    .estimate_at_last_response
+                    .saturating_sub(loop_garbage_tokens.min(self.state.estimate_at_last_response));
+                let pre = pre_replace_total.saturating_sub(loop_garbage_tokens);
+                if frozen > 0 && pre > 0 {
+                    let ratio = pre as f64 / frozen as f64;
+                    (base_estimate as f64 * ratio).round() as u64
+                } else {
+                    base_estimate
+                }
             } else {
                 base_estimate
             };
-        // Compaction must never appear to increase usage.
+        // Compaction must never appear to increase usage. Loop walls are not
+        // provider overhead: dropping dest-encoder-skip must shrink
+        // `Context compacted: 75.2k → 75.2k tokens`.
         if is_compaction && pre_replace_total > 0 {
-            estimated_tokens = estimated_tokens.min(pre_replace_total);
+            let cap = pre_replace_total.saturating_sub(loop_garbage_tokens);
+            estimated_tokens = estimated_tokens.min(if cap > 0 { cap } else { pre_replace_total });
+            // Compacted history is a small summary plus kept Operator prompts
+            // and dest reports. Ratio overhead must not reseed a ~75k window
+            // (`min(pre_replace_total)` alone paints `75.2k → 75.2k`). Operator:
+            // compact must not result in 75k contexts; that is wasteful.
+            let summary_cap =
+                crate::compaction_utils::COMPACT_RESEED_MAX_TOKENS.max(base_estimate);
+            estimated_tokens = estimated_tokens.min(summary_cap);
         }
         self.state.conversation = items;
         self.state.estimated_tokens_since_model = 0;

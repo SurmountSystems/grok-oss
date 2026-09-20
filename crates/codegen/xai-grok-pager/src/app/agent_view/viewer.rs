@@ -169,7 +169,24 @@ impl AgentView {
     }
 
     pub(super) fn composer_is_recognized_slash_command(&self) -> bool {
+        // A `[Pasted: N lines]` chip is review notes even if the folded
+        // body starts with `/implement`. Typed `/implement` without a
+        // paste chip is still a slash / continue-nested-work path.
+        // `/implement` is a skill, not a pager builtin, so registry
+        // membership alone would Approve-with-comment that typed slash.
+        if self
+            .prompt
+            .textarea
+            .elements()
+            .iter()
+            .any(|e| e.kind == crate::views::prompt_widget::KIND_PASTE)
+        {
+            return false;
+        }
         let trimmed = self.prompt.text().trim();
+        if crate::app::auto_implement::is_implement_command_sentence(trimmed) {
+            return true;
+        }
         let Some(invocation) = crate::slash::parse_invocation(trimmed) else {
             return false;
         };
@@ -179,12 +196,14 @@ impl AgentView {
 
     /// Isolated Preview idle after present: a non-empty Operator box
     /// (typed notes or a paste chip) plus Enter Approves with those notes.
-    /// Empty Enter never Approves. Keep-draft from before present still
-    /// SendPrompt. Slash commands still send. Line-comment overlay still
-    /// saves. Prompt-focused Revise / Questions keep those intents.
-    /// Vanished Isolated Preview (pane shut, live waiter, Preview focus)
-    /// still Approves with those notes. Leftover slash-palette `/` is not
-    /// notes.
+    /// A `[Pasted: 13 lines]` chip whose body starts with `/implement`
+    /// is still Approve-with-comment, not Plan Exit. Empty Enter never
+    /// Approves. Keep-draft from before present still SendPrompt. Typed
+    /// slash commands without a paste chip still send. Line-comment
+    /// overlay still saves. Prompt-focused Revise / Questions keep those
+    /// intents. Vanished Isolated Preview (pane shut, live waiter,
+    /// Preview focus) still Approves with those notes. Leftover
+    /// slash-palette `/` is not notes.
     pub(crate) fn isolated_preview_idle_enter_approves_with_notes(&self) -> bool {
         if self.plan_decision_resolved {
             return false;
@@ -317,13 +336,10 @@ impl AgentView {
         }
         // Recognized slash commands are not plan review comments.
         // `/plan queue` must still hold on the prompt queue; `--soft` is
-        // not the queue hold token.
-        if let Some(invocation) = crate::slash::parse_invocation(trimmed) {
-            let reg = self.prompt.slash_controller.registry();
-            if reg.get_for_dispatch(invocation.token).is_some() || reg.is_builtin(invocation.token)
-            {
-                return false;
-            }
+        // not the queue hold token. Typed `/implement` without a paste
+        // chip is still that slash, not a parked Isolated Preview comment.
+        if self.composer_is_recognized_slash_command() {
+            return false;
         }
         let allow_newlines = crate::appearance::cache::load_composer_multiline();
         if self.multiline_mode && allow_newlines {
@@ -724,6 +740,7 @@ impl AgentView {
         }
         self.casual_commenting_range = None;
         self.casual_editing_comment_id = None;
+        self.clear_prompt_double_click_pairing();
     }
 
     /// Dismiss the /btw panel. If Done, flush response to scrollback first.

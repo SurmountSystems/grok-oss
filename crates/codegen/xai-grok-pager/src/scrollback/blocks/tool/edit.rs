@@ -808,6 +808,8 @@ pub struct EditToolCallBlock {
     change_counts: (usize, usize),
     /// Hunk-only first paint; may upgrade to FileScoped via the edit-HL worker.
     pub highlight: EditHighlightPhase,
+    /// Whole-file `write` (Creating). Paint new content, not a unified diff.
+    pub paint_as_file_preview: bool,
 }
 
 fn workflow_script_name(path: &str) -> Option<String> {
@@ -852,6 +854,7 @@ impl EditToolCallBlock {
             summary_untrusted: false,
             change_counts,
             highlight: EditHighlightPhase::HunkOnly,
+            paint_as_file_preview: false,
         }
     }
 
@@ -861,6 +864,12 @@ impl EditToolCallBlock {
         } else {
             prefix
         };
+        self
+    }
+
+    /// Paint new-file write content without red/green unified-diff chrome.
+    pub fn with_file_preview(mut self) -> Self {
+        self.paint_as_file_preview = true;
         self
     }
 
@@ -997,29 +1006,33 @@ impl EditToolCallBlock {
             surface,
             crate::render::tool_paths::ToolPathSurface::Collapsed
         );
-        let suffix_spans: Vec<Span<'static>> =
-            if collapsed && show_summary && !self.hunks.is_empty() && !self.summary_untrusted {
-                let (ins, del) = self.count_changes();
-                if ins > 0 || del > 0 {
-                    vec![
-                        Span::styled(
-                            format!(" +{ins}"),
-                            Style::default().fg(theme.diff_insert_fg),
-                        ),
-                        Span::styled("/", detail_style),
-                        Span::styled(format!("-{del}"), Style::default().fg(theme.diff_delete_fg)),
-                    ]
-                } else {
-                    Vec::new()
-                }
-            } else if collapsed && self.edit_count > 1 {
-                vec![Span::styled(
-                    format!(" ({} edits)", self.edit_count),
-                    detail_style,
-                )]
+        let suffix_spans: Vec<Span<'static>> = if collapsed
+            && show_summary
+            && !self.hunks.is_empty()
+            && !self.summary_untrusted
+            && !self.paint_as_file_preview
+        {
+            let (ins, del) = self.count_changes();
+            if ins > 0 || del > 0 {
+                vec![
+                    Span::styled(
+                        format!(" +{ins}"),
+                        Style::default().fg(theme.diff_insert_fg),
+                    ),
+                    Span::styled("/", detail_style),
+                    Span::styled(format!("-{del}"), Style::default().fg(theme.diff_delete_fg)),
+                ]
             } else {
                 Vec::new()
-            };
+            }
+        } else if collapsed && self.edit_count > 1 {
+            vec![Span::styled(
+                format!(" ({} edits)", self.edit_count),
+                detail_style,
+            )]
+        } else {
+            Vec::new()
+        };
         let suffix_width: usize = suffix_spans
             .iter()
             .map(|span| unicode_width::UnicodeWidthStr::width(span.content.as_ref()))
@@ -1059,21 +1072,52 @@ impl EditToolCallBlock {
         width: u16,
         config: &DiffRenderConfig,
     ) -> Vec<DiffLineOutput> {
+        let mut config = config.clone();
+        if self.paint_as_file_preview {
+            // New-file write is not a two-column unified diff.
+            config.dual_line_numbers = false;
+        }
+        let painted = self.hunks_for_paint();
         let path = Path::new(&self.path);
         match &self.highlight {
             EditHighlightPhase::FileScoped {
                 by_new_line,
                 theme: baked,
             } if *baked == crate::theme::cache::current_kind() => render_diff_hunks_with_styles(
-                &self.hunks,
+                &painted,
                 path,
                 by_new_line.as_ref(),
                 theme,
                 width,
-                config,
+                &config,
             ),
-            _ => render_diff_hunks_highlighted(&self.hunks, path, theme, width, config),
+            _ => render_diff_hunks_highlighted(&painted, path, theme, width, &config),
         }
+    }
+
+    /// New-file write preview: new-side lines only, tagged Equal so paint
+    /// has no insert/delete band and no red/green gutter.
+    fn hunks_for_paint(&self) -> Cow<'_, [DiffHunk]> {
+        if !self.paint_as_file_preview {
+            return Cow::Borrowed(&self.hunks);
+        }
+        Cow::Owned(
+            self.hunks
+                .iter()
+                .map(|hunk| {
+                    hunk.iter()
+                        .filter(|line| line.tag != ChangeTag::Delete)
+                        .map(|line| xai_grok_pager_diff::DiffLine {
+                            text: line.text.clone(),
+                            lo: line.ln,
+                            ln: line.ln,
+                            tag: ChangeTag::Equal,
+                        })
+                        .collect::<DiffHunk>()
+                })
+                .filter(|hunk| !hunk.is_empty())
+                .collect(),
+        )
     }
 }
 
@@ -3174,6 +3218,133 @@ class ProcessQueueItem(BaseModel):
             cold[field_offset], *field_full,
             "expected cold-start mismatch (hunk-only string spill vs full-file); \
              if equal, the bug may already be fixed or the fixture no longer triggers"
+        );
+    }
+
+    /// A new-file write preview must not paint as a git-style red/green
+    /// unified diff. The Operator did not ask to diff. Show the new content
+    /// without a "green side" vs red deletions.
+    #[test]
+    fn new_file_write_preview_must_not_paint_as_git_style_red_green_unified_diff() {
+        let hunk: DiffHunk = vec![
+            DiffLine {
+                text: "# leftover\n".into(),
+                lo: 0,
+                ln: 1,
+                tag: ChangeTag::Insert,
+            },
+            DiffLine {
+                text: "The harness 500k window stays.\n".into(),
+                lo: 0,
+                ln: 2,
+                tag: ChangeTag::Insert,
+            },
+        ];
+        let block = EditToolCallBlock::new("remaining-2026-09-20-harness-500.md", vec![hunk])
+            .with_prefix("Creating ")
+            .with_file_preview();
+        let theme = Theme::current();
+        let config = DiffRenderConfig {
+            dual_line_numbers: true,
+            ..Default::default()
+        };
+        let outputs = block.render_diff_lines(&theme, 80, &config);
+        assert_eq!(outputs.len(), 2);
+        let joined = diff_outputs_to_string(&outputs);
+        assert!(
+            joined.contains("# leftover"),
+            "new content must be visible, got {joined:?}"
+        );
+        assert!(
+            joined.contains("The harness 500k window stays."),
+            "new content must be visible, got {joined:?}"
+        );
+        for output in &outputs {
+            assert!(
+                output.background.is_none(),
+                "new-file write must not paint insert/delete bands, bg={:?}",
+                output.background
+            );
+            let text = line_to_string(&output.line);
+            let trimmed = text.trim_start();
+            let nums: Vec<&str> = trimmed.split_whitespace().take(2).collect();
+            assert!(
+                !(nums.len() >= 2
+                    && nums[0].chars().all(|c| c.is_ascii_digit())
+                    && nums[1].chars().all(|c| c.is_ascii_digit())),
+                "must not paint two line-number columns (old vs new), got {text:?}"
+            );
+        }
+        let header = block.header_line(
+            &theme,
+            false,
+            true,
+            false,
+            ToolPathSurface::Collapsed,
+            None,
+            Some(80),
+        );
+        let header_text: String = header.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(
+            header_text.starts_with("Creating "),
+            "header {header_text:?}"
+        );
+        assert_eq!(
+            header.spans.len(),
+            2,
+            "collapsed write preview must not show +N/-M diffstat, got {header:?}"
+        );
+    }
+
+    #[test]
+    fn search_replace_edit_still_paints_red_green_diff() {
+        let block = EditToolCallBlock::new("src/foo.rs", vec![make_hunk()]);
+        let theme = Theme::current();
+        let outputs = block.render_diff_lines(&theme, 80, &DiffRenderConfig::default());
+        assert!(
+            outputs
+                .iter()
+                .any(|o| o.background == Some(theme.diff_insert_bg)),
+            "search_replace must keep insert band"
+        );
+        assert!(
+            outputs
+                .iter()
+                .any(|o| o.background == Some(theme.diff_delete_bg)),
+            "search_replace must keep delete band"
+        );
+    }
+
+    #[test]
+    fn write_overwrite_file_preview_shows_new_content_without_red_deletions() {
+        let hunk: DiffHunk = vec![
+            DiffLine {
+                text: "old leftover\n".into(),
+                lo: 1,
+                ln: 0,
+                tag: ChangeTag::Delete,
+            },
+            DiffLine {
+                text: "new leftover\n".into(),
+                lo: 0,
+                ln: 1,
+                tag: ChangeTag::Insert,
+            },
+        ];
+        let block = EditToolCallBlock::new("remaining-2026-09-20-harness-500.md", vec![hunk])
+            .with_prefix("Creating ")
+            .with_file_preview();
+        let theme = Theme::current();
+        let outputs = block.render_diff_lines(&theme, 80, &DiffRenderConfig::default());
+        let joined = diff_outputs_to_string(&outputs);
+        assert!(joined.contains("new leftover"), "{joined:?}");
+        assert!(
+            !joined.contains("old leftover"),
+            "write preview shows new content, not red old, got {joined:?}"
+        );
+        assert!(
+            outputs.iter().all(|o| o.background.is_none()),
+            "write preview must not paint red/green bands"
         );
     }
 }

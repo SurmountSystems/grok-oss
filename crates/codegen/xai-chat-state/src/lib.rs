@@ -26,6 +26,7 @@
 pub mod actor;
 pub mod commands;
 pub mod compaction_mode;
+pub mod compaction_repetition;
 pub mod compaction_utils;
 pub mod conversation_util;
 pub mod events;

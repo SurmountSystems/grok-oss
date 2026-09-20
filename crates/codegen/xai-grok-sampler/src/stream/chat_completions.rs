@@ -69,6 +69,7 @@ pub fn stream_chat_completions<'a>(
 
         let mut content_acc = String::new();
         let mut reasoning_acc = String::new();
+        let mut repetition = super::StreamRepetitionGuard::default();
         // Tool call deltas keyed by positional index. Each entry is
         // (id, name, arguments_buffer); the first chunk for an index
         // carries id+name and starts the arguments buffer, subsequent
@@ -186,12 +187,22 @@ pub fn stream_chat_completions<'a>(
                     chunk_index += 1;
                     message_chunk_count += 1;
                     content_acc.push_str(&text);
+                    repetition.append(SamplingChannel::Text, &text);
+                    let looping = repetition.is_looping(SamplingChannel::Text);
                     yield SamplingEvent::ChannelToken {
                         request_id: request_id.clone(),
                         channel: SamplingChannel::Text,
                         text,
                         chunk_index,
                     };
+                    if looping {
+                        let err = repetition.error(SamplingChannel::Text, chunk_index);
+                        yield SamplingEvent::Failed {
+                            request_id: request_id.clone(),
+                            error: SamplingErrorInfo::from(&err),
+                        };
+                        return;
+                    }
                 }
 
                 if let Some(thought) = delta.reasoning_content
@@ -206,12 +217,22 @@ pub fn stream_chat_completions<'a>(
                     chunk_has_content = true;
                     chunk_index += 1;
                     reasoning_acc.push_str(&thought);
+                    repetition.append(SamplingChannel::Reasoning, &thought);
+                    let looping = repetition.is_looping(SamplingChannel::Reasoning);
                     yield SamplingEvent::ChannelToken {
                         request_id: request_id.clone(),
                         channel: SamplingChannel::Reasoning,
                         text: thought,
                         chunk_index,
                     };
+                    if looping {
+                        let err = repetition.error(SamplingChannel::Reasoning, chunk_index);
+                        yield SamplingEvent::Failed {
+                            request_id: request_id.clone(),
+                            error: SamplingErrorInfo::from(&err),
+                        };
+                        return;
+                    }
                 }
 
                 for tc_delta in delta.tool_calls.into_iter() {
@@ -449,6 +470,115 @@ mod tests {
                 assert_eq!(response.message_chunks_emitted, 2);
             }
             other => panic!("expected Completed, got {other:?}"),
+        }
+    }
+
+    /// Named contract: Isolated Preview 2026-09-20 looped
+    /// `Spawn dests of dest encoder skip. I'll spawn dests of dest encoder skip.`
+    /// until the Operator cancelled at 19m18s. Feeding many repeats of that
+    /// pair through Chat Completions must stop the turn instead of painting
+    /// unbounded repeats.
+    #[tokio::test]
+    async fn chat_completions_stops_dest_encoder_skip_loop() {
+        let looping = format!("{} ", super::DEST_ENCODER_SKIP_LOOP);
+        assert!(
+            looping.contains(
+                "Spawn dests of dest encoder skip. I'll spawn dests of dest encoder skip."
+            ),
+            "named test must quote the dest-encoder-skip loop"
+        );
+        let mut chunks: Vec<Result<ChatCompletionChunk, SamplingError>> =
+            (0..20).map(|_| Ok(text_chunk(&looping))).collect();
+        chunks.push(Ok(final_chunk(FinishReason::Stop)));
+        let raw = stream::iter(chunks).boxed();
+        let events = collect(stream_chat_completions(
+            raw,
+            None,
+            rid(),
+            Duration::from_secs(60),
+        ))
+        .await;
+
+        let text_tokens = events
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e,
+                    SamplingEvent::ChannelToken {
+                        channel: SamplingChannel::Text,
+                        ..
+                    }
+                )
+            })
+            .count();
+        assert!(
+            text_tokens >= 3 && text_tokens < 20,
+            "must paint a few repeats then stop, got {text_tokens} tokens"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, SamplingEvent::Completed { .. })),
+            "looping dest-encoder-skip stream must not complete as a normal stop"
+        );
+        match events.last().unwrap() {
+            SamplingEvent::Failed { error, .. } => {
+                assert_eq!(
+                    error.kind,
+                    crate::events::SamplingErrorKind::RepetitiveGeneration
+                );
+                assert!(
+                    !error.is_retryable,
+                    "sentence loop must stop the turn, not resample"
+                );
+                assert!(
+                    error.message.contains("repeating the same sentence"),
+                    "user-facing stop must name repeating sentence, got {}",
+                    error.message
+                );
+                assert!(
+                    !error.message.contains("403"),
+                    "must not look like HTTP 403, got {}",
+                    error.message
+                );
+            }
+            other => panic!("expected Failed(RepetitiveGeneration), got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn chat_completions_stops_dest_encoder_skip_loop_in_thought() {
+        let looping = format!("{} ", super::DEST_ENCODER_SKIP_LOOP);
+        let mut chunks: Vec<Result<ChatCompletionChunk, SamplingError>> = (0..20)
+            .map(|_| {
+                let mut chunk = make_chunk(vec![ChatChunkDelta {
+                    role: Some(Role::Assistant),
+                    content: None,
+                    reasoning_content: Some(looping.clone()),
+                    tool_calls: vec![],
+                    tool_call_id: None,
+                }]);
+                chunk.choices[0].finish_reason = None;
+                Ok(chunk)
+            })
+            .collect();
+        chunks.push(Ok(final_chunk(FinishReason::Stop)));
+        let raw = stream::iter(chunks).boxed();
+        let events = collect(stream_chat_completions(
+            raw,
+            None,
+            rid(),
+            Duration::from_secs(60),
+        ))
+        .await;
+        match events.last().unwrap() {
+            SamplingEvent::Failed { error, .. } => {
+                assert_eq!(
+                    error.kind,
+                    crate::events::SamplingErrorKind::RepetitiveGeneration
+                );
+            }
+            other => panic!("expected Failed(RepetitiveGeneration) on thought loop, got {other:?}"),
         }
     }
 

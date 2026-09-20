@@ -1487,6 +1487,39 @@ mod tests {
         );
     }
 
+    /// Operator screenshot: Isolated Preview retry attempt 2 sat on
+    /// `Retrying the model request (attempt 2): waiting for first token`
+    /// for 11m27s while `#1 /compact` was queued. Chrome must keep that
+    /// copy. The wait itself is the sampler headers budget (120s), not
+    /// eleven minutes.
+    #[test]
+    fn retrying_attempt_two_waiting_for_first_token_chrome() {
+        let theme = Theme::current();
+        let (_, label, is_tool) = compute_activity(
+            &theme,
+            &AgentState::TurnRunning,
+            &Some(TurnActivity::Retrying {
+                attempt: 2,
+                max_retries: u32::MAX,
+                reason: "waiting for first token".into(),
+            }),
+            false,
+            false,
+        );
+        assert_eq!(
+            label,
+            "Retrying the model request (attempt 2): waiting for first token"
+        );
+        assert!(label.contains("Retrying the model request"));
+        assert!(label.contains("waiting for first token"));
+        assert!(!is_tool);
+        let bound = std::time::Duration::from_secs(120);
+        assert!(
+            bound < std::time::Duration::from_secs(11 * 60),
+            "first-token retry wait is the 120s headers budget, not 11 minutes"
+        );
+    }
+
     /// Pre-first-token chrome must name the model request. A generic
     /// "Waiting for response…" looks idle while the sampler has not
     /// produced a token, which is the live hang.

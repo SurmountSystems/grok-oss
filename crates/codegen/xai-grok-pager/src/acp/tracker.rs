@@ -2087,7 +2087,7 @@ fn tool_call_to_block(tc: &acp::ToolCall, session_cwd: Option<&Path>) -> RenderB
                 block = block.with_untrusted_summary();
             }
             if is_write {
-                block = block.with_prefix("Creating ");
+                block = block.with_prefix("Creating ").with_file_preview();
             }
             RenderBlock::ToolCall(ToolCallBlock::Edit(block))
         }
@@ -2615,14 +2615,15 @@ fn is_bg_tool(tc: &acp::ToolCall) -> bool {
 /// Check if an Edit-kind tool call is a whole-file write (write)
 /// rather than a targeted replacement (search_replace / edit).
 ///
-/// Detection: a Write-family `rawInput.variant` tag.
+/// Detection: a Write-family `rawInput.variant` tag, or the product
+/// title `Write \`path\``.
 fn is_write_tool(tc: &acp::ToolCall) -> bool {
     is_write_variant(
         tc.raw_input
             .as_ref()
             .and_then(|v| v.get("variant"))
             .and_then(|v| v.as_str()),
-    )
+    ) || tc.title.starts_with("Write `")
 }
 /// Extract the serde variant tag from a tool call's `raw_input.variant`.
 ///

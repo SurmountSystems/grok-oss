@@ -1756,8 +1756,8 @@ pub(super) fn apply_retry_state(
 }
 
 /// Same as [`apply_retry_state`], with whether nested implementers are still
-/// running. A safety-refusal fail after this turn already wrote a report is
-/// not a failed request.
+/// running. A safety-refusal or thought output-cap fail after this turn
+/// already wrote a dest/resume report is not a failed request.
 pub(super) fn apply_retry_state_with_nested(
     retry: &xai_grok_shell::extensions::notification::RetryState,
     session: &mut AgentSession,
@@ -1881,13 +1881,15 @@ pub(super) fn apply_retry_state_with_nested(
                     error: message.clone(),
                     error_type: Some(error_type.clone()),
                 }));
-            } else if nested_implementers_running
-                && session.tracker.output_since_last_finish()
-                && crate::app::error_display::is_safety_refusal_message(message)
-            {
-                // Resume report already written and nested implementers still
-                // running: do not paint Request denied (403) / safety refusal
-                // as if the whole turn failed.
+            } else if crate::app::error_display::written_report_with_nested_running_is_not_turn_failure(
+                nested_implementers_running,
+                session.tracker.output_since_last_finish(),
+                Some(error_type.as_str()),
+                message,
+            ) {
+                // Dest/resume report already written and nested implementors
+                // still running: do not paint RequestFailed (safety refusal or
+                // thought output-cap) as if the whole turn failed.
             } else {
                 scrollback.push_block(RenderBlock::session_event(
                     crate::app::error_display::format_request_failure(

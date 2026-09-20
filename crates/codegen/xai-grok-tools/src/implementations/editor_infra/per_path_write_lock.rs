@@ -17,20 +17,29 @@
 //! edits for the child's lifetime. The hard exclusive lock is only
 //! [`try_acquire_write`] for one `search_replace` / `write` /
 //! `apply_patch` call.
+//!
+//! [`try_acquire_read`] is a separate CoW snapshot read: ephemeral, many
+//! concurrent readers, not the exclusive write lock. A snapshot does not
+//! block a writer and is not blocked by a writer.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, MutexGuard, OnceLock};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
 use crate::types::resources::{OwnerSessionId, SharedResources};
 
 /// Process-wide table: in-flight hard locks and spawn-time soft assignments.
 struct WriteLockTable {
-    /// Path currently inside an edit-tool call (hard lock).
+    /// Path currently inside an edit-tool call (hard exclusive write lock).
+    /// At most one writer per path.
     held: HashMap<PathBuf, String>,
     /// Path assigned to live subagents via spawn `write_paths` (soft).
     /// Several holders may share a path. This does not block acquire.
     assigned: HashMap<PathBuf, HashSet<String>>,
+    /// Pre-write CoW bytes published while a writer holds the path.
+    /// Snapshot readers clone this Arc; they do not take `held`.
+    published: HashMap<PathBuf, Arc<[u8]>>,
 }
 
 static TABLE: OnceLock<Mutex<WriteLockTable>> = OnceLock::new();
@@ -40,6 +49,7 @@ fn table() -> &'static Mutex<WriteLockTable> {
         Mutex::new(WriteLockTable {
             held: HashMap::new(),
             assigned: HashMap::new(),
+            published: HashMap::new(),
         })
     })
 }
@@ -142,6 +152,7 @@ impl PerPathWriteGuard {
             .is_some_and(|held| held == &self.holder)
         {
             table.held.remove(&self.path);
+            table.published.remove(&self.path);
         }
     }
 }
@@ -162,11 +173,69 @@ pub fn try_acquire_write(path: &Path, holder: &str) -> Result<PerPathWriteGuard,
             holder: existing.to_string(),
         });
     }
+    if !table.published.contains_key(&key)
+        && let Ok(bytes) = std::fs::read(&key)
+    {
+        table.published.insert(key.clone(), Arc::from(bytes));
+    }
     table.held.insert(key.clone(), holder.to_string());
     Ok(PerPathWriteGuard {
         path: key,
         holder: holder.to_string(),
         released: false,
+    })
+}
+
+/// Published pre-write CoW bytes while a writer holds `path`.
+///
+/// Snapshot readers clone this. Absence means read the filesystem.
+pub fn published_cow_snapshot(path: &Path) -> Option<Arc<[u8]>> {
+    let key = normalize_lock_path(path);
+    lock_table().published.get(&key).cloned()
+}
+
+/// RAII CoW snapshot. Dropping it does not block or unblock writers.
+#[derive(Debug, Clone)]
+pub struct PerPathReadGuard {
+    path: PathBuf,
+    bytes: Arc<[u8]>,
+}
+
+impl PerPathReadGuard {
+    /// Frozen bytes from the snapshot point in time.
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    /// Path this snapshot was taken for.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Copy the snapshot into an owned buffer.
+    pub fn into_bytes(self) -> Vec<u8> {
+        self.bytes.to_vec()
+    }
+}
+
+/// CoW snapshot read. Ephemeral. Many concurrent readers.
+///
+/// Does not take the exclusive write lock. Does not fail because a writer
+/// holds the path: if a writer published a pre-write copy, that copy is
+/// the snapshot; otherwise this reads the filesystem outside the table
+/// mutex so the snapshot itself does not block writers.
+pub fn try_acquire_read(path: &Path) -> io::Result<PerPathReadGuard> {
+    let key = normalize_lock_path(path);
+    if let Some(bytes) = published_cow_snapshot(&key) {
+        return Ok(PerPathReadGuard { path: key, bytes });
+    }
+    let disk = std::fs::read(&key)?;
+    if let Some(bytes) = published_cow_snapshot(&key) {
+        return Ok(PerPathReadGuard { path: key, bytes });
+    }
+    Ok(PerPathReadGuard {
+        path: key,
+        bytes: Arc::from(disk),
     })
 }
 
@@ -450,5 +519,97 @@ mod tests {
         );
         drop(write);
         release_holder(&holder);
+    }
+
+    #[test]
+    fn cow_snapshot_read_is_ephemeral_many_readers_one_writer() {
+        // Operator: "there is a read lock, which is a snapshot read (CoW),
+        // and that is a separate thing from a write lock, and a read lock
+        // is ephemeral and doesn't interfere with writers. There can be
+        // only one write lock, there can be multiple readers."
+        // A read lock is not blocked by a writer for the snapshot itself
+        // (snapshot at a point in time). Readers must not take the exclusive
+        // write lock. Soft write_paths assignment stays a writer reminder.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("cow.txt");
+        std::fs::write(&path, "before\n").unwrap();
+
+        let reader_a = try_acquire_read(&path).expect("first CoW snapshot read must succeed");
+        let reader_b = try_acquire_read(&path).expect("many concurrent readers");
+        assert_eq!(
+            reader_a.as_bytes(),
+            b"before\n",
+            "CoW snapshot read must copy the file at acquire time"
+        );
+        assert_eq!(
+            reader_b.as_bytes(),
+            b"before\n",
+            "a second reader must snapshot the same point in time"
+        );
+
+        let writer_a =
+            try_acquire_write(&path, "writer-a").expect("a read lock must not block a writer");
+        let writer_b_err = try_acquire_write(&path, "writer-b").unwrap_err();
+        assert_eq!(
+            writer_b_err.holder, "writer-a",
+            "there can be only one write lock"
+        );
+
+        std::fs::write(&path, "after\n").unwrap();
+        assert_eq!(
+            reader_a.as_bytes(),
+            b"before\n",
+            "CoW snapshot read must stay frozen after a later write"
+        );
+        assert_eq!(
+            reader_b.as_bytes(),
+            b"before\n",
+            "every live reader keeps its own frozen snapshot"
+        );
+        let reader_during_write =
+            try_acquire_read(&path).expect("a snapshot read must not be blocked by a writer");
+        assert_eq!(
+            reader_during_write.as_bytes(),
+            b"before\n",
+            "CoW snapshot while a writer holds must be the pre-write point in time"
+        );
+
+        drop(writer_a);
+        assert_eq!(
+            reader_a.as_bytes(),
+            b"before\n",
+            "an ephemeral reader snapshot must outlive the writer drop"
+        );
+        let reader_after_commit =
+            try_acquire_read(&path).expect("a new reader after writer drop sees committed disk");
+        assert_eq!(
+            reader_after_commit.as_bytes(),
+            b"after\n",
+            "after the exclusive write lock drops, a new snapshot read uses disk"
+        );
+
+        let assignee = format!("soft-{}", path.display());
+        try_reserve_writes([&path], &assignee);
+        let reader_soft = try_acquire_read(&path)
+            .expect("readers must not take the exclusive write lock or fail spawn assignment");
+        assert_eq!(reader_soft.as_bytes(), b"after\n");
+        let note = format_soft_assignment_reminder(Some("other-agent"))
+            .expect("soft assignment reminder stays for writers");
+        assert!(
+            note.contains(&format!("L2 {assignee} is assigned these paths")),
+            "reminder must still name the writer assignment: {note}"
+        );
+        drop(reader_soft);
+        let later_write = try_acquire_write(&path, "writer-after-readers");
+        assert!(
+            later_write.is_ok(),
+            "live CoW readers must not exclusive-block a later writer"
+        );
+        drop(later_write);
+        drop(reader_a);
+        drop(reader_b);
+        drop(reader_during_write);
+        drop(reader_after_commit);
+        release_holder(&assignee);
     }
 }

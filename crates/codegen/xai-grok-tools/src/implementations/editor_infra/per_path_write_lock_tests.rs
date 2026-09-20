@@ -1,23 +1,25 @@
-//! ACP edit-tool contracts for the per-path write lock.
+//! ACP edit-tool contracts for the per-path write lock and CoW snapshot read.
 //!
-//! These tests call `search_replace`, `apply_patch`, `write`, and
-//! `hashline_edit`. They are the product red/green proof. The lock table
-//! unit tests live next to the helper module.
+//! These tests call `search_replace`, `apply_patch`, `write`,
+//! `hashline_edit`, and `read_file`. They are the product red/green proof.
+//! The lock table unit tests live next to the helper module.
 
 use std::sync::Arc;
 
 use crate::computer::local::LocalFs;
 use crate::implementations::codex::apply_patch::{ApplyPatchInput, ApplyPatchTool};
 use crate::implementations::editor_infra::per_path_write_lock::{
-    format_soft_assignment_reminder, release_holder, try_acquire_write, try_reserve_writes,
+    format_soft_assignment_reminder, release_holder, try_acquire_read, try_acquire_write,
+    try_reserve_writes,
 };
+use crate::implementations::grok_build::read_file::{ReadFileInput, ReadFileTool};
 use crate::implementations::grok_build::search_replace::{SearchReplaceInput, SearchReplaceTool};
 use crate::implementations::grok_build_hashline::edit::{
     HashlineEditInput, HashlineEditTool, HashlineOp,
 };
 use crate::implementations::opencode::write::{WriteInput, WriteTool};
 use crate::notification::types::ToolNotificationHandle;
-use crate::types::output::SearchReplaceOutput;
+use crate::types::output::{ReadFileOutput, SearchReplaceOutput};
 use crate::types::resources::{Cwd, FileSystem, NotificationHandle, OwnerSessionId, Resources};
 use crate::types::template_renderer::TemplateRenderer;
 use crate::types::tool::ToolKind;
@@ -418,4 +420,50 @@ async fn hashline_edit_happy_path_does_not_mention_the_lock() {
         other => panic!("expected EditsApplied, got {other:?}"),
     }
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "goodbye\n");
+}
+
+// Grok OSS: ACP per-path lock extra. This diverges from upstream xAI because the Operator contract is a CoW snapshot read lock, ephemeral, many readers, one writer.
+#[tokio::test]
+async fn read_file_uses_cow_snapshot_and_does_not_take_the_exclusive_write_lock() {
+    // Operator: read lock is a snapshot read (CoW), separate from the write
+    // lock, ephemeral, does not interfere with writers. Readers must not take
+    // the exclusive write lock.
+    let tmp = TempDir::new().unwrap();
+    let path = tmp.path().join("cow-read.txt");
+    std::fs::write(&path, "before\n").unwrap();
+    let snapshot = try_acquire_read(&path).expect("CoW snapshot read must succeed");
+    let _held = try_acquire_write(&path, "explore-agent-a")
+        .expect("a snapshot reader must not exclusive-block a writer");
+    std::fs::write(&path, "after\n").unwrap();
+
+    let result = xai_tool_runtime::Tool::run(
+        &ReadFileTool,
+        test_ctx(search_replace_resources(tmp.path(), "reader-b")),
+        ReadFileInput {
+            path: "cow-read.txt".to_string(),
+            offset: None,
+            limit: None,
+            pages: None,
+            format: None,
+        },
+    )
+    .await
+    .expect("read_file must not take the exclusive write lock");
+
+    match result {
+        ReadFileOutput::FileContent(content) => {
+            assert!(
+                content.content.contains("before"),
+                "CoW snapshot while a writer holds must be the pre-write point in time: {}",
+                content.content
+            );
+            assert!(
+                !content.content.contains("after"),
+                "in-flight disk mutation must not leak into the snapshot: {}",
+                content.content
+            );
+        }
+        other => panic!("expected FileContent, got {other:?}"),
+    }
+    assert_eq!(snapshot.as_bytes(), b"before\n");
 }

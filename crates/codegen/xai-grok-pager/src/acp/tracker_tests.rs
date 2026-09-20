@@ -289,6 +289,92 @@ fn write_tool_call_completed_clears_pending_running_activity() {
         tracker.activity()
     );
 }
+
+/// A new-file write preview must not paint as a git-style red/green unified
+/// diff. The Operator did not ask to diff. Show the new content without a
+/// "green side" vs red deletions.
+#[test]
+fn new_file_write_tool_call_is_creating_file_preview_not_unified_diff() {
+    let mut sb = ScrollbackState::new();
+    let mut tracker = AcpUpdateTracker::new();
+    let path = "remaining-2026-09-20-harness-500.md";
+    let new = "# leftover\nThe harness 500k window stays.\n";
+    let tc = acp::ToolCall::new(
+        acp::ToolCallId::new(Arc::from("tc-write-new")),
+        format!("Write `{path}`"),
+    )
+    .kind(acp::ToolKind::Edit)
+    .status(acp::ToolCallStatus::Completed)
+    .raw_input(Some(serde_json::json!({
+        "variant": "Write",
+        "file_path": path,
+        "content": new,
+    })))
+    .content(vec![acp::ToolCallContent::Diff(
+        acp::Diff::new(path, new.to_string()).old_text(Some(String::new())),
+    )]);
+    tracker.handle_update(acp::SessionUpdate::ToolCall(tc), &meta(), &mut sb);
+    let edit = edit_block_at(&sb, 0);
+    assert_eq!(edit.prefix, "Creating ");
+    assert!(
+        edit.paint_as_file_preview,
+        "write must paint as file preview, not a unified diff"
+    );
+    let theme = crate::theme::Theme::current();
+    let config = crate::scrollback::blocks::tool::DiffRenderConfig {
+        dual_line_numbers: true,
+        ..Default::default()
+    };
+    let outputs = edit.render_diff_lines(&theme, 80, &config);
+    assert!(
+        outputs.iter().all(|o| o.background.is_none()),
+        "new-file write must not paint insert/delete bands"
+    );
+    let joined: String = outputs
+        .iter()
+        .map(|o| {
+            o.line
+                .spans
+                .iter()
+                .map(|s| s.content.as_ref())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(joined.contains("# leftover"), "{joined:?}");
+    assert!(
+        !joined.contains("old leftover"),
+        "empty old_text must not invent red deletions, got {joined:?}"
+    );
+}
+
+#[test]
+fn search_replace_tool_call_is_not_a_file_preview() {
+    let mut sb = ScrollbackState::new();
+    let mut tracker = AcpUpdateTracker::new();
+    let tc = acp::ToolCall::new(
+        acp::ToolCallId::new(Arc::from("tc-sr")),
+        "Edit `foo.rs`".to_string(),
+    )
+    .kind(acp::ToolKind::Edit)
+    .status(acp::ToolCallStatus::Completed)
+    .raw_input(Some(serde_json::json!({
+        "variant": "SearchReplace",
+        "file_path": "foo.rs",
+    })))
+    .content(vec![acp::ToolCallContent::Diff(
+        acp::Diff::new("foo.rs", "let x = 2;\n".to_string())
+            .old_text(Some("let x = 1;\n".to_string())),
+    )]);
+    tracker.handle_update(acp::SessionUpdate::ToolCall(tc), &meta(), &mut sb);
+    let edit = edit_block_at(&sb, 0);
+    assert_eq!(edit.prefix, "Edit ");
+    assert!(
+        !edit.paint_as_file_preview,
+        "search_replace must keep the red/green diff"
+    );
+}
+
 /// Lost Write completion must drop `Running: Write …` after the short bound.
 #[test]
 fn stale_write_tool_running_drops_activity_after_bound() {

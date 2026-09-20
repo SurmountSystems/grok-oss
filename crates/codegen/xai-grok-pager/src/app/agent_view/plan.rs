@@ -1090,7 +1090,9 @@ impl AgentView {
         // live present. Do not require a keystroke snapshot of
         // `feedback_draft`. Leftover slash-palette `/` plus paste used to
         // skip that snapshot, Approve empty, and leave the notes sitting.
-        // Stash match from live present `stash()` is not keep-draft.
+        // A `[Pasted: 13 lines]` chip whose body starts with `/implement`
+        // is still those notes, not a typed slash. Stash match from live
+        // present `stash()` is not keep-draft.
         let isolated_idle_composer_notes = self.plan_approval_view.is_some()
             && !self.plan_decision_resolved
             && self.plan_feedback_in_flight.is_none()

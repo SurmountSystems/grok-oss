@@ -1019,7 +1019,8 @@ impl SessionActor {
         } else {
             Vec::new()
         };
-        const SUMMARY_BUDGET_RESERVE_TOKENS: u64 = 32_768;
+        const SUMMARY_BUDGET_RESERVE_TOKENS: u64 =
+            xai_chat_state::compaction_utils::COMPACT_RESEED_MAX_TOKENS;
         let verbatim_input_enabled = self.compaction.verbatim_input;
         let simplified_messages = if verbatim_input_enabled {
             xai_chat_state::compaction_utils::prepare_conversation_for_verbatim_summarization(
@@ -1943,6 +1944,28 @@ impl SessionActor {
             != SUPPRESS_NONE
         {
             return false;
+        }
+        // Thought/output hit max_tokens: compact on L1/L2 instead of
+        // stranding in "Try asking for a shorter answer". Context need not
+        // already be full. L3 still never AUTO compact above.
+        if matches!(
+            err.kind,
+            xai_grok_sampler::SamplingErrorKind::MaxTokensTruncation
+        ) {
+            let session_window = self
+                .chat_state_handle
+                .get_sampling_config()
+                .await
+                .map(|c| c.context_window.get())
+                .filter(|cw| *cw > 0)
+                .unwrap_or(0);
+            let error_window = err
+                .model_metadata
+                .as_ref()
+                .and_then(|m| m.context_window)
+                .filter(|cw| *cw > 0)
+                .unwrap_or(0);
+            return session_window > 0 || error_window > 0;
         }
         let estimated_total = self.chat_state_handle.get_estimated_total_tokens().await;
         let session_window = self

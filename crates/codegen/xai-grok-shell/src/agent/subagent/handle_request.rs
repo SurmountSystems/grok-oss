@@ -1657,7 +1657,12 @@ pub(crate) async fn run_shell_child(
         }
     }
     completion_data.set_persisted_output_dir(persist_subagent_output(&subagent_meta_dir, &result));
-    persist_subagent_completion(&subagent_meta_dir, &result, &gcs_upload_ctx);
+    let keep_nested = super::token_generation_fail_open::keep_nested_session_after_turn_error(
+        result.error.as_deref(),
+    );
+    if !keep_nested {
+        persist_subagent_completion(&subagent_meta_dir, &result, &gcs_upload_ctx);
+    }
     let final_status = result.status().to_string();
     let snapshot_dispose_enabled = ctx.resolve_subagent_worktree_snapshot_enabled();
     let telemetry_tokens = if result.tool_calls > 0 || result.success {
@@ -1812,73 +1817,85 @@ pub(crate) async fn run_shell_child(
         }
         (None, None) => {}
     }
-    let _ = child_handle.cmd_tx.send(SessionCommand::Shutdown(
-        crate::session::ShutdownKind::Graceful,
-    ));
-    ctx.workspace_ops
-        .end_local_session(child_session_id.0.as_ref());
+    if keep_nested {
+        tracing::warn!(
+            subagent_id = %request.id,
+            child_session_id = %child_session_id.0,
+            error = ?result.error,
+            "token-generation HTTP 500: keeping nested session live for resume"
+        );
+    } else {
+        let _ = child_handle.cmd_tx.send(SessionCommand::Shutdown(
+            crate::session::ShutdownKind::Graceful,
+        ));
+        ctx.workspace_ops
+            .end_local_session(child_session_id.0.as_ref());
+    }
     let mut disposed_snapshot_ref: Option<String> = None;
     let mut worktree_removed = false;
-    if let Some(ref wt_path) = worktree_path {
-        if snapshot_dispose_enabled {
-            let ref_name = format!("refs/grok/subagents/{}", request.id);
-            let source_repo = resolve_subagent_source_repo(&ctx);
-            match crate::session::worktree::snapshot_subagent_worktree(
-                wt_path,
-                &source_repo,
-                &ref_name,
-            )
-            .await
-            {
-                Ok(snapshot_ref) => {
-                    let persisted = update_subagent_meta_snapshot_ref(
-                        &subagent_meta_dir,
-                        &snapshot_ref,
-                        &final_status,
-                    );
-                    if persisted {
-                        disposed_snapshot_ref = Some(snapshot_ref);
-                        match crate::session::worktree::remove_subagent_worktree(wt_path).await {
-                            Ok(()) => {
-                                worktree_removed = true;
-                                tracing::info!(
-                                    subagent_id = %request.id,
-                                    worktree_path = %wt_path.display(),
-                                    "snapshotted and removed subagent worktree"
-                                );
+    if !keep_nested {
+        if let Some(ref wt_path) = worktree_path {
+            if snapshot_dispose_enabled {
+                let ref_name = format!("refs/grok/subagents/{}", request.id);
+                let source_repo = resolve_subagent_source_repo(&ctx);
+                match crate::session::worktree::snapshot_subagent_worktree(
+                    wt_path,
+                    &source_repo,
+                    &ref_name,
+                )
+                .await
+                {
+                    Ok(snapshot_ref) => {
+                        let persisted = update_subagent_meta_snapshot_ref(
+                            &subagent_meta_dir,
+                            &snapshot_ref,
+                            &final_status,
+                        );
+                        if persisted {
+                            disposed_snapshot_ref = Some(snapshot_ref);
+                            match crate::session::worktree::remove_subagent_worktree(wt_path).await
+                            {
+                                Ok(()) => {
+                                    worktree_removed = true;
+                                    tracing::info!(
+                                        subagent_id = %request.id,
+                                        worktree_path = %wt_path.display(),
+                                        "snapshotted and removed subagent worktree"
+                                    );
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        subagent_id = %request.id,
+                                        worktree_path = %wt_path.display(),
+                                        error = %e,
+                                        "snapshotted subagent worktree but removal failed; ref persisted for resume"
+                                    )
+                                }
                             }
-                            Err(e) => {
-                                tracing::warn!(
-                                    subagent_id = %request.id,
-                                    worktree_path = %wt_path.display(),
-                                    error = %e,
-                                    "snapshotted subagent worktree but removal failed; ref persisted for resume"
-                                )
-                            }
+                        } else {
+                            tracing::warn!(
+                                subagent_id = %request.id,
+                                worktree_path = %wt_path.display(),
+                                "snapshot_ref not persisted; preserving worktree for resume"
+                            );
                         }
-                    } else {
+                    }
+                    Err(e) => {
                         tracing::warn!(
                             subagent_id = %request.id,
                             worktree_path = %wt_path.display(),
-                            "snapshot_ref not persisted; preserving worktree for resume"
+                            error = %e,
+                            "Failed to snapshot subagent worktree; preserving for review"
                         );
                     }
                 }
-                Err(e) => {
-                    tracing::warn!(
-                        subagent_id = %request.id,
-                        worktree_path = %wt_path.display(),
-                        error = %e,
-                        "Failed to snapshot subagent worktree; preserving for review"
-                    );
-                }
+            } else {
+                tracing::info!(
+                    subagent_id = %request.id,
+                    worktree_path = %wt_path.display(),
+                    "Worktree preserved for review"
+                );
             }
-        } else {
-            tracing::info!(
-                subagent_id = %request.id,
-                worktree_path = %wt_path.display(),
-                "Worktree preserved for review"
-            );
         }
     }
     if worktree_removed {

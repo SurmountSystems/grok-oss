@@ -2745,3 +2745,289 @@ fn fit_counts_encrypted_reasoning_against_budget() {
         "recent turn must survive"
     );
 }
+
+/// Operator screenshot 2026-09-20 Isolated Preview: the stream looped this
+/// pair. Copied here; do not import from the sampler crate.
+const DEST_ENCODER_SKIP_LOOP: &str =
+    "Spawn dests of dest encoder skip. I'll spawn dests of dest encoder skip.";
+
+fn dest_encoder_skip_wall_near_75_2k() -> String {
+    let unit = format!("{DEST_ENCODER_SKIP_LOOP} ");
+    let copies = ((75_200 * 4) / unit.len()).max(3) + 1;
+    unit.repeat(copies)
+}
+
+fn dest_encoder_skip_conversation() -> Vec<ConversationItem> {
+    vec![
+        ConversationItem::system("sys"),
+        ConversationItem::user("Keep Isolated Preview open until Esc, Exit, or Approve."),
+        ConversationItem::tool_result(
+            "dest-1",
+            "Wrote /home/hunter/.agents/reports/fix-isolated-preview.md\nIsolated Preview stays until Esc.",
+        ),
+        ConversationItem::assistant(dest_encoder_skip_wall_near_75_2k()),
+    ]
+}
+
+fn dest_encoder_skip_count(text: &str) -> usize {
+    text.matches(DEST_ENCODER_SKIP_LOOP).count()
+}
+
+/// Lossy summarizer prep must drop the dest-encoder-skip wall so compact
+/// does not paint `Context compacted: 75.2k → 75.2k tokens`. Operator prompt
+/// stays. Tool results are dropped by this prep (lossy).
+#[test]
+fn prepare_for_summarization_drops_dest_encoder_skip_wall_keeps_operator() {
+    let conv = dest_encoder_skip_conversation();
+    let wall_tokens = crate::estimate_conversation_tokens(&conv);
+    assert!(
+        wall_tokens >= 75_200,
+        "fixture must be 75.2k-class if the wall is left in, got {wall_tokens}"
+    );
+    let result = prepare_conversation_for_summarization(conv);
+    let joined = result
+        .iter()
+        .map(|i| i.text_content())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        joined.contains("Keep Isolated Preview open until Esc, Exit, or Approve."),
+        "Operator prompt must survive dest-encoder-skip drop, got {joined}"
+    );
+    assert!(
+        dest_encoder_skip_count(&joined) < 3,
+        "dest-encoder-skip must not remain as a wall after prepare; compact miss was \
+         `Context compacted: 75.2k → 75.2k tokens`, got {joined}"
+    );
+    assert!(
+        result.iter().any(|i| {
+            matches!(i, ConversationItem::Assistant(a) if a.content.as_ref() == REPETITIVE_ASSISTANT_OMITTED)
+        }),
+        "looping assistant must become the omit stub, got {joined}"
+    );
+    assert!(
+        crate::estimate_conversation_tokens(&result) < 75_200,
+        "summarizer input must shrink below 75.2k after dropping the wall"
+    );
+}
+
+/// Two copies of the dest-encoder-skip pair is ordinary restatement.
+#[test]
+fn prepare_for_summarization_keeps_two_copy_dest_encoder_skip_restatement() {
+    let restatement = format!("{DEST_ENCODER_SKIP_LOOP} ").repeat(2);
+    let result = prepare_conversation_for_summarization(vec![
+        ConversationItem::user("Keep Isolated Preview open"),
+        ConversationItem::assistant(restatement.clone()),
+    ]);
+    let assistant = result
+        .iter()
+        .find_map(|i| match i {
+            ConversationItem::Assistant(a) => Some(a.content.as_ref().to_string()),
+            _ => None,
+        })
+        .expect("assistant");
+    assert_eq!(assistant, restatement);
+}
+
+/// Verbatim / segment prep keeps dest reports and stubs the looping assistant.
+#[test]
+fn prepare_verbatim_and_segment_keep_dest_report_drop_dest_encoder_skip_wall() {
+    let conv = dest_encoder_skip_conversation();
+    for (label, result) in [
+        (
+            "verbatim",
+            prepare_conversation_for_verbatim_summarization(conv.clone(), false),
+        ),
+        ("segment", prepare_conversation_for_segment(conv)),
+    ] {
+        let joined = result
+            .iter()
+            .map(|i| i.text_content())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            joined.contains("Keep Isolated Preview open until Esc, Exit, or Approve."),
+            "{label}: Operator prompt must survive"
+        );
+        assert!(
+            result.iter().any(|i| {
+                matches!(i, ConversationItem::ToolResult(t) if t.content.contains("fix-isolated-preview.md"))
+            }),
+            "{label}: dest report must survive compact recovery"
+        );
+        assert!(
+            dest_encoder_skip_count(&joined) < 3,
+            "{label}: dest-encoder-skip wall must not remain; miss was \
+             `Context compacted: 75.2k → 75.2k tokens`"
+        );
+        assert!(
+            result.iter().any(|i| {
+                matches!(i, ConversationItem::Assistant(a) if a.content.as_ref() == REPETITIVE_ASSISTANT_OMITTED)
+            }),
+            "{label}: looping assistant must be the omit stub"
+        );
+    }
+}
+
+/// A compact summary that is only dest-encoder-skip repeats must become the
+/// omit stub, not a 75k seed.
+#[test]
+fn format_compact_summary_stubs_dest_encoder_skip_wall() {
+    let wall = dest_encoder_skip_wall_near_75_2k();
+    let cleaned = format_compact_summary(&wall);
+    assert_eq!(
+        cleaned, REPETITIVE_ASSISTANT_OMITTED,
+        "looping summary must not reseed `Context compacted: 75.2k → 75.2k tokens`"
+    );
+    assert!(
+        dest_encoder_skip_count(&cleaned) < 3,
+        "cleaned summary must not keep the dest-encoder-skip wall"
+    );
+    assert!(
+        !is_degenerate_summary(&wall),
+        "the omit stub is a successful recovery seed, not a degenerate retry"
+    );
+    let seed = format_compact_summary_content(&wall);
+    assert!(seed.contains(REPETITIVE_ASSISTANT_OMITTED));
+    assert!(
+        dest_encoder_skip_count(&seed) < 3,
+        "continuation seed must not carry the dest-encoder-skip wall"
+    );
+}
+
+/// After drop + compacted-history assembly, the next-turn text has the
+/// Operator query and no dest-encoder-skip wall.
+#[tokio::test]
+async fn build_compacted_history_drops_dest_encoder_skip_wall_keeps_operator() {
+    let conversation = dest_encoder_skip_conversation();
+    let full = CompactionStateContext::build(&conversation, CompactionInputs::default()).await;
+    let compacted_ctx = full.for_compaction();
+    assert_eq!(
+        compacted_ctx.last_user_query.as_deref(),
+        Some("Keep Isolated Preview open until Esc, Exit, or Approve.")
+    );
+    let history = build_compacted_history(CompactedHistoryInput {
+        system_message: ConversationItem::system("sys"),
+        user_message_prefix: "<user_info>os</user_info>".to_string(),
+        agents_md_reminder: None,
+        state_context: &compacted_ctx,
+        compaction_summary: dest_encoder_skip_wall_near_75_2k(),
+        system_reminder: None,
+        summary_before_recent: false,
+        transcript_hint: Some(
+            "Spawn dests of dest encoder skip. I'll spawn dests of dest encoder skip. ".repeat(3),
+        ),
+        summary_count: 1,
+    });
+    let joined = history
+        .iter()
+        .map(|i| i.text_content())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        joined.contains("Keep Isolated Preview open until Esc, Exit, or Approve."),
+        "Operator query must survive recovery, got {joined}"
+    );
+    assert!(
+        dest_encoder_skip_count(&joined) < 3,
+        "compacted history must not re-include the dest-encoder-skip wall \
+         (`Context compacted: 75.2k → 75.2k tokens`), got count {}",
+        dest_encoder_skip_count(&joined)
+    );
+}
+
+fn unique_fat_history_near_75_2k() -> String {
+    let mut body = String::with_capacity((75_200 * 4) as usize);
+    let mut i = 0u32;
+    while (body.len() as u64) / xai_token_estimation::BYTES_PER_TOKEN < 75_200 {
+        body.push_str(&format!(
+            "Isolated Preview stay-open unique step {i:05}: dest report {i}.\n"
+        ));
+        i += 1;
+    }
+    body
+}
+
+/// Operator: "compactions shouldn't result in 75k contexts. That's
+/// incredibly wasteful." A unique (non-looping) 75k-class summarizer dump
+/// must clip to [`COMPACT_SUMMARY_MAX_TOKENS`], not reseed the window.
+#[test]
+fn format_compact_summary_caps_unique_75k_body_to_compact_summary_budget() {
+    let fat = unique_fat_history_near_75_2k();
+    let fat_tokens = xai_token_estimation::estimate_tokens(&fat);
+    assert!(
+        fat_tokens >= 75_200,
+        "fixture must be 75.2k-class unique text, got {fat_tokens}"
+    );
+    assert!(
+        !is_repetitive_generation(&fat),
+        "this contract is unique fat history, not dest-encoder-skip"
+    );
+    let cleaned = format_compact_summary(&fat);
+    let cleaned_tokens = xai_token_estimation::estimate_tokens(&cleaned);
+    assert!(
+        cleaned_tokens <= COMPACT_SUMMARY_MAX_TOKENS,
+        "Operator: 75k post-compact contexts are incredibly wasteful; \
+         compact summary budget is {COMPACT_SUMMARY_MAX_TOKENS} tokens \
+         (few thousand words at bytes/4), got {cleaned_tokens}"
+    );
+    assert_ne!(
+        cleaned, REPETITIVE_ASSISTANT_OMITTED,
+        "unique fat text must clip, not the dest-encoder-skip omit stub"
+    );
+    assert!(
+        cleaned.contains("Isolated Preview stay-open unique step"),
+        "clipped summary must keep the start of the unique work, got {cleaned}"
+    );
+}
+
+/// Compacted history from a unique 75k summary dump stays in the compact
+/// summary budget. Operator prompts and dest reports remain.
+#[tokio::test]
+async fn build_compacted_history_unique_75k_summary_stays_within_compact_summary_budget() {
+    let conversation = vec![
+        ConversationItem::system("sys"),
+        ConversationItem::user("Keep Isolated Preview open until Esc, Exit, or Approve."),
+        ConversationItem::tool_result(
+            "dest-1",
+            "Wrote /home/hunter/.agents/reports/fix-isolated-preview.md\nIsolated Preview stays until Esc.",
+        ),
+        ConversationItem::assistant(unique_fat_history_near_75_2k()),
+    ];
+    let full = CompactionStateContext::build(&conversation, CompactionInputs::default()).await;
+    let compacted_ctx = full.for_compaction();
+    assert!(
+        compacted_ctx.recent_messages.is_empty(),
+        "must not copy the sampling window into compacted history as recent messages"
+    );
+    let history = build_compacted_history(CompactedHistoryInput {
+        system_message: ConversationItem::system("sys"),
+        user_message_prefix: "<user_info>os</user_info>".to_string(),
+        agents_md_reminder: None,
+        state_context: &compacted_ctx,
+        compaction_summary: unique_fat_history_near_75_2k(),
+        system_reminder: None,
+        summary_before_recent: false,
+        transcript_hint: None,
+        summary_count: 1,
+    });
+    let joined = history
+        .iter()
+        .map(|i| i.text_content())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        joined.contains("Keep Isolated Preview open until Esc, Exit, or Approve."),
+        "Operator query must survive compact, got {joined}"
+    );
+    let tokens = crate::estimate_conversation_tokens(&history);
+    assert!(
+        tokens < COMPACT_RESEED_MAX_TOKENS,
+        "Operator: 75k post-compact contexts are incredibly wasteful; \
+         compact reserve is {COMPACT_RESEED_MAX_TOKENS} tokens, got {tokens}"
+    );
+    assert!(
+        tokens < 75_200,
+        "`Context compacted: 75.2k → 75.2k tokens` is a miss, got {tokens}"
+    );
+}
