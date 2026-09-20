@@ -1844,10 +1844,24 @@ pub(super) fn handle_prompt_response(
             || (http_status == Some(401)
                 && result.as_ref().err().is_some_and(|e| e.contains("(401)")));
         let request_failed_shown = scrollback_has_recent_request_failed(&agent.scrollback);
+        // Capture before `finish_turn` snapshots the output epoch.
+        let had_output = agent.session.tracker.output_since_last_finish();
+        let nested_implementers_running = agent
+            .subagent_sessions
+            .values()
+            .any(|info| info.is_running());
+        let safety_refusal_after_resume_report = nested_implementers_running
+            && had_output
+            && result
+                .as_ref()
+                .err()
+                .is_some_and(|e| crate::app::error_display::is_safety_refusal_message(e));
         // A dedicated prompt/modal/banner replaces the generic TurnFailed
         // marker and error toast (rate limit, free-usage paywall, model
         // incompatibility, credit 402/403, 401 re-auth, context overflow,
-        // disk-full, or a formatted RequestFailed banner from RetryState).
+        // disk-full, a formatted RequestFailed banner from RetryState, or a
+        // safety-refusal PromptResponse after a resume report while nested
+        // implementers are still running).
         let dedicated_ux_shown = rate_limited
             || free_usage_blocked
             || model_incompatible
@@ -1855,7 +1869,8 @@ pub(super) fn handle_prompt_response(
             || reauth_prompted
             || context_overflow
             || disk_full
-            || request_failed_shown;
+            || request_failed_shown
+            || safety_refusal_after_resume_report;
         let elapsed = agent.turn_elapsed();
 
         {

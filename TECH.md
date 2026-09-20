@@ -27,6 +27,10 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
     - L3 specialists (when spawned)
   - L2 Explore /rebuild exec path
     - L3 specialists (when spawned)
+  - L2 Finish 403 paint product
+    - L3 specialists (when spawned)
+  - L2 Finish 403 paint slice
+    - L3 specialists (when spawned)
   - L2 Finish Isolated Preview report
     - L3 specialists (when spawned)
   - L2 Finish totals report
@@ -43,6 +47,8 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
     - L3 specialists (when spawned)
   - L2 Fix 16 check-local TRY 2 FAILs
     - L3 specialists (when spawned)
+  - L2 Fix 403 after resume paint
+    - L3 specialists (when spawned)
   - L2 Fix Approve SendInterject
     - L3 specialists (when spawned)
   - L2 Fix Approve notes vs keep-draft
@@ -58,6 +64,8 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
   - L2 Fix Isolated Preview plan stay
     - L3 specialists (when spawned)
   - L2 Fix Isolated Preview vanish
+    - L3 specialists (when spawned)
+  - L2 Fix RetryState and session_id borrow
     - L3 specialists (when spawned)
   - L2 Fix approve with comment again
     - L3 specialists (when spawned)
@@ -93,11 +101,15 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
     - L3 specialists (when spawned)
   - L2 Fix quality compile errors
     - L3 specialists (when spawned)
+  - L2 Fix rebuild nested resume
+    - L3 specialists (when spawned)
   - L2 Fix rebuild resume like disconnect
     - L3 specialists (when spawned)
   - L2 Fix remaining 6 nextest fails
     - L3 specialists (when spawned)
   - L2 Fix replay.rs format string
+    - L3 specialists (when spawned)
+  - L2 Fix resume 403 chrome
     - L3 specialists (when spawned)
   - L2 Fix session_plans tempdir compile
     - L3 specialists (when spawned)
@@ -141,6 +153,8 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
     - L3 specialists (when spawned)
   - L2 L2 present-plus-past token totals
     - L3 specialists (when spawned)
+  - L2 Land rebuild resume tests
+    - L3 specialists (when spawned)
   - L2 Land totals and report
     - L3 specialists (when spawned)
   - L2 One check-remote after Approve split
@@ -151,7 +165,17 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
     - L3 specialists (when spawned)
   - L2 One check-remote after from_ref
     - L3 specialists (when spawned)
+  - L2 One check-remote after rebuild resume
+    - L3 specialists (when spawned)
+  - L2 One check-remote after rustc
+    - L3 specialists (when spawned)
   - L2 One check-remote after rustfmt
+    - L3 specialists (when spawned)
+  - L2 One check-remote after wrap
+    - L3 specialists (when spawned)
+  - L2 One check-remote then install
+    - L3 specialists (when spawned)
+  - L2 One check-remote wrap is done
     - L3 specialists (when spawned)
   - L2 Pin L1 never edits
     - L3 specialists (when spawned)
@@ -164,6 +188,12 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
   - L2 Pin then fix lock install
     - L3 specialists (when spawned)
   - L2 Plan stale-prompt TDD
+    - L3 specialists (when spawned)
+  - L2 Rebuild nested resume tests
+    - L3 specialists (when spawned)
+  - L2 Rebuild resume nested implementors
+    - L3 specialists (when spawned)
+  - L2 Rebuild resume nested work
     - L3 specialists (when spawned)
   - L2 Red tests then fix soft plan
     - L3 specialists (when spawned)
@@ -205,7 +235,11 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
     - L3 specialists (when spawned)
   - L2 Wire unused subagent list helpers
     - L3 specialists (when spawned)
+  - L2 Wrap-only rustfmt rebuild 403
+    - L3 specialists (when spawned)
   - L2 Wrap-only rustfmt three files
+    - L3 specialists (when spawned)
+  - L2 Write rebuild resume contracts
     - L3 specialists (when spawned)
   - L2 goal achievement skeptic
     - L3 specialists (when spawned)
@@ -257,7 +291,9 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
 | Diagnose rebuild resume drain | nested L2 session usage | L2 | 157032 | estimate | exited |
 | Embed ripgrep in tools | nested L2 session usage | L2 | 259890 | estimate | exited |
 | Explore /rebuild exec path | nested L2 session usage | L2 | 143364 | estimate | exited |
-| Finish Isolated Preview report | nested L2 session usage | L2 | 192937 | estimate | exited |
+| Finish 403 paint product | nested L2 session usage | L2 | 180278 | estimate | exited |
+| Finish 403 paint slice | nested L2 session usage | L2 | 151260 | estimate | exited |
+| Finish Isolated Preview report | nested L2 session usage | L2 | 133004 | estimate | exited |
 | Finish totals report | nested L2 session usage | L2 | 201460 | estimate | exited |
 | Fix /plan already-in-plan submit | nested L2 session usage | L2 | 141546 | estimate | exited |
 | Fix /plan ignored after Exit | nested L2 session usage | L2 | 205062 | estimate | exited |
@@ -265,6 +301,7 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
 | Fix /plan with body submit | nested L2 session usage | L2 | 202829 | estimate | exited |
 | Fix 11 nextest quality fails | nested L2 session usage | L2 | 210635 | estimate | exited |
 | Fix 16 check-local TRY 2 FAILs | nested L2 session usage | L2 | 182853 | estimate | exited |
+| Fix 403 after resume paint | nested L2 session usage | L2 | 97627 | estimate | exited |
 | Fix Approve SendInterject | nested L2 session usage | L2 | 149579 | estimate | exited |
 | Fix Approve notes vs keep-draft | nested L2 session usage | L2 | 116570 | estimate | exited |
 | Fix Approve with Comment | nested L2 session usage | L2 | 222798 | estimate | exited |
@@ -273,11 +310,12 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
 | Fix GHA just ci fail | nested L2 session usage | L2 | 87091 | estimate | exited |
 | Fix Isolated Preview plan stay | nested L2 session usage | L2 | 77227 | estimate | exited |
 | Fix Isolated Preview vanish | nested L2 session usage | L2 | 164545 | estimate | exited |
+| Fix RetryState and session_id borrow | nested L2 session usage | L2 | 90120 | estimate | exited |
 | Fix approve with comment again | nested L2 session usage | L2 | 221938 | estimate | exited |
 | Fix approve-with-comment paste | nested L2 session usage | L2 | 252440 | estimate | exited |
 | Fix await holding skip-env lock | nested L2 session usage | L2 | 99018 | estimate | exited |
 | Fix blank transcript on start | nested L2 session usage | L2 | 250157 | estimate | exited |
-| Fix from_ref SubagentInfo types | nested L2 session usage | L2 | 90060 | estimate | exited |
+| Fix from_ref SubagentInfo types | nested L2 session usage | L2 | 89943 | estimate | exited |
 | Fix image describe request fail | nested L2 session usage | L2 | 198548 | estimate | exited |
 | Fix interject elapsed bound | nested L2 session usage | L2 | 131141 | estimate | exited |
 | Fix just install ripgrep | nested L2 session usage | L2 | 125135 | estimate | exited |
@@ -287,12 +325,14 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
 | Fix paste chip Enter send | nested L2 session usage | L2 | 237589 | estimate | exited |
 | Fix plan Approve composer drafts | nested L2 session usage | L2 | 146200 | estimate | exited |
 | Fix plan approval resume PTY | nested L2 session usage | L2 | 204511 | estimate | exited |
-| Fix plan draft vs Approve notes | nested L2 session usage | L2 | 96089 | estimate | exited |
+| Fix plan draft vs Approve notes | nested L2 session usage | L2 | 95837 | estimate | exited |
 | Fix plan_stale_prompt rustc | nested L2 session usage | L2 | 79167 | estimate | exited |
 | Fix quality compile errors | nested L2 session usage | L2 | 87986 | estimate | exited |
+| Fix rebuild nested resume | nested L2 session usage | L2 | 130785 | estimate | exited |
 | Fix rebuild resume like disconnect | nested L2 session usage | L2 | 105264 | estimate | exited |
 | Fix remaining 6 nextest fails | nested L2 session usage | L2 | 187580 | estimate | exited |
 | Fix replay.rs format string | nested L2 session usage | L2 | 86714 | estimate | exited |
+| Fix resume 403 chrome | nested L2 session usage | L2 | 199325 | estimate | exited |
 | Fix session_plans tempdir compile | nested L2 session usage | L2 | 82961 | estimate | exited |
 | Fix soft plan secondary | nested L2 session usage | L2 | 240595 | estimate | exited |
 | Fix stale plan panel snapshot | nested L2 session usage | L2 | 166403 | estimate | exited |
@@ -312,20 +352,29 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
 | Isolated Preview exclusive plan | nested L2 session usage | L2 | 196783 | estimate | exited |
 | Isolated Preview soft tests | nested L2 session usage | L2 | 143378 | estimate | exited |
 | L2 present-past token totals | nested L2 session usage | L2 | 107984 | estimate | exited |
-| L2 present-plus-past token totals | nested L2 session usage | L2 | 78127 | estimate | exited |
-| L2 present-plus-past token totals | nested L2 session usage | L2 | 83974 | estimate | exited |
+| L2 present-plus-past token totals | nested L2 session usage | L2 | 78050 | estimate | exited |
+| L2 present-plus-past token totals | nested L2 session usage | L2 | 83961 | estimate | exited |
+| Land rebuild resume tests | nested L2 session usage | L2 | 202916 | estimate | exited |
 | Land totals and report | nested L2 session usage | L2 | 162630 | estimate | exited |
 | One check-remote after Approve split | nested L2 session usage | L2 | 118279 | estimate | exited |
 | One check-remote after dead-code | nested L2 session usage | L2 | 111510 | estimate | exited |
 | One check-remote after draft-vs-Approve | nested L2 session usage | L2 | 119614 | estimate | exited |
 | One check-remote after from_ref | nested L2 session usage | L2 | 94239 | estimate | exited |
-| One check-remote after rustfmt | nested L2 session usage | L2 | 94932 | estimate | exited |
+| One check-remote after rebuild resume | nested L2 session usage | L2 | 116235 | estimate | exited |
+| One check-remote after rustc | nested L2 session usage | L2 | 86345 | estimate | exited |
+| One check-remote after rustfmt | nested L2 session usage | L2 | 94829 | estimate | exited |
+| One check-remote after wrap | nested L2 session usage | L2 | 76101 | estimate | exited |
+| One check-remote then install | nested L2 session usage | L2 | 87251 | estimate | exited |
+| One check-remote wrap is done | nested L2 session usage | L2 | 92720 | estimate | exited |
 | Pin L1 never edits | nested L2 session usage | L2 | 80286 | estimate | exited |
 | Pin Operator Agent terminology | nested L2 session usage | L2 | 194470 | estimate | exited |
 | Pin jobs queue orchestration | nested L2 session usage | L2 | 86438 | estimate | exited |
 | Pin never ignore Operator | nested L2 session usage | L2 | 82013 | estimate | exited |
 | Pin then fix lock install | nested L2 session usage | L2 | 131658 | estimate | exited |
 | Plan stale-prompt TDD | nested L2 session usage | L2 | 158750 | estimate | exited |
+| Rebuild nested resume tests | nested L2 session usage | L2 | 199776 | estimate | exited |
+| Rebuild resume nested implementors | nested L2 session usage | L2 | 199614 | estimate | exited |
+| Rebuild resume nested work | nested L2 session usage | L2 | 77441 | estimate | exited |
 | Red tests then fix soft plan | nested L2 session usage | L2 | 75657 | estimate | exited |
 | Reliability unit integration tests | nested L2 session usage | L2 | 264256 | estimate | exited |
 | Remove in-tree bug dump | nested L2 session usage | L2 | 69726 | estimate | exited |
@@ -346,7 +395,9 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
 | Wire Subagents list helpers | nested L2 session usage | L2 | 118938 | estimate | exited |
 | Wire or drop unused commenting fn | nested L2 session usage | L2 | 106056 | estimate | exited |
 | Wire unused subagent list helpers | nested L2 session usage | L2 | 103808 | estimate | exited |
+| Wrap-only rustfmt rebuild 403 | nested L2 session usage | L2 | 86635 | estimate | exited |
 | Wrap-only rustfmt three files | nested L2 session usage | L2 | 78355 | estimate | exited |
+| Write rebuild resume contracts | nested L2 session usage | L2 | 195270 | estimate | exited |
 | goal achievement skeptic | nested L2 session usage | L2 | 105347 | estimate | exited |
 | goal achievement skeptic | nested L2 session usage | L2 | 116324 | estimate | exited |
 | goal achievement skeptic | nested L2 session usage | L2 | 108969 | estimate | exited |

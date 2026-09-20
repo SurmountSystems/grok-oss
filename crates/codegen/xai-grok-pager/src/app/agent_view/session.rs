@@ -23,11 +23,97 @@ use xai_grok_shell::session::pending_prompts::PersistedQueuedPrompt;
 
 use crate::app::agent::{QueueEntryKind, QueuedPrompt};
 use crate::app::prompt_queue::QueueEntryWire;
+use crate::app::subagent::SubagentInfo;
 use crate::scrollback::EntryId;
 use crate::scrollback::block::RenderBlock;
 use crate::scrollback::blocks::SessionEvent;
 use crate::views::queue_pane::visible_held_server_row;
+use serde::{Deserialize, Serialize};
 use xai_grok_shell::session::prompt_wal::{PromptWalImage, PromptWalKind};
+
+const NESTED_OCCUPANCY_FILE: &str = "nested_occupancy.json";
+
+/// Live nested implementor occupancy persisted across `/rebuild` re-exec,
+/// the same sidecar pattern as `pending_prompts.json`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PersistedNestedOccupancy {
+    child_session_id: String,
+    subagent_id: String,
+    description: String,
+    subagent_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    role: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    parent_session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    depth: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    activity_label: Option<String>,
+}
+
+fn nested_occupancy_path(cwd: &str, session_id: &str) -> Option<std::path::PathBuf> {
+    xai_grok_shell::session::unsent_prompt_draft::unsent_prompt_draft_path(cwd, session_id)
+        .map(|p| p.with_file_name(NESTED_OCCUPANCY_FILE))
+}
+
+fn nested_info_from_occupancy(row: &PersistedNestedOccupancy) -> SubagentInfo {
+    let now = Instant::now();
+    SubagentInfo {
+        subagent_id: row.subagent_id.clone().into(),
+        child_session_id: row.child_session_id.clone().into(),
+        description: row.description.clone().into(),
+        subagent_type: row.subagent_type.clone().into(),
+        persona: None,
+        role: row.role.clone().map(Into::into),
+        model: None,
+        context_source: None,
+        resumed_from: None,
+        capability_mode: None,
+        workflow_run_id: None,
+        context_normalized: false,
+        parent_prompt_id: None,
+        parent_session_id: row.parent_session_id.clone().map(Into::into),
+        depth: row.depth,
+        started_at: now,
+        last_progress_at: now,
+        finished: false,
+        status: None,
+        error: None,
+        duration_ms: None,
+        tool_calls: None,
+        turns: None,
+        turn_count: None,
+        tool_call_count: None,
+        tokens_used: None,
+        tokens_past: 0,
+        context_window_tokens: None,
+        context_usage_pct: None,
+        tools_used: Vec::new(),
+        error_count: None,
+        activity_label: row.activity_label.clone(),
+        is_background: false,
+        pending_kill: false,
+        kill_requested_at: None,
+        scrollback_entry_id: None,
+        prompt: None,
+        child_cwd: None,
+        worktree_path: None,
+        child_updates_replayed: false,
+    }
+}
+
+fn occupancy_from_nested_info(info: &SubagentInfo) -> PersistedNestedOccupancy {
+    PersistedNestedOccupancy {
+        child_session_id: info.child_session_id.to_string(),
+        subagent_id: info.subagent_id.to_string(),
+        description: info.description.to_string(),
+        subagent_type: info.subagent_type.to_string(),
+        role: info.role.as_ref().map(|s| s.to_string()),
+        parent_session_id: info.parent_session_id.as_ref().map(|s| s.to_string()),
+        depth: info.depth,
+        activity_label: info.activity_label.clone(),
+    }
+}
 
 /// How chrome should read an open turn's wait.
 ///
@@ -264,6 +350,7 @@ impl AgentView {
         self.restore_unsent_composer_draft();
         self.restore_pending_prompts();
         self.restore_prompt_wal();
+        self.restore_nested_occupancy();
         self.restore_isolated_preview_open_from_disk();
         crate::app::l0_enqueue::drain_into_agent_on_bind(self);
     }
@@ -623,6 +710,19 @@ impl AgentView {
             last_kept = Some(trimmed.to_string());
             true
         });
+        self.retain_still_running_nested_occupancy();
+    }
+
+    /// Occupancy drop may collapse stale queue rows. Still-running nested
+    /// implementors stay in the Subagents list after `/rebuild`.
+    fn retain_still_running_nested_occupancy(&mut self) {
+        for info in self.subagent_sessions.values_mut() {
+            if info.finished {
+                continue;
+            }
+            info.pending_kill = false;
+            info.status = None;
+        }
     }
 
     /// Force-write unsent draft and pager queue for `/rebuild` re-exec.
@@ -709,7 +809,95 @@ impl AgentView {
                 true,
             );
         }
+        self.persist_nested_occupancy_to_disk();
         self.persist_isolated_preview_open_marker();
+    }
+
+    /// Write live nested implementor occupancy so `/rebuild` session load
+    /// can resume the same way a TUI disconnect adopts nested work.
+    fn persist_nested_occupancy_to_disk(&self) {
+        let Some(session_id) = self.session.session_id.as_ref() else {
+            return;
+        };
+        let cwd = self.session.cwd.to_string_lossy();
+        let Some(path) = nested_occupancy_path(&cwd, session_id.0.as_ref()) else {
+            return;
+        };
+        let rows: Vec<PersistedNestedOccupancy> = self
+            .subagent_sessions
+            .values()
+            .filter(|info| !info.finished)
+            .map(occupancy_from_nested_info)
+            .collect();
+        if rows.is_empty() {
+            let _ = std::fs::remove_file(&path);
+            return;
+        }
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Ok(body) = serde_json::to_vec_pretty(&rows) {
+            let _ = std::fs::write(&path, body);
+        }
+    }
+
+    /// Tests skip this wrapper so they do not read the operator grok home.
+    pub(crate) fn restore_nested_occupancy(&mut self) {
+        if cfg!(test) {
+            return;
+        }
+        self.restore_nested_occupancy_from_disk();
+    }
+
+    /// Load `nested_occupancy.json` into empty Subagents occupancy. Still-running
+    /// nested work is not occupancy-dropped.
+    pub(crate) fn restore_nested_occupancy_from_disk(&mut self) {
+        let Some(session_id) = self.session.session_id.as_ref() else {
+            return;
+        };
+        let cwd = self.session.cwd.to_string_lossy();
+        let Some(path) = nested_occupancy_path(&cwd, session_id.0.as_ref()) else {
+            return;
+        };
+        let Ok(body) = std::fs::read_to_string(&path) else {
+            return;
+        };
+        let Ok(rows) = serde_json::from_str::<Vec<PersistedNestedOccupancy>>(&body) else {
+            return;
+        };
+        for row in rows {
+            if row.child_session_id.trim().is_empty() {
+                continue;
+            }
+            self.subagent_sessions
+                .entry(row.child_session_id.clone())
+                .and_modify(|info| {
+                    if info.finished {
+                        *info = nested_info_from_occupancy(&row);
+                    }
+                })
+                .or_insert_with(|| nested_info_from_occupancy(&row));
+        }
+        self.retain_still_running_nested_occupancy();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn live_nested_occupancy_row_for_tests(
+        child_session_id: &str,
+        subagent_id: &str,
+        description: &str,
+        role: Option<&str>,
+    ) -> SubagentInfo {
+        nested_info_from_occupancy(&PersistedNestedOccupancy {
+            child_session_id: child_session_id.into(),
+            subagent_id: subagent_id.into(),
+            description: description.into(),
+            subagent_type: "general-purpose".into(),
+            role: role.map(str::to_string),
+            parent_session_id: Some("sess-parent".into()),
+            depth: Some(1),
+            activity_label: Some("search_replace".into()),
+        })
     }
 
     /// Snapshot the local pager queue so a kill does not depend on

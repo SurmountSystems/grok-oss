@@ -375,6 +375,47 @@ mod tests {
         );
     }
 
+    /// Occupancy drop after rebuild must not wipe still-running nested work.
+    #[test]
+    #[serial_test::serial(GROK_HOME)]
+    fn still_running_nested_work_is_not_occupancy_dropped_after_rebuild() {
+        use crate::app::subagent::live_subagent_list;
+
+        let grok_home = tempfile::tempdir().unwrap();
+        let _home = xai_grok_test_support::EnvGuard::set("GROK_HOME", grok_home.path());
+        let proj = tempfile::tempdir().unwrap();
+        let cwd = proj.path().to_path_buf();
+        let sid = "occupancy-drop-keeps-nested";
+
+        let mut app = crate::app::app_view::tests::test_app_with_agent();
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        agent.session.session_id = Some(sid.into());
+        agent.session.cwd = cwd;
+        agent.session.state = AgentState::TurnRunning;
+        agent.subagent_sessions.insert(
+            "cs-nested-live".into(),
+            crate::app::agent_view::AgentView::live_nested_occupancy_row_for_tests(
+                "cs-nested-live",
+                "sa-nested-live",
+                "still running nested implementor",
+                Some("implementer"),
+            ),
+        );
+        agent.persist_session_work_to_disk_for_rebuild();
+        agent.subagent_sessions.clear();
+        agent.restore_nested_occupancy_from_disk();
+        agent.drop_stale_queue_occupancy();
+        agent.drop_stale_queue_occupancy_with_chat_history();
+        let live = live_subagent_list(agent.subagent_sessions.values());
+        assert_eq!(
+            live.len(),
+            1,
+            "occupancy drop after rebuild must not wipe still-running nested work; live={live:?}"
+        );
+        assert_eq!(live[0].child_session_id.as_ref(), "cs-nested-live");
+        assert!(!live[0].finished);
+    }
+
     /// Named contract: Compact-fail unstick after occupancy drop must not
     /// leave the last Human turn as a Prompt row. Command `/compact` only.
     #[test]

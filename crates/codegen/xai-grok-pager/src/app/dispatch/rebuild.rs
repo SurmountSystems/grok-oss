@@ -2023,32 +2023,6 @@ mod tests {
             "Subagents list must not go empty across rebuild re-exec"
         );
         assert!(!after[0].finished);
-
-        // Re-exec equivalent: this persist path still holds nested rows
-        // (not cancelled orphans). Leader drain keeps nested ids too.
-        let mut reopened = crate::app::app_view::tests::test_app_with_agent();
-        {
-            let agent = reopened.agents.get_mut(&agent_id).unwrap();
-            agent.session.session_id = Some("sess-parent".into());
-            agent.subagent_sessions.insert(
-                "cs-rebuild-nested".into(),
-                running_l2_subagent("Rebuild nested resume"),
-            );
-        }
-        let restored = live_subagent_list(
-            reopened
-                .agents
-                .get(&agent_id)
-                .unwrap()
-                .subagent_sessions
-                .values(),
-        );
-        assert!(
-            !restored.is_empty(),
-            "after re-exec the Subagents list must still show nested work"
-        );
-        assert_eq!(restored[0].subagent_id.as_ref(), "sa-rebuild-nested");
-        assert_eq!(restored[0].child_session_id.as_ref(), "cs-rebuild-nested");
         let toast = agent
             .toast
             .as_ref()
@@ -2060,6 +2034,246 @@ mod tests {
                 && !toast.to_lowercase().contains("nested"),
             "rebuild must not tell the operator they are blocked until nested work finishes; got {toast:?}"
         );
+
+        // After persist + session load: nested implementors must still be live
+        // from occupancy / pending / WAL, not a fake re-insert into a new app.
+        let reopened = reopen_after_rebuild_persist(
+            agent_id,
+            "sess-parent",
+            proj.path().to_path_buf(),
+            Some("pid-nested-rebuild".into()),
+        );
+        let restored = live_subagent_list(
+            reopened
+                .agents
+                .get(&agent_id)
+                .unwrap()
+                .subagent_sessions
+                .values(),
+        );
+        assert!(
+            !restored.is_empty(),
+            "after persist + session load the Subagents list must still show nested work from occupancy, not occupancy-dropped"
+        );
+        assert!(!restored[0].finished);
+        assert_eq!(restored[0].subagent_id.as_ref(), "sa-rebuild-nested");
+        assert_eq!(restored[0].child_session_id.as_ref(), "cs-rebuild-nested");
+    }
+
+    /// After `/rebuild`, nested implementors resume (stay running or restart
+    /// from occupancy / pending / WAL), same as network-interruption resume.
+    /// Two live nested rows plus a Lake-runner-class row must still be live
+    /// after persist+load.
+    #[test]
+    #[serial_test::serial(GROK_HOME)]
+    fn after_rebuild_nested_implementors_resume_from_occupancy_pending_or_wal() {
+        use crate::app::agent::{AgentId, AgentState};
+
+        let grok_home = tempfile::tempdir().unwrap();
+        let _home = xai_grok_test_support::EnvGuard::set("GROK_HOME", grok_home.path());
+        let proj = tempfile::tempdir().unwrap();
+        let cwd = proj.path().to_path_buf();
+        let sid = "rebuild-nested-occupancy-resume";
+        let installed = proj.path().join("grok-oss-installed");
+        std::fs::write(&installed, b"stub").unwrap();
+
+        let mut app = crate::app::app_view::tests::test_app_with_agent();
+        let agent_id = AgentId(0);
+        {
+            let agent = app.agents.get_mut(&agent_id).unwrap();
+            agent.session.session_id = Some(sid.into());
+            agent.session.cwd = cwd.clone();
+            agent.session.state = AgentState::TurnRunning;
+            agent.session.current_prompt_id = Some("pid-nested-resume".into());
+            agent.session.in_flight_prompt = None;
+            agent.subagent_sessions.insert(
+                "cs-impl-a".into(),
+                running_nested_row(
+                    "cs-impl-a",
+                    "sa-impl-a",
+                    "Isolated Preview writer",
+                    Some("implementer"),
+                ),
+            );
+            agent.subagent_sessions.insert(
+                "cs-impl-b".into(),
+                running_nested_row(
+                    "cs-impl-b",
+                    "sa-impl-b",
+                    "naming-style refactor",
+                    Some("implementer"),
+                ),
+            );
+            agent.subagent_sessions.insert(
+                "cs-lake-runner".into(),
+                running_nested_row(
+                    "cs-lake-runner",
+                    "sa-lake-runner",
+                    "Lake runner on surmount-1",
+                    Some("lake-coord"),
+                ),
+            );
+        }
+
+        let _ = handle_rebuild_done(
+            &mut app,
+            agent_id,
+            Ok(Box::new(sample_success_report(&installed))),
+        );
+        let reopened =
+            reopen_after_rebuild_persist(agent_id, sid, cwd, Some("pid-nested-resume".into()));
+        let agent = reopened.agents.get(&agent_id).unwrap();
+        let ids = live_nested_ids(agent);
+        assert_eq!(
+            ids,
+            vec![
+                "cs-impl-a".to_string(),
+                "cs-impl-b".to_string(),
+                "cs-lake-runner".to_string(),
+            ],
+            "after /rebuild, nested implementors resume from occupancy / pending / WAL the same way a network-interruption resume does; two live nested rows plus a Lake-runner-class row must still be live after persist+load, got {ids:?}"
+        );
+        for info in agent.subagent_sessions.values() {
+            assert!(
+                !info.finished,
+                "nested occupancy restored after /rebuild must stay live, not occupancy-dropped; {:?}",
+                info.child_session_id
+            );
+        }
+    }
+
+    /// Composer after `/rebuild` is the unsent draft (possibly empty), not a
+    /// canned resume line, unless that exact text was the unsent draft.
+    #[test]
+    #[serial_test::serial(GROK_HOME)]
+    fn after_rebuild_composer_is_not_a_canned_apology_unless_that_was_the_unsent_draft() {
+        use crate::app::agent::AgentId;
+
+        let grok_home = tempfile::tempdir().unwrap();
+        let _home = xai_grok_test_support::EnvGuard::set("GROK_HOME", grok_home.path());
+        let proj = tempfile::tempdir().unwrap();
+        let cwd = proj.path().to_path_buf();
+        let sid = "rebuild-composer-not-canned-resume";
+        let installed = proj.path().join("grok-oss-installed");
+        std::fs::write(&installed, b"stub").unwrap();
+
+        let mut app = crate::app::app_view::tests::test_app_with_agent();
+        let agent_id = AgentId(0);
+        {
+            let agent = app.agents.get_mut(&agent_id).unwrap();
+            agent.session.session_id = Some(sid.into());
+            agent.session.cwd = cwd.clone();
+            agent.prompt.set_text("");
+        }
+        let _ = handle_rebuild_done(
+            &mut app,
+            agent_id,
+            Ok(Box::new(sample_success_report(&installed))),
+        );
+        let reopened = reopen_after_rebuild_persist(agent_id, sid, cwd.clone(), None);
+        assert_eq!(
+            reopened.agents.get(&agent_id).unwrap().prompt.text(),
+            "",
+            "composer after /rebuild is the unsent draft (empty here), not a canned resume line"
+        );
+
+        let draft = "keep this unsent draft after rebuild";
+        let mut app = crate::app::app_view::tests::test_app_with_agent();
+        {
+            let agent = app.agents.get_mut(&agent_id).unwrap();
+            agent.session.session_id = Some(sid.into());
+            agent.session.cwd = cwd.clone();
+            agent.prompt.set_text(draft);
+        }
+        let _ = handle_rebuild_done(
+            &mut app,
+            agent_id,
+            Ok(Box::new(sample_success_report(&installed))),
+        );
+        let reopened = reopen_after_rebuild_persist(agent_id, sid, cwd.clone(), None);
+        assert_eq!(
+            reopened.agents.get(&agent_id).unwrap().prompt.text(),
+            draft,
+            "composer after /rebuild must restore the unsent draft, not inject resume text"
+        );
+
+        let operator_typed_resume = "please continue the nested implementors";
+        let mut app = crate::app::app_view::tests::test_app_with_agent();
+        {
+            let agent = app.agents.get_mut(&agent_id).unwrap();
+            agent.session.session_id = Some(sid.into());
+            agent.session.cwd = cwd.clone();
+            agent.prompt.set_text(operator_typed_resume);
+        }
+        let _ = handle_rebuild_done(
+            &mut app,
+            agent_id,
+            Ok(Box::new(sample_success_report(&installed))),
+        );
+        let reopened = reopen_after_rebuild_persist(agent_id, sid, cwd, None);
+        assert_eq!(
+            reopened.agents.get(&agent_id).unwrap().prompt.text(),
+            operator_typed_resume,
+            "composer is not a canned apology unless that exact text was the unsent draft"
+        );
+    }
+
+    /// Occupancy drop after rebuild must not wipe still-running nested work.
+    #[test]
+    #[serial_test::serial(GROK_HOME)]
+    fn still_running_nested_work_is_not_occupancy_dropped_after_rebuild() {
+        use crate::app::agent::{AgentId, AgentState};
+
+        let grok_home = tempfile::tempdir().unwrap();
+        let _home = xai_grok_test_support::EnvGuard::set("GROK_HOME", grok_home.path());
+        let proj = tempfile::tempdir().unwrap();
+        let cwd = proj.path().to_path_buf();
+        let sid = "rebuild-nested-not-occupancy-dropped";
+        let installed = proj.path().join("grok-oss-installed");
+        std::fs::write(&installed, b"stub").unwrap();
+
+        let mut app = crate::app::app_view::tests::test_app_with_agent();
+        let agent_id = AgentId(0);
+        {
+            let agent = app.agents.get_mut(&agent_id).unwrap();
+            agent.session.session_id = Some(sid.into());
+            agent.session.cwd = cwd.clone();
+            agent.session.state = AgentState::TurnRunning;
+            agent.session.current_prompt_id = Some("pid-nested-drop".into());
+            agent.subagent_sessions.insert(
+                "cs-still-running".into(),
+                running_nested_row(
+                    "cs-still-running",
+                    "sa-still-running",
+                    "still running nested implementor",
+                    Some("implementer"),
+                ),
+            );
+        }
+        let _ = handle_rebuild_done(
+            &mut app,
+            agent_id,
+            Ok(Box::new(sample_success_report(&installed))),
+        );
+        let mut reopened =
+            reopen_after_rebuild_persist(agent_id, sid, cwd, Some("pid-nested-drop".into()));
+        {
+            let agent = reopened.agents.get_mut(&agent_id).unwrap();
+            agent.drop_stale_queue_occupancy();
+            agent.drop_stale_queue_occupancy_with_chat_history();
+            let ids = live_nested_ids(agent);
+            assert_eq!(
+                ids,
+                vec!["cs-still-running".to_string()],
+                "occupancy drop after rebuild must not wipe still-running nested work; got {ids:?}"
+            );
+            let info = agent
+                .subagent_sessions
+                .get("cs-still-running")
+                .expect("still-running nested occupancy");
+            assert!(!info.finished);
+            assert!(!info.pending_kill);
+        }
     }
 
     /// Grok OSS Named contract: `/rebuild` starts while nested agents are running.
@@ -2099,6 +2313,69 @@ mod tests {
         agent.restore_unsent_composer_draft_from_disk();
         agent.restore_pending_prompts_from_disk();
         agent.restore_prompt_wal_from_disk();
+        agent.restore_nested_occupancy_from_disk();
+    }
+
+    fn running_nested_row(
+        child_session_id: &str,
+        subagent_id: &str,
+        description: &str,
+        role: Option<&str>,
+    ) -> crate::app::subagent::SubagentInfo {
+        let mut info = running_l2_subagent(description);
+        info.child_session_id = child_session_id.into();
+        info.subagent_id = subagent_id.into();
+        info.role = role.map(Into::into);
+        info
+    }
+
+    fn live_nested_ids(agent: &crate::app::agent_view::AgentView) -> Vec<String> {
+        use crate::app::subagent::live_subagent_list;
+        let mut ids: Vec<String> = live_subagent_list(agent.subagent_sessions.values())
+            .into_iter()
+            .map(|row| row.child_session_id.to_string())
+            .collect();
+        ids.sort();
+        ids
+    }
+
+    fn reopen_after_rebuild_persist(
+        agent_id: crate::app::agent::AgentId,
+        sid: &str,
+        cwd: std::path::PathBuf,
+        running_prompt_id: Option<String>,
+    ) -> crate::app::app_view::AppView {
+        use crate::app::actions::{Action, TaskResult};
+        use agent_client_protocol as acp;
+
+        let mut reopened = crate::app::app_view::tests::test_app_with_agent();
+        {
+            let agent = reopened.agents.get_mut(&agent_id).unwrap();
+            agent.session.session_id = Some(sid.to_string().into());
+            agent.session.cwd = cwd;
+            agent.prompt.set_text("");
+            agent.session.pending_prompts.clear();
+            agent.subagent_sessions.clear();
+            agent.session.loading_replay = true;
+        }
+        let _ = super::super::dispatch(
+            Action::TaskComplete(TaskResult::SessionLoaded {
+                agent_id,
+                session_id: acp::SessionId::new(sid),
+                models: None,
+                code_restored: false,
+                restore_summary: None,
+                restore_degree: None,
+                running_prompt_id,
+                scheduler_background_loops: None,
+            }),
+            &mut reopened,
+        );
+        {
+            let agent = reopened.agents.get_mut(&agent_id).unwrap();
+            restore_session_work_after_rebuild_load(agent);
+        }
+        reopened
     }
 
     /// Grok OSS / Surmount fork; tests are contracts. A WAL send that never made it into prompt_history or the queue is

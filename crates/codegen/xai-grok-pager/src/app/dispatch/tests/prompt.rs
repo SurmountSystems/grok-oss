@@ -1851,6 +1851,116 @@ fn prompt_response_request_failed_banner_suppresses_turn_failed_and_toast() {
     );
 }
 
+/// Resume report already written + nested implementers still running:
+/// PromptResponse Err with `permission-denied: I can't help with that request.`
+/// must not push TurnFailed or an error toast (and must not paint
+/// `Request denied (403)`).
+#[test]
+fn prompt_response_safety_refusal_after_resume_report_suppresses_turn_failed_and_toast() {
+    let operator_body = "permission-denied: I can't help with that request.";
+    assert!(operator_body.contains("permission-denied: I can't help with that request."));
+    let formatted =
+        crate::app::error_display::format_request_failure(Some(403), Some("api"), operator_body);
+    let err = formatted.message();
+    assert!(
+        !err.contains("Request denied (403)"),
+        "formatter must not label this HTTP 403, got {err}"
+    );
+    assert!(
+        err.contains("Safety refusal") && err.contains("I can't help with that request"),
+        "formatter must paint safety refusal chrome, got {err}"
+    );
+
+    fn run(nested_and_output: bool, err: String) -> (bool, bool, Vec<String>) {
+        let mut app = test_app_with_agent();
+        let id = AgentId(0);
+        {
+            let agent = app.agents.get_mut(&id).unwrap();
+            agent.session.state = AgentState::TurnRunning;
+            agent.turn_started_at = Some(std::time::Instant::now());
+            if nested_and_output {
+                agent.subagent_sessions.insert(
+                    "child-resume-403".into(),
+                    make_test_subagent("child-resume-403", "sa-child-resume-403"),
+                );
+                assert!(
+                    agent
+                        .subagent_sessions
+                        .values()
+                        .any(|info| info.is_running()),
+                    "nested implementer must still be running"
+                );
+                let chunk = acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(
+                    acp::ContentBlock::Text(acp::TextContent::new(
+                        "resume report already written".to_string(),
+                    )),
+                ));
+                let meta = crate::acp::meta::NotificationMeta::default();
+                let (session, scrollback) = (&mut agent.session, &mut agent.scrollback);
+                session.handle_update(chunk, &meta, scrollback);
+                assert!(
+                    session.tracker.output_since_last_finish(),
+                    "resume report must count as output"
+                );
+            }
+        }
+        dispatch(
+            Action::TaskComplete(TaskResult::PromptResponse {
+                agent_id: id,
+                result: Err(err),
+                http_status: Some(403),
+                prompt_id: None,
+            }),
+            &mut app,
+        );
+        let painted: Vec<String> = (0..app.agents[&id].scrollback.len())
+            .filter_map(|idx| app.agents[&id].scrollback.entry(idx))
+            .filter_map(|e| match &e.block {
+                RenderBlock::SessionEvent(ev) => Some(ev.event.message()),
+                _ => None,
+            })
+            .collect();
+        let has_turn_failed = (0..app.agents[&id].scrollback.len()).any(|idx| {
+            matches!(
+                app.agents[&id].scrollback.entry(idx).map(|e| &e.block),
+                Some(RenderBlock::SessionEvent(ev))
+                    if matches!(ev.event, SessionEvent::TurnFailed { .. })
+            )
+        });
+        (
+            has_turn_failed,
+            app.deferred_notification.is_some(),
+            painted,
+        )
+    }
+
+    let (failed_block, toast, painted) = run(false, err.clone());
+    assert!(failed_block, "baseline: a failed turn pushes TurnFailed");
+    assert!(toast, "baseline: a failed turn emits an error toast");
+    assert!(
+        painted
+            .iter()
+            .all(|msg| !msg.contains("Request denied (403)")),
+        "must not paint Request denied (403), got {painted:?}"
+    );
+
+    let (failed_block, toast, painted) = run(true, err);
+    assert!(
+        !failed_block,
+        "resume report + nested implementers must not push TurnFailed, got {painted:?}"
+    );
+    assert!(
+        !toast,
+        "resume report + nested implementers must not emit an error toast"
+    );
+    assert!(
+        painted
+            .iter()
+            .all(|msg| !msg.contains("Request denied (403)")),
+        "must not paint Request denied (403), got {painted:?}"
+    );
+}
+
 /// Operator: "Connection failed – request error stream: error sending request."
 /// Transport miss chrome must not wipe the Human image line.
 #[test]

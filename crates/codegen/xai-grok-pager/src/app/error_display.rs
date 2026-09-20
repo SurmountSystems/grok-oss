@@ -150,6 +150,17 @@ pub(crate) fn format_request_failure(
                 .to_string(),
         };
     }
+    // Safety refusal bodies (gRPC-style `permission-denied: I can't help with
+    // that request.`) sometimes ride HTTP 403. That is not endpoint forbid
+    // and not a tool-permission hub deny. Do not headline Request denied (403).
+    if is_safety_refusal_message(raw) || extracted.as_deref().is_some_and(is_safety_refusal_message)
+    {
+        return FormattedRequestFailure {
+            status: None,
+            headline: "Safety refusal".to_string(),
+            detail: safety_refusal_detail(extracted.as_deref().unwrap_or(raw)),
+        };
+    }
     let class = classify(status, wire);
     let why = extracted
         .filter(|d| !is_server_fault(status, wire) && !is_headline_echo(d, &class.headline))
@@ -426,6 +437,36 @@ pub(crate) fn is_transport_send_miss(raw: &str) -> bool {
     raw.to_ascii_lowercase().contains("error sending request")
 }
 
+/// Model-host safety refusal, not HTTP 403 endpoint forbid and not a tool
+/// permission deny (`permission_denied` / "permission denied for tool").
+///
+/// Operator-visible body: `permission-denied: I can't help with that request.`
+pub(crate) fn is_safety_refusal_message(raw: &str) -> bool {
+    let lower = raw.to_ascii_lowercase();
+    lower.contains("i can't help with that request")
+        || lower.contains("i cannot help with that request")
+        || lower.contains("can't help with that request")
+        || lower.contains("cannot help with that request")
+}
+
+fn safety_refusal_detail(raw: &str) -> String {
+    let trimmed = raw.trim();
+    let after_prefix = ["permission-denied:", "permission_denied:"]
+        .iter()
+        .find_map(|prefix| {
+            let lower = trimmed.to_ascii_lowercase();
+            lower
+                .starts_with(prefix)
+                .then(|| trimmed[prefix.len()..].trim())
+        })
+        .unwrap_or(trimmed);
+    if after_prefix.is_empty() {
+        "I can't help with that request.".to_string()
+    } else {
+        after_prefix.to_string()
+    }
+}
+
 fn find_ignore_ascii_case(haystack: &str, needle: &str) -> Option<usize> {
     haystack
         .as_bytes()
@@ -680,6 +721,52 @@ mod tests {
         assert_eq!(
             formatted.message(),
             "Request denied (403) \u{2014} Access to the chat endpoint is denied"
+        );
+    }
+
+    /// Operator screenshot 2026-09-19: resume transcript painted
+    /// `Request denied (403) – permission-denied: I can't help with that request.`
+    /// That body is a safety refusal, not HTTP 403 endpoint forbid.
+    #[test]
+    fn safety_refusal_permission_denied_must_not_paint_request_denied_403() {
+        let operator_body = "permission-denied: I can't help with that request.";
+        assert!(operator_body.contains("permission-denied: I can't help with that request."));
+        for (status, error_type, raw) in [
+            (
+                None,
+                Some("api"),
+                "API error (status 403 Forbidden): permission-denied: I can't help with that request.",
+            ),
+            (Some(403), Some("api"), operator_body),
+            (None, None, operator_body),
+            (None, Some("api"), "I can't help with that request."),
+        ] {
+            let formatted = format_request_failure(status, error_type, raw);
+            let msg = formatted.message();
+            assert!(
+                !msg.contains("Request denied (403)"),
+                "safety refusal must not be labeled HTTP 403, got {msg} from {raw}"
+            );
+            assert!(
+                msg.contains("Safety refusal"),
+                "must paint safety refusal chrome, got {msg} from {raw}"
+            );
+            assert!(
+                msg.contains("I can't help with that request"),
+                "must keep the refusal text, got {msg} from {raw}"
+            );
+            assert_eq!(formatted.status, None, "must not keep HTTP 403 status");
+        }
+        let tool_deny = format_request_failure(None, None, "tool permission denied for bash");
+        assert!(
+            !tool_deny.message().contains("Request denied (403)"),
+            "tool permission deny is not HTTP 403, got {}",
+            tool_deny.message()
+        );
+        assert!(
+            !tool_deny.message().contains("Safety refusal"),
+            "hub tool deny is not a model safety refusal, got {}",
+            tool_deny.message()
         );
     }
 

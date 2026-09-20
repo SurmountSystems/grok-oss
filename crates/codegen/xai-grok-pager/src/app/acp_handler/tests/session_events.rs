@@ -688,6 +688,125 @@
         }
     }
 
+    /// Operator screenshot 2026-09-19: `permission-denied: I can't help with that request.`
+    /// is a safety refusal, not HTTP 403. Without nested implementers + output,
+    /// RetryState still paints Safety refusal, never `Request denied (403)`.
+    #[test]
+    fn apply_retry_state_safety_refusal_paints_safety_refusal_not_request_denied_403() {
+        let operator_body = "permission-denied: I can't help with that request.";
+        assert!(operator_body.contains("permission-denied: I can't help with that request."));
+        let mut session = make_session(Some("s1"));
+        let mut scrollback = ScrollbackState::new();
+        apply_retry_state(
+            &RetryState::Failed {
+                error_type: "api".into(),
+                message: format!(
+                    "API error (status 403 Forbidden): {operator_body}"
+                ),
+            },
+            &mut session,
+            &mut scrollback,
+            false,
+        );
+        match last_session_event(&scrollback) {
+            Some(SessionEvent::RequestFailed {
+                status,
+                headline,
+                detail,
+            }) => {
+                let painted = crate::app::error_display::banner_message(&headline, &detail);
+                assert!(
+                    !painted.contains("Request denied (403)"),
+                    "safety refusal must not be labeled HTTP 403, got {painted}"
+                );
+                assert!(
+                    painted.contains("Safety refusal"),
+                    "must paint safety refusal chrome, got {painted}"
+                );
+                assert!(
+                    painted.contains("I can't help with that request"),
+                    "must keep the refusal text, got {painted}"
+                );
+                assert_eq!(status, None, "must not keep HTTP 403 status");
+            }
+            other => panic!("expected RequestFailed Safety refusal, got {other:?}"),
+        }
+    }
+
+    /// Resume report already written + nested implementers still running:
+    /// RetryState Failed with `permission-denied: I can't help with that request.`
+    /// must not paint RequestFailed / `Request denied (403)`.
+    #[test]
+    fn resume_after_report_safety_refusal_retry_state_must_not_paint_request_failed() {
+        let operator_body = "permission-denied: I can't help with that request.";
+        assert!(operator_body.contains("permission-denied: I can't help with that request."));
+        let parent_sid = "sess-resume-403";
+        let child_sid = "child-resume-403";
+        let mut app = make_app_with_agent(parent_sid);
+        handle(
+            make_ext_session_notification(
+                parent_sid,
+                test_subagent_spawned(parent_sid, child_sid),
+            ),
+            &mut app,
+        );
+        {
+            let agent = app.agents.get(&AgentId(0)).unwrap();
+            let info = agent
+                .subagent_sessions
+                .get(child_sid)
+                .expect("spawn must seed nested occupancy");
+            assert!(
+                info.is_running(),
+                "nested implementer must still be running (finished: false)"
+            );
+        }
+        handle(
+            make_agent_chunk_message(parent_sid, "resume report already written"),
+            &mut app,
+        );
+        {
+            let agent = app.agents.get(&AgentId(0)).unwrap();
+            assert!(
+                agent.session.tracker.output_since_last_finish(),
+                "parent agent chunk must count as a written resume report"
+            );
+        }
+        handle(
+            make_ext_session_notification(
+                parent_sid,
+                XaiSessionUpdate::RetryState(RetryState::Failed {
+                    error_type: "api".into(),
+                    message: operator_body.into(),
+                }),
+            ),
+            &mut app,
+        );
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        let painted: Vec<String> = (0..agent.scrollback.len())
+            .filter_map(|i| agent.scrollback.entry(i))
+            .filter_map(|e| match &e.block {
+                RenderBlock::SessionEvent(ev) => Some(ev.event.message()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            painted.iter().all(|msg| !msg.contains("Request denied (403)")),
+            "must not paint Request denied (403), got {painted:?}"
+        );
+        let has_request_failed = (0..agent.scrollback.len()).any(|i| {
+            matches!(
+                agent.scrollback.entry(i).map(|e| &e.block),
+                Some(RenderBlock::SessionEvent(ev))
+                    if matches!(ev.event, SessionEvent::RequestFailed { .. })
+            )
+        });
+        assert!(
+            !has_request_failed,
+            "resume report + nested implementers running must not paint RequestFailed, got {painted:?}"
+        );
+    }
+
     /// A context overflow surfaces the actionable `ContextTooLarge` prompt (not the
     /// raw `RetryFailed`); `PromptResponse` then suppresses the redundant `TurnFailed`.
     #[test]

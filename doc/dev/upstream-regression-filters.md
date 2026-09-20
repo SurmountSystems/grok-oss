@@ -1337,7 +1337,10 @@ turn is still busy, with no five-second cap.
 | `handle_rebuild_done_persists_unsent_composer_draft_and_session_load_restores_it` | Unsent composer draft survives `/rebuild` and session load |
 | `handle_rebuild_done_persists_pending_prompts_including_interject_and_session_load_restores_them` | Queued / interject prompts survive `/rebuild` |
 | `handle_rebuild_done_persists_plan_feedback_draft_and_plan_md` | Plan Human-box notes and `plan.md` survive `/rebuild` |
-| `handle_rebuild_done_keeps_nested_subagents_for_resume` | Nested ids are not cancelled in TUI persist; Subagents list must not go empty |
+| `handle_rebuild_done_keeps_nested_subagents_for_resume` | Nested ids are not cancelled in TUI persist; after persist + session load they stay live from occupancy |
+| `after_rebuild_nested_implementors_resume_from_occupancy_pending_or_wal` | After `/rebuild`, nested implementors resume from occupancy / pending / WAL; two live nested rows plus a Lake-runner-class row stay live |
+| `after_rebuild_composer_is_not_a_canned_apology_unless_that_was_the_unsent_draft` | Composer after `/rebuild` is the unsent draft, not a canned resume line, unless that exact text was the draft |
+| `still_running_nested_work_is_not_occupancy_dropped_after_rebuild` | Occupancy drop after rebuild must not wipe still-running nested work |
 | `rebuild_and_relaunch_starts_while_nested_subagents_are_running` | Nested work is not a `/rebuild` gate |
 | `tui_rebuild_starts_from_session_workspace_not_process_cwd` | TUI `/rebuild` compiles from the session workspace, not process cwd |
 | `relaunch_drain_keeps_nested_ids_alive_after_grace_like_disconnect` | Nested ids still exist after rebuild/relaunch intent; drain does not exec-replace while they are live |
@@ -1352,6 +1355,9 @@ cargo test -p xai-grok-pager --lib -- \
   handle_rebuild_done_persists_pending_prompts_including_interject_and_session_load_restores_them \
   handle_rebuild_done_persists_plan_feedback_draft_and_plan_md \
   handle_rebuild_done_keeps_nested_subagents_for_resume \
+  after_rebuild_nested_implementors_resume_from_occupancy_pending_or_wal \
+  after_rebuild_composer_is_not_a_canned_apology_unless_that_was_the_unsent_draft \
+  still_running_nested_work_is_not_occupancy_dropped_after_rebuild \
   rebuild_and_relaunch_starts_while_nested_subagents_are_running \
   tui_rebuild_starts_from_session_workspace_not_process_cwd \
   rebuild_subcommand_parses
@@ -2434,6 +2440,9 @@ cargo test -p xai-grok-pager --lib -- \
   handle_rebuild_done_idle_completed_turn_does_not_write_cancel_resume_or_refire_last_prompt \
   session_load_drops_stale_cancel_resume_marker_when_primary_turn_finished_successfully \
   handle_rebuild_done_keeps_nested_subagents_for_resume \
+  after_rebuild_nested_implementors_resume_from_occupancy_pending_or_wal \
+  after_rebuild_composer_is_not_a_canned_apology_unless_that_was_the_unsent_draft \
+  still_running_nested_work_is_not_occupancy_dropped_after_rebuild \
   rebuild_and_relaunch_starts_while_nested_subagents_are_running \
   rebuild_subcommand_parses \
   prompt_wal_appends_on_enter_before_model_wait \

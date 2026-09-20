@@ -225,7 +225,6 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
         | XaiSessionUpdate::AutoCompactFailed { .. }
         | XaiSessionUpdate::AutoCompactCancelled { .. }
         | XaiSessionUpdate::AutoCompactSkippedTinySavings
-        | XaiSessionUpdate::RetryState(_)
         | XaiSessionUpdate::ImageDropped { .. }
         | XaiSessionUpdate::MemoryFlushCompleted { .. }
         | XaiSessionUpdate::MemoryDreamCompleted { .. }
@@ -236,9 +235,6 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
                 &mut agent.scrollback,
                 is_api_key_auth,
             );
-            if let XaiSessionUpdate::RetryState(retry) = update {
-                apply_sampling_identity_from_retry(retry, &mut agent.sampling_identity);
-            }
             if let XaiSessionUpdate::AutoCompactStarted { context_window, .. } = update
                 && *context_window > 0
             {
@@ -253,6 +249,21 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
                 // normal ACP Plan path.
             }
             changed
+        }
+        XaiSessionUpdate::RetryState(retry) => {
+            apply_sampling_identity_from_retry(&retry, &mut agent.sampling_identity);
+            let nested_implementers_running = agent
+                .subagent_sessions
+                .values()
+                .any(|info| info.is_running());
+            apply_retry_state_with_nested(
+                &retry,
+                &mut agent.session,
+                &mut agent.scrollback,
+                is_api_key_auth,
+                nested_implementers_running,
+            );
+            true
         }
         XaiSessionUpdate::ImageCompressed {
             ref images,
@@ -1741,6 +1752,19 @@ pub(super) fn apply_retry_state(
     scrollback: &mut crate::scrollback::state::ScrollbackState,
     is_api_key_auth: bool,
 ) {
+    apply_retry_state_with_nested(retry, session, scrollback, is_api_key_auth, false);
+}
+
+/// Same as [`apply_retry_state`], with whether nested implementers are still
+/// running. A safety-refusal fail after this turn already wrote a report is
+/// not a failed request.
+pub(super) fn apply_retry_state_with_nested(
+    retry: &xai_grok_shell::extensions::notification::RetryState,
+    session: &mut AgentSession,
+    scrollback: &mut crate::scrollback::state::ScrollbackState,
+    is_api_key_auth: bool,
+    nested_implementers_running: bool,
+) {
     let mut is_credit_limit = false;
     let mut is_reauth = false;
     use xai_grok_shell::extensions::notification::RetryState;
@@ -1857,6 +1881,13 @@ pub(super) fn apply_retry_state(
                     error: message.clone(),
                     error_type: Some(error_type.clone()),
                 }));
+            } else if nested_implementers_running
+                && session.tracker.output_since_last_finish()
+                && crate::app::error_display::is_safety_refusal_message(message)
+            {
+                // Resume report already written and nested implementers still
+                // running: do not paint Request denied (403) / safety refusal
+                // as if the whole turn failed.
             } else {
                 scrollback.push_block(RenderBlock::session_event(
                     crate::app::error_display::format_request_failure(
