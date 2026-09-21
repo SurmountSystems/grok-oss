@@ -785,6 +785,7 @@ mod tests {
         assert_eq!(derive_selection_text(line), "QUOTE alpha");
     }
 
+    // Grok OSS: always-expand thinking is read at paint and keeps blocks expanded. This diverges from upstream xAI because FORK.md land class 2 and catalog § 2 pin always_expand_thinking as a shipped runtime reader, not serde-only.
     #[test]
     fn always_expand_thinking_keeps_blocks_expanded() {
         std::thread::spawn(|| {

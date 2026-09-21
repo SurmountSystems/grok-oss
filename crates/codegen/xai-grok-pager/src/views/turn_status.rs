@@ -1487,6 +1487,39 @@ mod tests {
         );
     }
 
+    /// Operator screenshot: Isolated Preview retry attempt 2 sat on
+    /// `Retrying the model request (attempt 2): waiting for first token`
+    /// for 11m27s while `#1 /compact` was queued. Chrome must keep that
+    /// copy. The wait itself is the sampler headers budget (120s), not
+    /// eleven minutes.
+    #[test]
+    fn retrying_attempt_two_waiting_for_first_token_chrome() {
+        let theme = Theme::current();
+        let (_, label, is_tool) = compute_activity(
+            &theme,
+            &AgentState::TurnRunning,
+            &Some(TurnActivity::Retrying {
+                attempt: 2,
+                max_retries: u32::MAX,
+                reason: "waiting for first token".into(),
+            }),
+            false,
+            false,
+        );
+        assert_eq!(
+            label,
+            "Retrying the model request (attempt 2): waiting for first token"
+        );
+        assert!(label.contains("Retrying the model request"));
+        assert!(label.contains("waiting for first token"));
+        assert!(!is_tool);
+        let bound = std::time::Duration::from_secs(120);
+        assert!(
+            bound < std::time::Duration::from_secs(11 * 60),
+            "first-token retry wait is the 120s headers budget, not 11 minutes"
+        );
+    }
+
     /// Pre-first-token chrome must name the model request. A generic
     /// "Waiting for response…" looks idle while the sampler has not
     /// produced a token, which is the live hang.
@@ -1582,6 +1615,52 @@ mod tests {
             .as_deref()
             .is_some_and(|s| s.contains("Retrying the model request"))
         );
+    }
+
+    /// Operator: Waiting chrome names the model request. It must not paint
+    /// Human, User, or Grok as a speaker label for the operator or the machine.
+    #[test]
+    fn waiting_chrome_does_not_paint_human_user_or_grok_as_speaker() {
+        use crate::acp::tracker::WaitingReason;
+        let theme = Theme::current();
+        let label = WaitingReason::Model.label();
+        assert!(
+            label.contains("Waiting for the model"),
+            "pre-first-token wait must name the model request, got {label}"
+        );
+        for banned in ["Human", "User", "Grok"] {
+            assert!(
+                !label.contains(banned),
+                "Waiting chrome must not paint {banned} as a speaker, got {label}"
+            );
+        }
+        let (_, activity, _) = compute_activity(
+            &theme,
+            &AgentState::TurnRunning,
+            &Some(TurnActivity::Waiting(WaitingReason::Model)),
+            false,
+            false,
+        );
+        for banned in ["Human", "User", "Grok"] {
+            assert!(
+                !activity.contains(banned),
+                "busy-row wait must not paint {banned} as a speaker, got {activity}"
+            );
+        }
+        let area = Rect::new(0, 0, 80, 4);
+        let mut buf = Buffer::empty(area);
+        paint_leftover_viewport_wait(&mut buf, area, &label, Style::default());
+        let painted = leftover_area_text(&buf, area);
+        assert!(
+            painted.contains("Waiting for the model"),
+            "leftover wait must still paint the model request, got:\n{painted}"
+        );
+        for banned in ["Human", "User", "Grok"] {
+            assert!(
+                !painted.contains(banned),
+                "leftover wait must not paint {banned} as a speaker, got:\n{painted}"
+            );
+        }
     }
 
     #[test]

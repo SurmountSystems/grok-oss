@@ -133,6 +133,7 @@ pub fn stream_messages<'a>(
         let mut chunk_index: u64 = 0;
         let mut message_chunk_count: u64 = 0;
         let mut first_token_emitted = false;
+        let mut repetition = super::StreamRepetitionGuard::default();
         let mut last_content_chunk_at = Instant::now();
         let first_token_budget = super::first_token_wait(idle_timeout);
         let first_token_deadline = Instant::now() + first_token_budget;
@@ -320,12 +321,24 @@ pub fn stream_messages<'a>(
                                         };
                                     }
                                     chunk_index += 1;
+                                    repetition.append(SamplingChannel::Reasoning, &thinking);
+                                    let looping =
+                                        repetition.is_looping(SamplingChannel::Reasoning);
                                     yield SamplingEvent::ChannelToken {
                                         request_id: request_id.clone(),
                                         channel: SamplingChannel::Reasoning,
                                         text: thinking,
                                         chunk_index,
                                     };
+                                    if looping {
+                                        let err = repetition
+                                            .error(SamplingChannel::Reasoning, chunk_index);
+                                        yield SamplingEvent::Failed {
+                                            request_id: request_id.clone(),
+                                            error: SamplingErrorInfo::from(&err),
+                                        };
+                                        return;
+                                    }
                                 }
                             }
                             StreamDelta::SignatureDelta { signature } => {
@@ -343,12 +356,23 @@ pub fn stream_messages<'a>(
                                     chunk_timestamps.push(Instant::now());
                                     chunk_index += 1;
                                     message_chunk_count += 1;
+                                    repetition.append(SamplingChannel::Text, &text);
+                                    let looping = repetition.is_looping(SamplingChannel::Text);
                                     yield SamplingEvent::ChannelToken {
                                         request_id: request_id.clone(),
                                         channel: SamplingChannel::Text,
                                         text,
                                         chunk_index,
                                     };
+                                    if looping {
+                                        let err =
+                                            repetition.error(SamplingChannel::Text, chunk_index);
+                                        yield SamplingEvent::Failed {
+                                            request_id: request_id.clone(),
+                                            error: SamplingErrorInfo::from(&err),
+                                        };
+                                        return;
+                                    }
                                 }
                             }
                             StreamDelta::InputJsonDelta { partial_json } => {

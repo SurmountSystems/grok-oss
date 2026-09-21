@@ -1,16 +1,12 @@
 //! `grep` tool — OpenCode namespace.
 //!
-//! Shells out to the ripgrep (`rg`) binary, parses the output, sorts
+//! Embedded `grep` crate search (not a sidecar `rg`). Parses hits, sorts
 //! matches by file modification time (most recent first), caps at 100
 //! results, truncates long lines, and formats as grouped output.
 
 use std::collections::HashMap;
-use std::process::Stdio;
 
-use tokio::io::AsyncReadExt;
-use tokio::process::Command;
-
-use crate::implementations::grok_build::grep::ripgrep::rg_path;
+use crate::implementations::grok_build::grep::embedded::{self, PrintMode, SearchRequest};
 use crate::types::output::{GrepFileMatch, GrepLineMatch, GrepSearchOutput};
 use crate::types::requirements::{Expr, ToolRequirement};
 #[allow(unused_imports)]
@@ -160,33 +156,37 @@ impl xai_tool_runtime::Tool for GrepTool {
             _ => cwd,
         };
 
-        // Build rg command.
-        let rg_exec = rg_path();
-        let mut cmd = Command::new(rg_exec);
-        cmd.args([
-            "-n",
-            "-H",
-            "--hidden",
-            "--no-messages",
-            "--field-match-separator=|",
-            "--regexp",
-        ]);
-        cmd.arg(&input.pattern);
-
-        if let Some(ref include) = input.include
-            && !include.is_empty()
+        let req = SearchRequest {
+            pattern: input.pattern.clone(),
+            path: search_path,
+            case_insensitive: false,
+            literal: false,
+            glob: input.include.clone(),
+            extra_globs: Vec::new(),
+            deny_globs: Vec::new(),
+            file_type: None,
+            hidden: true,
+            no_ignore: false,
+            multiline: false,
+            before_context: 0,
+            after_context: 0,
+            max_filesize: None,
+            max_columns: None,
+            print: PrintMode::Content,
+            max_output_lines: None,
+        };
+        let hits = match tokio::task::spawn_blocking(move || embedded::search_line_hits(&req)).await
         {
-            cmd.arg("--glob").arg(include);
-        }
-
-        cmd.arg(search_path.to_string_lossy().as_ref());
-        cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
-        crate::util::detach_search_command(&mut cmd);
-
-        // Spawn.
-        #[allow(clippy::disallowed_methods)] // search helper, waited on below
-        let mut child = match cmd.spawn() {
-            Ok(c) => c,
+            Ok(Ok(h)) => h,
+            Ok(Err(e)) => {
+                return Ok(GrepSearchOutput {
+                    stdout: Vec::new(),
+                    stderr: format!("Error spawning rg: {e}").into_bytes(),
+                    exit_code: -1,
+                    match_count: 0,
+                    file_matches: Vec::new(),
+                });
+            }
             Err(e) => {
                 return Ok(GrepSearchOutput {
                     stdout: Vec::new(),
@@ -197,23 +197,9 @@ impl xai_tool_runtime::Tool for GrepTool {
                 });
             }
         };
-
-        // Read stdout + stderr.
-        let mut stdout_buf = Vec::new();
-        if let Some(mut pipe) = child.stdout.take() {
-            let _ = pipe.read_to_end(&mut stdout_buf).await;
-        }
-        let mut stderr_buf = Vec::new();
-        if let Some(mut pipe) = child.stderr.take() {
-            let _ = pipe.read_to_end(&mut stderr_buf).await;
-        }
-
-        let status = child.wait().await.ok();
-        let exit_code = status.and_then(|s| s.code()).unwrap_or(-1);
-
-        // Exit code 1 = no matches, exit code 2 with no output = errors only.
-        let stdout_str = String::from_utf8_lossy(&stdout_buf);
-        if exit_code == 1 || (exit_code == 2 && stdout_str.trim().is_empty()) {
+        let stderr_buf = Vec::new();
+        let exit_code = if hits.is_empty() { 1 } else { 0 };
+        if hits.is_empty() {
             let formatted = "No files found".to_string();
             return Ok(GrepSearchOutput {
                 stdout: formatted.into_bytes(),
@@ -224,7 +210,6 @@ impl xai_tool_runtime::Tool for GrepTool {
             });
         }
 
-        // ── Parse ripgrep output (format: filepath|linenum|linetext) ────
         struct RawMatch {
             path: String,
             line_num: usize,
@@ -235,45 +220,26 @@ impl xai_tool_runtime::Tool for GrepTool {
         let mut matches: Vec<RawMatch> = Vec::new();
         let mut mtime_cache: HashMap<String, u64> = HashMap::new();
 
-        for line in stdout_str.lines() {
-            if line.is_empty() {
-                continue;
-            }
-            // Split on first two `|` separators.
-            let mut parts = line.splitn(3, '|');
-            let file_path = match parts.next() {
-                Some(p) => p,
-                None => continue,
-            };
-            let line_num_str = match parts.next() {
-                Some(n) => n,
-                None => continue,
-            };
-            let line_text = parts.next().unwrap_or("");
-            let line_num = match line_num_str.parse::<usize>() {
-                Ok(n) => n,
-                Err(_) => continue,
-            };
-
-            // Cache mtime per file.
-            let mtime_ms = if let Some(&cached) = mtime_cache.get(file_path) {
+        for hit in hits {
+            let file_path = hit.path;
+            let mtime_ms = if let Some(&cached) = mtime_cache.get(&file_path) {
                 cached
             } else {
-                let mtime = tokio::fs::metadata(file_path)
+                let mtime = tokio::fs::metadata(&file_path)
                     .await
                     .ok()
                     .and_then(|m| m.modified().ok())
                     .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                     .map(|d| d.as_millis() as u64)
                     .unwrap_or(0);
-                mtime_cache.insert(file_path.to_string(), mtime);
+                mtime_cache.insert(file_path.clone(), mtime);
                 mtime
             };
 
             matches.push(RawMatch {
-                path: file_path.to_string(),
-                line_num,
-                line_text: line_text.to_string(),
+                path: file_path,
+                line_num: hit.line_number,
+                line_text: hit.line_text,
                 mtime_ms,
             });
         }

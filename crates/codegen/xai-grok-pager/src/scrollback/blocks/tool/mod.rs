@@ -469,7 +469,9 @@ impl ToolCallBlock {
                 ToolCallBlock::Edit(EditToolCallBlock::new(summary, Vec::new()))
             }
             "write" => ToolCallBlock::Edit(
-                EditToolCallBlock::new(summary, Vec::new()).with_prefix("Creating "),
+                EditToolCallBlock::new(summary, Vec::new())
+                    .with_prefix("Creating ")
+                    .with_file_preview(),
             ),
             "list_dir" | "ls" => ToolCallBlock::ListDir(ListDirToolCallBlock::new(summary)),
             "grep" | "search" | "glob" => {

@@ -227,6 +227,14 @@ pub fn nested_spawn_allowed(child_depth: u32, max_depth: u32) -> bool {
 
 /// Apply capability filtering and recursion depth to the exact production
 /// definition toolset.
+///
+/// GitHub #141: an L2 grok-build / general-purpose coordinator (nested spawn
+/// on, no capability override, toolset ships Edit) must not Grep, ReadFile,
+/// SearchReplace, or Write. Keep Task, wait, kill, background wait, and todos
+/// so that coordinator spawns L3. Explore/plan omit Edit already; do not strip
+/// them further. `SubagentCapabilityMode::All` keeps grep/read/edit on L2
+/// (existing full-tool escape; do not invent another permission system). L3
+/// at max depth keeps Grep/Read/Edit; Task is already stripped.
 pub fn apply_child_tool_policy(
     definition: &mut AgentDefinition,
     capability_mode: Option<SubagentCapabilityMode>,
@@ -241,6 +249,19 @@ pub fn apply_child_tool_policy(
             .tools
             .retain(|tool| tool.kind != Some(ToolKind::Task));
         prune_orphaned_background_task_tools(&mut definition.tool_config);
+    } else if capability_mode.is_none()
+        && definition
+            .tool_config
+            .tools
+            .iter()
+            .any(|tool| tool.kind == Some(ToolKind::Edit))
+    {
+        definition.tool_config.tools.retain(|tool| {
+            !matches!(
+                tool.kind,
+                Some(ToolKind::Search | ToolKind::Read | ToolKind::Edit | ToolKind::Write)
+            )
+        });
     }
 }
 /// Resolve runtime overrides and definition defaults in the production order.
@@ -391,6 +412,181 @@ mod tests {
             ids.iter()
                 .any(|id| id.ends_with(":get_task_output") || id.ends_with(":wait_tasks")),
             "background wait tools stay when bash can still spawn background work; ids={ids:?}"
+        );
+    }
+
+    // GitHub #141. Operator: "It's not process feedback, actually. It's a bug."
+    // "It's doing too much work in L2 and not using L3s." The 2026-08-20
+    // "easy work on L2" pin is superseded.
+
+    /// Named contract: L2 implement coordinator with capability_mode None
+    /// must not get SearchReplace (Edit) or Write.
+    #[test]
+    fn l2_implement_coordinator_capability_none_strips_search_replace() {
+        let mut definition = AgentDefinition::default_grok_build();
+        assert!(
+            definition
+                .tool_config
+                .tools
+                .iter()
+                .any(|tool| tool.kind == Some(ToolKind::Edit)),
+            "premise: grok-build ships SearchReplace (Edit)"
+        );
+        apply_child_tool_policy(&mut definition, None, true);
+        assert!(
+            !definition
+                .tool_config
+                .tools
+                .iter()
+                .any(|tool| tool.kind == Some(ToolKind::Edit)),
+            "L2 implement coordinator with capability_mode None must not SearchReplace; spawn L3"
+        );
+        assert!(
+            !definition
+                .tool_config
+                .tools
+                .iter()
+                .any(|tool| tool.kind == Some(ToolKind::Write)),
+            "L2 implement coordinator with capability_mode None must not Write; spawn L3"
+        );
+    }
+
+    /// Named contract: L2 implement coordinator with capability_mode None
+    /// must not Grep or ReadFile.
+    #[test]
+    fn l2_implement_coordinator_capability_none_strips_grep_and_read_file() {
+        let mut definition = AgentDefinition::default_grok_build();
+        assert!(
+            definition
+                .tool_config
+                .tools
+                .iter()
+                .any(|tool| tool.kind == Some(ToolKind::Search)),
+            "premise: grok-build ships Grep (Search)"
+        );
+        assert!(
+            definition
+                .tool_config
+                .tools
+                .iter()
+                .any(|tool| tool.kind == Some(ToolKind::Read)),
+            "premise: grok-build ships ReadFile (Read)"
+        );
+        apply_child_tool_policy(&mut definition, None, true);
+        assert!(
+            !definition
+                .tool_config
+                .tools
+                .iter()
+                .any(|tool| tool.kind == Some(ToolKind::Search)),
+            "L2 implement coordinator with capability_mode None must not Grep; spawn L3"
+        );
+        assert!(
+            !definition
+                .tool_config
+                .tools
+                .iter()
+                .any(|tool| tool.kind == Some(ToolKind::Read)),
+            "L2 implement coordinator with capability_mode None must not ReadFile; spawn L3"
+        );
+    }
+
+    /// Named contract: stripping implement tools must not take spawn_subagent,
+    /// wait, or kill away from the L2 coordinator.
+    #[test]
+    fn l2_implement_coordinator_still_keeps_spawn_subagent() {
+        let mut definition = AgentDefinition::default_grok_build();
+        apply_child_tool_policy(&mut definition, None, true);
+        let ids: Vec<&str> = definition
+            .tool_config
+            .tools
+            .iter()
+            .map(|tool| tool.id.as_str())
+            .collect();
+        assert!(
+            definition
+                .tool_config
+                .tools
+                .iter()
+                .any(|tool| tool.kind == Some(ToolKind::Task)),
+            "L2 implement coordinator must keep spawn_subagent (Task); ids={ids:?}"
+        );
+        assert!(
+            ids.iter()
+                .any(|id| id.ends_with(":get_task_output") || id.ends_with(":wait_tasks")),
+            "L2 implement coordinator must keep wait / get_command_or_subagent_output; ids={ids:?}"
+        );
+        assert!(
+            definition
+                .tool_config
+                .tools
+                .iter()
+                .any(|tool| tool.kind == Some(ToolKind::KillTaskAction))
+                || ids.iter().any(|id| id.ends_with(":kill_task")),
+            "L2 implement coordinator must keep kill; ids={ids:?}"
+        );
+    }
+
+    /// Named contract: L3 at max depth keeps SearchReplace and Grep. Task is gone.
+    #[test]
+    fn l3_at_max_depth_keeps_search_replace_and_grep_without_task() {
+        let mut definition = AgentDefinition::default_grok_build();
+        apply_child_tool_policy(&mut definition, None, false);
+        assert!(
+            definition
+                .tool_config
+                .tools
+                .iter()
+                .any(|tool| tool.kind == Some(ToolKind::Edit)),
+            "L3 at max depth must keep SearchReplace (Edit) so it can implement"
+        );
+        assert!(
+            definition
+                .tool_config
+                .tools
+                .iter()
+                .any(|tool| tool.kind == Some(ToolKind::Search)),
+            "L3 at max depth must keep Grep (Search) so it can implement"
+        );
+        assert!(
+            !definition
+                .tool_config
+                .tools
+                .iter()
+                .any(|tool| tool.kind == Some(ToolKind::Task)),
+            "L3 at max depth must not get spawn_subagent (Task)"
+        );
+    }
+
+    /// Named contract: capability_mode All is the existing full-tool escape.
+    /// L2 keeps Edit, Grep, and Read.
+    #[test]
+    fn l2_capability_mode_all_keeps_edit_grep_read() {
+        let mut definition = AgentDefinition::default_grok_build();
+        apply_child_tool_policy(&mut definition, Some(SubagentCapabilityMode::All), true);
+        assert!(
+            definition
+                .tool_config
+                .tools
+                .iter()
+                .any(|tool| tool.kind == Some(ToolKind::Edit)),
+            "L2 with SubagentCapabilityMode::All must keep SearchReplace (Edit)"
+        );
+        assert!(
+            definition
+                .tool_config
+                .tools
+                .iter()
+                .any(|tool| tool.kind == Some(ToolKind::Search)),
+            "L2 with SubagentCapabilityMode::All must keep Grep (Search)"
+        );
+        assert!(
+            definition
+                .tool_config
+                .tools
+                .iter()
+                .any(|tool| tool.kind == Some(ToolKind::Read)),
+            "L2 with SubagentCapabilityMode::All must keep ReadFile (Read)"
         );
     }
 

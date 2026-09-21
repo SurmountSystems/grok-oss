@@ -163,6 +163,8 @@ pub(super) fn dispatch_unstick_last_l1_prompt(app: &mut AppView) -> Vec<Effect> 
         app.show_toast(NO_LAST_PROMPT_TOAST);
         return vec![];
     };
+    // Hung Isolated Preview after Plan Exit: leave the pane, then resend.
+    agent.leave_parked_isolated_preview();
     let Some(last) = last_l1_prompt(agent) else {
         agent.show_toast(NO_LAST_PROMPT_TOAST);
         return vec![];

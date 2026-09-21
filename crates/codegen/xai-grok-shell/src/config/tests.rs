@@ -1287,6 +1287,7 @@ fn subagents_config_allow_worktree_true_via_resolve() {
 }
 
 #[test]
+// Grok OSS: [subagents] allow_worktree is copied onto the runtime config. This diverges from upstream xAI because a toml field that deserializes is not shipped unless spawn can honor it.
 fn resolve_subagents_copies_allow_worktree() {
     without_grok_subagents(|| {
         let mut cfg = crate::agent::config::Config::default();
@@ -1304,6 +1305,60 @@ fn resolve_subagents_copies_allow_worktree() {
         assert!(
             !off.subagent_allow_worktree,
             "empty/false allow_worktree must stay off after resolve"
+        );
+    });
+}
+
+#[test]
+// Grok OSS: Hunter's razor: off is SpaceXAI spawn/wait/resume_from completed-only.
+// Off must be a real operator-editable [subagents] key, not a dropped unknown field.
+fn subagents_config_parent_follow_up_false_parses_and_omitted_defaults_true() {
+    without_grok_subagents(|| {
+        let omitted = toml::Value::Table(toml::map::Map::new());
+        let sa = SubagentsConfig::resolve(false, &omitted);
+        assert!(
+            sa.parent_follow_up,
+            "omitted [subagents] parent_follow_up parses true"
+        );
+        let config: toml::Value =
+            toml::from_str("[subagents]\nenabled = true\nparent_follow_up = false").unwrap();
+        let off = SubagentsConfig::resolve(false, &config);
+        assert!(off.enabled);
+        assert!(
+            !off.parent_follow_up,
+            "toml [subagents] parent_follow_up = false parses false; off is SpaceXAI spawn/wait/resume_from completed-only"
+        );
+    });
+    let empty: SubagentsConfig = toml::from_str("").unwrap();
+    assert!(
+        empty.parent_follow_up,
+        "serde empty section body defaults true"
+    );
+    let enabled: SubagentsConfig = toml::from_str("parent_follow_up = true").unwrap();
+    assert!(enabled.parent_follow_up, "explicit true stays on");
+    let disabled: SubagentsConfig = toml::from_str("parent_follow_up = false").unwrap();
+    assert!(!disabled.parent_follow_up);
+}
+
+#[test]
+// Grok OSS: [subagents] parent_follow_up is copied onto the runtime config. This diverges from upstream xAI because a toml field that deserializes is not shipped unless the live coordinator honors it.
+fn resolve_subagents_copies_parent_follow_up() {
+    without_grok_subagents(|| {
+        let mut cfg = crate::agent::config::Config::default();
+        let raw: toml::Value =
+            toml::from_str("[subagents]\nenabled = true\nparent_follow_up = false").unwrap();
+        cfg.resolve_subagents(false, &raw);
+        assert!(
+            !cfg.subagent_parent_follow_up,
+            "resolve_subagents must copy parent_follow_up so the live coordinator honors toml"
+        );
+        let mut omitted = crate::agent::config::Config::default();
+        let raw_omitted: toml::Value =
+            toml::from_str("[subagents]\nenabled = true").unwrap();
+        omitted.resolve_subagents(false, &raw_omitted);
+        assert!(
+            omitted.subagent_parent_follow_up,
+            "omitted parent_follow_up must stay on after resolve"
         );
     });
 }

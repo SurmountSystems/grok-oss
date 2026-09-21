@@ -194,6 +194,9 @@ pub fn map_sampling_err_to_acp(err: SamplingError) -> acp::Error {
         SamplingError::DoomLoopDetected { .. } => {
             acp::Error::internal_error().data(err.to_string())
         }
+        SamplingError::RepetitiveGeneration { .. } => {
+            acp::Error::internal_error().data(err.to_string())
+        }
     }
 }
 

@@ -1696,6 +1696,8 @@ mod tests {
     // lock_edit_verify_runtime serializes spy runner and path queue across Tool::run.
     #[allow(clippy::await_holding_lock)]
     async fn search_replace_formats_rust_file_after_write() {
+        let _skip =
+            crate::util::rust_edit_verify::SkipEditVerifyEnvAsyncGuard::unset_host_kill_switch();
         let _verify = crate::util::rust_edit_verify::lock_edit_verify_runtime();
         crate::util::rust_edit_verify::clear_test_command_runner();
         crate::util::rust_edit_verify::clear_pending_verify_paths();
@@ -1754,6 +1756,8 @@ mod tests {
     // lock_edit_verify_runtime serializes spy runner and path queue across Tool::run.
     #[allow(clippy::await_holding_lock)]
     async fn search_replace_clippy_findings_do_not_rollback_write() {
+        let _skip =
+            crate::util::rust_edit_verify::SkipEditVerifyEnvAsyncGuard::unset_host_kill_switch();
         let _verify = crate::util::rust_edit_verify::lock_edit_verify_runtime();
         crate::util::rust_edit_verify::clear_test_command_runner();
         crate::util::rust_edit_verify::clear_pending_verify_paths();

@@ -586,6 +586,7 @@ impl ScrollbackState {
     ///
     /// Returns the assigned EntryId which can be used to access this entry later.
     pub fn push(&mut self, entry: ScrollbackEntry) -> EntryId {
+        self.follow_tail_if_operator_still_there();
         let id = EntryId::new(self.next_id);
         self.next_id += 1;
 
@@ -1668,6 +1669,7 @@ impl ScrollbackState {
 
         // Case 1: Cache missing or width changed - full rebuild
         if self.layout_cache.is_none() || width != self.last_width {
+            self.follow_tail_if_operator_still_there();
             // A width change re-wraps every entry, so the absolute wrapped-row
             // scroll_offset would point at different content after the rebuild
             // (the resize jump). While the old cache is still valid, anchor the
@@ -1728,6 +1730,7 @@ impl ScrollbackState {
 
         // Case 2: Some entries have dirty heights - incremental update
         if !self.dirty_heights.is_empty() {
+            self.follow_tail_if_operator_still_there();
             // Viewport-top identity BEFORE heights change. Case 2 retains
             // the cache (no insert/remove), so the plain index stays valid
             // for the duration of this call.

@@ -5,7 +5,7 @@ use crate::app::agent::AgentId;
 use crate::app::agent_view::AgentView;
 use crate::app::roster::{RosterActivity, RosterEntry};
 use crate::app::subagent::{
-    SubagentInfo, format_activity_label, format_live_l3_count, format_subagent_label,
+    SubagentInfo, format_activity_label, format_live_l3_count, format_subagent_label_among,
     is_l2_list_row, live_l3_count,
 };
 use indexmap::IndexMap;
@@ -585,7 +585,8 @@ fn subagent_row(
     home: Option<&str>,
 ) -> DashboardRow {
     let state = classify_subagent(info);
-    let (label_raw, desc_raw) = format_subagent_label(info);
+    let all: Vec<&SubagentInfo> = parent_view.subagent_sessions.values().collect();
+    let (label_raw, desc_raw) = format_subagent_label_among(info, &all);
     let label = {
         let label = sanitize(&label_raw);
         let desc = sanitize(&desc_raw);
@@ -1106,6 +1107,7 @@ mod tests {
             turn_count: None,
             tool_call_count: None,
             tokens_used: None,
+            tokens_past: 0,
             context_window_tokens: None,
             context_usage_pct: None,
             tools_used: Vec::new(),

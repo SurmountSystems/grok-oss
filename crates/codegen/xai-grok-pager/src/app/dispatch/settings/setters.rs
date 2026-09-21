@@ -6,12 +6,23 @@ use crate::app::actions::Effect;
 use crate::app::app_view::{ActiveView, AppView};
 use agent_client_protocol as acp;
 
-/// Set multiline input mode — swap Enter and Shift+Enter behavior.
+/// Set multiline input mode. Mid-line Enter inserts a newline. Enter at
+/// the end of the last line still sends or interjects. Shift+Enter still
+/// sends.
 ///
 /// PAGER-OWNED: ephemeral, no `Effect::PersistSetting`. On the agent
 /// view this is per-session (`AgentView::multiline_mode`); on the
 /// dashboard it lives on `DashboardState::multiline_mode`. Idempotent.
+///
+/// Grok OSS: Operator: when `[ui] allow_session_multiline` is false, refuse
+/// turning session Multiline on (slash, settings, Ctrl+M).
 pub(in crate::app::dispatch) fn set_multiline_mode(app: &mut AppView, new: bool) -> Vec<Effect> {
+    if new && !crate::appearance::cache::load_allow_session_multiline() {
+        app.show_toast(
+            "Session Multiline is disabled ([ui] allow_session_multiline / Settings → Editor)",
+        );
+        return vec![];
+    }
     if matches!(app.active_view, ActiveView::AgentDashboard) {
         let Some(d) = app.dashboard.as_mut() else {
             return vec![];
@@ -81,6 +92,51 @@ pub(in crate::app::dispatch) fn set_composer_multiline(
     app.show_toast(&save_success_toast("Composer multiline", new));
     vec![Effect::PersistSetting {
         key: "composer_multiline",
+        value: crate::settings::SettingValue::Bool(new),
+        rollback_value: crate::settings::SettingValue::Bool(prev),
+    }]
+}
+
+pub(super) fn set_allow_session_multiline_inner(app: &mut AppView, new: bool) {
+    crate::appearance::cache::set_allow_session_multiline(new);
+    app.current_ui.allow_session_multiline = Some(new);
+    // Grok OSS: Operator: turning the allow flag off forces active session
+    // Multiline off so the Operator cannot stay in that mode accidentally.
+    if !new {
+        if let ActiveView::Agent(id) = app.active_view {
+            if let Some(agent) = app.agents.get_mut(&id) {
+                agent.multiline_mode = false;
+            }
+        }
+        if let Some(d) = app.dashboard.as_mut() {
+            d.multiline_mode = false;
+        }
+    }
+}
+
+/// Allow session Multiline to be enabled (`Ctrl+M` / `/multiline` / settings).
+///
+/// SHELL-owned: cache + `[ui].allow_session_multiline` via `Effect::PersistSetting`.
+/// Default on. Distinct from `[ui].composer_multiline`.
+pub(in crate::app::dispatch) fn set_allow_session_multiline(
+    app: &mut AppView,
+    new: bool,
+) -> Vec<Effect> {
+    let prev = crate::appearance::cache::load_allow_session_multiline();
+    if prev == new {
+        return vec![];
+    }
+    set_allow_session_multiline_inner(app, new);
+    refresh_open_settings_modals(app);
+    tracing::info!(
+        target: "settings",
+        key = "allow_session_multiline",
+        value = new,
+        "setting changed",
+    );
+    app.show_toast(&save_success_toast("Allow session Multiline", new));
+    vec![Effect::PersistSetting {
+        key: "allow_session_multiline",
         value: crate::settings::SettingValue::Bool(new),
         rollback_value: crate::settings::SettingValue::Bool(prev),
     }]
@@ -1230,6 +1286,96 @@ pub(in crate::app::dispatch) fn set_confirm_before_rewind(
         key: "confirm_before_rewind",
         value: crate::settings::SettingValue::Bool(new),
         rollback_value: crate::settings::SettingValue::Bool(prev),
+    }]
+}
+
+fn refresh_process_rule_reminders_live(app: &AppView) {
+    xai_grok_tools::reminders::ProcessRuleReminders::set_live(
+        xai_grok_tools::reminders::ProcessRuleReminders::from_ui(
+            app.current_ui.process_rule_reminders_enabled(),
+            app.current_ui.process_rule_reminders_text(),
+        ),
+    );
+}
+
+pub(in crate::app::dispatch) fn set_turbo_planning_inner(app: &mut AppView, new: bool) {
+    app.current_ui.turbo_planning = Some(new);
+    crate::appearance::cache::set_turbo_planning(new);
+    xai_grok_shell::util::config::set_turbo_planning_live(new);
+}
+
+/// SHARED: `[ui].turbo_planning` via `Effect::PersistSetting`. Default ON.
+pub(in crate::app::dispatch) fn set_turbo_planning(app: &mut AppView, new: bool) -> Vec<Effect> {
+    let prev = crate::appearance::cache::load_turbo_planning();
+    if prev == new {
+        return vec![];
+    }
+    set_turbo_planning_inner(app, new);
+    refresh_open_settings_modals(app);
+    tracing::info!(target: "settings", key = "turbo_planning", value = new, "setting changed");
+    app.show_toast(&save_success_toast("Turbo planning", new));
+    vec![Effect::PersistSetting {
+        key: "turbo_planning",
+        value: crate::settings::SettingValue::Bool(new),
+        rollback_value: crate::settings::SettingValue::Bool(prev),
+    }]
+}
+
+pub(in crate::app::dispatch) fn set_process_rule_reminders_enabled_inner(
+    app: &mut AppView,
+    new: bool,
+) {
+    app.current_ui.process_rule_reminders_enabled = Some(new);
+    refresh_process_rule_reminders_live(app);
+}
+
+/// SHARED: `[ui].process_rule_reminders_enabled` via `Effect::PersistSetting`.
+pub(in crate::app::dispatch) fn set_process_rule_reminders_enabled(
+    app: &mut AppView,
+    new: bool,
+) -> Vec<Effect> {
+    let prev = app.current_ui.process_rule_reminders_enabled();
+    if prev == new {
+        return vec![];
+    }
+    set_process_rule_reminders_enabled_inner(app, new);
+    refresh_open_settings_modals(app);
+    tracing::info!(
+        target: "settings",
+        key = "process_rule_reminders_enabled",
+        value = new,
+        "setting changed"
+    );
+    app.show_toast(&save_success_toast("Process-rule reminders", new));
+    vec![Effect::PersistSetting {
+        key: "process_rule_reminders_enabled",
+        value: crate::settings::SettingValue::Bool(new),
+        rollback_value: crate::settings::SettingValue::Bool(prev),
+    }]
+}
+
+pub(in crate::app::dispatch) fn set_process_rule_reminders_inner(app: &mut AppView, new: String) {
+    app.current_ui.process_rule_reminders = if new.is_empty() { None } else { Some(new) };
+    refresh_process_rule_reminders_live(app);
+}
+
+/// SHARED: `[ui].process_rule_reminders` newline-separated list. Empty clears.
+pub(in crate::app::dispatch) fn set_process_rule_reminders(
+    app: &mut AppView,
+    new: String,
+) -> Vec<Effect> {
+    let prev = app.current_ui.process_rule_reminders_text().to_string();
+    if prev == new {
+        return vec![];
+    }
+    set_process_rule_reminders_inner(app, new.clone());
+    refresh_open_settings_modals(app);
+    tracing::info!(target: "settings", key = "process_rule_reminders", "setting changed");
+    app.show_toast("\u{2713} Process-rule reminder list saved");
+    vec![Effect::PersistSetting {
+        key: "process_rule_reminders",
+        value: crate::settings::SettingValue::String(new),
+        rollback_value: crate::settings::SettingValue::String(prev),
     }]
 }
 

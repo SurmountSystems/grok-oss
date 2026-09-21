@@ -3358,6 +3358,102 @@ fn dashboard_overlay_cycle_wraps_through_agents() {
     let _ = dispatch_dashboard_overlay_cycle(&mut app, -1);
     assert_eq!(app.dashboard.as_ref().unwrap().attached_agent, Some(id2));
 }
+
+/// Pager prev/next (`2/2 [‹][›]`) must not pin a live session so new
+/// assistant output looks like silence. Cycling away and back, or restoring
+/// a peek page-flip pin, still follows the tail unless the Operator scrolled
+/// away.
+#[serial_test::serial(GROK_AGENT_DASHBOARD)]
+#[test]
+fn overlay_cycle_does_not_pin_live_tail_off_screen() {
+    let mut app = test_app_with_agent();
+    mark_agent_nonempty(&mut app, AgentId(0));
+    let id2 = AgentId(1);
+    let session2 = make_test_agent_session(&app, id2, "second");
+    let mut agent2 = AgentView::new(session2, ScrollbackState::new());
+    agent2.generated_session_title = Some("Second".into());
+    app.agents.insert(id2, agent2);
+    mark_agent_nonempty(&mut app, id2);
+
+    {
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        agent.session.state = AgentState::TurnRunning;
+        for i in 0..20 {
+            agent
+                .scrollback
+                .push_block(RenderBlock::agent_message(format!("history {i}")));
+        }
+        agent
+            .scrollback
+            .push_block(RenderBlock::user_prompt("live question"));
+        let prompt_idx = agent.scrollback.len().saturating_sub(1);
+        agent.scrollback.prepare_layout(80, 8);
+        agent.scrollback.follow_new_turn(Some(prompt_idx), true);
+        for i in 0..16 {
+            agent
+                .scrollback
+                .push_block(RenderBlock::agent_message(format!("stream {i}")));
+        }
+        agent.scrollback.prepare_layout(80, 8);
+        // Cursor in the transcript drops follow without leaving the tail.
+        agent.scrollback.scroll_up(0);
+    }
+
+    open_dashboard(&mut app);
+    let _ = dispatch_dashboard_attach(
+        &mut app,
+        crate::views::dashboard::DashboardRowId::TopLevel(AgentId(0)),
+    );
+    if let Some(d) = app.dashboard.as_mut() {
+        d.begin_peek_viewport(
+            crate::views::dashboard::DashboardRowId::TopLevel(AgentId(0)),
+            &mut app.agents,
+        );
+        let page_flip = app.agents[&AgentId(0)]
+            .scrollback
+            .entry(app.agents[&AgentId(0)].scrollback.len().saturating_sub(1))
+            .map(|e| e.id);
+        if let Some(entry_id) = page_flip {
+            app.agents
+                .get_mut(&AgentId(0))
+                .unwrap()
+                .scrollback
+                .enable_follow_with_preserve();
+            d.note_page_flip_for_lease(AgentId(0), entry_id, &app.agents);
+        }
+    }
+
+    let _ = dispatch_dashboard_overlay_cycle(&mut app, 1);
+    let _ = dispatch_dashboard_overlay_cycle(&mut app, -1);
+
+    {
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        for i in 0..10 {
+            agent
+                .scrollback
+                .push_block(RenderBlock::agent_message(format!("after cycle {i}")));
+        }
+        agent.scrollback.prepare_layout(80, 8);
+        let last_idx = agent.scrollback.len().saturating_sub(1);
+        let visible = agent.scrollback.visible_entry_range();
+        let (window, _) =
+            agent
+                .scrollback
+                .paint_window(visible, agent.scrollback.scroll_offset(), 8);
+        assert!(
+            window.contains(&last_idx),
+            "pager scrolling broken: new output looks like the model is ignoring the Operator"
+        );
+        assert!(
+            agent.scrollback.is_follow_mode(),
+            "2/2 [‹][›] must not leave the live session unfollowed"
+        );
+        assert!(
+            !agent.scrollback.has_content_below(),
+            "pager prev/next must not pin live output below the viewport"
+        );
+    }
+}
 /// Cycle respects the dashboard's filter. With a state
 /// filter that hides one of two agents, the cycle becomes a
 /// no-op (only one visible row to walk through) — the user

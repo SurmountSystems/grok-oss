@@ -1178,6 +1178,126 @@ async fn compaction_reseed_without_provider_count_matches_plain_estimate() {
     );
 }
 
+/// Operator screenshot 2026-09-20: compact painted
+/// `Context compacted: 75.2k → 75.2k tokens` after a dest-encoder-skip loop.
+/// After dropping that wall, tokens_after must be strictly less than before.
+#[tokio::test]
+async fn compaction_reseed_drops_dest_encoder_skip_loop_below_75_2k() {
+    const DEST_ENCODER_SKIP_LOOP: &str =
+        "Spawn dests of dest encoder skip. I'll spawn dests of dest encoder skip.";
+    let h = TestHarness::new();
+    h.handle.push_user_message(ConversationItem::user(
+        "Keep Isolated Preview open until Esc, Exit, or Approve.",
+    ));
+    h.handle.push_tool_result(ConversationItem::tool_result(
+        "dest-1",
+        "Wrote /home/hunter/.agents/reports/fix-isolated-preview.md\nIsolated Preview stays until Esc.",
+    ));
+    h.handle.record_token_usage(75_200);
+    let unit = format!("{DEST_ENCODER_SKIP_LOOP} ");
+    let copies = ((75_200 * 4) / unit.len()).max(3) + 1;
+    h.handle
+        .push_assistant_response(ConversationItem::assistant(unit.repeat(copies)));
+
+    let tokens_before = h.handle.get_total_tokens().await;
+    assert_eq!(
+        tokens_before, 75_200,
+        "fixture must start at the painted 75.2k total"
+    );
+
+    let compacted = vec![
+        ConversationItem::system("sys"),
+        ConversationItem::user("Keep Isolated Preview open until Esc, Exit, or Approve."),
+        ConversationItem::tool_result(
+            "dest-1",
+            "Wrote /home/hunter/.agents/reports/fix-isolated-preview.md\nIsolated Preview stays until Esc.",
+        ),
+        ConversationItem::user("This session is being continued from a previous conversation."),
+    ];
+    h.handle.replace_conversation_for_compaction(compacted);
+
+    let tokens_after = h.handle.get_total_tokens().await;
+    assert!(
+        tokens_after < tokens_before,
+        "dropping the dest-encoder-skip wall must shrink compact; \
+         `Context compacted: 75.2k → 75.2k tokens` is a miss, got {tokens_after}"
+    );
+    assert!(
+        tokens_after < 75_200,
+        "tokens_after must be strictly below 75.2k after loop drop, got {tokens_after}"
+    );
+}
+
+/// Operator: "compactions shouldn't result in 75k contexts. That's
+/// incredibly wasteful." Unique fat history (not dest-encoder-skip) that
+/// lands after the last provider usage must not reseed
+/// `Context compacted: 75.2k → 75.2k tokens`. After compact, `get_total_tokens`
+/// stays in the compact summary reserve (32_768 = 4 × 8_192), not 75_200.
+/// Surmount fork of SpaceXAI compact reseed.
+#[tokio::test]
+async fn compaction_reseed_of_unique_75k_history_must_not_leave_wasteful_75k_context() {
+    let h = TestHarness::new();
+    h.handle.push_user_message(ConversationItem::user(
+        "Keep Isolated Preview open until Esc, Exit, or Approve.",
+    ));
+    h.handle.push_tool_result(ConversationItem::tool_result(
+        "dest-1",
+        "Wrote /home/hunter/.agents/reports/fix-isolated-preview.md\nIsolated Preview stays until Esc.",
+    ));
+    h.handle.record_token_usage(75_200);
+    let mut unique = String::with_capacity((75_200 * 4) as usize);
+    let mut i = 0u32;
+    while (unique.len() as u64) / 4 < 75_200 {
+        unique.push_str(&format!(
+            "Isolated Preview stay-open unique step {i:05}: dest report {i}.\n"
+        ));
+        i += 1;
+    }
+    h.handle
+        .push_assistant_response(ConversationItem::assistant(unique));
+
+    let tokens_before = h.handle.get_total_tokens().await;
+    assert_eq!(
+        tokens_before, 75_200,
+        "fixture must start at the painted 75.2k total"
+    );
+
+    let compacted = vec![
+        ConversationItem::system("sys"),
+        ConversationItem::user("Keep Isolated Preview open until Esc, Exit, or Approve."),
+        ConversationItem::tool_result(
+            "dest-1",
+            "Wrote /home/hunter/.agents/reports/fix-isolated-preview.md\nIsolated Preview stays until Esc.",
+        ),
+        ConversationItem::user("This session is being continued from a previous conversation."),
+    ];
+    h.handle.replace_conversation_for_compaction(compacted);
+
+    let tokens_after = h.handle.get_total_tokens().await;
+    assert_eq!(
+        crate::compaction_utils::COMPACT_SUMMARY_MAX_TOKENS,
+        8_192,
+        "compact summary cap is 8192 tokens, not a 75k window"
+    );
+    assert_eq!(
+        crate::compaction_utils::COMPACT_RESEED_MAX_TOKENS,
+        32_768,
+        "compact reseed reserve is 32768 tokens (4 × 8192)"
+    );
+    assert!(
+        tokens_after <= crate::compaction_utils::COMPACT_RESEED_MAX_TOKENS,
+        "Operator: 75k post-compact contexts are incredibly wasteful; \
+         compact sampling reserve is {} tokens (4 × compact summary budget {}), \
+         got {tokens_after}",
+        crate::compaction_utils::COMPACT_RESEED_MAX_TOKENS,
+        crate::compaction_utils::COMPACT_SUMMARY_MAX_TOKENS,
+    );
+    assert!(
+        tokens_after < 75_200,
+        "`Context compacted: 75.2k → 75.2k tokens` is a miss, got {tokens_after}"
+    );
+}
+
 #[tokio::test]
 async fn non_compaction_replace_does_not_carry_overhead() {
     let h = TestHarness::new();

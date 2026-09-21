@@ -45,10 +45,15 @@ theme = "doge"                         # default when unset is also DOGE; "grokn
                                        # previous neutral dark default (see 06-theming.md)
 simple_mode = true                     # readline-style prompt editing (default); false = vim editing in the prompt
 vim_mode = false                       # vim-style scrollback navigation keys (default: false)
-composer_multiline = true              # Human box may insert newlines (default on). Set false
+composer_multiline = true              # Operator box may insert newlines (default on). Set false
                                        # so Enter and Shift+Enter send (or interject) and never
                                        # open a second line. Session Multiline cannot restore
-                                       # newlines while this is false.
+                                       # newlines while this is false. Ctrl+Enter still inserts
+                                       # a newline when interject is not appropriate.
+allow_session_multiline = true         # Allow Ctrl+M / /multiline / Multiline settings to turn
+                                       # session Multiline on (default on). Set false to block
+                                       # enabling session Multiline. Distinct from
+                                       # composer_multiline.
 max_thoughts_width = 120               # max column width for reasoning display
 default_selected_permission = "always_allow_all_sessions" # preselected row on the FIRST approval prompt
 remember_tool_approvals = false        # show per-command "Always allow" options on permission prompts;
@@ -78,6 +83,11 @@ resume_canceled_turn_on_restart = true # continue interrupted turn (canceled_tur
 hide_header = false                    # hide in-app status / welcome / dashboard headers only
                                        # Not the desktop/terminal window title (see Notifications).
 cancel_subagents_on_turn_cancel = "ask" # ask | always_stop | always_continue
+# Turbo planning (Settings → Agent): default on. A live exclusive /plan turn
+# or Isolated Preview /plan --soft turn uses reasoning effort xhigh.
+# Off keeps the session /effort on those plan turns.
+# Process-rule reminder list (Settings): soft nested-spawn reminder strings.
+# Empty or off adds no extra reminder text. Spawn still succeeds.
 
 # Token Economy. All of these except grok_oss_database_path are also in /settings.
 # Durable books live in $GROK_HOME/grok_oss.db (not session trees).
@@ -128,11 +138,14 @@ Desired spend order (chrome and rank): spend included SuperGrok period limits on
 | `[ui] resume_canceled_turn_on_restart` | true | Settings → Session | Continue interrupted turn (`canceled_turn_resume.json`). Not last-session-on-start and not `/resume`. |
 | `[ui] cancel_subagents_on_turn_cancel` | `ask` | Settings → Agent | When you cancel a parent turn that still has running subagents: ask, always stop, or always leave them running. |
 | `[ui] hide_header` | false | Settings → Appearance | Hide in-app status / welcome / dashboard headers only. Not the window title. |
-| `[ui] composer_multiline` | true | Settings → Editor | When false, the Human box stays single-line. Enter and Shift+Enter send (or interject if a turn is running) and never insert a newline. Session Multiline (`Ctrl+M` / `/multiline`) cannot turn newline-on-Enter back on. Plan Preview and the main Prompt honor the same flag. Default keeps current multiline behavior. |
+| `[ui] composer_multiline` | true | Settings → Editor | When false, the Operator box stays single-line for Enter and Shift+Enter (they send or interject and never insert a newline). Session Multiline (`Ctrl+M` / `/multiline`) cannot turn newline-on-Enter back on. `Ctrl+Enter` still inserts a newline when interject is not appropriate. Plan Preview and the main Prompt honor the same flag. Default keeps current multiline behavior. |
+| `[ui] allow_session_multiline` | true | Settings → Editor | When false, `Ctrl+M`, `/multiline`, and the session Multiline settings row cannot turn session Multiline on. Distinct from `composer_multiline`. `Ctrl+Enter` and `Shift+Enter` newline behavior is unchanged. Default on. |
 | `[ui] scrub_ascii_punct` | true | Settings → Appearance | Map em dashes, smart quotes, and similar marks in assistant text to ASCII-safe forms. Env `GROK_SCRUB_ASCII_PUNCT=0` also turns it off. The agent cannot silently disable this; `disable_ascii_scrub` always goes through a permission prompt. |
 | `[ui] ulid_session_ids` | true | Settings → Session | Use ULIDs as the primary session id in grok-oss. Default on. Turn off to show the Grok Build UUID as the primary id. The ULID map still exists either way. |
 | `[ui] always_expand_thinking` | false | Settings | Keep thinking fully expanded. Off paints collapsed Thought-for headers, including nested overlays. Ctrl+T writes this same key so the next thought and the next session match the last toggle. Distinct from `show_thinking_blocks`. |
 | `[ui] plan_approval_park` | `soft` | Settings → Agent | Soft side panel (default) or `modal` fullscreen. |
+| Turbo planning | on | Settings → Agent | While exclusive `/plan` or Isolated Preview `/plan --soft` is the live plan turn, reasoning effort is **xhigh** even if the session `/effort` is medium. After Exit or Approve, the session effort applies again. Off means those plan turns use the session effort. Default on. The only live indication is the existing lower-right yellow model/effort line showing `xhigh`. The magenta model id stays the model id. There is no TURBO badge, banner, or toast. This is not implement-skill effort. See [Plan Mode](19-plan-mode.md). |
+| Process-rule reminder list | empty | Settings | When this is on and the list is not empty, those strings inject as **soft** reminders into nested spawn, in the same family as path assignment. Spawn still succeeds. A third implementor L2 still spawns. Extra L2s are not auto-killed. Off or an empty list adds no extra reminder text. These reminders are not a hard max-2 enforcer. See [Subagents](16-subagents.md). |
 | `cap_implement_effort_when_economic` | true | Settings → Agent | Master for economic ceiling plus desired inject. |
 | `max_implement_effort` | 3 | Settings → Agent | Hard ceiling 1–5 when economic caps are active. |
 | `min_implement_effort` | 1 | Settings → Agent | Floor always applied. Set 2 to raise thoroughness, not reviewer count. |
@@ -162,6 +175,22 @@ Application order (product may rewrite the command string and toast):
 
 Slash cross-links: `/economic-mode`, `/limits`, `/usage`, `/spend`.
 
+#### Turbo planning
+
+**Turbo planning** is a `/settings` on/off row. Default is on.
+
+While exclusive `/plan` or Isolated Preview `/plan --soft` is the live plan turn, grok-oss uses reasoning effort **xhigh** even if the session `/effort` is medium. After you click Exit or Approve, later turns use the session effort again. `/effort` is still how you set the stored session effort. Turbo planning does not replace `/effort`.
+
+Turn Turbo planning off when you want those plan turns to keep the session effort. That off behavior is the upstream-like path.
+
+The only live indication is the existing lower-right yellow model/effort line showing `xhigh`. The magenta model id stays the model id. There is no TURBO badge, banner, or toast. See [Plan Mode](19-plan-mode.md).
+
+#### Process-rule reminders
+
+`/settings` also holds a **process-rule reminder list**: a config list of reminder strings. When that list is on and not empty, grok-oss injects those strings as **soft** reminders into nested spawn, in the same family as path assignment. Spawn still succeeds. A third implementor L2 still spawns. Extra L2s are not auto-killed. Off or an empty list adds no extra reminder text. That off or empty path is the upstream-like path.
+
+These reminders are not a hard max-2 enforcer. A string such as "only two implementor L2s allowed" is an example reminder, not a spawn reject. Keep such reminders soft for now. Two agents may share a file. Exclusive write is one tool call then release. Assignment overlap is not a reason to stop. See [Subagents](16-subagents.md).
+
 #### Input mode
 
 `[ui] simple_mode` controls how you edit text in the **prompt** — the input editor. It has nothing to do with how you move around the scrollback; that's [`vim_mode`](#vim-mode).
@@ -182,16 +211,29 @@ You can also flip it from the settings pane (`/settings` → **Disable vim input
 
 #### Composer multiline
 
-`[ui] composer_multiline` is whether the Human box may insert newlines. Default is on, so Shift+Enter still inserts a newline when session Multiline is off, and `Ctrl+M` / `/multiline` still swaps Enter and Shift+Enter for that session.
+`[ui] composer_multiline` is whether the Operator box may insert newlines from Enter / Shift+Enter. Default is on, so Shift+Enter still inserts a newline when session Multiline is off. Session Multiline (`Ctrl+M` / `/multiline`) still makes mid-line Enter insert a newline, and Shift+Enter still sends. Enter at the end of the last line still sends or interjects. It does not insert a silent extra newline. `Ctrl+Enter` inserts a newline when interjection is not appropriate, and interjects when a running turn can take it. That is not gated by this flag.
 
-Set it false when you want a single-line Human box:
+Set it false when you want Enter / Shift+Enter to stay single-line:
 
 ```toml
 [ui]
 composer_multiline = false
 ```
 
-Then Enter sends (or interjects if a turn is running). Shift+Enter also sends. Neither key opens a second line. Session Multiline cannot restore newlines while this is false. Plan Preview and the main Prompt use the same flag. `/settings` → **Composer multiline** writes the same key.
+Then Enter sends (or interjects if a turn is running). Shift+Enter also sends. Neither of those keys opens a second line. `Ctrl+Enter` still inserts a newline when interject is not appropriate, and still interjects when a running turn can take it. Session Multiline cannot restore Enter / Shift+Enter newlines while this is false. Plan Preview and the main Prompt use the same flag. `/settings` → **Composer multiline** writes the same key.
+
+#### Allow session Multiline
+
+`[ui] allow_session_multiline` is whether session Multiline can be turned on. Default is on. Distinct from `[ui] composer_multiline`.
+
+Set it false when you want to block accidental session Multiline:
+
+```toml
+[ui]
+allow_session_multiline = false
+```
+
+Then `Ctrl+M`, `/multiline`, and the Multiline settings row cannot turn session Multiline on. Turning the allow flag off also forces any active session Multiline off. `Ctrl+Enter` and `Shift+Enter` newline behavior is unchanged. `/settings` → **Allow session Multiline** writes the same key.
 
 #### Default selected permission
 
@@ -391,6 +433,7 @@ dimensions = 1024                     # vector dimensions
 [subagents]
 enabled = true
 allow_worktree = false                # default: force isolation=none on spawn
+parent_follow_up = true               # default on; false is SpaceXAI spawn/wait/resume_from completed-only
 
 [subagents.toggle]
 explore = true                        # enable/disable specific types
@@ -403,6 +446,10 @@ explore = "grok-build"               # route to different models
 To pin the model a subagent uses, set its entry under `[subagents.models]`.
 
 `[subagents] allow_worktree` defaults to **false**. Empty config means force-none: spawn uses `isolation = none` even if the tool or a role asked for a worktree. Set `true` to opt in. This row is also in `/settings` → Agent. See [Subagents](16-subagents.md#worktree-isolation-is-off-by-default).
+
+`[subagents] parent_follow_up` defaults to **true**. That lets L1 enqueue a follow-up onto a still-running nested L2 as additive work. Set `false` to keep SpaceXAI spawn, wait, and `resume_from` after the nested session has already exited. Overlay compose stays. This is not a new `[auth]` key. See [Subagents](16-subagents.md#follow_up-l1-onto-a-running-l2).
+
+The process-rule reminder list is a `/settings` row plus a config list of reminder strings. When that list is on and not empty, those strings inject as **soft** reminders into nested spawn. Spawn still succeeds. Off or an empty list adds no extra reminder text. See [Process-rule reminders](#process-rule-reminders) and [Subagents](16-subagents.md).
 
 ### Goal mode and background workflows
 

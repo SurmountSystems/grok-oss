@@ -6,13 +6,42 @@ use crate::app::agent::AgentId;
 use crate::app::agent_view::AgentView;
 use crate::app::app_view::AppView;
 use crate::scrollback::block::RenderBlock;
+use std::sync::OnceLock;
 use std::time::Duration;
+use xai_grok_shell::auth::LimitsSnapshotMode;
 use xai_grok_telemetry::events::{SuperGrokUpsell, SuperGrokUpsellClicked};
 use xai_grok_telemetry::session_ctx::log_event;
 
 /// How long the pager auto-checks subscription status before stopping.
 /// After this, the user can still manually check via the [Refresh] button.
 pub(super) const PAYWALL_AUTO_CHECK_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+
+/// Snapshot mode for the near-full included SuperGrok period background loop.
+/// HonorTtl: do not clear Management process caches; hub leader HTTP only
+/// when `limits_snapshot.json` is older than one hour.
+pub(crate) fn background_billing_poll_snapshot_mode() -> LimitsSnapshotMode {
+    static MODE: OnceLock<LimitsSnapshotMode> = OnceLock::new();
+    *MODE.get_or_init(|| LimitsSnapshotMode::HonorTtl)
+}
+
+/// `FetchBilling.force_refresh` for that background loop. False is HonorTtl.
+pub(crate) fn background_billing_poll_force_refresh() -> bool {
+    matches!(
+        background_billing_poll_snapshot_mode(),
+        LimitsSnapshotMode::ForceRefresh
+    )
+}
+
+/// Near-full included SuperGrok period timer: silent HonorTtl fetch.
+/// `/limits` Refresh is ForceRefresh. This loop is not.
+pub(crate) fn background_billing_poll_fetch_billing(agent_id: AgentId) -> Effect {
+    Effect::FetchBilling {
+        agent_id,
+        silent: true,
+        nonce: 0,
+        force_refresh: background_billing_poll_force_refresh(),
+    }
+}
 
 /// Whether the user is at the highest subscription tier (SuperGrok Heavy).
 ///
@@ -359,6 +388,9 @@ pub(super) fn handle_billing_fetched(
     // `Resolved` updates the cached rule, `Cleared` resets it to unknown
     // (no credits), `Unchanged` keeps the last-known-good (fetch failed).
     apply_auto_topup(&mut app.auto_topup, &autotopup);
+    // Near-full included SuperGrok period used percent: keep painting from
+    // the snapshot. The event-loop interval is one hour (shared HonorTtl
+    // snapshot), not a 30s HTTP stampede. Background FetchBilling is HonorTtl.
     app.billing_poll_wanted = balance
         .as_ref()
         .map(|b| b.usage_pct >= 99.0)

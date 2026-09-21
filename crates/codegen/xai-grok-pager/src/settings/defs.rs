@@ -6,6 +6,7 @@
 
 use super::registry::{
     DynamicEnumSource, EnumChoice, SettingCategory, SettingKind, SettingMeta, SettingOwner,
+    StringValidator,
 };
 use crate::appearance::ScrollMode;
 use crate::appearance::TextSelection;
@@ -1014,6 +1015,52 @@ pub fn default_settings() -> Vec<SettingMeta> {
             restart_required: false,
             hidden_in_minimal: false,
         },
+        SettingMeta {
+            key: "turbo_planning",
+            category: SettingCategory::Agent,
+            owner: SettingOwner::Shared,
+            label: "Turbo planning",
+            description: "Plan turns use xhigh. Only the lower-right yellow model/effort line \
+                          changes. Off keeps session effort (upstream-like). No TURBO badge. \
+                          Default on.",
+            keywords: &["plan", "turbo", "effort", "xhigh", "reasoning", "badge"],
+            kind: SettingKind::Bool {
+                default: ui_default.turbo_planning_enabled(),
+            },
+            restart_required: false,
+            hidden_in_minimal: false,
+        },
+        SettingMeta {
+            key: "process_rule_reminders_enabled",
+            category: SettingCategory::Agent,
+            owner: SettingOwner::Shared,
+            label: "Process-rule reminders",
+            description: "When on and the list is non-empty, inject those strings as soft spawn \
+                          reminders. Spawn still succeeds. Off or empty injects nothing. Keep \
+                          such reminders soft for now. Default on.",
+            keywords: &["reminder", "process", "spawn", "subagent", "soft"],
+            kind: SettingKind::Bool {
+                default: ui_default.process_rule_reminders_enabled(),
+            },
+            restart_required: false,
+            hidden_in_minimal: false,
+        },
+        SettingMeta {
+            key: "process_rule_reminders",
+            category: SettingCategory::Agent,
+            owner: SettingOwner::Shared,
+            label: "Process-rule reminder list",
+            description: "Newline-separated reminder strings. Example: only two implementor L2s \
+                          allowed. Share is allowed; exclusive is one tool call then release. \
+                          Empty injects nothing.",
+            keywords: &["reminder", "list", "process", "spawn", "subagent"],
+            kind: SettingKind::String {
+                default: "",
+                validator: StringValidator::Any,
+            },
+            restart_required: false,
+            hidden_in_minimal: false,
+        },
         // SHARED: `[ui].cancel_subagents_on_turn_cancel`. Sticky cancel picker.
         // Written by the cancel-turn "Always…" choices; also searchable here.
         SettingMeta {
@@ -1274,7 +1321,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
             category: SettingCategory::Editor,
             owner: SettingOwner::Pager,
             label: "Multiline",
-            description: "When on, Enter inserts a newline and Shift+Enter sends. Resets each session.",
+            description: "When on, Enter in the middle of a draft inserts a newline and Shift+Enter sends. Enter at the end of the last line still sends or interjects. Resets each session.",
             keywords: &["multiline", "newline", "input", "editor", "enter"],
             kind: SettingKind::Bool { default: false },
             restart_required: false,
@@ -1299,6 +1346,31 @@ pub fn default_settings() -> Vec<SettingMeta> {
             ],
             kind: SettingKind::Bool {
                 default: ui_default.composer_multiline_enabled(),
+            },
+            restart_required: false,
+            hidden_in_minimal: false,
+        },
+        // Grok OSS: Operator: gate so session Multiline cannot be enabled
+        // accidentally via slash, Ctrl+M, or the Multiline settings row.
+        SettingMeta {
+            key: "allow_session_multiline",
+            category: SettingCategory::Editor,
+            owner: SettingOwner::Shell,
+            label: "Allow session Multiline",
+            description: "When off, Ctrl+M, /multiline, and the session Multiline settings row \
+                          cannot turn session Multiline on. Ctrl+Enter and Shift+Enter newline \
+                          behavior is unchanged. Distinct from Composer multiline. Default on.",
+            keywords: &[
+                "multiline",
+                "session",
+                "allow",
+                "ctrl+m",
+                "slash",
+                "editor",
+                "newline",
+            ],
+            kind: SettingKind::Bool {
+                default: ui_default.allow_session_multiline_enabled(),
             },
             restart_required: false,
             hidden_in_minimal: false,

@@ -226,9 +226,14 @@ pub(super) fn format_acp_error(err: &acp::Error, is_api_key_auth: bool) -> Strin
         .and_then(error_detail_from_data)
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| err.to_string());
+    let error_kind = err
+        .data
+        .as_ref()
+        .and_then(|d| d.get("error_kind"))
+        .and_then(|v| v.as_str());
     crate::app::error_display::format_request_failure(
             http_status_from_error(err),
-            None,
+            error_kind,
             &raw,
         )
         .message()
@@ -1178,6 +1183,30 @@ pub(crate) async fn persist_setting(
                 .await
                 .map_err(|e| e.to_string())
         }
+        "turbo_planning" => {
+            let SettingValue::Bool(b) = value else {
+                return Err(kind_mismatch("turbo_planning", "Bool", &value));
+            };
+            xai_grok_shell::util::config::set_turbo_planning(b)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        "process_rule_reminders_enabled" => {
+            let SettingValue::Bool(b) = value else {
+                return Err(kind_mismatch("process_rule_reminders_enabled", "Bool", &value));
+            };
+            xai_grok_shell::util::config::set_process_rule_reminders_enabled(b)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        "process_rule_reminders" => {
+            let SettingValue::String(s) = value else {
+                return Err(kind_mismatch("process_rule_reminders", "String", &value));
+            };
+            xai_grok_shell::util::config::set_process_rule_reminders(s)
+                .await
+                .map_err(|e| e.to_string())
+        }
         "combine_queued_prompts" => {
             let SettingValue::Bool(b) = value else {
                 return Err(kind_mismatch("combine_queued_prompts", "Bool", &value));
@@ -1417,6 +1446,14 @@ pub(crate) async fn persist_setting(
                 return Err(kind_mismatch("composer_multiline", "Bool", &value));
             };
             xai_grok_shell::util::config::set_composer_multiline(b)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        "allow_session_multiline" => {
+            let SettingValue::Bool(b) = value else {
+                return Err(kind_mismatch("allow_session_multiline", "Bool", &value));
+            };
+            xai_grok_shell::util::config::set_allow_session_multiline(b)
                 .await
                 .map_err(|e| e.to_string())
         }

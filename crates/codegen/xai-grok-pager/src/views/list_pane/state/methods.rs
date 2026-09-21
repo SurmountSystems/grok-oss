@@ -1889,6 +1889,13 @@ impl ListPaneState {
         }
     }
 
+    /// Isolated Preview title-bar glass: open LineViewer search without
+    /// stealing composer `/`. Reuses the same Search input bar as `:search`.
+    pub(crate) fn open_search<T: ListItem>(&mut self, items: &[T]) {
+        self.clear_visual_if_active();
+        self.open_input(InputBarMode::Search, items);
+    }
+
     /// Accept the current input (Enter) — keep matcher active, close bar.
     fn accept_input<T: ListItem>(&mut self, _items: &[T]) {
         let is_filter = matches!(

@@ -11,22 +11,35 @@
 //! This is a fail-fast table, not the unused FIFO waiter in
 //! [`super::file_operation_lock`].
 //!
-//! Spawn may also claim paths for a live subagent (`write_paths` on
-//! `task` / `spawn_subagent`). That claim lasts until the child
-//! finishes. Edit tools still take the short in-flight lock on top.
+//! Spawn `write_paths` on `task` / `spawn_subagent` is a **soft
+//! assignment**. Other nested agents get a reminder that a sibling is
+//! assigned those paths. Assignment does not exclusive-block spawn or
+//! edits for the child's lifetime. The hard exclusive lock is only
+//! [`try_acquire_write`] for one `search_replace` / `write` /
+//! `apply_patch` call.
+//!
+//! [`try_acquire_read`] is a separate CoW snapshot read: ephemeral, many
+//! concurrent readers, not the exclusive write lock. A snapshot does not
+//! block a writer and is not blocked by a writer.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, MutexGuard, OnceLock};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
 use crate::types::resources::{OwnerSessionId, SharedResources};
 
-/// Process-wide table: in-flight writes and spawn-time claims.
+/// Process-wide table: in-flight hard locks and spawn-time soft assignments.
 struct WriteLockTable {
-    /// Path currently inside an edit-tool call.
+    /// Path currently inside an edit-tool call (hard exclusive write lock).
+    /// At most one writer per path.
     held: HashMap<PathBuf, String>,
-    /// Path claimed by a live subagent until [`release_holder`].
-    reserved: HashMap<PathBuf, String>,
+    /// Path assigned to live subagents via spawn `write_paths` (soft).
+    /// Several holders may share a path. This does not block acquire.
+    assigned: HashMap<PathBuf, HashSet<String>>,
+    /// Pre-write CoW bytes published while a writer holds the path.
+    /// Snapshot readers clone this Arc; they do not take `held`.
+    published: HashMap<PathBuf, Arc<[u8]>>,
 }
 
 static TABLE: OnceLock<Mutex<WriteLockTable>> = OnceLock::new();
@@ -35,7 +48,8 @@ fn table() -> &'static Mutex<WriteLockTable> {
     TABLE.get_or_init(|| {
         Mutex::new(WriteLockTable {
             held: HashMap::new(),
-            reserved: HashMap::new(),
+            assigned: HashMap::new(),
+            published: HashMap::new(),
         })
     })
 }
@@ -54,11 +68,6 @@ fn unique_normalized_paths(paths: impl IntoIterator<Item = impl AsRef<Path>>) ->
 
 fn holder_conflict<'a>(table: &'a WriteLockTable, key: &Path, holder: &str) -> Option<&'a str> {
     if let Some(existing) = table.held.get(key)
-        && existing != holder
-    {
-        return Some(existing.as_str());
-    }
-    if let Some(existing) = table.reserved.get(key)
         && existing != holder
     {
         return Some(existing.as_str());
@@ -143,6 +152,7 @@ impl PerPathWriteGuard {
             .is_some_and(|held| held == &self.holder)
         {
             table.held.remove(&self.path);
+            table.published.remove(&self.path);
         }
     }
 }
@@ -163,11 +173,78 @@ pub fn try_acquire_write(path: &Path, holder: &str) -> Result<PerPathWriteGuard,
             holder: existing.to_string(),
         });
     }
+    if !table.published.contains_key(&key)
+        && let Ok(bytes) = std::fs::read(&key)
+    {
+        table.published.insert(key.clone(), Arc::from(bytes));
+    }
     table.held.insert(key.clone(), holder.to_string());
     Ok(PerPathWriteGuard {
         path: key,
         holder: holder.to_string(),
         released: false,
+    })
+}
+
+/// Published pre-write CoW bytes while a writer holds `path`.
+///
+/// Snapshot readers clone this. Absence means read the filesystem.
+pub fn published_cow_snapshot(path: &Path) -> Option<Arc<[u8]>> {
+    let key = normalize_lock_path(path);
+    lock_table().published.get(&key).cloned()
+}
+
+/// In-flight exclusive write holds.
+///
+/// After `search_replace` / `write` / `apply_patch` returns, the written
+/// path is absent: the lock must be released. The table is process-wide, so
+/// other in-flight paths may still appear.
+pub fn held() -> HashMap<PathBuf, String> {
+    lock_table().held.clone()
+}
+
+/// RAII CoW snapshot. Dropping it does not block or unblock writers.
+#[derive(Debug, Clone)]
+pub struct PerPathReadGuard {
+    path: PathBuf,
+    bytes: Arc<[u8]>,
+}
+
+impl PerPathReadGuard {
+    /// Frozen bytes from the snapshot point in time.
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    /// Path this snapshot was taken for.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Copy the snapshot into an owned buffer.
+    pub fn into_bytes(self) -> Vec<u8> {
+        self.bytes.to_vec()
+    }
+}
+
+/// CoW snapshot read. Ephemeral. Many concurrent readers.
+///
+/// Does not take the exclusive write lock. Does not fail because a writer
+/// holds the path: if a writer published a pre-write copy, that copy is
+/// the snapshot; otherwise this reads the filesystem outside the table
+/// mutex so the snapshot itself does not block writers.
+pub fn try_acquire_read(path: &Path) -> io::Result<PerPathReadGuard> {
+    let key = normalize_lock_path(path);
+    if let Some(bytes) = published_cow_snapshot(&key) {
+        return Ok(PerPathReadGuard { path: key, bytes });
+    }
+    let disk = std::fs::read(&key)?;
+    if let Some(bytes) = published_cow_snapshot(&key) {
+        return Ok(PerPathReadGuard { path: key, bytes });
+    }
+    Ok(PerPathReadGuard {
+        path: key,
+        bytes: Arc::from(disk),
     })
 }
 
@@ -185,34 +262,64 @@ pub fn try_acquire_writes(
     Ok(guards)
 }
 
-/// Claim paths for a live subagent until [`release_holder`].
+/// Soft-assign paths for a live subagent until [`release_holder`].
 ///
-/// All-or-nothing. The same holder may claim a path twice. Another
-/// holder, or an in-flight write by someone else, is a [`PathHeldError`].
-pub fn try_reserve_writes(
-    paths: impl IntoIterator<Item = impl AsRef<Path>>,
-    holder: &str,
-) -> Result<(), PathHeldError> {
+/// Overlapping assignment with another live subagent succeeds. It does
+/// not exclusive-block that sibling's later edit. The same holder may
+/// assign a path twice. Hard conflict is only an in-flight
+/// [`try_acquire_write`] by someone else, and that is still only for
+/// that one tool call.
+pub fn try_reserve_writes(paths: impl IntoIterator<Item = impl AsRef<Path>>, holder: &str) {
     let unique = unique_normalized_paths(paths);
     let mut table = lock_table();
-    for key in &unique {
-        if let Some(existing) = holder_conflict(&table, key, holder) {
-            return Err(PathHeldError {
-                path: key.clone(),
-                holder: existing.to_string(),
-            });
-        }
-    }
     for key in unique {
-        table.reserved.insert(key, holder.to_string());
+        table
+            .assigned
+            .entry(key)
+            .or_default()
+            .insert(holder.to_string());
     }
-    Ok(())
 }
 
-/// Drop every spawn-time path claim for this holder.
+/// Drop every spawn-time path assignment for this holder.
 pub fn release_holder(holder: &str) {
     let mut table = lock_table();
-    table.reserved.retain(|_, existing| existing != holder);
+    for holders in table.assigned.values_mut() {
+        holders.remove(holder);
+    }
+    table.assigned.retain(|_, holders| !holders.is_empty());
+}
+
+/// Reminder text for other nested agents: which live L2s are assigned
+/// which paths. `except_holder` is the current agent, so they do not
+/// get a note about their own assignment.
+pub fn format_soft_assignment_reminder(except_holder: Option<&str>) -> Option<String> {
+    let table = lock_table();
+    let mut by_holder: BTreeMap<&str, Vec<&Path>> = BTreeMap::new();
+    for (path, holders) in &table.assigned {
+        for holder in holders {
+            if except_holder.is_some_and(|id| id == holder) {
+                continue;
+            }
+            by_holder.entry(holder.as_str()).or_default().push(path);
+        }
+    }
+    if by_holder.is_empty() {
+        return None;
+    }
+    let mut lines = Vec::with_capacity(by_holder.len());
+    for (holder, mut paths) in by_holder {
+        paths.sort();
+        let listed = paths
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        lines.push(format!(
+            "L2 {holder} is assigned these paths: {listed}. Share is allowed. Exclusive write is one edit then release."
+        ));
+    }
+    Some(lines.join("\n"))
 }
 
 /// Who should be named if this call holds the path.
@@ -326,28 +433,86 @@ mod tests {
     }
 
     #[test]
-    fn reserved_path_blocks_another_agent_until_holder_released() {
+    fn sequential_writes_succeed_after_the_first_tool_call_returns_even_when_both_agents_were_assigned_the_same_write_paths()
+     {
+        // Operator: write locks must be hard at the tool-call level, not at
+        // the agent/layer level. Two agents sequential writes to the same
+        // file after first tool call returns must succeed.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("shared.txt");
+        std::fs::write(&path, "x\n").unwrap();
+        let first = format!("seq-first-{}", path.display());
+        let second = format!("seq-second-{}", path.display());
+        try_reserve_writes([&path], &first);
+        try_reserve_writes([&path], &second);
+
+        let first_call = try_acquire_write(&path, &first).unwrap();
+        drop(first_call);
+        let second_call = try_acquire_write(&path, &second);
+        assert!(
+            second_call.is_ok(),
+            "after the first search_replace/write/apply_patch call returns, a sibling must be able to write the same file"
+        );
+        release_holder(&first);
+        release_holder(&second);
+    }
+
+    #[test]
+    fn concurrent_in_flight_writes_on_the_same_path_still_conflict() {
+        // Operator: keep the two-agents-cannot-write-the-same-file-at-the-same-instant
+        // contract. That is the hard lock. Concurrent overlapping in-flight
+        // edits on the same path still fail.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("inflight.txt");
+        std::fs::write(&path, "x\n").unwrap();
+        let first = format!("hard-first-{}", path.display());
+        let second = format!("hard-second-{}", path.display());
+        try_reserve_writes([&path], &first);
+        try_reserve_writes([&path], &second);
+        let _first_call = try_acquire_write(&path, &first).unwrap();
+        let err = try_acquire_write(&path, &second).unwrap_err();
+        assert_eq!(err.holder, first);
+        release_holder(&first);
+        release_holder(&second);
+    }
+
+    #[test]
+    fn spawn_write_paths_soft_assignment_does_not_block_a_sibling_and_the_reminder_is_observable() {
+        // Operator: layer/L2 write_paths claims must be a soft lock. Other
+        // agents get an automated reminder that a sibling is working on that
+        // path. They must not be blocked for minutes (ACP claim for the whole
+        // L2 lifetime).
         let tmp = tempfile::TempDir::new().unwrap();
         let path = tmp.path().join("claimed.txt");
         std::fs::write(&path, "x\n").unwrap();
-        // Holder ids must be unique across parallel tests: release_holder
-        // drops every claim for that id.
-        let first = format!("reserve-until-{}", path.display());
-        let second = format!("reserve-until-other-{}", path.display());
-        try_reserve_writes([&path], &first).unwrap();
-        let err = try_reserve_writes([&path], &second).unwrap_err();
-        assert_eq!(err.holder, first);
-        let message = err.message();
+        let first = format!("soft-first-{}", path.display());
+        let second = format!("soft-second-{}", path.display());
+        try_reserve_writes([&path], &first);
+        try_reserve_writes([&path], &second);
+
+        let note = format_soft_assignment_reminder(Some(&second))
+            .expect("soft-lock reminder must be observable to the sibling");
         assert!(
-            message.contains(&first),
-            "error must name the holder: {message}"
+            note.contains(&format!("L2 {first} is assigned these paths")),
+            "reminder must name the assigned sibling: {note}"
         );
         assert!(
-            message.contains("claimed.txt"),
-            "error must name the file: {message}"
+            note.contains("claimed.txt"),
+            "reminder must name the file: {note}"
         );
+
+        let write = try_acquire_write(&path, &second);
+        assert!(
+            write.is_ok(),
+            "a sibling must not be exclusive-blocked for the assignee's lifetime"
+        );
+        drop(write);
         release_holder(&first);
-        try_reserve_writes([&path], &second).expect("path must be free after the holder finishes");
+        let leftover = format_soft_assignment_reminder(Some(&second)).unwrap_or_default();
+        assert!(
+            !leftover.contains(&first),
+            "reminder must end when the assignee finishes: {leftover}"
+        );
         release_holder(&second);
     }
 
@@ -357,7 +522,7 @@ mod tests {
         let path = tmp.path().join("own.txt");
         std::fs::write(&path, "x\n").unwrap();
         let holder = format!("same-holder-{}", path.display());
-        try_reserve_writes([&path], &holder).unwrap();
+        try_reserve_writes([&path], &holder);
         let write = try_acquire_write(&path, &holder);
         assert!(
             write.is_ok(),
@@ -368,15 +533,183 @@ mod tests {
     }
 
     #[test]
-    fn reserved_path_blocks_another_agent_in_flight_write() {
+    fn cow_snapshot_read_is_ephemeral_many_readers_one_writer() {
+        // Operator: "there is a read lock, which is a snapshot read (CoW),
+        // and that is a separate thing from a write lock, and a read lock
+        // is ephemeral and doesn't interfere with writers. There can be
+        // only one write lock, there can be multiple readers."
+        // A read lock is not blocked by a writer for the snapshot itself
+        // (snapshot at a point in time). Readers must not take the exclusive
+        // write lock. Soft write_paths assignment stays a writer reminder.
         let tmp = tempfile::TempDir::new().unwrap();
-        let path = tmp.path().join("other.txt");
+        let path = tmp.path().join("cow.txt");
+        std::fs::write(&path, "before\n").unwrap();
+
+        let reader_a = try_acquire_read(&path).expect("first CoW snapshot read must succeed");
+        let reader_b = try_acquire_read(&path).expect("many concurrent readers");
+        assert_eq!(
+            reader_a.as_bytes(),
+            b"before\n",
+            "CoW snapshot read must copy the file at acquire time"
+        );
+        assert_eq!(
+            reader_b.as_bytes(),
+            b"before\n",
+            "a second reader must snapshot the same point in time"
+        );
+
+        let writer_a =
+            try_acquire_write(&path, "writer-a").expect("a read lock must not block a writer");
+        let writer_b_err = try_acquire_write(&path, "writer-b").unwrap_err();
+        assert_eq!(
+            writer_b_err.holder, "writer-a",
+            "there can be only one write lock"
+        );
+
+        std::fs::write(&path, "after\n").unwrap();
+        assert_eq!(
+            reader_a.as_bytes(),
+            b"before\n",
+            "CoW snapshot read must stay frozen after a later write"
+        );
+        assert_eq!(
+            reader_b.as_bytes(),
+            b"before\n",
+            "every live reader keeps its own frozen snapshot"
+        );
+        let reader_during_write =
+            try_acquire_read(&path).expect("a snapshot read must not be blocked by a writer");
+        assert_eq!(
+            reader_during_write.as_bytes(),
+            b"before\n",
+            "CoW snapshot while a writer holds must be the pre-write point in time"
+        );
+
+        drop(writer_a);
+        assert_eq!(
+            reader_a.as_bytes(),
+            b"before\n",
+            "an ephemeral reader snapshot must outlive the writer drop"
+        );
+        let reader_after_commit =
+            try_acquire_read(&path).expect("a new reader after writer drop sees committed disk");
+        assert_eq!(
+            reader_after_commit.as_bytes(),
+            b"after\n",
+            "after the exclusive write lock drops, a new snapshot read uses disk"
+        );
+
+        let assignee = format!("soft-{}", path.display());
+        try_reserve_writes([&path], &assignee);
+        let reader_soft = try_acquire_read(&path)
+            .expect("readers must not take the exclusive write lock or fail spawn assignment");
+        assert_eq!(reader_soft.as_bytes(), b"after\n");
+        let note = format_soft_assignment_reminder(Some("other-agent"))
+            .expect("soft assignment reminder stays for writers");
+        assert!(
+            note.contains(&format!("L2 {assignee} is assigned these paths")),
+            "reminder must still name the writer assignment: {note}"
+        );
+        drop(reader_soft);
+        let later_write = try_acquire_write(&path, "writer-after-readers");
+        assert!(
+            later_write.is_ok(),
+            "live CoW readers must not exclusive-block a later writer"
+        );
+        drop(later_write);
+        drop(reader_a);
+        drop(reader_b);
+        drop(reader_during_write);
+        drop(reader_after_commit);
+        release_holder(&assignee);
+    }
+
+    #[test]
+    fn after_write_returns_held_is_empty_lock_must_be_released() {
+        // GitHub #129. After write returns, `held` is empty. Lock must be
+        // released. Exclusive write is per search_replace / write /
+        // apply_patch, then release.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("released.txt");
         std::fs::write(&path, "x\n").unwrap();
-        let first = format!("inflight-reserve-{}", path.display());
-        let second = format!("inflight-other-{}", path.display());
-        try_reserve_writes([&path], &first).unwrap();
-        let err = try_acquire_write(&path, &second).unwrap_err();
-        assert_eq!(err.holder, first);
-        release_holder(&first);
+        let key = normalize_lock_path(&path);
+        let guard = try_acquire_write(&path, "writer-release").unwrap();
+        assert!(
+            held().contains_key(&key),
+            "in-flight write must occupy held"
+        );
+        drop(guard);
+        assert!(
+            !held().contains_key(&key),
+            "after write returns, held is empty for this path; lock must be released"
+        );
+        assert!(
+            published_cow_snapshot(&path).is_none(),
+            "CoW published must drop with the exclusive hold"
+        );
+    }
+
+    #[test]
+    fn reader_during_held_write_gets_published_pre_write_bytes_current_atomic_snapshot() {
+        // GitHub #129. Reader during held write gets published pre-write
+        // bytes. Current atomic snapshot (CoW `published`). Snapshot does
+        // not wait on a writer and does not block a writer.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("atomic-snapshot.txt");
+        std::fs::write(&path, "published-before\n").unwrap();
+        let writer = try_acquire_write(&path, "writer-during-read").unwrap();
+        std::fs::write(&path, "disk-after\n").unwrap();
+        let published =
+            published_cow_snapshot(&path).expect("writer must publish a current atomic snapshot");
+        assert_eq!(
+            published.as_ref(),
+            b"published-before\n",
+            "current atomic snapshot (CoW published) is pre-write bytes"
+        );
+        let reader = try_acquire_read(&path).expect("snapshot does not wait on a writer");
+        assert_eq!(
+            reader.as_bytes(),
+            b"published-before\n",
+            "reader during held write gets published pre-write bytes"
+        );
+        let second = try_acquire_write(&path, "other-writer");
+        assert!(
+            second.is_err(),
+            "a snapshot reader must not block the exclusive writer"
+        );
+        drop(writer);
+        drop(reader);
+    }
+
+    #[test]
+    fn two_live_agents_with_the_same_write_paths_spawn_without_error_l2_and_l3_may_be_assigned_the_same_file()
+     {
+        // GitHub #129. Two live agents with the same write_paths spawn
+        // without error. L2 and L3 may be assigned the same file. Soft
+        // write_paths is a reminder, not a lifetime exclusive lock.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("l2-l3-shared.txt");
+        std::fs::write(&path, "shared\n").unwrap();
+        let l2 = format!("l2-{}", path.display());
+        let l3 = format!("l3-{}", path.display());
+        try_reserve_writes([&path], &l2);
+        try_reserve_writes([&path], &l3);
+        let holders = lock_table()
+            .assigned
+            .get(&normalize_lock_path(&path))
+            .cloned()
+            .unwrap_or_default();
+        assert!(
+            holders.contains(&l2) && holders.contains(&l3),
+            "L2 and L3 may be assigned the same file: {holders:?}"
+        );
+        let write = try_acquire_write(&path, &l3);
+        assert!(
+            write.is_ok(),
+            "two live agents with the same write_paths spawn without error"
+        );
+        drop(write);
+        release_holder(&l2);
+        release_holder(&l3);
     }
 }

@@ -29,10 +29,11 @@ accessed: 2026-08-27). CATE is not specification 0006.
 
 Reply with this shape only. Four labeled complete thoughts. Nothing
 fluffier. One idea per sentence when that stays clear. Labels are
-**Job / State / Operator / Next**. Address the person as Operator,
-not Human. Do not say You or Human for the operator. Do not say Me
-or Grok for the assistant (Grok OSS and grok-oss stay product names).
-Do not rename the product composer Human box.
+**Job / State / Operator / Next**. Prefer Operator and Agent as speaker labels.
+Address the person as Operator, not Human. Do not say You or Human for the operator.
+Do not say Me or Grok as the speaker label for the machine
+(Grok OSS and grok-oss stay product names).
+Painted chrome and user-guide call the composer the Operator box.
 
 1. **Job:** one sentence. The real product outcome this session is
    trying to finish right now.
@@ -65,6 +66,13 @@ Do not rename the product composer Human box.
 - Optional focus from `/what ...` is the part they did not understand.
   Answer it under the four labels. Do not add extra sections.
 - This is not `/recap`, not `/finish`, not `/reports`.
+- Never mix Grok Build version with grok-oss product version. grok-oss
+  is `grok-oss --version` (`1.0.3` plus git SHA). Grok Build is
+  `grok --version`. Isolated Preview and plan chrome are grok-oss unless
+  this process was launched as `grok` from downloads. Remaining-work,
+  reports, and this restatement: probe this turn if stating which
+  binary this window is. Do not reuse a leftover Grok Build version as
+  grok-oss.
 - When the operator asks to revise a skill in grok-oss, edit
   `crates/codegen/xai-grok-bundle/skills/`, not only a host overlay
   and not repo `.agents/skills/`.

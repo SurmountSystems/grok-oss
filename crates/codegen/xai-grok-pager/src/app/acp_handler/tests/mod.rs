@@ -102,6 +102,7 @@ pub(super) fn make_subagent_info(child_sid: &str) -> SubagentInfo {
         turn_count: None,
         tool_call_count: None,
         tokens_used: None,
+        tokens_past: 0,
         context_window_tokens: Some(131072),
         context_usage_pct: Some(85),
         tools_used: Vec::new(),
@@ -368,9 +369,19 @@ pub(super) fn make_exit_plan_ext_with_tool_call_id(
     xai_acp_lib::AcpArgs<acp::ExtRequest>,
     tokio::sync::oneshot::Receiver<xai_acp_lib::AcpResult<acp::ExtResponse>>,
 ) {
+    make_exit_plan_ext_for_session("sess-1", tool_call_id, plan_content)
+}
+pub(super) fn make_exit_plan_ext_for_session(
+    session_id: &str,
+    tool_call_id: &str,
+    plan_content: Option<&str>,
+) -> (
+    xai_acp_lib::AcpArgs<acp::ExtRequest>,
+    tokio::sync::oneshot::Receiver<xai_acp_lib::AcpResult<acp::ExtResponse>>,
+) {
     let raw = serde_json::value::to_raw_value(
             &serde_json::json!({
-            "sessionId": "sess-1",
+            "sessionId": session_id,
             "toolCallId": tool_call_id,
             "planContent": plan_content,
         }),
@@ -2145,6 +2156,7 @@ mod scheduled_tasks;
 mod queue_and_adoption;
 mod plan_mode;
 mod plan_approve_lost_prompt;
+mod plan_stale_prompt;
 mod reconnect;
 mod turn_completion;
 mod interjection;

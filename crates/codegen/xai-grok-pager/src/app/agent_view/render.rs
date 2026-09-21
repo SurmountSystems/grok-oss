@@ -120,7 +120,12 @@ impl AgentView {
             return;
         }
         crate::app::subagent::ensure_subagent_child_replayed(self, &child_sid);
-        crate::app::subagent::idle_finished_nested_overlay(self, &child_sid);
+        // Compacting [↗] still opens. Do not idle AutoCompacting chrome on
+        // this path. AutoCompactStarted already cleared this overlay so
+        // compact chrome does not auto-steal the parent TUI.
+        if !self.child_is_auto_compacting(&child_sid) {
+            crate::app::subagent::idle_finished_nested_overlay(self, &child_sid);
+        }
         let l2 = crate::app::subagent::overlay_child_is_l2_coordinator(
             &self.subagent_sessions,
             &child_sid,
@@ -133,10 +138,6 @@ impl AgentView {
                 child.mark_as_subagent_view();
                 child.set_active_pane(AgentPane::Scrollback, true);
             }
-        }
-        if self.child_is_auto_compacting(&child_sid) {
-            // Nested compact chrome must not force a fullscreen steal.
-            return;
         }
         self.active_subagent = Some(child_sid);
     }
@@ -605,7 +606,7 @@ impl AgentView {
         Option<(u16, u16)>,
         Option<crate::terminal::overlay::PostFlush>,
     ) {
-        use crate::app::subagent::{format_context_badge, format_subagent_label};
+        use crate::app::subagent::{format_context_badge, format_subagent_label_among};
         use ratatui::style::Modifier;
         use unicode_width::UnicodeWidthStr;
         self.sync_parented_specialists_into_child_view(child_sid);
@@ -679,8 +680,10 @@ impl AgentView {
         let elapsed = elapsed_ms
             .map(crate::util::format_duration)
             .unwrap_or_default();
+        let all: Vec<&crate::app::subagent::SubagentInfo> =
+            self.subagent_sessions.values().collect();
         let (type_label, description): (String, String) = match info {
-            Some(s) => format_subagent_label(s),
+            Some(s) => format_subagent_label_among(s, &all),
             None => (String::new(), raw_description.to_string()),
         };
         let status_completed = info.and_then(|s| s.status.as_deref()) == Some("completed");
@@ -1036,9 +1039,7 @@ impl AgentView {
             self.inline_media_ids.clear();
             self.inline_media_iterm_emitted.clear();
         }
-        if let Some(ref child_sid) = self.active_subagent.clone()
-            && !self.child_is_auto_compacting(child_sid)
-        {
+        if let Some(child_sid) = self.visible_nested_overlay_sid().map(str::to_owned) {
             if let Some(esc) = self.take_own_inline_media_clear_escapes() {
                 xai_grok_shell::util::with_locked_stderr(|stderr| {
                     let _ = std::io::Write::write_all(stderr, esc.as_bytes());
@@ -1071,7 +1072,7 @@ impl AgentView {
             .models
             .current_model_name()
             .unwrap_or_else(|| "unknown".to_string());
-        let effective_plan = self.plan_mode_pending.unwrap_or(self.plan_mode_active);
+        let effective_plan = self.composer_plan_flag_visible();
         let casual_commenting = self.is_casual_commenting();
         // Plan present keeps the composer typeable (letter keys). Paint the
         // Human box caret even while Preview owns Tab/?/y so typing is not
@@ -1182,6 +1183,10 @@ impl AgentView {
             self.ephemeral_tip_renderable(area.height) && self.ephemeral_tip.is_active();
         let banner_height = banner_height.max(u16::from(tip_row_visible));
         let max_prompt_height = area.height / 2;
+        // Grok OSS: While recording, the prompt box grows with the transcript
+        // and must not clip spoken text. Overlay Some is the live recording path.
+        self.prompt
+            .set_voice_recording_grow(voice_listening, voice_interim);
         let base_prompt_height = if !prompt_focused && appearance.prompt.collapse_unfocused {
             self.prompt
                 .desired_height(inner_width, &prompt_style, true, max_prompt_height)
@@ -1598,12 +1603,9 @@ impl AgentView {
         }
         if let Some(ref goal) = self.goal_state {
             let tick = self.tasks.tick_count() as usize;
-            let active_subagent_tokens: u64 = self
-                .subagent_sessions
-                .values()
-                .filter(|s| !s.finished && s.workflow_run_id.is_none())
-                .filter_map(|s| s.tokens_used)
-                .sum();
+            let active_subagent_tokens = crate::app::subagent::sum_live_nested_session_windows(
+                self.subagent_sessions.values(),
+            );
             status.push(
                 "goal",
                 crate::views::agent_status::goal_status_line(
@@ -2781,10 +2783,18 @@ impl AgentView {
         let usage_warning_text: Option<String> = warning.as_ref().map(|(t, _)| t.clone());
         let usage_warning = usage_warning_text.as_deref();
         let usage_warning_critical = warning.is_some_and(|(_, critical)| critical);
-        let model_label = match self.session.models.reasoning_effort {
-            Some(eff) => format!("{model_id} ({eff})"),
-            None => model_id,
-        };
+        let stored_effort = self.session.models.reasoning_effort;
+        let effective_effort = crate::acp::turbo_planning::effective_reasoning_effort(
+            stored_effort,
+            crate::appearance::cache::load_turbo_planning(),
+            crate::acp::turbo_planning::live_plan_turn(
+                self.plan_mode_pending,
+                self.plan_mode_active,
+                self.isolated_preview_shows_secondary_plan,
+            ),
+        );
+        let model_label =
+            crate::acp::turbo_planning::model_effort_chrome_line(&model_id, effective_effort);
         let info = match &self.prompt_mode {
             PromptMode::Normal => PromptInfo {
                 model_name: &model_label,
@@ -4651,13 +4661,10 @@ impl AgentView {
             let todos = self.todo.todos();
             let overlay_rect = crate::views::goal_detail::goal_detail_area(area, goal, todos);
             let tick = self.tasks.tick_count() as usize;
-            let active_subagent_tokens: u64 = self
-                .subagent_sessions
-                .values()
-                .filter(|s| !s.finished && s.workflow_run_id.is_none())
-                .filter_map(|s| s.tokens_used)
-                .sum();
-            let close_rect = crate::views::goal_detail::render_goal_detail(
+            let active_subagent_tokens = crate::app::subagent::sum_live_nested_session_windows(
+                self.subagent_sessions.values(),
+            );
+            let hits = crate::views::goal_detail::render_goal_detail(
                 buf,
                 overlay_rect,
                 goal,
@@ -4665,9 +4672,21 @@ impl AgentView {
                 tick,
                 self.context_state.as_ref().map(|c| c.used),
                 active_subagent_tokens,
-                self.hit_goal_close.hovered,
+                crate::views::goal_detail::GoalDetailHovers {
+                    close: self.hit_goal_close.hovered,
+                    esc_close: self.hit_goal_esc_close.hovered,
+                    resume: self.hit_goal_resume.hovered,
+                    pause: self.hit_goal_pause.hovered,
+                    status: self.hit_goal_status_cmd.hovered,
+                    clear: self.hit_goal_clear.hovered,
+                },
             );
-            self.hit_goal_close.rect = close_rect;
+            self.hit_goal_close.rect = hits.close;
+            self.hit_goal_esc_close.rect = hits.esc_close;
+            self.hit_goal_resume.rect = hits.resume;
+            self.hit_goal_pause.rect = hits.pause;
+            self.hit_goal_status_cmd.rect = hits.status;
+            self.hit_goal_clear.rect = hits.clear;
             self.frame_occluder_rects.push(overlay_rect);
         }
         if self.show_workflows {
@@ -6656,8 +6675,12 @@ mod status_credits_meter_tests {
             "status bar must push \"credits\" so hit_credits.rect is a real rect"
         );
         assert!(
-            text.contains("included SuperGrok period limits"),
-            "status bar must paint the compact included SuperGrok period limits meter:\n{text}"
+            text.contains("SuperGrok period"),
+            "status bar must paint the compact SuperGrok period meter:\n{text}"
+        );
+        assert!(
+            !text.contains("included SuperGrok period limits"),
+            "user-facing TUI chrome must not paint included SuperGrok period limits:\n{text}"
         );
         assert!(
             text.contains("24%"),
@@ -7352,6 +7375,217 @@ mod clear_finished_paint_tests {
         }
     }
 
+    fn insert_listed_running_l2(
+        agent: &mut AgentView,
+        child_sid: &str,
+        description: &str,
+        started_ago_secs: u64,
+    ) {
+        use super::super::test_fixtures::{make_agent, running_subagent_info};
+        use std::sync::Arc;
+        use std::time::{Duration, Instant};
+
+        let mut info = running_subagent_info(child_sid);
+        info.model = Some(Arc::from("grok-4.5"));
+        info.is_background = true;
+        info.description = Arc::from(description);
+        info.depth = Some(1);
+        info.parent_session_id = Some(Arc::from("sess-l1"));
+        info.activity_label = Some("Thinking".into());
+        let now = Instant::now();
+        info.started_at = now
+            .checked_sub(Duration::from_secs(started_ago_secs))
+            .unwrap_or(now);
+        agent.subagent_sessions.insert(child_sid.into(), info);
+        agent
+            .subagent_views
+            .insert(child_sid.into(), Box::new(make_agent()));
+    }
+
+    fn mark_child_auto_compacting(agent: &mut AgentView, child_sid: &str) {
+        use crate::acp::tracker::TurnActivity;
+        let child = agent
+            .subagent_views
+            .get_mut(child_sid)
+            .expect("child view must exist before marking Compacting");
+        child.session.state = crate::app::agent::AgentState::TurnRunning;
+        child
+            .session
+            .set_compaction_activity(Some(TurnActivity::AutoCompacting));
+        if let Some(info) = agent.subagent_sessions.get_mut(child_sid) {
+            info.activity_label = Some("Compacting".into());
+        }
+        assert!(
+            agent.child_is_auto_compacting(child_sid),
+            "precondition: row status is Compacting"
+        );
+    }
+
+    fn listed_agent_id(child_sid: &str) -> String {
+        format!("sa-{child_sid}")
+    }
+
+    fn agent_open_rect(agent: &AgentView, child_sid: &str) -> ratatui::layout::Rect {
+        let listed = listed_agent_id(child_sid);
+        agent
+            .tasks
+            .view_button_rects
+            .iter()
+            .find(|(id, _)| {
+                matches!(
+                    id,
+                    crate::views::tasks_pane::TaskEntryId::Agent(sid) if sid == &listed
+                )
+            })
+            .map(|(_, rect)| *rect)
+            .unwrap_or_else(|| panic!("open chrome [↗] must exist for {child_sid}"))
+    }
+
+    fn agent_kill_rect(agent: &AgentView, child_sid: &str) -> ratatui::layout::Rect {
+        let listed = listed_agent_id(child_sid);
+        agent
+            .tasks
+            .kill_button_rects
+            .iter()
+            .find(|(id, _)| {
+                matches!(
+                    id,
+                    crate::views::tasks_pane::TaskEntryId::Agent(sid) if sid == &listed
+                )
+            })
+            .map(|(_, rect)| *rect)
+            .unwrap_or_else(|| panic!("kill chrome [X] must exist for {child_sid}"))
+    }
+
+    fn setup_three_listed_l2s(agent: &mut AgentView) -> (&'static str, &'static str, &'static str) {
+        let mut appearance = agent.scrollback.appearance().clone();
+        appearance.prompt.compact = true;
+        agent.scrollback.set_appearance(appearance);
+        agent.tasks.overlay.visible = true;
+        let compacting = "child-compacting-open";
+        let middle = "child-thinking-middle";
+        let last = "child-thinking-last";
+        insert_listed_running_l2(
+            agent,
+            compacting,
+            "turbo planning compacting coordinator",
+            30,
+        );
+        insert_listed_running_l2(agent, middle, "thinking middle coordinator", 20);
+        insert_listed_running_l2(agent, last, "thinking last coordinator", 10);
+        (compacting, middle, last)
+    }
+
+    /// Named contract: Operator `[↗]` still opens while the child is
+    /// AutoCompacting. Compact chrome must not skip `active_subagent`.
+    #[test]
+    fn open_subagent_fullscreen_sets_active_while_child_is_auto_compacting() {
+        let mut agent = super::super::test_fixtures::make_agent();
+        let child_sid = "child-compact-direct-open";
+        insert_listed_running_l2(&mut agent, child_sid, "direct open while compacting", 5);
+        mark_child_auto_compacting(&mut agent, child_sid);
+        assert!(agent.active_subagent.is_none());
+        agent.open_subagent_fullscreen(child_sid.to_string());
+        assert_eq!(
+            agent.active_subagent.as_deref(),
+            Some(child_sid),
+            "Operator open must set the overlay while the child is AutoCompacting"
+        );
+        assert_eq!(
+            agent.visible_nested_overlay_sid(),
+            Some(child_sid),
+            "visible overlay must follow Operator [↗], not stay hidden during Compacting"
+        );
+        assert!(agent.child_is_auto_compacting(child_sid));
+    }
+
+    /// Named contract: a row whose status is Compacting still opens on `[↗]`.
+    /// Compact must not swallow the open hit target on any row, including
+    /// the top painted row. Quote: L2 window opens for the other ones, but
+    /// this specific button doesn't work. Quote: Now it's the top one.
+    #[test]
+    fn click_tasks_open_on_compacting_row_opens_subagent() {
+        let mut agent = super::super::test_fixtures::make_agent();
+        let (compacting, _middle, last) = setup_three_listed_l2s(&mut agent);
+        mark_child_auto_compacting(&mut agent, compacting);
+
+        let _buf = draw_hits(&mut agent);
+        let open = agent_open_rect(&agent, compacting);
+        let last_open = agent_open_rect(&agent, last);
+        assert!(
+            open.y < last_open.y,
+            "this fixture paints Compacting above the last row so the miss cannot hide as last-row-only; compacting y={} last y={}",
+            open.y,
+            last_open.y
+        );
+        agent.set_active_pane(super::super::AgentPane::Scrollback, false);
+        assert!(agent.active_subagent.is_none());
+        let out = click_at(&mut agent, open.x, open.y);
+        assert!(
+            matches!(out, InputOutcome::Changed),
+            "Compacting [↗] must open the L2 window, got {out:?} at {open:?}"
+        );
+        assert_eq!(
+            agent.active_subagent.as_deref(),
+            Some(compacting),
+            "must open the Compacting child, not a neighbor"
+        );
+        assert_eq!(agent.visible_nested_overlay_sid(), Some(compacting));
+        assert!(
+            agent.child_is_auto_compacting(compacting),
+            "open must not clear Compacting status"
+        );
+    }
+
+    /// Named contract: last painted row `[↗]` still opens so footer overlap
+    /// cannot hide the hit target. Descriptions are unique so the live list
+    /// keeps three rows.
+    #[test]
+    fn click_tasks_open_on_last_painted_row_opens_subagent() {
+        let mut agent = super::super::test_fixtures::make_agent();
+        let (_compacting, _middle, last) = setup_three_listed_l2s(&mut agent);
+
+        let _buf = draw_hits(&mut agent);
+        let (entry_id, open) = agent
+            .tasks
+            .view_button_rects
+            .iter()
+            .filter(|(id, _)| matches!(id, crate::views::tasks_pane::TaskEntryId::Agent(_)))
+            .max_by_key(|(_, rect)| rect.y)
+            .cloned()
+            .expect("at least one listed [↗] must paint");
+        assert_eq!(
+            entry_id,
+            crate::views::tasks_pane::TaskEntryId::Agent(listed_agent_id(last)),
+            "last painted [↗] must be the latest-started unique row"
+        );
+        agent.set_active_pane(super::super::AgentPane::Scrollback, false);
+        let out = click_at(&mut agent, open.x, open.y);
+        assert!(
+            matches!(out, InputOutcome::Changed),
+            "last painted [↗] must open, got {out:?} at {open:?}"
+        );
+        assert_eq!(agent.active_subagent.as_deref(), Some(last));
+        assert_eq!(agent.visible_nested_overlay_sid(), Some(last));
+    }
+
+    /// Named contract: `[X]` on a Compacting row still kills.
+    #[test]
+    fn click_tasks_kill_on_compacting_row_emits_kill() {
+        let mut agent = super::super::test_fixtures::make_agent();
+        let (compacting, _middle, _last) = setup_three_listed_l2s(&mut agent);
+        mark_child_auto_compacting(&mut agent, compacting);
+        let _buf = draw_hits(&mut agent);
+        let kill = agent_kill_rect(&agent, compacting);
+        let out = click_at(&mut agent, kill.x, kill.y);
+        match out {
+            InputOutcome::Action(Action::KillSubagent(id)) => {
+                assert_eq!(id, listed_agent_id(compacting));
+            }
+            other => panic!("Compacting [X] must emit KillSubagent, got {other:?}"),
+        }
+    }
+
     /// Named contract: overlay frame `[x]` on a completed nested snapshot that
     /// is still listed must drop the live row or emit KillSubagent. Closing
     /// the overlay alone is a chrome no-op. The tasks pane is hidden while
@@ -7617,6 +7851,67 @@ mod plan_turn_row_revising_copy_tests {
         assert!(
             !text.contains("Waiting on plan approval"),
             "must not re-arm parked wait after Quit:\n{text}"
+        );
+        assert!(
+            !text.contains("Plan ready. Side panel open"),
+            "after Plan Exit, chrome must not keep Plan ready. Side panel open:\n{text}"
+        );
+    }
+
+    /// Operator (2026-09-11): Plan Exit, then footer still Plan ready.
+    /// Side panel open. Idle CTAs must not stay armed for that present.
+    #[test]
+    fn after_plan_exit_chrome_must_not_keep_plan_ready_side_panel_open() {
+        let mut agent = make_agent();
+        present_new_exit_plan_mode(&mut agent, "# Mill WATCHER plan\n\nDo mill\n");
+        agent.session.state = AgentState::Idle;
+        let before = draw_screen(&mut agent);
+        assert!(
+            before.contains("Plan ready. Side panel open"),
+            "fixture: live present paints Plan ready. Side panel open:\n{before}"
+        );
+
+        let _ = agent.abandon_plan();
+        agent.plan_mode_pending = None;
+        agent.plan_mode_active = true;
+        agent.session.state = AgentState::Idle;
+
+        let text = draw_screen(&mut agent);
+        assert!(
+            !text.contains("Plan ready. Side panel open"),
+            "after Plan Exit, chrome must not keep Plan ready. Side panel open:\n{text}"
+        );
+        assert!(
+            !agent.should_arm_plan_decision_chrome(),
+            "after Plan Exit, idle CTAs must not stay armed for the exited present"
+        );
+        assert!(
+            agent.plan_approval_view.is_none(),
+            "after Plan Exit, the live park must be gone"
+        );
+    }
+
+    /// Operator (2026-09-12): Isolated Preview closed. Composer send.
+    /// Status still **plan**. After Plan Exit with Isolated Preview closed,
+    /// the turn-status draw must not keep composer `plan` chrome.
+    #[test]
+    fn after_plan_exit_closed_isolated_preview_draw_must_not_keep_plan_chrome() {
+        let mut agent = make_agent();
+        present_new_exit_plan_mode(&mut agent, "# Mill WATCHER plan\n\nDo mill\n");
+        let _ = agent.abandon_plan();
+        agent.line_viewer = None;
+        agent.plan_mode_pending = None;
+        agent.plan_mode_active = true;
+        agent.session.state = AgentState::Idle;
+
+        assert!(
+            !agent.composer_plan_flag_visible(),
+            "after Plan Exit with Isolated Preview closed, chrome must not stay plan"
+        );
+        let text = draw_screen(&mut agent);
+        assert!(
+            !text.contains("Plan ready. Side panel open"),
+            "after Plan Exit, chrome must not keep Plan ready. Side panel open:\n{text}"
         );
     }
 

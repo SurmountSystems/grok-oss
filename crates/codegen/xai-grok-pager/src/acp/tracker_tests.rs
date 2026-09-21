@@ -289,6 +289,92 @@ fn write_tool_call_completed_clears_pending_running_activity() {
         tracker.activity()
     );
 }
+
+/// A new-file write preview must not paint as a git-style red/green unified
+/// diff. The Operator did not ask to diff. Show the new content without a
+/// "green side" vs red deletions.
+#[test]
+fn new_file_write_tool_call_is_creating_file_preview_not_unified_diff() {
+    let mut sb = ScrollbackState::new();
+    let mut tracker = AcpUpdateTracker::new();
+    let path = "remaining-2026-09-20-harness-500.md";
+    let new = "# leftover\nThe harness 500k window stays.\n";
+    let tc = acp::ToolCall::new(
+        acp::ToolCallId::new(Arc::from("tc-write-new")),
+        format!("Write `{path}`"),
+    )
+    .kind(acp::ToolKind::Edit)
+    .status(acp::ToolCallStatus::Completed)
+    .raw_input(Some(serde_json::json!({
+        "variant": "Write",
+        "file_path": path,
+        "content": new,
+    })))
+    .content(vec![acp::ToolCallContent::Diff(
+        acp::Diff::new(path, new.to_string()).old_text(Some(String::new())),
+    )]);
+    tracker.handle_update(acp::SessionUpdate::ToolCall(tc), &meta(), &mut sb);
+    let edit = edit_block_at(&sb, 0);
+    assert_eq!(edit.prefix, "Creating ");
+    assert!(
+        edit.paint_as_file_preview,
+        "write must paint as file preview, not a unified diff"
+    );
+    let theme = crate::theme::Theme::current();
+    let config = crate::scrollback::blocks::tool::DiffRenderConfig {
+        dual_line_numbers: true,
+        ..Default::default()
+    };
+    let outputs = edit.render_diff_lines(&theme, 80, &config);
+    assert!(
+        outputs.iter().all(|o| o.background.is_none()),
+        "new-file write must not paint insert/delete bands"
+    );
+    let joined: String = outputs
+        .iter()
+        .map(|o| {
+            o.line
+                .spans
+                .iter()
+                .map(|s| s.content.as_ref())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(joined.contains("# leftover"), "{joined:?}");
+    assert!(
+        !joined.contains("old leftover"),
+        "empty old_text must not invent red deletions, got {joined:?}"
+    );
+}
+
+#[test]
+fn search_replace_tool_call_is_not_a_file_preview() {
+    let mut sb = ScrollbackState::new();
+    let mut tracker = AcpUpdateTracker::new();
+    let tc = acp::ToolCall::new(
+        acp::ToolCallId::new(Arc::from("tc-sr")),
+        "Edit `foo.rs`".to_string(),
+    )
+    .kind(acp::ToolKind::Edit)
+    .status(acp::ToolCallStatus::Completed)
+    .raw_input(Some(serde_json::json!({
+        "variant": "SearchReplace",
+        "file_path": "foo.rs",
+    })))
+    .content(vec![acp::ToolCallContent::Diff(
+        acp::Diff::new("foo.rs", "let x = 2;\n".to_string())
+            .old_text(Some("let x = 1;\n".to_string())),
+    )]);
+    tracker.handle_update(acp::SessionUpdate::ToolCall(tc), &meta(), &mut sb);
+    let edit = edit_block_at(&sb, 0);
+    assert_eq!(edit.prefix, "Edit ");
+    assert!(
+        !edit.paint_as_file_preview,
+        "search_replace must keep the red/green diff"
+    );
+}
+
 /// Lost Write completion must drop `Running: Write …` after the short bound.
 #[test]
 fn stale_write_tool_running_drops_activity_after_bound() {
@@ -4658,5 +4744,62 @@ fn thought_chunk_peels_trailing_user_facing_draft_while_streaming() {
         !texts[0].contains("Hey, sorry about that"),
         "trailing draft must not stay in live thinking chrome, got {:?}",
         texts[0]
+    );
+}
+
+/// Operator contract: grok-oss stopped responding after a cancelled turn,
+/// Goal Paused, and "Can you please answer?". The TUI painted Thought for
+/// 1.7s, then sat with a blinking cursor and [pause] and no assistant reply.
+/// An empty AgentMessageChunk (content-start with no text) must not finish
+/// thinking and leave the turn with no visible answer.
+#[test]
+fn empty_agent_chunk_after_thinking_does_not_drop_the_reply() {
+    crate::appearance::cache::set_show_thinking_blocks(true);
+    let mut sb = ScrollbackState::new();
+    let mut tracker = AcpUpdateTracker::new();
+    tracker.handle_update(
+        thought_chunk("The operator cancelled, then asked Can you please answer?"),
+        &meta(),
+        &mut sb,
+    );
+    assert_eq!(thinking_count(&sb), 1, "precondition: thinking is live");
+    tracker.handle_update(agent_chunk(""), &meta(), &mut sb);
+    assert_eq!(
+        thinking_count(&sb),
+        1,
+        "empty agent chunk must not omit the live thought"
+    );
+    let thought_still_running = (0..sb.len()).any(|i| {
+        matches!(
+            sb.get(i).map(|e| (&e.block, e.is_running)),
+            Some((RenderBlock::Thinking(_), true))
+        )
+    });
+    assert!(
+        thought_still_running,
+        "empty agent chunk must not paint Thought for N.s as finished with no reply"
+    );
+    let agent_bodies: Vec<String> = (0..sb.len())
+        .filter_map(|i| match sb.get(i).map(|e| &e.block) {
+            Some(RenderBlock::AgentMessage(m)) => Some(m.text()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        agent_bodies.iter().all(|b| b.trim().is_empty()),
+        "empty chunk must not invent an assistant row, got {agent_bodies:?}"
+    );
+    tracker.handle_update(agent_chunk("Yes. Here is the answer."), &meta(), &mut sb);
+    let agent_bodies: Vec<String> = (0..sb.len())
+        .filter_map(|i| match sb.get(i).map(|e| &e.block) {
+            Some(RenderBlock::AgentMessage(m)) => Some(m.text()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        agent_bodies
+            .iter()
+            .any(|b| b.contains("Here is the answer")),
+        "a later real assistant chunk must still become the reply, got {agent_bodies:?}"
     );
 }

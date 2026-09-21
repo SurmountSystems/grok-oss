@@ -216,6 +216,7 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
         return false;
     }
     let mut plugins_changed_needs_skills_refetch = false;
+    let mut auto_implement_qid: Option<u64> = None;
     let mut terminal_outcome: Option<super::super::turn_completion::TerminalApply> = None;
     let root_session_id: &str = session_notif.session_id.0.as_ref();
     let changed = match session_notif.update {
@@ -224,7 +225,6 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
         | XaiSessionUpdate::AutoCompactFailed { .. }
         | XaiSessionUpdate::AutoCompactCancelled { .. }
         | XaiSessionUpdate::AutoCompactSkippedTinySavings
-        | XaiSessionUpdate::RetryState(_)
         | XaiSessionUpdate::ImageDropped { .. }
         | XaiSessionUpdate::MemoryFlushCompleted { .. }
         | XaiSessionUpdate::MemoryDreamCompleted { .. }
@@ -235,9 +235,6 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
                 &mut agent.scrollback,
                 is_api_key_auth,
             );
-            if let XaiSessionUpdate::RetryState(retry) = update {
-                apply_sampling_identity_from_retry(retry, &mut agent.sampling_identity);
-            }
             if let XaiSessionUpdate::AutoCompactStarted { context_window, .. } = update
                 && *context_window > 0
             {
@@ -252,6 +249,21 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
                 // normal ACP Plan path.
             }
             changed
+        }
+        XaiSessionUpdate::RetryState(retry) => {
+            apply_sampling_identity_from_retry(&retry, &mut agent.sampling_identity);
+            let nested_implementers_running = agent
+                .subagent_sessions
+                .values()
+                .any(|info| info.is_running());
+            apply_retry_state_with_nested(
+                &retry,
+                &mut agent.session,
+                &mut agent.scrollback,
+                is_api_key_auth,
+                nested_implementers_running,
+            );
+            true
         }
         XaiSessionUpdate::ImageCompressed {
             ref images,
@@ -440,6 +452,7 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
                     turn_count: None,
                     tool_call_count: None,
                     tokens_used: None,
+                    tokens_past: 0,
                     context_window_tokens: None,
                     context_usage_pct: None,
                     tools_used: Vec::new(),
@@ -454,6 +467,10 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
                     worktree_path: None,
                     child_updates_replayed: false,
                 },
+            );
+            crate::app::agent_view::l2_token_tracking::on_nested_l2_spawn(
+                &child_session_id,
+                &description,
             );
             if let Some(ref sid) = agent.session.session_id
                 && let Some(info) = agent.subagent_sessions.get_mut(&child_session_id)
@@ -650,6 +667,10 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
                 info.tools_used = tools_used.into_iter().map(Arc::from).collect();
                 info.error_count = Some(error_count);
                 info.last_progress_at = std::time::Instant::now();
+                crate::app::agent_view::l2_token_tracking::on_nested_l2_usage(
+                    &child_session_id,
+                    tokens_used,
+                );
             }
             if let Some(child_view) = agent.subagent_views.get_mut(&child_session_id)
                 && context_window_tokens > 0
@@ -688,6 +709,7 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
                 duration_ms = duration_ms,
                 "Subagent finished"
             );
+            let mill_completed = status == "completed";
             let elapsed_dur = std::time::Duration::from_millis(duration_ms);
             let info_ref = agent.subagent_sessions.get(&child_session_id);
             let entry_id = info_ref.and_then(|s| s.scrollback_entry_id);
@@ -755,7 +777,12 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
                 info.turns = Some(turns);
                 if tokens_used > 0 {
                     info.tokens_used = Some(tokens_used);
+                    crate::app::agent_view::l2_token_tracking::on_nested_l2_usage(
+                        &child_session_id,
+                        tokens_used,
+                    );
                 }
+                crate::app::agent_view::l2_token_tracking::on_nested_l2_exit(&child_session_id);
                 info.pending_kill = false;
                 info.kill_requested_at = None;
                 info.last_progress_at = std::time::Instant::now();
@@ -769,6 +796,16 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
                 if !resuming {
                     crate::app::subagent::finalize_finished_child_view(child_view, elapsed_dur);
                 }
+            }
+            // Nested implementer finish must not close Isolated Preview.
+            // Isolated Preview stays until Esc, Exit, or Approve. Keep
+            // auto-run Next implement on the parent.
+
+            if mill_completed && !resuming {
+                auto_implement_qid = crate::app::auto_implement::enqueue_nested_l2_next_implement(
+                    agent,
+                    &child_session_id,
+                );
             }
             true
         }
@@ -1217,6 +1254,14 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
     };
     let extra = std::mem::take(&mut agent.pending_effects);
     app.pending_effects.extend(extra);
+    if let Some(qid) = auto_implement_qid {
+        let effects = crate::app::dispatch::maybe_drain_queue_and_note_peek_protecting(
+            app,
+            parent_id,
+            Some(qid),
+        );
+        app.pending_effects.extend(effects);
+    }
     if plugins_changed_needs_skills_refetch {
         if let Some(agent) = app.agents.get(&parent_id)
             && let Some(session_id) = agent.session.session_id.clone()
@@ -1279,7 +1324,11 @@ pub(super) fn handle_child_session_notification(
                 return false;
             }
             let compact_tokens = match &update {
-                XaiSessionUpdate::AutoCompactCompleted { tokens_after, .. } => Some(*tokens_after),
+                XaiSessionUpdate::AutoCompactCompleted {
+                    tokens_before,
+                    tokens_after,
+                    ..
+                } => Some((*tokens_before, *tokens_after)),
                 _ => None,
             };
             let mut changed = false;
@@ -1305,14 +1354,14 @@ pub(super) fn handle_child_session_notification(
                 {
                     child_view.session_sampling_window = Some(*context_window);
                 }
-                if let Some(tokens_after) = compact_tokens {
+                if let Some((_, tokens_after)) = compact_tokens {
                     refresh_context_used(child_view, tokens_after);
                 }
             }
-            if let Some(tokens_after) = compact_tokens
+            if let Some((tokens_before, tokens_after)) = compact_tokens
                 && let Some(info) = agent.subagent_sessions.get_mut(child_sid)
             {
-                info.tokens_used = Some(tokens_after);
+                info.record_compact(tokens_before, tokens_after);
                 if let Some(cw) = info.context_window_tokens.filter(|&cw| cw > 0) {
                     info.context_usage_pct =
                         Some(xai_token_estimation::usage_percentage_u8(tokens_after, cw));
@@ -1402,7 +1451,7 @@ fn apply_nested_subagent_update(agent: &mut AgentView, update: XaiSessionUpdate)
                 SubagentInfo {
                     subagent_id: Arc::from(subagent_id),
                     child_session_id: Arc::from(child_session_id.clone()),
-                    description: Arc::from(description),
+                    description: Arc::from(description.clone()),
                     subagent_type: Arc::from(subagent_type),
                     persona: persona.map(Arc::from),
                     role: role.map(Arc::from),
@@ -1426,6 +1475,7 @@ fn apply_nested_subagent_update(agent: &mut AgentView, update: XaiSessionUpdate)
                     turn_count: None,
                     tool_call_count: None,
                     tokens_used: None,
+                    tokens_past: 0,
                     context_window_tokens: None,
                     context_usage_pct: None,
                     tools_used: Vec::new(),
@@ -1440,6 +1490,10 @@ fn apply_nested_subagent_update(agent: &mut AgentView, update: XaiSessionUpdate)
                     worktree_path: None,
                     child_updates_replayed: false,
                 },
+            );
+            crate::app::agent_view::l2_token_tracking::on_nested_l2_spawn(
+                &child_session_id,
+                &description,
             );
             agent.ensure_subagent_child_view(&child_session_id);
             true
@@ -1471,6 +1525,10 @@ fn apply_nested_subagent_update(agent: &mut AgentView, update: XaiSessionUpdate)
             info.tools_used = tools_used.into_iter().map(Arc::from).collect();
             info.error_count = Some(error_count);
             info.last_progress_at = std::time::Instant::now();
+            crate::app::agent_view::l2_token_tracking::on_nested_l2_usage(
+                &child_session_id,
+                tokens_used,
+            );
             true
         }
         XaiSessionUpdate::SubagentFinished {
@@ -1494,6 +1552,11 @@ fn apply_nested_subagent_update(agent: &mut AgentView, update: XaiSessionUpdate)
             info.turns = Some(turns);
             info.duration_ms = Some(duration_ms);
             info.tokens_used = Some(tokens_used);
+            crate::app::agent_view::l2_token_tracking::on_nested_l2_usage(
+                &child_session_id,
+                tokens_used,
+            );
+            crate::app::agent_view::l2_token_tracking::on_nested_l2_exit(&child_session_id);
             info.activity_label = None;
             info.pending_kill = false;
             info.kill_requested_at = None;
@@ -1689,6 +1752,19 @@ pub(super) fn apply_retry_state(
     scrollback: &mut crate::scrollback::state::ScrollbackState,
     is_api_key_auth: bool,
 ) {
+    apply_retry_state_with_nested(retry, session, scrollback, is_api_key_auth, false);
+}
+
+/// Same as [`apply_retry_state`], with whether nested implementers are still
+/// running. A safety-refusal or thought output-cap fail after this turn
+/// already wrote a dest/resume report is not a failed request.
+pub(super) fn apply_retry_state_with_nested(
+    retry: &xai_grok_shell::extensions::notification::RetryState,
+    session: &mut AgentSession,
+    scrollback: &mut crate::scrollback::state::ScrollbackState,
+    is_api_key_auth: bool,
+    nested_implementers_running: bool,
+) {
     let mut is_credit_limit = false;
     let mut is_reauth = false;
     use xai_grok_shell::extensions::notification::RetryState;
@@ -1805,6 +1881,15 @@ pub(super) fn apply_retry_state(
                     error: message.clone(),
                     error_type: Some(error_type.clone()),
                 }));
+            } else if crate::app::error_display::written_report_with_nested_running_is_not_turn_failure(
+                nested_implementers_running,
+                session.tracker.output_since_last_finish(),
+                Some(error_type.as_str()),
+                message,
+            ) {
+                // Dest/resume report already written and nested implementors
+                // still running: do not paint RequestFailed (safety refusal or
+                // thought output-cap) as if the whole turn failed.
             } else {
                 scrollback.push_block(RenderBlock::session_event(
                     crate::app::error_display::format_request_failure(

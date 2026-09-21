@@ -1563,6 +1563,7 @@ fn resolve_credentials_openrouter_does_not_use_xai_session() {
 }
 
 #[test]
+// Grok OSS: OpenRouter request headers set Surmount referer and Grok OSS title. This diverges from upstream xAI because OpenRouter attribution headers must identify this unofficial fork.
 fn inject_url_derived_headers_adds_openrouter_attribution() {
     let mut headers = IndexMap::new();
     inject_url_derived_headers(
@@ -7488,6 +7489,7 @@ fn remote_settings_disarm_requires_prod_proxy_when_keys_embedded() {
 /// when the pin is set.
 #[test]
 #[serial]
+// Grok OSS: hop proof. sampling_config fills console failover after included SuperGrok period limits are full (or the operator pins preferred_method = api_key). Rank helpers are not this proof. SuperGrok is paid.
 fn sampling_config_auto_use_fills_console_hop_after_included_full() {
     use crate::agent::auth_method::{LEGACY_XAI_API_KEY_ENV_VAR, XAI_API_KEY_ENV_VAR};
     use crate::auth::{
@@ -7550,6 +7552,7 @@ fn sampling_config_auto_use_fills_console_hop_after_included_full() {
 /// SuperGrok HTTP 402 or later `preferred_method = "api_key"` / use-console.
 #[test]
 #[serial]
+// Grok OSS: hop proof (fail-open). A client 100% / remaining 0 / SuperGrok dollar credits $0 printout must not hop to console. SuperGrok is paid.
 fn sampling_config_keeps_supergrok_primary_on_unproven_full_printout() {
     use crate::agent::auth_method::{LEGACY_XAI_API_KEY_ENV_VAR, XAI_API_KEY_ENV_VAR};
     use crate::auth::{
@@ -7608,6 +7611,7 @@ fn sampling_config_keeps_supergrok_primary_on_unproven_full_printout() {
 /// mark and must not use this path.
 #[test]
 #[serial]
+// Grok OSS: hop proof. Real SuperGrok HTTP 402 after that request failed can still leave SuperGrok. SuperGrok is paid.
 fn sampling_config_next_request_uses_console_after_real_supergrok_http_402() {
     use crate::agent::auth_method::{LEGACY_XAI_API_KEY_ENV_VAR, XAI_API_KEY_ENV_VAR};
     use crate::auth::{
@@ -7672,6 +7676,7 @@ fn sampling_config_next_request_uses_console_after_real_supergrok_http_402() {
 /// printout guess.
 #[test]
 #[serial]
+// Grok OSS: hop proof. SuperGrok dollar credits prepaidBalance.val 0 after that meter paid, plus HTTP 402, hops to console. SuperGrok is paid.
 fn sampling_config_next_request_uses_console_when_paying_prepaid_balance_is_zero_after_http_402() {
     use crate::agent::auth_method::{LEGACY_XAI_API_KEY_ENV_VAR, XAI_API_KEY_ENV_VAR};
     use crate::auth::{
@@ -7724,6 +7729,7 @@ fn sampling_config_next_request_uses_console_when_paying_prepaid_balance_is_zero
 /// `resolve_model_to_sampling_config` must omit the console key from the hop.
 #[test]
 #[serial]
+// Grok OSS: hop proof. sampling_config omits console failover while included SuperGrok period limits still have room. Rank helpers are not this proof. SuperGrok is paid.
 fn sampling_config_auto_use_omits_console() {
     use crate::agent::auth_method::{LEGACY_XAI_API_KEY_ENV_VAR, XAI_API_KEY_ENV_VAR};
     use crate::auth::PreferredAuthMethod;
@@ -7772,6 +7778,7 @@ fn sampling_config_auto_use_omits_console() {
 /// is not the hop proof (fail-open). HTTP 402 rotate stays the live leave path.
 #[test]
 #[serial]
+// Grok OSS: hop proof. resolve_model_to_sampling_config uses the same auto-use hop policy as sampling_config. Rank helpers are not this proof. SuperGrok is paid.
 fn resolve_model_to_sampling_config_auto_use() {
     use crate::agent::auth_method::{LEGACY_XAI_API_KEY_ENV_VAR, XAI_API_KEY_ENV_VAR};
     use crate::auth::{
@@ -7831,7 +7838,8 @@ fn resolve_model_to_sampling_config_auto_use() {
 /// SuperGrok session stays primary; console is failover only.
 #[test]
 #[serial]
-fn sampling_config_auto_use_extras_keep_session_console_failover() {
+// Grok OSS: hop proof. SuperGrok dollar credits keep SuperGrok session primary with console failover. SuperGrok is paid.
+fn sampling_config_auto_use_dollar_credits_keep_session_console_failover() {
     use crate::agent::auth_method::{LEGACY_XAI_API_KEY_ENV_VAR, XAI_API_KEY_ENV_VAR};
     use crate::auth::{
         PreferredAuthMethod, SupergrokAccountRole, SupergrokIdentityHeadroom,
@@ -7886,10 +7894,11 @@ fn sampling_config_auto_use_extras_keep_session_console_failover() {
 /// Named catalog contract: personal included SuperGrok period limits full with
 /// SuperGrok dollar credits remaining hops to a Business sibling that still
 /// has included remaining. Console stays off the hop list. Keep the
-/// single-identity extras test above green (no sibling).
+/// single-identity SuperGrok dollar credits test above green (no sibling).
 #[test]
 #[serial]
-fn sampling_config_hops_to_sibling_included_before_extras() {
+// Grok OSS: hop proof. Personal included SuperGrok period limits full hops to Business included before SuperGrok dollar credits. SuperGrok is paid.
+fn sampling_config_hops_to_sibling_included_before_dollar_credits() {
     use crate::agent::auth_method::{LEGACY_XAI_API_KEY_ENV_VAR, XAI_API_KEY_ENV_VAR};
     use crate::auth::{
         PreferredAuthMethod, SupergrokAccountRole, SupergrokIdentityHeadroom,
@@ -7970,6 +7979,7 @@ fn sampling_config_hops_to_sibling_included_before_extras() {
 /// not personal SuperGrok dollar credits, not console.
 #[test]
 #[serial]
+// Grok OSS: hop proof. Team included remaining plus personal exhausted stays Team, not SuperGrok dollar credits or console. SuperGrok is paid.
 fn sampling_config_hop_team_remaining_personal_exhausted_not_dollars_or_console() {
     use crate::agent::auth_method::{LEGACY_XAI_API_KEY_ENV_VAR, XAI_API_KEY_ENV_VAR};
     use crate::auth::{
@@ -8047,6 +8057,7 @@ fn sampling_config_hop_team_remaining_personal_exhausted_not_dollars_or_console(
 /// Personal remaining + Team exhausted: sampling hop uses personal SuperGrok.
 #[test]
 #[serial]
+// Grok OSS: hop proof. Personal included remaining plus Team exhausted stays personal SuperGrok. SuperGrok is paid.
 fn sampling_config_hop_personal_remaining_team_exhausted() {
     use crate::agent::auth_method::{LEGACY_XAI_API_KEY_ENV_VAR, XAI_API_KEY_ENV_VAR};
     use crate::auth::{
@@ -8116,6 +8127,7 @@ fn sampling_config_hop_personal_remaining_team_exhausted() {
 /// Both remaining: personal SuperGrok JWT first. Team JWT omitted. Console omitted.
 #[test]
 #[serial]
+// Grok OSS: hop proof. Both included remaining: Team first then personal; console omitted. SuperGrok is paid.
 fn sampling_config_hop_both_remaining_team_first_then_personal() {
     use crate::agent::auth_method::{LEGACY_XAI_API_KEY_ENV_VAR, XAI_API_KEY_ENV_VAR};
     use crate::auth::{
@@ -8194,6 +8206,7 @@ fn sampling_config_hop_both_remaining_team_first_then_personal() {
 /// stay primary; console is failover only.
 #[test]
 #[serial]
+// Grok OSS: hop proof. Both included SuperGrok period pools exhausted: SuperGrok dollar credits before console. SuperGrok is paid.
 fn sampling_config_hop_both_included_exhausted_dollar_credits_before_console() {
     use crate::agent::auth_method::{LEGACY_XAI_API_KEY_ENV_VAR, XAI_API_KEY_ENV_VAR};
     use crate::auth::{
@@ -8263,6 +8276,7 @@ fn sampling_config_hop_both_included_exhausted_dollar_credits_before_console() {
 /// identities to remaining 0 and hop to SuperGrok dollar credits.
 #[test]
 #[serial]
+// Grok OSS: hop proof. Missing SuperGrok Heavy plus false 100% must not flatten sibling included remaining. SuperGrok is paid.
 fn sampling_config_hop_missing_heavy_false_100_keeps_sibling_included() {
     use crate::agent::auth_method::{LEGACY_XAI_API_KEY_ENV_VAR, XAI_API_KEY_ENV_VAR};
     use crate::auth::{
@@ -8366,6 +8380,7 @@ fn sampling_config_hop_missing_heavy_false_100_keeps_sibling_included() {
 /// Heavy must not flatten Team remaining and hop to SuperGrok dollar credits.
 #[test]
 #[serial]
+// Grok OSS: hop proof. SuperGrok dollar credits on both plus missing SuperGrok Heavy keeps Team included remaining. SuperGrok is paid.
 fn sampling_config_hop_dollar_credits_on_both_missing_heavy_keeps_team() {
     use crate::agent::auth_method::{LEGACY_XAI_API_KEY_ENV_VAR, XAI_API_KEY_ENV_VAR};
     use crate::auth::{

@@ -185,7 +185,9 @@ pub fn section_running_subagents(
     Some(format!(
         "## Running Subagents\n\
          These subagents were launched before this compaction and are still running. \
-         Use `{}` with the subagent_id to check their status or retrieve results. \
+         Keep working; completion is a notification. \
+         Use `{}` with the subagent_id for an optional snapshot (omit timeout or pass 0). \
+         Do not start a blocking wait on a long-running builder. \
          Use `{}` with the subagent_id to cancel a subagent.\n{lines}",
         tools.poll, tools.cancel
     ))
@@ -412,6 +414,12 @@ mod tests {
         let out = format_active_agent_reminder(&state, Some(&tools_renamed())).expect("reminder");
         assert!(out.contains("get_command_or_subagent_output"));
         assert!(!out.contains("get_task_output"));
+        assert!(
+            out.contains("Keep working")
+                && out.contains("omit timeout or pass 0")
+                && out.contains("Do not start a blocking wait"),
+            "compact reminder must be fire-and-return, not a blocking wait: {out}"
+        );
     }
 
     #[test]

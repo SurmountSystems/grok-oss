@@ -54,10 +54,14 @@ const COLLAPSED_EDIT_BLOCKS_DEFAULT: bool = false;
 const PROMPT_SUGGESTIONS_DEFAULT: bool = true;
 /// Human-box newlines from Enter / Shift+Enter. Default ON when unset.
 const COMPOSER_MULTILINE_DEFAULT: bool = UiConfig::COMPOSER_MULTILINE_DEFAULT;
+/// Whether session Multiline may be enabled. Default ON when unset.
+const ALLOW_SESSION_MULTILINE_DEFAULT: bool = UiConfig::ALLOW_SESSION_MULTILINE_DEFAULT;
 /// Auto-run follow-up `/implement` from the prior prompt after a turn ends.
 const AUTO_RUN_IMPLEMENT_DEFAULT: bool = true;
 /// Soft-cap context at the 200K pricing tier; default ON when unset.
 const ECONOMIC_MODE_DEFAULT: bool = true;
+/// Live exclusive / Isolated Preview plan turns use xhigh. Default ON.
+const TURBO_PLANNING_DEFAULT: bool = UiConfig::TURBO_PLANNING_DEFAULT;
 const KEEP_TEXT_SELECTION_DEFAULT: TextSelection = TextSelection::Flash;
 /// Scroll speed default (1-100 scale, matches the legacy `[ui].scroll_speed`).
 const SCROLL_SPEED_DEFAULT: u8 = 50;
@@ -368,17 +372,17 @@ thread_local! {
     static ALWAYS_EXPAND_THINKING_LOADED: Cell<bool> = const { Cell::new(false) };
 }
 
-/// Read cached `always_expand_thinking`, seeding from `[ui]` on first call.
-/// Default OFF when unset. Startup may override via resolve.
+/// Read cached `always_expand_thinking`. Default OFF until [`prime`] or
+/// [`set_always_expand_thinking`].
+///
+/// Do not lazy-read host `[ui] always_expand_thinking`. Cargo tests load this
+/// crate as a normal library, so a disk seed would inherit the operator's live
+/// config and collapse/expand contracts would not see the product default.
+/// Startup still applies disk through [`prime`].
 pub fn load_always_expand_thinking() -> bool {
     ALWAYS_EXPAND_THINKING_LOADED.with(|loaded| {
         if !loaded.get() {
-            ALWAYS_EXPAND_THINKING_CURRENT.with(|c| {
-                c.set(load_bool_from_effective_config(
-                    "always_expand_thinking",
-                    ALWAYS_EXPAND_THINKING_DEFAULT,
-                ))
-            });
+            ALWAYS_EXPAND_THINKING_CURRENT.with(|c| c.set(ALWAYS_EXPAND_THINKING_DEFAULT));
             loaded.set(true);
         }
     });
@@ -625,6 +629,37 @@ pub fn set_composer_multiline(enabled: bool) {
     COMPOSER_MULTILINE_LOADED.with(|l| l.set(true));
 }
 
+// -- Allow session Multiline -------------------------------------------------
+
+thread_local! {
+    static ALLOW_SESSION_MULTILINE_CURRENT: Cell<bool> =
+        const { Cell::new(ALLOW_SESSION_MULTILINE_DEFAULT) };
+    static ALLOW_SESSION_MULTILINE_LOADED: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Cached `[ui].allow_session_multiline`. Default on. When false, slash,
+/// Ctrl+M, and the Multiline settings row cannot turn session Multiline on.
+pub fn load_allow_session_multiline() -> bool {
+    ALLOW_SESSION_MULTILINE_LOADED.with(|loaded| {
+        if !loaded.get() {
+            ALLOW_SESSION_MULTILINE_CURRENT.with(|c| {
+                c.set(load_bool_from_effective_config(
+                    "allow_session_multiline",
+                    ALLOW_SESSION_MULTILINE_DEFAULT,
+                ))
+            });
+            loaded.set(true);
+        }
+    });
+    ALLOW_SESSION_MULTILINE_CURRENT.with(|c| c.get())
+}
+
+/// Replace cached `allow_session_multiline`.
+pub fn set_allow_session_multiline(enabled: bool) {
+    ALLOW_SESSION_MULTILINE_CURRENT.with(|c| c.set(enabled));
+    ALLOW_SESSION_MULTILINE_LOADED.with(|l| l.set(true));
+}
+
 // -- Auto-run /implement follow-ups ------------------------------------------
 
 thread_local! {
@@ -684,6 +719,35 @@ pub fn load_economic_mode() -> bool {
 pub fn set_economic_mode(enabled: bool) {
     ECONOMIC_MODE_CURRENT.with(|c| c.set(enabled));
     ECONOMIC_MODE_LOADED.with(|l| l.set(true));
+}
+
+// -- turbo_planning ----------------------------------------------------------
+
+thread_local! {
+    static TURBO_PLANNING_CURRENT: Cell<bool> = const { Cell::new(TURBO_PLANNING_DEFAULT) };
+    static TURBO_PLANNING_LOADED: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Cached `[ui].turbo_planning`. Default ON when unset.
+pub fn load_turbo_planning() -> bool {
+    TURBO_PLANNING_LOADED.with(|loaded| {
+        if !loaded.get() {
+            TURBO_PLANNING_CURRENT.with(|c| {
+                c.set(load_bool_from_effective_config(
+                    "turbo_planning",
+                    TURBO_PLANNING_DEFAULT,
+                ))
+            });
+            loaded.set(true);
+        }
+    });
+    TURBO_PLANNING_CURRENT.with(|c| c.get())
+}
+
+/// Replace cached `turbo_planning`.
+pub fn set_turbo_planning(enabled: bool) {
+    TURBO_PLANNING_CURRENT.with(|c| c.set(enabled));
+    TURBO_PLANNING_LOADED.with(|l| l.set(true));
 }
 
 // -- keep_text_selection (`flash` | `hold`) ----------------------------------
@@ -935,8 +999,10 @@ pub fn prime(ui: &UiConfig) {
     let _ = load_collapsed_edit_blocks();
     let _ = load_prompt_suggestions();
     set_composer_multiline(ui.composer_multiline_enabled());
+    set_allow_session_multiline(ui.allow_session_multiline_enabled());
     let _ = load_auto_run_implement();
     let _ = load_economic_mode();
+    set_turbo_planning(ui.turbo_planning_enabled());
     // `default_selected_permission` owns its own cache in `permission_cursor`.
     crate::appearance::permission_cursor::prime();
 }
@@ -1251,6 +1317,25 @@ mod tests {
     }
 
     #[test]
+    fn prime_applies_allow_session_multiline_from_ui() {
+        std::thread::spawn(|| {
+            let ui = UiConfig {
+                allow_session_multiline: Some(false),
+                ..UiConfig::default()
+            };
+            prime(&ui);
+            assert!(
+                !load_allow_session_multiline(),
+                "prime must seed allow_session_multiline from UiConfig so disk false applies at launch"
+            );
+            set_allow_session_multiline(true);
+            assert!(load_allow_session_multiline());
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[test]
     fn prime_applies_always_expand_thinking_from_ui() {
         std::thread::spawn(|| {
             let ui = UiConfig {
@@ -1276,6 +1361,18 @@ mod tests {
             assert!(load_always_expand_thinking());
             set_always_expand_thinking(false);
             assert!(!load_always_expand_thinking());
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[test]
+    fn load_always_expand_thinking_does_not_seed_from_host_disk() {
+        std::thread::spawn(|| {
+            assert!(
+                !load_always_expand_thinking(),
+                "unit tests must see the product default (collapsed headers), not the operator live [ui] always_expand_thinking"
+            );
         })
         .join()
         .unwrap();

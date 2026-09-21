@@ -12,6 +12,7 @@ mod persist;
 mod resolve;
 mod settings_writes;
 mod tips;
+mod turbo_planning;
 mod worktree;
 
 pub use announcements::*;
@@ -37,6 +38,11 @@ pub use persist::*;
 pub use resolve::*;
 pub use settings_writes::*;
 pub use tips::*;
+pub use turbo_planning::{
+    TURBO_PLANNING_DEFAULT, apply_live_plan_turn_effort, effective_reasoning_effort_for_turn,
+    live_plan_turn_flag, set_live_plan_turn, set_turbo_planning_live, turbo_planning_enabled,
+    turbo_planning_from_disk,
+};
 pub use worktree::*;
 pub use xai_grok_config_types::{
     CampaignOverride, ContextualHintsRemote, DisplayRefreshSettings, DoomLoopRecoverySettings,

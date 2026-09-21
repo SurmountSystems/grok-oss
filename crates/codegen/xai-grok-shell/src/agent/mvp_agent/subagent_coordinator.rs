@@ -176,6 +176,7 @@ impl MvpAgent {
             limit_sink: Some(limit_sink),
             buffer_completions: true,
             buffered_completion_output_cap: None,
+            parent_follow_up: self.cfg.borrow().subagent_parent_follow_up,
         };
         tokio::task::spawn_local(coordinator::SubagentCoordinator::new(rx, runner, config).run());
         let (trace_tx, mut trace_rx) = tokio::sync::mpsc::unbounded_channel::<

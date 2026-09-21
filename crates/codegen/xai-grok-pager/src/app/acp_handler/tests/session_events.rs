@@ -218,6 +218,40 @@
         }
     }
 
+    /// Attempt 2 after StreamResumed must keep `waiting for first token`
+    /// so leftover chrome matches `Retrying the model request (attempt 2):
+    /// waiting for first token`. Nested implementors stay running; this
+    /// is not a failed request.
+    #[test]
+    fn apply_retry_state_stream_resumed_attempt_two_keeps_first_token_wait() {
+        use crate::acp::tracker::TurnActivity;
+        let mut session = make_session(Some("s1"));
+        let mut scrollback = ScrollbackState::new();
+        session.set_retry_activity(Some(TurnActivity::Retrying {
+            attempt: 2,
+            max_retries: u32::MAX,
+            reason: "first token timed out · next try in 2s".into(),
+        }));
+        apply_retry_state(&RetryState::StreamResumed, &mut session, &mut scrollback, false);
+        match session.tracker.activity() {
+            Some(TurnActivity::Retrying {
+                attempt: 2,
+                reason,
+                ..
+            }) => {
+                assert_eq!(reason, "waiting for first token");
+                let chrome = format!("Retrying the model request (attempt 2): {reason}");
+                assert!(chrome.contains("Retrying the model request"));
+                assert!(chrome.contains("waiting for first token"));
+            }
+            other => panic!("expected Retrying attempt 2 first-token wait, got {other:?}"),
+        }
+        assert!(
+            session.in_flight_prompt.is_none(),
+            "/compact queued on L1 must not be treated as a failed in-flight prompt"
+        );
+    }
+
     #[test]
     fn retry_exhausted_rate_limited_sets_flag() {
         let mut session = make_session(Some("s1"));
@@ -686,6 +720,234 @@
             }
             other => panic!("expected RequestFailed, got {other:?}"),
         }
+    }
+
+    /// Operator screenshot 2026-09-19: `permission-denied: I can't help with that request.`
+    /// is a safety refusal, not HTTP 403. Without nested implementers + output,
+    /// RetryState still paints Safety refusal, never `Request denied (403)`.
+    #[test]
+    fn apply_retry_state_safety_refusal_paints_safety_refusal_not_request_denied_403() {
+        let operator_body = "permission-denied: I can't help with that request.";
+        assert!(operator_body.contains("permission-denied: I can't help with that request."));
+        let mut session = make_session(Some("s1"));
+        let mut scrollback = ScrollbackState::new();
+        apply_retry_state(
+            &RetryState::Failed {
+                error_type: "api".into(),
+                message: format!(
+                    "API error (status 403 Forbidden): {operator_body}"
+                ),
+            },
+            &mut session,
+            &mut scrollback,
+            false,
+        );
+        match last_session_event(&scrollback) {
+            Some(SessionEvent::RequestFailed {
+                status,
+                headline,
+                detail,
+            }) => {
+                let painted = crate::app::error_display::banner_message(&headline, &detail);
+                assert!(
+                    !painted.contains("Request denied (403)"),
+                    "safety refusal must not be labeled HTTP 403, got {painted}"
+                );
+                assert!(
+                    painted.contains("Safety refusal"),
+                    "must paint safety refusal chrome, got {painted}"
+                );
+                assert!(
+                    painted.contains("I can't help with that request"),
+                    "must keep the refusal text, got {painted}"
+                );
+                assert_eq!(status, None, "must not keep HTTP 403 status");
+            }
+            other => panic!("expected RequestFailed Safety refusal, got {other:?}"),
+        }
+    }
+
+    /// Resume report already written + nested implementers still running:
+    /// RetryState Failed with `permission-denied: I can't help with that request.`
+    /// must not paint RequestFailed / `Request denied (403)`.
+    #[test]
+    fn resume_after_report_safety_refusal_retry_state_must_not_paint_request_failed() {
+        let operator_body = "permission-denied: I can't help with that request.";
+        assert!(operator_body.contains("permission-denied: I can't help with that request."));
+        let parent_sid = "sess-resume-403";
+        let child_sid = "child-resume-403";
+        let mut app = make_app_with_agent(parent_sid);
+        handle(
+            make_ext_session_notification(
+                parent_sid,
+                test_subagent_spawned(parent_sid, child_sid),
+            ),
+            &mut app,
+        );
+        {
+            let agent = app.agents.get(&AgentId(0)).unwrap();
+            let info = agent
+                .subagent_sessions
+                .get(child_sid)
+                .expect("spawn must seed nested occupancy");
+            assert!(
+                info.is_running(),
+                "nested implementer must still be running (finished: false)"
+            );
+        }
+        handle(
+            make_agent_chunk_message(parent_sid, "resume report already written"),
+            &mut app,
+        );
+        {
+            let agent = app.agents.get(&AgentId(0)).unwrap();
+            assert!(
+                agent.session.tracker.output_since_last_finish(),
+                "parent agent chunk must count as a written resume report"
+            );
+        }
+        handle(
+            make_ext_session_notification(
+                parent_sid,
+                XaiSessionUpdate::RetryState(RetryState::Failed {
+                    error_type: "api".into(),
+                    message: operator_body.into(),
+                }),
+            ),
+            &mut app,
+        );
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        let painted: Vec<String> = (0..agent.scrollback.len())
+            .filter_map(|i| agent.scrollback.entry(i))
+            .filter_map(|e| match &e.block {
+                RenderBlock::SessionEvent(ev) => Some(ev.event.message()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            painted.iter().all(|msg| !msg.contains("Request denied (403)")),
+            "must not paint Request denied (403), got {painted:?}"
+        );
+        let has_request_failed = (0..agent.scrollback.len()).any(|i| {
+            matches!(
+                agent.scrollback.entry(i).map(|e| &e.block),
+                Some(RenderBlock::SessionEvent(ev))
+                    if matches!(ev.event, SessionEvent::RequestFailed { .. })
+            )
+        });
+        assert!(
+            !has_request_failed,
+            "resume report + nested implementers running must not paint RequestFailed, got {painted:?}"
+        );
+    }
+
+    /// Operator screenshot 2026-09-20: dest completeOk (Worked for 48s), then
+    /// L1 thought 29m26s, then yellow
+    /// `Response truncated – The model hit its output limit. Try asking for a shorter answer.`
+    /// Dest report already written + nested implementors still running + thought
+    /// hits the output cap must not paint that Operator-blaming chrome.
+    #[test]
+    fn dest_complete_ok_then_truncated_thought_must_not_paint_shorter_answer_chrome() {
+        let operator_chrome =
+            "Response truncated – The model hit its output limit. Try asking for a shorter answer.";
+        assert!(
+            operator_chrome
+                .contains("Response truncated – The model hit its output limit. Try asking for a shorter answer.")
+        );
+        let parent_sid = "sess-dest-trunc";
+        let dest_sid = "dest-complete-ok";
+        let impl_sid = "nested-still-running";
+        let mut app = make_app_with_agent(parent_sid);
+        handle(
+            make_ext_session_notification(
+                parent_sid,
+                test_subagent_spawned(parent_sid, dest_sid),
+            ),
+            &mut app,
+        );
+        handle(
+            make_ext_session_notification(
+                parent_sid,
+                test_subagent_spawned(parent_sid, impl_sid),
+            ),
+            &mut app,
+        );
+        handle(
+            make_ext_session_notification(parent_sid, test_subagent_finished(dest_sid)),
+            &mut app,
+        );
+        handle(
+            make_agent_chunk_message(parent_sid, "dest report completeOk Worked for 48s"),
+            &mut app,
+        );
+        {
+            let agent = app.agents.get(&AgentId(0)).unwrap();
+            let dest = agent
+                .subagent_sessions
+                .get(dest_sid)
+                .expect("dest occupancy");
+            assert!(
+                !dest.is_running(),
+                "dest completeOk must mark dest finished"
+            );
+            let nested = agent
+                .subagent_sessions
+                .get(impl_sid)
+                .expect("nested implementor occupancy");
+            assert!(
+                nested.is_running(),
+                "nested implementor must still be running"
+            );
+            assert!(
+                agent.session.tracker.output_since_last_finish(),
+                "dest report must count as written output"
+            );
+        }
+        handle(
+            make_ext_session_notification(
+                parent_sid,
+                XaiSessionUpdate::RetryState(RetryState::Failed {
+                    error_type: "max_tokens_truncation".into(),
+                    message: "response truncated by max_tokens".into(),
+                }),
+            ),
+            &mut app,
+        );
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        let painted: Vec<String> = (0..agent.scrollback.len())
+            .filter_map(|i| agent.scrollback.entry(i))
+            .filter_map(|e| match &e.block {
+                RenderBlock::SessionEvent(ev) => Some(ev.event.message()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            painted.iter().all(|msg| !msg.contains("Try asking for a shorter answer")),
+            "must not tell the Operator to ask for a shorter answer, got {painted:?}"
+        );
+        assert!(
+            painted.iter().all(|msg| !msg.contains(operator_chrome)),
+            "must not paint Operator-blaming truncation chrome, got {painted:?}"
+        );
+        let has_request_failed = (0..agent.scrollback.len()).any(|i| {
+            matches!(
+                agent.scrollback.entry(i).map(|e| &e.block),
+                Some(RenderBlock::SessionEvent(ev))
+                    if matches!(ev.event, SessionEvent::RequestFailed { .. })
+            )
+        });
+        assert!(
+            !has_request_failed,
+            "dest completeOk + nested implementors running must not strand L1 in RequestFailed, got {painted:?}"
+        );
+        let nested = agent
+            .subagent_sessions
+            .get(impl_sid)
+            .expect("nested implementor occupancy after truncation");
+        assert!(
+            nested.is_running(),
+            "nested implementors must keep running after dest-then-truncated-thought"
+        );
     }
 
     /// A context overflow surfaces the actionable `ContextTooLarge` prompt (not the

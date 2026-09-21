@@ -208,13 +208,31 @@ impl xai_tool_runtime::Tool for CodexReadFileTool {
         {
             fs = resources.lock().await.require::<FileSystem>()?.0.clone();
         }
-        let file_bytes = match fs.read_file(&path).await {
-            Ok(bytes) => bytes,
-            Err(e) => {
-                return Ok(ReadFileOutput::FileReadError(format!(
-                    "Failed to read file: {}, {e}",
-                    path.display()
-                )));
+        let file_bytes = if let Some(bytes) =
+            crate::implementations::editor_infra::per_path_write_lock::published_cow_snapshot(&path)
+        {
+            bytes.to_vec()
+        } else {
+            match fs.read_file(&path).await {
+                Ok(disk) => {
+                    crate::implementations::editor_infra::per_path_write_lock::published_cow_snapshot(
+                        &path,
+                    )
+                    .map(|bytes| bytes.to_vec())
+                    .unwrap_or(disk)
+                }
+                Err(e) => {
+                    if let Some(bytes) = crate::implementations::editor_infra::per_path_write_lock::published_cow_snapshot(
+                        &path,
+                    ) {
+                        bytes.to_vec()
+                    } else {
+                        return Ok(ReadFileOutput::FileReadError(format!(
+                            "Failed to read file: {}, {e}",
+                            path.display()
+                        )));
+                    }
+                }
             }
         };
 

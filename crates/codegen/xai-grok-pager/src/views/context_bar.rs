@@ -588,6 +588,31 @@ mod tests {
         assert_eq!(line_text(&line), "207K / 500K");
     }
 
+    /// Parent context `239K / 500K` is the L1 window. Nested L2/L3 windows
+    /// must not be added into that chip.
+    #[test]
+    fn parent_context_chip_is_l1_window_and_does_not_add_nested_windows() {
+        let l1_used = 239_000;
+        let nested_l2_plus_l3 = 90_000u64.saturating_add(50_000);
+        let text = context_chip_token_text(l1_used, Some(500_000), Some(500_000))
+            .expect("L1 context chip");
+        assert_eq!(text, "239K / 500K");
+        assert!(
+            !text.contains("379K"),
+            "must not add nested 140k into the L1 chip, got {text}"
+        );
+        let doubled = context_chip_token_text(
+            l1_used.saturating_add(nested_l2_plus_l3),
+            Some(500_000),
+            Some(500_000),
+        )
+        .expect("wrong nested sum");
+        assert_ne!(
+            text, doubled,
+            "adding nested windows to the L1 used count must not be how the parent chip is painted"
+        );
+    }
+
     /// Session sampling stays the AUTO gate. Catalog 500K must not paint as
     /// the unlabeled total when the session window is the nested 200k budget.
     #[test]

@@ -736,7 +736,8 @@ async fn apply_retry_decision(
                 | SamplingError::IdleTimeout { .. }
                 | SamplingError::EmptyResponse { .. }
                 | SamplingError::MaxTokensTruncation
-                | SamplingError::DoomLoopDetected { .. } => StripReason::PayloadHeuristic,
+                | SamplingError::DoomLoopDetected { .. }
+                | SamplingError::RepetitiveGeneration { .. } => StripReason::PayloadHeuristic,
             };
             tracing::warn!(
                 stripped = stripped_urls.len(),
@@ -1144,6 +1145,10 @@ fn synthesize_from_info(info: &SamplingErrorInfo) -> SamplingError {
             triggers: info.doom_loop_triggers.clone().unwrap_or_default(),
             aborted_at_chunk: info.doom_loop_aborted_at_chunk,
         },
+        SamplingErrorKind::RepetitiveGeneration => SamplingError::RepetitiveGeneration {
+            channel: String::new(),
+            aborted_at_chunk: None,
+        },
     }
 }
 
@@ -1217,7 +1222,7 @@ fn retry_footer_reason(err: &SamplingError) -> String {
         SamplingError::EventStreamError(msg)
             if msg.contains("timed out waiting for response headers") =>
         {
-            "response headers timed out".into()
+            "cold start: response headers timed out".into()
         }
         SamplingError::EventStreamError(msg)
             if msg.to_ascii_lowercase().contains("first token") =>
@@ -1621,7 +1626,10 @@ mod tests {
         let headers = SamplingError::EventStreamError(
             "timed out waiting for response headers after 120s".into(),
         );
-        assert_eq!(retry_footer_reason(&headers), "response headers timed out");
+        assert_eq!(
+            retry_footer_reason(&headers),
+            "cold start: response headers timed out"
+        );
         let first_token = SamplingError::EventStreamError(
             "timed out waiting for the first token after 2m0s".into(),
         );

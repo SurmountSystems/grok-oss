@@ -343,7 +343,7 @@ Re-login that SuperGrok account with: grok login"
 /// `period_type` is the billing proto name (`USAGE_PERIOD_TYPE_WEEKLY`, …)
 /// when known; empty/None leaves any prior value.
 /// Does **not** clear a prior `prepaid_balance_cents` (use
-/// [`remember_supergrok_dollar_extras`] after a full credits config parse).
+/// [`remember_supergrok_dollar_credits`] after a full credits config parse).
 pub fn remember_supergrok_included_billing(
     identity_id: &str,
     usage_pct: f64,
@@ -379,7 +379,7 @@ pub fn remember_supergrok_included_billing(
 /// Process cache only. Signed cents as returned by billing (UI takes abs).
 /// Distinct from console team prepaid. Call after a successful credits poll
 /// so dual `/limits` can show sibling dollar extras without inventing $.
-pub fn remember_supergrok_dollar_extras(identity_id: &str, prepaid_balance_cents: i64) {
+pub fn remember_supergrok_dollar_credits(identity_id: &str, prepaid_balance_cents: i64) {
     let id = identity_id.trim();
     if id.is_empty() {
         return;
@@ -1028,7 +1028,7 @@ pub fn afterburner_skips_allowance_mark_with_sibling(
     usage_pct >= xai_grok_sampler::INCLUDED_ALLOWANCE_EXHAUST_PCT
         && auto_use_included_limits
         && dual_auth_ready
-        && super::supergrok_identity_rank::has_positive_supergrok_dollar_extras(
+        && super::supergrok_identity_rank::has_positive_supergrok_dollar_credits(
             prepaid_balance_cents,
         )
         && !sibling_has_distinct_included_remaining
@@ -1078,7 +1078,7 @@ fn apply_billing_usage_to_session_exhaust_inner(
     // prefer_live does not hop to console before extras burn.
     if dual_auth_ready {
         if let Some(identity_id) = active_supergrok_identity_id(grok_home) {
-            let extras = included_billing_fields_snapshot()
+            let dollar_credits_cents = included_billing_fields_snapshot()
                 .get(&identity_id)
                 .and_then(|f| f.prepaid_balance_cents);
             // Sibling included remaining only gates the 100% after-burner skip.
@@ -1091,7 +1091,7 @@ fn apply_billing_usage_to_session_exhaust_inner(
                 usage_pct,
                 auto_use_included_limits,
                 dual_auth_ready,
-                extras,
+                dollar_credits_cents,
                 sibling_included,
             ) {
                 let Some(token) = load_session_access_token(grok_home) else {
@@ -1109,15 +1109,15 @@ fn apply_billing_usage_to_session_exhaust_inner(
                     tracing::info!(
                         target: "xai_grok_shell::auth",
                         usage_pct,
-                        prepaid_balance_cents = extras,
-                        "SuperGrok included full but $ extras remain; cleared allowance memo for after-burner"
+                        prepaid_balance_cents = dollar_credits_cents,
+                        "SuperGrok included full but SuperGrok dollar credits remain; cleared allowance memo for after-burner"
                     );
                 } else {
                     tracing::debug!(
                         target: "xai_grok_shell::auth",
                         usage_pct,
-                        prepaid_balance_cents = extras,
-                        "SuperGrok included full but $ extras remain; not marking out of allowance (after-burner)"
+                        prepaid_balance_cents = dollar_credits_cents,
+                        "SuperGrok included full but SuperGrok dollar credits remain; not marking out of allowance (after-burner)"
                     );
                 }
                 return action;
@@ -1206,7 +1206,7 @@ mod tests {
             Some("2026-08-10T00:00:00Z"),
             Some("USAGE_PERIOD_TYPE_WEEKLY"),
         );
-        remember_supergrok_dollar_extras("user-dead", 500);
+        remember_supergrok_dollar_credits("user-dead", 500);
         assert_eq!(
             included_billing_fields_snapshot()
                 .get("user-dead")
@@ -1664,7 +1664,7 @@ mod tests {
     /// Usage Credits (`prepaidBalance`) without inventing console team $.
     #[test]
     #[serial_test::serial]
-    fn remember_dollar_extras_stores_prepaid_cents_for_limits_fill() {
+    fn remember_dollar_credits_stores_prepaid_cents_for_limits_fill() {
         clear_included_billing_cache();
         remember_supergrok_included_billing(
             "team-surmount",
@@ -1672,7 +1672,7 @@ mod tests {
             Some("2026-08-04T01:25:32Z"),
             Some("USAGE_PERIOD_TYPE_WEEKLY"),
         );
-        remember_supergrok_dollar_extras("team-surmount", 10029);
+        remember_supergrok_dollar_credits("team-surmount", 10029);
         let snap = included_billing_fields_snapshot();
         let fields = snap.get("team-surmount").expect("remembered identity");
         assert_eq!(fields.usage_pct, Some(65.0));
@@ -1775,6 +1775,7 @@ mod tests {
     /// distinct sibling still has included remaining, so prefer_live / rank can
     /// hop. After-burner skip is only for every distinct included pool exhausted.
     #[test]
+    // Grok OSS: hop-neighbor. Personal included full plus SuperGrok dollar credits still marks when a sibling has included remaining. Rank helpers are not hop proof. SuperGrok is paid.
     fn afterburner_does_not_skip_mark_when_sibling_has_included_remaining() {
         assert!(
             !afterburner_skips_allowance_mark_with_sibling(100.0, true, true, Some(10_029), true,),
@@ -1827,7 +1828,7 @@ mod tests {
             let store = CredentialsStore::at_grok_home(home);
             assert!(add_console_api_key(&store, "console-failover-key").unwrap());
 
-            remember_supergrok_dollar_extras("user-p", 10_029);
+            remember_supergrok_dollar_credits("user-p", 10_029);
             remember_supergrok_included_billing(
                 "team-biz",
                 40.0,
@@ -1888,7 +1889,7 @@ mod tests {
     /// included → do not mark SuperGrok out of allowance (after-burner).
     #[test]
     #[serial_test::serial]
-    fn apply_billing_100_pct_with_positive_extras_and_auto_use_does_not_mark() {
+    fn apply_billing_100_pct_with_positive_dollar_credits_and_auto_use_does_not_mark() {
         with_isolated_home(|home| {
             clear_included_billing_cache();
             let session = "session-jwt-afterburner-no-mark";
@@ -1898,7 +1899,7 @@ mod tests {
             assert!(add_console_api_key(&store, "console-failover-key").unwrap());
 
             // write_oidc user_id is "user-1" → active identity_id.
-            remember_supergrok_dollar_extras("user-1", 10_029);
+            remember_supergrok_dollar_credits("user-1", 10_029);
 
             let action = apply_billing_usage_to_session_exhaust(100.0, home);
             assert_eq!(
@@ -1917,7 +1918,7 @@ mod tests {
     /// Named contract (Issue 1): prior mark + auto_use + positive extras → Cleared.
     #[test]
     #[serial_test::serial]
-    fn apply_billing_100_pct_with_positive_extras_clears_prior_mark() {
+    fn apply_billing_100_pct_with_positive_dollar_credits_clears_prior_mark() {
         with_isolated_home(|home| {
             clear_included_billing_cache();
             let session = "session-jwt-afterburner-clear";
@@ -1930,7 +1931,7 @@ mod tests {
             xai_grok_sampler::mark_exhausted(&grok_rate_limit::fingerprint_secret(session));
             assert!(xai_grok_sampler::is_credential_exhausted(session));
 
-            remember_supergrok_dollar_extras("user-1", 5_000);
+            remember_supergrok_dollar_credits("user-1", 5_000);
             let action = apply_billing_usage_to_session_exhaust(100.0, home);
             assert_eq!(
                 action,
@@ -1949,7 +1950,7 @@ mod tests {
     /// must not Mark. Identifier keeps the old catalog name.
     #[test]
     #[serial_test::serial]
-    fn apply_billing_100_pct_auto_use_marks_when_extras_gone_or_unknown() {
+    fn apply_billing_100_pct_auto_use_marks_when_dollar_credits_gone_or_unknown() {
         with_isolated_home(|home| {
             clear_included_billing_cache();
             let session = "session-jwt-afterburner-mark-no-extras";
@@ -1966,7 +1967,7 @@ mod tests {
             );
             assert!(!xai_grok_sampler::is_credential_exhausted(session));
 
-            remember_supergrok_dollar_extras("user-1", 0);
+            remember_supergrok_dollar_credits("user-1", 0);
             let action_zero = apply_billing_usage_to_session_exhaust(100.0, home);
             assert_eq!(
                 action_zero,

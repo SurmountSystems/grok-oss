@@ -756,63 +756,12 @@ pub mod prompt_wal {
         )
     }
 
-    /// Whether `text` already exists as a Human turn in history or the pager queue.
-    pub fn operator_text_already_recorded(
-        text: &str,
-        prompt_history: &[String],
-        queue_texts: &[String],
-        chat_history_blob: Option<&str>,
-    ) -> bool {
-        let needle = text.trim();
-        if needle.is_empty() {
-            return true;
-        }
-        if prompt_history.iter().any(|p| p.trim() == needle) {
-            return true;
-        }
-        if queue_texts.iter().any(|p| p.trim() == needle) {
-            return true;
-        }
-        if let Some(blob) = chat_history_blob
-            && blob.contains(needle)
-        {
-            return true;
-        }
-        false
-    }
-
-    /// WAL sends (and interject/queue) missing from chat/prompt/queue.
-    /// Restore those as pending Human turns. Plan notes and rebuild flush
-    /// have their own draft/queue restore paths.
-    pub fn wal_sends_missing_from_history(
-        records: &[PromptWalRecord],
-        prompt_history: &[String],
-        queue_texts: &[String],
-        chat_history_blob: Option<&str>,
-    ) -> Vec<PromptWalRecord> {
-        let mut out = Vec::new();
-        let mut seen = std::collections::HashSet::new();
-        for rec in records {
-            match rec.kind {
-                PromptWalKind::Send | PromptWalKind::Interject | PromptWalKind::Queue => {}
-                PromptWalKind::PlanNotes | PromptWalKind::RebuildFlush => continue,
-            }
-            let key = rec.text.trim().to_string();
-            if key.is_empty() || !seen.insert(key) {
-                continue;
-            }
-            if operator_text_already_recorded(
-                &rec.text,
-                prompt_history,
-                queue_texts,
-                chat_history_blob,
-            ) {
-                continue;
-            }
-            out.push(rec.clone());
-        }
-        out
-    }
+    /// Parsed user-turn matching (JSONL, `/goal` rewrite, escaped quotes).
+    /// Not a raw file `contains` of decoded WAL text.
+    pub use crate::session::prompt_wal_recorded::{
+        operator_text_already_recorded, operator_text_matches_recorded, unwrap_user_query,
+        user_texts_from_chat_history_jsonl, wal_sends_missing_from_history,
+    };
 
     #[cfg(test)]
     mod tests {

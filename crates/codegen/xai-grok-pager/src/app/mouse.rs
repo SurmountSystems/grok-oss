@@ -30,6 +30,13 @@ impl AgentView {
         self.last_prompt_click_ms = Some(now);
         is_double
     }
+    /// Drop prompt double-click pairing (textarea timer and paste-chip
+    /// timer). A click from before Isolated Preview Exit or question
+    /// InputMode exit must not complete a double-click after reentry.
+    pub(super) fn clear_prompt_double_click_pairing(&mut self) {
+        self.last_prompt_click_ms = None;
+        self.prompt.clear_paste_chip_double_click();
+    }
     /// Handle mouse events: click-to-focus, forward to prompt textarea.
     ///
     /// Scroll events are handled at app level (not here).

@@ -218,17 +218,17 @@ See the [Plugins guide](09-plugins.md) for more on installing plugins that provi
 
 ## Skills are not a Python runtime
 
-Product skills are markdown procedures plus native Grok tools. They are not a Python runtime. Agents must not add `.py` helpers to a skill, and they must not invent ad-hoc Python to do skill work.
+Product skills are markdown procedures plus native Grok tools. They are not a Python runtime. Agents must not add `.py` helpers to a skill, and they must not invent ad-hoc Python to do skill work. Tool work is a named Rust function, an ACP tool, or a shipped CLI bin of that function. Skills must not generate arbitrary Python or Bash payloads and then run them.
 
 A restack that installs non-excepted Python into product skills, or that drops the Rust intercept for the allowlisted CLI forms, is a failed land.
 
-**Allowlisted intercept CLI forms.** Keep these exact command shapes so the bash tool can run embedded Rust and never spawn Python:
+**Allowlisted intercept CLI forms.** Keep these stub **names** so Grok Build skills can call them; grok-oss intercepts to Rust and never spawns Python:
 
-- `python3 .../implement/scripts/memory.py ...`
-- `python3 .../execute-plan/scripts/validate-plan.py ...`
-- `python3 .../resume-session/session_reader.py ...`
+- `python3 .../implement/scripts/memory.py ...` or `grok-oss-implement-memory ...`
+- `python3 .../execute-plan/scripts/validate-plan.py ...` or `grok-oss-plan-validate ...`
+- `python3 .../resume-session/session_reader.py ...` or `grok-oss-session-reader ...`
 
-Do not invent a second helper or read those files by hand.
+Grok Build compatibility is those CLI bins of the Rust functions, not a second Python runtime. Do not invent a second helper or read those files by hand.
 
 **Office and PDF exception.** Pre-reviewed scripts under the `docx`, `pptx`, `xlsx`, and `pdf` skills may stay. That exception is not a license to add new Python.
 

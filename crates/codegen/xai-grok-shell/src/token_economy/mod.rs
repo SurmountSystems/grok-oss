@@ -161,6 +161,7 @@ mod spend_path_tests {
     use tempfile::TempDir;
 
     #[test]
+    // Grok OSS: grok_oss.db Token Economy ledger must ingest usage.jsonl into local_usage_event and write reconciliation_run. This diverges from upstream xAI because schema-only grok_oss.db without /spend ingest is a failed land.
     fn spend_path_ingests_usage_jsonl_and_records_reconciliation() {
         let tmp = TempDir::new().unwrap();
         let db = tmp.path().join("grok_oss.db");

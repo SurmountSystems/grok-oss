@@ -1,17 +1,12 @@
 //! `grep` tool — new architecture (`Tool` trait).
 //!
-//! Wraps ripgrep to search file contents. Reads `Cwd` from Resources and
-//! truncation settings from its own `Params<GrepParams>`.
-//!
-//! The ripgrep binary resolution logic (`rg_path()`) is shared with the
-//! old implementation via `implementations::grep::ripgrep`.
+//! Searches file contents with the `grep` crate plus `ignore` (embedded
+//! ripgrep). Reads `Cwd` from Resources and truncation settings from its
+//! own `Params<GrepParams>`. grok-oss grep is embedded Rust, not a sidecar
+//! `rg`.
 
-use std::process::Stdio;
 use std::sync::LazyLock;
 use std::time::Duration;
-
-use tokio::io::AsyncReadExt;
-use tokio::process::{Child, ChildStderr, ChildStdout, Command};
 
 use crate::DEFAULT_TOOL_OUTPUT_BYTES;
 use crate::types::output::{GrepFileMatch, GrepLineMatch, GrepSearchOutput};
@@ -30,10 +25,10 @@ use crate::util::truncate::truncate_line;
 use serde::{Deserialize, Serialize};
 
 pub mod ripgrep;
+pub use ripgrep as embedded;
 
 // Re-export the shared GrokIntegerSchema from types module
 pub use crate::types::GrokIntegerSchema;
-use ripgrep::rg_path;
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, PartialEq, Default)]
 #[serde(rename_all = "snake_case")]
@@ -157,14 +152,9 @@ const FILE_COUNT_LIMIT: usize = 10_000;
 const FILE_COUNT_DEFAULT: usize = 500;
 pub const DEFAULT_MAX_CHARS_PER_LINE: usize = 1_000;
 
-/// Hard cap on bytes read from ripgrep's stdout (5 MB).
+/// Hard cap on bytes read from search stdout (5 MB). Tests still encode it.
+#[cfg(test)]
 const MAX_STDOUT_BYTES: usize = 5_000_000;
-
-/// After the line/byte budget is filled, how long to wait for one more byte to
-/// distinguish exact-fit (EOF) from overflow. Must stay far below the tool
-/// wall-clock timeout: an unbounded probe can block until the outer timeout
-/// and discard the already-buffered matches via `grep_timeout_output`.
-const EXACT_FIT_PROBE_TIMEOUT: Duration = Duration::from_millis(100);
 
 /// Default grep wall-clock timeout (seconds) on non-WSL platforms.
 const GREP_TIMEOUT_DEFAULT_SECS: u64 = 20;
@@ -276,10 +266,10 @@ impl xai_tool_runtime::Tool for GrepTool {
     }
 
     /// Streaming entry point. Gate OFF (default): byte-for-byte the blocking
-    /// [`GrepTool::run`] contract. Gate ON: spawn ripgrep, project each match
-    /// line via [`BodyStreamer`] (same projection [`finalize_grep`] re-derives
-    /// in batch) and emit `grep_match_chunk` deltas — the stream is a faithful
-    /// prefix of the terminal card body. Gated by
+    /// [`GrepTool::run`] contract. Gate ON: run the embedded search, project
+    /// each match line via [`BodyStreamer`] (same projection [`finalize_grep`]
+    /// re-derives in batch) and emit `grep_match_chunk` deltas — the stream is
+    /// a faithful prefix of the terminal card body. Gated by
     /// `WorkspaceViewerContext::stream_tool_progress`.
     async fn execute(
         &self,
@@ -331,9 +321,10 @@ impl xai_tool_runtime::Tool for GrepTool {
     ) -> Result<GrepSearchOutput, xai_tool_runtime::ToolError> {
         let started = std::time::Instant::now();
         let GrepReady {
-            mut child,
-            stdout_pipe,
-            stderr_pipe,
+            stdout_buf,
+            stdout_truncated,
+            stderr_buf,
+            exit_code,
             config,
         } = match prepare_grep(&ctx, &input).await? {
             GrepStep::Ready(ready) => ready,
@@ -344,68 +335,6 @@ impl xai_tool_runtime::Tool for GrepTool {
             }
         };
         tracing::Span::current().record("effective_head_limit", config.effective_head_limit as u64);
-
-        let timeout = grep_timeout();
-        let io_result = tokio::time::timeout(timeout, async {
-            // Read stdout until EOF, byte cap, or one line past the budget.
-            // Reading `effective_head_limit + 1` lines lets us distinguish an
-            // exact-fit result (not truncated) from an overflowing one, so we
-            // never flag truncation when there are exactly `effective_head_limit`
-            // lines — matching `finalize_grep`'s `> limit` check.
-            let (stdout_buf, stdout_truncated) = if let Some(stdout_pipe) = stdout_pipe {
-                read_rg_stdout_capped(stdout_pipe, config.effective_head_limit.saturating_add(1))
-                    .await
-            } else {
-                (Vec::new(), false)
-            };
-
-            // Kill `rg` **before** draining stderr when we stopped at the budget.
-            // Dropping `stdout_pipe` above closes the read end, but a tree-walking
-            // `rg` only observes that on its next match write; until then it holds
-            // stderr open, so `read_to_end` would block until `rg` exits or the
-            // outer timeout fires — the latter returns `grep_timeout_output` and
-            // drops the matches we already buffered (the same failure the
-            // exact-fit probe bound guards against, one step later).
-            if stdout_truncated {
-                let _ = child.start_kill();
-            }
-
-            // Read stderr (always small).
-            let mut stderr_buf = Vec::new();
-            if let Some(stderr_pipe) = stderr_pipe {
-                let _ = stderr_pipe
-                    .take(1_000_000)
-                    .read_to_end(&mut stderr_buf)
-                    .await;
-            }
-
-            (stdout_buf, stdout_truncated, stderr_buf)
-        })
-        .await;
-
-        let (stdout_buf, stdout_truncated, stderr_buf) = match io_result {
-            Ok(result) => result,
-            Err(_elapsed) => {
-                tracing::Span::current().record("timed_out", true);
-                tracing::Span::current().record("early_kill", true);
-                tracing::Span::current().record("wall_ms", started.elapsed().as_millis() as u64);
-                tracing::warn!(timeout_secs = timeout.as_secs(), "grep timed out");
-                let _ = child.start_kill();
-                crate::util::reap_killed_search_child(&mut child).await;
-                return Ok(grep_timeout_output(timeout.as_secs()));
-            }
-        };
-
-        // Truncated output means `rg` was already killed above — bounded reap,
-        // and the exit code is defined as 0. A natural EOF means rg is exiting,
-        // so the plain wait is prompt.
-        let exit_code = if stdout_truncated {
-            crate::util::reap_killed_search_child(&mut child).await;
-            0
-        } else {
-            child.wait().await.ok().and_then(|s| s.code()).unwrap_or(-1)
-        };
-
         tracing::Span::current().record("early_kill", stdout_truncated);
         tracing::Span::current().record("wall_ms", started.elapsed().as_millis() as u64);
         tracing::info!(
@@ -426,8 +355,8 @@ impl xai_tool_runtime::Tool for GrepTool {
     }
 }
 
-/// Streaming grep pipeline: spawn ripgrep, project each match line via
-/// `BodyStreamer`, and emit deltas before the terminal card.
+/// Streaming grep pipeline: run the embedded search, project each match line
+/// via `BodyStreamer`, and emit deltas before the terminal card.
 fn grep_progress_stream(
     ctx: xai_tool_runtime::ToolCallContext,
     input: GrepSearchInput,
@@ -437,15 +366,14 @@ fn grep_progress_stream(
     Box::pin(async_stream::stream! {
         let stream_started = std::time::Instant::now();
         let GrepReady {
-            mut child,
-            stdout_pipe,
-            stderr_pipe,
+            stdout_buf,
+            stdout_truncated,
+            stderr_buf,
+            exit_code,
             config,
         } = match prepare_grep(&ctx, &input).await {
             Ok(GrepStep::Ready(ready)) => ready,
             Ok(GrepStep::Early(out)) => {
-                // Mirror `run`'s Early arm so path-not-found / spawn short-circuits
-                // still populate the `tool.grep` span in the streaming (prod) path.
                 span.record("wall_ms", stream_started.elapsed().as_millis() as u64);
                 span.record("early_kill", false);
                 yield xai_tool_runtime::ToolStreamItem::Terminal(Ok(out));
@@ -457,181 +385,15 @@ fn grep_progress_stream(
             }
         };
 
-        // Raw bytes for the authoritative terminal card.
         span.record("effective_head_limit", config.effective_head_limit as u64);
-        let mut stdout_buf = Vec::with_capacity(MAX_STDOUT_BYTES.min(65_536));
-        let mut stdout_truncated = false;
-        // Incremental card-body formatter (deltas == terminal body).
-        let mut streamer = BodyStreamer::new(spec, &config);
-        let mut timed_out = false;
-        // Complete newlines accepted into `stdout_buf` (same budget as
-        // `read_rg_stdout_capped` / `finalize_grep`).
-        let mut complete_lines = 0usize;
-        // One deadline shared by stdout loop + stderr drain (same total
-        // budget as `run`).
-        let timeout = grep_timeout();
-        let deadline_at = tokio::time::Instant::now() + timeout;
-
-        if let Some(mut stdout_pipe) = stdout_pipe {
-            let mut tmp = [0u8; 8192];
-            // Deadline rides the `select!` (can't wrap a yielding block).
-            let deadline = tokio::time::sleep_until(deadline_at);
-            tokio::pin!(deadline);
-            loop {
-                tokio::select! {
-                    biased;
-                    _ = &mut deadline => {
-                        timed_out = true;
-                        break;
-                    }
-                    res = stdout_pipe.read(&mut tmp) => {
-                        let n = match res {
-                            Ok(0) => break,
-                            Ok(n) => n,
-                            Err(_) => break,
-                        };
-                        // Mirror `run`'s hard byte + line caps when filling
-                        // `stdout_buf`, then kill so rg stops walking the tree.
-                        // `+ 1`: read one line past the budget so truncation is
-                        // only flagged when there are genuinely MORE than
-                        // `effective_head_limit` lines (matches `run` /
-                        // `finalize_grep`). The extra line is dropped by
-                        // `BodyStreamer`/`finalize_grep`, never emitted.
-                        let (accepted, hit_cap) = accept_rg_stdout_chunk(
-                            &tmp[..n],
-                            stdout_buf.len(),
-                            complete_lines,
-                            config.effective_head_limit.saturating_add(1),
-                        );
-                        if accepted > 0 {
-                            complete_lines += tmp[..accepted]
-                                .iter()
-                                .filter(|&&b| b == b'\n')
-                                .count();
-                            stdout_buf.extend_from_slice(&tmp[..accepted]);
-                        }
-
-                        // Project + emit each newly completed line BEFORE the
-                        // exact-fit probe below: the probe reads into `tmp`,
-                        // overwriting the just-accepted bytes, so feeding after
-                        // it would stream corrupted data (the terminal card is
-                        // rebuilt from `stdout_buf`, but streamed deltas must
-                        // stay a faithful prefix of it).
-                        for p in streamer.feed(&tmp[..accepted]) {
-                            yield xai_tool_runtime::ToolStreamItem::Progress(p);
-                        }
-
-                        if hit_cap {
-                            // Same short exact-fit probe as `read_rg_stdout_capped`.
-                            // Use ONLY `EXACT_FIT_PROBE_TIMEOUT` — never the shared
-                            // tool `deadline_at`. Clamping the probe to `deadline_at`
-                            // and setting `timed_out` on expiry would force the
-                            // timeout terminal branch (banner, exit -1) for a
-                            // normal head-limit fill near the wall-clock edge.
-                            if accepted < n {
-                                stdout_truncated = true;
-                            } else {
-                                match tokio::time::timeout(
-                                    EXACT_FIT_PROBE_TIMEOUT,
-                                    stdout_pipe.read(&mut tmp),
-                                )
-                                .await
-                                {
-                                    Ok(Ok(0)) => stdout_truncated = false,
-                                    Ok(Ok(_)) => stdout_truncated = true,
-                                    Ok(Err(_)) => stdout_truncated = true,
-                                    // Probe budget only: head-limit truncation path
-                                    // (keep buffer, kill `rg` below). Never set
-                                    // `timed_out` here.
-                                    Err(_elapsed) => stdout_truncated = true,
-                                }
-                            }
-                        }
-
-                        // Also stop once the formatted body has hit its own
-                        // head/byte budget (may trip before raw line count when
-                        // max_output_bytes is small).
-                        if hit_cap || streamer.done {
-                            if streamer.done {
-                                stdout_truncated = true;
-                            }
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-
-        if timed_out {
-            span.record("timed_out", true);
-            span.record("early_kill", true);
-            span.record("wall_ms", stream_started.elapsed().as_millis() as u64);
-            let secs = timeout.as_secs();
-            span.in_scope(|| {
-                tracing::warn!(timeout_secs = secs, "grep timed out");
-            });
-            let _ = child.start_kill();
-            crate::util::reap_killed_search_child(&mut child).await;
-            // Timeout: finalize what was read (marked truncated) plus an
-            // explicit notice, so the stream isn't contradicted; with
-            // nothing streamed, fall back to the timeout-only card.
-            if stdout_buf.is_empty() {
-                yield xai_tool_runtime::ToolStreamItem::Terminal(Ok(grep_timeout_output(secs)));
-            } else {
-                if let Some(p) = streamer.finish() {
-                    yield xai_tool_runtime::ToolStreamItem::Progress(p);
-                }
-                let mut output = finalize_grep(stdout_buf, true, Vec::new(), 0, &config);
-                output.stdout.extend_from_slice(
-                    format!(
-                        "\nRipgrep search timed out after {}; \
-                         the matches above are partial. Try searching a more specific \
-                         path or pattern.",
-                        xai_tty_utils::format_human_duration(timeout)
-                    )
-                    .as_bytes(),
-                );
-                output.exit_code = -1;
-                yield xai_tool_runtime::ToolStreamItem::Terminal(Ok(output));
-            }
-            return;
-        }
         span.record("timed_out", false);
-
-        // Flush the final non-terminated segment (see `BodyStreamer::finish`).
+        let mut streamer = BodyStreamer::new(spec, &config);
+        for p in streamer.feed(&stdout_buf) {
+            yield xai_tool_runtime::ToolStreamItem::Progress(p);
+        }
         if let Some(p) = streamer.finish() {
             yield xai_tool_runtime::ToolStreamItem::Progress(p);
         }
-
-        // Kill the child **before** draining stderr when we stopped early
-        // (byte/line/format cap); rg may still be walking the tree and only
-        // notices the closed stdout on its next write, so a stderr drain first
-        // would stall until the deadline (up to the full timeout) even though we
-        // already have a full budget.
-        if stdout_truncated {
-            let _ = child.start_kill();
-        }
-
-        // stderr is small and never streamed; still bounded by the shared
-        // deadline as a backstop so a wedged child can't stall the stream.
-        let mut stderr_buf = Vec::new();
-        if let Some(stderr_pipe) = stderr_pipe {
-            let _ = tokio::time::timeout_at(
-                deadline_at,
-                stderr_pipe.take(1_000_000).read_to_end(&mut stderr_buf),
-            )
-            .await;
-        }
-
-        // Truncated output means `rg` was already killed above — bounded reap,
-        // and the exit code is defined as 0. A natural EOF means rg is exiting,
-        // so the plain wait is prompt.
-        let exit_code = if stdout_truncated {
-            crate::util::reap_killed_search_child(&mut child).await;
-            0
-        } else {
-            child.wait().await.ok().and_then(|s| s.code()).unwrap_or(-1)
-        };
 
         let wall_ms = stream_started.elapsed().as_millis() as u64;
         span.record("early_kill", stdout_truncated);
@@ -673,11 +435,12 @@ struct GrepFormatConfig {
     cwd_display: String,
 }
 
-/// A spawned ripgrep ready to be read, plus the resolved formatting config.
+/// Embedded search output plus the resolved formatting config.
 struct GrepReady {
-    child: Child,
-    stdout_pipe: Option<ChildStdout>,
-    stderr_pipe: Option<ChildStderr>,
+    stdout_buf: Vec<u8>,
+    stdout_truncated: bool,
+    stderr_buf: Vec<u8>,
+    exit_code: i32,
     config: GrepFormatConfig,
 }
 
@@ -720,13 +483,13 @@ async fn prepare_grep(
     let cwd_display = display_base.display().to_string();
 
     // Pre-check: if the search path doesn't exist, return enriched hints
-    // before rg runs. We intentionally pre-check with metadata() rather
-    // than parsing rg's stderr after the fact because rg lumps all errors
-    // under exit code 2 (path not found, invalid regex, bad glob, unknown
-    // file type, etc.). Distinguishing path-not-found would require
-    // matching on OS error strings in stderr, which is fragile. The
+    // before the embedded search runs. We intentionally pre-check with
+    // metadata() rather than parsing searcher errors after the fact
+    // because those errors lump path not found, invalid regex, bad glob,
+    // and unknown file type together. Distinguishing path-not-found would
+    // require matching on OS error strings, which is fragile. The
     // pre-check avoids that and keeps the exit-code-2 handler below
-    // unchanged for all other rg error classes.
+    // unchanged for all other error classes.
     if input.path.is_some()
         && let Err(e) = tokio::fs::metadata(&workdir).await
         && e.kind() == std::io::ErrorKind::NotFound
@@ -756,89 +519,80 @@ async fn prepare_grep(
     let output_mode = input.output_mode.clone().unwrap_or(OutputMode::Content);
     let effective_head_limit = resolve_effective_head_limit(input, &output_mode);
 
-    let rg_exec = rg_path();
-
-    let mut cmd = Command::new(rg_exec);
-    cmd.arg("--heading")
-        .arg("--with-filename")
-        .arg("--line-number")
-        .arg("--color=never")
-        .arg("--max-columns")
-        .arg("1000")
-        .arg("--max-columns-preview");
-
-    if input.case_insensitive {
-        cmd.arg("--ignore-case");
-    }
-
-    if let Some(glob) = &input.glob
-        && !glob.is_empty()
-    {
-        cmd.arg("--glob").arg(glob);
-    }
-
-    // Managed Read-deny globs become ripgrep excludes so a search never reads
-    // a policy-forbidden path — whether reached by a recursive walk or by a
-    // `glob` arg that targets a denied file. Added AFTER the caller's `--glob`
-    // so the exclude wins (ripgrep applies the last matching glob). An
-    // explicitly-passed denied `path` is blocked earlier by the permission
-    // manager (ripgrep searches explicit paths even against excludes).
-    for deny in &deny_read_globs {
-        cmd.arg("--glob").arg(format!("!{deny}"));
-    }
-
-    if let Some(t) = &input.r#type
-        && !t.is_empty()
-    {
-        cmd.arg("--type").arg(t);
-    }
-
-    if input.multiline {
-        cmd.arg("-U").arg("--multiline-dotall");
-    }
-
+    let mut before_context = 0usize;
+    let mut after_context = 0usize;
     if let Some(c) = input.context
         && c > 0
     {
-        cmd.arg("-C").arg(c.to_string());
+        before_context = c;
+        after_context = c;
     }
     if let Some(b) = input.before_context
         && b > 0
     {
-        cmd.arg("-B").arg(b.to_string());
+        before_context = b;
     }
     if let Some(a) = input.after_context
         && a > 0
     {
-        cmd.arg("-A").arg(a.to_string());
+        after_context = a;
     }
 
-    match output_mode {
-        OutputMode::FilesWithMatches => {
-            cmd.arg("-l");
+    let print = match output_mode {
+        OutputMode::FilesWithMatches => embedded::PrintMode::FilesWithMatches,
+        OutputMode::Count => embedded::PrintMode::Count,
+        OutputMode::Content => embedded::PrintMode::Content,
+    };
+
+    // Managed Read-deny globs become excludes so a search never reads a
+    // policy-forbidden path — whether reached by a recursive walk or by a
+    // glob that targets a denied file. An explicitly-passed denied `path`
+    // is blocked earlier by the permission manager.
+    let req = embedded::SearchRequest {
+        pattern: input.pattern.clone(),
+        path: workdir.clone(),
+        case_insensitive: input.case_insensitive,
+        literal: false,
+        glob: input.glob.clone(),
+        extra_globs: Vec::new(),
+        deny_globs: deny_read_globs.clone(),
+        file_type: input.r#type.clone(),
+        hidden: false,
+        no_ignore: false,
+        multiline: input.multiline,
+        before_context,
+        after_context,
+        max_filesize: Some(5 * 1024 * 1024),
+        max_columns: Some(1000),
+        print,
+        max_output_lines: Some(effective_head_limit.saturating_add(1)),
+    };
+
+    let timeout = grep_timeout();
+    let search = tokio::task::spawn_blocking(move || embedded::search_to_rg_stdout(&req));
+    let searched = match tokio::time::timeout(timeout, search).await {
+        Ok(join) => join,
+        Err(_elapsed) => {
+            tracing::warn!(timeout_secs = timeout.as_secs(), "grep timed out");
+            return Ok(GrepStep::Early(grep_timeout_output(timeout.as_secs())));
         }
-        OutputMode::Count => {
-            cmd.arg("-c");
+    };
+    let out = match searched {
+        Ok(Ok(o)) => o,
+        Ok(Err(e)) => {
+            return Ok(GrepStep::Early(GrepSearchOutput {
+                stdout: format!("Error calling tool: {} (exit 2, root: {})", e, cwd_display)
+                    .into_bytes(),
+                stderr: e.message.into_bytes(),
+                exit_code: 2,
+                match_count: 0,
+                file_matches: Vec::new(),
+            }));
         }
-        OutputMode::Content => {}
-    }
-
-    cmd.arg("-e").arg(&input.pattern);
-    cmd.arg(workdir.to_string_lossy().as_ref());
-    cmd.arg("--max-filesize").arg("5M");
-
-    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
-    crate::util::detach_search_command(&mut cmd);
-
-    #[allow(clippy::disallowed_methods)]
-    // search helper; killed and reaped with a bound on timeout/truncation,
-    // abandoned to the orphan reaper if unreapable (D-state)
-    let mut child = match cmd.spawn() {
-        Ok(c) => c,
         Err(e) => {
             return Ok(GrepStep::Early(GrepSearchOutput {
                 stdout: Vec::new(),
-                stderr: format!("Error calling tool: {}", e).into_bytes(),
+                stderr: format!("Error calling tool: {e}").into_bytes(),
                 exit_code: -1,
                 match_count: 0,
                 file_matches: Vec::new(),
@@ -846,12 +600,6 @@ async fn prepare_grep(
         }
     };
 
-    // Take pipes so child remains accessible for cleanup on timeout.
-    let stdout_pipe = child.stdout.take();
-    let stderr_pipe = child.stderr.take();
-
-    // Resolve truncation settings from tool-specific Params (static config; no
-    // dependency on the rg output, so it is resolved up front).
     let params = resources
         .lock()
         .await
@@ -867,10 +615,12 @@ async fn prepare_grep(
         .max_output_bytes
         .unwrap_or(DEFAULT_TOOL_OUTPUT_BYTES);
 
+    let exit_code = if out.truncated { 0 } else { out.exit_code };
     Ok(GrepStep::Ready(GrepReady {
-        child,
-        stdout_pipe,
-        stderr_pipe,
+        stdout_buf: out.bytes,
+        stdout_truncated: out.truncated,
+        stderr_buf: out.stderr,
+        exit_code,
         config: GrepFormatConfig {
             output_mode,
             effective_head_limit,
@@ -886,6 +636,7 @@ async fn prepare_grep(
 /// Used when a hard *byte* budget would otherwise cut mid-code-unit; line-budget
 /// stops already land on `\n` (ASCII), so they are always boundaries. Counting
 /// lines by `b'\n'` is UTF-8-safe (newlines are never multi-byte).
+#[cfg(test)]
 fn utf8_char_boundary_prefix_len(bytes: &[u8]) -> usize {
     match std::str::from_utf8(bytes) {
         Ok(_) => bytes.len(),
@@ -904,6 +655,7 @@ fn utf8_char_boundary_prefix_len(bytes: &[u8]) -> usize {
 /// to a UTF-8 char boundary so we never append a partial multi-byte sequence
 /// into `stdout_buf` (downstream uses `String::from_utf8_lossy`, but mid-char
 /// cuts also break incremental `BodyStreamer` line assembly).
+#[cfg(test)]
 fn accept_rg_stdout_chunk(
     chunk: &[u8],
     buf_len: usize,
@@ -939,59 +691,6 @@ fn accept_rg_stdout_chunk(
         return (safe, true);
     }
     (limited.len(), false)
-}
-
-/// Read `rg` stdout until EOF or a hard stop (byte cap / effective head_limit
-/// lines). Callers should kill the child when the returned truncated flag is
-/// set so `rg` does not keep walking the tree.
-/// When the line budget is filled exactly and the next read is EOF, `truncated`
-/// is **false** (exact fit). If more bytes remain after the budget, true.
-///
-/// The post-budget "exact-fit" probe is **time-bounded** ([`EXACT_FIT_PROBE_TIMEOUT`]).
-/// An unbounded `read` would hold the outer tool timeout and, on expiry, drop the
-/// already-buffered matches in favor of a timeout error card.
-async fn read_rg_stdout_capped(mut stdout_pipe: ChildStdout, max_lines: usize) -> (Vec<u8>, bool) {
-    let mut buf = Vec::with_capacity(MAX_STDOUT_BYTES.min(65_536));
-    let mut complete_lines = 0usize;
-    let mut truncated = false;
-    let mut tmp = [0u8; 8192];
-    loop {
-        match stdout_pipe.read(&mut tmp).await {
-            Ok(0) => break,
-            Ok(n) => {
-                let (accepted, hit_cap) =
-                    accept_rg_stdout_chunk(&tmp[..n], buf.len(), complete_lines, max_lines);
-                if accepted > 0 {
-                    complete_lines += tmp[..accepted].iter().filter(|&&b| b == b'\n').count();
-                    buf.extend_from_slice(&tmp[..accepted]);
-                }
-                if hit_cap {
-                    if accepted < n {
-                        truncated = true;
-                    } else {
-                        // Bounded probe: never wait for the full tool timeout here.
-                        match tokio::time::timeout(
-                            EXACT_FIT_PROBE_TIMEOUT,
-                            stdout_pipe.read(&mut tmp),
-                        )
-                        .await
-                        {
-                            Ok(Ok(0)) => truncated = false,
-                            Ok(Ok(_)) => truncated = true,
-                            Ok(Err(_)) => truncated = true,
-                            // No more data arrived quickly — assume overflow so the
-                            // caller kills `rg` and keeps the buffer (do not escalate
-                            // to the outer timeout path that drops matches).
-                            Err(_elapsed) => truncated = true,
-                        }
-                    }
-                    break;
-                }
-            }
-            Err(_) => break,
-        }
-    }
-    (buf, truncated)
 }
 
 /// Terminal card for a grep that exceeded its wall-clock timeout. Shared by the
@@ -2623,15 +2322,12 @@ mod tests {
         );
     }
 
-    /// A cancelled tool future drops the `Child` before any wait/kill path
-    /// runs; the spawn config must kill rg on drop.
-    #[cfg(unix)]
+    /// grok-oss grep is embedded Rust, not a sidecar `rg`. prepare_grep
+    /// returns search bytes, not a spawned child.
     #[tokio::test]
-    async fn dropping_spawned_grep_child_kills_rg() {
+    async fn prepare_grep_is_embedded_rust_not_a_sidecar_rg() {
         let tmp = TempDir::new().unwrap();
-        // Overflow the stdout pipe so rg blocks on write and stays alive until killed.
-        let line = format!("needle {}\n", "x".repeat(120));
-        fs::write(tmp.path().join("big.txt"), line.repeat(20_000)).unwrap();
+        fs::write(tmp.path().join("a.txt"), "needle\n").unwrap();
 
         let mut resources = Resources::new();
         resources.insert(Cwd(tmp.path().to_path_buf()));
@@ -2642,24 +2338,13 @@ mod tests {
             .expect("prepare_grep");
         let ready = match step {
             GrepStep::Ready(r) => r,
-            GrepStep::Early(out) => panic!("expected spawned rg, got early output: {out:?}"),
+            GrepStep::Early(out) => panic!("expected embedded search, got early output: {out:?}"),
         };
-        let pid = ready.child.id().expect("child pid");
-
-        // Hold the read end open (no EPIPE death) and drop the child mid-run.
-        let GrepReady {
-            child, stdout_pipe, ..
-        } = ready;
-        drop(child);
-
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        while !xai_tty_utils::process_not_running(pid) {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "rg (pid {pid}) still running 5s after its Child was dropped — leaked"
-            );
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-        drop(stdout_pipe);
+        let text = String::from_utf8_lossy(&ready.stdout_buf);
+        assert!(
+            text.contains("needle"),
+            "embedded grep must find the line without exec'ing rg: {text}"
+        );
+        assert_eq!(ready.exit_code, 0);
     }
 }

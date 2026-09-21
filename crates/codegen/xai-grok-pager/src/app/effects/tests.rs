@@ -142,6 +142,31 @@ fn format_acp_error_formats_http_500_dump() {
         );
 }
 #[test]
+fn format_acp_error_safety_refusal_must_not_paint_request_denied_403() {
+    let operator_body = "permission-denied: I can't help with that request.";
+    assert!(operator_body.contains("permission-denied: I can't help with that request."));
+    let err = acp::Error::internal_error()
+        .data(
+            serde_json::json!({
+            "message": operator_body,
+            "http_status": 403
+        }),
+        );
+    let msg = format_acp_error(&err, false);
+    assert!(
+        !msg.contains("Request denied (403)"),
+        "safety refusal must not be labeled HTTP 403, got {msg}"
+    );
+    assert!(
+        msg.contains("Safety refusal"),
+        "must paint safety refusal chrome, got {msg}"
+    );
+    assert!(
+        msg.contains("I can't help with that request"),
+        "must keep the refusal text, got {msg}"
+    );
+}
+#[test]
 fn format_acp_error_rate_limit_surfaces_detail_or_fallback() {
     use xai_grok_shell::sampling::error::{
         FREE_USAGE_USER_MESSAGE, RATE_LIMITED_ERROR_CODE,
@@ -812,7 +837,7 @@ fn successful_tui_billing_map_paints_included_period_percent_not_ellipsis() {
     let theme = crate::theme::Theme::default();
     let line = crate::views::credit_bar::credit_bar_line(&bal, false, &theme);
     let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-    assert_eq!(text, "included SuperGrok period limits · 36%");
+    assert_eq!(text, "SuperGrok period · 36%");
     assert!(
         !text.contains("...%"),
         "known included SuperGrok period usage must not paint the unknown placeholder"

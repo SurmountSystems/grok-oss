@@ -24,9 +24,23 @@ The agent exited plan mode without writing a plan.
 - **Exit** - abandon and turn plan mode off
 ";
 
+/// Isolated Preview body for `/plan --soft` before `exit_plan_mode` writes
+/// the secondary plan. Must be non-empty after trim so the markdown viewer
+/// accepts it. Must not copy leftover primary `plan.md`.
+pub const SECONDARY_PLAN_PLACEHOLDER: &str = "\
+# Secondary plan
+
+Soft planning. This Isolated Preview is a secondary plan. It does not reset the primary session plan.md.
+
+- Empty Enter never Approves
+- Comment then Approve works after exit_plan_mode writes this secondary plan
+";
+
 /// Status-line label while plan mode is active without a live reverse-request
 /// (idle / freeform dead end). Never return this while Revise/Clarify rewrite
-/// is in flight (see [`PLAN_REVISING_STATUS`] / [`PLAN_WAITING_UPDATED_STATUS`]).
+/// is in flight (see [`PLAN_REVISING_STATUS`] / [`PLAN_WAITING_UPDATED_STATUS`]),
+/// or while a plan-update turn is rewriting-wait
+/// ([`PLAN_REWRITE_WAIT_STATUS`]).
 /// Never return this while the side panel is shut (see [`PLAN_READY_STATUS`]).
 pub const PLAN_IDLE_REVIEW_STATUS: &str = "Plan written. Click or /view-plan";
 
@@ -67,6 +81,37 @@ pub const PLAN_REVISING_STATUS: &str = "Revising plan...";
 /// present yet. Same no-idle-chrome contract as revise-in-flight.
 pub const PLAN_WAITING_UPDATED_STATUS: &str = "Waiting for updated plan...";
 
+/// Status while a plan-update turn is rewriting `plan.md` (second `/plan`
+/// prompt). Isolated Preview stays docked as rewriting-wait. Idle Approve
+/// / Comment / Revise / Exit do not arm. Empty Enter never Approves.
+pub const PLAN_REWRITE_WAIT_STATUS: &str = "Rewriting plan...";
+
+/// Isolated Preview heading while a plan-update turn is in flight.
+pub const PLAN_REWRITE_WAIT_HEADING: &str = "Rewriting the plan";
+
+/// Isolated Preview body while a plan-update turn is rewriting `plan.md`.
+/// Quotes the Operator's second prompt. Does not paint leftover `plan.md`
+/// as a live present. Does not persist this chrome as session `plan.md`.
+pub fn isolated_preview_rewrite_wait_markdown(operator_prompt: &str) -> String {
+    let quoted = operator_prompt
+        .trim()
+        .lines()
+        .map(|line| format!("> {line}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let quoted = if quoted.is_empty() {
+        "> (empty)".to_string()
+    } else {
+        quoted
+    };
+    format!(
+        "# {PLAN_REWRITE_WAIT_HEADING}\n\n\
+         Isolated Preview is waiting while the mill rewrites `plan.md` from this Operator prompt:\n\n\
+         {quoted}\n\n\
+         Idle Approve, Comment, Revise, and Exit are not armed. Empty Enter never Approves.\n"
+    )
+}
+
 /// What decisive plan feedback is waiting on before decision chrome re-arms.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PlanFeedbackInFlight {
@@ -74,6 +119,9 @@ pub enum PlanFeedbackInFlight {
     Revising,
     /// Clarify (ACP questions / Interject answer-only).
     Clarifying,
+    /// `/plan` extra Operator text / plan-update turn. Isolated Preview
+    /// stays docked as rewriting-wait until a new `exit_plan_mode` present.
+    Updating,
 }
 
 impl PlanFeedbackInFlight {
@@ -82,6 +130,7 @@ impl PlanFeedbackInFlight {
         match self {
             Self::Revising => PLAN_REVISING_STATUS,
             Self::Clarifying => PLAN_WAITING_UPDATED_STATUS,
+            Self::Updating => PLAN_REWRITE_WAIT_STATUS,
         }
     }
 }
@@ -154,6 +203,15 @@ pub struct PlanApprovalViewState {
     /// Last non-slash Revise / Comment box text. Survives `/view-plan`,
     /// pane close, and resume replace. Not the pre-panel agent-prompt stash.
     pub feedback_draft: Option<String>,
+    /// Comment CTA Enter already stashed this compose for ride-Approve.
+    /// Keystroke snapshots also write `feedback_draft`; they must not count
+    /// as that Enter. A later matching Enter still SendPrompt.
+    pub comment_held_from_enter: bool,
+    /// Keep-draft is the next Operator turn because Isolated Preview was
+    /// closed, reopened, or restored after close. Live present `stash()` is
+    /// not this: idle notes already in the Operator box at present ride
+    /// click Approve as review comments.
+    pub keep_draft_is_next_operator_turn: bool,
     /// Local idle decision park: no live `exit_plan_mode` reverse-request.
     /// Approve / Revise / Quit still work; Revise Interjects a rewrite.
     pub is_local_idle_decision: bool,
@@ -196,6 +254,8 @@ impl PlanApprovalViewState {
             commenting_range: None,
             stashed_feedback_prompt: None,
             feedback_draft: None,
+            comment_held_from_enter: false,
+            keep_draft_is_next_operator_turn: false,
             is_local_idle_decision: false,
         }
     }
@@ -222,6 +282,8 @@ impl PlanApprovalViewState {
             commenting_range: None,
             stashed_feedback_prompt: None,
             feedback_draft: None,
+            comment_held_from_enter: false,
+            keep_draft_is_next_operator_turn: false,
             is_local_idle_decision: true,
         }
     }

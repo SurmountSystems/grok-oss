@@ -202,12 +202,30 @@ pub(super) fn handle_exit_plan_mode(
         agent.view_plan_requested = true;
         agent.prompt.set_text("");
     }
+    // Consume the rebuild dock marker even when Enter is send so a later
+    // empty-composer restore cannot inherit a leftover Isolated Preview open.
+    let isolated_preview_was_open = agent.session.session_id.as_ref().is_some_and(|sid| {
+        crate::slash::commands::plan::take_isolated_preview_open(
+            &agent.session.cwd.to_string_lossy(),
+            sid.0.as_ref(),
+        )
+    });
+    let send_armed_composer = !agent.prompt.text().trim().is_empty();
     let restore_open_pane = is_restore
-        && (agent.is_plan_viewer() || agent.line_viewer.is_some() || agent.view_plan_requested);
+        && !send_armed_composer
+        && (agent.is_plan_viewer()
+            || agent.line_viewer.is_some()
+            || agent.view_plan_requested
+            || isolated_preview_was_open);
 
     let mut carried_comments = Vec::new();
     let mut carried_next_comment_id = 0;
     let mut carried_feedback_draft = None;
+    if !is_restore {
+        // Isolated Preview view-only after Exit has no park. Drop the
+        // leftover markdown so the new present cannot keep a frozen body.
+        agent.line_viewer = None;
+    }
     if let Some(mut old) = agent.plan_approval_view.take() {
         tracing::warn!(
             old_tool_call_id = %old.tool_call_id,
@@ -259,8 +277,11 @@ pub(super) fn handle_exit_plan_mode(
 
     let keep_draft = !agent.prompt.text().trim().is_empty();
     let live_cursor = agent.prompt.cursor();
-    // Restore must not snapshot the Revise / Comment box as keep-draft
-    // review notes. Isolated present still Approves from Preview.
+    // Live present stashes via stash(). That stash match is not keep-draft
+    // for click Approve: idle notes already in the Operator box ride Approve
+    // as review comments. Restore copies text only and marks keep-draft as
+    // the next Operator turn (Enter SendPrompt, Approve does not wrap).
+    // stash() drains image chips.
     let stashed = if is_restore {
         crate::views::prompt_widget::StashedPrompt::default()
     } else {
@@ -277,6 +298,19 @@ pub(super) fn handle_exit_plan_mode(
         agent.latest_inline_plan_content = state.plan_content.clone();
     } else {
         agent.latest_inline_plan_content = None;
+    }
+    if let Some(ref body) = state.plan_content {
+        if agent.isolated_preview_shows_secondary_plan && source == PlanReviewSource::Inline {
+            agent.persist_session_plan_body_for(
+                xai_grok_shell::grok_oss::SECONDARY_PLAN_IDENTITY,
+                body,
+            );
+        } else {
+            if source == PlanReviewSource::FileBacked {
+                agent.isolated_preview_shows_secondary_plan = false;
+            }
+            agent.persist_session_plan_body(body);
+        }
     }
     // Live present re-arms decision CTAs after a prior Approve/Quit and
     // clears Revise/Clarify in-flight so CTAs arm once. Restore must not
@@ -302,6 +336,11 @@ pub(super) fn handle_exit_plan_mode(
     // `a` / `s` / `q` stay accelerators.
     if keep_draft {
         agent.prompt.set_cursor(live_cursor);
+        if is_restore && let Some(ref mut pav) = agent.plan_approval_view {
+            pav.stashed_prompt.text = agent.prompt.text().to_string();
+            pav.stashed_prompt.cursor = live_cursor;
+            pav.keep_draft_is_next_operator_turn = true;
+        }
     }
 
     agent.casual_commenting_range = None;
@@ -321,6 +360,20 @@ pub(super) fn handle_exit_plan_mode(
         // Isolated present is visual. Leave Preview so the composer stays
         // the agent prompt. Click Revise / Clarify / Comment to arm feedback.
         viewer.plan_mut().feedback_active = true;
+        viewer.plan_mut().show_action_buttons = true;
+        // Soft park stays a side panel. Modal park paints fullscreen Isolated
+        // Preview. Stay-after-present is the dock persist below, not this flag.
+        viewer.fullscreen = app.current_ui.plan_approval_force_modal();
+    }
+    // Isolated Preview must stay after present so Comment then Approve can
+    // run. Persist the dock so `/view-plan` and `/rebuild` reopen it.
+    agent.persist_session_plan_dock_open(agent.line_viewer.is_some());
+    if let Some(sid) = agent.session.session_id.as_ref() {
+        crate::slash::commands::plan::persist_isolated_preview_open(
+            &agent.session.cwd.to_string_lossy(),
+            sid.0.as_ref(),
+            agent.line_viewer.is_some(),
+        );
     }
     agent.restore_plan_feedback_draft_if_composer_lost();
     agent.persist_unsent_composer_draft();

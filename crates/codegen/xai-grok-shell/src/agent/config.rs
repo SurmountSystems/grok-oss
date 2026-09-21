@@ -1542,6 +1542,11 @@ pub struct Config {
     /// none. `true` opts in. Copied from `[subagents] allow_worktree`.
     #[serde(skip)]
     pub subagent_allow_worktree: bool,
+    /// L1 follow-up onto a still-running nested L2. Default true.
+    /// Copied from `[subagents] parent_follow_up`. Off is SpaceXAI
+    /// spawn/wait/`resume_from` completed-only.
+    #[serde(skip)]
+    pub subagent_parent_follow_up: bool,
     /// Whether web search is force-disabled via `--disable-web-search` CLI flag.
     /// When true, the web search tool is never added to the agent toolset
     /// regardless of available credentials.
@@ -1860,6 +1865,7 @@ impl Default for Config {
             subagent_roles: std::collections::HashMap::new(),
             subagent_personas: std::collections::HashMap::new(),
             subagent_allow_worktree: false,
+            subagent_parent_follow_up: true,
             disable_web_search: false,
             todo_gate: false,
             laziness_debug_log: None,
@@ -2173,6 +2179,7 @@ impl Config {
         self.subagent_roles = sa.roles;
         self.subagent_personas = sa.personas;
         self.subagent_allow_worktree = sa.allow_worktree;
+        self.subagent_parent_follow_up = sa.parent_follow_up;
         let env = std::env::var(crate::config::SubagentsConfig::ENV_MAX_DEPTH).ok();
         let remote = self
             .remote_settings
@@ -2207,7 +2214,7 @@ impl Config {
     /// Resolve all `#[serde(skip)]` runtime fields that have resolver functions.
     ///
     /// Call immediately after `new_from_toml_cfg()`. Fields resolved:
-    /// - subagents base layers (6 fields) via `SubagentsConfig::resolve`
+    /// - subagents base layers (7 fields) via `SubagentsConfig::resolve`
     /// - respect_gitignore via `ToolsConfig::resolve`
     /// - disable_zdr_incompatible_tools via `ToolsConfig::resolve`
     /// - managed_mcps_enabled via `ManagedMcpsConfig::resolve`

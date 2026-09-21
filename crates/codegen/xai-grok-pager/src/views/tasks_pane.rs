@@ -19,8 +19,8 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::app::agent::{BgTaskState, BgTaskStatus, ScheduledTaskInfo};
 use crate::app::subagent::{
-    SubagentInfo, format_context_badge, format_live_l3_count, format_subagent_label,
-    is_l2_list_row, live_l3_count, live_nested_specialist_list, live_subagent_list,
+    SubagentInfo, format_context_badge, format_live_l3_count, format_subagent_label_parts_among,
+    is_l2_list_row, listed_live_subagents, live_l3_count,
 };
 use crate::appearance::LayoutConfig;
 use crate::scrollback::layout::HorizontalLayout;
@@ -360,16 +360,18 @@ impl TaskEntry {
         }
     }
 
-    fn from_subagent(info: &SubagentInfo) -> Self {
-        Self::from_subagent_with_l3_count(info, 0)
-    }
-
-    fn from_subagent_with_l3_count(info: &SubagentInfo, live_l3: usize) -> Self {
+    fn from_subagent_with_l3_count(
+        info: &SubagentInfo,
+        live_l3: usize,
+        all: &[&SubagentInfo],
+    ) -> Self {
         let theme = Theme::current();
 
         // Single consolidated label (persona > role > subagent_type > tag >
-        // "general") plus description with any `[tag]` prefix stripped.
-        let (type_label, description) = format_subagent_label(info);
+        // "general") plus job description with any `[tag]` prefix stripped.
+        // Compact count is a separate span so truncation cannot become
+        // `112.6k token...`. Unit is implicit. Never the word `tokens`.
+        let (type_label, job_desc, compact) = format_subagent_label_parts_among(info, all);
         let model_suffix = info
             .model
             .as_deref()
@@ -413,10 +415,14 @@ impl TaskEntry {
             .then(|| info.wait_progress_label())
             .flatten();
         let shown_desc = if activity.is_some() {
-            crate::render::line_utils::truncate_str(&description, ACTIVITY_DESC_MAX_WIDTH)
+            crate::render::line_utils::truncate_str(&job_desc, ACTIVITY_DESC_MAX_WIDTH)
         } else {
-            description.clone()
+            job_desc.clone()
         };
+        let compact_suffix = compact
+            .as_ref()
+            .map(|c| format!(" ({c})"))
+            .unwrap_or_default();
 
         // Skip the trailing-space separator when the cleaned description is
         // empty (reachable when `info.description == "[tag]"`); otherwise we
@@ -425,11 +431,18 @@ impl TaskEntry {
         // The model is NOT rendered inline here — it's drawn right-aligned in
         // the overlay (just to the left of the elapsed/duration). The label
         // string below still includes the model so it remains searchable.
-        let type_sep = if description.is_empty() { "" } else { " " };
+        let type_sep = if job_desc.is_empty() && compact.is_none() {
+            ""
+        } else {
+            " "
+        };
         let mut spans = vec![
             Span::styled(format!("{type_label}{type_sep}"), type_style),
             Span::styled(shown_desc, desc_style),
         ];
+        if let Some(ref compact) = compact {
+            spans.push(Span::styled(format!(" ({compact})"), desc_style));
+        }
         if let Some(count) = format_live_l3_count(live_l3) {
             spans.push(Span::styled(
                 format!(" · {count}"),
@@ -446,11 +459,13 @@ impl TaskEntry {
         let l3_suffix = format_live_l3_count(live_l3)
             .map(|c| format!(" · {c}"))
             .unwrap_or_default();
-        let label = match (description.is_empty(), model_suffix.is_empty()) {
-            (true, true) => format!("{type_label}{l3_suffix}"),
-            (true, false) => format!("{type_label} {model_suffix}{l3_suffix}"),
-            (false, true) => format!("{type_label} {description}{l3_suffix}"),
-            (false, false) => format!("{type_label} {description} {model_suffix}{l3_suffix}"),
+        let label = match (job_desc.is_empty(), model_suffix.is_empty()) {
+            (true, true) => format!("{type_label}{compact_suffix}{l3_suffix}"),
+            (true, false) => format!("{type_label} {model_suffix}{compact_suffix}{l3_suffix}"),
+            (false, true) => format!("{type_label} {job_desc}{compact_suffix}{l3_suffix}"),
+            (false, false) => {
+                format!("{type_label} {job_desc} {model_suffix}{compact_suffix}{l3_suffix}")
+            }
         };
         let styled = Line::from(spans);
 
@@ -946,16 +961,12 @@ impl TasksPane {
             .values()
             .map(|info| info.child_session_id.as_ref())
             .collect();
-        let live = live_subagent_list(subagents.values());
-        let live = if live.is_empty() {
-            live_nested_specialist_list(subagents.values())
-        } else {
-            live
-        };
+        let live = listed_live_subagents(subagents.values());
+        let all: Vec<&SubagentInfo> = subagents.values().collect();
         for info in live {
             let n = live_l3_count(subagents.values(), info.child_session_id.as_ref());
             self.items
-                .push(TaskEntry::from_subagent_with_l3_count(info, n));
+                .push(TaskEntry::from_subagent_with_l3_count(info, n, &all));
         }
         if self.show_done {
             for info in subagents.values() {
@@ -965,7 +976,8 @@ impl TasksPane {
                 if !is_l2_list_row(info, &child_ids) {
                     continue;
                 }
-                self.items.push(TaskEntry::from_subagent(info));
+                self.items
+                    .push(TaskEntry::from_subagent_with_l3_count(info, 0, &all));
             }
         }
 
@@ -994,8 +1006,8 @@ impl TasksPane {
 
         // Sort: group by type first (subagents → tasks → monitors →
         // scheduled) so each kind is one contiguous block, then running
-        // before done within each group, then newest-first, then a stable
-        // id tiebreak. Monitors and scheduled/loops render under one shared
+        // before done within each group, then time, then a stable id
+        // tiebreak. Monitors and scheduled/loops render under one shared
         // "Watchers" header but keep distinct ranks (monitors first).
         self.items.sort_by(|a, b| {
             // 1. Group by type so each kind is one contiguous block:
@@ -1005,9 +1017,12 @@ impl TasksPane {
                 // 2. Running before done *within* each group.
                 .then_with(|| b.is_running().cmp(&a.is_running()))
                 // 3. Within a (group, run-state): subagents order by agent
-                //    type (alphabetical) then newest-first; tasks/monitors/
-                //    loops order newest-first. Avoids mixing SystemTime and
-                //    Instant across types.
+                //    type (alphabetical) then earliest-started first, so the
+                //    last painted `[↗]` is the latest-started unique row
+                //    (`click_tasks_open_on_last_painted_row_opens_subagent`).
+                //    Compacting `[↗]` can then sit above that last row.
+                //    Tasks/monitors/loops stay newest-first. Avoids mixing
+                //    SystemTime and Instant across types.
                 .then_with(|| match (a, b) {
                     (
                         TaskEntry::Agent {
@@ -1020,7 +1035,7 @@ impl TasksPane {
                             started_at: sb,
                             ..
                         },
-                    ) => ta.cmp(tb).then_with(|| sb.cmp(sa)),
+                    ) => ta.cmp(tb).then_with(|| sa.cmp(sb)),
                     (
                         TaskEntry::Scheduled { started_at: a, .. },
                         TaskEntry::Scheduled { started_at: b, .. },
@@ -1065,10 +1080,7 @@ impl TasksPane {
             .values()
             .filter(|t| t.status == BgTaskStatus::Running && !t.restored_from_replay)
             .count()
-            + subagents
-                .values()
-                .filter(|s| s.is_running() && s.workflow_run_id.is_none())
-                .count()
+            + listed_live_subagents(subagents.values()).len()
             + scheduled.len()
             + workflow_runs.iter().filter(|run| run.is_active()).count();
 
@@ -1171,10 +1183,7 @@ impl TasksPane {
             .values()
             .filter(|t| t.status == BgTaskStatus::Running)
             .count()
-            + subagents
-                .values()
-                .filter(|s| s.is_running() && s.workflow_run_id.is_none())
-                .count()
+            + listed_live_subagents(subagents.values()).len()
             + scheduled.len()
             + workflow_runs.iter().filter(|run| run.is_active()).count()
     }
@@ -1965,6 +1974,10 @@ mod tests {
     use std::sync::Arc;
     use std::time::Instant;
 
+    fn entry_from_subagent(info: &SubagentInfo) -> TaskEntry {
+        TaskEntry::from_subagent_with_l3_count(info, 0, std::slice::from_ref(&info))
+    }
+
     fn make_info() -> SubagentInfo {
         SubagentInfo {
             subagent_id: Arc::from("sa-1"),
@@ -1993,6 +2006,7 @@ mod tests {
             turn_count: None,
             tool_call_count: None,
             tokens_used: None,
+            tokens_past: 0,
             context_window_tokens: None,
             context_usage_pct: None,
             tools_used: Vec::new(),
@@ -2238,7 +2252,7 @@ mod tests {
 
         let mut info = make_info();
         info.child_session_id = "shared-id".into();
-        let agent = TaskEntry::from_subagent(&info);
+        let agent = entry_from_subagent(&info);
 
         assert_ne!(
             bg.stable_id(),
@@ -3196,7 +3210,7 @@ mod tests {
     #[test]
     fn entry_label_includes_type_badge() {
         let info = make_info();
-        let entry = TaskEntry::from_subagent(&info);
+        let entry = entry_from_subagent(&info);
         let label = match &entry {
             TaskEntry::Agent { label, .. } => label.as_str(),
             _ => panic!("expected Agent variant"),
@@ -3212,7 +3226,7 @@ mod tests {
         let mut info = make_info();
         info.persona = Some("researcher".into());
         info.model = Some("grok-3".into());
-        let entry = TaskEntry::from_subagent(&info);
+        let entry = entry_from_subagent(&info);
         let label = match &entry {
             TaskEntry::Agent { label, .. } => label.as_str(),
             _ => panic!("expected Agent variant"),
@@ -3230,7 +3244,7 @@ mod tests {
     #[test]
     fn entry_label_no_meta_when_empty() {
         let info = make_info();
-        let entry = TaskEntry::from_subagent(&info);
+        let entry = entry_from_subagent(&info);
         let label = match &entry {
             TaskEntry::Agent { label, .. } => label.as_str(),
             _ => panic!("expected Agent variant"),
@@ -3241,7 +3255,7 @@ mod tests {
     #[test]
     fn l2_row_shows_live_l3_count_not_specialist_names() {
         let info = make_info();
-        let entry = TaskEntry::from_subagent_with_l3_count(&info, 2);
+        let entry = TaskEntry::from_subagent_with_l3_count(&info, 2, std::slice::from_ref(&&info));
         let (label, styled) = match &entry {
             TaskEntry::Agent { label, styled, .. } => (label, styled),
             _ => panic!("expected Agent variant"),
@@ -3259,11 +3273,99 @@ mod tests {
         );
     }
 
+    /// Subagents list omits the word tokens. Truncation of a long job name
+    /// plus activity must not become `112.6k token...`. Compact count stays
+    /// in its own span. L3 counted separately.
+    #[test]
+    fn subagents_list_truncation_does_not_split_compact_count() {
+        let mut info = make_info();
+        info.description = Arc::from(
+            "Residual mill occupancy leftover primary plan rewrite that is longer than forty columns",
+        );
+        info.tokens_used = Some(112_600);
+        info.activity_label = Some("read_file".into());
+        let entry = TaskEntry::from_subagent_with_l3_count(&info, 1, std::slice::from_ref(&&info));
+        let (label, styled) = match &entry {
+            TaskEntry::Agent { label, styled, .. } => (label, styled),
+            _ => panic!("expected Agent variant"),
+        };
+        let joined: String = styled.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(
+            styled.spans.iter().any(|s| s.content.contains("112.6k")),
+            "compact count must survive truncation in its own span, got {styled:?}"
+        );
+        assert!(
+            !joined.contains("tokens") && !joined.contains("token"),
+            "Subagents list omits the word tokens; truncation must not become 112.6k token...; got {joined:?}"
+        );
+        assert!(
+            label.contains("112.6k") && !label.contains("tokens"),
+            "searchable label keeps 112.6k and omits tokens, got {label}"
+        );
+        assert!(
+            joined.contains("1 specialist"),
+            "L3 counted separately as specialist count, got {joined:?}"
+        );
+    }
+
+    /// Operator contract: L2 Subagents list row is present plus past plus
+    /// specialists, each unit once. Specialists still show separately.
+    #[test]
+    fn l2_row_paints_present_plus_past_atomic_total_including_specialists() {
+        let mut l2 = make_info();
+        l2.child_session_id = Arc::from("l2-residual");
+        l2.description = Arc::from("Residual");
+        l2.depth = Some(1);
+        l2.tokens_used = Some(25_000);
+        l2.tokens_past = 65_000;
+        let mut l3 = make_info();
+        l3.subagent_id = Arc::from("sa-l3");
+        l3.child_session_id = Arc::from("l3-specialist");
+        l3.parent_session_id = Some(Arc::from("l2-residual"));
+        l3.depth = Some(2);
+        l3.description = Arc::from("read Residual lockstep");
+        l3.tokens_used = Some(50_000);
+        let all = [&l2, &l3];
+        let entry = TaskEntry::from_subagent_with_l3_count(&l2, 1, &all);
+        let (label, styled) = match &entry {
+            TaskEntry::Agent { label, styled, .. } => (label, styled),
+            _ => panic!("expected Agent variant"),
+        };
+        let joined: String = styled.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(
+            joined.contains("140k"),
+            "L2 row must paint present plus past plus specialist 140k, got {joined:?}"
+        );
+        assert!(
+            !joined.contains("tokens") && !joined.contains("token"),
+            "Subagents list omits the word tokens; got {joined:?}"
+        );
+        assert!(
+            label.contains("140k") && !label.contains("tokens"),
+            "searchable L2 label keeps 140k and omits tokens, got {label}"
+        );
+        let l3_entry = TaskEntry::from_subagent_with_l3_count(&l3, 0, &all);
+        let l3_joined: String = match &l3_entry {
+            TaskEntry::Agent { styled, .. } => {
+                styled.spans.iter().map(|s| s.content.as_ref()).collect()
+            }
+            _ => panic!("expected Agent variant"),
+        };
+        assert!(
+            l3_joined.contains("50k"),
+            "specialists still show separately, got {l3_joined:?}"
+        );
+        assert!(
+            !l3_joined.contains("140k"),
+            "specialist row must not paint the L2 atomic total, got {l3_joined:?}"
+        );
+    }
+
     #[test]
     fn subagent_activity_suffix_renders_while_running_only() {
         let mut info = make_info();
         info.activity_label = Some("Running: cargo build".into());
-        let entry = TaskEntry::from_subagent(&info);
+        let entry = entry_from_subagent(&info);
         let (label, styled) = match &entry {
             TaskEntry::Agent { label, styled, .. } => (label, styled),
             _ => panic!("expected Agent variant"),
@@ -3278,7 +3380,7 @@ mod tests {
 
         // Finished rows drop the suffix even if a stale label lingers.
         info.finished = true;
-        let entry = TaskEntry::from_subagent(&info);
+        let entry = entry_from_subagent(&info);
         let styled = match &entry {
             TaskEntry::Agent { styled, .. } => styled,
             _ => panic!("expected Agent variant"),
@@ -3297,7 +3399,7 @@ mod tests {
         let mut info = make_info();
         info.activity_label = Some("Preparing search_replace…".into());
         info.tools_used = vec![Arc::from("read_file")];
-        let entry = TaskEntry::from_subagent(&info);
+        let entry = entry_from_subagent(&info);
         let styled = match &entry {
             TaskEntry::Agent { styled, .. } => styled,
             _ => panic!("expected Agent variant"),
@@ -3319,7 +3421,7 @@ mod tests {
         let mut info = make_info();
         info.description = Arc::from(long_desc.as_str());
         info.activity_label = Some("Thinking".into());
-        let entry = TaskEntry::from_subagent(&info);
+        let entry = entry_from_subagent(&info);
         let (label, styled) = match &entry {
             TaskEntry::Agent { label, styled, .. } => (label, styled),
             _ => panic!("expected Agent variant"),
@@ -3336,7 +3438,7 @@ mod tests {
 
         // Without an activity suffix the description renders uncapped.
         info.activity_label = None;
-        let entry = TaskEntry::from_subagent(&info);
+        let entry = entry_from_subagent(&info);
         let styled = match &entry {
             TaskEntry::Agent { styled, .. } => styled,
             _ => panic!("expected Agent variant"),
@@ -3665,6 +3767,73 @@ mod tests {
         assert_eq!(
             pane.running_count(&BTreeMap::new(), &subagents, &HashMap::new(), &runs),
             1
+        );
+    }
+
+    /// Header sparkler, Subagents N, and footer N subagents share one
+    /// running-only filter. An L2 plus its live L3 counts as one listed
+    /// row, not two.
+    #[test]
+    fn running_count_matches_listed_live_l2_not_l3() {
+        let mut pane = TasksPane::new();
+        let mut l2 = make_info();
+        l2.subagent_id = Arc::from("l2-coord");
+        l2.child_session_id = Arc::from("l2-coord");
+        l2.description = Arc::from("coordinate the slice");
+        l2.parent_session_id = Some(Arc::from("sess-l1"));
+        l2.depth = Some(1);
+        l2.finished = false;
+        let mut l3 = make_info();
+        l3.subagent_id = Arc::from("l3-grep");
+        l3.child_session_id = Arc::from("l3-grep");
+        l3.description = Arc::from("search the crate");
+        l3.parent_session_id = Some(Arc::from("l2-coord"));
+        l3.depth = Some(2);
+        l3.finished = false;
+        let mut done = make_info();
+        done.subagent_id = Arc::from("l2-done");
+        done.child_session_id = Arc::from("l2-done");
+        done.description = Arc::from("already exited");
+        done.parent_session_id = Some(Arc::from("sess-l1"));
+        done.depth = Some(1);
+        done.finished = true;
+        let mut subagents = HashMap::new();
+        subagents.insert("l2-coord".to_string(), l2);
+        subagents.insert("l3-grep".to_string(), l3);
+        subagents.insert("l2-done".to_string(), done);
+        pane.sync(
+            &BTreeMap::new(),
+            &subagents,
+            &HashMap::new(),
+            None,
+            &HashSet::new(),
+            &[],
+        );
+        let listed = listed_live_subagents(subagents.values());
+        assert_eq!(
+            listed.len(),
+            1,
+            "listed live rows must be the L2 only, got {:?}",
+            listed
+                .iter()
+                .map(|i| i.child_session_id.as_ref())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(listed[0].child_session_id.as_ref(), "l2-coord");
+        assert_eq!(
+            pane.running_count(&BTreeMap::new(), &subagents, &HashMap::new(), &[]),
+            1,
+            "running_count must match listed live L2 rows, not L2+L3"
+        );
+        let subagent_items: Vec<_> = pane
+            .items
+            .iter()
+            .filter(|e| matches!(e, TaskEntry::Agent { .. }))
+            .collect();
+        assert_eq!(
+            subagent_items.len(),
+            1,
+            "Subagents group must paint one live L2 row, got {subagent_items:?}"
         );
     }
 

@@ -46,6 +46,7 @@ const ALL_SETTINGS_EXERCISED: &[&str] = &[
     "render_mermaid",
     "multiline_mode",
     "composer_multiline",
+    "allow_session_multiline",
     "permission_mode",
     "default_model",
     "default_reasoning_effort",
@@ -67,6 +68,9 @@ const ALL_SETTINGS_EXERCISED: &[&str] = &[
     "scrub_ascii_punct",
     "ulid_session_ids",
     "allow_worktree",
+    "turbo_planning",
+    "process_rule_reminders_enabled",
+    "process_rule_reminders",
     "bubble_copy_buttons",
     "plan_approval_park",
     "economic_mode",
@@ -172,9 +176,115 @@ fn matrix_is_subset_of_registry() {
     }
 }
 
+/// Keyboard Space on `turbo_planning` (Bool, default ON) emits the typed setter.
+/// Product `from_typed_setter` maps `SetTurboPlanning` to `SetBool`.
+#[test]
+fn turbo_planning_keyboard_space_emits_typed_setter() {
+    let mut s = make_state();
+    navigate_to(&mut s, "turbo_planning");
+    let outcome = handle_settings_key(&mut s, &press(KeyCode::Char(' ')));
+    match outcome {
+        SettingsKeyOutcome::SetBool {
+            key: "turbo_planning",
+            value: false,
+        } => {}
+        other => panic!("expected SetBool for turbo_planning, got {other:?}"),
+    }
+}
+
+/// Mouse click on `turbo_planning` emits the same typed setter as Space.
+#[test]
+fn turbo_planning_mouse_click_emits_typed_setter() {
+    let mut s = make_state();
+    navigate_to(&mut s, "turbo_planning");
+    let outcome = click_selected_row(&mut s);
+    match outcome {
+        SettingsKeyOutcome::SetBool {
+            key: "turbo_planning",
+            value: false,
+        } => {}
+        other => panic!("expected SetBool for turbo_planning from mouse, got {other:?}"),
+    }
+}
+
+/// Keyboard Space on `process_rule_reminders_enabled` (Bool) emits the typed setter.
+#[test]
+fn process_rule_reminders_enabled_keyboard_space_emits_typed_setter() {
+    let mut s = make_state();
+    navigate_to(&mut s, "process_rule_reminders_enabled");
+    let outcome = handle_settings_key(&mut s, &press(KeyCode::Char(' ')));
+    match outcome {
+        SettingsKeyOutcome::SetBool {
+            key: "process_rule_reminders_enabled",
+            value: false,
+        } => {}
+        other => panic!("expected SetBool for process_rule_reminders_enabled, got {other:?}"),
+    }
+}
+
+/// Mouse click on `process_rule_reminders_enabled` emits the same typed setter as Space.
+#[test]
+fn process_rule_reminders_enabled_mouse_click_emits_typed_setter() {
+    let mut s = make_state();
+    navigate_to(&mut s, "process_rule_reminders_enabled");
+    let outcome = click_selected_row(&mut s);
+    match outcome {
+        SettingsKeyOutcome::SetBool {
+            key: "process_rule_reminders_enabled",
+            value: false,
+        } => {}
+        other => {
+            panic!("expected SetBool for process_rule_reminders_enabled from mouse, got {other:?}")
+        }
+    }
+}
+
+/// Keyboard Enter on `process_rule_reminders` (String) starts value edit.
+#[test]
+fn process_rule_reminders_keyboard_enter_starts_edit() {
+    let mut s = make_state();
+    navigate_to(&mut s, "process_rule_reminders");
+    let outcome = handle_settings_key(&mut s, &press(KeyCode::Enter));
+    assert!(
+        matches!(outcome, SettingsKeyOutcome::Changed),
+        "Enter on process_rule_reminders must start edit, got {outcome:?}"
+    );
+    assert!(
+        !matches!(s.mode(), SettingsModalMode::Browse),
+        "expected value-edit mode after Enter on process_rule_reminders"
+    );
+}
+
+/// Mouse click on `process_rule_reminders` starts the same value edit as Enter.
+#[test]
+fn process_rule_reminders_mouse_click_starts_edit() {
+    let mut s = make_state();
+    navigate_to(&mut s, "process_rule_reminders");
+    let outcome = click_selected_row(&mut s);
+    assert!(
+        matches!(outcome, SettingsKeyOutcome::Changed),
+        "mouse on process_rule_reminders must start edit, got {outcome:?}"
+    );
+    assert!(
+        !matches!(s.mode(), SettingsModalMode::Browse),
+        "expected value-edit mode after mouse on process_rule_reminders"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+fn click_selected_row(s: &mut SettingsModalState) -> SettingsKeyOutcome {
+    synth_rects(s);
+    let mouse = crossterm::event::MouseEvent {
+        kind: MouseEventKind::Down(crossterm::event::MouseButton::Left),
+        column: 8,
+        row: s.selected as u16,
+        modifiers: KeyModifiers::NONE,
+    };
+    handle_settings_mouse(s, mouse.kind, mouse.column, mouse.row)
+}
 
 fn make_state() -> SettingsModalState {
     // Voice rows are hidden when the process gate is off (default until startup).
@@ -309,6 +419,12 @@ fn assert_set_bool_action(outcome: SettingsKeyOutcome, key: &str, expected: bool
             assert_eq!(
                 b, expected,
                 "SetComposerMultiline value differs from expected"
+            )
+        }
+        ("allow_session_multiline", Action::SetAllowSessionMultiline(b)) => {
+            assert_eq!(
+                b, expected,
+                "SetAllowSessionMultiline value differs from expected"
             )
         }
         ("vim_mode", Action::SetVimMode(b)) => {
@@ -1046,6 +1162,18 @@ fn slash_enters_filter_mode_and_chars_go_to_query_no_action_leak() {
             }
             SettingsKeyOutcome::ActionThenClose(a) => {
                 panic!("filter mode leaked ActionThenClose({a:?}) for char {c:?}");
+            }
+            SettingsKeyOutcome::SetBool { key, value } => {
+                let outcome = SettingsKeyOutcome::SetBool { key, value };
+                if let Some(a) = outcome.typed_dispatch_action() {
+                    panic!("filter mode leaked Action({a:?}) via SetBool for char {c:?}");
+                }
+            }
+            SettingsKeyOutcome::SetString { key, value } => {
+                let outcome = SettingsKeyOutcome::SetString { key, value };
+                if let Some(a) = outcome.typed_dispatch_action() {
+                    panic!("filter mode leaked Action({a:?}) via SetString for char {c:?}");
+                }
             }
             SettingsKeyOutcome::Close => {
                 panic!("filter mode unexpectedly closed on char {c:?}");
@@ -1991,6 +2119,7 @@ fn registry_kind_membership_through_pr_14() {
             "display_refresh_auto_cadence",
             "multiline_mode",
             "composer_multiline",
+            "allow_session_multiline",
             "prompt_suggestions",
             "respect_manual_folds",
             "show_thinking_blocks",
@@ -1999,6 +2128,8 @@ fn registry_kind_membership_through_pr_14() {
             "scrub_ascii_punct",
             "ulid_session_ids",
             "allow_worktree",
+            "turbo_planning",
+            "process_rule_reminders_enabled",
             "bubble_copy_buttons",
             "auto_run_implement",
             "economic_mode",
@@ -2065,10 +2196,10 @@ fn registry_kind_membership_through_pr_14() {
     );
 
     let string_keys = by_kind.remove("String").unwrap_or_default();
-    assert!(
-        string_keys.is_empty(),
-        "no String-kind settings should remain — `default_model` + `fork_secondary_model` \
-         migrated to DynamicEnum; got: {string_keys:?}",
+    assert_eq!(
+        string_keys,
+        vec!["process_rule_reminders"],
+        "String kind membership drift",
     );
 
     let dynamic_enum_keys = by_kind.remove("DynamicEnum").unwrap_or_default();
@@ -2166,6 +2297,7 @@ fn defaults_round_trip_through_registry() {
     xai_grok_pager::appearance::cache::set_scrub_ascii_punct(true);
     xai_grok_pager::appearance::cache::set_ulid_session_ids(true);
     xai_grok_pager::appearance::cache::set_allow_worktree(false);
+    xai_grok_pager::appearance::cache::set_turbo_planning(true);
     xai_grok_pager::appearance::cache::set_bubble_copy_buttons(true);
     xai_grok_pager::appearance::cache::set_plan_approval_force_modal(false);
     xai_grok_pager::appearance::cache::set_prompt_suggestions(true);
@@ -2209,6 +2341,7 @@ fn defaults_round_trip_through_registry() {
             "render_mermaid" => SettingValue::Enum("auto"),
             "multiline_mode" => SettingValue::Bool(false),
             "composer_multiline" => SettingValue::Bool(true),
+            "allow_session_multiline" => SettingValue::Bool(true),
             "permission_mode" => SettingValue::Enum("ask"),
             "default_model" => SettingValue::String(String::new()),
             "default_reasoning_effort" => SettingValue::Enum("medium"),
@@ -2234,6 +2367,9 @@ fn defaults_round_trip_through_registry() {
             "scrub_ascii_punct" => SettingValue::Bool(true),
             "ulid_session_ids" => SettingValue::Bool(true),
             "allow_worktree" => SettingValue::Bool(false),
+            "turbo_planning" => SettingValue::Bool(true),
+            "process_rule_reminders_enabled" => SettingValue::Bool(true),
+            "process_rule_reminders" => SettingValue::String(String::new()),
             "bubble_copy_buttons" => SettingValue::Bool(true),
             "plan_approval_park" => SettingValue::Enum("soft"),
             "prompt_suggestions" => SettingValue::Bool(true),
@@ -2327,6 +2463,7 @@ fn settings_value_payload_matches_kind() {
             | SettingsKeyOutcome::Action(Action::SetSimpleMode(_))
             | SettingsKeyOutcome::Action(Action::SetMultilineMode(_))
             | SettingsKeyOutcome::Action(Action::SetComposerMultiline(_))
+            | SettingsKeyOutcome::Action(Action::SetAllowSessionMultiline(_))
             | SettingsKeyOutcome::Action(Action::SetVimMode(_))
             | SettingsKeyOutcome::Action(Action::SetRememberToolApprovals(_))
             | SettingsKeyOutcome::Action(Action::SetAskUserQuestionTimeoutEnabled(_))
@@ -2339,6 +2476,14 @@ fn settings_value_payload_matches_kind() {
             | SettingsKeyOutcome::Action(Action::SetScrubAsciiPunct(_))
             | SettingsKeyOutcome::Action(Action::SetUlidSessionIds(_))
             | SettingsKeyOutcome::Action(Action::SetAllowWorktree(_))
+            | SettingsKeyOutcome::SetBool {
+                key: "turbo_planning",
+                ..
+            }
+            | SettingsKeyOutcome::SetBool {
+                key: "process_rule_reminders_enabled",
+                ..
+            }
             | SettingsKeyOutcome::Action(Action::SetBubbleCopyButtons(_))
             | SettingsKeyOutcome::Action(Action::SetPromptSuggestions(_))
             | SettingsKeyOutcome::Action(Action::SetAutoRunImplement(_))
@@ -3247,6 +3392,47 @@ fn composer_multiline_renders_under_editor_category_shell_owned() {
             assert!(*default, "composer_multiline must default ON")
         }
         other => panic!("expected Bool kind for composer_multiline, got {other:?}"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// `allow_session_multiline` (SHELL-owned persist; default on)
+//
+// Grok OSS: Operator: gate so slash / Ctrl+M / Multiline settings cannot
+// turn session Multiline on. Distinct from composer_multiline.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn allow_session_multiline_space_dispatches_typed_setter() {
+    xai_grok_pager::appearance::cache::set_allow_session_multiline(true);
+    let mut s = make_state();
+    navigate_to(&mut s, "allow_session_multiline");
+    let outcome = handle_settings_key(&mut s, &press(KeyCode::Char(' ')));
+    assert_set_bool_action(outcome, "allow_session_multiline", false);
+    xai_grok_pager::appearance::cache::set_allow_session_multiline(true);
+}
+
+#[test]
+fn allow_session_multiline_renders_under_editor_category_shell_owned() {
+    let reg = SettingsRegistry::defaults();
+    let meta = reg
+        .find("allow_session_multiline")
+        .expect("allow_session_multiline must be registered");
+    assert_eq!(
+        meta.category,
+        SettingCategory::Editor,
+        "allow_session_multiline must live under Editor"
+    );
+    assert_eq!(
+        meta.owner,
+        SettingOwner::Shell,
+        "allow_session_multiline must be SHELL-owned so it persists"
+    );
+    match &meta.kind {
+        SettingKind::Bool { default } => {
+            assert!(*default, "allow_session_multiline must default ON")
+        }
+        other => panic!("expected Bool kind for allow_session_multiline, got {other:?}"),
     }
 }
 
@@ -7956,8 +8142,8 @@ fn prompt_suggestions_renders_under_editor_category_shell_owned() {
         SettingKind::Bool { default } => assert!(*default, "default must be true"),
         other => panic!("expected Bool kind for prompt_suggestions, got {other:?}"),
     }
-    // Session Multiline, then persist composer_multiline, then prompt
-    // suggestions.
+    // Session Multiline, then composer_multiline, then allow_session_multiline,
+    // then prompt suggestions.
     let keys: Vec<&str> = reg
         .all()
         .iter()
@@ -7972,6 +8158,10 @@ fn prompt_suggestions_renders_under_editor_category_shell_owned() {
         .iter()
         .position(|k| *k == "composer_multiline")
         .expect("composer_multiline in Editor");
+    let allow_idx = keys
+        .iter()
+        .position(|k| *k == "allow_session_multiline")
+        .expect("allow_session_multiline in Editor");
     let prompt_idx = keys
         .iter()
         .position(|k| *k == "prompt_suggestions")
@@ -7984,8 +8174,14 @@ fn prompt_suggestions_renders_under_editor_category_shell_owned() {
     );
     assert_eq!(
         composer_idx + 1,
+        allow_idx,
+        "allow_session_multiline must sit immediately below composer_multiline; \
+         Editor order: {keys:?}"
+    );
+    assert_eq!(
+        allow_idx + 1,
         prompt_idx,
-        "prompt_suggestions must sit immediately below composer_multiline; \
+        "prompt_suggestions must sit immediately below allow_session_multiline; \
          Editor order: {keys:?}"
     );
 }
@@ -8280,6 +8476,7 @@ fn collapsed_edit_blocks_renders_under_appearance_category_shell_owned() {
 // Unread Surmount keys restored after the 1.0.3 restack
 // ---------------------------------------------------------------------------
 
+// Grok OSS: Space on hide_header dispatches the typed /settings setter. This diverges from upstream xAI because FORK.md land class 2 and catalog § 2 pin hide_header as a shipped surface, not serde-only.
 #[test]
 fn hide_header_space_dispatches_typed_setter() {
     xai_grok_pager::appearance::cache::set_hide_header(false);
@@ -8291,6 +8488,7 @@ fn hide_header_space_dispatches_typed_setter() {
 }
 
 #[test]
+// Grok OSS: mouse click on hide_header two-stage toggles the shipped /settings row. This diverges from upstream xAI because FORK.md land class 2 pins hide_header as a runtime reader plus settings row.
 fn hide_header_mouse_click_two_stage_toggles() {
     xai_grok_pager::appearance::cache::set_hide_header(false);
     let mut s = make_state();
@@ -8317,6 +8515,7 @@ fn hide_header_mouse_click_two_stage_toggles() {
 }
 
 #[test]
+// Grok OSS: Space on always_expand_thinking dispatches the typed /settings setter. This diverges from upstream xAI because FORK.md land class 2 pins always-expand thinking as a shipped surface.
 fn always_expand_thinking_space_dispatches_typed_setter() {
     xai_grok_pager::appearance::cache::set_always_expand_thinking(false);
     let mut s = make_state();
@@ -8327,6 +8526,7 @@ fn always_expand_thinking_space_dispatches_typed_setter() {
 }
 
 #[test]
+// Grok OSS: mouse click on always_expand_thinking two-stage toggles the shipped /settings row. This diverges from upstream xAI because FORK.md land class 2 pins always-expand thinking as a runtime reader.
 fn always_expand_thinking_mouse_click_two_stage_toggles() {
     xai_grok_pager::appearance::cache::set_always_expand_thinking(false);
     let mut s = make_state();
@@ -8353,6 +8553,7 @@ fn always_expand_thinking_mouse_click_two_stage_toggles() {
 }
 
 #[test]
+// Grok OSS: Space on scrub_ascii_punct dispatches the typed /settings setter. This diverges from upstream xAI because FORK.md land class 2 pins ASCII scrub at launch as a shipped surface.
 fn scrub_ascii_punct_space_dispatches_typed_setter() {
     xai_grok_pager::appearance::cache::set_scrub_ascii_punct(true);
     let mut s = make_state();
@@ -8425,6 +8626,7 @@ fn ulid_session_ids_mouse_click_two_stage_toggles() {
 }
 
 #[test]
+// Grok OSS: Space on allow_worktree dispatches the typed /settings setter. This diverges from upstream xAI because FORK.md land class 2 pins worktrees as a shipped surface.
 fn allow_worktree_space_dispatches_typed_setter() {
     xai_grok_pager::appearance::cache::set_allow_worktree(false);
     let mut s = make_state();
@@ -8461,6 +8663,7 @@ fn allow_worktree_mouse_click_two_stage_toggles() {
 }
 
 #[test]
+// Grok OSS: Space on bubble_copy_buttons dispatches the typed /settings setter. This diverges from upstream xAI because FORK.md land class 2 pins bubble copy as a shipped surface.
 fn bubble_copy_buttons_space_dispatches_typed_setter() {
     xai_grok_pager::appearance::cache::set_bubble_copy_buttons(true);
     let mut s = make_state();
@@ -8497,6 +8700,7 @@ fn bubble_copy_buttons_mouse_click_two_stage_toggles() {
 }
 
 #[test]
+// Grok OSS: plan-approval park picker nav does not dispatch a preview. This diverges from upstream xAI because FORK.md land class 2 pins plan park as a shipped /settings surface.
 fn plan_approval_park_picker_nav_does_not_dispatch_preview() {
     for nav_key in &[
         KeyCode::Down,

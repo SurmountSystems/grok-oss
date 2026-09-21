@@ -1,18 +1,35 @@
 #![cfg_attr(rustfmt, rustfmt::skip)]
     use super::*;
 
-    /// Mid-turn `exit_plan_mode` (not restore) still auto-opens the pane.
+    /// Named contract (operator): live `exit_plan_mode` present-park docks
+    /// Isolated Preview and must not cancel nested L2s. Nested
+    /// `subagent_sessions` stay Working: `pending_kill` false, `finished`
+    /// false, no `Effect::CancelTurn` from the dock.
     #[test]
     fn live_exit_plan_mode_present_still_docks_side_panel() {
+        use crate::app::actions::Effect;
+
         let mut app = make_app_with_agent("sess-1");
         {
             let agent = app.agents.get_mut(&AgentId(0)).unwrap();
             seed_pending_tool(agent, "create-plan-call", "CreatePlan");
+            agent.subagent_sessions.insert(
+                "child-l2".into(),
+                make_subagent_info("child-sess"),
+            );
         }
         let (ext, _rx) =
             make_exit_plan_ext_with_tool_call_id("create-plan-call", Some("# Live present"));
 
         assert!(handle_exit_plan_mode(ext, &mut app));
+        assert!(
+            app.pending_effects.iter().all(|e| !matches!(
+                e,
+                Effect::CancelTurn { .. }
+            )),
+            "present-park must not emit Effect::CancelTurn, got {:?}",
+            app.pending_effects
+        );
         let agent = app.agents.get(&AgentId(0)).unwrap();
         assert!(agent.plan_approval_view.is_some());
         assert!(
@@ -22,6 +39,18 @@
         assert_eq!(
             agent.plan_loop_status_label(),
             Some("Plan ready. Side panel open"),
+        );
+        assert!(
+            !agent.plan_decision_resolved,
+            "present is not Approve; present-park must not resolve the plan"
+        );
+        let nested = agent
+            .subagent_sessions
+            .get("child-l2")
+            .expect("present-park must keep the nested L2 session");
+        assert!(
+            !nested.pending_kill && !nested.finished,
+            "nested L2 must stay Working; present-park is not Cancelling"
         );
     }
 
@@ -103,6 +132,156 @@
         let raw = response.expect("waiter response Ok");
         let parsed: serde_json::Value = serde_json::from_str(raw.0.get()).expect("json");
         assert_eq!(parsed["outcome"], "approved");
+    }
+
+    /// Named contract (operator): Isolated Preview open, `/rebuild` persist,
+    /// SessionLoaded restore docks `line_viewer` again and keeps the live
+    /// waiter bind when one exists. Resume / `--continue` must still not
+    /// auto-dock when the pane was not open.
+    ///
+    /// `handle_rebuild_done` calls `persist_session_work_to_disk_for_rebuild`.
+    /// That persist path is the product write; this test does not edit
+    /// `rebuild.rs`.
+    #[test]
+    #[serial_test::serial(GROK_HOME)]
+    fn handle_rebuild_done_persists_open_plan_pane_and_session_load_docks_it() {
+        use crate::app::actions::{Action, TaskResult};
+        use crate::app::dispatch::dispatch;
+        use agent_client_protocol as acp;
+
+        let grok_home = tempfile::tempdir().unwrap();
+        let _home = xai_grok_test_support::EnvGuard::set("GROK_HOME", grok_home.path());
+        let proj = tempfile::tempdir().unwrap();
+        let cwd = proj.path().to_path_buf();
+        let cwd_str = cwd.to_string_lossy().into_owned();
+        let sid = "sess-1";
+        let plan_body = "# Isolated Preview\n\nMust reopen after rebuild\n";
+        let marker = xai_grok_shell::session::unsent_prompt_draft::unsent_prompt_draft_path(
+            &cwd_str, sid,
+        )
+        .expect("session dir")
+        .parent()
+        .expect("session dir")
+        .join("isolated_preview_open");
+
+        let mut closed = make_app_with_agent(sid);
+        {
+            let agent = closed.agents.get_mut(&AgentId(0)).unwrap();
+            agent.session.session_id = Some(sid.into());
+            agent.session.cwd = cwd.clone();
+            agent.plan_mode_active = true;
+            agent.latest_inline_plan_content = Some(plan_body.into());
+            assert!(agent.line_viewer.is_none());
+            agent.persist_session_work_to_disk_for_rebuild();
+        }
+        assert!(
+            !marker.is_file(),
+            "rebuild persist must not write Isolated Preview open when the pane was shut"
+        );
+        let _ = dispatch(
+            Action::TaskComplete(TaskResult::SessionLoaded {
+                agent_id: AgentId(0),
+                session_id: acp::SessionId::new(sid),
+                models: None,
+                code_restored: false,
+                restore_summary: None,
+                restore_degree: None,
+                running_prompt_id: None,
+                scheduler_background_loops: None,
+            }),
+            &mut closed,
+        );
+        assert!(
+            closed.agents.get(&AgentId(0)).unwrap().line_viewer.is_none(),
+            "SessionLoaded must not auto-dock Isolated Preview when the pane was not open"
+        );
+
+        let mut app = make_app_with_agent(sid);
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            agent.session.session_id = Some(sid.into());
+            agent.session.cwd = cwd.clone();
+            agent.plan_mode_active = true;
+            agent.latest_inline_plan_content = Some(plan_body.into());
+            agent.show_plan_preview();
+            assert!(
+                agent.line_viewer.is_some(),
+                "fixture: Isolated Preview is open before /rebuild persist"
+            );
+            agent.persist_session_work_to_disk_for_rebuild();
+        }
+        assert!(
+            marker.is_file(),
+            "successful /rebuild persist must write Isolated Preview open when the pane was docked"
+        );
+
+        let mut reopened = make_app_with_agent(sid);
+        {
+            let agent = reopened.agents.get_mut(&AgentId(0)).unwrap();
+            agent.session.cwd = cwd;
+            agent.plan_mode_active = true;
+            agent.latest_inline_plan_content = Some(plan_body.into());
+            seed_pending_tool(agent, "exit-plan-mode-resume-sess-1", "CreatePlan");
+            agent.unbind_session_id();
+            agent.line_viewer = None;
+            agent.plan_approval_view = None;
+            agent.session.loading_replay = true;
+        }
+        reopened.reconnect_pending = true;
+        let (ext, rx) = make_exit_plan_ext_with_tool_call_id(
+            "exit-plan-mode-resume-sess-1",
+            Some(plan_body),
+        );
+        assert!(!handle_exit_plan_mode(ext, &mut reopened));
+        assert!(reopened.pending_exit_plan_mode.is_some());
+        assert!(
+            reopened.agents.get(&AgentId(0)).unwrap().line_viewer.is_none(),
+            "held restore must not dock before SessionLoaded"
+        );
+
+        dispatch(
+            Action::TaskComplete(TaskResult::SessionLoaded {
+                agent_id: AgentId(0),
+                session_id: acp::SessionId::new(sid),
+                models: None,
+                code_restored: false,
+                restore_summary: None,
+                restore_degree: None,
+                running_prompt_id: None,
+                scheduler_background_loops: None,
+            }),
+            &mut reopened,
+        );
+        {
+            let agent = reopened.agents.get_mut(&AgentId(0)).unwrap();
+            assert!(
+                agent.line_viewer.is_some(),
+                "session load after /rebuild must dock Isolated Preview when the pane was open"
+            );
+            assert!(
+                agent
+                    .line_viewer
+                    .as_ref()
+                    .is_some_and(|v| v.feedback_active()),
+                "session load after /rebuild must bind Approve when a live waiter exists"
+            );
+            assert!(
+                agent
+                    .plan_approval_view
+                    .as_ref()
+                    .is_some_and(|p| !p.is_local_idle_decision && p.response_tx.is_some()),
+                "session load after /rebuild must keep the live waiter bind"
+            );
+            agent.approve_plan();
+        }
+        let response = rx.blocking_recv().expect("Approve must complete the restored waiter");
+        let raw = response.expect("waiter response Ok");
+        let parsed: serde_json::Value = serde_json::from_str(raw.0.get()).expect("json");
+        assert_eq!(parsed["outcome"], "approved");
+        assert!(
+            !marker.is_file(),
+            "SessionLoaded must consume the Isolated Preview open marker so a later resume without the pane does not dock"
+        );
     }
 
     /// Restore / resume re-park must keep the live waiter and must not dock.
@@ -1843,6 +2022,100 @@
             agent.prompt.text(),
             "still typing a plan note",
             "empty composer after rebuild must restore the unsent draft"
+        );
+    }
+
+    /// Operator (2026-09-11): Isolated Preview showed TECH.md while the
+    /// transcript was mill/WATCHER. After Plan Exit and a new present,
+    /// Isolated Preview must paint current disk plan.md. Chrome must not
+    /// keep Plan ready. Side panel open for the exited present.
+    #[serial_test::serial(GROK_HOME)]
+    #[test]
+    fn isolated_preview_after_exit_represent_paints_disk_not_frozen_sql() {
+        let mut fx = crate::test_util::GrokHomeFixture::new();
+        let cwd = fx.cwd_str();
+        let session_id = "sess-1";
+        fx.write_summary(&cwd, session_id, serde_json::json!({}));
+        let encoded = urlencoding::encode(&cwd);
+        let plan_md = xai_grok_shell::util::grok_home::grok_home()
+            .join("sessions")
+            .join(encoded.as_ref())
+            .join(session_id)
+            .join("plan.md");
+        std::fs::create_dir_all(plan_md.parent().unwrap()).unwrap();
+        let tech_tree = "# TECH.md dependency tree\nfirst Isolated Preview body\n";
+        std::fs::write(&plan_md, tech_tree).unwrap();
+        let db = xai_grok_shell::util::grok_home::grok_home().join("grok_oss.db");
+        let store = xai_grok_shell::grok_oss::open_at(&db).unwrap();
+        store
+            .upsert_session_plan(
+                session_id,
+                xai_grok_shell::grok_oss::SESSION_PLAN_IDENTITY,
+                Some("TECH.md dependency tree"),
+                tech_tree,
+                true,
+                "[]",
+            )
+            .unwrap();
+
+        let mut app = make_app_with_agent(session_id);
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            agent.session.cwd = std::path::PathBuf::from(&cwd);
+            seed_pending_tool(agent, "create-plan-call", "CreatePlan");
+        }
+        let (ext, _rx) =
+            make_exit_plan_ext_with_tool_call_id("create-plan-call", Some(tech_tree));
+        assert!(handle_exit_plan_mode(ext, &mut app));
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            assert_eq!(
+                agent.plan_loop_status_label(),
+                Some("Plan ready. Side panel open")
+            );
+            let _ = agent.abandon_plan();
+            assert!(agent.plan_approval_view.is_none());
+            assert_ne!(
+                agent.plan_loop_status_label(),
+                Some("Plan ready. Side panel open"),
+                "after Plan Exit, chrome must not keep Plan ready. Side panel open"
+            );
+        }
+
+        let mill = "# Mill WATCHER plan\nlive disk plan.md after Exit\n";
+        std::fs::write(&plan_md, mill).unwrap();
+        let later = std::time::SystemTime::now() + std::time::Duration::from_secs(2);
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&plan_md)
+            .unwrap()
+            .set_modified(later)
+            .unwrap();
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            seed_pending_tool(agent, "create-plan-call-2", "CreatePlan");
+        }
+        let (ext2, _rx2) =
+            make_exit_plan_ext_with_tool_call_id("create-plan-call-2", Some(mill));
+        assert!(handle_exit_plan_mode(ext2, &mut app));
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        let painted = agent
+            .line_viewer
+            .as_ref()
+            .and_then(|v| v.markdown_content_for_test())
+            .expect("Isolated Preview must paint after re-present");
+        assert!(
+            painted.contains("Mill WATCHER plan") && painted.contains("live disk plan.md"),
+            "Isolated Preview must paint current disk plan.md after Exit+re-present; got {painted:?}"
+        );
+        assert!(
+            !painted.contains("TECH.md dependency tree"),
+            "Isolated Preview must not keep a frozen TECH.md snapshot; got {painted:?}"
+        );
+        let disk = std::fs::read_to_string(&plan_md).unwrap();
+        assert!(
+            disk.contains("live disk plan.md") && painted.contains("live disk plan.md"),
+            "two different plan texts after Exit+re-present is a fail unless the panel matches disk"
         );
     }
 

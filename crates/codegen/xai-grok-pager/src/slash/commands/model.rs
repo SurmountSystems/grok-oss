@@ -65,6 +65,14 @@ impl SlashCommand for ModelCommand {
     }
 
     fn run(&self, ctx: &mut CommandExecCtx, args: &str) -> CommandResult {
+        Self::action_for_args(ctx.models, args)
+    }
+}
+
+impl ModelCommand {
+    /// Parse `/model` args into the same action `run` would return.
+    /// Unique-row Tab/Enter reuses this instead of SendPrompt.
+    pub(crate) fn action_for_args(models: &ModelState, args: &str) -> CommandResult {
         let trimmed = args.trim();
         if trimmed.is_empty() {
             return CommandResult::Error("Usage: /model <name> [effort]".into());
@@ -74,7 +82,7 @@ impl SlashCommand for ModelCommand {
         // often contain spaces ("Grok 4.5"); if we split on the last token
         // first, a shorter catalog entry ("Grok") would steal the prefix and
         // treat "4.5" as an effort level.
-        if let Some(id) = ctx.models.resolve_by_name_or_id(trimmed) {
+        if let Some(id) = models.resolve_by_name_or_id(trimmed) {
             return CommandResult::Action(Action::SetDefaultModel(id));
         }
 
@@ -83,15 +91,14 @@ impl SlashCommand for ModelCommand {
         // level (e.g. `none` on grok-4.5) surfaces the effort error with the
         // model's offered ids — not "Unknown model: … none".
         if let Some((prefix, token)) = split_trailing_token(trimmed)
-            && let Some(id) = resolve_model(ctx.models, prefix)
-            && ctx
-                .models
+            && let Some(id) = resolve_model(models, prefix)
+            && models
                 .available
                 .get(&id)
                 .map(supports_reasoning_effort)
                 .unwrap_or(false)
         {
-            return match ctx.models.resolve_effort_for_model(&id, token) {
+            return match models.resolve_effort_for_model(&id, token) {
                 Ok(effort) => CommandResult::Action(Action::SwitchModel {
                     model_id: id,
                     effort: Some(effort),

@@ -93,8 +93,8 @@ pub async fn run_voice_pipeline(
                     continue;
                 };
                 // The reader task owns the capture handle; signalling it lets the
-                // reader stop the mic and send `audio.done` in a single place,
-                // matching the no-speech-watchdog teardown below.
+                // reader stop the mic and send `audio.done` in a single place.
+                // Recording stays open until this Operator stop (or Shutdown).
                 let _ = session.finish_tx.send(()).await;
             }
         }
@@ -156,7 +156,25 @@ const BACKLOG_MAX_CHUNKS: usize = 1024;
 async fn forward_pcm(
     mut mic_rx: mpsc::Receiver<Vec<u8>>,
     mut audio_tx_rx: tokio::sync::oneshot::Receiver<mpsc::Sender<Vec<u8>>>,
+    session_dir: Option<std::path::PathBuf>,
 ) {
+    // Grok OSS: Until the Operator stops recording, audio bytes are forked
+    // with near-zerocopy: one path writes through an fd (audio WAL, sibling of
+    // prompt WAL), the other goes to STT. Prefer the session dir; temp only
+    // when the pager did not stamp one.
+    let wal_dir = session_dir.unwrap_or_else(std::env::temp_dir);
+    let mut wal = crate::audio_wal::AudioWal::open(crate::audio_wal::audio_wal_path(&wal_dir)).ok();
+    let finish_wal = |wal: &mut Option<crate::audio_wal::AudioWal>| {
+        if let Some(w) = wal.as_mut() {
+            let _ = w.finish();
+        }
+    };
+    let fork_chunk = |wal: &mut Option<crate::audio_wal::AudioWal>, chunk: &[u8]| {
+        if let Some(w) = wal.as_mut() {
+            let _ = w.append(chunk);
+        }
+    };
+
     let mut backlog: VecDeque<Vec<u8>> = VecDeque::new();
     let audio_tx = loop {
         tokio::select! {
@@ -169,43 +187,36 @@ async fn forward_pcm(
                     if backlog.len() == BACKLOG_MAX_CHUNKS {
                         backlog.pop_front();
                     }
+                    fork_chunk(&mut wal, &c);
                     backlog.push_back(c);
                 }
-                None => return, // mic stopped before the socket was ready
+                None => {
+                    finish_wal(&mut wal);
+                    return; // mic stopped before the socket was ready
+                }
             },
             tx = &mut audio_tx_rx => match tx {
                 Ok(tx) => break tx,
-                Err(_) => return, // connect failed → sender dropped
+                Err(_) => {
+                    finish_wal(&mut wal);
+                    return; // connect failed → sender dropped
+                }
             },
         }
     };
     for chunk in backlog {
         if audio_tx.send(chunk).await.is_err() {
+            finish_wal(&mut wal);
             return;
         }
     }
     while let Some(chunk) = mic_rx.recv().await {
+        fork_chunk(&mut wal, &chunk);
         if audio_tx.send(chunk).await.is_err() {
             break;
         }
     }
-}
-
-/// How long a session may run without any transcript before it is torn down
-/// (instead of streaming a dead mic until the user gives up). Disarmed by the
-/// first transcript, so long dictation with pauses is unaffected.
-#[cfg(feature = "audio")]
-const NO_SPEECH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
-
-/// Message and permission guidance for a session torn down by
-/// [`NO_SPEECH_TIMEOUT`]. A denied grant is indistinguishable from not speaking
-/// because macOS may return silence instead of an error.
-#[cfg(feature = "audio")]
-fn no_speech_error() -> (String, Option<String>) {
-    (
-        "No speech was detected. Voice stopped.".to_owned(),
-        Some(crate::probe::mic_fix_help().to_owned()),
-    )
+    finish_wal(&mut wal);
 }
 
 #[cfg(feature = "audio")]
@@ -226,7 +237,13 @@ async fn start_capture_session(
     // Drain mic before connect resolves so capture never backpressures while
     // the socket comes up.
     let (audio_tx_tx, audio_tx_rx) = tokio::sync::oneshot::channel::<mpsc::Sender<Vec<u8>>>();
-    tokio::spawn(forward_pcm(mic_rx, audio_tx_rx));
+    // Grok OSS: Until the Operator stops recording, PCM forks to audio WAL
+    // (session dir, else temp) and to STT without cloning the whole recording.
+    tokio::spawn(forward_pcm(
+        mic_rx,
+        audio_tx_rx,
+        config.audio_wal_session_dir.clone(),
+    ));
 
     let connect = async {
         let bearer = crate::auth::require_bearer(auth).await?;
@@ -266,9 +283,8 @@ async fn start_capture_session(
                 handle.stop();
             }
         };
-        // No transcript within the timeout → tear down. Disarmed after speech.
-        let no_speech_deadline = tokio::time::Instant::now() + NO_SPEECH_TIMEOUT;
-        let mut awaiting_speech = true;
+        // Grok OSS: Silent 10s teardown without a visible recording state is a
+        // miss. Recording stays live until Operator stop (or a real error).
         // Chunk-final (`is_final && !speech_final`) text is locked: the server
         // sends it as a delta of the turn. Stitch those deltas into the live
         // preview so a long pauseless utterance keeps accumulating on screen
@@ -281,21 +297,11 @@ async fn start_capture_session(
             tokio::select! {
                 msg = finish_rx.recv() => {
                     if msg.is_some() {
-                        // User ended the turn; stop the no-speech watchdog.
-                        awaiting_speech = false;
                         stop_capture(&mut capture);
                         stt.finish_audio();
                     } else {
                         return;
                     }
-                }
-                _ = tokio::time::sleep_until(no_speech_deadline), if awaiting_speech => {
-                    // Tear down rather than streaming a dead mic until the user stops.
-                    stop_capture(&mut capture);
-                    stt.finish_audio();
-                    let (message, hint) = no_speech_error();
-                    let _ = out.send(VoiceEvent::Error { message, hint }).await;
-                    return;
                 }
                 ev = stt.recv() => {
                     match ev {
@@ -304,8 +310,6 @@ async fn start_capture_session(
                             if text.is_empty() {
                                 continue;
                             }
-                            // Real speech arrived: disarm the no-speech watchdog.
-                            awaiting_speech = false;
 
                             let event = if p.speech_final {
                                 locked_prefix.clear();
@@ -336,7 +340,6 @@ async fn start_capture_session(
                         Some(StreamingSttEvent::Done { text }) => {
                             locked_prefix.clear();
                             if !text.trim().is_empty() {
-                                awaiting_speech = false;
                                 let _ = out.send(VoiceEvent::UtteranceFinal { text }).await;
                             }
                         }
@@ -366,7 +369,7 @@ mod tests {
         let (mic_tx, mic_rx) = mpsc::channel::<Vec<u8>>(8);
         let (tx_tx, tx_rx) = tokio::sync::oneshot::channel();
         let (audio_tx, mut audio_rx) = mpsc::channel::<Vec<u8>>(8);
-        let task = tokio::spawn(forward_pcm(mic_rx, tx_rx));
+        let task = tokio::spawn(forward_pcm(mic_rx, tx_rx, None));
 
         // Buffered before the live sender is handed over, then flushed once it
         // arrives. (Keep `mic_tx` open across the handoff: a mic that closes
@@ -392,7 +395,7 @@ mod tests {
     async fn forward_pcm_returns_when_mic_closes_before_connect() {
         let (mic_tx, mic_rx) = mpsc::channel::<Vec<u8>>(8);
         let (_tx_tx, tx_rx) = tokio::sync::oneshot::channel::<mpsc::Sender<Vec<u8>>>();
-        let task = tokio::spawn(forward_pcm(mic_rx, tx_rx));
+        let task = tokio::spawn(forward_pcm(mic_rx, tx_rx, None));
         drop(mic_tx);
         task.await.unwrap();
     }
@@ -403,16 +406,9 @@ mod tests {
     async fn forward_pcm_returns_when_connect_fails() {
         let (mic_tx, mic_rx) = mpsc::channel::<Vec<u8>>(8);
         let (tx_tx, tx_rx) = tokio::sync::oneshot::channel::<mpsc::Sender<Vec<u8>>>();
-        let task = tokio::spawn(forward_pcm(mic_rx, tx_rx));
+        let task = tokio::spawn(forward_pcm(mic_rx, tx_rx, None));
         mic_tx.send(vec![1]).await.unwrap();
         drop(tx_tx);
         task.await.unwrap();
-    }
-
-    #[test]
-    fn no_speech_error_carries_permission_hint() {
-        let (message, hint) = no_speech_error();
-        assert_eq!(message, "No speech was detected. Voice stopped.");
-        assert!(hint.is_some_and(|hint| hint.contains(crate::probe::mic_fix_help())));
     }
 }

@@ -23,6 +23,7 @@ pub(crate) enum WireErrorType {
     Serialization,
     RateLimited,
     MaxTokensTruncation,
+    RepetitiveGeneration,
     Other,
 }
 
@@ -44,6 +45,7 @@ impl WireErrorType {
             Some("serialization") => Self::Serialization,
             Some("rate_limited") => Self::RateLimited,
             Some("max_tokens_truncation") => Self::MaxTokensTruncation,
+            Some("repetitive_generation") => Self::RepetitiveGeneration,
             _ => Self::Other,
         }
     }
@@ -105,6 +107,38 @@ pub(crate) fn format_request_failure(
             .flatten()
     });
     let extracted = extract_error_detail(raw);
+    if is_headers_timeout_cold_start(raw)
+        || extracted
+            .as_deref()
+            .is_some_and(is_headers_timeout_cold_start)
+    {
+        return FormattedRequestFailure {
+            status,
+            headline: "Cold start: response headers timed out".to_string(),
+            detail: "The model host may still be starting. Retry is in progress. This is not Thought-only."
+                .to_string(),
+        };
+    }
+    if is_image_transcription_transport_miss(raw)
+        || extracted
+            .as_deref()
+            .is_some_and(is_image_transcription_transport_miss)
+    {
+        return FormattedRequestFailure {
+            status,
+            headline: "Image transcription unavailable".to_string(),
+            detail: "Transport miss: error sending request. The Human image line stays. This is not a silent hang. Try sending again."
+                .to_string(),
+        };
+    }
+    if is_transport_send_miss(raw) || extracted.as_deref().is_some_and(is_transport_send_miss) {
+        return FormattedRequestFailure {
+            status,
+            headline: "Connection failed".to_string(),
+            detail: "Transport miss: error sending request. This is not a silent hang. Check your network and try again."
+                .to_string(),
+        };
+    }
     let team_prepaid = xai_grok_sampling_types::is_console_team_prepaid_message(raw)
         || extracted
             .as_deref()
@@ -116,6 +150,17 @@ pub(crate) fn format_request_failure(
             headline: format!("Request denied ({code})"),
             detail: xai_grok_sampling_types::console_team_prepaid_stay_on_supergrok_user_message()
                 .to_string(),
+        };
+    }
+    // Safety refusal bodies (gRPC-style `permission-denied: I can't help with
+    // that request.`) sometimes ride HTTP 403. That is not endpoint forbid
+    // and not a tool-permission hub deny. Do not headline Request denied (403).
+    if is_safety_refusal_message(raw) || extracted.as_deref().is_some_and(is_safety_refusal_message)
+    {
+        return FormattedRequestFailure {
+            status: None,
+            headline: "Safety refusal".to_string(),
+            detail: safety_refusal_detail(extracted.as_deref().unwrap_or(raw)),
         };
     }
     let class = classify(status, wire);
@@ -226,8 +271,13 @@ fn classify(status: Option<u16>, wire: WireErrorType) -> Classified {
         ),
         WireErrorType::MaxTokensTruncation => (
             "Response truncated",
-            Some("Try asking for a shorter answer."),
+            None,
             Some("The model hit its output limit."),
+        ),
+        WireErrorType::RepetitiveGeneration => (
+            "Stopped: repeating sentence",
+            None,
+            Some("The reply was repeating the same sentence."),
         ),
         WireErrorType::RateLimited => (
             "Rate limited",
@@ -369,6 +419,86 @@ fn parse_status_digits(s: &str, require_close_paren: bool) -> Option<u16> {
     }
     let code: u16 = s[..3].parse().ok()?;
     (400..600).contains(&code).then_some(code)
+}
+
+/// Header-timeout / cold-start class: TCP accepted but no HTTP response
+/// headers within the stream-headers budget (default 2m). Not billing.
+pub(crate) fn is_headers_timeout_cold_start(raw: &str) -> bool {
+    let lower = raw.to_ascii_lowercase();
+    lower.contains("timed out waiting for response headers")
+        || (lower.contains("response headers") && lower.contains("timed out"))
+}
+
+/// Fail-closed describe path: "image transcription failed" plus a send miss.
+/// Named chrome so the pager does not paint a generic Request failed turn kill
+/// as if the Human image were gone.
+pub(crate) fn is_image_transcription_transport_miss(raw: &str) -> bool {
+    let lower = raw.to_ascii_lowercase();
+    lower.contains("image transcription failed") && lower.contains("error sending request")
+}
+
+/// HTTP/SSE send miss (`error sending request`). Covers `request error stream`
+/// and `reqwest error stream` when they carry that cause. Not a silent hang.
+/// Not billing.
+pub(crate) fn is_transport_send_miss(raw: &str) -> bool {
+    raw.to_ascii_lowercase().contains("error sending request")
+}
+
+/// Output-cap truncation (`max_tokens_truncation` / `response truncated by
+/// max_tokens`). Thought dumps hit this; it is not the Operator writing a
+/// long prompt.
+pub(crate) fn is_max_tokens_truncation(error_type: Option<&str>, raw: &str) -> bool {
+    if WireErrorType::parse(error_type) == WireErrorType::MaxTokensTruncation {
+        return true;
+    }
+    let lower = raw.to_ascii_lowercase();
+    lower.contains("max_tokens")
+        || lower.contains("try asking for a shorter answer")
+        || lower.contains("the model hit its output limit")
+        || lower.contains("response truncated")
+}
+
+/// Dest/resume report already written and nested implementors still running:
+/// a safety refusal or thought output-cap is not a failed Operator request.
+pub(crate) fn written_report_with_nested_running_is_not_turn_failure(
+    nested_implementers_running: bool,
+    had_output: bool,
+    error_type: Option<&str>,
+    message: &str,
+) -> bool {
+    nested_implementers_running
+        && had_output
+        && (is_safety_refusal_message(message) || is_max_tokens_truncation(error_type, message))
+}
+
+/// Model-host safety refusal, not HTTP 403 endpoint forbid and not a tool
+/// permission deny (`permission_denied` / "permission denied for tool").
+///
+/// Operator-visible body: `permission-denied: I can't help with that request.`
+pub(crate) fn is_safety_refusal_message(raw: &str) -> bool {
+    let lower = raw.to_ascii_lowercase();
+    lower.contains("i can't help with that request")
+        || lower.contains("i cannot help with that request")
+        || lower.contains("can't help with that request")
+        || lower.contains("cannot help with that request")
+}
+
+fn safety_refusal_detail(raw: &str) -> String {
+    let trimmed = raw.trim();
+    let after_prefix = ["permission-denied:", "permission_denied:"]
+        .iter()
+        .find_map(|prefix| {
+            let lower = trimmed.to_ascii_lowercase();
+            lower
+                .starts_with(prefix)
+                .then(|| trimmed[prefix.len()..].trim())
+        })
+        .unwrap_or(trimmed);
+    if after_prefix.is_empty() {
+        "I can't help with that request.".to_string()
+    } else {
+        after_prefix.to_string()
+    }
 }
 
 fn find_ignore_ascii_case(haystack: &str, needle: &str) -> Option<usize> {
@@ -628,6 +758,52 @@ mod tests {
         );
     }
 
+    /// Operator screenshot 2026-09-19: resume transcript painted
+    /// `Request denied (403) – permission-denied: I can't help with that request.`
+    /// That body is a safety refusal, not HTTP 403 endpoint forbid.
+    #[test]
+    fn safety_refusal_permission_denied_must_not_paint_request_denied_403() {
+        let operator_body = "permission-denied: I can't help with that request.";
+        assert!(operator_body.contains("permission-denied: I can't help with that request."));
+        for (status, error_type, raw) in [
+            (
+                None,
+                Some("api"),
+                "API error (status 403 Forbidden): permission-denied: I can't help with that request.",
+            ),
+            (Some(403), Some("api"), operator_body),
+            (None, None, operator_body),
+            (None, Some("api"), "I can't help with that request."),
+        ] {
+            let formatted = format_request_failure(status, error_type, raw);
+            let msg = formatted.message();
+            assert!(
+                !msg.contains("Request denied (403)"),
+                "safety refusal must not be labeled HTTP 403, got {msg} from {raw}"
+            );
+            assert!(
+                msg.contains("Safety refusal"),
+                "must paint safety refusal chrome, got {msg} from {raw}"
+            );
+            assert!(
+                msg.contains("I can't help with that request"),
+                "must keep the refusal text, got {msg} from {raw}"
+            );
+            assert_eq!(formatted.status, None, "must not keep HTTP 403 status");
+        }
+        let tool_deny = format_request_failure(None, None, "tool permission denied for bash");
+        assert!(
+            !tool_deny.message().contains("Request denied (403)"),
+            "tool permission deny is not HTTP 403, got {}",
+            tool_deny.message()
+        );
+        assert!(
+            !tool_deny.message().contains("Safety refusal"),
+            "hub tool deny is not a model safety refusal, got {}",
+            tool_deny.message()
+        );
+    }
+
     /// Operator shot 2026-08-22: yellow banner must not paint console team
     /// prepaid 403 as included SuperGrok period limits truth.
     #[test]
@@ -798,6 +974,45 @@ mod tests {
         );
     }
 
+    /// Operator: "Connection failed – request error stream: timed out waiting
+    /// for response headers after 2m0s"; retry attempt 2; "might be caused by
+    /// it being a cold start, not warm." Chrome must name the cold-start
+    /// class and keep a retry path. Not Thought-only. Not billing.
+    #[test]
+    fn header_timeout_is_named_cold_start_class_with_retry_path() {
+        let raw = "Connection failed – request error stream: timed out waiting for response headers after 2m0s";
+        let formatted = format_request_failure(None, Some("http"), raw);
+        let msg = formatted.message();
+        assert!(
+            msg.contains("Cold start") && msg.contains("response headers timed out"),
+            "header timeout must name the cold-start class, got {msg}"
+        );
+        assert!(
+            msg.contains("Retry is in progress"),
+            "must keep a retry path, not Thought-only, got {msg}"
+        );
+        assert!(
+            !msg.contains("Thought") || msg.contains("not Thought-only"),
+            "must not leave Thought-only chrome, got {msg}"
+        );
+        assert!(
+            !msg.to_ascii_lowercase().contains("dollar")
+                && !msg.to_ascii_lowercase().contains("billing"),
+            "must not invent billing, got {msg}"
+        );
+        let retry = crate::app::subagent::format_activity_label(
+            &crate::acp::tracker::TurnActivity::Retrying {
+                attempt: 2,
+                max_retries: u32::MAX,
+                reason: "cold start: response headers timed out".into(),
+            },
+        );
+        assert!(
+            retry.contains("Retrying (2)"),
+            "retry attempt 2 must stay Retrying chrome, got {retry}"
+        );
+    }
+
     #[test]
     fn strips_reqwest_url_from_connection_error() {
         let formatted = format_request_failure(
@@ -805,15 +1020,86 @@ mod tests {
             Some("http"),
             "error sending request for url (https://server.grok.com/v1/responses)",
         );
+        let msg = formatted.message();
+        assert!(!msg.contains("http"), "{msg}");
         assert!(
-            !formatted.message().contains("http"),
-            "{}",
-            formatted.message()
+            msg.contains("Connection failed") && msg.contains("Transport miss"),
+            "send miss must name transport, got {msg}"
         );
-        assert_eq!(
-            formatted.message(),
-            "Connection failed \u{2014} error sending request. \
-             Check your network and try again."
+        assert!(
+            msg.contains("not a silent hang"),
+            "must not look like a hang, got {msg}"
+        );
+        assert!(
+            msg.contains("Check your network") && msg.contains("try again"),
+            "must keep a retry path, got {msg}"
+        );
+    }
+
+    /// Operator: "Turn failed in 10s: Request failed – image transcription failed: image describe call failed: request error: error sending request. Try sending again."
+    /// Backstop chrome if a fail-closed ACP error still reaches the pager.
+    /// Not billing. Not a silent hang.
+    #[test]
+    fn image_transcription_error_sending_request_is_named_transport_miss() {
+        let operator = "Turn failed in 10s: Request failed – image transcription failed: image describe call failed: request error: error sending request. Try sending again.";
+        assert!(operator.contains(
+            "image transcription failed: image describe call failed: request error: error sending request"
+        ));
+        let formatted = format_request_failure(
+            None,
+            None,
+            "image transcription failed: image describe call failed: request error: error sending request",
+        );
+        let msg = formatted.message();
+        assert!(
+            msg.contains("Image transcription unavailable") && msg.contains("Transport miss"),
+            "must not paint generic Request failed for this miss, got {msg}"
+        );
+        assert!(
+            msg.contains("Human image line stays") && msg.contains("not a silent hang"),
+            "must name the Human image line and the hang class, got {msg}"
+        );
+        let lower = msg.to_ascii_lowercase();
+        assert!(
+            !lower.contains("billing") && !lower.contains("dollar"),
+            "must not invent billing, got {msg}"
+        );
+    }
+
+    /// Operator: "Connection failed – request error stream: error sending request."
+    /// Transport miss, not a silent hang, not billing.
+    #[test]
+    fn request_error_stream_error_sending_request_is_named_transport_miss() {
+        let operator = "Connection failed – request error stream: error sending request.";
+        assert!(operator.contains("request error stream: error sending request"));
+        let formatted = format_request_failure(
+            None,
+            Some("http"),
+            "Connection failed – request error stream: error sending request.",
+        );
+        let msg = formatted.message();
+        assert!(
+            msg.contains("Connection failed") && msg.contains("Transport miss"),
+            "stream send miss must name transport, got {msg}"
+        );
+        assert!(
+            msg.contains("not a silent hang"),
+            "must not look like a hang, got {msg}"
+        );
+        let lower = msg.to_ascii_lowercase();
+        assert!(
+            !lower.contains("billing") && !lower.contains("dollar"),
+            "must not invent billing, got {msg}"
+        );
+        let reqwest = format_request_failure(
+            None,
+            Some("http"),
+            "reqwest error stream: error sending request",
+        );
+        assert!(
+            reqwest.message().contains("Transport miss"),
+            "reqwest error stream must classify the same, got {}",
+            reqwest.message()
         );
     }
 
@@ -865,8 +1151,77 @@ mod tests {
             WireErrorType::parse(Some("rate_limited")),
             WireErrorType::RateLimited
         );
+        assert_eq!(
+            WireErrorType::parse(Some("max_tokens_truncation")),
+            WireErrorType::MaxTokensTruncation
+        );
+        assert_eq!(
+            WireErrorType::parse(Some("repetitive_generation")),
+            WireErrorType::RepetitiveGeneration
+        );
         assert_eq!(WireErrorType::parse(Some("nope")), WireErrorType::Other);
         assert_eq!(WireErrorType::parse(None), WireErrorType::Other);
+    }
+
+    /// Operator screenshot 2026-09-20: after dest completeOk (Worked for 48s),
+    /// L1 thought 29m26s then yellow
+    /// `Response truncated – The model hit its output limit. Try asking for a shorter answer.`
+    /// The Operator did not write a long prompt. Do not tell them to ask for a
+    /// shorter answer.
+    #[test]
+    fn max_tokens_truncation_must_not_tell_operator_to_ask_for_a_shorter_answer() {
+        let operator_chrome =
+            "Response truncated – The model hit its output limit. Try asking for a shorter answer.";
+        assert!(operator_chrome.contains(
+            "Response truncated – The model hit its output limit. Try asking for a shorter answer."
+        ));
+        assert!(operator_chrome.contains("Try asking for a shorter answer"));
+        let formatted = format_request_failure(
+            None,
+            Some("max_tokens_truncation"),
+            "response truncated by max_tokens",
+        );
+        let msg = formatted.message();
+        assert!(
+            !msg.contains("Try asking for a shorter answer"),
+            "must not blame the Operator for a long prompt, got {msg}"
+        );
+        assert!(
+            !msg.contains(operator_chrome),
+            "must not paint the Operator-blaming screenshot chrome, got {msg}"
+        );
+        assert!(
+            is_max_tokens_truncation(
+                Some("max_tokens_truncation"),
+                "response truncated by max_tokens"
+            ),
+            "wire type max_tokens_truncation must classify as output-cap truncation"
+        );
+    }
+
+    /// Isolated Preview 2026-09-20 looped
+    /// `Spawn dests of dest encoder skip. I'll spawn dests of dest encoder skip.`
+    /// The stop must not paint Request denied (403).
+    #[test]
+    fn dest_encoder_skip_repetitive_generation_is_not_request_denied_403() {
+        assert!(
+            "Spawn dests of dest encoder skip. I'll spawn dests of dest encoder skip."
+                .contains("Spawn dests of dest encoder skip")
+        );
+        let formatted = format_request_failure(
+            None,
+            Some("repetitive_generation"),
+            "Stopped: the reply was repeating the same sentence.",
+        );
+        let msg = formatted.message();
+        assert!(
+            !msg.contains("403") && !msg.contains("Request denied"),
+            "must not look like HTTP 403, got {msg}"
+        );
+        assert!(
+            msg.contains("repeating") || msg.contains("sentence"),
+            "must name the repeating-sentence stop, got {msg}"
+        );
     }
 
     #[test]

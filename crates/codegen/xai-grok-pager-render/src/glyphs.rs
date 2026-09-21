@@ -117,6 +117,21 @@ pub fn copy_icon() -> &'static str {
     }
 }
 
+/// `"⌕"` (U+2315 TELEPHONE RECORDER) normally, `"s"` on legacy ConHost.
+/// Always 1 column wide.
+///
+/// Isolated Preview title-bar search glass, immediately left of copy.
+/// U+2315 is the conventional magnifying-glass stand-in in monospace
+/// fonts; the Miscellaneous Technical block is missing from legacy
+/// console fonts, so ConHost falls back to `s` (search).
+pub fn search_icon() -> &'static str {
+    if is_legacy_windows_console() {
+        "s"
+    } else {
+        "\u{2315}"
+    }
+}
+
 /// `"⇣"` (U+21E3 DOWNWARDS DASHED ARROW) normally, `"↓"` (U+2193) on legacy
 /// ConHost. Always 1 column wide.
 ///
@@ -846,6 +861,7 @@ mod tests {
             ("\u{2713}", "\u{221A}"), // check_mark
             ("\u{2197}", "o"),        // enlarge
             ("\u{29C9}", "c"),        // copy_icon
+            ("\u{2315}", "s"),        // search_icon
             ("\u{21E3}", "\u{2193}"), // token_arrow
         ] {
             assert_eq!(fancy.width(), 1, "icon {fancy:?} must be 1 column");

@@ -659,9 +659,10 @@ pub(super) fn default_actions(
         // ── Prompt ───────────────────────────────────────────────────
         ActionDef {
             id: ActionId::InterjectPrompt,
-            // "send now" label: footer Ctrl+Enter:send now. This chord is
-            // explicit `x.ai/interject` (never cancel-and-send). Enter with
-            // text while a turn runs is the separate soft-interject path.
+            // Grok OSS: Ctrl+Enter inserts a newline in the composer (same
+            // family as Shift+Enter). Send-now / interject uses Ctrl+I
+            // (default), Apple Terminal Ctrl+O, VS Code family Ctrl+L, plus
+            // queue [Send now]. Do not teach Ctrl+Enter:send now.
             label: "send now",
             description: "Send now while running (interjects; does not cancel)",
             default_key: if in_apple_terminal {
@@ -670,16 +671,15 @@ pub(super) fn default_actions(
                 // Ctrl+L is a stable C0 form feed on xterm.js; see user-guide § interject.
                 key!('l', CONTROL)
             } else {
-                key!(Enter, CONTROL)
+                key!('i', CONTROL)
             },
-            // Windows: Ctrl+Enter may drop Ctrl → Ctrl+I alt. VS Code family: no alts
-            // (Ctrl+L sole chord; OpenExtensions unbound so it does not steal).
+            // VS Code family and default: no alts (Ctrl+L sole chord in VS Code;
+            // OpenExtensions unbound). Apple Terminal: Ctrl+I alt.
+            // Ctrl+Enter is composer newline, not send-now.
             alt_keys: if in_apple_terminal {
-                vec![key!(Enter, CONTROL), key!('i', CONTROL)]
-            } else if in_vscode_family {
-                vec![]
-            } else {
                 vec![key!('i', CONTROL)]
+            } else {
+                vec![]
             },
             category: Category::Input,
             context: When::PromptFocused,
@@ -687,7 +687,7 @@ pub(super) fn default_actions(
             hint_key_display: None,
             requires_confirmation: false,
             long_help: Some(
-                "Sends a message to the agent mid-turn without cancelling it (interject), so you can steer or add context while it keeps working.\nPlain Enter with text while a turn is running is the same kind of merge (soft interject). This chord is the explicit send-now path (footer Ctrl+Enter:send now).\nWith an empty composer, this chord (and empty Enter) force-sends the top queued follow-up from the prompt as an interject. On the queue pane, this chord and the [Send now] button send the selected row the same way.\nEmpty composer with nothing queued does not send.\nReach for it to correct course without losing the turn's progress.",
+                "Sends a message to the agent mid-turn without cancelling it (interject), so you can steer or add context while it keeps working.\nPlain Enter with text while a turn is running is the same kind of merge (soft interject). This chord is the explicit send-now path (Ctrl+I, Apple Terminal Ctrl+O, VS Code family Ctrl+L).\nCtrl+Enter inserts a newline in the composer; it does not send now.\nWith an empty composer, this chord (and empty Enter) force-sends the top queued follow-up from the prompt as an interject. On the queue pane, this chord and the [Send now] button send the selected row the same way.\nEmpty composer with nothing queued does not send.\nReach for it to correct course without losing the turn's progress.",
             ),
         },
         ActionDef {

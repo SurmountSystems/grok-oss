@@ -208,7 +208,19 @@ pub enum SamplingError {
         triggers: Vec<String>,
         aborted_at_chunk: Option<u64>,
     },
+    /// Client-side sentence loop in streaming assistant or thought text.
+    /// Fatal: stop the turn. Not the server doom-loop resample path.
+    #[error("{}", REPETITIVE_GENERATION_USER_MESSAGE)]
+    RepetitiveGeneration {
+        /// `text` or `reasoning`. Labels only; never generation content.
+        channel: String,
+        aborted_at_chunk: Option<u64>,
+    },
 }
+
+/// Operator-facing stop when the stream was repeating the same sentence.
+pub const REPETITIVE_GENERATION_USER_MESSAGE: &str =
+    "Stopped: the reply was repeating the same sentence.";
 
 /// Semantic `error.code` the server stamps on invalid-image rejections, on
 /// both non-stream error bodies and mid-stream SSE error events.
@@ -354,7 +366,8 @@ impl SamplingError {
             | SamplingError::IdleTimeout { .. }
             | SamplingError::EmptyResponse { .. }
             | SamplingError::MaxTokensTruncation
-            | SamplingError::DoomLoopDetected { .. } => false,
+            | SamplingError::DoomLoopDetected { .. }
+            | SamplingError::RepetitiveGeneration { .. } => false,
         }
     }
 
@@ -433,7 +446,8 @@ impl SamplingError {
             | SamplingError::IdleTimeout { .. }
             | SamplingError::EmptyResponse { .. }
             | SamplingError::MaxTokensTruncation
-            | SamplingError::DoomLoopDetected { .. } => false,
+            | SamplingError::DoomLoopDetected { .. }
+            | SamplingError::RepetitiveGeneration { .. } => false,
         }
     }
 
@@ -450,6 +464,7 @@ impl SamplingError {
             SamplingError::EmptyResponse { .. } => true,
             SamplingError::MaxTokensTruncation => false,
             SamplingError::DoomLoopDetected { .. } => true,
+            SamplingError::RepetitiveGeneration { .. } => false,
         }
     }
 
@@ -493,6 +508,20 @@ impl SamplingError {
         match self {
             SamplingError::Api { message, .. } | SamplingError::StreamError { message, .. } => {
                 is_context_length_error(message)
+            }
+            _ => false,
+        }
+    }
+
+    /// Transient xAI 500 while generating tokens. Retry with the transport
+    /// cap; this is not context-length, idle timeout, or serialization.
+    pub fn is_token_generation_internal_error(&self) -> bool {
+        match self {
+            SamplingError::Api {
+                status, message, ..
+            } => status.as_u16() == 500 && is_token_generation_internal_error(message),
+            SamplingError::StreamError { message, .. } => {
+                is_token_generation_internal_error(message)
             }
             _ => false,
         }
@@ -805,6 +834,16 @@ pub fn try_parse_stream_error(data: &str) -> Option<SamplingError> {
         message,
         code,
     })
+}
+
+/// xAI body when token generation fails with HTTP 500. Transient; retry with
+/// the transport cap. Operator-visible Display is
+/// `API error (status 500 Internal Server Error): error: Internal error during token generation`.
+pub const TOKEN_GENERATION_INTERNAL_ERROR: &str = "Internal error during token generation";
+
+/// True when the body is a transient token-generation 500, not a size overflow.
+pub fn is_token_generation_internal_error(message: &str) -> bool {
+    message.contains(TOKEN_GENERATION_INTERNAL_ERROR)
 }
 
 /// True when an error message indicates a context-window overflow. Backends report
@@ -1305,6 +1344,40 @@ mod tests {
         assert!(!SamplingError::auth_unknown("nope").is_context_length_error());
     }
 
+    /// Named contract: HTTP 500 `Internal error during token generation` is
+    /// retryable transport, not context-length / idle / serialization.
+    #[test]
+    fn token_generation_500_is_retryable_not_context_length_idle_or_serialization() {
+        let body = format!("error: {TOKEN_GENERATION_INTERNAL_ERROR}");
+        let err = SamplingError::Api {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            message: body.clone(),
+            model_metadata: None,
+            retry_after_secs: None,
+            should_retry: None,
+            error_code: None,
+        };
+        let painted = err.to_string();
+        assert_eq!(
+            painted,
+            format!("API error (status 500 Internal Server Error): {body}")
+        );
+        assert!(
+            painted.contains("Internal error during token generation"),
+            "operator-visible Display must quote the token-generation 500: {painted}"
+        );
+        assert!(err.is_retryable());
+        assert!(err.is_token_generation_internal_error());
+        assert!(!err.is_context_length_error());
+        assert!(!err.is_retry_vetoed());
+        assert!(!matches!(err, SamplingError::IdleTimeout { .. }));
+        assert!(!matches!(err, SamplingError::Serialization(_)));
+        assert!(is_retryable_api_status(StatusCode::INTERNAL_SERVER_ERROR));
+        assert!(!is_context_length_error(&body));
+        assert!(is_token_generation_internal_error(&body));
+        assert!(is_token_generation_internal_error(&painted));
+    }
+
     #[test]
     fn serialization_message_stays_serialization_and_non_retryable() {
         let err = SamplingError::serialization_message("bad payload at line 1 column 7");
@@ -1342,6 +1415,17 @@ mod tests {
             !err.is_retryable(),
             "IdleTimeout must not be retried — would cause 3× amplification"
         );
+    }
+
+    #[test]
+    fn repetitive_generation_is_not_retryable_and_names_the_stop() {
+        let err = SamplingError::RepetitiveGeneration {
+            channel: "text".into(),
+            aborted_at_chunk: Some(3),
+        };
+        assert!(!err.is_retryable());
+        assert_eq!(err.to_string(), REPETITIVE_GENERATION_USER_MESSAGE);
+        assert!(err.to_string().contains("repeating the same sentence"));
     }
 
     #[test]

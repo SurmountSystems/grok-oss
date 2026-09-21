@@ -29,6 +29,15 @@ use super::session_load_barrier::{
 };
 use super::{PagerArgs, PagerTerminal, acp_handler, dispatch, effects};
 
+/// Near-full included SuperGrok period background poll interval.
+///
+/// Matches the shared limits snapshot HonorTtl window (one hour) so this
+/// loop does not stampede SuperGrok credits or Management credits APIs
+/// every 30 seconds. FetchBilling from this timer is HonorTtl
+/// (`force_refresh: false`). Chrome may keep painting from the snapshot.
+pub(crate) const BILLING_POLL_INTERVAL: Duration =
+    Duration::from_secs(xai_grok_shell::auth::SNAPSHOT_TTL_SECS);
+
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct TimedInputEvent {
     pub(super) event: Event,
@@ -1745,7 +1754,6 @@ pub(crate) async fn run(
     // iteration so it is popped on every close path.
     let mut gboom_keyboard_pushed = false;
 
-    const BILLING_POLL_INTERVAL: Duration = Duration::from_secs(30);
     let mut billing_poll_at: Option<Instant> = None;
 
     // L0 drop files arrive while this window may be idle (`TickDemand::None`
@@ -2120,6 +2128,9 @@ pub(crate) async fn run(
                 let voice_auth = crate::voice::build_voice_auth(voice_auth_factory.clone());
                 let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel(32);
                 let (event_tx, event_rx) = tokio::sync::mpsc::channel(128);
+                // Grok OSS: Until the Operator stops recording, PCM forks to
+                // audio WAL beside prompt_wal.jsonl. Temp fallback if no session.
+                app.voice_config.audio_wal_session_dir = app.audio_wal_session_dir_for(target);
                 let voice_config = app.voice_config.clone();
                 tokio::spawn(xai_grok_voice::run_voice_pipeline(
                     voice_config,
@@ -2632,12 +2643,7 @@ pub(crate) async fn run(
             _ = billing_poll => {
                 billing_poll_at = None;
                 if let ActiveView::Agent(id) = app.active_view {
-                    let effs = vec![Effect::FetchBilling {
-                        agent_id: id,
-                        silent: true,
-                        nonce: 0,
-                        force_refresh: false,
-                    }];
+                    let effs = vec![dispatch::background_billing_poll_fetch_billing(id)];
                     if process_effects(effs, &mut tasks, &mut app, &progress_tx) {
                         break;
                     }
@@ -4290,6 +4296,42 @@ fn process_effects(
 mod tests {
     use super::*;
     use crossterm::event::{KeyEvent, KeyEventState};
+
+    #[test]
+    fn billing_poll_interval_is_one_hour_honor_ttl_not_thirty_second_http() {
+        assert_eq!(
+            BILLING_POLL_INTERVAL,
+            Duration::from_secs(xai_grok_shell::auth::SNAPSHOT_TTL_SECS)
+        );
+        assert_eq!(
+            BILLING_POLL_INTERVAL,
+            Duration::from_secs(3600),
+            "near-full included SuperGrok period background poll must not HTTP every 30s"
+        );
+        assert_eq!(
+            dispatch::background_billing_poll_snapshot_mode(),
+            xai_grok_shell::auth::LimitsSnapshotMode::HonorTtl,
+            "background FetchBilling is HonorTtl, not ForceRefresh"
+        );
+        let Effect::FetchBilling {
+            force_refresh,
+            silent,
+            nonce,
+            ..
+        } = dispatch::background_billing_poll_fetch_billing(crate::app::agent::AgentId(0))
+        else {
+            panic!("background billing poll must queue FetchBilling");
+        };
+        assert!(
+            !force_refresh,
+            "background FetchBilling is HonorTtl, not ForceRefresh"
+        );
+        assert!(silent, "background billing poll is silent chrome refresh");
+        assert_eq!(
+            nonce, 0,
+            "background billing poll is not a usage-modal fetch"
+        );
+    }
 
     #[test]
     fn typeahead_classification_keeps_text_drops_noise_and_control() {

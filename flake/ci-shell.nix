@@ -19,16 +19,14 @@ let
     CARGO_MEM_JOBS_MIN = "1";
     CARGO_MEM_HIGH_WATER = "0.15";
     CARGO_MEM_MAX_RESTARTS = "3";
-    CARGO_MEM_USE_MOLD = if pkgs.stdenv.isLinux then "1" else "0";
+    CARGO_MEM_USE_MOLD = if pkgs.stdenv.hostPlatform.isLinux then "1" else "0";
     PROTOC = "${pkgs.protobuf}/bin/protoc";
     OPENSSL_NO_VENDOR = "1";
-    GROK_TOOLS_BUNDLE_RG_PATH = "${pkgs.ripgrep}/bin/rg";
-    GROK_SHELL_BUNDLE_RG_PATH = "${pkgs.ripgrep}/bin/rg";
     PKG_CONFIG_PATH = lib.makeSearchPathOutput "dev" "lib/pkgconfig" (
-      [ pkgs.openssl ] ++ lib.optionals pkgs.stdenv.isLinux [ pkgs.dbus ]
+      [ pkgs.openssl ] ++ lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.dbus ]
     );
     LD_LIBRARY_PATH = lib.makeLibraryPath (
-      [ pkgs.openssl ] ++ lib.optionals pkgs.stdenv.isLinux [ pkgs.dbus ]
+      [ pkgs.openssl ] ++ lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.dbus ]
     );
     # mkShell injects NIX_HARDENING_ENABLE with fortify. jemalloc's
     # configure runs C probes under -O0 -Werror; fortify then emits
@@ -75,7 +73,7 @@ let
         pkgs.python3
         justPkg
       ]
-      ++ lib.optionals pkgs.stdenv.isLinux [
+      ++ lib.optionals pkgs.stdenv.hostPlatform.isLinux [
         pkgs.mold
         pkgs.dbus
       ];
@@ -107,7 +105,7 @@ let
       grok-nix-helper
       pkgs.cargo-nextest
     ]
-    ++ lib.optionals pkgs.stdenv.isLinux [
+    ++ lib.optionals pkgs.stdenv.hostPlatform.isLinux [
       pkgs.dbus
       pkgs.mold
     ];
@@ -117,8 +115,6 @@ let
     inherit (ciLowMemEnv)
       PROTOC
       OPENSSL_NO_VENDOR
-      GROK_TOOLS_BUNDLE_RG_PATH
-      GROK_SHELL_BUNDLE_RG_PATH
       NIX_HARDENING_ENABLE
       ;
 

@@ -185,12 +185,14 @@ mod tests {
         assert!(other.exists(), "ignored drop file must not be consumed");
     }
 
-    /// Surmount / grok-oss fork; tests are contracts.
-    /// Queue enqueue writes a `queue` WAL line when the body lands on
+    /// Grok OSS / Surmount fork; tests are contracts. Queue enqueue writes a `queue` WAL line when the body lands on
     /// `pending_prompts`, before the model is asked. L0 drain and mid-turn
     /// local enqueue (follow-up while a turn is running and the local queue
     /// is already non-empty) both append `kind=queue`. A later drain may
-    /// still append `kind=send`; the queue line must exist first.
+    /// still append `kind=send`; the queue line must exist first. This diverges from
+    /// upstream xAI because FORK.md wasted-human-time and the catalog WAL table pin
+    /// `prompt_wal.jsonl`. This is not operator-verified known good (2026-09-02): a
+    /// live session wrote `pending_prompts.json` without `prompt_wal.jsonl`.
     #[test]
     #[serial_test::serial(GROK_HOME)]
     fn prompt_wal_appends_on_queue_enqueue() {

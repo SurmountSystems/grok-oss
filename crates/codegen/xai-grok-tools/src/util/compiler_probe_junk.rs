@@ -279,6 +279,7 @@ mod tests {
     use super::*;
     use std::path::Path;
 
+    // Grok OSS: file-level infer-from-path verify. This diverges from upstream xAI because workspace rust_out, a.out, rmeta, and long-type dumps must be named as probe junk.
     #[test]
     fn names_match_rmeta_long_type_a_out_rust_out() {
         assert!(is_compiler_probe_junk_file_name(
@@ -293,6 +294,7 @@ mod tests {
         assert!(!is_compiler_probe_junk_file_name("long-type-not-a-dump.rs"));
     }
 
+    // Grok OSS: file-level infer-from-path verify. This diverges from upstream xAI because probe junk is refused at the workspace root, not under target/.
     #[test]
     fn root_rmeta_is_junk_nested_target_is_not() {
         let root = Path::new("/tmp/ws");
@@ -306,6 +308,7 @@ mod tests {
         ));
     }
 
+    // Grok OSS: file-level infer-from-path verify. This diverges from upstream xAI because a workspace rustc oneshot must be refused while rustc --version and --out-dir under /tmp may run.
     #[test]
     fn rustc_oneshot_is_refused_version_and_tmp_out_dir_are_not() {
         let cwd = Path::new("/tmp/ws");

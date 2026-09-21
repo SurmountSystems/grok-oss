@@ -80,7 +80,7 @@ prompt. `⇧E` clears all pins, and `Ctrl+T` clears pins on thinking blocks.
 |-----|--------|
 | `y` | Copy block content to clipboard |
 | `⇧Y` | Copy block metadata (e.g., the shell command) to clipboard |
-| `Enter` | Open block content in fullscreen viewer |
+| `Enter` | Expand a selected collapsed or hidden block (image attachment ellipsis and other folded hidden bodies), same as `:expand`. On an already-expanded selected entry, open the fullscreen viewer. Composer `Enter` with text still sends. |
 | `Ctrl+F` | Open block content in fullscreen viewer (alt binding) |
 
 ---
@@ -224,7 +224,7 @@ Actions that affect the agent session, available from the agent screen.
 | `Ctrl+.` (alt: `Ctrl+X`) | Agent screen | Open the keyboard shortcuts help |
 | `F2` (alt: `Ctrl+,` / `Cmd+,`) | Agent screen | Open the settings modal |
 
-**Note:** `Ctrl+M` is context-dependent. When the prompt is focused, it toggles multiline input mode. Otherwise, it opens the model picker. `[ui] composer_multiline = false` disables newlines in the Human box entirely. Session Multiline cannot turn them back on while that flag is false.
+**Note:** `Ctrl+M` is context-dependent. When the prompt is focused, it toggles multiline input mode. Otherwise, it opens the model picker. `[ui] composer_multiline = false` disables newlines in the Operator box entirely. Session Multiline cannot turn them back on while that flag is false. `[ui] allow_session_multiline = false` (Settings → Editor → Allow session Multiline) blocks turning session Multiline on via `Ctrl+M`, `/multiline`, or the Multiline settings row. `Shift+Enter` newline behavior is unchanged. `Ctrl+Enter` still interjects when that is appropriate.
 
 **Note:** Minimal-mode external editing resolves `$VISUAL`, then `$EDITOR`, then `vi`. Values may include quoted arguments. Saving replaces only the draft; an empty file clears it. Drafts with pasted/file/image chips must be edited in the composer so attachments are not flattened.
 
@@ -264,34 +264,43 @@ Over SSH, the remote Grok process usually cannot access the terminal's local X11
 
 ## Plan approval keys
 
-When plan approval is open, letter keys type into the prompt and the plan pane box. Mouse is the primary path for **Approve**, **Clarify**, **Revise**, and **Exit**. See [Plan mode](19-plan-mode.md).
+When plan approval is open, letter keys type into the prompt and the plan pane box. Mouse is the primary path for idle **Approve**, **Comment**, **Revise**, and **Exit**. **Clarify** is only after **Comment**. See [Plan mode](19-plan-mode.md).
 
 | Key | Action |
 |-----|--------|
 | letters | Type (including `a` / `A`). They do not Approve or open notes. |
 | `?` | Clarify (focus the box for a question) |
-| `Tab` | Move focus between the plan preview and the prompt |
-| empty `Ctrl+C` | Exit (abandon the plan) |
+| `Tab` | Move focus between the plan preview and the prompt. When the slash dropdown is `/model` or `/m` and exactly one model row is highlighted, Tab applies the switch now (model plus effort), clears the composer, and does not send Operator chat. |
+| first `Ctrl+C` with text or image chips | Clears the Isolated Preview / mill composer draft. Isolated Preview stays. Does not Exit, cancel the turn, quit, or leave plan mode. |
+| empty `Ctrl+C` | Second press: Isolated Preview Exit / abandon the plan, or cancel a running turn. |
 
-Empty `Enter` never approves a plan. Use the clickable **Approve** button.
+Empty `Enter` never Approves. Clickable Approve only ([GitHub #122](https://github.com/SurmountSystems/grok-oss/issues/122)). Use the clickable **Approve** button.
+
+Isolated Preview has a magnifying-glass search control on the title bar, immediately left of copy and the fullscreen arrow. Search is case-insensitive by default (`plan` matches `Plan` and `PLAN`). After you accept the query, `n` / `N` jump hits. Isolated Preview composer `/` stays slash; the glass click opens search. Reuse line-viewer search. Do not dump a screenshot paste into that search bar.
+
+GNOME All Markup Copy is an image, not the dialog title. Clipboard image paste is an image chip in the Operator box. Isolated Preview must not put that paste into line-viewer search. Paste-chip Enter still sends ([GitHub #114](https://github.com/SurmountSystems/grok-oss/issues/114)).
 
 ## During an active turn (agent running)
 
 The composer footer Enter cue is **send**, **queue**, or **interject**. It names what plain `Enter` will do.
 
+A `[Pasted: N lines]` chip in the Operator box is a prompt. Enter sends or interjects that body. It does not only expand the chip. Expand is paste-again or double-click. Isolated Preview idle after present, a non-empty Operator paste plus Enter, still Approves with those notes. Isolated Preview does not close when nested implementers continue. Isolated Preview stays until Esc, Exit, or Approve. Isolated Preview is not a Plan Exit timer. Empty Enter never Approves. Clickable Approve only ([GitHub #122](https://github.com/SurmountSystems/grok-oss/issues/122)).
+
 While the agent is generating:
 
-- **Plain `Enter`** (with text in the composer) **queues** a follow-up for later. Queued follow-ups run after the current turn ends, and they deliberately **hold** while the agent is blocked waiting on background tasks or a subagent (a hint explains the hold).
+- **Plain `Enter`** (with text in the composer) **soft-interjects** into this turn (`x.ai/interject`). It does not wait as a serial queue row. Named `/queue` hold still waits.
 - **Empty `Enter` mid-turn** with a queued follow-up **soft-interjects** the top queued row into the current turn.
-- **Soft interject** injects into the current turn and **never cancels**. Cancel is `Esc` or status **`[stop]`** only. This is not send-now.
+- **Soft interject** injects into the current turn and **never cancels**. Cancel is `Esc` or status **`[stop]`** only.
 
 | Terminal | Primary | Alternates | Action |
 |----------|---------|------------|--------|
-| Default | `Ctrl+Enter` | `Ctrl+I` | Soft interject (injects into the current turn; never cancels) |
-| Apple Terminal | `Ctrl+O` | `Ctrl+Enter`, `Ctrl+I` | Soft interject |
-| VS Code family (VS Code, Cursor, Windsurf, Zed) | **`Ctrl+L`** | *(none)* | Soft interject (`Ctrl+I` not used. Tab / host chat. Plugins via `/plugins`) |
+| Default | `Ctrl+I` | queue **[Send now]** | Soft interject / send-now (injects into the current turn; never cancels) |
+| Apple Terminal | `Ctrl+O` | `Ctrl+I`, queue **[Send now]** | Soft interject / send-now |
+| VS Code family (VS Code, Cursor, Windsurf, Zed) | **`Ctrl+L`** | queue **[Send now]** | Soft interject / send-now (`Ctrl+I` not used. Tab / host chat. Plugins via `/plugins`) |
 
-In `/multiline` mode, `Shift+Enter` (or `Alt+Enter`) sends while plain `Enter` inserts a newline, except on an **empty** composer mid-turn with a queued follow-up, where plain `Enter` still **soft-interjects** the top row. (`Ctrl+Enter` is soft interject mid-turn when bound on non-VS Code family. It does not submit a new idle turn.) When `[ui] composer_multiline = false`, both Enter and Shift+Enter send or interject and never insert a newline. Plan Preview uses the same Enter rules as the main Human box.
+`Ctrl+Enter` interjects when interjection is appropriate, and otherwise inserts a newline (the `Shift+Enter` analog). Interjection is appropriate when a sampler turn is running, the Operator box has text or images, and the target can take `x.ai/interject` (this session, or an open L2 overlay). It is not appropriate when idle, when the composer is empty, or when an L3 specialist overlay is open (specialists stay unbothered). Cancel-and-send is not this chord. Empty `Ctrl+Enter` does not send. Soft interject remaining chords are still `Ctrl+I`, Apple Terminal `Ctrl+O`, VS Code family `Ctrl+L`, the queue **[Send now]** control (plain prompt rows), and empty-composer mid-turn `Enter` on a queued row. A queued `/goal` row is a goal action after **[Send now]**, not an interjected string.
+
+In session Multiline (`Ctrl+M` / `/multiline`), `Shift+Enter` (or `Alt+Enter`) still sends. Plain `Enter` at the end of the last composer line sends immediately (or interjects if a turn is running). It does not insert a silent extra newline. Plain `Enter` in the middle of a multiline draft still inserts a newline. Empty composer mid-turn with a queued follow-up still force-sends the top row. When `[ui] composer_multiline = false`, Enter and Shift+Enter send or interject and never insert a newline. `Ctrl+Enter` still inserts a newline when interjection is not appropriate, and still interjects when it is. When `[ui] allow_session_multiline = false`, you cannot turn session Multiline on. Plan Preview still inserts a newline on session-Multiline Enter even at the end of the last line; the main Operator box submits there.
 
 To hand the agent a note **without** stopping it, queue with plain `Enter` or use the soft-interject chord.
 
@@ -309,11 +318,11 @@ Three work controls exist. They are not interchangeable:
 
 Soft stop is **chord-only** even if status-row paint is still landing after a restack. Fearless pause that cancels a running turn writes continue interrupted turn (`canceled_turn_resume.json`) so last-session on start and `/start` can continue if this process dies. The pause gate itself stays in this process in RAM. See [Sessions](17-sessions.md#continue-interrupted-turn-on-restart).
 
-> **WezTerm**: These modified Enter keys need `enable_kitty_keyboard = true` in your WezTerm config. Full steps and a one-line workaround are in the [terminal support guide](21-terminal-support.md#problem-ctrlenter-doesnt-interject-in-wezterm).
+> **WezTerm**: Modified Enter / Ctrl chords that need Kitty keyboard protocol still want `enable_kitty_keyboard = true` in your WezTerm config. Full steps are in the [terminal support guide](21-terminal-support.md). Mid-turn `Ctrl+Enter` with text interjects when that is appropriate; otherwise it inserts a newline.
 
-> **Windows (non–VS Code family)**: Some consoles drop the `Ctrl` modifier on `Ctrl+Enter` (it can collapse to bare `Enter` or `Ctrl+J`). Use `Ctrl+I` as the alt — letter-key Ctrl chords are stable everywhere. On VS Code family, use **`Ctrl+L`**.
+> **Windows (non–VS Code family)**: Prefer `Ctrl+I` for soft interject. Letter-key Ctrl chords are stable everywhere. On VS Code family, use **`Ctrl+L`**.
 
-> **VS Code family `Ctrl+L`**: Grok uses it for interject and leaves the extensions shortcut unbound (open plugins with `/plugins` or the command palette). If your terminal profile still maps **Clear** (or another command) to `Ctrl+L`, that host binding can steal the chord — rebind or remove it so the PTY receives form feed (`\x0c`).
+> **VS Code family `Ctrl+L`**: Grok uses it for soft interject / send-now and leaves the extensions shortcut unbound (open plugins with `/plugins` or the command palette). If your terminal profile still maps **Clear** (or another command) to `Ctrl+L`, that host binding can steal the chord — rebind or remove it so the PTY receives form feed (`\x0c`).
 
 ---
 
@@ -328,7 +337,7 @@ Actions available from any screen.
 | `Ctrl+Q` | `Ctrl+D` | Quit the application | Yes (double-press within 1000ms) |
 | `F9` | | Capture the current TUI frame as a PNG (`/screenshot`). When plan approval is open, auto-attach that PNG. | No |
 
-**VS Code family terminal** (VS Code, Cursor, Windsurf, Zed integrated terminals): `Ctrl+Q` is captured by the host, so Grok makes **`Ctrl+D` the sole quit key** (`Ctrl+Q` is not bound). Half-page-down is rebound to bare **`Shift+D`**. Mid-turn interject uses **`Ctrl+L`** (no alternates) because `Ctrl+Enter` / `Ctrl+I` do not reliably reach the PTY; extensions are opened via `/plugins` instead of `Ctrl+L`.
+**VS Code family terminal** (VS Code, Cursor, Windsurf, Zed integrated terminals): `Ctrl+Q` is captured by the host, so Grok makes **`Ctrl+D` the sole quit key** (`Ctrl+Q` is not bound). Half-page-down is rebound to bare **`Shift+D`**. Mid-turn soft interject / send-now uses **`Ctrl+L`** (plus queue **[Send now]**). `Ctrl+Enter` interjects when appropriate and otherwise inserts a newline. Extensions are opened via `/plugins` instead of `Ctrl+L`.
 
 > **Returning to the welcome screen has no key binding** — use the `/home` slash command (alias `/welcome`) from inside a session. See [Slash Commands](04-slash-commands.md).
 
@@ -404,11 +413,12 @@ The bottom of the TUI displays a contextual shortcuts bar showing the most relev
 The TUI supports mouse interaction:
 
 - **Click** on a scrollback entry to select it
+- **Double-click** a collapsed or hidden block (image attachment ellipsis and other folded hidden bodies) to expand it, same as `:expand`
 - **Scroll wheel** to scroll through the scrollback
 - **Click** on the prompt area to focus it
 - **Hover** over the prompt to see a highlight (configurable via `pager.toml`)
 - **Middle click** on Linux X11/XWayland to paste the PRIMARY selection
-- **Click** **`[−]`** in the todo header (board open, at least one completed or cancelled row) to **Clear finished**. Idle is quiet gray. Hover is a stronger gray, not Human green and not agent magenta. Tasks pane open/kill chrome (`[↗]` / `[x]`) wins if the hits overlap. Compact layout still keeps one chrome row above the todo body so this control cannot paint into the tasks model/timer.
+- **Click** **`[−]`** in the todo header (board open, at least one completed or cancelled row) to **Clear finished**. Idle is quiet gray. Hover is a stronger gray, not Operator green and not agent magenta. Tasks pane open/kill chrome (`[↗]` / `[x]`) wins if the hits overlap. Compact layout still keeps one chrome row above the todo body so this control cannot paint into the tasks model/timer.
 
 ---
 
@@ -428,7 +438,7 @@ Focus prompt:     Space or any letter key (auto-focuses and types)
 Navigation:       j/k (up/down)  H/L (prev/next turn)  K/J (prev/next response)  g/G (top/bottom)
 Scrolling:        Ctrl+J/K (line)  Ctrl+U/D (half page; D=Shift+D in VSCode)  PgUp/PgDn (page)
 Folding:          h/l (collapse/expand)  e (toggle)  E (all)
-Content:          y (copy)  Y (copy cmd)  Enter (fullscreen)
+Content:          y (copy)  Y (copy cmd)  Enter (expand hidden, else fullscreen)
 View:             r (raw markdown)  Ctrl+T (thinking)
 Focus prompt:     i, Tab, or Space
 ```
@@ -437,8 +447,9 @@ Focus prompt:     i, Tab, or Space
 
 ```
 Send:             Enter
-Newline:          Shift+Enter or Alt+Enter
-Multiline:        Ctrl+M (toggle)
+Newline:          Shift+Enter, Alt+Enter, or Ctrl+Enter when interject is not appropriate
+Multiline:        Ctrl+M (toggle; blocked when allow_session_multiline is false)
+Soft interject:   Ctrl+I (Apple Ctrl+O; VS Code family Ctrl+L; queue [Send now])
 Buffer start:     Ctrl+Home or Ctrl+PageUp (whole draft)
 Buffer end:       Ctrl+End or Ctrl+PageDown (whole draft)
 Paste:            Ctrl+V (text, files, screenshots on macOS/Linux)

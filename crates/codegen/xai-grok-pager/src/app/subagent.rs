@@ -56,7 +56,11 @@ pub struct SubagentInfo {
     pub turns: Option<u32>,
     pub turn_count: Option<u32>,
     pub tool_call_count: Option<u32>,
+    /// Present usage: this nested session's live sampling window.
     pub tokens_used: Option<u64>,
+    /// Past usage dropped by compact (`tokens_before - tokens_after` each time).
+    /// Present plus past is this session's atomic total. Each unit once.
+    pub tokens_past: u64,
     pub context_window_tokens: Option<u64>,
     /// 0-100.
     pub context_usage_pct: Option<u8>,
@@ -102,6 +106,17 @@ impl SubagentInfo {
         } else {
             self.elapsed()
         }
+    }
+
+    /// Fold a compact into present plus past. Dropped units move to `tokens_past`
+    /// so the surviving window is not counted twice.
+    pub(crate) fn record_compact(&mut self, tokens_before: Option<u64>, tokens_after: u64) {
+        if let Some(before) = tokens_before {
+            self.tokens_past = self
+                .tokens_past
+                .saturating_add(before.saturating_sub(tokens_after));
+        }
+        self.tokens_used = Some(tokens_after);
     }
 
     /// Last operator-visible tool or progress for wait chrome.
@@ -542,8 +557,9 @@ pub(crate) fn parse_tag_prefix(description: &str) -> (Option<&str>, &str) {
 ///
 /// The returned description always has any leading `[tag]` prefix stripped,
 /// regardless of whether the tag was used as the label, so callers never
-/// render `[tag]` bracket noise inline.
-pub(crate) fn format_subagent_label(info: &SubagentInfo) -> (String, String) {
+/// render `[tag]` bracket noise inline. Compact window counts are added by
+/// [`format_subagent_label`] and [`format_subagent_label_parts`].
+fn format_subagent_type_and_job(info: &SubagentInfo) -> (String, String) {
     let (tag, clean_desc) = parse_tag_prefix(&info.description);
     let raw_label = if let Some(p) = info
         .persona
@@ -572,6 +588,69 @@ pub(crate) fn format_subagent_label(info: &SubagentInfo) -> (String, String) {
         None => raw_label,
     };
     (label, clean_desc.to_string())
+}
+
+/// Operator-visible Subagents list parts: type label, job description without
+/// a compact count, and an optional compact count (`90k`, `112.6k`).
+///
+/// For an L2 row the compact count is that L2's present plus past usage plus
+/// every specialist it spawned, each unit once. An L3 row is that specialist's
+/// own present plus past. The unit is implicit. Never the word `tokens`.
+pub(crate) fn format_subagent_label_parts(info: &SubagentInfo) -> (String, String, Option<String>) {
+    format_subagent_label_parts_among(info, std::slice::from_ref(&info))
+}
+
+/// Same as [`format_subagent_label_parts`] with the full registry so an L2 row
+/// can include specialists without double-count.
+pub(crate) fn format_subagent_label_parts_among(
+    info: &SubagentInfo,
+    all: &[&SubagentInfo],
+) -> (String, String, Option<String>) {
+    let (label, clean_desc) = format_subagent_type_and_job(info);
+    let usage = subagent_list_row_usage(info, all);
+    let suffix = match usage {
+        Some(total) => {
+            Some(crate::app::agent_view::l2_token_tracking::format_measured_tokens_suffix(total))
+        }
+        None => crate::app::agent_view::l2_token_tracking::format_live_subagents_list_suffix(
+            info.child_session_id.as_ref(),
+            None,
+        ),
+    };
+    (label, clean_desc, suffix)
+}
+
+/// Operator-visible type label plus job description with compact window count.
+///
+/// Calls [`format_subagent_label_parts`] so the compact suffix uses
+/// [`crate::app::agent_view::l2_token_tracking::format_measured_tokens_suffix`].
+/// L2 rows that need specialists in the total must use
+/// [`format_subagent_label_among`]. The unit is implicit (`90k`, `112.6k`).
+/// Never the word `tokens`.
+pub(crate) fn format_subagent_label(info: &SubagentInfo) -> (String, String) {
+    let (label, clean_desc, suffix) = format_subagent_label_parts(info);
+    (
+        label,
+        crate::app::agent_view::l2_token_tracking::format_subagents_list_row_from_memory(
+            &clean_desc,
+            suffix.as_deref(),
+        ),
+    )
+}
+
+/// Subagents list description using the full registry for L2 atomic totals.
+pub(crate) fn format_subagent_label_among(
+    info: &SubagentInfo,
+    all: &[&SubagentInfo],
+) -> (String, String) {
+    let (label, clean_desc, suffix) = format_subagent_label_parts_among(info, all);
+    (
+        label,
+        crate::app::agent_view::l2_token_tracking::format_subagents_list_row_from_memory(
+            &clean_desc,
+            suffix.as_deref(),
+        ),
+    )
 }
 
 /// Running, non-workflow L2 rows for the L1 Subagents list.
@@ -612,6 +691,23 @@ where
         .collect();
     live.sort_by_key(|info| info.started_at);
     dedupe_live_by_description(live)
+}
+
+/// Rows the Subagents list actually paints: L2 live list, or nested
+/// specialists when that L2 filter is empty (overlay with only L3 rows).
+/// Header sparkler, Subagents N, and footer N subagents use this same
+/// running-only filter.
+pub(crate) fn listed_live_subagents<'a, I>(infos: I) -> Vec<&'a SubagentInfo>
+where
+    I: IntoIterator<Item = &'a SubagentInfo>,
+{
+    let all: Vec<_> = infos.into_iter().collect();
+    let live = live_subagent_list(all.iter().copied());
+    if live.is_empty() {
+        live_nested_specialist_list(all)
+    } else {
+        live
+    }
 }
 
 fn dedupe_live_by_description<'a>(live: Vec<&'a SubagentInfo>) -> Vec<&'a SubagentInfo> {
@@ -690,6 +786,79 @@ pub(crate) fn format_live_l3_count(n: usize) -> Option<String> {
         1 => Some("1 specialist".to_string()),
         n => Some(format!("{n} specialists")),
     }
+}
+
+/// Present plus past for one nested session. Each unit once.
+///
+/// `None` before the first usage tick and before any compact.
+pub(crate) fn nested_session_present_plus_past(info: &SubagentInfo) -> Option<u64> {
+    match (info.tokens_used, info.tokens_past) {
+        (None, 0) => None,
+        (present, past) => Some(present.unwrap_or(0).saturating_add(past)),
+    }
+}
+
+/// L2 Subagents list row: that L2's present plus past plus every specialist
+/// it spawned, each unit once.
+///
+/// Does not add a specialist that is already stored in the L2 window (L2
+/// `tokens_used` / `tokens_past` stay this L2 only; specialists are extra
+/// rows). Finished specialists still count: every specialist it spawned.
+pub(crate) fn l2_present_plus_past_atomic_total<'a, I>(l2: &SubagentInfo, infos: I) -> Option<u64>
+where
+    I: IntoIterator<Item = &'a SubagentInfo>,
+{
+    let own = nested_session_present_plus_past(l2);
+    let mut specialist_total = 0u64;
+    let mut any_specialist = false;
+    for info in infos {
+        if info.workflow_run_id.is_some() {
+            continue;
+        }
+        if info.parent_session_id.as_deref() != Some(l2.child_session_id.as_ref()) {
+            continue;
+        }
+        if let Some(usage) = nested_session_present_plus_past(info) {
+            specialist_total = specialist_total.saturating_add(usage);
+            any_specialist = true;
+        }
+    }
+    match (own, any_specialist) {
+        (None, false) => None,
+        (own, _) => Some(own.unwrap_or(0).saturating_add(specialist_total)),
+    }
+}
+
+/// Compact count for a Subagents list row.
+///
+/// L2: present plus past including specialists. L3: that specialist only.
+pub(crate) fn subagent_list_row_usage(info: &SubagentInfo, all: &[&SubagentInfo]) -> Option<u64> {
+    let child_ids: std::collections::HashSet<&str> = all
+        .iter()
+        .map(|row| row.child_session_id.as_ref())
+        .collect();
+    if is_l2_list_row(info, &child_ids) {
+        l2_present_plus_past_atomic_total(info, all.iter().copied())
+    } else {
+        nested_session_present_plus_past(info)
+    }
+}
+
+/// Sum each live nested session window once.
+///
+/// L1, L2, and L3 are separate sampling windows. One unit belongs to one
+/// window. This total adds every live non-workflow nested session once. It
+/// does not add an L3 both inside an L2 Subagents list figure and again here.
+/// Do not feed this sum into the parent `239K / 500K` L1 context chip.
+pub(crate) fn sum_live_nested_session_windows<'a, I>(infos: I) -> u64
+where
+    I: IntoIterator<Item = &'a SubagentInfo>,
+{
+    infos
+        .into_iter()
+        .filter(|info| info.is_running() && info.workflow_run_id.is_none())
+        .filter_map(nested_session_present_plus_past)
+        .fold(0u64, u64::saturating_add)
 }
 
 pub(crate) fn format_subagent_meta(
@@ -798,6 +967,7 @@ mod tests {
             turn_count: None,
             tool_call_count: None,
             tokens_used: None,
+            tokens_past: 0,
             context_window_tokens: None,
             context_usage_pct: None,
             tools_used: Vec::new(),
@@ -1231,6 +1401,32 @@ mod tests {
             " (grok-3)"
         );
     }
+    /// Subagents list omits the word tokens. Nested chrome must not contain
+    /// `measured`, must not paint a raw integer like 53407, and must contain
+    /// compact `53.4k`.
+    #[test]
+    fn format_subagent_label_measured_tokens_use_compact_counts() {
+        let mut info = make_info();
+        info.tokens_used = Some(53407);
+        info.description = "Stale prompt still live".into();
+        let (_, desc) = format_subagent_label(&info);
+        assert!(
+            desc.contains("53.4k"),
+            "nested L2 token chrome must use the same compact count style as the rest of grok-oss (K/M), not a raw integer like 53407, got {desc:?}"
+        );
+        assert!(
+            !desc.contains("tokens") && !desc.contains("token"),
+            "Subagents list omits the word tokens; got {desc:?}"
+        );
+        assert!(
+            !desc.contains("measured"),
+            "Contract A: Subagents nested token chrome must not contain measured, got {desc:?}"
+        );
+        assert!(
+            !desc.contains("53407"),
+            "must not paint a raw integer token count, got {desc:?}"
+        );
+    }
     #[test]
     fn label_uses_persona_when_set() {
         let mut info = make_info();
@@ -1326,6 +1522,172 @@ mod tests {
         info.persona = Some("Reviewer".into());
         let (label, _) = format_subagent_label(&info);
         assert_eq!(label, "Reviewer");
+    }
+    /// Subagents list omits the word tokens. Description suffix is `12.4k`
+    /// after an in-memory 12400 usage tick. Must not contain `measured`. Must
+    /// not paint the raw integer 12400. Layout uses `l2_token_tracking`. It
+    /// must not open the session transcript file.
+    #[test]
+    fn format_subagent_label_shows_measured_tokens_suffix() {
+        let mut info = make_info();
+        info.description = "rate-limit implementer".into();
+        info.tokens_used = Some(12400);
+        let (_, desc) = format_subagent_label(&info);
+        assert!(
+            desc.contains("12.4k"),
+            "Subagents list row must contain 12.4k, got {desc:?}"
+        );
+        assert!(
+            !desc.contains("tokens") && !desc.contains("token"),
+            "Subagents list omits the word tokens; got {desc:?}"
+        );
+        assert!(
+            !desc.contains("measured"),
+            "Contract A: Subagents nested token chrome must not contain measured, got {desc:?}"
+        );
+        assert!(
+            !desc.contains("12400"),
+            "must not paint a raw integer token count, got {desc:?}"
+        );
+        assert!(
+            desc.contains("rate-limit implementer"),
+            "row uses the description label, got {desc:?}"
+        );
+        assert_eq!(
+            desc,
+            crate::app::agent_view::l2_token_tracking::format_subagents_list_row_from_memory(
+                "rate-limit implementer",
+                Some("12.4k"),
+            )
+        );
+        info.tokens_used = None;
+        let (_, before) = format_subagent_label(&info);
+        assert_eq!(before, "rate-limit implementer");
+        assert!(
+            !before.contains("tokens"),
+            "no compact suffix before the first usage tick, got {before:?}"
+        );
+    }
+
+    /// Operator contract: each L2 Subagents list row is a live atomic total
+    /// of that L2's present and past usage, including every specialist it
+    /// spawned, with each unit counted once. Specialists still show separately.
+    #[test]
+    fn subagents_list_l2_row_is_present_plus_past_atomic_total_including_specialists() {
+        let mut l2 = make_info();
+        l2.child_session_id = "l2-residual".into();
+        l2.description = "Residual".into();
+        l2.depth = Some(1);
+        l2.tokens_used = Some(25_000);
+        l2.tokens_past = 65_000;
+        let mut l3 = make_info();
+        l3.subagent_id = "sa-l3".into();
+        l3.child_session_id = "l3-specialist".into();
+        l3.parent_session_id = Some("l2-residual".into());
+        l3.depth = Some(2);
+        l3.description = "read Residual lockstep".into();
+        l3.tokens_used = Some(50_000);
+        let all = [&l2, &l3];
+        let (_, _, l2_suffix) = format_subagent_label_parts_among(&l2, &all);
+        assert_eq!(
+            l2_suffix.as_deref(),
+            Some("140k"),
+            "L2 parts suffix is present plus past plus specialist 140k, not 90k or 190k"
+        );
+        let (_, l2_desc) = format_subagent_label_among(&l2, &all);
+        assert!(
+            l2_desc.contains("140k"),
+            "L2 row is present 25k plus past 65k plus specialist 50k (140k), got {l2_desc:?}"
+        );
+        assert!(
+            !l2_desc.contains("90k") && !l2_desc.contains("25k") && !l2_desc.contains("50k"),
+            "L2 row must paint the atomic total, not present-only or specialist-only, got {l2_desc:?}"
+        );
+        assert!(
+            !l2_desc.contains("tokens"),
+            "Subagents list omits the word tokens; got {l2_desc:?}"
+        );
+        assert_eq!(
+            l2_present_plus_past_atomic_total(&l2, all),
+            Some(140_000),
+            "present 25000 plus past 65000 plus specialist 50000 is 140000, not 190000"
+        );
+        let naive_double = 25_000u64
+            .saturating_add(65_000)
+            .saturating_add(50_000)
+            .saturating_add(50_000);
+        assert_ne!(
+            l2_present_plus_past_atomic_total(&l2, all).unwrap(),
+            naive_double,
+            "must not add the specialist twice"
+        );
+        assert_eq!(live_l3_count([&l2, &l3], "l2-residual"), 1);
+        assert_eq!(format_live_l3_count(1).as_deref(), Some("1 specialist"));
+        let (_, l3_desc) = format_subagent_label_among(&l3, &all);
+        assert!(
+            l3_desc.contains("50k"),
+            "specialists still show separately with their own present plus past, got {l3_desc:?}"
+        );
+        assert!(
+            !l3_desc.contains("140k"),
+            "specialist row must not paint the L2 atomic total, got {l3_desc:?}"
+        );
+    }
+
+    /// Compact 90k to 25k must keep past 65k so present plus past stays 90k
+    /// for that nested session before specialists.
+    #[test]
+    fn nested_compact_keeps_present_plus_past_without_double_counting_the_surviving_window() {
+        let mut l2 = make_info();
+        l2.child_session_id = "l2-residual".into();
+        l2.depth = Some(1);
+        l2.tokens_used = Some(90_000);
+        l2.record_compact(Some(90_000), 25_000);
+        assert_eq!(l2.tokens_used, Some(25_000));
+        assert_eq!(l2.tokens_past, 65_000);
+        assert_eq!(nested_session_present_plus_past(&l2), Some(90_000));
+        l2.tokens_used = Some(40_000);
+        assert_eq!(
+            nested_session_present_plus_past(&l2),
+            Some(105_000),
+            "new present after compact adds to past; surviving 25k is not counted twice"
+        );
+    }
+
+    /// Total does not double-count nested specialists. L2 90k plus L3 50k is
+    /// 140000, not 190000 (L2+L3 added into L2, then L3 again).
+    #[test]
+    fn nested_specialist_windows_are_not_double_counted_in_the_total() {
+        let mut l2 = make_info();
+        l2.child_session_id = "l2-residual".into();
+        l2.depth = Some(1);
+        l2.tokens_used = Some(90_000);
+        let mut l3 = make_info();
+        l3.subagent_id = "sa-l3".into();
+        l3.child_session_id = "l3-specialist".into();
+        l3.parent_session_id = Some("l2-residual".into());
+        l3.depth = Some(2);
+        l3.tokens_used = Some(50_000);
+        let total = sum_live_nested_session_windows([&l2, &l3]);
+        assert_eq!(
+            total, 140_000,
+            "total does not double-count nested specialists: L2 90k + L3 50k is 140000, not 190000"
+        );
+        let l2_only = sum_live_nested_session_windows(std::iter::once(&l2));
+        assert_eq!(l2_only, 90_000);
+        let naive_double = l2
+            .tokens_used
+            .unwrap()
+            .saturating_add(l3.tokens_used.unwrap())
+            .saturating_add(l3.tokens_used.unwrap());
+        assert_ne!(total, naive_double);
+        let l2_row = l2_present_plus_past_atomic_total(&l2, [&l2, &l3]).unwrap();
+        assert_eq!(l2_row, 140_000);
+        assert_ne!(
+            l2_row.saturating_add(nested_session_present_plus_past(&l3).unwrap()),
+            total,
+            "must not add L2 row totals plus specialist rows into the nested sum"
+        );
     }
     fn write_meta_json(dir: &std::path::Path, subagent_id: &str, json: &str) {
         let meta_dir = dir.join("subagents").join(subagent_id);
@@ -1589,6 +1951,23 @@ mod tests {
             overlay_ids,
             ["l3-grep", "l3-edit", "l3-live"],
             "nested overlay list must show live L3 specialists, got {overlay_ids:?}"
+        );
+        let listed = listed_live_subagents([&l2_a, &l2_b, &l3_a, &l3_b, &l3_done, &l3_c]);
+        let listed_ids: Vec<&str> = listed.iter().map(|r| r.child_session_id.as_ref()).collect();
+        assert_eq!(
+            listed_ids,
+            ["l2-coord", "l2-other"],
+            "listed live rows must match the L1 L2 list when L2s are running, got {listed_ids:?}"
+        );
+        let overlay_only = listed_live_subagents([&l3_a, &l3_b, &l3_done, &l3_c]);
+        let overlay_only_ids: Vec<&str> = overlay_only
+            .iter()
+            .map(|r| r.child_session_id.as_ref())
+            .collect();
+        assert_eq!(
+            overlay_only_ids,
+            ["l3-grep", "l3-edit", "l3-live"],
+            "listed live rows fall back to live nested specialists when the L2 list is empty, got {overlay_only_ids:?}"
         );
     }
 

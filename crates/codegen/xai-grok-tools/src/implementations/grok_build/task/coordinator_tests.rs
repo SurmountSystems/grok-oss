@@ -9,9 +9,20 @@ use crate::implementations::grok_build::task::types::{
 };
 use tokio_util::sync::CancellationToken;
 
+#[path = "parent_follow_up_tests.rs"]
+mod parent_follow_up_tests;
+
+/// Interject text recorded by [`TestControl::follow_up`].
+struct FollowUpDelivery {
+    child_session_id: String,
+    text: String,
+}
+
 #[derive(Clone)]
 struct TestControl {
     cancellation: CancellationToken,
+    child_session_id: String,
+    follow_ups: mpsc::UnboundedSender<FollowUpDelivery>,
 }
 
 impl ChildControl for TestControl {
@@ -32,6 +43,13 @@ impl ChildControl for TestControl {
     fn cancel(&self) {
         self.cancellation.cancel();
     }
+
+    fn follow_up(&self, text: String) {
+        let _ = self.follow_ups.send(FollowUpDelivery {
+            child_session_id: self.child_session_id.clone(),
+            text,
+        });
+    }
 }
 
 struct TestRunner {
@@ -44,6 +62,7 @@ struct TestRunner {
     started: mpsc::UnboundedSender<String>,
     tokens: mpsc::UnboundedSender<CancellationToken>,
     queue_waits: mpsc::UnboundedSender<(String, Option<std::time::Duration>, usize)>,
+    follow_ups: mpsc::UnboundedSender<FollowUpDelivery>,
 }
 
 impl ChildRunner for TestRunner {
@@ -62,6 +81,7 @@ impl ChildRunner for TestRunner {
         let started = self.started.clone();
         let tokens = self.tokens.clone();
         let queue_waits = self.queue_waits.clone();
+        let follow_ups = self.follow_ups.clone();
         Box::pin(async move {
             let ChildRunRequest {
                 request,
@@ -71,6 +91,27 @@ impl ChildRunner for TestRunner {
                 session_running,
             } = run;
             let _ = queue_waits.send((request.id.clone(), queued_for, session_running));
+            // Same fail-closed Active `resume_from` as shell
+            // `handle_request.rs`. Named test
+            // `resume_from_of_running_l2_still_fails_active` is the contract.
+            if let Some(resume_id) = request.resume_from.as_deref()
+                && matches!(
+                    reporter
+                        .resume_source(resume_id, &request.parent_session_id)
+                        .await,
+                    SubagentResumeLookup::Active
+                )
+            {
+                let msg = format!(
+                    "Cannot resume from subagent '{resume_id}': it is still running. \
+                     Wait for it to complete before resuming."
+                );
+                return ChildRunOutput {
+                    result: failed_result(&request, &msg),
+                    completion_data: (),
+                    snapshot_ref: None,
+                };
+            }
             let _ = requests.send(request.clone());
             if wait_before_start {
                 tokio::select! {
@@ -99,6 +140,8 @@ impl ChildRunner for TestRunner {
                     definition_background: request.subagent_type == "background-default",
                     control: TestControl {
                         cancellation: cancellation.clone(),
+                        child_session_id: request.id.clone(),
+                        follow_ups: follow_ups.clone(),
                     },
                 })
                 .await
@@ -169,6 +212,16 @@ fn cancelled_result(request: &SubagentRequest) -> SubagentResult {
     }
 }
 
+fn failed_result(request: &SubagentRequest, error: &str) -> SubagentResult {
+    SubagentResult {
+        success: false,
+        error: Some(error.to_owned()),
+        subagent_id: request.id.clone(),
+        child_session_id: request.id.clone(),
+        ..Default::default()
+    }
+}
+
 fn request(id: &str, background: bool) -> SubagentRequest {
     SubagentRequest {
         id: id.to_owned(),
@@ -202,6 +255,7 @@ struct Harness {
     started: mpsc::UnboundedReceiver<String>,
     tokens: mpsc::UnboundedReceiver<CancellationToken>,
     queue_waits: mpsc::UnboundedReceiver<(String, Option<std::time::Duration>, usize)>,
+    follow_ups: mpsc::UnboundedReceiver<FollowUpDelivery>,
     actor: tokio::task::JoinHandle<()>,
     resume: ChildReporter<TestControl>,
 }
@@ -233,6 +287,7 @@ fn harness_with_options(
     let (started_tx, started) = mpsc::unbounded_channel();
     let (token_tx, tokens) = mpsc::unbounded_channel();
     let (queue_wait_tx, queue_waits) = mpsc::unbounded_channel();
+    let (follow_up_tx, follow_ups) = mpsc::unbounded_channel();
     let coordinator = SubagentCoordinator::new(
         command_rx,
         TestRunner {
@@ -245,6 +300,7 @@ fn harness_with_options(
             started: started_tx,
             tokens: token_tx,
             queue_waits: queue_wait_tx,
+            follow_ups: follow_up_tx,
         },
         config,
     );
@@ -265,6 +321,7 @@ fn harness_with_options(
         started,
         tokens,
         queue_waits,
+        follow_ups,
         actor,
         resume,
     }

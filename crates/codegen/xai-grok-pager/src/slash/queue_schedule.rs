@@ -37,6 +37,23 @@ pub fn is_plan_slash(text: &str) -> bool {
     first_slash_token(text) == "/plan"
 }
 
+/// `/goal` is a shell builtin (GoalSet). A queued row must stay a goal
+/// action after Send now, not an interjected composer string.
+pub fn is_goal_slash(text: &str) -> bool {
+    first_slash_token(text) == "/goal"
+}
+
+/// `/goal clear` dismisses without waiting on nested work. Not GoalSet.
+pub fn is_goal_clear_slash(text: &str) -> bool {
+    if !is_goal_slash(text) {
+        return false;
+    }
+    text.trim()
+        .strip_prefix("/goal")
+        .map(|rest| rest.trim().eq_ignore_ascii_case("clear"))
+        .unwrap_or(false)
+}
+
 pub fn compact_command_text(rest: &str) -> String {
     if rest.is_empty() {
         "/compact".to_string()
@@ -61,6 +78,32 @@ pub fn plan_description_from_command(text: &str) -> Option<String> {
     } else {
         Some(rest.to_string())
     }
+}
+
+/// `/plan` with extra Operator text is a plan-update turn (Operator send /
+/// plan rewrite). Bare `/plan` exclusive-blocks nested implementers.
+/// `/plan --soft` docks Isolated Preview. `queue` / `later` still hold.
+/// `--soft` is not the queue hold token.
+pub fn plan_slash_is_update_turn(text: &str) -> bool {
+    if !is_plan_slash(text) {
+        return false;
+    }
+    let Some(rest) = plan_description_from_command(text) else {
+        return false;
+    };
+    let (hold, rest) = split_schedule_token(&rest);
+    if hold {
+        return false;
+    }
+    if rest == "--soft" {
+        return false;
+    }
+    if let Some(after) = rest.strip_prefix("--soft")
+        && after.starts_with(char::is_whitespace)
+    {
+        return false;
+    }
+    !rest.is_empty()
 }
 
 fn slash_name_and_rest(args: &str) -> Option<(&str, &str)> {
@@ -134,5 +177,57 @@ mod tests {
         assert_eq!(split_schedule_token("later keep auth"), (true, "keep auth"));
         assert_eq!(split_schedule_token("keep auth"), (false, "keep auth"));
         assert_eq!(split_schedule_token(""), (false, ""));
+    }
+
+    /// Named contract: `--soft` is not the queue hold token.
+    #[test]
+    fn split_schedule_token_does_not_treat_soft_as_hold() {
+        assert_eq!(split_schedule_token("--soft"), (false, "--soft"));
+        assert_eq!(
+            split_schedule_token("--soft add feature"),
+            (false, "--soft add feature")
+        );
+        assert_eq!(split_schedule_token("queue --soft"), (true, "--soft"));
+        assert_eq!(split_schedule_token("later --soft"), (true, "--soft"));
+    }
+
+    #[test]
+    fn is_goal_slash_detects_queued_goal_body() {
+        assert!(is_goal_slash(
+            "/goal also now do a /goal to check everything remotely"
+        ));
+        assert!(is_goal_slash("/goal"));
+        assert!(!is_goal_slash("/goals"));
+        assert!(!is_goal_slash("goal check remotely"));
+    }
+
+    /// `/goal clear` dismisses without waiting on nested work.
+    #[test]
+    fn is_goal_clear_slash_is_only_the_clear_subcommand() {
+        assert!(is_goal_clear_slash("/goal clear"));
+        assert!(is_goal_clear_slash("  /goal  CLEAR  "));
+        assert!(!is_goal_clear_slash("/goal"));
+        assert!(!is_goal_clear_slash("/goal pause"));
+        assert!(!is_goal_clear_slash(
+            "/goal also now do a /goal to check everything remotely"
+        ));
+    }
+
+    /// Operator: "/plan never submits, it just pulls up the stale plan."
+    /// Extra Operator text after `/plan` is a plan-update turn. Bare `/plan`
+    /// exclusive-blocks nested implementers. `/plan --soft` docks Isolated
+    /// Preview.
+    #[test]
+    fn plan_slash_with_body_is_update_turn_bare_and_soft_are_not() {
+        assert!(plan_slash_is_update_turn(
+            "/plan update the plan with what was accomplished and all that remains please"
+        ));
+        assert!(!plan_slash_is_update_turn("/plan"));
+        assert!(!plan_slash_is_update_turn("/plan   "));
+        assert!(!plan_slash_is_update_turn("/plan --soft"));
+        assert!(!plan_slash_is_update_turn("/plan --soft add feature"));
+        assert!(!plan_slash_is_update_turn("/plan queue"));
+        assert!(!plan_slash_is_update_turn("/plan later keep auth"));
+        assert!(!plan_slash_is_update_turn("/view-plan"));
     }
 }

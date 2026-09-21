@@ -1275,19 +1275,24 @@ impl AcpUpdateTracker {
         meta: &NotificationMeta,
         scrollback: &mut ScrollbackState,
     ) -> bool {
-        self.peel_user_facing_draft_from_current_thinking(scrollback);
-        self.finish_thinking(scrollback, false);
         let text = extract_text_from_content(&chunk.content);
+        // An empty content-start must not collapse "Thought for N.s" with no
+        // assistant row. After cancel / Goal Paused / "Can you please answer?",
+        // that left a blinking cursor and [pause] and no reply.
+        if self.current_agent_msg.is_none() && text.trim().is_empty() {
+            if !text.is_empty() {
+                tracing::warn!(
+                    text = %text.escape_debug(),
+                    "ignoring whitespace-only agent message chunk (no prior content)"
+                );
+            }
+            return false;
+        }
         if text.is_empty() {
             return false;
         }
-        if self.current_agent_msg.is_none() && text.trim().is_empty() {
-            tracing::warn!(
-                text = %text.escape_debug(),
-                "ignoring whitespace-only agent message chunk (no prior content)"
-            );
-            return false;
-        }
+        self.peel_user_facing_draft_from_current_thinking(scrollback);
+        self.finish_thinking(scrollback, false);
         let is_new = self.current_agent_msg.is_none();
         let id = *self.current_agent_msg.get_or_insert_with(|| {
             let entry_id = scrollback.start_streaming_agent();
@@ -2082,7 +2087,7 @@ fn tool_call_to_block(tc: &acp::ToolCall, session_cwd: Option<&Path>) -> RenderB
                 block = block.with_untrusted_summary();
             }
             if is_write {
-                block = block.with_prefix("Creating ");
+                block = block.with_prefix("Creating ").with_file_preview();
             }
             RenderBlock::ToolCall(ToolCallBlock::Edit(block))
         }
@@ -2610,14 +2615,15 @@ fn is_bg_tool(tc: &acp::ToolCall) -> bool {
 /// Check if an Edit-kind tool call is a whole-file write (write)
 /// rather than a targeted replacement (search_replace / edit).
 ///
-/// Detection: a Write-family `rawInput.variant` tag.
+/// Detection: a Write-family `rawInput.variant` tag, or the product
+/// title `Write \`path\``.
 fn is_write_tool(tc: &acp::ToolCall) -> bool {
     is_write_variant(
         tc.raw_input
             .as_ref()
             .and_then(|v| v.get("variant"))
             .and_then(|v| v.as_str()),
-    )
+    ) || tc.title.starts_with("Write `")
 }
 /// Extract the serde variant tag from a tool call's `raw_input.variant`.
 ///

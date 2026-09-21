@@ -1928,6 +1928,7 @@ impl DashboardState {
         let w = lease.snapshot.last_width;
         let h = lease.snapshot.viewport_height;
         sb.restore_viewport_snapshot(lease.snapshot);
+        let wanted_follow = sb.is_follow_mode() || page_flip.is_some();
         if let Some(entry_id) = page_flip
             && let Some(idx) = sb.index_of_id(entry_id)
         {
@@ -1937,6 +1938,12 @@ impl DashboardState {
             sb.set_selected(Some(idx));
             sb.scroll_to_entry_top(idx);
             sb.enable_follow_with_preserve();
+        }
+        // Live output that already overflowed the restored pin must follow
+        // the tail. Overlay `2/2 [‹][›]` restore otherwise hides new rows
+        // and looks like the model is ignoring the Operator.
+        if wanted_follow && sb.has_content_below() {
+            sb.enable_follow_mode();
         }
     }
 
@@ -2979,8 +2986,9 @@ impl DashboardState {
             {
                 return Some(InputOutcome::Changed);
             }
-            let enter_is_newline =
-                focused && compose_enter_is_newline(self.multiline_mode, mod_enter);
+            let enter_is_newline = focused
+                && compose_enter_is_newline(self.multiline_mode, mod_enter)
+                && self.peek_reply.paste_element_at_cursor().is_none();
             if !enter_is_newline {
                 let Some(row) = self.peek.as_ref().map(|p| p.row.clone()) else {
                     return Some(InputOutcome::Unchanged);
@@ -3573,11 +3581,13 @@ impl DashboardState {
                 return InputOutcome::Changed;
             }
             // slash_accepted_send: no-arg slash accept must submit, not newline.
-            let enter_is_newline =
-                !slash_accepted_send && compose_enter_is_newline(self.multiline_mode, mod_enter);
-            // Expand paste/file chips only for real bare Enter. Apple Terminal
-            // rescue yields bare Enter while is_mod_enter is true — that must
-            // send/newline, not expand (peek already gates the same way).
+            let enter_is_newline = !slash_accepted_send
+                && compose_enter_is_newline(self.multiline_mode, mod_enter)
+                && self.dispatch.paste_element_at_cursor().is_none();
+            // Expand file-ref chips only for real bare Enter. Paste-chip Enter
+            // submits. Apple Terminal rescue yields bare Enter while
+            // is_mod_enter is true — that must send/newline, not expand
+            // (peek already gates the same way).
             if !mod_enter
                 && matches!(
                     self.dispatch.try_element_interaction(key),

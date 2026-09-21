@@ -21,6 +21,16 @@ pub enum SamplingChannel {
     Reasoning,
 }
 
+impl SamplingChannel {
+    /// Wire/telemetry label for the channel (`text` or `reasoning`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Text => "text",
+            Self::Reasoning => "reasoning",
+        }
+    }
+}
+
 /// Why the in-flight request was stripped. What to do about it (e.g. persist
 /// the strip to stored history) is the consumer's decision, not the sampler's.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -235,6 +245,7 @@ pub enum SamplingErrorKind {
     EmptyResponse,
     MaxTokensTruncation,
     DoomLoopDetected,
+    RepetitiveGeneration,
 }
 
 impl SamplingErrorKind {
@@ -254,6 +265,7 @@ impl SamplingErrorKind {
             SamplingErrorKind::EmptyResponse => "empty_response",
             SamplingErrorKind::MaxTokensTruncation => "max_tokens_truncation",
             SamplingErrorKind::DoomLoopDetected => "doom_loop_detected",
+            SamplingErrorKind::RepetitiveGeneration => "repetitive_generation",
         }
     }
 }
@@ -301,6 +313,9 @@ impl From<&SamplingError> for SamplingErrorInfo {
             }
             SamplingError::DoomLoopDetected { .. } => {
                 (SamplingErrorKind::DoomLoopDetected, None, None, None)
+            }
+            SamplingError::RepetitiveGeneration { .. } => {
+                (SamplingErrorKind::RepetitiveGeneration, None, None, None)
             }
         };
 

@@ -2585,9 +2585,10 @@ fn prompt_page_actions_target_visible_fullscreen_child_scrollback() {
     );
 }
 
-/// Nested compact chrome must not steal parent TUI scroll. While the child
-/// is AutoCompacting, PageUp pages the parent even if the overlay flag is
-/// still set.
+/// Nested compact chrome must not steal parent TUI scroll. AutoCompactStarted
+/// already cleared `active_subagent`, so PageUp pages the parent while the
+/// child is AutoCompacting. Operator `[↗]` may reopen that overlay; that
+/// path is `click_tasks_open_on_compacting_row_opens_subagent`.
 #[test]
 fn nested_compact_chrome_must_not_steal_parent_tui_scroll() {
     use crate::acp::tracker::TurnActivity;
@@ -2624,10 +2625,10 @@ fn nested_compact_chrome_must_not_steal_parent_tui_scroll() {
         make_pageable(parent);
         parent.set_active_pane(crate::app::agent_view::AgentPane::Prompt, true);
         parent.subagent_views.insert(child_sid.to_owned(), child);
-        parent.active_subagent = Some(child_sid.to_owned());
+        parent.active_subagent = None;
         assert!(
             parent.visible_nested_overlay_sid().is_none(),
-            "compact chrome must not count as a fullscreen steal"
+            "AutoCompactStarted path: overlay flag is cleared so compact chrome does not steal the parent TUI"
         );
     }
     let offsets = |app: &AppView| {
@@ -2894,6 +2895,54 @@ fn ctrl_c_idle_prompt_with_text_clears_text() {
         app.agents[&id].prompt.textarea.text(),
     );
 }
+/// Operator: "ctrl-c in every prompt input always clears first, then
+/// exits only when ctrl-c is issued again." Draft includes image chips.
+/// Mill first Ctrl+C with chips only (no typed words) must CLEAR the
+/// chips and must not CancelTurn.
+#[test]
+fn ctrl_c_idle_prompt_with_image_chips_only_clears_chips() {
+    let mut app = test_app_with_agent();
+    let id = super::super::agent::AgentId(0);
+    let agent = app.agents.get_mut(&id).unwrap();
+    agent.active_pane = crate::views::agent::ActivePane::Prompt;
+    agent
+        .prompt
+        .insert_image(crate::app::agent_view::test_fixtures::test_pasted_image())
+        .expect("mill image chip");
+    assert!(agent.session.state.is_idle());
+    assert!(
+        agent.prompt.text().trim().is_empty() || agent.prompt.text().contains("Image #"),
+        "chips only: no extra typed Operator words besides the image chip; got {:?}",
+        agent.prompt.text(),
+    );
+    assert!(
+        !agent.prompt.images.is_empty(),
+        "setup must attach an image chip"
+    );
+    let outcome = app.handle_input(&ctrl_c());
+    assert!(
+        matches!(outcome, InputOutcome::Changed),
+        "Ctrl+C with image chips only in idle prompt must Change (clear chips), got: {outcome:?}",
+    );
+    assert!(
+        !matches!(outcome, InputOutcome::Action(Action::CancelTurn)),
+        "first Ctrl+C with image chips only must not CancelTurn"
+    );
+    assert!(
+        app.agents[&id].prompt.images.is_empty(),
+        "first Ctrl+C must clear image chips; leftover {}",
+        app.agents[&id].prompt.images.len(),
+    );
+    assert!(
+        app.agents[&id].prompt.textarea.text().is_empty(),
+        "Ctrl+C must clear mill composer when idle; got: {:?}",
+        app.agents[&id].prompt.textarea.text(),
+    );
+    assert!(
+        app.pending_action.is_none(),
+        "first Ctrl+C with image chips only must not arm quit"
+    );
+}
 #[test]
 fn ctrl_c_running_prompt_with_text_clears_text_and_preserves_turn() {
     let mut app = test_app_with_agent();
@@ -2915,6 +2964,59 @@ fn ctrl_c_running_prompt_with_text_clears_text_and_preserves_turn() {
     assert!(
         app.agents[&id].session.state.is_turn_running(),
         "First Ctrl+C must NOT cancel the turn while a draft was present",
+    );
+    let outcome = app.handle_input(&ctrl_c());
+    assert!(
+        matches!(outcome, InputOutcome::Action(Action::CancelTurn)),
+        "Second Ctrl+C on empty running prompt must CancelTurn, got: {outcome:?}",
+    );
+}
+/// Operator: "ctrl-c in every prompt input always clears first, then
+/// exits only when ctrl-c is issued again." Draft includes image chips.
+/// Mill first Ctrl+C with chips only (no typed words) must CLEAR the
+/// chips and must not CancelTurn. Second Ctrl+C on empty then CancelTurn.
+#[test]
+fn ctrl_c_running_prompt_with_image_chips_only_clears_chips_and_preserves_turn() {
+    let mut app = test_app_with_agent();
+    let id = super::super::agent::AgentId(0);
+    let agent = app.agents.get_mut(&id).unwrap();
+    agent.session.state = AgentState::TurnRunning;
+    agent.active_pane = crate::views::agent::ActivePane::Prompt;
+    agent
+        .prompt
+        .insert_image(crate::app::agent_view::test_fixtures::test_pasted_image())
+        .expect("mill image chip");
+    assert!(
+        agent.prompt.text().trim().is_empty() || agent.prompt.text().contains("Image #"),
+        "chips only: no extra typed Operator words besides the image chip; got {:?}",
+        agent.prompt.text(),
+    );
+    assert!(
+        !agent.prompt.images.is_empty(),
+        "setup must attach an image chip"
+    );
+    let outcome = app.handle_input(&ctrl_c());
+    assert!(
+        matches!(outcome, InputOutcome::Changed),
+        "Ctrl+C with image chips only must clear the chips, got: {outcome:?}",
+    );
+    assert!(
+        !matches!(outcome, InputOutcome::Action(Action::CancelTurn)),
+        "first Ctrl+C with image chips only must not CancelTurn"
+    );
+    assert!(
+        app.agents[&id].prompt.images.is_empty(),
+        "first Ctrl+C must clear image chips; leftover {}",
+        app.agents[&id].prompt.images.len(),
+    );
+    assert!(
+        app.agents[&id].prompt.textarea.text().is_empty(),
+        "first Ctrl+C must leave the mill composer empty; got: {:?}",
+        app.agents[&id].prompt.textarea.text(),
+    );
+    assert!(
+        app.agents[&id].session.state.is_turn_running(),
+        "First Ctrl+C must NOT cancel the turn while image chips were present",
     );
     let outcome = app.handle_input(&ctrl_c());
     assert!(

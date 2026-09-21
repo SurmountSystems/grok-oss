@@ -6,8 +6,33 @@ use crate::app::actions::Action;
 use crate::app::app_view::InputOutcome;
 use crate::key;
 use crate::scrollback::ScrollbackSearchState;
+use crate::scrollback::types::DisplayMode;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 impl AgentView {
+    /// Selected collapsed or truncated transcript block: Enter expands
+    /// (same as `:expand`), including a collapsed tool whose body is not
+    /// yet `is_foldable` (read_file without content still paints Collapsed).
+    /// Group headers keep Enter as OpenBlockViewer (toggles the group).
+    fn selected_hidden_foldable(&self) -> bool {
+        self.scrollback
+            .selected()
+            .and_then(|idx| self.scrollback.entry(idx))
+            .is_some_and(|e| {
+                if e.display_mode == DisplayMode::Expanded {
+                    return false;
+                }
+                // Collapsed tool rows Expand even when layout tagged the
+                // slot as a group header. Subagent / "N more" headers are
+                // not tool rows and stay OpenBlockViewer.
+                if e.block.is_tool_call() {
+                    return true;
+                }
+                if self.scrollback.is_selected_group_header() {
+                    return false;
+                }
+                e.is_foldable()
+            })
+    }
     /// Scrollback-focused key handling.
     ///
     /// When the block viewer is open, routes keys to the viewer.
@@ -47,6 +72,12 @@ impl AgentView {
         {
             self.highlighted_link_idx = None;
             return InputOutcome::Action(Action::OpenLink(target));
+        }
+        // Collapsed/hidden selected block: Enter expands (same as :expand).
+        // Do this before inline-edit and OpenBlockViewer so a folded
+        // `[Image #1] ...` user prompt actually opens instead of no-op.
+        if key!(Enter).matches(key) && self.selected_hidden_foldable() {
+            return InputOutcome::Action(Action::Expand);
         }
         if crate::app::inline_edit::INLINE_EDIT_ENABLED
             && key!(Enter).matches(key)

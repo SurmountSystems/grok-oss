@@ -780,6 +780,7 @@ mod tests {
         );
     }
 
+    // Grok OSS: hide_header zeros the dashboard header and header gap. This diverges from upstream xAI because FORK.md and catalog class 2 pin hide_header as a shipped runtime reader, not serde-only.
     #[test]
     fn hide_header_zeroes_header_and_header_gap() {
         std::thread::spawn(|| {

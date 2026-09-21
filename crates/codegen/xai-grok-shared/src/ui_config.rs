@@ -65,6 +65,21 @@ pub struct UiConfig {
     /// Confirm before `/rewind` applies. `None` = on (default).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub confirm_before_rewind: Option<bool>,
+    /// While exclusive `/plan` or Isolated Preview `/plan --soft` is the live
+    /// plan turn, use xhigh effort. `None` = on (default). Off keeps the
+    /// stored session effort (upstream / SpaceXAI-like). Does not mutate
+    /// stored `session.models.reasoning_effort`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turbo_planning: Option<bool>,
+    /// Soft process-rule reminders injected into nested spawn. `None` = on.
+    /// Off injects no extra reminder text. Not a deny and not a spawn cap.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process_rule_reminders_enabled: Option<bool>,
+    /// Newline-separated process-rule reminder strings. `None` / empty = no
+    /// extra text even when enabled. Example help copy only: "At most two
+    /// implementor L2s."
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process_rule_reminders: Option<String>,
     /// Theme to use when the OS is in dark mode. Written by the pager's theme persist module.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_dark_theme: Option<String>,
@@ -204,8 +219,16 @@ pub struct UiConfig {
     /// turn is running). Session Multiline (`Ctrl+M` / `/multiline`)
     /// cannot turn newline-on-Enter on. `None` = on (client default:
     /// Shift+Enter still inserts a newline; Ctrl+M still works).
+    /// Ctrl+Enter inserts a newline when interject is not appropriate,
+    /// and is not gated by this flag.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub composer_multiline: Option<bool>,
+    /// When false, session Multiline cannot be turned on via `/multiline`,
+    /// `/ml`, `Ctrl+M`, or the Multiline settings row. `None` = on (current
+    /// sessions may still enable session Multiline). Distinct from
+    /// [`Self::composer_multiline`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_session_multiline: Option<bool>,
     /// Retired hidden opt-in for terminal-like double/triple-click word/line
     /// selection. Superseded by `keep_text_selection = "word_select"`. Still
     /// read only when `keep_text_selection` is unset; Settings clears this on
@@ -353,6 +376,9 @@ impl Default for UiConfig {
             scrub_ascii_punct: None,
             ulid_session_ids: None,
             confirm_before_rewind: None,
+            turbo_planning: None,
+            process_rule_reminders_enabled: None,
+            process_rule_reminders: None,
             auto_dark_theme: None,
             auto_light_theme: None,
             scroll_speed: None,
@@ -381,6 +407,7 @@ impl Default for UiConfig {
             cursor_blink: None,
             screen_mode: None,
             composer_multiline: None,
+            allow_session_multiline: None,
             double_click_action: None,
             contextual_hints: ContextualHints::default(),
             combine_queued_prompts: None,
@@ -424,6 +451,28 @@ impl UiConfig {
     pub fn confirm_before_rewind_enabled(&self) -> bool {
         self.confirm_before_rewind
             .unwrap_or(Self::CONFIRM_BEFORE_REWIND_DEFAULT)
+    }
+
+    /// Default for [`Self::turbo_planning`] when unset (on).
+    pub const TURBO_PLANNING_DEFAULT: bool = true;
+
+    /// Whether exclusive `/plan` and Isolated Preview `/plan --soft` live
+    /// turns use xhigh effort. Off keeps the stored session effort.
+    pub fn turbo_planning_enabled(&self) -> bool {
+        self.turbo_planning.unwrap_or(Self::TURBO_PLANNING_DEFAULT)
+    }
+
+    /// Default for [`Self::process_rule_reminders_enabled`] when unset (on).
+    pub const PROCESS_RULE_REMINDERS_ENABLED_DEFAULT: bool = true;
+
+    pub fn process_rule_reminders_enabled(&self) -> bool {
+        self.process_rule_reminders_enabled
+            .unwrap_or(Self::PROCESS_RULE_REMINDERS_ENABLED_DEFAULT)
+    }
+
+    /// Newline-separated reminder list. Empty when unset.
+    pub fn process_rule_reminders_text(&self) -> &str {
+        self.process_rule_reminders.as_deref().unwrap_or("")
     }
 
     /// Default for [`Self::resume_canceled_turn_on_restart`] when unset (on).
@@ -488,6 +537,17 @@ impl UiConfig {
     pub fn composer_multiline_enabled(&self) -> bool {
         self.composer_multiline
             .unwrap_or(Self::COMPOSER_MULTILINE_DEFAULT)
+    }
+
+    /// Default for [`Self::allow_session_multiline`] when unset (on: slash,
+    /// Ctrl+M, and settings may enable session Multiline).
+    pub const ALLOW_SESSION_MULTILINE_DEFAULT: bool = true;
+
+    /// Whether session Multiline may be enabled. When false, `/multiline`,
+    /// Ctrl+M, and the Multiline settings row cannot set it on.
+    pub fn allow_session_multiline_enabled(&self) -> bool {
+        self.allow_session_multiline
+            .unwrap_or(Self::ALLOW_SESSION_MULTILINE_DEFAULT)
     }
 }
 
@@ -573,6 +633,27 @@ mod tests {
             serde_json::from_value(serde_json::json!({ "composer_multiline": false }))
                 .expect("deserializes composer_multiline false");
         assert!(!off_parsed.composer_multiline_enabled());
+    }
+
+    #[test]
+    fn allow_session_multiline_defaults_on() {
+        assert!(UiConfig::default().allow_session_multiline_enabled());
+        let off = UiConfig {
+            allow_session_multiline: Some(false),
+            ..Default::default()
+        };
+        assert!(!off.allow_session_multiline_enabled());
+        let on: UiConfig =
+            serde_json::from_value(serde_json::json!({ "allow_session_multiline": true }))
+                .expect("deserializes allow_session_multiline true");
+        assert!(on.allow_session_multiline_enabled());
+        let missing: UiConfig =
+            serde_json::from_value(serde_json::json!({})).expect("defaults missing key");
+        assert!(missing.allow_session_multiline_enabled());
+        let off_parsed: UiConfig =
+            serde_json::from_value(serde_json::json!({ "allow_session_multiline": false }))
+                .expect("deserializes allow_session_multiline false");
+        assert!(!off_parsed.allow_session_multiline_enabled());
     }
 
     #[test]

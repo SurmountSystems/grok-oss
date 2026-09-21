@@ -1,25 +1,27 @@
 //! Settings UI: command palette, settings modal, toggles, resets, and rollback.
 
 use super::setters::{
-    pr13_effective_default, set_allow_worktree_inner, set_always_expand_thinking_inner,
-    set_ask_user_question_timeout_enabled_inner, set_auto_compact_threshold_percent_inner,
-    set_auto_compact_threshold_tokens_inner, set_auto_dark_theme_inner, set_auto_light_theme_inner,
-    set_auto_run_implement_inner, set_auto_update_inner, set_bubble_copy_buttons_inner,
-    set_collapsed_edit_blocks_inner, set_combine_queued_prompts_inner, set_compact_mode,
-    set_compact_mode_inner, set_composer_multiline_inner, set_confirm_before_rewind_inner,
-    set_contextual_hint_inner, set_default_model_inner, set_default_reasoning_effort_inner,
+    pr13_effective_default, set_allow_session_multiline_inner, set_allow_worktree_inner,
+    set_always_expand_thinking_inner, set_ask_user_question_timeout_enabled_inner,
+    set_auto_compact_threshold_percent_inner, set_auto_compact_threshold_tokens_inner,
+    set_auto_dark_theme_inner, set_auto_light_theme_inner, set_auto_run_implement_inner,
+    set_auto_update_inner, set_bubble_copy_buttons_inner, set_collapsed_edit_blocks_inner,
+    set_combine_queued_prompts_inner, set_compact_mode, set_compact_mode_inner,
+    set_composer_multiline_inner, set_confirm_before_rewind_inner, set_contextual_hint_inner,
+    set_default_model_inner, set_default_reasoning_effort_inner,
     set_default_selected_permission_inner, set_display_refresh_auto_cadence_inner,
     set_economic_mode_inner, set_features_session_recap_inner, set_fork_secondary_model_inner,
     set_group_tool_verbs_inner, set_hide_header_inner, set_hunk_tracker_mode_inner,
     set_invert_scroll_inner, set_keep_text_selection_inner, set_max_thoughts_width_inner,
     set_multiline_mode, set_notifications_session_recap_inner,
     set_notifications_session_recap_threshold_secs_inner, set_page_flip_on_send_inner,
-    set_plan_approval_park_inner, set_prompt_suggestions_inner, set_remember_tool_approvals_inner,
-    set_render_mermaid_inner, set_respect_manual_folds_inner, set_screen_mode_inner,
-    set_scroll_lines_inner, set_scroll_mode_inner, set_scroll_speed_inner,
+    set_plan_approval_park_inner, set_process_rule_reminders_enabled_inner,
+    set_process_rule_reminders_inner, set_prompt_suggestions_inner,
+    set_remember_tool_approvals_inner, set_render_mermaid_inner, set_respect_manual_folds_inner,
+    set_screen_mode_inner, set_scroll_lines_inner, set_scroll_mode_inner, set_scroll_speed_inner,
     set_scrub_ascii_punct_inner, set_show_thinking_blocks_inner, set_show_tips_inner,
     set_simple_mode_inner, set_theme_inner, set_timeline_inner, set_timestamps,
-    set_timestamps_inner, set_ulid_session_ids_inner, set_vim_mode_inner,
+    set_timestamps_inner, set_turbo_planning_inner, set_ulid_session_ids_inner, set_vim_mode_inner,
     set_voice_capture_mode_inner, set_voice_keybind_enabled_inner, set_voice_stt_language_inner,
 };
 use crate::app::actions::{Action, Effect};
@@ -820,6 +822,13 @@ pub(in crate::app::dispatch) fn action_for_reset(
         ("confirm_before_rewind", SettingValue::Bool(b)) => {
             Some(Action::SetConfirmBeforeRewind(*b))
         }
+        ("turbo_planning", SettingValue::Bool(b)) => Some(Action::SetTurboPlanning(*b)),
+        ("process_rule_reminders_enabled", SettingValue::Bool(b)) => {
+            Some(Action::SetProcessRuleRemindersEnabled(*b))
+        }
+        ("process_rule_reminders", SettingValue::String(s)) => {
+            Some(Action::SetProcessRuleReminders(s.clone()))
+        }
         ("combine_queued_prompts", SettingValue::Bool(b)) => {
             Some(Action::SetCombineQueuedPrompts(*b))
         }
@@ -869,6 +878,9 @@ pub(in crate::app::dispatch) fn action_for_reset(
         }
         ("hide_header", SettingValue::Bool(b)) => Some(Action::SetHideHeader(*b)),
         ("composer_multiline", SettingValue::Bool(b)) => Some(Action::SetComposerMultiline(*b)),
+        ("allow_session_multiline", SettingValue::Bool(b)) => {
+            Some(Action::SetAllowSessionMultiline(*b))
+        }
         ("scrub_ascii_punct", SettingValue::Bool(b)) => Some(Action::SetScrubAsciiPunct(*b)),
         ("ulid_session_ids", SettingValue::Bool(b)) => Some(Action::SetUlidSessionIds(*b)),
         ("allow_worktree", SettingValue::Bool(b)) => Some(Action::SetAllowWorktree(*b)),
@@ -1296,6 +1308,9 @@ pub(in crate::app::dispatch) fn apply_setting_rollback(
         }
         ("hide_header", SettingValue::Bool(b)) => set_hide_header_inner(app, *b),
         ("composer_multiline", SettingValue::Bool(b)) => set_composer_multiline_inner(app, *b),
+        ("allow_session_multiline", SettingValue::Bool(b)) => {
+            set_allow_session_multiline_inner(app, *b)
+        }
         ("scrub_ascii_punct", SettingValue::Bool(b)) => set_scrub_ascii_punct_inner(app, *b),
         ("ulid_session_ids", SettingValue::Bool(b)) => set_ulid_session_ids_inner(app, *b),
         ("allow_worktree", SettingValue::Bool(b)) => set_allow_worktree_inner(app, *b),
@@ -1308,6 +1323,13 @@ pub(in crate::app::dispatch) fn apply_setting_rollback(
         ("prompt_suggestions", SettingValue::Bool(b)) => set_prompt_suggestions_inner(app, *b),
         ("auto_run_implement", SettingValue::Bool(b)) => set_auto_run_implement_inner(app, *b),
         ("economic_mode", SettingValue::Bool(b)) => set_economic_mode_inner(app, *b),
+        ("turbo_planning", SettingValue::Bool(b)) => set_turbo_planning_inner(app, *b),
+        ("process_rule_reminders_enabled", SettingValue::Bool(b)) => {
+            set_process_rule_reminders_enabled_inner(app, *b)
+        }
+        ("process_rule_reminders", SettingValue::String(s)) => {
+            set_process_rule_reminders_inner(app, s.clone())
+        }
         ("resume_canceled_turn_on_restart", SettingValue::Bool(b)) => {
             super::setters::set_resume_canceled_turn_on_restart_inner(app, *b)
         }

@@ -94,6 +94,7 @@ fn classify_sampling_error(err: SamplingError) -> CompactFailure {
                     && *status != StatusCode::TOO_MANY_REQUESTS)
         }
         SamplingError::MaxTokensTruncation => true,
+        SamplingError::RepetitiveGeneration { .. } => true,
         // Loops are stochastic at sampling temperature; a retry may differ.
         SamplingError::Http(_)
         | SamplingError::EventStreamError(_)
@@ -361,6 +362,79 @@ where
     }
 }
 
+/// Stream-open (headers) wait uses the sampler headers budget (default 120s).
+/// After headers, compact stall is idle-timeout even with 0 tokens.
+fn compact_stream_wait(
+    saw_first_token: bool,
+    first_token_deadline: std::time::Instant,
+    idle_timeout: std::time::Duration,
+    last_progress_at: std::time::Instant,
+) -> std::time::Duration {
+    if saw_first_token {
+        idle_timeout.saturating_sub(last_progress_at.elapsed())
+    } else {
+        first_token_deadline.saturating_duration_since(std::time::Instant::now())
+    }
+}
+
+fn compact_wait_expired(
+    saw_first_token: bool,
+    first_token_budget: std::time::Duration,
+    idle_timeout: std::time::Duration,
+    chars: usize,
+) -> CompactFailure {
+    if saw_first_token {
+        CompactFailure::Transient(acp::Error::internal_error().data(format!(
+            "compact failed: stream idle timeout after {idle_timeout:?} ({chars} chars received)"
+        )))
+    } else {
+        CompactFailure::Transient(acp::Error::internal_error().data(format!(
+            "compact failed: timed out waiting for the first token after {first_token_budget:?} ({chars} chars received)"
+        )))
+    }
+}
+
+/// Remaining idle after compact HTTP headers. 0-token stall is still idle.
+fn compact_post_headers_wait(
+    idle_timeout: std::time::Duration,
+    last_progress_at: std::time::Instant,
+) -> std::time::Duration {
+    compact_stream_wait(
+        true,
+        std::time::Instant::now(),
+        idle_timeout,
+        last_progress_at,
+    )
+}
+
+fn compact_post_headers_expired(idle_timeout: std::time::Duration, chars: usize) -> CompactFailure {
+    compact_wait_expired(true, std::time::Duration::ZERO, idle_timeout, chars)
+}
+
+fn compact_responses_event_is_scaffolding(event: &ResponseStreamEvent) -> bool {
+    matches!(
+        event,
+        ResponseStreamEvent::ResponseCreated(_)
+            | ResponseStreamEvent::ResponseInProgress(_)
+            | ResponseStreamEvent::ResponseQueued(_)
+            | ResponseStreamEvent::ResponseOutputItemAdded(_)
+            | ResponseStreamEvent::ResponseContentPartAdded(_)
+            | ResponseStreamEvent::ResponseReasoningSummaryPartAdded(_)
+            | ResponseStreamEvent::ResponseOutputTextAnnotationAdded(_)
+    )
+}
+
+#[cfg(test)]
+fn compact_responses_event_is_token(event: &ResponseStreamEvent) -> bool {
+    match event {
+        ResponseStreamEvent::ResponseOutputTextDelta(e) => !e.delta.is_empty(),
+        ResponseStreamEvent::ResponseReasoningTextDelta(e) => !e.delta.is_empty(),
+        ResponseStreamEvent::ResponseReasoningSummaryTextDelta(e) => !e.delta.is_empty(),
+        ResponseStreamEvent::ResponseFunctionCallArgumentsDelta(e) => !e.delta.is_empty(),
+        _ => false,
+    }
+}
+
 /// Abort `fut` if stop wins while the compact HTTP stream is still opening.
 async fn await_unless_cancelled<F, T>(
     cancel: &tokio_util::sync::CancellationToken,
@@ -373,6 +447,27 @@ where
         biased;
         _ = cancel.cancelled() => Err(CompactFailure::Cancelled),
         result = fut => Ok(result),
+    }
+}
+
+/// First-token / headers bound applies only until the compact stream opens.
+/// After headers, [`compact_post_headers_expired`] owns silence.
+async fn await_compact_stream_open<F, T>(
+    cancel: &tokio_util::sync::CancellationToken,
+    first_token_budget: std::time::Duration,
+    fut: F,
+) -> Result<T, CompactFailure>
+where
+    F: std::future::Future<Output = T>,
+{
+    match tokio::time::timeout(first_token_budget, await_unless_cancelled(cancel, fut)).await {
+        Ok(inner) => inner,
+        Err(_) => Err(compact_wait_expired(
+            false,
+            first_token_budget,
+            first_token_budget,
+            0,
+        )),
     }
 }
 
@@ -477,8 +572,13 @@ pub(crate) async fn generate_session_compact(
                 num_messages = num_messages,
                 "Sending compact request (streaming)"
             );
-            let stream_result =
-                await_unless_cancelled(cancel, client.chat_completion_stream(message)).await?;
+            let first_token_budget = xai_grok_sampler::stream::first_token_wait(idle_timeout);
+            let stream_result = await_compact_stream_open(
+                cancel,
+                first_token_budget,
+                client.chat_completion_stream(message),
+            )
+            .await?;
 
             let mut stream = match stream_result {
                 Ok((s, _metadata)) => s,
@@ -491,18 +591,20 @@ pub(crate) async fn generate_session_compact(
             let mut content = String::new();
             let mut last_progress_at = std::time::Instant::now();
             loop {
-                let idle_remaining = idle_timeout.saturating_sub(last_progress_at.elapsed());
-                let chunk_result = match next_stream_step(&mut stream, idle_remaining, cancel)
-                    .await?
-                {
+                let wait = compact_post_headers_wait(idle_timeout, last_progress_at);
+                if wait.is_zero() {
+                    return Err(compact_post_headers_expired(
+                        idle_timeout,
+                        content.chars().count(),
+                    ));
+                }
+                let chunk_result = match next_stream_step(&mut stream, wait, cancel).await? {
                     StreamStep::Item(item) => item,
                     StreamStep::Ended => break,
                     StreamStep::IdleTimeout => {
-                        return Err(CompactFailure::Transient(
-                            acp::Error::internal_error().data(format!(
-                                "compact failed: stream idle timeout after {idle_timeout:?} ({} chars received)",
-                                content.chars().count()
-                            )),
+                        return Err(compact_post_headers_expired(
+                            idle_timeout,
+                            content.chars().count(),
                         ));
                     }
                 };
@@ -569,9 +671,13 @@ pub(crate) async fn generate_session_compact(
                 x_grok_agent_id: Some(xai_grok_telemetry::id::agent_id()),
                 ..Default::default()
             };
-            let stream_result =
-                await_unless_cancelled(cancel, client.conversation_stream_responses(request))
-                    .await?;
+            let first_token_budget = xai_grok_sampler::stream::first_token_wait(idle_timeout);
+            let stream_result = await_compact_stream_open(
+                cancel,
+                first_token_budget,
+                client.conversation_stream_responses(request),
+            )
+            .await?;
             let mut stream = match stream_result {
                 Ok((s, _metadata, _doom_loop)) => s,
                 Err(e) => return Err(classify_sampling_error(e)),
@@ -582,18 +688,20 @@ pub(crate) async fn generate_session_compact(
             let mut content = String::new();
             let mut last_progress_at = std::time::Instant::now();
             loop {
-                let idle_remaining = idle_timeout.saturating_sub(last_progress_at.elapsed());
-                let chunk_result = match next_stream_step(&mut stream, idle_remaining, cancel)
-                    .await?
-                {
+                let wait = compact_post_headers_wait(idle_timeout, last_progress_at);
+                if wait.is_zero() {
+                    return Err(compact_post_headers_expired(
+                        idle_timeout,
+                        content.chars().count(),
+                    ));
+                }
+                let chunk_result = match next_stream_step(&mut stream, wait, cancel).await? {
                     StreamStep::Item(item) => item,
                     StreamStep::Ended => break,
                     StreamStep::IdleTimeout => {
-                        return Err(CompactFailure::Transient(
-                            acp::Error::internal_error().data(format!(
-                                "compact failed: stream idle timeout after {idle_timeout:?} ({} chars received)",
-                                content.chars().count()
-                            )),
+                        return Err(compact_post_headers_expired(
+                            idle_timeout,
+                            content.chars().count(),
                         ));
                     }
                 };
@@ -608,12 +716,7 @@ pub(crate) async fn generate_session_compact(
                 }
                 match chunk_result {
                     Ok(chunk) => {
-                        if !matches!(
-                            &chunk,
-                            ResponseStreamEvent::ResponseCreated(_)
-                                | ResponseStreamEvent::ResponseInProgress(_)
-                                | ResponseStreamEvent::ResponseQueued(_)
-                        ) {
+                        if !compact_responses_event_is_scaffolding(&chunk) {
                             last_progress_at = std::time::Instant::now();
                         }
                         match &chunk {
@@ -693,9 +796,13 @@ pub(crate) async fn generate_session_compact(
                 x_grok_agent_id: Some(xai_grok_telemetry::id::agent_id()),
                 ..Default::default()
             };
-            let stream_result =
-                await_unless_cancelled(cancel, client.conversation_stream_messages(request))
-                    .await?;
+            let first_token_budget = xai_grok_sampler::stream::first_token_wait(idle_timeout);
+            let stream_result = await_compact_stream_open(
+                cancel,
+                first_token_budget,
+                client.conversation_stream_messages(request),
+            )
+            .await?;
             let mut stream = match stream_result {
                 Ok((s, _metadata)) => s,
                 Err(e) => return Err(classify_sampling_error(e)),
@@ -707,18 +814,20 @@ pub(crate) async fn generate_session_compact(
             let mut content = String::new();
             let mut last_progress_at = std::time::Instant::now();
             loop {
-                let idle_remaining = idle_timeout.saturating_sub(last_progress_at.elapsed());
-                let chunk_result = match next_stream_step(&mut stream, idle_remaining, cancel)
-                    .await?
-                {
+                let wait = compact_post_headers_wait(idle_timeout, last_progress_at);
+                if wait.is_zero() {
+                    return Err(compact_post_headers_expired(
+                        idle_timeout,
+                        content.chars().count(),
+                    ));
+                }
+                let chunk_result = match next_stream_step(&mut stream, wait, cancel).await? {
                     StreamStep::Item(item) => item,
                     StreamStep::Ended => break,
                     StreamStep::IdleTimeout => {
-                        return Err(CompactFailure::Transient(
-                            acp::Error::internal_error().data(format!(
-                                "compact failed: stream idle timeout after {idle_timeout:?} ({} chars received)",
-                                content.chars().count()
-                            )),
+                        return Err(compact_post_headers_expired(
+                            idle_timeout,
+                            content.chars().count(),
                         ));
                     }
                 };
@@ -733,17 +842,12 @@ pub(crate) async fn generate_session_compact(
                 }
                 match chunk_result {
                     Ok(event) => {
-                        if !matches!(
-                            &event,
-                            xai_grok_sampling_types::messages::MessageStreamEvent::Ping
-                        ) {
-                            last_progress_at = std::time::Instant::now();
-                        }
                         match event {
                         xai_grok_sampling_types::messages::MessageStreamEvent::ContentBlockDelta {
                             delta: xai_grok_sampling_types::messages::StreamDelta::TextDelta { text },
                             ..
                         } => {
+                            last_progress_at = std::time::Instant::now();
                             timing.record_delta();
                             content.push_str(&text);
                         }

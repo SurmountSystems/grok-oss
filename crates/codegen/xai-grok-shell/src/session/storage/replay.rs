@@ -9,7 +9,8 @@
 //!   typed materialize-all reference for tests.
 
 use std::collections::HashMap;
-use std::io;
+use std::fs::File;
+use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Component, Path, PathBuf};
 
 use agent_client_protocol as acp;
@@ -21,6 +22,7 @@ use super::{
 };
 use crate::extensions::notification::SessionNotification;
 use crate::extensions::notification::SessionUpdate as XaiUpdate;
+use crate::sampling::ConversationItem;
 use crate::session::wire_tags::{
     AVAILABLE_COMMANDS_UPDATE, TOOL_CALL_STATUS_IN_PROGRESS, TOOL_CALL_UPDATE,
 };
@@ -70,6 +72,29 @@ pub struct PreparedReplay<'a> {
     /// Replayed spawns with no matching finish (a rewind can drop the finish):
     /// `(subagent_id, child_session_id)`, reconciled on load.
     pub(crate) unfinished_subagents: Vec<(String, String)>,
+}
+
+/// One live replay line located by byte offset so `session/load` does not
+/// hold the whole `updates.jsonl` as one `String` (iso mill resume was 1.3GiB).
+#[derive(Debug, Clone, Copy)]
+pub struct ReplayLineLoc {
+    pub offset: u64,
+    pub len: u32,
+}
+
+/// Offset plan for streaming `session/load` replay. Pass 1 classifies and
+/// rewind-filters; pass 2 seeks one survivor line at a time.
+#[derive(Debug, Clone)]
+pub struct ReplayFilePlan {
+    pub lines: Vec<ReplayLineLoc>,
+    pub mark_replay: bool,
+    pub last_tokens: u64,
+    pub max_event_seq: Option<u64>,
+    pub total_live: usize,
+    pub unfinished_subagents: Vec<(String, String)>,
+    pub end_offset: u64,
+    /// True when a surviving line is a user or agent message chunk.
+    pub has_user_or_agent_chunk: bool,
 }
 
 /// Whether a replay stream forwarded any update. Gates the caller's
@@ -257,6 +282,200 @@ pub fn stream_replay_updates_at<F: FnMut(acp::SessionUpdate)>(
     stream_replay_updates_at_hinted(session_id, grok_home, ReplayPathHint::default(), f)
 }
 
+/// Plan replay of `updates.jsonl` without slurping the file into one String.
+///
+/// Named contract: last-session resume must paint Operator/Agent lines. A
+/// gigabyte `updates.jsonl` must not block chrome-only for minutes because
+/// `read_to_string` copied the whole file first.
+pub fn plan_replay_file(updates_path: &Path, cursor: Option<&str>) -> io::Result<ReplayFilePlan> {
+    plan_replay_file_inner(updates_path, cursor, true)
+}
+
+fn plan_replay_file_inner(
+    updates_path: &Path,
+    cursor: Option<&str>,
+    drop_redundant: bool,
+) -> io::Result<ReplayFilePlan> {
+    let file = File::open(updates_path)?;
+    let end_offset = file.metadata()?.len();
+    let mut reader = BufReader::new(file);
+    let mut buf = String::new();
+    let mut offset: u64 = 0;
+    let mut locs: Vec<ReplayLineLoc> = Vec::new();
+    let mut steps: Vec<super::RewindStep> = Vec::new();
+    let mut event_ids: Vec<Option<String>> = Vec::new();
+    let mut tokens: Vec<Option<u64>> = Vec::new();
+    let mut dropped: Vec<bool> = Vec::new();
+    let mut is_user_or_agent: Vec<bool> = Vec::new();
+    let mut unfinished: std::collections::BTreeMap<String, String> =
+        std::collections::BTreeMap::new();
+    let mut max_event_seq: Option<u64> = None;
+    let mut has_rewind = false;
+
+    loop {
+        buf.clear();
+        let n = reader.read_line(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        let line_len = n as u32;
+        let line = buf.trim();
+        if line.is_empty() {
+            offset += u64::from(line_len);
+            continue;
+        }
+        let step = super::rewind_step_for_line(line);
+        if matches!(step, super::RewindStep::Rewind { .. }) {
+            has_rewind = true;
+        }
+        if line.contains("subagent_spawned") || line.contains("subagent_finished") {
+            update_unfinished_subagents(line, &mut unfinished);
+        }
+        if line.contains(EVENT_ID_KEY)
+            && let Some(seq) = line_event_seq(line)
+        {
+            max_event_seq = Some(max_event_seq.map_or(seq, |m| m.max(seq)));
+        }
+        locs.push(ReplayLineLoc {
+            offset,
+            len: line_len,
+        });
+        steps.push(step);
+        event_ids.push(line_event_id(line).map(|s| s.into_owned()));
+        tokens.push(line_total_tokens(line));
+        dropped.push(drop_redundant && line_is_dropped_on_replay(line));
+        is_user_or_agent
+            .push(line.contains("user_message_chunk") || line.contains("agent_message_chunk"));
+        offset += u64::from(line_len);
+    }
+
+    let live_idx: Vec<usize> = if has_rewind {
+        super::filter_rewind_by((0..locs.len()).collect(), |&i| steps[i])
+    } else {
+        (0..locs.len()).collect()
+    };
+
+    let last_tokens = live_idx.iter().rev().find_map(|&i| tokens[i]).unwrap_or(0);
+
+    let cursor_pos = cursor.and_then(|id| {
+        live_idx
+            .iter()
+            .rposition(|&i| event_ids[i].as_deref() == Some(id))
+            .filter(|&pos| {
+                live_idx[pos + 1..]
+                    .iter()
+                    .all(|&i| dropped[i] || event_ids[i].is_some())
+            })
+    });
+    let mark_replay = cursor_pos.is_none();
+    let start = cursor_pos.map_or(0, |pos| pos + 1);
+
+    let mut lines = Vec::new();
+    let mut total_live = 0usize;
+    let mut has_user_or_agent_chunk = false;
+    for (pos, &i) in live_idx.iter().enumerate() {
+        if dropped[i] {
+            continue;
+        }
+        total_live += 1;
+        if pos >= start {
+            if is_user_or_agent[i] {
+                has_user_or_agent_chunk = true;
+            }
+            lines.push(locs[i]);
+        }
+    }
+
+    Ok(ReplayFilePlan {
+        lines,
+        mark_replay,
+        last_tokens,
+        max_event_seq,
+        total_live,
+        unfinished_subagents: unfinished.into_iter().collect(),
+        end_offset,
+        has_user_or_agent_chunk,
+    })
+}
+
+fn line_event_seq(line: &str) -> Option<u64> {
+    line_event_id(line)?.rsplit('-').next()?.parse().ok()
+}
+
+fn update_unfinished_subagents(
+    line: &str,
+    pending: &mut std::collections::BTreeMap<String, String>,
+) {
+    let raw = serde_json::from_str::<RawLinePeek<'_>>(line)
+        .ok()
+        .and_then(|e| e.params.map(|p| p.get()))
+        .unwrap_or(line);
+    let Ok(notification) = serde_json::from_str::<SessionNotification>(raw) else {
+        return;
+    };
+    match notification.update {
+        XaiUpdate::SubagentSpawned {
+            subagent_id,
+            child_session_id,
+            ..
+        } => {
+            pending.insert(subagent_id, child_session_id);
+        }
+        XaiUpdate::SubagentFinished { subagent_id, .. } => {
+            pending.remove(&subagent_id);
+        }
+        _ => {}
+    }
+}
+
+/// Operator/Agent UI lines from `chat_history.jsonl` when `updates.jsonl`
+/// has no `user_message_chunk` / `agent_message_chunk` (fork parent after
+/// occupancy drop, or a failed huge-file replay).
+///
+/// Screenshot contract: 119K/500K with an empty scrollback is a fail.
+pub fn chat_history_replay_lines(session_id: &str, items: &[ConversationItem]) -> Vec<String> {
+    let mut lines = Vec::new();
+    for item in items {
+        let (tag, text) = match item {
+            ConversationItem::User(u) => {
+                if u.synthetic_reason.is_some() {
+                    continue;
+                }
+                ("user_message_chunk", item.text_content())
+            }
+            ConversationItem::Assistant(_) => ("agent_message_chunk", item.text_content()),
+            _ => continue,
+        };
+        if text.trim().is_empty() {
+            continue;
+        }
+        let text_json = serde_json::to_string(&text).unwrap_or_else(|_| "\"\"".to_string());
+        lines.push(format!(
+            r#"{{"timestamp":0,"method":"session/update","params":{{"sessionId":{sid},"update":{{"sessionUpdate":"{tag}","content":{{"type":"text","text":{text}}}}}}}}}"#,
+            sid = serde_json::to_string(session_id).unwrap_or_else(|_| "\"\"".to_string()),
+            tag = tag,
+            text = text_json,
+        ));
+    }
+    lines
+}
+
+/// Read one planned replay line. The buffer is reused by the caller.
+pub fn read_replay_line_at(
+    file: &mut File,
+    loc: ReplayLineLoc,
+    buf: &mut String,
+) -> io::Result<()> {
+    buf.clear();
+    file.seek(SeekFrom::Start(loc.offset))?;
+    let mut bytes = vec![0u8; loc.len as usize];
+    file.read_exact(&mut bytes)?;
+    buf.push_str(
+        std::str::from_utf8(&bytes).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?,
+    );
+    Ok(())
+}
+
 /// [`stream_replay_updates_at`] with parent/child cwd hints so child hydrate
 /// can skip a full sessions-root scan on the common encoded-cwd path.
 pub fn stream_replay_updates_at_hinted<F: FnMut(acp::SessionUpdate)>(
@@ -268,12 +487,15 @@ pub fn stream_replay_updates_at_hinted<F: FnMut(acp::SessionUpdate)>(
     let Some(updates_path) = resolve_replay_updates_path(session_id, grok_home, hint)? else {
         return Ok(ReplayEmission::Empty);
     };
-    let raw_contents = std::fs::read_to_string(&updates_path)?;
-    let live = rewind_filtered_live(&raw_contents);
+    let plan = plan_replay_file(&updates_path, None)?;
+    let mut file = File::open(&updates_path)?;
+    let mut buf = String::new();
     let mut collapser = ReplayToolCollapser::new();
     let mut forwarded = false;
-    for line in live {
-        if line_is_dropped_on_replay(line) {
+    for loc in plan.lines {
+        read_replay_line_at(&mut file, loc, &mut buf)?;
+        let line = buf.trim();
+        if line.is_empty() || line_is_dropped_on_replay(line) {
             continue;
         }
         match SessionUpdateEnvelope::from_str(line) {
@@ -305,10 +527,16 @@ pub(crate) fn for_each_replay_update_in_file<F: FnMut(acp::SessionUpdate)>(
     updates_path: &std::path::Path,
     mut f: F,
 ) -> std::io::Result<bool> {
-    let raw_contents = std::fs::read_to_string(updates_path)?;
-    let live = rewind_filtered_live(&raw_contents);
+    let plan = plan_replay_file_inner(updates_path, None, false)?;
+    let mut file = File::open(updates_path)?;
+    let mut buf = String::new();
     let mut forwarded = false;
-    for line in live {
+    for loc in plan.lines {
+        read_replay_line_at(&mut file, loc, &mut buf)?;
+        let line = buf.trim();
+        if line.is_empty() {
+            continue;
+        }
         match SessionUpdateEnvelope::from_str(line) {
             Ok(SessionUpdate::Acp(notif)) => {
                 forwarded = true;
@@ -319,10 +547,6 @@ pub(crate) fn for_each_replay_update_in_file<F: FnMut(acp::SessionUpdate)>(
         }
     }
     Ok(forwarded)
-}
-
-fn rewind_filtered_live(raw: &str) -> Vec<&str> {
-    filter_rewind_lines(raw.lines().filter(|l| !l.trim().is_empty()).collect())
 }
 
 /// Unpaired spawns across the rewind-filtered timeline. Substring pre-filter

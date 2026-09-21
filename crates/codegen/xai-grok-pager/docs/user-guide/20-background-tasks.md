@@ -19,8 +19,8 @@ Set `background: true` on the `run_terminal_command` tool to run a command in th
 
 Use the `get_command_or_subagent_output` tool to check on a background command or subagent:
 
-- `get_command_or_subagent_output(task_id)` — current output and status without waiting
-- `get_command_or_subagent_output(task_id, timeout_ms=30000)` — wait up to the given milliseconds for completion
+- `get_command_or_subagent_output(task_ids=["<id>"])` — current output and status without waiting. Omit `timeout_ms` or pass `0` for a snapshot. That is the default for a long-running builder.
+- `get_command_or_subagent_output(task_ids=["<id>"], timeout_ms=30000)` — wait up to 30000 milliseconds only when this parent must join before continuing. A positive `timeout_ms` is not the default retrieval.
 
 ### Waiting for Multiple Tasks
 
@@ -28,7 +28,7 @@ Use `wait_commands_or_subagents` to block on several tasks at once:
 
 - `task_ids` — the list of task IDs to wait for (maximum 20)
 - `mode` — `wait_any` returns when the first task completes; `wait_all` waits for every task
-- `timeout_ms` — the maximum time to wait, in milliseconds (default: 30 seconds)
+- `timeout_ms` — optional max wait in milliseconds. Omit it or pass `0` for a snapshot. A positive value waits only when you must join. The compatibility tool still caps a join wait (30 seconds if you omit a positive value on that older tool).
 
 The tool returns the status and output for every task you list.
 
@@ -252,5 +252,5 @@ Each error or warning appears as a notification in the conversation.
 - **Use `monitor` for real-time event streams** (log tailing, file watching)
 - **Use `scheduler_create` with `recurring: false`** for delayed one-shot tasks
 - **Keep monitor filters tight** — prefer `grep --line-buffered` over raw log streams
-- **Do not use sleep loops** in normal commands to poll — use `get_command_or_subagent_output` with `timeout_ms` instead
+- **Do not use sleep loops** in normal commands to poll. Use `get_command_or_subagent_output` with omit/`timeout_ms=0` for a snapshot. Use a positive `timeout_ms` only when you must join.
 - **Set reasonable poll intervals** — 30s+ for remote APIs to avoid rate limits, shorter for local checks

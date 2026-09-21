@@ -163,6 +163,27 @@ mod tests {
         assert!(try_parse_memory_intercept("python3 -c 'print(1)'").is_none());
     }
 
+    /// Operator: skills must not generate arbitrary Python or Bash and then
+    /// run it. Generated payloads are not allowlisted intercepts.
+    #[test]
+    fn generated_python_or_bash_payload_is_not_allowlisted_intercept() {
+        assert!(try_parse_memory_intercept("python3 -c 'print(1)'").is_none());
+        assert!(
+            try_parse_memory_intercept("cat > /tmp/x.py <<'EOF'\nprint(1)\nEOF\npython3 /tmp/x.py")
+                .is_none()
+        );
+        assert!(try_parse_memory_intercept("bash -lc 'python3 -c \"print(1)\"'").is_none());
+    }
+
+    #[test]
+    fn grok_oss_implement_memory_cli_bin_is_intercepted() {
+        let hit = try_parse_memory_intercept("grok-oss-implement-memory snapshot")
+            .expect("CLI bin must intercept");
+        assert!(matches!(hit.subcommand, MemorySubcommand::Snapshot));
+        let stub = try_parse_memory_intercept("memory.py path").expect("stub name");
+        assert!(matches!(stub.subcommand, MemorySubcommand::Path));
+    }
+
     #[test]
     fn user_project_memory_py_not_intercepted() {
         // basename memory.py alone is not enough — must be implement skill path

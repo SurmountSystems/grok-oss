@@ -103,6 +103,19 @@ pub async fn to_system_reminder(
     )
 }
 
+/// Surmount standing law for the first post-compaction model screen.
+///
+/// Injected into the existing `<system-reminder>` (not AGENTS.md, not `/recap`).
+pub fn section_surmount_standing_law_after_compact() -> String {
+    "## Surmount standing law (after compact)\n\
+     FORK.md is the Surmount divergence home. Read it after compact.\n\
+     Named tests are contracts. Do not fit tests to code.\n\
+     Behavior work is red then green TDD: observe the fail, then change the product so the same test passes.\n\
+     Do not interrupt live L2s when L1 shows a plan pane.\n\
+     A nested L2 that is a long builder (compile, lake, mill) is fire-and-return: the parent starts it and keeps working; completion is a notification. Do not occupy the parent as a blocking 10-minute `get_command_or_subagent_output` wait loop. The parent can spawn a second L2 while the first is still running."
+        .to_string()
+}
+
 /// Shared implementation for both sync and async variants.
 fn to_system_reminder_inner(
     ctx: &CompactionStateContext,
@@ -113,6 +126,7 @@ fn to_system_reminder_inner(
     mcp_tool_names: Option<&McpToolNames>,
 ) -> Option<String> {
     let mut sections = Vec::new();
+    sections.push(section_surmount_standing_law_after_compact());
 
     // Agent-edited files (shell-only)
     if !ctx.agent_edited_paths.is_empty() {
@@ -304,13 +318,19 @@ mod tests {
         };
         let result = to_system_reminder_sync(&ctx, &[], &[], None, None);
         let text = result.expect("should produce a reminder");
-        let expected = "\
-<system-reminder>
-## Connected MCP Servers
-- grafana (28 tools): Observability platform
-- linear (12 tools)
-</system-reminder>";
-        assert_eq!(text, expected, "got:\n{text}");
+        assert!(
+            text.starts_with("<system-reminder>") && text.ends_with("</system-reminder>"),
+            "MCP reminder must stay wrapped: {text}"
+        );
+        assert!(
+            text.contains("## Connected MCP Servers"),
+            "missing MCP section: {text}"
+        );
+        assert!(
+            text.contains("- grafana (28 tools): Observability platform"),
+            "grafana line: {text}"
+        );
+        assert!(text.contains("- linear (12 tools)"), "linear line: {text}");
     }
 
     /// Regression: task IDs in the post-compaction reminder must be rendered
@@ -454,5 +474,89 @@ mod tests {
                 "TODO section should be omitted when nothing is active: {text}"
             );
         }
+    }
+
+    fn empty_compaction_ctx() -> CompactionStateContext {
+        CompactionStateContext {
+            cwd_generation: 0,
+            destination_project_instructions: None,
+            running_subagents: vec![],
+            recent_messages: vec![],
+            last_user_query: None,
+            agent_edited_paths: vec![],
+            running_tasks: vec![],
+            connected_mcp_servers: vec![],
+            todos: vec![],
+        }
+    }
+
+    /// Discovery after compact: Standing Surmount law (FORK.md, tests-as-contracts,
+    /// red/green TDD, do not interrupt L2s when L1 shows a plan pane,
+    /// fire-and-return for long builder L2s) must be injected on compact/recap
+    /// so it is in the first screen.
+    #[test]
+    // Grok OSS: empty live-state still injects standing law as the first system-reminder section after compact. This diverges from upstream xAI because Surmount standing law must not be a buried AGENTS.md paragraph.
+    fn post_compact_reminder_includes_surmount_standing_law() {
+        let text = to_system_reminder_sync(&empty_compaction_ctx(), &[], &[], None, None)
+            .expect("standing law must produce a post-compact reminder even with empty live state");
+        assert!(
+            text.starts_with("<system-reminder>"),
+            "must use the existing wrap_system_reminder path: {text}"
+        );
+        assert!(
+            text.contains("## Surmount standing law (after compact)"),
+            "standing law must be a first-screen reminder section: {text}"
+        );
+        let law = text
+            .find("## Surmount standing law (after compact)")
+            .expect("heading");
+        assert_eq!(
+            law,
+            text.find("<system-reminder>").expect("wrap") + "<system-reminder>\n".len(),
+            "standing law must be the first reminder section (first screen): {text}"
+        );
+        assert!(
+            text.contains("FORK.md is the Surmount divergence home. Read it after compact."),
+            "FORK.md must be named as the Surmount divergence home: {text}"
+        );
+        assert!(
+            text.contains("Named tests are contracts. Do not fit tests to code."),
+            "named tests are contracts: {text}"
+        );
+        assert!(
+            text.contains(
+                "Behavior work is red then green TDD: observe the fail, then change the product so the same test passes."
+            ),
+            "red then green TDD: {text}"
+        );
+        assert!(
+            text.contains("Do not interrupt live L2s when L1 shows a plan pane."),
+            "do not interrupt live L2s: {text}"
+        );
+        assert!(
+            text.contains(
+                "A nested L2 that is a long builder (compile, lake, mill) is fire-and-return: the parent starts it and keeps working; completion is a notification. Do not occupy the parent as a blocking 10-minute `get_command_or_subagent_output` wait loop. The parent can spawn a second L2 while the first is still running."
+            ),
+            "fire-and-return for long builder L2s: {text}"
+        );
+        assert!(
+            !text.contains("/recap"),
+            "standing law is the compact reminder, not /recap: {text}"
+        );
+
+        let mut with_files = empty_compaction_ctx();
+        with_files.agent_edited_paths = vec!["src/auth.rs".into()];
+        let with_files_text =
+            to_system_reminder_sync(&with_files, &[], &[], None, None).expect("reminder");
+        let law_pos = with_files_text
+            .find("## Surmount standing law (after compact)")
+            .expect("standing law");
+        let files_pos = with_files_text
+            .find("## Files Edited This Session")
+            .expect("files");
+        assert!(
+            law_pos < files_pos,
+            "standing law must precede live-state sections: {with_files_text}"
+        );
     }
 }

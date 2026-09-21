@@ -1,6 +1,5 @@
 //! Top-level input routing for [`AgentView`]: `handle_input` fans events
 //! out to the active pane/overlay handlers; pane and input-mode setters.
-use super::bracketed_paste_should_probe;
 #[cfg(test)]
 use super::paste::paste_key_tests;
 #[cfg(test)]
@@ -473,9 +472,7 @@ impl AgentView {
                 _ => self.clear_stuck_scrollback_drag(),
             }
         }
-        if let Some(ref child_sid) = self.active_subagent.clone()
-            && !self.child_is_auto_compacting(child_sid)
-        {
+        if let Some(child_sid) = self.visible_nested_overlay_sid().map(str::to_owned) {
             if let Event::Key(key) = ev
                 && key.kind != KeyEventKind::Release
                 && key!('q', CONTROL).matches(key)
@@ -488,14 +485,14 @@ impl AgentView {
                     .hit_subagent_frame_close
                     .contains(mouse.column, mouse.row)
             {
-                let kill_idle_listed = self.subagent_sessions.get(child_sid).and_then(|info| {
+                let kill_idle_listed = self.subagent_sessions.get(&child_sid).and_then(|info| {
                     let idle = self
                         .subagent_views
-                        .get(child_sid)
+                        .get(&child_sid)
                         .is_some_and(|child| !child.session.state.is_busy());
                     (info.is_running() && idle).then(|| info.subagent_id.to_string())
                 });
-                self.active_subagent = None;
+                self.dismiss_nested_overlay();
                 if let Some(subagent_id) = kill_idle_listed {
                     return InputOutcome::Action(Action::KillSubagent(subagent_id));
                 }
@@ -529,7 +526,7 @@ impl AgentView {
             if let Event::Mouse(mouse) = ev
                 && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
             {
-                if let Some(child) = self.subagent_views.get(child_sid) {
+                if let Some(child) = self.subagent_views.get(&child_sid) {
                     let rects = child.tasks.view_button_rects.clone();
                     for (entry_id, rect) in rects {
                         if !rect.contains((mouse.column, mouse.row).into()) {
@@ -545,7 +542,7 @@ impl AgentView {
             }
             let child_in_scrollback = self
                 .subagent_views
-                .get(child_sid)
+                .get(&child_sid)
                 .is_some_and(|c| c.is_bare_scrollback());
             if let Event::Key(key) = ev
                 && key.kind != KeyEventKind::Release
@@ -553,10 +550,10 @@ impl AgentView {
                 && key.modifiers.is_empty()
                 && self
                     .subagent_views
-                    .get(child_sid)
+                    .get(&child_sid)
                     .is_some_and(|c| c.nested_overlay_esc_dismisses())
             {
-                self.active_subagent = None;
+                self.dismiss_nested_overlay();
                 return InputOutcome::Changed;
             }
             if child_in_scrollback
@@ -564,13 +561,13 @@ impl AgentView {
                 && key.kind != KeyEventKind::Release
                 && key!('q').matches(key)
             {
-                self.active_subagent = None;
+                self.dismiss_nested_overlay();
                 return InputOutcome::Changed;
             }
-            if let Some(child_view) = self.subagent_views.get_mut(child_sid) {
+            if let Some(child_view) = self.subagent_views.get_mut(&child_sid) {
                 if !crate::app::subagent::overlay_child_is_l2_coordinator(
                     &self.subagent_sessions,
-                    child_sid,
+                    &child_sid,
                 ) {
                     child_view.mark_as_subagent_view();
                 }
@@ -681,16 +678,46 @@ impl AgentView {
             }
             if let Event::Mouse(mouse) = ev
                 && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
-                && self.hit_goal_close.contains(mouse.column, mouse.row)
             {
-                self.show_goal_detail = false;
-                return InputOutcome::Changed;
+                if self.hit_goal_close.contains(mouse.column, mouse.row)
+                    || self.hit_goal_clear.contains(mouse.column, mouse.row)
+                {
+                    self.show_goal_detail = false;
+                    if let Some(g) = self.goal_state.take() {
+                        self.last_cleared_goal_id = Some(g.goal_id);
+                    }
+                    return InputOutcome::Action(Action::SendPrompt("/goal clear".into()));
+                }
+                if self.hit_goal_esc_close.contains(mouse.column, mouse.row) {
+                    self.show_goal_detail = false;
+                    return InputOutcome::Changed;
+                }
+                if self.hit_goal_resume.contains(mouse.column, mouse.row) {
+                    return InputOutcome::Action(Action::SendPrompt("/goal resume".into()));
+                }
+                if self.hit_goal_pause.contains(mouse.column, mouse.row) {
+                    return InputOutcome::Action(Action::SendPrompt("/goal pause".into()));
+                }
+                if self.hit_goal_status_cmd.contains(mouse.column, mouse.row) {
+                    return InputOutcome::Action(Action::SendPrompt("/goal status".into()));
+                }
             }
             if let Event::Mouse(mouse) = ev
                 && matches!(mouse.kind, MouseEventKind::Moved)
-                && self.hit_goal_close.update_hover(mouse.column, mouse.row)
             {
-                return InputOutcome::Changed;
+                let changed = self.hit_goal_close.update_hover(mouse.column, mouse.row)
+                    | self.hit_goal_clear.update_hover(mouse.column, mouse.row)
+                    | self
+                        .hit_goal_esc_close
+                        .update_hover(mouse.column, mouse.row)
+                    | self.hit_goal_resume.update_hover(mouse.column, mouse.row)
+                    | self.hit_goal_pause.update_hover(mouse.column, mouse.row)
+                    | self
+                        .hit_goal_status_cmd
+                        .update_hover(mouse.column, mouse.row);
+                if changed {
+                    return InputOutcome::Changed;
+                }
             }
             if matches!(ev, Event::Mouse(_) | Event::Paste(_)) {
                 return InputOutcome::Changed;
@@ -797,7 +824,9 @@ impl AgentView {
                         {
                             return outcome;
                         }
-                        if self.plan_approval_view.is_some() && crate::input::key::is_paste_key(key)
+                        if self.plan_overlay_owns_composer_paste()
+                            && (crate::input::key::is_paste_key(key)
+                                || crate::input::key::is_inline_paste_key(key))
                         {
                             let clipboard_text =
                                 crate::app::actions::ClipboardTextRead::from_result(
@@ -805,11 +834,18 @@ impl AgentView {
                                 );
                             return self.handle_paste_key_deferred(clipboard_text);
                         }
+                        if let Some(outcome) = self.isolated_preview_slash_tab_enter(key, registry)
+                        {
+                            return outcome;
+                        }
                         self.handle_line_viewer_key(key)
                     }
                     Event::Paste(text) => {
-                        if self.plan_approval_view.is_some() {
-                            return self.route_popup_paste(text);
+                        if self.plan_overlay_owns_composer_paste() {
+                            if let Some((outcome, _)) = self.try_handle_dropped_paths_paste(text) {
+                                return outcome;
+                            }
+                            return self.insert_or_defer_bracketed_prompt_paste(text);
                         }
                         self.line_viewer
                             .as_mut()
@@ -845,13 +881,24 @@ impl AgentView {
                     if let Some(outcome) = self.try_plan_overlay_agent_action(key, registry, true) {
                         return outcome;
                     }
+                    if super::viewer::isolated_preview_search_owns_key(self, key) {
+                        return self.handle_line_viewer_key(key);
+                    }
+                    if let Some(outcome) = self.isolated_preview_slash_tab_enter(key, registry) {
+                        return outcome;
+                    }
                     if casual_commenting {
                         self.handle_casual_plan_feedback_key(key)
                     } else {
                         self.handle_plan_feedback_key(key)
                     }
                 }
-                Event::Paste(text) => self.route_popup_paste(text),
+                Event::Paste(text) => {
+                    if let Some((outcome, _)) = self.try_handle_dropped_paths_paste(text) {
+                        return outcome;
+                    }
+                    self.insert_or_defer_bracketed_prompt_paste(text)
+                }
                 Event::Mouse(mouse) => {
                     let in_prompt = self
                         .pane_areas
@@ -1036,15 +1083,10 @@ impl AgentView {
                     self.handle_plan_feedback_key(key)
                 }
                 Event::Paste(text) => {
-                    if self
-                        .plan_approval_view
-                        .as_ref()
-                        .is_some_and(|view| view.focus != PlanApprovalFocus::Preview)
-                    {
-                        self.route_popup_paste(text)
-                    } else {
-                        InputOutcome::Unchanged
+                    if let Some((outcome, _)) = self.try_handle_dropped_paths_paste(text) {
+                        return outcome;
                     }
+                    self.insert_or_defer_bracketed_prompt_paste(text)
                 }
                 Event::Mouse(mouse) => {
                     let mut changed = false;
@@ -1221,23 +1263,7 @@ impl AgentView {
                     if let Some((outcome, _)) = self.try_handle_dropped_paths_paste(text) {
                         return outcome;
                     }
-                    let attachment_change_count = if bracketed_paste_should_probe(text) {
-                        crate::clipboard::attachment_probe_gate(Some(text))
-                    } else {
-                        None
-                    };
-                    let (outcome, synchronous_text_insertion) =
-                        self.insert_bracketed_prompt_text(text);
-                    if let Some(change_count) = attachment_change_count {
-                        self.enqueue_clipboard_attachment_probe(
-                            crate::app::actions::ClipboardPasteSource::BracketedInserted {
-                                text: text.to_owned(),
-                                insertion: synchronous_text_insertion,
-                            },
-                            change_count,
-                        );
-                    }
-                    outcome
+                    self.insert_or_defer_bracketed_prompt_paste(text)
                 } else {
                     let consumed = match self.active_pane {
                         AgentPane::Todo => self.todo.handle_paste(text),
@@ -1405,6 +1431,34 @@ impl AgentView {
         }
         InputOutcome::Unchanged
     }
+
+    /// Isolated Preview slash Tab/Enter must reuse mill `handle_prompt_key`
+    /// after overlay and before RowWalk / leftover list capture. Search
+    /// input bar owns keys while it is open.
+    fn isolated_preview_slash_tab_enter(
+        &mut self,
+        key: &crossterm::event::KeyEvent,
+        registry: &ActionRegistry,
+    ) -> Option<InputOutcome> {
+        if !self.prompt.slash_open() {
+            return None;
+        }
+        if self
+            .line_viewer
+            .as_ref()
+            .is_some_and(|v| v.list_state.input_mode().is_some())
+        {
+            return None;
+        }
+        if !key.modifiers.is_empty() {
+            return None;
+        }
+        if !matches!(key.code, KeyCode::Tab | KeyCode::Enter) {
+            return None;
+        }
+        Some(self.handle_prompt_key(key, registry, false))
+    }
+
     /// Handle an agent-level action using the compatibility fullscreen registry.
     /// Runtime key dispatch uses [`Self::handle_agent_action_with_registry`].
     #[cfg(test)]
@@ -1426,10 +1480,16 @@ impl AgentView {
         ) {
             return Some(InputOutcome::Unchanged);
         }
-        // Preview line-viewer swallows Ctrl+C as a no-op. A running or
-        // cancelling turn must still CancelTurn (plan present plus queue
-        // edit must not freeze stop). Idle empty-composer Ctrl+C abandons.
+        // Two-stage Ctrl+C on every prompt: a non-empty draft (text or
+        // image chips) clears first. Do not Exit Isolated Preview, cancel
+        // the turn, quit, or leave plan mode on that first press. Empty
+        // plus a running turn still CancelTurn so stop does not freeze.
+        // Idle empty Ctrl+C abandons / Isolated Preview Exit.
         if registry.matches_id(ActionId::CancelTurn, key) {
+            let has_draft = !self.prompt.text().is_empty() || !self.prompt.images.is_empty();
+            if has_draft {
+                return None;
+            }
             let overlay_busy = self.active_subagent.as_ref().is_some_and(|sid| {
                 self.subagent_views.get(sid.as_str()).is_some_and(|child| {
                     child.stoppable_activity_running() || child.any_cancel_pending()
@@ -1930,6 +1990,7 @@ mod background_and_tasks_shortcut_tests {
             turn_count: None,
             tool_call_count: None,
             tokens_used: None,
+            tokens_past: 0,
             context_window_tokens: None,
             context_usage_pct: None,
             tools_used: Vec::new(),
@@ -2201,6 +2262,97 @@ mod background_and_tasks_shortcut_tests {
             parent.subagent_views.contains_key("l3-gate"),
             "missing L3 view must be created so the click is not a dead control"
         );
+    }
+
+    fn draw_nested_overlay_hits(parent: &mut super::super::AgentView) {
+        use crate::app::bundle::BundleState;
+        use crate::scrollback::render::ScratchBuffer;
+        use ratatui::buffer::Buffer;
+        use ratatui::layout::Rect;
+
+        let registry = ActionRegistry::defaults();
+        let area = Rect::new(0, 0, 120, 40);
+        let mut buf = Buffer::empty(area);
+        let mut scratch = ScratchBuffer::new();
+        let _ = parent.draw(
+            area,
+            &mut buf,
+            &registry,
+            &mut scratch,
+            None,
+            false,
+            crate::app::agent_view::BannerSlotParams::none(),
+            &BundleState::default(),
+            false,
+            false,
+            &mut Vec::new(),
+            crate::app::agent_view::AppRenderParams::default(),
+        );
+    }
+
+    /// Named contract: L3 overlay `[x]` pops one overlay to the parent L2
+    /// view. It must not drop to L1. It must not cancel the L2 or L3
+    /// process. Overlay-dismiss is not Stop.
+    #[test]
+    fn l3_overlay_x_returns_to_l2_not_l1() {
+        let registry = ActionRegistry::defaults();
+        let (mut parent, l2_sid) = parent_with_overlay_child("l2-coord", 1);
+        let mut l3 = overlay_info("l3-gate", "l2-coord", 2);
+        l3.is_background = true;
+        parent.subagent_sessions.insert("l3-gate".into(), l3);
+        let mut l3_view = make_agent();
+        l3_view.session.session_id = Some(agent_client_protocol::SessionId::new("l3-gate"));
+        l3_view.session.state = crate::app::agent::AgentState::TurnRunning;
+        parent.insert_subagent_view("l3-gate".into(), Box::new(l3_view));
+        parent.open_subagent_fullscreen("l3-gate".into());
+        assert_eq!(
+            parent.active_subagent.as_deref(),
+            Some("l3-gate"),
+            "setup must show the L3 overlay on top of L2"
+        );
+        draw_nested_overlay_hits(&mut parent);
+        let close = parent
+            .hit_subagent_frame_close
+            .rect
+            .expect("open L3 overlay must paint frame [x]");
+        let outcome = parent.handle_input(
+            &Event::Mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: close.x,
+                row: close.y,
+                modifiers: KeyModifiers::NONE,
+            }),
+            &registry,
+        );
+        assert!(
+            matches!(outcome, InputOutcome::Changed),
+            "L3 overlay [x] must dismiss one overlay, got {outcome:?}"
+        );
+        assert!(
+            !matches!(
+                outcome,
+                InputOutcome::Action(Action::CancelTurn | Action::KillSubagent(_))
+            ),
+            "L3 overlay [x] must not cancel L2 or L3, got {outcome:?}"
+        );
+        assert_eq!(
+            parent.active_subagent.as_deref(),
+            Some(l2_sid.as_str()),
+            "L3 overlay [x] must return to the L2 overlay, not L1"
+        );
+        let l2 = parent.subagent_views.get(&l2_sid).expect("l2");
+        assert!(
+            l2.session.state.is_turn_running(),
+            "L2 must keep running after L3 overlay [x]"
+        );
+        assert!(!l2.session.state.is_cancelling());
+        let l3 = parent.subagent_views.get("l3-gate").expect("l3");
+        assert!(
+            l3.session.state.is_turn_running(),
+            "L3 must keep running after overlay dismiss"
+        );
+        assert!(!l3.session.state.is_cancelling());
+        assert!(l3.cancel_trigger_hint.is_none());
     }
 
     #[test]

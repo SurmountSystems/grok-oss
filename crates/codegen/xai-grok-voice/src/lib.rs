@@ -9,6 +9,7 @@
 
 #[cfg(feature = "audio")]
 pub mod audio;
+pub mod audio_wal;
 pub mod auth;
 pub mod config;
 pub mod error;
@@ -19,6 +20,7 @@ pub mod pipeline;
 pub mod probe;
 pub mod stt;
 
+pub use audio_wal::{AUDIO_WAL_FILE, AudioWal, audio_wal_path};
 pub use auth::{SharedVoiceAuth, StaticVoiceAuth, VoiceAuthProvider};
 pub use config::VoiceConfig;
 pub use error::VoiceError;
@@ -28,6 +30,16 @@ pub use language::{
     language_for_api, stt_language_by_code,
 };
 pub use pipeline::{VoiceCommand, run_voice_pipeline};
+
+/// Grok OSS: Silent 10s teardown without a visible recording state is a miss.
+pub fn silence_tears_down_recording() -> bool {
+    false
+}
+
+/// Grok OSS: Recording stays open until Operator stop, not after 10s of silence.
+pub fn recording_ends_after_silence(_d: std::time::Duration) -> bool {
+    false
+}
 #[cfg(feature = "audio")]
 pub use probe::run_mic_only_probe;
 pub use probe::{

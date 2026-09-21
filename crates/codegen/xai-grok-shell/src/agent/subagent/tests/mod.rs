@@ -8,8 +8,37 @@ use crate::test_support::lsp_runtime::{
 };
 use xai_grok_subagent_resolution::resolve_effective_overrides;
 use xai_grok_tools::implementations::grok_build::task::coordinator::{
-    ChildCompletion, CompletionDisposition,
+    ChildCompletion, ChildControl, CompletionDisposition,
 };
+/// Operator: "You can't talk to your own L2s? And you're fine with that? Why?"
+#[test]
+fn shell_child_follow_up_sends_session_command_interject_on_child_session() {
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let runtime = ShellChildRuntime::for_follow_up_test(tx);
+    ChildControl::follow_up(
+        &runtime,
+        "additive follow-up, not kill, not respawn".to_owned(),
+    );
+    match rx.try_recv().expect("Interject delivered") {
+        SessionCommand::Interject { text, id, images } => {
+            assert_eq!(text, "additive follow-up, not kill, not respawn");
+            assert_eq!(id, None, "parent-tool follow-up is not overlay typing");
+            assert!(images.is_empty());
+        }
+        SessionCommand::Cancel(_) | SessionCommand::Shutdown(_) => {
+            panic!("follow-up must not kill or respawn")
+        }
+        SessionCommand::Prompt { .. } => {
+            panic!("follow-up must not spawn a second session")
+        }
+        _ => panic!("follow-up must enqueue SessionCommand::Interject on the child session"),
+    }
+    assert!(
+        rx.try_recv().is_err(),
+        "follow-up must not emit a second command"
+    );
+}
+
 #[test]
 fn canonical_total_tokens_does_not_double_count_reasoning() {
     let totals = xai_chat_state::UsageTotals {

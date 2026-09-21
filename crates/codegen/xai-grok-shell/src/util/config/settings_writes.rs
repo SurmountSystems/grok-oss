@@ -31,6 +31,21 @@ pub async fn set_confirm_before_rewind(value: bool) -> Result<()> {
     update_config(|cfg| cfg.ui.confirm_before_rewind = Some(value)).await
 }
 
+pub async fn set_turbo_planning(value: bool) -> Result<()> {
+    update_config(|cfg| cfg.ui.turbo_planning = Some(value)).await
+}
+
+pub async fn set_process_rule_reminders_enabled(value: bool) -> Result<()> {
+    update_config(|cfg| cfg.ui.process_rule_reminders_enabled = Some(value)).await
+}
+
+pub async fn set_process_rule_reminders(value: String) -> Result<()> {
+    update_config(|cfg| {
+        cfg.ui.process_rule_reminders = if value.is_empty() { None } else { Some(value) }
+    })
+    .await
+}
+
 /// Persist `[ui].scrub_ascii_punct` via `update_config`.
 pub async fn set_scrub_ascii_punct(value: bool) -> Result<()> {
     update_config(|cfg| cfg.ui.scrub_ascii_punct = Some(value)).await
@@ -250,6 +265,11 @@ pub async fn set_hide_header(value: bool) -> Result<()> {
 /// Persist `[ui].composer_multiline` via `update_config`.
 pub async fn set_composer_multiline(value: bool) -> Result<()> {
     update_config(|cfg| cfg.ui.composer_multiline = Some(value)).await
+}
+
+/// Persist `[ui].allow_session_multiline` via `update_config`.
+pub async fn set_allow_session_multiline(value: bool) -> Result<()> {
+    update_config(|cfg| cfg.ui.allow_session_multiline = Some(value)).await
 }
 
 /// Persist `[ui].plan_approval_park` (`soft` | `modal`) via `update_config`.

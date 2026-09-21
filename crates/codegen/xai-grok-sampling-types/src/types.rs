@@ -467,6 +467,14 @@ pub struct ChatCompletionResponse {
     pub usage: Option<Usage>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub citations: Option<Vec<String>>,
+    /// Chat Completions serving-path fingerprint. Backend configuration, not a
+    /// SHA of the weights. Empty string deserializes as absent.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::serde_helpers::empty_string_as_none"
+    )]
+    pub system_fingerprint: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -578,6 +586,8 @@ pub struct ChatCompletionChunk {
     pub choices: Vec<ChatChunkChoice>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub usage: Option<Usage>,
+    /// Chat Completions serving-path fingerprint. Backend configuration, not a
+    /// SHA of the weights. Empty string deserializes as absent.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -1531,5 +1541,58 @@ mod tests {
         let inner: &dyn TraceContext = &*cloned_trace;
         let downcast = inner.as_any().downcast_ref::<TestTrace>().unwrap();
         assert_eq!(downcast.0, "trace-data");
+    }
+
+    /// Named contract: Chat Completions JSON includes `system_fingerprint`
+    /// (serving-path config). Do not treat it as a SHA of the weights.
+    #[test]
+    fn chat_completion_response_deserializes_system_fingerprint() {
+        let json = r#"{
+            "id": "chatcmpl-1",
+            "object": "chat.completion",
+            "created": 1,
+            "model": "grok-4.6",
+            "choices": [],
+            "system_fingerprint": "fp_84ff176447"
+        }"#;
+        let parsed: ChatCompletionResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            parsed.system_fingerprint.as_deref(),
+            Some("fp_84ff176447"),
+            "owed: Chat Completions parse exposes system_fingerprint from the wire"
+        );
+        let empty = r#"{
+            "id": "chatcmpl-2",
+            "object": "chat.completion",
+            "created": 1,
+            "model": "grok-4.6",
+            "choices": [],
+            "system_fingerprint": ""
+        }"#;
+        let parsed_empty: ChatCompletionResponse = serde_json::from_str(empty).unwrap();
+        assert!(
+            parsed_empty.system_fingerprint.is_none(),
+            "empty system_fingerprint is absent, not a SHA"
+        );
+    }
+
+    /// Named contract: streaming Chat Completions chunks include
+    /// `system_fingerprint` (serving-path config).
+    #[test]
+    fn chat_completion_chunk_deserializes_system_fingerprint() {
+        let json = r#"{
+            "id": "chatcmpl-1",
+            "object": "chat.completion.chunk",
+            "created": 1,
+            "model": "grok-4.6",
+            "choices": [],
+            "system_fingerprint": "fp_84ff176447"
+        }"#;
+        let parsed: ChatCompletionChunk = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            parsed.system_fingerprint.as_deref(),
+            Some("fp_84ff176447"),
+            "owed: Chat Completions chunks expose system_fingerprint from the wire"
+        );
     }
 }
