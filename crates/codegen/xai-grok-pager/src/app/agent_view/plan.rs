@@ -91,10 +91,7 @@ impl AgentView {
     /// and must not take this close. Empty Enter never Approves. Does not
     /// Approve the parked plan.
     pub(crate) fn leave_or_reread_isolated_preview_after_mill_continues(&mut self) {
-        if matches!(
-            self.plan_feedback_in_flight,
-            Some(PlanFeedbackInFlight::Updating)
-        ) {
+        if self.plan_feedback_in_flight.is_some() {
             return;
         }
         if self.isolated_preview_shows_secondary_plan {
@@ -825,7 +822,7 @@ impl AgentView {
         viewer.kind = crate::views::file_search::line_viewer::LineViewerKind::PlanPreview;
         let rewrite_wait = matches!(
             self.plan_feedback_in_flight,
-            Some(PlanFeedbackInFlight::Updating)
+            Some(PlanFeedbackInFlight::Updating | PlanFeedbackInFlight::Revising)
         );
         viewer.title_override = Some(if rewrite_wait {
             crate::views::plan_approval_view::PLAN_REWRITE_WAIT_HEADING.to_string()
@@ -1173,6 +1170,10 @@ impl AgentView {
     }
     pub(crate) fn abandon_plan(&mut self) -> InputOutcome {
         let Some(mut pav) = self.plan_approval_view.take() else {
+            // Operator: "exit won't work too. it's fucking stuck!!"
+            // Clickable Exit must leave leftover exclusive covering even
+            // after a dead park so Isolated Preview does not keep owning keys.
+            self.leave_exclusive_covering_after_plan_exit();
             return InputOutcome::Changed;
         };
         self.record_explicit_plan_choice(
@@ -1187,6 +1188,22 @@ impl AgentView {
         // a running shell.
         self.finish_turn_idle_after_plan_park();
         InputOutcome::Changed
+    }
+
+    /// Exit leaves Isolated Preview. Do not keep exclusive covering after
+    /// abandon. Clears rewrite-wait so `plan_feedback_in_flight` cannot
+    /// stay forever.
+    fn leave_exclusive_covering_after_plan_exit(&mut self) {
+        self.plan_feedback_in_flight = None;
+        self.isolated_preview_rewrite_wait_prompt = None;
+        if !self.plan_decision_resolved {
+            self.plan_decision_resolved = true;
+            self.persist_plan_decision_resolved_flag(true);
+            self.plan_mode_pending = Some(false);
+        }
+        if self.is_plan_viewer() {
+            self.leave_parked_isolated_preview();
+        }
     }
 
     /// Dead park or Exit: Idle, no Waiting, no timer.
@@ -1226,48 +1243,21 @@ impl AgentView {
         self.latest_inline_plan_content = None;
         self.plan_next_comment_id = pav.next_comment_id;
         self.restore_stashed_prompt_unless_composer_has_text(pav.stashed_prompt);
-        // Exit may keep Isolated Preview as view-only. Approve still closes
-        // the pane. Never re-arm Plan ready for the exited present. Paint
-        // this session's current disk plan.md. Do not restore a leftover
-        // TECH.md viewer when disk is mill. No disk: keep view-only present
-        // body so Esc:close / `/start` / `/unstick` can leave the pane.
-        let keep_isolated_preview = action == "abandon" && self.line_viewer.is_some();
-        let kept_viewer = if keep_isolated_preview {
-            self.line_viewer.take()
-        } else {
-            self.line_viewer = None;
-            None
-        };
+        // Operator: "exit won't work too. it's fucking stuck!!"
+        // Exit leaves Isolated Preview. Do not keep exclusive covering after
+        // abandon so leftover covering still owns keys. Approve still closes
+        // the pane. Never re-arm Plan ready for the exited present.
+        self.plan_feedback_in_flight = None;
+        self.isolated_preview_rewrite_wait_prompt = None;
+        self.line_viewer = None;
         self.casual_commenting_range = None;
         self.casual_editing_comment_id = None;
-        if keep_isolated_preview {
-            self.show_plan_preview();
-            if self.line_viewer.is_none() {
-                let disk = self
-                    .plan_file_path()
-                    .and_then(|p| std::fs::read_to_string(p).ok())
-                    .filter(|s| !s.trim().is_empty());
-                if let Some(disk_body) = disk {
-                    if let Some(mut viewer) =
-                        LineViewerState::open_markdown_content("plan.md", disk_body, None)
-                    {
-                        viewer.kind =
-                            crate::views::file_search::line_viewer::LineViewerKind::PlanPreview;
-                        viewer.plan_mut().feedback_active = false;
-                        self.line_viewer = Some(viewer);
-                    }
-                } else if let Some(mut viewer) = kept_viewer {
-                    viewer.plan_mut().feedback_active = false;
-                    self.line_viewer = Some(viewer);
-                }
-            }
-        }
-        self.persist_session_plan_dock_open(self.line_viewer.is_some());
+        self.persist_session_plan_dock_open(false);
         if let Some(sid) = self.session.session_id.as_ref() {
             crate::slash::commands::plan::persist_isolated_preview_open(
                 &self.session.cwd.to_string_lossy(),
                 sid.0.as_ref(),
-                self.line_viewer.is_some(),
+                false,
             );
         }
         log_plan_submit(action);
@@ -1312,7 +1302,17 @@ impl AgentView {
         let images = self.prompt.drain_images();
         self.prompt.set_text("");
         self.persist_unsent_composer_draft_now();
-        self.line_viewer = None;
+        // Isolated Preview stays until Esc, Exit, or Approve. Clickable
+        // Revise rewrites and re-presents; do not drop exclusive covering
+        // so the Operator is stuck with no pane and no CTAs. Idle Approve
+        // / Comment / Revise / Exit do not arm on leftover body until the
+        // next `exit_plan_mode` present.
+        if let Some(viewer) = self.line_viewer.as_mut() {
+            let plan = viewer.plan_mut();
+            plan.show_action_buttons = false;
+            plan.feedback_active = false;
+            plan.selected_cta = None;
+        }
         self.prompt.textarea.cancel_undo_group();
         // Block idle "Plan written" / local idle re-park until re-present.
         self.plan_feedback_in_flight =
@@ -1326,7 +1326,9 @@ impl AgentView {
         // Local idle or dead reverse-request channel: Interject so the agent
         // rewrites plan.md and calls exit_plan_mode again (never barren wait).
         // Live ACP still Interjects when the composer holds images so those
-        // bytes are not dropped as `images: vec![]`.
+        // bytes are not dropped as `images: vec![]`. Isolated Preview
+        // exclusive covering with a live waiter answers ACP cancelled with
+        // notes, then a later `exit_plan_mode` re-presents.
         if pav.is_local_idle_decision || !sent_acp || !images.is_empty() {
             let feedback_block = to_send
                 .as_deref()
@@ -5215,6 +5217,55 @@ mod session_plan_sql_preview_tests {
         let _ = agent.abandon_plan();
     }
 
+    /// Operator: "exit won't work too. it's fucking stuck!!"
+    /// Exit must leave Isolated Preview. Do not keep exclusive covering after
+    /// abandon so leftover covering still owns keys.
+    #[test]
+    fn isolated_preview_exit_does_not_keep_covering_after_abandon() {
+        let mut agent = make_agent();
+        park_then_exit(
+            &mut agent,
+            "# Exclusive covering\n\nExit will not work stuck\n",
+        );
+        assert!(
+            agent.line_viewer.is_none(),
+            "Exit will not work / stuck: Exit must not keep Isolated Preview covering after abandon"
+        );
+        assert!(
+            agent.plan_approval_view.is_none(),
+            "Exit will not work / stuck: Exit must drop the live park"
+        );
+        assert!(
+            agent.plan_decision_resolved,
+            "Exit will not work / stuck: Exit must decide the present"
+        );
+        assert!(
+            agent.plan_feedback_in_flight.is_none(),
+            "Exit will not work / stuck: Exit must not leave plan_feedback_in_flight forever"
+        );
+        assert!(
+            !matches!(
+                agent.key_owner(),
+                crate::app::agent_view::KeyOwner::LineViewer
+            ),
+            "Exit will not work / stuck: leftover exclusive covering must not own keys after Exit"
+        );
+
+        agent.latest_inline_plan_content =
+            Some("# leftover exclusive covering after dead park\n".into());
+        agent.show_plan_preview();
+        assert!(
+            agent.line_viewer.is_some(),
+            "fixture: leftover exclusive covering can reopen as view-only"
+        );
+        assert!(agent.plan_approval_view.is_none());
+        let _ = agent.abandon_plan();
+        assert!(
+            agent.line_viewer.is_none(),
+            "Exit will not work / stuck: Exit must leave leftover exclusive covering even after a dead park"
+        );
+    }
+
     fn type_esc(agent: &mut AgentView) -> InputOutcome {
         agent.handle_input(
             &Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
@@ -5528,15 +5579,16 @@ mod session_plan_sql_preview_tests {
     /// Operator (2026-09-12): "Can't seem to resume the plan now... Like,
     /// when it's parked like this, it's almost wedged... Also it's still
     /// showing the stale plan. I can't unstuck it, and the old plan is
-    /// still there." After Plan Exit, Isolated Preview stays as view-only.
-    /// Esc:close must leave that pane. Empty Enter never Approves.
+    /// still there." Operator (2026-09-20): "exit won't work too. it's
+    /// fucking stuck!!" Exit leaves Isolated Preview. Esc still does not
+    /// Approve. Empty Enter never Approves.
     #[test]
     fn after_plan_exit_esc_closes_isolated_preview() {
         let mut agent = make_agent();
         park_then_exit(&mut agent, "# Mill WATCHER plan\nDo mill\n");
         assert!(
-            agent.line_viewer.is_some(),
-            "fixture: Plan Exit may keep Isolated Preview as view-only"
+            agent.line_viewer.is_none(),
+            "Exit will not work / stuck: Plan Exit must leave Isolated Preview, not keep covering"
         );
         assert!(agent.plan_approval_view.is_none());
         assert!(agent.plan_decision_resolved);
@@ -5552,7 +5604,7 @@ mod session_plan_sql_preview_tests {
         );
         assert!(
             agent.line_viewer.is_none(),
-            "Esc:close must leave parked Isolated Preview after Plan Exit"
+            "Esc after Plan Exit must not re-open Isolated Preview"
         );
         assert!(
             agent.plan_approval_view.is_none(),
@@ -5638,8 +5690,9 @@ mod session_plan_sql_preview_tests {
     }
 
     /// Operator: Isolated Preview still showed TECH.md after mill Plan Exit.
-    /// Kept Isolated Preview must paint this session's current disk plan.md,
-    /// not a leftover TECH.md SQL snapshot.
+    /// Operator (2026-09-20): "exit won't work too. it's fucking stuck!!"
+    /// Exit leaves Isolated Preview. A later `/view-plan` dock paints this
+    /// session's current disk plan.md, not a leftover TECH.md SQL snapshot.
     #[serial_test::serial(GROK_HOME)]
     #[test]
     fn after_plan_exit_kept_isolated_preview_paints_current_disk_plan_md_not_tech_md() {
@@ -5680,19 +5733,24 @@ mod session_plan_sql_preview_tests {
         let mill = "# Mill WATCHER plan\nlive disk plan.md after Exit\n";
         write_newer_session_plan_md(&plan_md, mill);
         let _ = agent.abandon_plan();
+        assert!(
+            agent.line_viewer.is_none(),
+            "Exit will not work / stuck: Plan Exit must leave Isolated Preview covering"
+        );
 
+        agent.dock_isolated_preview();
         let painted = agent
             .line_viewer
             .as_ref()
             .and_then(|v| v.markdown_content_for_test())
-            .expect("Plan Exit may keep Isolated Preview as view-only");
+            .expect("later Isolated Preview dock after Plan Exit must paint a body");
         assert!(
             painted.contains("Mill WATCHER plan") && painted.contains("live disk plan.md"),
-            "kept Isolated Preview after Plan Exit must paint current disk plan.md; got {painted:?}"
+            "Isolated Preview dock after Plan Exit must paint current disk plan.md; got {painted:?}"
         );
         assert!(
             !painted.contains("TECH.md dependency tree"),
-            "kept Isolated Preview must not keep a leftover TECH.md snapshot; got {painted:?}"
+            "Isolated Preview dock after Plan Exit must not keep a leftover TECH.md snapshot; got {painted:?}"
         );
     }
 
@@ -5707,15 +5765,18 @@ mod session_plan_sql_preview_tests {
         fx.write_summary(&cwd, session_id, serde_json::json!({}));
         let mut agent = test_agent_view(Some(session_id), std::path::PathBuf::from(&cwd));
         park_then_exit(&mut agent, "# Mill WATCHER plan\nDo mill\n");
-        crate::slash::commands::plan::persist_isolated_preview_open(&cwd, session_id, true);
-        let _ = type_esc(&mut agent);
         assert!(
             agent.line_viewer.is_none(),
-            "Esc:close must leave Isolated Preview"
+            "Exit will not work / stuck: Plan Exit must leave Isolated Preview"
         );
         assert!(
             !crate::slash::commands::plan::take_isolated_preview_open(&cwd, session_id),
-            "Esc:close must clear the Isolated Preview dock marker"
+            "Plan Exit must clear the Isolated Preview dock marker"
+        );
+        let _ = type_esc(&mut agent);
+        assert!(
+            agent.line_viewer.is_none(),
+            "Esc after Plan Exit must not re-open Isolated Preview"
         );
     }
 

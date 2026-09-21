@@ -574,8 +574,7 @@ impl ChatStateActor {
             // and dest reports. Ratio overhead must not reseed a ~75k window
             // (`min(pre_replace_total)` alone paints `75.2k → 75.2k`). Operator:
             // compact must not result in 75k contexts; that is wasteful.
-            let summary_cap =
-                crate::compaction_utils::COMPACT_RESEED_MAX_TOKENS.max(base_estimate);
+            let summary_cap = crate::compaction_utils::COMPACT_RESEED_MAX_TOKENS.max(base_estimate);
             estimated_tokens = estimated_tokens.min(summary_cap);
         }
         self.state.conversation = items;

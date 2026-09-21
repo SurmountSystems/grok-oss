@@ -1083,6 +1083,42 @@ mod tests {
         );
     }
 
+    /// Named contract: leftover remaining-work said This debugger is Grok
+    /// Build 1.0.13 and that line was treated as this window's grok-oss
+    /// version. Isolated Preview and plan chrome are grok-oss unless this
+    /// process was launched as grok from downloads. Probe this turn.
+    #[test]
+    fn user_guide_what_does_not_mix_grok_build_version_with_grok_oss() {
+        let slash = USER_GUIDE
+            .iter()
+            .find(|d| d.filename == "04-slash-commands.md")
+            .expect("04-slash-commands.md is embedded");
+        assert!(
+            slash
+                .content
+                .contains("Never mix Grok Build version with grok-oss product version"),
+            "04-slash-commands.md /what must keep grok-oss and Grok Build versions distinct"
+        );
+        assert!(
+            slash.content.contains("grok-oss --version")
+                && slash.content.contains("grok --version"),
+            "04-slash-commands.md must name both grok-oss --version and grok --version"
+        );
+        assert!(
+            slash
+                .content
+                .contains("Isolated Preview and plan chrome are grok-oss")
+                && slash.content.contains("probe this turn"),
+            "04-slash-commands.md must name Isolated Preview chrome as grok-oss and probe this turn"
+        );
+        assert!(
+            !slash
+                .content
+                .contains("This debugger is Grok Build 1.0.13"),
+            "04-slash-commands.md must not teach leftover Grok Build 1.0.13 as grok-oss"
+        );
+    }
+
     /// Grok OSS Named contract: `/plan --soft` docks Isolated Preview for a new
     /// feature. It does not enter plan mode. It does not park L1. It does
     /// not enqueue the description as a Prompt. Present is not Approve.

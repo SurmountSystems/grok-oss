@@ -2356,3 +2356,103 @@ fn isolated_preview_keep_draft_from_before_present_enter_sends_prompt() {
         "keep-draft Enter must not stash the pre-present composer as review comments"
     );
 }
+
+fn arm_exclusive_covering_revise_and_exit(agent: &mut AgentView) {
+    let viewer = agent.line_viewer.as_mut().expect("plan pane");
+    viewer.fullscreen = true;
+    viewer.plan_mut().send_button_area = Some(Rect::new(40, 20, 8, 1));
+    viewer.plan_mut().abandon_button_area = Some(Rect::new(50, 20, 8, 1));
+    viewer.last_modal_area = Some(Rect::new(0, 0, 80, 24));
+}
+
+/// Operator: "I can't even revise plans now... exit won't work too. it's
+/// fucking stuck!!" Exclusive covering clickable Revise rewrites and
+/// re-presents. Letter keys type; they do not steal Approve.
+#[test]
+fn exclusive_covering_revise_cta_rewrites_and_represents_cannot_revise_plans() {
+    use crate::app::actions::Action;
+    use crate::app::app_view::InputOutcome;
+    use crate::views::plan_approval_view::PlanFeedbackInFlight;
+
+    let mut agent = agent_with_scrollable_plan();
+    agent.prompt.set_text("cannot revise plans: add auth");
+    arm_exclusive_covering_revise_and_exit(&mut agent);
+    let outcome = agent.handle_input(
+        &mouse(MouseEventKind::Down(MouseButton::Left), 41, 20),
+        &ActionRegistry::defaults(),
+    );
+    assert!(
+        matches!(
+            outcome,
+            InputOutcome::Changed | InputOutcome::Action(Action::Interject { .. })
+        ),
+        "cannot revise plans: clickable Revise must run; got {outcome:?}"
+    );
+    assert!(
+        agent.plan_approval_view.is_none(),
+        "cannot revise plans: clickable Revise must send the rewrite"
+    );
+    assert_eq!(
+        agent.plan_feedback_in_flight,
+        Some(PlanFeedbackInFlight::Revising)
+    );
+    assert!(
+        !agent.plan_decision_resolved,
+        "cannot revise plans: Revise is not Approve and not Exit"
+    );
+    assert!(
+        agent.line_viewer.as_ref().is_some_and(|v| v.fullscreen),
+        "cannot revise plans: Isolated Preview stays until Esc, Exit, or Approve"
+    );
+    assert!(
+        agent.line_viewer.as_ref().is_some_and(|v| v
+            .plan_ref()
+            .is_some_and(|p| !p.show_action_buttons && !p.feedback_active)),
+        "cannot revise plans: rewrite-wait must not arm idle Approve on leftover body"
+    );
+}
+
+/// Operator: "exit won't work too. it's fucking stuck!!" Clickable Exit
+/// leaves exclusive covering. Empty Enter never Approves.
+#[test]
+fn exclusive_covering_exit_cta_leaves_plan_exit_will_not_work_stuck() {
+    use crate::app::agent_view::KeyOwner;
+    use crate::app::app_view::InputOutcome;
+
+    let mut agent = agent_with_scrollable_plan();
+    agent.prompt.set_text("");
+    arm_exclusive_covering_revise_and_exit(&mut agent);
+    let empty = agent.handle_input(
+        &Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        &ActionRegistry::defaults(),
+    );
+    assert!(
+        !matches!(
+            empty,
+            InputOutcome::Action(_)
+                | InputOutcome::ActionThenForward(_)
+                | InputOutcome::ActionPair(_, _)
+        ),
+        "GitHub #122: empty Enter never Approves exclusive covering; got {empty:?}"
+    );
+    let outcome = agent.handle_input(
+        &mouse(MouseEventKind::Down(MouseButton::Left), 51, 20),
+        &ActionRegistry::defaults(),
+    );
+    assert!(
+        matches!(outcome, InputOutcome::Changed | InputOutcome::Action(_)),
+        "Exit will not work / stuck: clickable Exit must run; got {outcome:?}"
+    );
+    assert!(
+        agent.plan_approval_view.is_none() && agent.plan_decision_resolved,
+        "Exit will not work / stuck: clickable Exit must leave plan"
+    );
+    assert!(
+        agent.line_viewer.is_none(),
+        "Exit will not work / stuck: Exit must not keep Isolated Preview covering after abandon"
+    );
+    assert!(
+        !matches!(agent.key_owner(), KeyOwner::LineViewer),
+        "Exit will not work / stuck: leftover exclusive covering must not own keys"
+    );
+}

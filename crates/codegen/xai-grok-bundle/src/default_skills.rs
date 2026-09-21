@@ -137,6 +137,16 @@ mod tests {
             "install must write what"
         );
         assert!(
+            read(root, "skills/what/SKILL.md")
+                .contains("Never mix Grok Build version with grok-oss product version"),
+            "installed what skill must keep grok-oss and Grok Build versions distinct"
+        );
+        assert!(
+            read(root, "skills/polish/SKILL.md")
+                .contains("Never mix Grok Build version with grok-oss product version"),
+            "installed polish remaining-work pointer must keep grok-oss and Grok Build versions distinct"
+        );
+        assert!(
             read(root, "skills/pull-remote-tree/SKILL.md").contains("name: pull-remote-tree"),
             "install must write pull-remote-tree"
         );

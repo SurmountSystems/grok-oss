@@ -480,14 +480,14 @@ mod tests {
     /// unbounded repeats.
     #[tokio::test]
     async fn chat_completions_stops_dest_encoder_skip_loop() {
-        let looping = format!("{} ", super::DEST_ENCODER_SKIP_LOOP);
+        let looping = format!("{} ", crate::stream::DEST_ENCODER_SKIP_LOOP);
         assert_eq!(
-            super::DEST_ENCODER_SKIP_LOOP,
+            crate::stream::DEST_ENCODER_SKIP_LOOP,
             "Spawn dests of dest encoder skip. I'll spawn dests of dest encoder skip.",
             "named test must quote the dest-encoder-skip loop"
         );
         assert!(
-            looping.contains(super::DEST_ENCODER_SKIP_LOOP),
+            looping.contains(crate::stream::DEST_ENCODER_SKIP_LOOP),
             "stream fixture must carry DEST_ENCODER_SKIP_LOOP"
         );
         let mut chunks: Vec<Result<ChatCompletionChunk, SamplingError>> =
@@ -515,7 +515,7 @@ mod tests {
             })
             .count();
         assert!(
-            text_tokens >= 3 && text_tokens < 20,
+            (3..20).contains(&text_tokens),
             "must paint a few repeats then stop, got {text_tokens} tokens"
         );
         assert!(
@@ -551,7 +551,7 @@ mod tests {
 
     #[tokio::test]
     async fn chat_completions_stops_dest_encoder_skip_loop_in_thought() {
-        let looping = format!("{} ", super::DEST_ENCODER_SKIP_LOOP);
+        let looping = format!("{} ", crate::stream::DEST_ENCODER_SKIP_LOOP);
         let mut chunks: Vec<Result<ChatCompletionChunk, SamplingError>> = (0..20)
             .map(|_| {
                 let mut chunk = make_chunk(vec![ChatChunkDelta {

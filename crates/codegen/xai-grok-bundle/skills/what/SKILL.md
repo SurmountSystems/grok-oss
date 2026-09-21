@@ -66,6 +66,13 @@ Painted chrome and user-guide call the composer the Operator box.
 - Optional focus from `/what ...` is the part they did not understand.
   Answer it under the four labels. Do not add extra sections.
 - This is not `/recap`, not `/finish`, not `/reports`.
+- Never mix Grok Build version with grok-oss product version. grok-oss
+  is `grok-oss --version` (`1.0.3` plus git SHA). Grok Build is
+  `grok --version`. Isolated Preview and plan chrome are grok-oss unless
+  this process was launched as `grok` from downloads. Remaining-work,
+  reports, and this restatement: probe this turn if stating which
+  binary this window is. Do not reuse a leftover Grok Build version as
+  grok-oss.
 - When the operator asks to revise a skill in grok-oss, edit
   `crates/codegen/xai-grok-bundle/skills/`, not only a host overlay
   and not repo `.agents/skills/`.

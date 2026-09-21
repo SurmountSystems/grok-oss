@@ -242,6 +242,46 @@ mod tests {
         );
     }
 
+    // Grok OSS: leftover remaining-work said This debugger is Grok Build 1.0.13
+    // and that line was treated as this window's grok-oss version. Isolated
+    // Preview and plan chrome are grok-oss unless this process was launched as
+    // grok from downloads. Probe this turn. Do not reuse leftover 1.0.13.
+    #[test]
+    fn what_skill_does_not_mix_grok_build_version_with_grok_oss() {
+        let skill_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../xai-grok-bundle/skills/what/SKILL.md");
+        let skill = std::fs::read_to_string(&skill_path)
+            .unwrap_or_else(|e| panic!("read {}: {e}", skill_path.display()));
+        let skill_body = skill
+            .split_once("\n---\n")
+            .map(|(_, body)| body)
+            .unwrap_or(skill.as_str());
+        assert!(
+            skill_body.contains("Never mix Grok Build version with grok-oss product version"),
+            "what skill must keep grok-oss and Grok Build versions distinct; got {skill}"
+        );
+        assert!(
+            skill_body.contains("grok-oss --version"),
+            "what skill must name grok-oss --version; got {skill}"
+        );
+        assert!(
+            skill_body.contains("grok --version"),
+            "what skill must name grok --version; got {skill}"
+        );
+        assert!(
+            skill_body.contains("Isolated Preview and plan chrome are grok-oss"),
+            "what skill must name Isolated Preview chrome as grok-oss unless launched as grok; got {skill}"
+        );
+        assert!(
+            skill_body.contains("probe this turn"),
+            "what skill must probe this turn instead of leftover 1.0.13; got {skill}"
+        );
+        assert!(
+            !skill_body.contains("This debugger is Grok Build 1.0.13"),
+            "what skill must not teach leftover Grok Build 1.0.13 as grok-oss; got {skill}"
+        );
+    }
+
     #[test]
     fn what_optional_focus_is_in_injected_prompt() {
         let models = ModelState::default();

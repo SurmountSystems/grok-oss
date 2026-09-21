@@ -393,6 +393,16 @@ less than product code and tests. Do not invent long essays or git nags.
    user-guide call the composer the **Operator box** (`accent_user`).
    Identifiers such as `accent_user` and `UserPrompt` may stay. Host dual-pin:
    `~/.grok/AGENTS.md` § Prose + tone; skill `~/.agents/skills/what/SKILL.md`.
+   **Never mix Grok Build version with grok-oss product version (pinned
+   2026-09-20):** Never mix Grok Build version with grok-oss product
+   version. grok-oss is `1.0.3` plus a git SHA from `grok-oss --version`.
+   Grok Build is `grok --version` (this session started as 1.0.13; PATH
+   now is 1.0.34). Isolated Preview and plan chrome are grok-oss unless
+   this process was launched as `grok` from downloads. Remaining-work,
+   reports, and the Operator restatement must probe this turn if they
+   state which binary this window is. Do not reuse a leftover Grok
+   Build 1.0.13 line as grok-oss. Host dual-pin: `~/.grok/AGENTS.md`
+   same heading.
    **Address the Operator as Operator (pinned 2026-09-01; Operator box
    2026-09-15):** The
    operator prefers being called Operator instead of Human. In chat,

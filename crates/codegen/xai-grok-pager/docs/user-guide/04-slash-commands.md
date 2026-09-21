@@ -194,7 +194,7 @@ This is **not** `/polish` (a polish pass) and **not** `/implement` (plan handoff
 
 ### `/what`
 
-Restate this session when you cannot parse the last agent chat. Not an apology. The agent replies with four labeled complete thoughts only: **Job**, **State**, **Operator** (or `nothing`), **Next**. Speaker labels are Operator not You or Human, and Agent not Me or Grok when Grok means the assistant. Optional focus text is passed through. Follow Concise American Technical English as specified in Surmount `0005_CATE.md`.
+Restate this session when you cannot parse the last agent chat. Not an apology. The agent replies with four labeled complete thoughts only: **Job**, **State**, **Operator** (or `nothing`), **Next**. Speaker labels are Operator not You or Human, and Agent not Me or Grok when Grok means the assistant. Optional focus text is passed through. Follow Concise American Technical English as specified in Surmount `0005_CATE.md`. Never mix Grok Build version with grok-oss product version. grok-oss is `grok-oss --version` (`1.0.3` plus git SHA). Grok Build is `grok --version`. Isolated Preview and plan chrome are grok-oss unless this process was launched as `grok` from downloads. Remaining-work and this restatement must probe this turn if they state which binary this window is. Do not reuse a leftover Grok Build version as grok-oss.
 
 This is **not** `/recap` (a short chat recap), **not** `/finish` (session post-mortem), and **not** `/reports` (a checkpoint file). Complete American English thoughts. No leftover board ids as the body.
 

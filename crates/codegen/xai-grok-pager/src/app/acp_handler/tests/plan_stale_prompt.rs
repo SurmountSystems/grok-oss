@@ -18,8 +18,8 @@ use crate::app::agent::{QueueEntryKind, QueuedPrompt};
 use crate::app::app_view::InputOutcome;
 use crate::scrollback::block::RenderBlock;
 use crate::views::plan_approval_view::{
-    PLAN_APPROVED_REVIEW_COMMENTS_LEAD, PLAN_REWRITE_WAIT_HEADING, PlanApprovalFocus,
-    PlanFeedbackInFlight, PlanPromptIntent,
+    PlanApprovalFocus, PlanFeedbackInFlight, PlanPromptIntent, PLAN_APPROVED_REVIEW_COMMENTS_LEAD,
+    PLAN_REWRITE_WAIT_HEADING,
 };
 use crossterm::event::{
     Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
@@ -47,6 +47,18 @@ const APPROVE_HIT: Rect = Rect {
 };
 const COMMENT_HIT: Rect = Rect {
     x: 30,
+    y: 20,
+    width: 8,
+    height: 1,
+};
+const REVISE_HIT: Rect = Rect {
+    x: 40,
+    y: 20,
+    width: 8,
+    height: 1,
+};
+const EXIT_HIT: Rect = Rect {
+    x: 50,
     y: 20,
     width: 8,
     height: 1,
@@ -93,6 +105,17 @@ fn arm_comment_and_approve_hit_rects(app: &mut AppView) {
     let viewer = agent.line_viewer.as_mut().expect("plan pane open");
     viewer.plan_mut().approve_button_area = Some(APPROVE_HIT);
     viewer.plan_mut().comment_button_area = Some(COMMENT_HIT);
+    viewer.last_modal_area = Some(MODAL_AREA);
+}
+
+fn arm_exclusive_covering_idle_ctas(app: &mut AppView) {
+    let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+    let viewer = agent.line_viewer.as_mut().expect("plan pane open");
+    viewer.fullscreen = true;
+    viewer.plan_mut().approve_button_area = Some(APPROVE_HIT);
+    viewer.plan_mut().comment_button_area = Some(COMMENT_HIT);
+    viewer.plan_mut().send_button_area = Some(REVISE_HIT);
+    viewer.plan_mut().abandon_button_area = Some(EXIT_HIT);
     viewer.last_modal_area = Some(MODAL_AREA);
 }
 
@@ -2022,6 +2045,181 @@ fn empty_enter_never_approves_exclusive_covering_present_github_122() {
             || agent.plan_approval_view.is_none(),
         "clickable Approve must Approve; effects={click_effects:?}"
     );
+}
+
+/// Operator: "oh this sucks ... and I still can't paste here either... yeap..
+/// very fucking broken still. fuck. and it's broken now too that I can't even
+/// revise plans now... fuck! exit won't work too. it's fucking stuck!!"
+///
+/// Exclusive covering clickable Revise rewrites session `plan.md` and
+/// re-presents (`exit_plan_mode` present again). Idle CTAs are Approve /
+/// Comment / Revise / Exit. Letter keys type; they do not steal Approve.
+/// Empty Enter never Approves. Isolated Preview stays until Esc, Exit, or
+/// Approve, so Revise must not drop exclusive covering into a stuck wait.
+#[test]
+fn exclusive_covering_revise_cta_rewrites_and_represents_cannot_revise_plans() {
+    let mut app = make_app_with_agent("sess-exclusive-revise-stuck");
+    let mut rx = isolated_present(
+        &mut app,
+        "create-plan-call",
+        "# Exclusive covering\n\ncannot revise plans\n",
+    );
+    {
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        agent.prompt.set_text("");
+        agent.pane_areas.prompt = Rect::new(0, 22, 80, 3);
+    }
+    type_into_human_box(&mut app, "cannot revise plans: add auth");
+    {
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(
+            agent.plan_approval_view.is_some() && !agent.plan_decision_resolved,
+            "letter keys type; they do not steal Approve"
+        );
+    }
+    arm_exclusive_covering_idle_ctas(&mut app);
+    let revise = app.handle_input(&mouse_down(REVISE_HIT.x + 1, REVISE_HIT.y));
+    let revise_effects = dispatch_outcome(&mut app, revise);
+    {
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(
+            agent.plan_approval_view.is_none(),
+            "cannot revise plans: clickable Revise must send the rewrite, not leave the first present parked"
+        );
+        assert_eq!(
+            agent.plan_feedback_in_flight,
+            Some(PlanFeedbackInFlight::Revising),
+            "cannot revise plans: Revise must mark rewrite in flight"
+        );
+        assert!(
+            !agent.plan_decision_resolved,
+            "cannot revise plans: Revise is not Approve and not Exit"
+        );
+        assert!(
+            agent.line_viewer.as_ref().is_some_and(|v| v.fullscreen),
+            "cannot revise plans: Isolated Preview stays until Esc, Exit, or Approve; Revise must not drop exclusive covering"
+        );
+        assert!(
+            agent.line_viewer.as_ref().is_some_and(|v| v
+                .plan_ref()
+                .is_some_and(|p| !p.show_action_buttons && !p.feedback_active)),
+            "cannot revise plans: rewrite-wait must not arm idle Approve on leftover body"
+        );
+        let acp_revise = match rx.try_recv() {
+            Ok(Ok(raw)) => serde_json::from_str::<serde_json::Value>(raw.0.get()).ok(),
+            _ => None,
+        };
+        let interject_rewrite = revise_effects.iter().any(|effect| match effect {
+            Effect::SendInterject { text, .. } => {
+                text.contains("plan revisions")
+                    && text.contains("exit_plan_mode")
+                    && text.contains("cannot revise plans: add auth")
+            }
+            _ => false,
+        });
+        assert!(
+            interject_rewrite
+                || acp_revise.as_ref().is_some_and(|v| {
+                    v.get("outcome").and_then(|o| o.as_str()) == Some("cancelled")
+                        && v.to_string().contains("cannot revise plans: add auth")
+                }),
+            "cannot revise plans: clickable Revise must rewrite (Interject or ACP cancelled with notes); effects={revise_effects:?} acp={acp_revise:?}"
+        );
+    }
+    let _rx2 = isolated_present(
+        &mut app,
+        "create-plan-call-2",
+        "# Exclusive covering\n\nrevised after cannot revise plans\n",
+    );
+    let agent = app.agents.get(&AgentId(0)).unwrap();
+    assert!(
+        agent.plan_feedback_in_flight.is_none(),
+        "cannot revise plans: re-present must not leave plan_feedback_in_flight forever"
+    );
+    assert!(
+        agent.plan_approval_view.is_some() && !agent.plan_decision_resolved,
+        "cannot revise plans: re-present is review, not Approve"
+    );
+    assert!(
+        agent.line_viewer.as_ref().is_some_and(|v| v
+            .plan_ref()
+            .is_some_and(|p| p.show_action_buttons && p.feedback_active)),
+        "cannot revise plans: exclusive covering rewrite-wait must arm clickable Revise again after re-present"
+    );
+}
+
+/// Operator: "exit won't work too. it's fucking stuck!!"
+/// Clickable Exit leaves plan. Exclusive covering must not keep Isolated
+/// Preview after abandon so leftover covering still owns keys.
+#[test]
+fn exclusive_covering_exit_cta_leaves_plan_exit_will_not_work_stuck() {
+    let mut app = make_app_with_agent("sess-exclusive-exit-stuck");
+    let _rx = isolated_present(
+        &mut app,
+        "create-plan-call",
+        "# Exclusive covering\n\nExit will not work stuck\n",
+    );
+    {
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        agent.prompt.set_text("");
+        agent.pane_areas.prompt = Rect::new(0, 22, 80, 3);
+    }
+    let empty = app.handle_input(&enter_key());
+    let empty_effects = dispatch_outcome(&mut app, empty);
+    {
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(
+            agent.plan_approval_view.is_some() && !agent.plan_decision_resolved,
+            "GitHub #122: empty Enter never Approves exclusive covering"
+        );
+        assert!(
+            !empty_effects.iter().any(|effect| matches!(
+                effect,
+                Effect::SendPrompt { .. }
+                    | Effect::SendInterject { .. }
+                    | Effect::SendPromptNow { .. }
+            )),
+            "empty Enter must not start a Prompt; effects={empty_effects:?}"
+        );
+    }
+    arm_exclusive_covering_idle_ctas(&mut app);
+    let exit = app.handle_input(&mouse_down(EXIT_HIT.x + 1, EXIT_HIT.y));
+    let exit_effects = dispatch_outcome(&mut app, exit);
+    {
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(
+            agent.plan_approval_view.is_none(),
+            "Exit will not work / stuck: clickable Exit must drop the live park"
+        );
+        assert!(
+            agent.plan_decision_resolved,
+            "Exit will not work / stuck: Exit must decide the present"
+        );
+        assert!(
+            agent.plan_feedback_in_flight.is_none(),
+            "Exit will not work / stuck: Exit must not leave plan_feedback_in_flight forever"
+        );
+        assert!(
+            agent.line_viewer.is_none(),
+            "Exit will not work / stuck: Exit must leave exclusive covering, not keep Isolated Preview after abandon"
+        );
+        assert!(
+            !matches!(
+                agent.key_owner(),
+                crate::app::agent_view::KeyOwner::LineViewer
+            ),
+            "Exit will not work / stuck: leftover exclusive covering must not own keys after Exit"
+        );
+        assert!(
+            !exit_effects.iter().any(|effect| matches!(
+                effect,
+                Effect::SendPrompt { .. }
+                    | Effect::SendInterject { .. }
+                    | Effect::SendPromptNow { .. }
+            )),
+            "clickable Exit must not Approve; effects={exit_effects:?}"
+        );
+    }
 }
 
 /// Operator: "soft planning is still very broken; two tests were not enough."

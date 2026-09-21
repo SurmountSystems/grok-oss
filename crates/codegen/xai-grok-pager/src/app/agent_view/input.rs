@@ -827,7 +827,9 @@ impl AgentView {
                         {
                             return outcome;
                         }
-                        if self.plan_approval_view.is_some() && crate::input::key::is_paste_key(key)
+                        if self.plan_overlay_owns_composer_paste()
+                            && (crate::input::key::is_paste_key(key)
+                                || crate::input::key::is_inline_paste_key(key))
                         {
                             let clipboard_text =
                                 crate::app::actions::ClipboardTextRead::from_result(
@@ -838,7 +840,7 @@ impl AgentView {
                         self.handle_line_viewer_key(key)
                     }
                     Event::Paste(text) => {
-                        if self.plan_approval_view.is_some() {
+                        if self.plan_overlay_owns_composer_paste() {
                             return self.route_popup_paste(text);
                         }
                         self.line_viewer

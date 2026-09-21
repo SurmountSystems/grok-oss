@@ -279,12 +279,22 @@ impl AgentView {
     /// route each entry: image paths become `[Image #N]` chips, non-image
     /// paths get inserted as decoded absolute path text.
     ///
+    /// Isolated Preview, exclusive covering, leftover plan line viewer, and
+    /// parked plan approval share the Operator box. Screenshot paste must
+    /// take [`Self::route_popup_paste`] / [`Self::handle_paste_key_deferred`],
+    /// not the line-viewer search bar. Regular file line-viewer paste stays
+    /// on list search.
+    pub(super) fn plan_overlay_owns_composer_paste(&self) -> bool {
+        self.plan_approval_view.is_some() || self.is_plan_viewer()
+    }
+
     /// Route a popup pane's `Event::Paste(text)` through the drop
     /// classifier and fall back to a plain text paste into the shared
-    /// prompt buffer. Used by the plan-feedback, permission-followup,
+    /// prompt buffer. Used by Isolated Preview, exclusive covering,
+    /// leftover plan line viewer, plan-feedback, permission-followup,
     /// plan-approval, and question-view paste arms — all of which share
     /// the same prompt widget as the main Prompt pane and need identical
-    /// classifier semantics.
+    /// classifier semantics, including the clipboard image probe.
     pub(super) fn route_popup_paste(&mut self, text: &str) -> InputOutcome {
         if let Some(outcome) = self.try_handle_wrap_host_image_paste(text) {
             return outcome;
@@ -1295,6 +1305,203 @@ pub(super) mod paste_key_tests {
             ctx.target,
             crate::app::actions::ClipboardPasteTarget::AgentPrompt { .. }
         ));
+    }
+
+    fn park_isolated_preview_without_approval(agent: &mut AgentView, fullscreen: bool) {
+        let mut viewer =
+            crate::views::file_search::line_viewer::LineViewerState::open_markdown_content(
+                "plan.md",
+                "# Isolated Preview\nstill can't paste screenshots\n".to_string(),
+                None,
+            )
+            .expect("Isolated Preview fixture must open");
+        viewer.kind = crate::views::file_search::line_viewer::LineViewerKind::PlanPreview;
+        viewer.fullscreen = fullscreen;
+        agent.line_viewer = Some(viewer);
+        agent.plan_approval_view = None;
+        assert!(
+            agent.is_plan_viewer(),
+            "fixture must be Isolated Preview / exclusive covering"
+        );
+        assert!(
+            agent.plan_approval_view.is_none(),
+            "the miss is a plan line viewer without plan_approval_view"
+        );
+        assert!(
+            agent.plan_overlay_owns_composer_paste(),
+            "plan overlay must own composer screenshot paste"
+        );
+    }
+
+    fn assert_empty_paste_probes_composer_not_search(
+        agent: &mut AgentView,
+        why: &str,
+    ) -> crate::app::actions::ClipboardPasteContext {
+        let registry = ActionRegistry::defaults();
+        crate::clipboard::set_clipboard_probe_hook(
+            crate::clipboard::ClipboardProbeHook::with_raster(None),
+        );
+        let _ = agent.handle_input(&Event::Paste(String::new()), &registry);
+        let ctx = deferred_probe_ctx(agent);
+        crate::clipboard::clear_clipboard_probe_hook();
+        let ctx = ctx.expect(why);
+        assert!(
+            ctx.source.is_bracketed(),
+            "{why}: Event::Paste must stamp a bracketed probe context"
+        );
+        assert!(
+            matches!(
+                ctx.target,
+                crate::app::actions::ClipboardPasteTarget::AgentPrompt { .. }
+            ),
+            "{why}: probe must target the Operator box"
+        );
+        assert!(
+            agent
+                .line_viewer
+                .as_ref()
+                .is_some_and(|v| v.list_state.input_mode().is_none()),
+            "{why}: screenshot paste must not open the line-viewer search bar"
+        );
+        ctx
+    }
+
+    /// Operator: "still can't paste" / cannot paste screenshots. Isolated
+    /// Preview stay-open with no `plan_approval_view` must not swallow
+    /// empty `Event::Paste` into the line-viewer search bar.
+    #[test]
+    fn isolated_preview_event_paste_must_not_swallow_screenshot_still_cant_paste() {
+        let mut agent = make_agent();
+        agent.set_active_pane(ActivePane::Prompt, true);
+        park_isolated_preview_without_approval(&mut agent, false);
+        let ctx = assert_empty_paste_probes_composer_not_search(
+            &mut agent,
+            "Isolated Preview still can't paste screenshots: empty Event::Paste with a raster must defer a probe",
+        );
+        let pasted = crate::prompt_images::from_clipboard_data(&test_image_data());
+        agent.complete_clipboard_attachment_paste(
+            ctx,
+            crate::app::actions::ProbedAttachment::Image(pasted),
+            None,
+        );
+        assert_eq!(agent.prompt.images.len(), 1);
+        assert!(
+            agent.prompt.text().contains("[Image #1]"),
+            "screenshot paste must attach a chip in the Operator box; got {:?}",
+            agent.prompt.text()
+        );
+        assert!(
+            agent.is_plan_viewer(),
+            "Isolated Preview must stay open after screenshot paste"
+        );
+        agent.pending_effects.clear();
+        crate::clipboard::set_clipboard_probe_hook(
+            crate::clipboard::ClipboardProbeHook::with_raster(None),
+        );
+        let _ = agent.handle_input(&Event::Key(ctrl_v_key()), &ActionRegistry::defaults());
+        let ctrl_ctx = deferred_probe_ctx(&agent);
+        crate::clipboard::clear_clipboard_probe_hook();
+        assert!(
+            ctrl_ctx.is_some(),
+            "Isolated Preview Ctrl+V still can't paste screenshots unless it probes"
+        );
+    }
+
+    /// Exclusive covering leftover plan line viewer (fullscreen Isolated
+    /// Preview, no `plan_approval_view`) cannot paste screenshots unless
+    /// `Event::Paste` takes the composer probe path.
+    #[test]
+    fn exclusive_covering_event_paste_probes_clipboard_image_cannot_paste_screenshots() {
+        let mut agent = make_agent();
+        agent.set_active_pane(ActivePane::Prompt, true);
+        park_isolated_preview_without_approval(&mut agent, true);
+        assert!(
+            agent.line_viewer.as_ref().is_some_and(|v| v.fullscreen
+                && v.kind == crate::views::file_search::line_viewer::LineViewerKind::PlanPreview),
+            "exclusive covering is a fullscreen plan line viewer"
+        );
+        let _ = assert_empty_paste_probes_composer_not_search(
+            &mut agent,
+            "exclusive covering cannot paste screenshots: empty Event::Paste with a raster must defer a probe",
+        );
+        agent.pending_effects.clear();
+        crate::clipboard::set_clipboard_probe_hook(
+            crate::clipboard::ClipboardProbeHook::with_raster(None),
+        );
+        let _ = agent.handle_input(&Event::Key(ctrl_v_key()), &ActionRegistry::defaults());
+        let ctx = deferred_probe_ctx(&agent);
+        crate::clipboard::clear_clipboard_probe_hook();
+        assert!(
+            ctx.is_some(),
+            "exclusive covering Ctrl+V cannot paste screenshots unless it probes"
+        );
+    }
+
+    /// Grok Build debugger is the same pager family (`xai-grok-pager`).
+    /// Linux empty-composer image paste must still probe. Do not skip
+    /// the probe.
+    #[test]
+    fn debugger_pager_empty_composer_image_paste_same_family() {
+        let mut agent = make_agent();
+        agent.set_active_pane(ActivePane::Prompt, true);
+        assert!(agent.prompt.text().is_empty());
+        assert!(agent.line_viewer.is_none());
+        let registry = ActionRegistry::defaults();
+        crate::clipboard::set_clipboard_probe_hook(
+            crate::clipboard::ClipboardProbeHook::with_raster(None),
+        );
+        let _ = agent.handle_input(&Event::Paste(String::new()), &registry);
+        let ctx = deferred_probe_ctx(&agent);
+        crate::clipboard::clear_clipboard_probe_hook();
+        let ctx = ctx.expect(
+            "debugger pager empty composer still can't paste screenshots unless empty Event::Paste probes",
+        );
+        assert!(
+            ctx.source.is_bracketed(),
+            "same-family empty composer Event::Paste must stamp a bracketed probe"
+        );
+        assert!(matches!(
+            ctx.target,
+            crate::app::actions::ClipboardPasteTarget::AgentPrompt { .. }
+        ));
+        let pasted = crate::prompt_images::from_clipboard_data(&test_image_data());
+        agent.complete_clipboard_attachment_paste(
+            ctx,
+            crate::app::actions::ProbedAttachment::Image(pasted),
+            None,
+        );
+        assert_eq!(agent.prompt.images.len(), 1);
+        assert!(agent.prompt.text().contains("[Image #1]"));
+    }
+
+    /// Regular file line-viewer paste stays on list search. Empty
+    /// screenshot paste must not steal the Isolated Preview probe path.
+    #[test]
+    fn file_line_viewer_empty_paste_does_not_probe_clipboard_image() {
+        let mut agent = make_agent();
+        agent.set_active_pane(ActivePane::Prompt, true);
+        agent.line_viewer =
+            crate::views::file_search::line_viewer::LineViewerState::open_markdown_content(
+                "notes.md",
+                "regular file preview\n".to_string(),
+                None,
+            );
+        assert!(agent.line_viewer.is_some(), "file line viewer fixture");
+        assert!(
+            !agent.is_plan_viewer(),
+            "regular file preview is not Isolated Preview"
+        );
+        crate::clipboard::set_clipboard_probe_hook(
+            crate::clipboard::ClipboardProbeHook::with_raster(None),
+        );
+        let _ = agent.handle_input(&Event::Paste(String::new()), &ActionRegistry::defaults());
+        let probed = deferred_probe_ctx(&agent).is_some();
+        crate::clipboard::clear_clipboard_probe_hook();
+        assert!(
+            !probed,
+            "regular file line-viewer paste must stay on list search, not the composer image probe"
+        );
+        assert!(agent.prompt.images.is_empty());
     }
 
     /// Idle composer with draft text (Enter:send) must still probe a

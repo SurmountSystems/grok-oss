@@ -1928,6 +1928,7 @@ impl DashboardState {
         let w = lease.snapshot.last_width;
         let h = lease.snapshot.viewport_height;
         sb.restore_viewport_snapshot(lease.snapshot);
+        let wanted_follow = sb.is_follow_mode() || page_flip.is_some();
         if let Some(entry_id) = page_flip
             && let Some(idx) = sb.index_of_id(entry_id)
         {
@@ -1937,6 +1938,12 @@ impl DashboardState {
             sb.set_selected(Some(idx));
             sb.scroll_to_entry_top(idx);
             sb.enable_follow_with_preserve();
+        }
+        // Live output that already overflowed the restored pin must follow
+        // the tail. Overlay `2/2 [‹][›]` restore otherwise hides new rows
+        // and looks like the model is ignoring the Operator.
+        if wanted_follow && sb.has_content_below() {
+            sb.enable_follow_mode();
         }
     }
 

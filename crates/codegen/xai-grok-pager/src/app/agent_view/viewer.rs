@@ -251,7 +251,11 @@ impl AgentView {
 
     /// Enter (and a second click) run the marked idle CTA.
     fn activate_selected_plan_cta(&mut self, choice: SelectedPlanCta) -> InputOutcome {
-        if self.plan_feedback_in_flight.is_some() {
+        // Operator: "I can't even revise plans now... exit won't work too.
+        // it's fucking stuck!!" Rewrite-wait must not swallow Exit. Revise
+        // still waits for a live park (`send_plan_feedback` takes
+        // `plan_approval_view`). Empty Enter never Approves.
+        if self.plan_feedback_in_flight.is_some() && choice != SelectedPlanCta::Exit {
             return InputOutcome::Changed;
         }
         self.mark_selected_plan_cta(choice);

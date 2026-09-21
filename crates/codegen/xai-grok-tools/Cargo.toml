@@ -4,6 +4,9 @@ edition.workspace = true
 name = "xai-grok-tools"
 version = "0.1.220-alpha.4"
 description = "Grok tools library"
+# Explicit [[bin]] names below. Without this, src/bin/grok_oss_skill_cli.rs is
+# also autodiscovered as grok_oss_skill_cli.
+autobins = false
 
 [dependencies]
 anyhow = { workspace = true }
@@ -125,6 +128,7 @@ wiremock = { workspace = true }
 xai-grok-test-support = { workspace = true }
 xai-test-utils = { workspace = true }
 
+# argv0 dispatch in grok_oss_skill_cli.rs. Three product CLI names, one crate root.
 [[bin]]
 name = "grok-oss-implement-memory"
 path = "src/bin/grok_oss_skill_cli.rs"

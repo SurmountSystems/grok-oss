@@ -15,6 +15,8 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
     - L3 specialists (when spawned)
   - L2 Bound first-token retry
     - L3 specialists (when spawned)
+  - L2 Bump rustls past advisory
+    - L3 specialists (when spawned)
   - L2 Check-remote and Isolated Preview paths
     - L3 specialists (when spawned)
   - L2 Clear composer after send
@@ -23,9 +25,13 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
     - L3 specialists (when spawned)
   - L2 Close Isolated Preview after mill
     - L3 specialists (when spawned)
+  - L2 Collect quality-fix playbook
+    - L3 specialists (when spawned)
   - L2 Compact must not leave 75k
     - L3 specialists (when spawned)
   - L2 Compact must shrink loop garbage
+    - L3 specialists (when spawned)
+  - L2 Continue quality sequence after first gate
     - L3 specialists (when spawned)
   - L2 Crate-build bundled fd
     - L3 specialists (when spawned)
@@ -79,6 +85,8 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
     - L3 specialists (when spawned)
   - L2 Fix Approve with paste chip
     - L3 specialists (when spawned)
+  - L2 Fix DEST_ENCODER_SKIP_LOOP path
+    - L3 specialists (when spawned)
   - L2 Fix GHA just ci 85f3c6ad
     - L3 specialists (when spawned)
   - L2 Fix GHA just ci a35a047
@@ -127,7 +135,15 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
     - L3 specialists (when spawned)
   - L2 Fix let_underscore_future clippy
     - L3 specialists (when spawned)
+  - L2 Fix manual_range_contains clippy
+    - L3 specialists (when spawned)
+  - L2 Fix mut rx plan_stale_prompt
+    - L3 specialists (when spawned)
   - L2 Fix next implement auto-run
+    - L3 specialists (when spawned)
+  - L2 Fix pager follow-tail
+    - L3 specialists (when spawned)
+  - L2 Fix pager follow-tail scroll
     - L3 specialists (when spawned)
   - L2 Fix paste chip Enter send
     - L3 specialists (when spawned)
@@ -165,15 +181,21 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
     - L3 specialists (when spawned)
   - L2 Fix three named quality fails
     - L3 specialists (when spawned)
+  - L2 Fix tools multi-bin warning
+    - L3 specialists (when spawned)
   - L2 Fix truncated output chrome
     - L3 specialists (when spawned)
   - L2 Fix truncated output-limit chrome
     - L3 specialists (when spawned)
   - L2 Fix write preview not a git diff
     - L3 specialists (when spawned)
+  - L2 Format mutations.rs rustfmt
+    - L3 specialists (when spawned)
   - L2 Goal card clickable clear
     - L3 specialists (when spawned)
   - L2 Goal check-remote closeout
+    - L3 specialists (when spawned)
+  - L2 Goal quality then install
     - L3 specialists (when spawned)
   - L2 Green Isolated Preview present tests
     - L3 specialists (when spawned)
@@ -245,6 +267,10 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
     - L3 specialists (when spawned)
   - L2 One check-remote after handle_mouse
     - L3 specialists (when spawned)
+  - L2 One check-remote after mut rx
+    - L3 specialists (when spawned)
+  - L2 One check-remote after plan unstick
+    - L3 specialists (when spawned)
   - L2 One check-remote after rebuild resume
     - L3 specialists (when spawned)
   - L2 One check-remote after rustc
@@ -258,6 +284,8 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
   - L2 One check-remote after truncation
     - L3 specialists (when spawned)
   - L2 One check-remote after truncation wrap
+    - L3 specialists (when spawned)
+  - L2 One check-remote after viewer_tests wrap
     - L3 specialists (when spawned)
   - L2 One check-remote after wrap
     - L3 specialists (when spawned)
@@ -273,11 +301,15 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
     - L3 specialists (when spawned)
   - L2 Pin Operator Agent terminology
     - L3 specialists (when spawned)
+  - L2 Pin grok-oss vs Grok Build versions
+    - L3 specialists (when spawned)
   - L2 Pin jobs queue orchestration
     - L3 specialists (when spawned)
   - L2 Pin never ignore Operator
     - L3 specialists (when spawned)
   - L2 Pin then fix lock install
+    - L3 specialists (when spawned)
+  - L2 Plan Revise Exit unstick
     - L3 specialists (when spawned)
   - L2 Plan stale-prompt TDD
     - L3 specialists (when spawned)
@@ -307,9 +339,29 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
     - L3 specialists (when spawned)
   - L2 Run just check-remote
     - L3 specialists (when spawned)
+  - L2 Run just check-remote
+    - L3 specialists (when spawned)
+  - L2 Run just check-remote 1b
+    - L3 specialists (when spawned)
+  - L2 Run just check-remote 1c
+    - L3 specialists (when spawned)
+  - L2 Run just check-remote 1d
+    - L3 specialists (when spawned)
+  - L2 Run just check-remote 1e
+    - L3 specialists (when spawned)
+  - L2 Run just check-remote 1f
+    - L3 specialists (when spawned)
+  - L2 Run just check-remote 2
+    - L3 specialists (when spawned)
   - L2 Run just install
     - L3 specialists (when spawned)
   - L2 Runner surmount-1 quality install
+    - L3 specialists (when spawned)
+  - L2 Rustfmt chat_completions Nix form
+    - L3 specialists (when spawned)
+  - L2 Rustfmt pager nav.rs Nix form
+    - L3 specialists (when spawned)
+  - L2 Screenshot paste composer
     - L3 specialists (when spawned)
   - L2 Second just check-remote
     - L3 specialists (when spawned)
@@ -328,6 +380,8 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
   - L2 TDD subagent path rwlock
     - L3 specialists (when spawned)
   - L2 Unstick Isolated Preview resume
+    - L3 specialists (when spawned)
+  - L2 Unstick plan Revise and Exit
     - L3 specialists (when spawned)
   - L2 Unwedge parked Isolated Preview
     - L3 specialists (when spawned)
@@ -359,6 +413,8 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
     - L3 specialists (when spawned)
   - L2 Wrap-only rustfmt truncation
     - L3 specialists (when spawned)
+  - L2 Wrap-only rustfmt viewer_tests.rs
+    - L3 specialists (when spawned)
   - L2 Wrap-only session_compact.rs
     - L3 specialists (when spawned)
   - L2 Write goal card tests
@@ -367,7 +423,7 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
     - L3 specialists (when spawned)
   - L2 Write truncation tests and product
     - L3 specialists (when spawned)
-  - L2 goal achievement skeptic
+  - L2 cargo update then cargo audit
     - L3 specialists (when spawned)
   - L2 goal achievement skeptic
     - L3 specialists (when spawned)
@@ -378,6 +434,18 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
   - L2 goal achievement skeptic
     - L3 specialists (when spawned)
   - L2 goal achievement skeptic
+    - L3 specialists (when spawned)
+  - L2 goal achievement skeptic
+    - L3 specialists (when spawned)
+  - L2 goal plan writer
+    - L3 specialists (when spawned)
+  - L2 goal plan writer
+    - L3 specialists (when spawned)
+  - L2 goal plan writer
+    - L3 specialists (when spawned)
+  - L2 goal plan writer
+    - L3 specialists (when spawned)
+  - L2 goal plan writer
     - L3 specialists (when spawned)
   - L2 goal plan writer
     - L3 specialists (when spawned)
@@ -388,6 +456,8 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
   - L2 goal summarizer
     - L3 specialists (when spawned)
   - L2 just install crate-built rg
+    - L3 specialists (when spawned)
+  - L2 just install then version mtime
     - L3 specialists (when spawned)
   - L2 rustfmt Operator Agent pin files
     - L3 specialists (when spawned)
@@ -411,12 +481,15 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
 | Approve paste-chip comment | nested L2 session usage | L2 | 121302 | estimate | exited |
 | Approve paste-chip review notes | nested L2 session usage | L2 | 130860 | estimate | exited |
 | Bound first-token retry | nested L2 session usage | L2 | 199588 | estimate | exited |
+| Bump rustls past advisory | nested L2 session usage | L2 | 82648 | estimate | exited |
 | Check-remote and Isolated Preview paths | nested L2 session usage | L2 | 149501 | estimate | exited |
 | Clear composer after send | nested L2 session usage | L2 | 156108 | estimate | exited |
 | Clear persist after Isolated send | nested L2 session usage | L2 | 132983 | estimate | exited |
 | Close Isolated Preview after mill | nested L2 session usage | L2 | 197806 | estimate | exited |
+| Collect quality-fix playbook | nested L2 session usage | L2 | 96860 | estimate | exited |
 | Compact must not leave 75k | nested L2 session usage | L2 | 90119 | estimate | exited |
 | Compact must shrink loop garbage | nested L2 session usage | L2 | 130019 | estimate | exited |
+| Continue quality sequence after first gate | nested L2 session usage | L2 | 169857 | estimate | exited |
 | Crate-build bundled fd | nested L2 session usage | L2 | 126994 | estimate | exited |
 | Crate-build bundled ripgrep | nested L2 session usage | L2 | 157847 | estimate | exited |
 | Diagnose grok-oss /rebuild | nested L2 session usage | L2 | 185221 | estimate | exited |
@@ -443,6 +516,7 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
 | Fix Approve notes vs keep-draft | nested L2 session usage | L2 | 116570 | estimate | exited |
 | Fix Approve with Comment | nested L2 session usage | L2 | 222798 | estimate | exited |
 | Fix Approve with paste chip | nested L2 session usage | L2 | 128663 | estimate | exited |
+| Fix DEST_ENCODER_SKIP_LOOP path | nested L2 session usage | L2 | 83352 | estimate | exited |
 | Fix GHA just ci 85f3c6ad | nested L2 session usage | L2 | 92472 | estimate | exited |
 | Fix GHA just ci a35a047 | nested L2 session usage | L2 | 136692 | estimate | exited |
 | Fix GHA just ci fail | nested L2 session usage | L2 | 87091 | estimate | exited |
@@ -467,7 +541,11 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
 | Fix just install ripgrep | nested L2 session usage | L2 | 125135 | estimate | exited |
 | Fix last 2 nextest fails | nested L2 session usage | L2 | 175479 | estimate | exited |
 | Fix let_underscore_future clippy | nested L2 session usage | L2 | 82225 | estimate | exited |
+| Fix manual_range_contains clippy | nested L2 session usage | L2 | 77224 | estimate | exited |
+| Fix mut rx plan_stale_prompt | nested L2 session usage | L2 | 77993 | estimate | exited |
 | Fix next implement auto-run | nested L2 session usage | L2 | 229477 | estimate | exited |
+| Fix pager follow-tail | nested L2 session usage | L2 | 195084 | estimate | exited |
+| Fix pager follow-tail scroll | nested L2 session usage | L2 | 121099 | estimate | exited |
 | Fix paste chip Enter send | nested L2 session usage | L2 | 237589 | estimate | exited |
 | Fix plan Approve composer drafts | nested L2 session usage | L2 | 146200 | estimate | exited |
 | Fix plan approval resume PTY | nested L2 session usage | L2 | 204511 | estimate | exited |
@@ -486,11 +564,14 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
 | Fix stuck first-token retry | nested L2 session usage | L2 | 111134 | estimate | exited |
 | Fix subagent token chrome | nested L2 session usage | L2 | 0 | estimate | exited |
 | Fix three named quality fails | nested L2 session usage | L2 | 82219 | estimate | exited |
+| Fix tools multi-bin warning | nested L2 session usage | L2 | 177948 | estimate | exited |
 | Fix truncated output chrome | nested L2 session usage | L2 | 199839 | estimate | exited |
 | Fix truncated output-limit chrome | nested L2 session usage | L2 | 102215 | estimate | exited |
 | Fix write preview not a git diff | nested L2 session usage | L2 | 178268 | estimate | exited |
+| Format mutations.rs rustfmt | nested L2 session usage | L2 | 79334 | estimate | exited |
 | Goal card clickable clear | nested L2 session usage | L2 | 199757 | estimate | exited |
 | Goal check-remote closeout | nested L2 session usage | L2 | 85842 | estimate | exited |
+| Goal quality then install | nested L2 session usage | L2 | 83971 | estimate | exited |
 | Green Isolated Preview present tests | nested L2 session usage | L2 | 156883 | estimate | exited |
 | Green mill leftover Isolated Preview | nested L2 session usage | L2 | 152759 | estimate | exited |
 | Harden 500 token-generation harness | nested L2 session usage | L2 | 200384 | estimate | exited |
@@ -526,6 +607,8 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
 | One check-remote after goal card | nested L2 session usage | L2 | 77109 | estimate | exited |
 | One check-remote after goal wrap | nested L2 session usage | L2 | 78312 | estimate | exited |
 | One check-remote after handle_mouse | nested L2 session usage | L2 | 79352 | estimate | exited |
+| One check-remote after mut rx | nested L2 session usage | L2 | 115784 | estimate | exited |
+| One check-remote after plan unstick | nested L2 session usage | L2 | 86836 | estimate | exited |
 | One check-remote after rebuild resume | nested L2 session usage | L2 | 116235 | estimate | exited |
 | One check-remote after rustc | nested L2 session usage | L2 | 86345 | estimate | exited |
 | One check-remote after rustfmt | nested L2 session usage | L2 | 94829 | estimate | exited |
@@ -533,6 +616,7 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
 | One check-remote after tracked fail-open | nested L2 session usage | L2 | 100574 | estimate | exited |
 | One check-remote after truncation | nested L2 session usage | L2 | 97280 | estimate | exited |
 | One check-remote after truncation wrap | nested L2 session usage | L2 | 98967 | estimate | exited |
+| One check-remote after viewer_tests wrap | nested L2 session usage | L2 | 90952 | estimate | exited |
 | One check-remote after wrap | nested L2 session usage | L2 | 76101 | estimate | exited |
 | One check-remote then install | nested L2 session usage | L2 | 87251 | estimate | exited |
 | One check-remote wrap is done | nested L2 session usage | L2 | 92720 | estimate | exited |
@@ -540,9 +624,11 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
 | Path CoW rwlock TDD | nested L2 session usage | L2 | 140339 | estimate | exited |
 | Pin L1 never edits | nested L2 session usage | L2 | 80286 | estimate | exited |
 | Pin Operator Agent terminology | nested L2 session usage | L2 | 194470 | estimate | exited |
+| Pin grok-oss vs Grok Build versions | nested L2 session usage | L2 | 132114 | estimate | exited |
 | Pin jobs queue orchestration | nested L2 session usage | L2 | 86438 | estimate | exited |
 | Pin never ignore Operator | nested L2 session usage | L2 | 82013 | estimate | exited |
 | Pin then fix lock install | nested L2 session usage | L2 | 131658 | estimate | exited |
+| Plan Revise Exit unstick | nested L2 session usage | L2 | 199533 | estimate | exited |
 | Plan stale-prompt TDD | nested L2 session usage | L2 | 158750 | estimate | exited |
 | Post-compact summary size cap | nested L2 session usage | L2 | 166690 | estimate | exited |
 | Rebuild nested resume tests | nested L2 session usage | L2 | 199776 | estimate | exited |
@@ -557,8 +643,18 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
 | Review rebuild identity slice | nested L2 session usage | L2 | 121386 | estimate | exited |
 | Review soft-plan skills ULID | nested L2 session usage | L2 | 145127 | estimate | exited |
 | Run just check-remote | nested L2 session usage | L2 | 84177 | estimate | exited |
+| Run just check-remote | nested L2 session usage | L2 | 83297 | estimate | exited |
+| Run just check-remote 1b | nested L2 session usage | L2 | 88004 | estimate | exited |
+| Run just check-remote 1c | nested L2 session usage | L2 | 84917 | estimate | exited |
+| Run just check-remote 1d | nested L2 session usage | L2 | 79832 | estimate | exited |
+| Run just check-remote 1e | nested L2 session usage | L2 | 87856 | estimate | exited |
+| Run just check-remote 1f | nested L2 session usage | L2 | 110377 | estimate | exited |
+| Run just check-remote 2 | nested L2 session usage | L2 | 116284 | estimate | exited |
 | Run just install | nested L2 session usage | L2 | 77310 | estimate | exited |
 | Runner surmount-1 quality install | nested L2 session usage | L2 | 92031 | estimate | exited |
+| Rustfmt chat_completions Nix form | nested L2 session usage | L2 | 82457 | estimate | exited |
+| Rustfmt pager nav.rs Nix form | nested L2 session usage | L2 | 83221 | estimate | exited |
+| Screenshot paste composer | nested L2 session usage | L2 | 166450 | estimate | exited |
 | Second just check-remote | nested L2 session usage | L2 | 83414 | estimate | exited |
 | Soft plan tests then product | nested L2 session usage | L2 | 86959 | estimate | exited |
 | Stay until handle_mouse then gate | nested L2 session usage | L2 | 92504 | estimate | exited |
@@ -568,6 +664,7 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
 | TDD stop runaway repetition | nested L2 session usage | L2 | 99166 | estimate | exited |
 | TDD subagent path rwlock | nested L2 session usage | L2 | 77323 | estimate | exited |
 | Unstick Isolated Preview resume | nested L2 session usage | L2 | 196993 | estimate | exited |
+| Unstick plan Revise and Exit | nested L2 session usage | L2 | 138765 | estimate | exited |
 | Unwedge parked Isolated Preview | nested L2 session usage | L2 | 112874 | estimate | exited |
 | Use dest encoder skip const | nested L2 session usage | L2 | 83695 | estimate | exited |
 | User-guide exclusive plan stay | nested L2 session usage | L2 | 129812 | estimate | exited |
@@ -583,10 +680,12 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
 | Wrap-only rustfmt rebuild 403 | nested L2 session usage | L2 | 86635 | estimate | exited |
 | Wrap-only rustfmt three files | nested L2 session usage | L2 | 78355 | estimate | exited |
 | Wrap-only rustfmt truncation | nested L2 session usage | L2 | 81338 | estimate | exited |
+| Wrap-only rustfmt viewer_tests.rs | nested L2 session usage | L2 | 86461 | estimate | exited |
 | Wrap-only session_compact.rs | nested L2 session usage | L2 | 77424 | estimate | exited |
 | Write goal card tests | nested L2 session usage | L2 | 202779 | estimate | exited |
 | Write rebuild resume contracts | nested L2 session usage | L2 | 195270 | estimate | exited |
 | Write truncation tests and product | nested L2 session usage | L2 | 193842 | estimate | exited |
+| cargo update then cargo audit | nested L2 session usage | L2 | 100524 | estimate | exited |
 | goal achievement skeptic | nested L2 session usage | L2 | 105347 | estimate | exited |
 | goal achievement skeptic | nested L2 session usage | L2 | 116324 | estimate | exited |
 | goal achievement skeptic | nested L2 session usage | L2 | 108969 | estimate | exited |
@@ -595,9 +694,15 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
 | goal achievement skeptic | nested L2 session usage | L2 | 126427 | estimate | exited |
 | goal plan writer | nested L2 session usage | L2 | 279088 | estimate | exited |
 | goal plan writer | nested L2 session usage | L2 | 89837 | estimate | exited |
+| goal plan writer | nested L2 session usage | L2 | 354763 | estimate | exited |
+| goal plan writer | nested L2 session usage | L2 | 354763 | estimate | exited |
+| goal plan writer | nested L2 session usage | L2 | 354763 | estimate | exited |
+| goal plan writer | nested L2 session usage | L2 | 354763 | estimate | exited |
+| goal plan writer | nested L2 session usage | L2 | 354763 | estimate | exited |
 | goal summarizer | nested L2 session usage | L2 | 71747 | estimate | exited |
 | goal summarizer | nested L2 session usage | L2 | 71628 | estimate | exited |
 | just install crate-built rg | nested L2 session usage | L2 | 75006 | estimate | exited |
+| just install then version mtime | nested L2 session usage | L2 | 104826 | estimate | exited |
 | rustfmt Operator Agent pin files | nested L2 session usage | L2 | 78149 | estimate | exited |
 | rustfmt docs.rs wrap | nested L2 session usage | L2 | 69222 | estimate | exited |
 | rustfmt four remaining pin sites | nested L2 session usage | L2 | 74150 | estimate | exited |
