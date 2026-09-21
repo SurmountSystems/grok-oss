@@ -172,7 +172,9 @@ mod tests {
     use super::*;
 
     /// Operator screenshot 2026-09-20 Isolated Preview: the stream looped this
-    /// pair until cancel. Copied here; do not import from the sampler crate.
+    /// pair until cancel (GitHub #133). Copied here; do not import from the
+    /// sampler crate. Compact drop is recovery after the live Fatal breaker,
+    /// not a second stream stop.
     const DEST_ENCODER_SKIP_LOOP: &str =
         "Spawn dests of dest encoder skip. I'll spawn dests of dest encoder skip.";
 

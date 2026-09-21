@@ -65,6 +65,21 @@ pub struct UiConfig {
     /// Confirm before `/rewind` applies. `None` = on (default).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub confirm_before_rewind: Option<bool>,
+    /// While exclusive `/plan` or Isolated Preview `/plan --soft` is the live
+    /// plan turn, use xhigh effort. `None` = on (default). Off keeps the
+    /// stored session effort (upstream / SpaceXAI-like). Does not mutate
+    /// stored `session.models.reasoning_effort`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turbo_planning: Option<bool>,
+    /// Soft process-rule reminders injected into nested spawn. `None` = on.
+    /// Off injects no extra reminder text. Not a deny and not a spawn cap.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process_rule_reminders_enabled: Option<bool>,
+    /// Newline-separated process-rule reminder strings. `None` / empty = no
+    /// extra text even when enabled. Example help copy only: "At most two
+    /// implementor L2s."
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process_rule_reminders: Option<String>,
     /// Theme to use when the OS is in dark mode. Written by the pager's theme persist module.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_dark_theme: Option<String>,
@@ -361,6 +376,9 @@ impl Default for UiConfig {
             scrub_ascii_punct: None,
             ulid_session_ids: None,
             confirm_before_rewind: None,
+            turbo_planning: None,
+            process_rule_reminders_enabled: None,
+            process_rule_reminders: None,
             auto_dark_theme: None,
             auto_light_theme: None,
             scroll_speed: None,
@@ -433,6 +451,28 @@ impl UiConfig {
     pub fn confirm_before_rewind_enabled(&self) -> bool {
         self.confirm_before_rewind
             .unwrap_or(Self::CONFIRM_BEFORE_REWIND_DEFAULT)
+    }
+
+    /// Default for [`Self::turbo_planning`] when unset (on).
+    pub const TURBO_PLANNING_DEFAULT: bool = true;
+
+    /// Whether exclusive `/plan` and Isolated Preview `/plan --soft` live
+    /// turns use xhigh effort. Off keeps the stored session effort.
+    pub fn turbo_planning_enabled(&self) -> bool {
+        self.turbo_planning.unwrap_or(Self::TURBO_PLANNING_DEFAULT)
+    }
+
+    /// Default for [`Self::process_rule_reminders_enabled`] when unset (on).
+    pub const PROCESS_RULE_REMINDERS_ENABLED_DEFAULT: bool = true;
+
+    pub fn process_rule_reminders_enabled(&self) -> bool {
+        self.process_rule_reminders_enabled
+            .unwrap_or(Self::PROCESS_RULE_REMINDERS_ENABLED_DEFAULT)
+    }
+
+    /// Newline-separated reminder list. Empty when unset.
+    pub fn process_rule_reminders_text(&self) -> &str {
+        self.process_rule_reminders.as_deref().unwrap_or("")
     }
 
     /// Default for [`Self::resume_canceled_turn_on_restart`] when unset (on).

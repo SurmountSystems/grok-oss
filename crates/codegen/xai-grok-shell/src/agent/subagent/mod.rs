@@ -562,13 +562,15 @@ impl SubagentSpawnContext {
 }
 /// Shell runtime handle retained while a child is active.
 pub(crate) struct ShellChildRuntime {
-    pub child_handle: SessionHandle,
-    pub _child_thread: SessionThread,
+    /// Child session command channel. Follow-up sends [`SessionCommand::Interject`] here.
+    pub(crate) child_cmd_tx: mpsc::UnboundedSender<SessionCommand>,
+    pub(crate) signals_handle: crate::session::signals::SessionSignalsHandle,
+    pub(crate) _child_thread: SessionThread,
 }
 impl ChildControl for ShellChildRuntime {
     type ProgressFuture = LocalBoxFuture<SubagentProgress>;
     fn progress(&self) -> Self::ProgressFuture {
-        let signals = self.child_handle.signals_handle.clone();
+        let signals = self.signals_handle.clone();
         Box::pin(async move {
             let snapshot = signals.snapshot().await.unwrap_or_default();
             SubagentProgress {
@@ -583,17 +585,37 @@ impl ChildControl for ShellChildRuntime {
         })
     }
     fn cancel(&self) {
-        let _ =
-            self.child_handle
-                .cmd_tx
-                .send(SessionCommand::Cancel(crate::session::CancelOptions {
-                    cancel_subagents: true,
-                    kill_background_tasks: true,
-                    ..Default::default()
-                }));
-        let _ = self.child_handle.cmd_tx.send(SessionCommand::Shutdown(
+        let _ = self
+            .child_cmd_tx
+            .send(SessionCommand::Cancel(crate::session::CancelOptions {
+                cancel_subagents: true,
+                kill_background_tasks: true,
+                ..Default::default()
+            }));
+        let _ = self.child_cmd_tx.send(SessionCommand::Shutdown(
             crate::session::ShutdownKind::Graceful,
         ));
+    }
+    fn follow_up(&self, text: String) {
+        // Same path overlay `x.ai/interject` uses: child session cmd_tx + Interject
+        // text. Not overlay typing (`id: None`). Not cancel. Not a second spawn.
+        let _ = self.child_cmd_tx.send(SessionCommand::Interject {
+            text,
+            id: None,
+            images: Vec::new(),
+        });
+    }
+}
+#[cfg(test)]
+impl ShellChildRuntime {
+    /// Channel-only runtime so the named follow-up test can call [`ChildControl::follow_up`].
+    fn for_follow_up_test(cmd_tx: mpsc::UnboundedSender<SessionCommand>) -> Self {
+        let (signals_handle, _actor) = crate::session::signals::SessionSignalsActor::new();
+        Self {
+            child_cmd_tx: cmd_tx,
+            signals_handle,
+            _child_thread: SessionThread::from_handle(std::thread::spawn(|| {})),
+        }
     }
 }
 #[derive(Default)]

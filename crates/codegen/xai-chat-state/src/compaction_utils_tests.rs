@@ -2948,6 +2948,26 @@ fn unique_fat_history_near_75_2k() -> String {
     body
 }
 
+/// Surmount fork: compact summary budget is 8192 tokens and reseed
+/// reserve is 32768. SpaceXAI compact can leave a ~75k painted window
+/// (`Context compacted: 75.2k → 75.2k tokens`). These numbers are the
+/// Operator contract, not a ratio of the sampling window.
+#[test]
+fn compact_summary_budget_is_8192_tokens_and_reseed_reserve_is_32768() {
+    assert_eq!(COMPACT_SUMMARY_MAX_TOKENS, 8_192);
+    assert_eq!(COMPACT_RESEED_MAX_TOKENS, 32_768);
+    assert_eq!(
+        COMPACT_RESEED_MAX_TOKENS,
+        COMPACT_SUMMARY_MAX_TOKENS.saturating_mul(4)
+    );
+    const {
+        assert!(
+            COMPACT_RESEED_MAX_TOKENS < 75_200,
+            "reseed reserve must stay far below the wasteful 75.2k window"
+        );
+    }
+}
+
 /// Operator: "compactions shouldn't result in 75k contexts. That's
 /// incredibly wasteful." A unique (non-looping) 75k-class summarizer dump
 /// must clip to [`COMPACT_SUMMARY_MAX_TOKENS`], not reseed the window.

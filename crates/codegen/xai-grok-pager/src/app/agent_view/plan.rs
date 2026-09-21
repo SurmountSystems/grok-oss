@@ -1196,6 +1196,8 @@ impl AgentView {
     fn leave_exclusive_covering_after_plan_exit(&mut self) {
         self.plan_feedback_in_flight = None;
         self.isolated_preview_rewrite_wait_prompt = None;
+        self.isolated_preview_shows_secondary_plan = false;
+        xai_grok_shell::util::config::set_live_plan_turn(false);
         if !self.plan_decision_resolved {
             self.plan_decision_resolved = true;
             self.persist_plan_decision_resolved_flag(true);
@@ -1234,6 +1236,8 @@ impl AgentView {
     /// stays in plan mode there, so the indicator must stay on.
     fn close_plan_review(&mut self, pav: PlanApprovalViewState, action: &'static str) {
         self.plan_mode_pending = Some(false);
+        self.isolated_preview_shows_secondary_plan = false;
+        xai_grok_shell::util::config::set_live_plan_turn(false);
         // Sticky until a new `exit_plan_mode` present: survives pending clear
         // when the shell still reports plan mode. Persist so rebuild does not
         // re-present leftover plan.md.

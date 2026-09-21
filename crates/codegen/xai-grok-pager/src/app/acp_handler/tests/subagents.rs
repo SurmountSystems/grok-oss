@@ -272,6 +272,70 @@
         );
     }
 
+    /// Host exit leaves a paused Implementer overlay. Kill then returns
+    /// already_exited. That kill must drop the live row and dismiss the
+    /// paused overlay. Quote: cannot make a finished paused Implementer
+    /// session disappear.
+    #[test]
+    fn kill_already_exited_dismisses_paused_implementer_overlay() {
+        let mut app = make_app_with_agent("sess-parent");
+        let child_sid = "child-paused-implementer";
+        let _ = handle(
+            make_ext_session_notification(
+                "sess-parent",
+                test_subagent_spawned("sess-parent", child_sid),
+            ),
+            &mut app,
+        );
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            agent.active_subagent = Some(child_sid.into());
+        }
+        let _ = handle(
+            make_ext_session_notification("sess-parent", test_subagent_finished(child_sid)),
+            &mut app,
+        );
+        {
+            let agent = app.agents.get(&AgentId(0)).unwrap();
+            let info = agent.subagent_sessions.get(child_sid).unwrap();
+            assert!(info.finished, "host exit must set finished the same turn");
+            assert_eq!(
+                agent.active_subagent.as_deref(),
+                Some(child_sid),
+                "paused closeout is not live: host finish must not dismiss the overlay"
+            );
+            assert!(
+                crate::app::subagent::live_subagent_list(agent.subagent_sessions.values())
+                    .is_empty(),
+                "live Subagents list must not keep a finished Implementer as running"
+            );
+        }
+
+        let finalized = finalize_killed_subagent(
+            &mut app,
+            &acp::SessionId::new("sess-parent".to_owned()),
+            child_sid,
+            "completed",
+        );
+        assert!(
+            finalized,
+            "already_exited kill must still close out a finished paused overlay"
+        );
+
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(
+            agent.active_subagent.is_none(),
+            "already_exited kill must dismiss the paused Implementer overlay"
+        );
+        assert!(
+            crate::app::subagent::live_subagent_list(agent.subagent_sessions.values()).is_empty(),
+            "already_exited kill must not put the finished row back on the live list"
+        );
+        let info = agent.subagent_sessions.get(child_sid).unwrap();
+        assert!(info.finished);
+        assert_eq!(info.status.as_deref(), Some("completed"));
+    }
+
     /// Thread-leak regression: every `SubagentSpawned` creates a child
     /// `AgentView` whose `PromptWidget` owns a `HistorySearchState`, and the
     /// matcher thread used to spawn eagerly per view — one leaked thread per

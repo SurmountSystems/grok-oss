@@ -270,10 +270,15 @@ When plan approval is open, letter keys type into the prompt and the plan pane b
 |-----|--------|
 | letters | Type (including `a` / `A`). They do not Approve or open notes. |
 | `?` | Clarify (focus the box for a question) |
-| `Tab` | Move focus between the plan preview and the prompt |
-| empty `Ctrl+C` | Exit (abandon the plan) |
+| `Tab` | Move focus between the plan preview and the prompt. When the slash dropdown is `/model` or `/m` and exactly one model row is highlighted, Tab applies the switch now (model plus effort), clears the composer, and does not send Operator chat. |
+| first `Ctrl+C` with text or image chips | Clears the Isolated Preview / mill composer draft. Isolated Preview stays. Does not Exit, cancel the turn, quit, or leave plan mode. |
+| empty `Ctrl+C` | Second press: Isolated Preview Exit / abandon the plan, or cancel a running turn. |
 
 Empty `Enter` never Approves. Clickable Approve only ([GitHub #122](https://github.com/SurmountSystems/grok-oss/issues/122)). Use the clickable **Approve** button.
+
+Isolated Preview has a magnifying-glass search control on the title bar, immediately left of copy and the fullscreen arrow. Search is case-insensitive by default (`plan` matches `Plan` and `PLAN`). After you accept the query, `n` / `N` jump hits. Isolated Preview composer `/` stays slash; the glass click opens search. Reuse line-viewer search. Do not dump a screenshot paste into that search bar.
+
+GNOME All Markup Copy is an image, not the dialog title. Clipboard image paste is an image chip in the Operator box. Isolated Preview must not put that paste into line-viewer search. Paste-chip Enter still sends ([GitHub #114](https://github.com/SurmountSystems/grok-oss/issues/114)).
 
 ## During an active turn (agent running)
 

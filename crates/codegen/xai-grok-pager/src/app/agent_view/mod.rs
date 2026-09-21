@@ -2183,6 +2183,20 @@ pub(super) fn apply_settings_outcome(
             agent.active_modal = None;
             InputOutcome::Action(a)
         }
+        SettingsKeyOutcome::SetBool { key, value } => {
+            let outcome = SettingsKeyOutcome::SetBool { key, value };
+            match outcome.typed_dispatch_action() {
+                Some(a) => InputOutcome::Action(a),
+                None => InputOutcome::Unchanged,
+            }
+        }
+        SettingsKeyOutcome::SetString { key, value } => {
+            let outcome = SettingsKeyOutcome::SetString { key, value };
+            match outcome.typed_dispatch_action() {
+                Some(a) => InputOutcome::Action(a),
+                None => InputOutcome::Unchanged,
+            }
+        }
         SettingsKeyOutcome::Changed => InputOutcome::Changed,
         SettingsKeyOutcome::Unchanged => InputOutcome::Unchanged,
     }

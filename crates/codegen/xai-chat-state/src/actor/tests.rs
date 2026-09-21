@@ -1233,6 +1233,7 @@ async fn compaction_reseed_drops_dest_encoder_skip_loop_below_75_2k() {
 /// lands after the last provider usage must not reseed
 /// `Context compacted: 75.2k → 75.2k tokens`. After compact, `get_total_tokens`
 /// stays in the compact summary reserve (32_768 = 4 × 8_192), not 75_200.
+/// Surmount fork of SpaceXAI compact reseed.
 #[tokio::test]
 async fn compaction_reseed_of_unique_75k_history_must_not_leave_wasteful_75k_context() {
     let h = TestHarness::new();
@@ -1273,6 +1274,16 @@ async fn compaction_reseed_of_unique_75k_history_must_not_leave_wasteful_75k_con
     h.handle.replace_conversation_for_compaction(compacted);
 
     let tokens_after = h.handle.get_total_tokens().await;
+    assert_eq!(
+        crate::compaction_utils::COMPACT_SUMMARY_MAX_TOKENS,
+        8_192,
+        "compact summary cap is 8192 tokens, not a 75k window"
+    );
+    assert_eq!(
+        crate::compaction_utils::COMPACT_RESEED_MAX_TOKENS,
+        32_768,
+        "compact reseed reserve is 32768 tokens (4 × 8192)"
+    );
     assert!(
         tokens_after <= crate::compaction_utils::COMPACT_RESEED_MAX_TOKENS,
         "Operator: 75k post-compact contexts are incredibly wasteful; \

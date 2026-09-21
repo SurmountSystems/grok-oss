@@ -62,6 +62,16 @@ After Plan Exit, Isolated Preview must not trap the session on a leftover plan. 
 
 ---
 
+## Reasoning effort on a live plan turn
+
+While exclusive `/plan` or Isolated Preview `/plan --soft` is the live plan turn, grok-oss uses reasoning effort **xhigh** even if the session `/effort` is medium. After you click Exit or Approve, later turns use the session effort again. `/effort` is still how you set the stored session effort.
+
+**Turbo planning** in `/settings` is on by default. Turn it off when you want those plan turns to keep the session effort. That off path is the upstream-like behavior.
+
+The only live indication is the existing lower-right yellow model/effort line showing `xhigh`. The magenta model id stays the model id. There is no TURBO badge, banner, or toast. See [Configuration → Turbo planning](05-configuration.md#turbo-planning).
+
+---
+
 ## The Plan File
 
 The plan is written to `plan.md` inside the session directory (`~/.grok/sessions/<cwd>/<session-id>/plan.md`, where `<cwd>` is an encoded directory name, not the literal path).

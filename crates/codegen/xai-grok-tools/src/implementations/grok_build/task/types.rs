@@ -793,6 +793,39 @@ pub enum SubagentResumeLookup {
     Missing,
 }
 
+/// Outcome of a parent-tool follow-up onto a nested session.
+///
+/// GitHub #143: L1 follow-up to a running L2. Off (`[subagents]
+/// parent_follow_up = false`) is SpaceXAI spawn/wait/`resume_from`
+/// completed-only.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SubagentFollowUpOutcome {
+    /// Enqueued `SessionCommand::Interject` on the child session.
+    Queued {
+        child_session_id: String,
+    },
+    /// Id is not pending/active (completed, cancelled, or still queued).
+    NotRunning,
+    NotFound,
+    /// Caller is not this child's L1 parent.
+    NotThisParentsL2,
+    /// Live L3: do not inject unless the Operator targeted that specialist.
+    LiveL3Unbothered,
+    /// `[subagents] parent_follow_up = false`.
+    Disabled,
+}
+
+/// Parent-tool follow-up request. Prompt text is the existing `task` `prompt`.
+#[derive(Educe)]
+#[educe(Debug)]
+pub struct SubagentFollowUpRequest {
+    pub subagent_id: String,
+    pub text: String,
+    pub parent_session_id: Option<String>,
+    #[educe(Debug(ignore))]
+    pub respond_to: oneshot::Sender<SubagentFollowUpOutcome>,
+}
+
 // Validate-type protocol
 
 #[derive(Debug, Clone)]
@@ -923,6 +956,8 @@ pub enum SubagentEvent {
     ValidateType(SubagentValidateTypeRequest),
     DescribeType(SubagentDescribeRequest),
     LoopUnitActive(SubagentLoopUnitActiveRequest),
+    /// L1 follow-up onto a still-running L2. Not `resume_from`.
+    FollowUp(SubagentFollowUpRequest),
 }
 
 // Resource types

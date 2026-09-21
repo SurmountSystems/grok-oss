@@ -56,10 +56,51 @@ pub enum SettingsKeyOutcome {
     ActionPair(Action, Action),
     /// Close the modal and dispatch `Action` (deep-link Esc revert or Enter commit).
     ActionThenClose(Action),
+    /// Typed Bool-kind setter. Distinct from wrapping `Action::SetX(bool)`.
+    SetBool { key: SettingKey, value: bool },
+    /// Typed String-kind setter. Distinct from wrapping `Action::SetX(String)`.
+    SetString { key: SettingKey, value: String },
     /// Internal state mutation, no action.
     Changed,
     /// No-op.
     Unchanged,
+}
+
+impl SettingsKeyOutcome {
+    /// Emit a typed Bool/String setter when the Action is one, else wrap Action.
+    /// Turbo planning and process-rule reminder toggles stay `SetBool`.
+    /// Inventory must not treat `Action(SetTurboPlanning(_))` as the Bool payload.
+    pub(crate) fn from_typed_setter(action: Action) -> Self {
+        match action {
+            Action::SetTurboPlanning(value) => Self::SetBool {
+                key: "turbo_planning",
+                value,
+            },
+            Action::SetProcessRuleRemindersEnabled(value) => Self::SetBool {
+                key: "process_rule_reminders_enabled",
+                value,
+            },
+            Action::SetProcessRuleReminders(value) => Self::SetString {
+                key: "process_rule_reminders",
+                value,
+            },
+            other => Self::Action(other),
+        }
+    }
+
+    /// Dispatch Action for typed Bool/String setter variants.
+    pub fn typed_dispatch_action(self) -> Option<Action> {
+        match self {
+            Self::SetBool { key, value } => action_for_bool(key, value),
+            Self::SetString { key, value } => match key {
+                "process_rule_reminders" => Some(Action::SetProcessRuleReminders(value)),
+                _ => None,
+            },
+            Self::Action(a) | Self::ActionThenClose(a) => Some(a),
+            Self::ActionPair(a, _) => Some(a),
+            Self::Close | Self::Changed | Self::Unchanged => None,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -933,6 +974,8 @@ pub(super) fn action_for_bool(key: SettingKey, new: bool) -> Option<Action> {
         "bubble_copy_buttons" => Some(Action::SetBubbleCopyButtons(new)),
         "page_flip_on_send" => Some(Action::SetPageFlipOnSend(new)),
         "confirm_before_rewind" => Some(Action::SetConfirmBeforeRewind(new)),
+        "turbo_planning" => Some(Action::SetTurboPlanning(new)),
+        "process_rule_reminders_enabled" => Some(Action::SetProcessRuleRemindersEnabled(new)),
         "combine_queued_prompts" => Some(Action::SetCombineQueuedPrompts(new)),
         "invert_scroll" => Some(Action::SetInvertScroll(new)),
         "show_tips" => Some(Action::SetShowTips(new)),
@@ -1068,6 +1111,7 @@ pub(super) fn action_for_string(
                     .map(Action::SetForkSecondaryModel)
             }
         }
+        "process_rule_reminders" => Some(Action::SetProcessRuleReminders(value)),
 
         _ => {
             let _ = value;

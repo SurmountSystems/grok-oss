@@ -416,6 +416,66 @@ mod tests {
         assert!(!live[0].finished);
     }
 
+    /// Occupancy snapshot always has finished: false. Restore must not
+    /// un-finish a host that already exited, and persist-after-finish must
+    /// not revive that dead host as a live list row.
+    #[test]
+    #[serial_test::serial(GROK_HOME)]
+    fn restore_nested_occupancy_does_not_unfinish_or_revive_dead_host() {
+        use crate::app::subagent::live_subagent_list;
+
+        let grok_home = tempfile::tempdir().unwrap();
+        let _home = xai_grok_test_support::EnvGuard::set("GROK_HOME", grok_home.path());
+        let proj = tempfile::tempdir().unwrap();
+        let cwd = proj.path().to_path_buf();
+        let sid = "occupancy-restore-dead-host";
+
+        let mut app = crate::app::app_view::tests::test_app_with_agent();
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        agent.session.session_id = Some(sid.into());
+        agent.session.cwd = cwd;
+        agent.session.state = AgentState::TurnRunning;
+        agent.subagent_sessions.insert(
+            "cs-dead-host".into(),
+            crate::app::agent_view::AgentView::live_nested_occupancy_row_for_tests(
+                "cs-dead-host",
+                "sa-dead-host",
+                "finished paused implementor",
+                Some("implementer"),
+            ),
+        );
+        agent.persist_session_work_to_disk_for_rebuild();
+        {
+            let info = agent.subagent_sessions.get_mut("cs-dead-host").unwrap();
+            info.finished = true;
+            info.status = Some(std::sync::Arc::from("completed"));
+        }
+        agent.restore_nested_occupancy_from_disk();
+        let dead = agent
+            .subagent_sessions
+            .get("cs-dead-host")
+            .expect("finished host must stay in the registry");
+        assert!(
+            dead.finished,
+            "/rebuild restore must not un-finish a dead host from occupancy"
+        );
+        assert_eq!(dead.status.as_deref(), Some("completed"));
+        assert!(
+            live_subagent_list(agent.subagent_sessions.values()).is_empty(),
+            "dead host must not return to the live Subagents list; live={:?}",
+            live_subagent_list(agent.subagent_sessions.values())
+        );
+
+        agent.persist_session_work_to_disk_for_rebuild();
+        agent.subagent_sessions.clear();
+        agent.restore_nested_occupancy_from_disk();
+        assert!(
+            !agent.subagent_sessions.contains_key("cs-dead-host"),
+            "persist after finish must not revive a dead host as a running occupancy row"
+        );
+        assert!(live_subagent_list(agent.subagent_sessions.values()).is_empty());
+    }
+
     /// Named contract: Compact-fail unstick after occupancy drop must not
     /// leave the last Human turn as a Prompt row. Command `/compact` only.
     #[test]

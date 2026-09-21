@@ -1568,3 +1568,72 @@ fn just_update_refreshes_workspace_and_flake_locks() {
         "just update must not compile and must not run just check-remote:\n{update}"
     );
 }
+
+/// Nixpkgs deprecates `stdenv.isLinux` / `stdenv.isDarwin`. Evaluation
+/// prints those warnings unless flake modules use `stdenv.hostPlatform`.
+fn flake_nix_paths(root: &Path) -> Vec<PathBuf> {
+    let mut out = vec![root.join("flake.nix")];
+    for dir in ["flake", "packaging/nixos"] {
+        let d = root.join(dir);
+        let Ok(rd) = fs::read_dir(&d) else {
+            continue;
+        };
+        let mut files: Vec<PathBuf> = rd
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.extension().is_some_and(|e| e == "nix"))
+            .collect();
+        files.sort();
+        out.extend(files);
+    }
+    out
+}
+
+fn production_nix_line(line: &str) -> bool {
+    let t = line.trim();
+    !t.is_empty() && !t.starts_with('#')
+}
+
+#[test]
+fn flake_modules_use_stdenv_host_platform_not_deprecated_stdenv_is_os() {
+    let Some(root) = skip_or_root() else {
+        return;
+    };
+    let mut hits = Vec::new();
+    let mut saw_host_linux = false;
+    let mut saw_host_darwin = false;
+    for path in flake_nix_paths(&root) {
+        let rel = path
+            .strip_prefix(&root)
+            .unwrap_or(&path)
+            .display()
+            .to_string();
+        let src = fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {rel}: {e}"));
+        if src.contains("stdenv.hostPlatform.isLinux") {
+            saw_host_linux = true;
+        }
+        if src.contains("stdenv.hostPlatform.isDarwin") {
+            saw_host_darwin = true;
+        }
+        for (i, line) in src.lines().enumerate() {
+            if !production_nix_line(line) {
+                continue;
+            }
+            if line.contains("stdenv.isLinux") || line.contains("stdenv.isDarwin") {
+                hits.push(format!("{rel}:{}:{line}", i + 1));
+            }
+        }
+    }
+    assert!(
+        hits.is_empty(),
+        "flake and Nix modules must use stdenv.hostPlatform.isLinux / stdenv.hostPlatform.isDarwin, not deprecated stdenv.isLinux / stdenv.isDarwin (evaluation warning):\n{}",
+        hits.join("\n")
+    );
+    assert!(
+        saw_host_linux,
+        "flake modules still need at least one stdenv.hostPlatform.isLinux (Linux mold/dbus)"
+    );
+    assert!(
+        saw_host_darwin,
+        "flake modules still need at least one stdenv.hostPlatform.isDarwin (Darwin frameworks)"
+    );
+}

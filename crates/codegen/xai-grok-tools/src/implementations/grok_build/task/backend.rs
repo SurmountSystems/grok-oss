@@ -14,8 +14,9 @@ use tokio::sync::{mpsc, oneshot};
 
 use super::types::{
     SpawnedSubagentRef, SubagentCancelOutcome, SubagentCancelRequest, SubagentCancelTarget,
-    SubagentDescribeOutcome, SubagentDescribeRequest, SubagentEvent, SubagentInspectRequest,
-    SubagentInspection, SubagentListRunningRequest, SubagentQueryRequest, SubagentRegistryCounts,
+    SubagentDescribeOutcome, SubagentDescribeRequest, SubagentEvent, SubagentFollowUpOutcome,
+    SubagentFollowUpRequest, SubagentInspectRequest, SubagentInspection,
+    SubagentListRunningRequest, SubagentQueryRequest, SubagentRegistryCounts,
     SubagentRegistryCountsRequest, SubagentRequest, SubagentResult, SubagentSnapshot,
     SubagentSpawnRequest, SubagentSpawnedRefsRequest, SubagentValidateTypeOutcome,
     SubagentValidateTypeRequest,
@@ -85,6 +86,12 @@ pub trait SubagentBackend: Send + Sync + 'static {
         harness_agent_type: Option<&str>,
         parent_session_id: &str,
     ) -> SubagentDescribeOutcome;
+
+    /// Enqueue a follow-up onto a running L2. Default refuses (NotFound) so
+    /// test doubles that only spawn/query/cancel still compile.
+    async fn follow_up(&self, _id: &str, _text: &str) -> SubagentFollowUpOutcome {
+        SubagentFollowUpOutcome::NotFound
+    }
 }
 
 /// Resource wrapper injected into every session's `Resources`.
@@ -548,6 +555,25 @@ impl SubagentBackend for ChannelBackend {
                 SubagentDescribeOutcome::Unavailable
             }
         }
+    }
+
+    async fn follow_up(&self, id: &str, text: &str) -> SubagentFollowUpOutcome {
+        let (respond_to, response_rx) = oneshot::channel();
+        if self
+            .tx
+            .send(SubagentEvent::FollowUp(SubagentFollowUpRequest {
+                subagent_id: id.to_owned(),
+                text: text.to_owned(),
+                parent_session_id: self.parent_session_id(),
+                respond_to,
+            }))
+            .is_err()
+        {
+            return SubagentFollowUpOutcome::NotFound;
+        }
+        response_rx
+            .await
+            .unwrap_or(SubagentFollowUpOutcome::NotFound)
     }
 }
 

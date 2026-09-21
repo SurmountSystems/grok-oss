@@ -1273,9 +1273,9 @@ const TASK_TOOL_NAMING: xai_tool_types::TaskToolNaming<'static> = xai_tool_types
     isolation_param: "${{ params.task.isolation }}",
     write_paths_param: "${{ params.task.write_paths }}",
 };
-/// Concise task-tool description for child (L2) sessions. Spawn L3 only
-/// if the problem is actually hard. Easy work can stay on L2. L2 may
-/// compact. L3 must not compact-and-continue.
+/// Concise task-tool description for child (L2) sessions. An L2
+/// coordinator for implement work must spawn L3 for greps, reads, and
+/// product edits. L2 may compact. L3 must not compact-and-continue.
 ///
 /// NOTE: This hardcodes the built-in agent type names ("general-purpose",
 /// "explore", "plan"). If custom child-visible subagent types become common,
@@ -1283,9 +1283,11 @@ const TASK_TOOL_NAMING: xai_tool_types::TaskToolNaming<'static> = xai_tool_types
 const CHILD_TASK_DESCRIPTION: &str = "\
 Launch a specialist (L3) for an independent sub-task.\n\
 \n\
-Spawn L3 only if the problem is actually hard. Easy work can stay on L2. \
-Including implement loops. L2 may compact. L3 must not compact-and-continue. \
-Give each L3 a distinct description. One reviewer unless the operator asked for more. \
+An L2 coordinator for implement work must spawn L3 for greps, reads, and product edits. \
+L2 does not fill 200k implementing. Compact on that L2 is a product miss when the cause is L2-solo implement tools. \
+L2 may compact (ordinary AUTO compact still fires at 95% of nested 200k). \
+L3 must not compact-and-continue. No L4. \
+Give each L3 a distinct description. One reviewer unless the Operator asked for more. \
 Token Economy effort is not reviewer count.\n\
 \n\
 Usage: specify ${{ params.task.subagent_type }} (\"general-purpose\", \"explore\", or \"plan\"), \
@@ -1695,40 +1697,64 @@ mod tests {
             "child task description must require distinct L3 descriptions"
         );
     }
-    // Grok OSS: nested L2 spawn L3 only if the problem is actually hard. This diverges from upstream xAI because FORK.md agent-depth pins easy work on L2 and forbids compact-and-continue on L3.
+    // Grok OSS: nested L2 spawn_subagent copy. An L2 coordinator for
+    // implement work must spawn L3 for greps, reads, and product edits.
+    // Compact from L2-solo implement tools is a product miss. L2 may
+    // compact. L3 must not compact-and-continue.
     #[test]
     fn child_task_description_is_concise() {
         assert!(
-            CHILD_TASK_DESCRIPTION.contains("Spawn L3 only if the problem is actually hard"),
-            "child description must match 2026-08-20: spawn L3 only if actually hard"
+            CHILD_TASK_DESCRIPTION.contains(
+                "An L2 coordinator for implement work must spawn L3 for greps, reads, and product edits"
+            ),
+            "child description must require L2 implement coordinators to spawn L3 for greps, reads, and product edits"
         );
         assert!(
-            CHILD_TASK_DESCRIPTION.contains("Easy work can stay on L2"),
-            "child description must allow easy work to stay on L2"
+            CHILD_TASK_DESCRIPTION.contains("L2 does not fill 200k implementing"),
+            "child description must forbid L2 filling 200k implementing"
         );
         assert!(
-            !CHILD_TASK_DESCRIPTION.contains("MUST always spawn L3"),
-            "child description must not force MUST always spawn L3"
+            CHILD_TASK_DESCRIPTION.contains(
+                "Compact on that L2 is a product miss when the cause is L2-solo implement tools"
+            ),
+            "child description must name L2-solo implement compact as a product miss"
         );
         assert!(
-            !CHILD_TASK_DESCRIPTION.contains("MUST spawn L3 for all tool work"),
-            "nested L2 prompt must not teach MUST spawn L3 for all tool work"
+            CHILD_TASK_DESCRIPTION.contains("L2 may compact"),
+            "child description must keep L2 allowed to compact"
         );
         assert!(
-            !CHILD_TASK_DESCRIPTION.contains("L2 never does greps, edits, or tests"),
-            "child description must not ban L2 tool work when the job is easy"
+            CHILD_TASK_DESCRIPTION
+                .contains("ordinary AUTO compact still fires at 95% of nested 200k"),
+            "child description must keep ordinary AUTO compact at 95% of nested 200k"
         );
         assert!(
-            CHILD_TASK_DESCRIPTION.contains("Including implement loops"),
-            "child description must include implement loops"
+            !CHILD_TASK_DESCRIPTION.contains("never_auto_compact"),
+            "child description must not teach never_auto_compact on L2"
         );
         assert!(
             CHILD_TASK_DESCRIPTION.contains("L3 must not compact-and-continue"),
             "child description must forbid compact-and-continue on L3"
         );
         assert!(
-            CHILD_TASK_DESCRIPTION.contains("L2 may compact"),
-            "child description must keep L2 allowed to compact"
+            CHILD_TASK_DESCRIPTION.contains("No L4"),
+            "child description must forbid L4"
+        );
+        assert!(
+            CHILD_TASK_DESCRIPTION.contains("One reviewer unless the Operator asked for more"),
+            "child description must teach one reviewer unless the Operator asked for more"
+        );
+        assert!(
+            !CHILD_TASK_DESCRIPTION.contains("Spawn L3 only if the problem is actually hard"),
+            "child description must supersede spawn-L3-only-if-hard for implement greps, reads, and product edits"
+        );
+        assert!(
+            !CHILD_TASK_DESCRIPTION.contains("Easy work can stay on L2"),
+            "child description must not keep easy-work-on-L2 for implement greps, reads, and product edits"
+        );
+        assert!(
+            !CHILD_TASK_DESCRIPTION.contains("Including implement loops"),
+            "child description must not keep including-implement-loops as a stay-on-L2 license"
         );
         assert!(
             !CHILD_TASK_DESCRIPTION.contains("product restore on L2"),
@@ -1751,7 +1777,7 @@ mod tests {
             "child description should not contain examples"
         );
         assert!(
-            CHILD_TASK_DESCRIPTION.len() < 700,
+            CHILD_TASK_DESCRIPTION.len() < 800,
             "child description should be compact, got {} chars",
             CHILD_TASK_DESCRIPTION.len()
         );

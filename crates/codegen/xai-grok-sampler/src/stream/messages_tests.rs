@@ -724,3 +724,41 @@ async fn pure_cache_hit_with_zero_uncached_still_emits_usage() {
     assert_eq!(usage.cached_prompt_tokens, 2500);
     assert_eq!(usage.total_tokens, 2501);
 }
+
+/// Surmount fork: same `StreamRepetitionGuard` as Chat Completions (GitHub
+/// #133). SpaceXAI Messages has no client Fatal sentence-loop stop. Uses
+/// `DEST_ENCODER_SKIP_LOOP` so `-D warnings` keeps that const live.
+#[tokio::test]
+async fn messages_stops_dest_encoder_skip_loop() {
+    let looping = format!("{} ", crate::stream::DEST_ENCODER_SKIP_LOOP);
+    assert!(
+        looping.contains(crate::stream::DEST_ENCODER_SKIP_LOOP),
+        "Messages fixture must carry DEST_ENCODER_SKIP_LOOP"
+    );
+    let mut events: Vec<Result<MessageStreamEvent, SamplingError>> =
+        vec![Ok(message_start()), Ok(text_block_start(0))];
+    events.extend((0..20).map(|_| Ok(text_delta(0, &looping))));
+    events.push(Ok(block_stop(0)));
+    events.push(Ok(message_delta_with_stop(messages::StopReason::EndTurn)));
+    events.push(Ok(MessageStreamEvent::MessageStop));
+    let raw = stream::iter(events).boxed();
+    let evs = collect(stream_messages(raw, None, rid(), Duration::from_secs(60))).await;
+    assert!(
+        !evs.iter()
+            .any(|e| matches!(e, SamplingEvent::Completed { .. })),
+        "looping dest-encoder-skip Messages stream must not complete as a normal stop"
+    );
+    match evs.last().unwrap() {
+        SamplingEvent::Failed { error, .. } => {
+            assert_eq!(
+                error.kind,
+                crate::events::SamplingErrorKind::RepetitiveGeneration
+            );
+            assert!(
+                !error.is_retryable,
+                "sentence loop must stop the turn, not resample"
+            );
+        }
+        other => panic!("expected Failed(RepetitiveGeneration), got {other:?}"),
+    }
+}

@@ -29,9 +29,9 @@ use super::coordinator_state::{
 };
 use super::types::{
     SpawnedSubagentRef, SubagentCancelOutcome, SubagentCancelTarget, SubagentDescribeOutcome,
-    SubagentEvent, SubagentOutstandingReply, SubagentRegistryCounts, SubagentRequest,
-    SubagentResult, SubagentResumeLookup, SubagentResumeSource, SubagentSnapshot,
-    SubagentValidateTypeOutcome,
+    SubagentEvent, SubagentFollowUpOutcome, SubagentFollowUpRequest, SubagentOutstandingReply,
+    SubagentRegistryCounts, SubagentRequest, SubagentResult, SubagentResumeLookup,
+    SubagentResumeSource, SubagentSnapshot, SubagentValidateTypeOutcome,
 };
 
 pub use super::coordinator_state::{
@@ -483,7 +483,51 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                 });
                 let _ = request.respond_to.send(is_active);
             }
+            SubagentEvent::FollowUp(request) => self.handle_follow_up(request),
         }
+    }
+
+    fn handle_follow_up(&mut self, request: SubagentFollowUpRequest) {
+        let SubagentFollowUpRequest {
+            subagent_id,
+            text,
+            parent_session_id,
+            respond_to,
+        } = request;
+        let outcome = self.follow_up_outcome(&subagent_id, text, parent_session_id.as_deref());
+        let _ = respond_to.send(outcome);
+    }
+
+    fn follow_up_outcome(
+        &mut self,
+        subagent_id: &str,
+        text: String,
+        parent_session_id: Option<&str>,
+    ) -> SubagentFollowUpOutcome {
+        if !self.config.parent_follow_up {
+            return SubagentFollowUpOutcome::Disabled;
+        }
+        if self.completed.contains_key(subagent_id) {
+            return SubagentFollowUpOutcome::NotRunning;
+        }
+        if self.pending.contains_key(subagent_id)
+            || self.queued.iter().any(|q| q.request.id == subagent_id)
+        {
+            return SubagentFollowUpOutcome::NotRunning;
+        }
+        let Some(child) = self.active.get_mut(subagent_id) else {
+            return SubagentFollowUpOutcome::NotFound;
+        };
+        if request_is_l3(&child.request) {
+            return SubagentFollowUpOutcome::LiveL3Unbothered;
+        }
+        let spawned_by = self.spawned_by_session.get(subagent_id).map(String::as_str);
+        if !belongs_to_session(&child.request, parent_session_id, spawned_by) {
+            return SubagentFollowUpOutcome::NotThisParentsL2;
+        }
+        let child_session_id = child.child_session_id.clone();
+        child.control.follow_up(text);
+        SubagentFollowUpOutcome::Queued { child_session_id }
     }
 
     fn handle_internal(&mut self, event: InternalEvent<R::Control>) {
@@ -1192,6 +1236,20 @@ fn belongs_to_session(
                 .as_deref()
                 == Some(id)
     })
+}
+
+/// Nested specialist (L3): `spawn_depth >= 2` and/or an immediate parent.
+/// Limits reparent `parent_session_id` to the root, so that field is not
+/// the L3 test. Parent-tool follow-up must refuse a live L3.
+fn request_is_l3(request: &SubagentRequest) -> bool {
+    request
+        .runtime_overrides
+        .spawn_depth
+        .is_some_and(|depth| depth >= 2)
+        || request
+            .runtime_overrides
+            .immediate_parent_session_id
+            .is_some()
 }
 
 impl<R: ChildRunner> Drop for SubagentCoordinator<R> {

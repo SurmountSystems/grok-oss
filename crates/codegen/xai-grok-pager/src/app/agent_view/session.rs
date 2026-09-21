@@ -869,13 +869,11 @@ impl AgentView {
             if row.child_session_id.trim().is_empty() {
                 continue;
             }
+            // Occupied rows stay as-is, including finished. The occupancy
+            // snapshot always has finished: false, so overwriting would
+            // un-finish a dead host. Vacant insert is still-running resume.
             self.subagent_sessions
                 .entry(row.child_session_id.clone())
-                .and_modify(|info| {
-                    if info.finished {
-                        *info = nested_info_from_occupancy(&row);
-                    }
-                })
                 .or_insert_with(|| nested_info_from_occupancy(&row));
         }
         self.retain_still_running_nested_occupancy();
@@ -2595,15 +2593,11 @@ impl AgentView {
     }
 
     /// Child session id of a fullscreen overlay that is allowed to replace
-    /// the parent TUI. While that child is AutoCompacting this is `None`
-    /// even if `active_subagent` is still set.
+    /// the parent TUI. Operator `[↗]` may set this while the child is
+    /// AutoCompacting. AutoCompactStarted still clears `active_subagent`
+    /// so compact chrome does not auto-steal.
     pub(crate) fn visible_nested_overlay_sid(&self) -> Option<&str> {
-        let sid = self.active_subagent.as_deref()?;
-        if self.child_is_auto_compacting(sid) {
-            None
-        } else {
-            Some(sid)
-        }
+        self.active_subagent.as_deref()
     }
 
     /// Overlay title wait chrome: name the live parented specialist, last

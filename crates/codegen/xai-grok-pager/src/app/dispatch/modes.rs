@@ -3,9 +3,23 @@
 use super::queue::{maybe_drain_queue_protecting, note_peek_page_flip};
 use super::settings::ui::{refresh_open_settings_modals, save_success_toast};
 use crate::app::actions::Effect;
+use crate::app::agent_view::AgentView;
 use crate::app::app_view::{ActiveView, AppView};
 use agent_client_protocol as acp;
 use xai_grok_telemetry::session_ctx::log_event;
+
+/// Stamp turbo-planning live-plan-turn for this agent's next sampler reconstruct.
+///
+/// Exclusive `/plan` and Isolated Preview `/plan --soft` set `live` true.
+/// Exit / Approve / plan-mode off set `live` false. Stored session `/effort`
+/// is not mutated. `stamp_request_effort` owns the shell `LIVE_PLAN_TURN` flag.
+fn stamp_live_plan_request(agent: &AgentView, live: bool) {
+    crate::acp::turbo_planning::stamp_request_effort(
+        agent.session.models.reasoning_effort,
+        crate::appearance::cache::load_turbo_planning(),
+        live,
+    );
+}
 
 /// Stick `/view-plan` until SessionLoaded / restore can dock Approve.
 /// Resume still does not auto-dock; this is an explicit open request.
@@ -63,6 +77,9 @@ pub(super) fn dispatch_dock_isolated_preview(
     };
     if let Some(agent) = app.agents.get_mut(&id) {
         agent.dock_isolated_preview_with_feature(description);
+        // Isolated Preview `/plan --soft` is a live plan turn even though it
+        // does not enter plan mode and does not enqueue the description.
+        stamp_live_plan_request(agent, true);
     }
     vec![]
 }
@@ -105,6 +122,7 @@ pub(super) fn dispatch_enter_plan_mode(
         // Compact must not swallow this. Isolated Preview leftover dock is
         // `/plan --soft`, not this path.
         agent.enter_exclusive_plan_covering();
+        stamp_live_plan_request(agent, true);
         let mut effects = agent.exclusive_block_nested_implementers();
         if !in_plan {
             let Some(session_id) = agent.session.session_id.clone() else {
@@ -133,6 +151,7 @@ pub(super) fn dispatch_enter_plan_mode(
         agent.show_toast("No active session");
         return vec![];
     };
+    stamp_live_plan_request(agent, true);
 
     let mode_id = acp::SessionModeId::new("plan");
 
@@ -261,6 +280,7 @@ pub(super) fn set_plan_mode(
     // is not leftover Isolated Preview (`fullscreen = false`).
     if new {
         agent.enter_exclusive_plan_covering();
+        stamp_live_plan_request(agent, true);
         let covering = agent.exclusive_block_nested_implementers();
         if prev == new {
             // Idempotent ON still toasts. Covering exclusive `/plan` still
@@ -296,6 +316,7 @@ pub(super) fn set_plan_mode(
     // then effect. The shell's `CurrentModeUpdate` broadcast will
     // confirm + clear `plan_mode_pending` via `detect_plan_mode_change`.
     agent.plan_mode_pending = Some(new);
+    stamp_live_plan_request(agent, false);
     refresh_open_settings_modals(app);
     app.show_toast(&plan_mode_toast(kind));
 

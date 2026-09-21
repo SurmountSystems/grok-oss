@@ -475,9 +475,11 @@ mod tests {
 
     /// Named contract: Isolated Preview 2026-09-20 looped
     /// `Spawn dests of dest encoder skip. I'll spawn dests of dest encoder skip.`
-    /// until the Operator cancelled at 19m18s. Feeding many repeats of that
-    /// pair through Chat Completions must stop the turn instead of painting
-    /// unbounded repeats.
+    /// until the Operator cancelled at 19m18s (GitHub #133). Feeding many
+    /// repeats of that pair through Chat Completions must stop the turn
+    /// instead of painting unbounded repeats. Surmount fork: SpaceXAI
+    /// server doom-loop resample does not cover this Chat Completions
+    /// wall; `StreamRepetitionGuard` is Fatal, not a second breaker.
     #[tokio::test]
     async fn chat_completions_stops_dest_encoder_skip_loop() {
         let looping = format!("{} ", crate::stream::DEST_ENCODER_SKIP_LOOP);

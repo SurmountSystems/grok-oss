@@ -6,6 +6,7 @@
 
 use super::registry::{
     DynamicEnumSource, EnumChoice, SettingCategory, SettingKind, SettingMeta, SettingOwner,
+    StringValidator,
 };
 use crate::appearance::ScrollMode;
 use crate::appearance::TextSelection;
@@ -1011,6 +1012,52 @@ pub fn default_settings() -> Vec<SettingMeta> {
                           false forces no worktree isolation.",
             keywords: &["subagent", "worktree", "isolation", "spawn"],
             kind: SettingKind::Bool { default: false },
+            restart_required: false,
+            hidden_in_minimal: false,
+        },
+        SettingMeta {
+            key: "turbo_planning",
+            category: SettingCategory::Agent,
+            owner: SettingOwner::Shared,
+            label: "Turbo planning",
+            description: "Plan turns use xhigh. Only the lower-right yellow model/effort line \
+                          changes. Off keeps session effort (upstream-like). No TURBO badge. \
+                          Default on.",
+            keywords: &["plan", "turbo", "effort", "xhigh", "reasoning", "badge"],
+            kind: SettingKind::Bool {
+                default: ui_default.turbo_planning_enabled(),
+            },
+            restart_required: false,
+            hidden_in_minimal: false,
+        },
+        SettingMeta {
+            key: "process_rule_reminders_enabled",
+            category: SettingCategory::Agent,
+            owner: SettingOwner::Shared,
+            label: "Process-rule reminders",
+            description: "When on and the list is non-empty, inject those strings as soft spawn \
+                          reminders. Spawn still succeeds. Off or empty injects nothing. Keep \
+                          such reminders soft for now. Default on.",
+            keywords: &["reminder", "process", "spawn", "subagent", "soft"],
+            kind: SettingKind::Bool {
+                default: ui_default.process_rule_reminders_enabled(),
+            },
+            restart_required: false,
+            hidden_in_minimal: false,
+        },
+        SettingMeta {
+            key: "process_rule_reminders",
+            category: SettingCategory::Agent,
+            owner: SettingOwner::Shared,
+            label: "Process-rule reminder list",
+            description: "Newline-separated reminder strings. Example: only two implementor L2s \
+                          allowed. Share is allowed; exclusive is one tool call then release. \
+                          Empty injects nothing.",
+            keywords: &["reminder", "list", "process", "spawn", "subagent"],
+            kind: SettingKind::String {
+                default: "",
+                validator: StringValidator::Any,
+            },
             restart_required: false,
             hidden_in_minimal: false,
         },

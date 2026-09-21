@@ -1769,9 +1769,11 @@ impl PromptWidget {
             return PromptEvent::Edited;
         }
 
-        // Clear: Ctrl-C (empty → Ignored so caller can handle)
+        // Clear: Ctrl-C (empty text and no image chips → Ignored so
+        // the caller can CancelTurn / quit). Image chips alone are a
+        // draft: first Ctrl+C must clear them.
         if key!('c', CONTROL).matches(key) {
-            return if self.textarea.text().is_empty() {
+            return if self.textarea.text().is_empty() && self.images.is_empty() {
                 PromptEvent::Ignored
             } else {
                 self.set_text("");

@@ -120,7 +120,12 @@ impl AgentView {
             return;
         }
         crate::app::subagent::ensure_subagent_child_replayed(self, &child_sid);
-        crate::app::subagent::idle_finished_nested_overlay(self, &child_sid);
+        // Compacting [↗] still opens. Do not idle AutoCompacting chrome on
+        // this path. AutoCompactStarted already cleared this overlay so
+        // compact chrome does not auto-steal the parent TUI.
+        if !self.child_is_auto_compacting(&child_sid) {
+            crate::app::subagent::idle_finished_nested_overlay(self, &child_sid);
+        }
         let l2 = crate::app::subagent::overlay_child_is_l2_coordinator(
             &self.subagent_sessions,
             &child_sid,
@@ -133,10 +138,6 @@ impl AgentView {
                 child.mark_as_subagent_view();
                 child.set_active_pane(AgentPane::Scrollback, true);
             }
-        }
-        if self.child_is_auto_compacting(&child_sid) {
-            // Nested compact chrome must not force a fullscreen steal.
-            return;
         }
         self.active_subagent = Some(child_sid);
     }
@@ -1038,9 +1039,7 @@ impl AgentView {
             self.inline_media_ids.clear();
             self.inline_media_iterm_emitted.clear();
         }
-        if let Some(ref child_sid) = self.active_subagent.clone()
-            && !self.child_is_auto_compacting(child_sid)
-        {
+        if let Some(child_sid) = self.visible_nested_overlay_sid().map(str::to_owned) {
             if let Some(esc) = self.take_own_inline_media_clear_escapes() {
                 xai_grok_shell::util::with_locked_stderr(|stderr| {
                     let _ = std::io::Write::write_all(stderr, esc.as_bytes());
@@ -2784,10 +2783,18 @@ impl AgentView {
         let usage_warning_text: Option<String> = warning.as_ref().map(|(t, _)| t.clone());
         let usage_warning = usage_warning_text.as_deref();
         let usage_warning_critical = warning.is_some_and(|(_, critical)| critical);
-        let model_label = match self.session.models.reasoning_effort {
-            Some(eff) => format!("{model_id} ({eff})"),
-            None => model_id,
-        };
+        let stored_effort = self.session.models.reasoning_effort;
+        let effective_effort = crate::acp::turbo_planning::effective_reasoning_effort(
+            stored_effort,
+            crate::appearance::cache::load_turbo_planning(),
+            crate::acp::turbo_planning::live_plan_turn(
+                self.plan_mode_pending,
+                self.plan_mode_active,
+                self.isolated_preview_shows_secondary_plan,
+            ),
+        );
+        let model_label =
+            crate::acp::turbo_planning::model_effort_chrome_line(&model_id, effective_effort);
         let info = match &self.prompt_mode {
             PromptMode::Normal => PromptInfo {
                 model_name: &model_label,
@@ -7365,6 +7372,217 @@ mod clear_finished_paint_tests {
                 assert_eq!(id, format!("sa-{child_sid}"));
             }
             other => panic!("list [x] must emit KillSubagent, got {other:?}"),
+        }
+    }
+
+    fn insert_listed_running_l2(
+        agent: &mut AgentView,
+        child_sid: &str,
+        description: &str,
+        started_ago_secs: u64,
+    ) {
+        use super::super::test_fixtures::{make_agent, running_subagent_info};
+        use std::sync::Arc;
+        use std::time::{Duration, Instant};
+
+        let mut info = running_subagent_info(child_sid);
+        info.model = Some(Arc::from("grok-4.5"));
+        info.is_background = true;
+        info.description = Arc::from(description);
+        info.depth = Some(1);
+        info.parent_session_id = Some(Arc::from("sess-l1"));
+        info.activity_label = Some("Thinking".into());
+        let now = Instant::now();
+        info.started_at = now
+            .checked_sub(Duration::from_secs(started_ago_secs))
+            .unwrap_or(now);
+        agent.subagent_sessions.insert(child_sid.into(), info);
+        agent
+            .subagent_views
+            .insert(child_sid.into(), Box::new(make_agent()));
+    }
+
+    fn mark_child_auto_compacting(agent: &mut AgentView, child_sid: &str) {
+        use crate::acp::tracker::TurnActivity;
+        let child = agent
+            .subagent_views
+            .get_mut(child_sid)
+            .expect("child view must exist before marking Compacting");
+        child.session.state = crate::app::agent::AgentState::TurnRunning;
+        child
+            .session
+            .set_compaction_activity(Some(TurnActivity::AutoCompacting));
+        if let Some(info) = agent.subagent_sessions.get_mut(child_sid) {
+            info.activity_label = Some("Compacting".into());
+        }
+        assert!(
+            agent.child_is_auto_compacting(child_sid),
+            "precondition: row status is Compacting"
+        );
+    }
+
+    fn listed_agent_id(child_sid: &str) -> String {
+        format!("sa-{child_sid}")
+    }
+
+    fn agent_open_rect(agent: &AgentView, child_sid: &str) -> ratatui::layout::Rect {
+        let listed = listed_agent_id(child_sid);
+        agent
+            .tasks
+            .view_button_rects
+            .iter()
+            .find(|(id, _)| {
+                matches!(
+                    id,
+                    crate::views::tasks_pane::TaskEntryId::Agent(sid) if sid == &listed
+                )
+            })
+            .map(|(_, rect)| *rect)
+            .unwrap_or_else(|| panic!("open chrome [↗] must exist for {child_sid}"))
+    }
+
+    fn agent_kill_rect(agent: &AgentView, child_sid: &str) -> ratatui::layout::Rect {
+        let listed = listed_agent_id(child_sid);
+        agent
+            .tasks
+            .kill_button_rects
+            .iter()
+            .find(|(id, _)| {
+                matches!(
+                    id,
+                    crate::views::tasks_pane::TaskEntryId::Agent(sid) if sid == &listed
+                )
+            })
+            .map(|(_, rect)| *rect)
+            .unwrap_or_else(|| panic!("kill chrome [X] must exist for {child_sid}"))
+    }
+
+    fn setup_three_listed_l2s(agent: &mut AgentView) -> (&'static str, &'static str, &'static str) {
+        let mut appearance = agent.scrollback.appearance().clone();
+        appearance.prompt.compact = true;
+        agent.scrollback.set_appearance(appearance);
+        agent.tasks.overlay.visible = true;
+        let compacting = "child-compacting-open";
+        let middle = "child-thinking-middle";
+        let last = "child-thinking-last";
+        insert_listed_running_l2(
+            agent,
+            compacting,
+            "turbo planning compacting coordinator",
+            30,
+        );
+        insert_listed_running_l2(agent, middle, "thinking middle coordinator", 20);
+        insert_listed_running_l2(agent, last, "thinking last coordinator", 10);
+        (compacting, middle, last)
+    }
+
+    /// Named contract: Operator `[↗]` still opens while the child is
+    /// AutoCompacting. Compact chrome must not skip `active_subagent`.
+    #[test]
+    fn open_subagent_fullscreen_sets_active_while_child_is_auto_compacting() {
+        let mut agent = super::super::test_fixtures::make_agent();
+        let child_sid = "child-compact-direct-open";
+        insert_listed_running_l2(&mut agent, child_sid, "direct open while compacting", 5);
+        mark_child_auto_compacting(&mut agent, child_sid);
+        assert!(agent.active_subagent.is_none());
+        agent.open_subagent_fullscreen(child_sid.to_string());
+        assert_eq!(
+            agent.active_subagent.as_deref(),
+            Some(child_sid),
+            "Operator open must set the overlay while the child is AutoCompacting"
+        );
+        assert_eq!(
+            agent.visible_nested_overlay_sid(),
+            Some(child_sid),
+            "visible overlay must follow Operator [↗], not stay hidden during Compacting"
+        );
+        assert!(agent.child_is_auto_compacting(child_sid));
+    }
+
+    /// Named contract: a row whose status is Compacting still opens on `[↗]`.
+    /// Compact must not swallow the open hit target on any row, including
+    /// the top painted row. Quote: L2 window opens for the other ones, but
+    /// this specific button doesn't work. Quote: Now it's the top one.
+    #[test]
+    fn click_tasks_open_on_compacting_row_opens_subagent() {
+        let mut agent = super::super::test_fixtures::make_agent();
+        let (compacting, _middle, last) = setup_three_listed_l2s(&mut agent);
+        mark_child_auto_compacting(&mut agent, compacting);
+
+        let _buf = draw_hits(&mut agent);
+        let open = agent_open_rect(&agent, compacting);
+        let last_open = agent_open_rect(&agent, last);
+        assert!(
+            open.y < last_open.y,
+            "this fixture paints Compacting above the last row so the miss cannot hide as last-row-only; compacting y={} last y={}",
+            open.y,
+            last_open.y
+        );
+        agent.set_active_pane(super::super::AgentPane::Scrollback, false);
+        assert!(agent.active_subagent.is_none());
+        let out = click_at(&mut agent, open.x, open.y);
+        assert!(
+            matches!(out, InputOutcome::Changed),
+            "Compacting [↗] must open the L2 window, got {out:?} at {open:?}"
+        );
+        assert_eq!(
+            agent.active_subagent.as_deref(),
+            Some(compacting),
+            "must open the Compacting child, not a neighbor"
+        );
+        assert_eq!(agent.visible_nested_overlay_sid(), Some(compacting));
+        assert!(
+            agent.child_is_auto_compacting(compacting),
+            "open must not clear Compacting status"
+        );
+    }
+
+    /// Named contract: last painted row `[↗]` still opens so footer overlap
+    /// cannot hide the hit target. Descriptions are unique so the live list
+    /// keeps three rows.
+    #[test]
+    fn click_tasks_open_on_last_painted_row_opens_subagent() {
+        let mut agent = super::super::test_fixtures::make_agent();
+        let (_compacting, _middle, last) = setup_three_listed_l2s(&mut agent);
+
+        let _buf = draw_hits(&mut agent);
+        let (entry_id, open) = agent
+            .tasks
+            .view_button_rects
+            .iter()
+            .filter(|(id, _)| matches!(id, crate::views::tasks_pane::TaskEntryId::Agent(_)))
+            .max_by_key(|(_, rect)| rect.y)
+            .cloned()
+            .expect("at least one listed [↗] must paint");
+        assert_eq!(
+            entry_id,
+            crate::views::tasks_pane::TaskEntryId::Agent(listed_agent_id(last)),
+            "last painted [↗] must be the latest-started unique row"
+        );
+        agent.set_active_pane(super::super::AgentPane::Scrollback, false);
+        let out = click_at(&mut agent, open.x, open.y);
+        assert!(
+            matches!(out, InputOutcome::Changed),
+            "last painted [↗] must open, got {out:?} at {open:?}"
+        );
+        assert_eq!(agent.active_subagent.as_deref(), Some(last));
+        assert_eq!(agent.visible_nested_overlay_sid(), Some(last));
+    }
+
+    /// Named contract: `[X]` on a Compacting row still kills.
+    #[test]
+    fn click_tasks_kill_on_compacting_row_emits_kill() {
+        let mut agent = super::super::test_fixtures::make_agent();
+        let (compacting, _middle, _last) = setup_three_listed_l2s(&mut agent);
+        mark_child_auto_compacting(&mut agent, compacting);
+        let _buf = draw_hits(&mut agent);
+        let kill = agent_kill_rect(&agent, compacting);
+        let out = click_at(&mut agent, kill.x, kill.y);
+        match out {
+            InputOutcome::Action(Action::KillSubagent(id)) => {
+                assert_eq!(id, listed_agent_id(compacting));
+            }
+            other => panic!("Compacting [X] must emit KillSubagent, got {other:?}"),
         }
     }
 

@@ -1708,6 +1708,20 @@ fn move_setting_away_from_default(app: &mut AppView, key: crate::settings::Setti
         "allow_worktree" => {
             let _ = dispatch(Action::SetAllowWorktree(true), app);
         }
+        "turbo_planning" => {
+            let away = !crate::appearance::cache::load_turbo_planning();
+            let _ = dispatch(Action::SetTurboPlanning(away), app);
+        }
+        "process_rule_reminders_enabled" => {
+            let away = !app.current_ui.process_rule_reminders_enabled();
+            let _ = dispatch(Action::SetProcessRuleRemindersEnabled(away), app);
+        }
+        "process_rule_reminders" => {
+            let _ = dispatch(
+                Action::SetProcessRuleReminders("only two implementor L2s allowed".to_string()),
+                app,
+            );
+        }
         "bubble_copy_buttons" => {
             let _ = dispatch(Action::SetBubbleCopyButtons(false), app);
         }

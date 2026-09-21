@@ -9,8 +9,8 @@ use std::sync::Arc;
 use crate::computer::local::LocalFs;
 use crate::implementations::codex::apply_patch::{ApplyPatchInput, ApplyPatchTool};
 use crate::implementations::editor_infra::per_path_write_lock::{
-    format_soft_assignment_reminder, release_holder, try_acquire_read, try_acquire_write,
-    try_reserve_writes,
+    format_soft_assignment_reminder, held, normalize_lock_path, release_holder, try_acquire_read,
+    try_acquire_write, try_reserve_writes,
 };
 use crate::implementations::grok_build::read_file::{ReadFileInput, ReadFileTool};
 use crate::implementations::grok_build::search_replace::{SearchReplaceInput, SearchReplaceTool};
@@ -179,6 +179,33 @@ async fn lock_releases_after_the_tool_call_so_a_later_call_can_write() {
     .unwrap();
     assert!(matches!(second, SearchReplaceOutput::EditsApplied(_)));
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "three\n");
+}
+
+// Grok OSS: ACP per-path write lock extra. GitHub #129. After write returns,
+// `held` is empty. Lock must be released.
+#[tokio::test]
+async fn after_write_returns_held_is_empty_lock_must_be_released() {
+    let tmp = TempDir::new().unwrap();
+    let path = tmp.path().join("held-empty.txt");
+    std::fs::write(&path, "before\n").unwrap();
+
+    let result = xai_tool_runtime::Tool::run(
+        &WriteTool,
+        test_ctx(write_resources(tmp.path(), "write-then-release")),
+        WriteInput {
+            file_path: path.to_string_lossy().into_owned(),
+            content: "after write\n".to_string(),
+        },
+    )
+    .await
+    .unwrap();
+    assert!(matches!(result, SearchReplaceOutput::EditsApplied(_)));
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "after write\n");
+    let key = normalize_lock_path(&path);
+    assert!(
+        !held().contains_key(&key),
+        "after write returns, held is empty; lock must be released"
+    );
 }
 
 // Grok OSS: ACP per-path write lock extra. This diverges from upstream xAI because FORK.md pins search_replace, apply_patch, and write to the same exclusive lock.

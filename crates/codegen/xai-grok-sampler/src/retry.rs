@@ -1340,6 +1340,9 @@ mod tests {
         ));
     }
 
+    /// Surmount fork: `RepetitiveGeneration` is Fatal (stop the turn).
+    /// SpaceXAI `DoomLoopDetected` still retries / resamples thinking.
+    /// Do not treat a dest-encoder-skip assistant wall as resample.
     #[test]
     fn classify_repetitive_generation_is_fatal() {
         let err = SamplingError::RepetitiveGeneration {

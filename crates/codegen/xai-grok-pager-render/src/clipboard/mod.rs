@@ -1454,6 +1454,15 @@ mod tests {
         ));
     }
 
+    /// GNOME All Markup Copy is a short 1-line dialog title. Probe so the
+    /// raster wins as an image chip instead of inserting that title.
+    #[test]
+    fn gnome_all_markup_copy_title_still_probes() {
+        assert!(paste_payload_needs_clipboard_attachment_probe(
+            "All Markup Copy"
+        ));
+    }
+
     #[test]
     fn bracketed_two_line_https_still_probes() {
         assert!(paste_payload_needs_clipboard_attachment_probe(

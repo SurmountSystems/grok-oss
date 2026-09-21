@@ -632,6 +632,33 @@ fn hold_parked_plan_review_comments(agent: &mut AgentView, text: &str) -> bool {
     true
 }
 
+/// Stamp this send's sampling effort for turbo planning.
+///
+/// Exclusive `/plan` and Isolated Preview `/plan --soft` request xhigh when
+/// turbo is on. Stored `session.models.reasoning_effort` stays the Operator
+/// `/effort`. After Exit/Approve, `live` is false so session effort is used.
+fn stamp_session_request_effort(agent: &AgentView) {
+    stamp_session_request_effort_with_live(
+        agent,
+        crate::acp::turbo_planning::live_plan_turn(
+            agent.plan_mode_pending,
+            agent.plan_mode_active,
+            agent.isolated_preview_shows_secondary_plan,
+        ),
+    );
+}
+
+fn stamp_session_request_effort_with_live(agent: &AgentView, live: bool) {
+    // Sets LIVE_PLAN_TURN. reconstruct_full_config then applies
+    // apply_live_plan_turn_effort to SamplingConfig.reasoning_effort.
+    // Stored session.models.reasoning_effort is not mutated.
+    crate::acp::turbo_planning::stamp_request_effort(
+        agent.session.models.reasoning_effort,
+        crate::appearance::cache::load_turbo_planning(),
+        live,
+    );
+}
+
 /// Body of [`dispatch_send_prompt`], parameterized over whether to consume
 /// the prompt textarea after the command is processed.
 ///
@@ -825,6 +852,7 @@ pub(super) fn dispatch_send_prompt_inner(
         let enter_new_plan =
             !in_plan && agent.session.state.is_idle() && agent.session.session_id.is_some();
         if enter_new_plan {
+            stamp_session_request_effort_with_live(agent, true);
             let effects = super::modes::dispatch_enter_plan_mode(app, Some(desc.clone()));
             if consume_input {
                 consume_plan_update_composer(app, id, &desc, &effects);
@@ -1041,6 +1069,14 @@ pub(super) fn dispatch_send_prompt_inner(
                 return dispatch(Action::EditPromptExternal, app);
             }
             CommandResult::Action(action) => {
+                if matches!(
+                    &action,
+                    Action::EnterPlanMode { .. }
+                        | Action::DockIsolatedPreview { .. }
+                        | Action::SetPlanMode(crate::app::actions::PlanModeKind::On)
+                ) {
+                    stamp_session_request_effort_with_live(agent, true);
+                }
                 let plan_update = match &action {
                     Action::EnterPlanMode {
                         description: Some(d),
@@ -1389,6 +1425,10 @@ pub(super) fn dispatch_send_prompt_inner(
                 if consume_input {
                     agent.clear_sent_human_from_plan_feedback_draft(&text);
                 }
+                // Turbo planning: stamp this send's request effort xhigh while
+                // exclusive `/plan` or Isolated Preview `/plan --soft` is live.
+                // Stored session medium / `/effort` is not mutated.
+                stamp_session_request_effort(agent);
             }
             return vec![Effect::SendPrompt {
                 agent_id,
@@ -1486,6 +1526,7 @@ pub(super) fn dispatch_send_prompt_inner(
         let Some(agent) = app.agents.get_mut(&id) else {
             return effects;
         };
+        stamp_session_request_effort(agent);
 
         // Insert into local prompt history (move-to-front dedup, cap at 200).
         // Skipped for modal-driven dispatch: the user didn't type these

@@ -693,6 +693,23 @@ where
     dedupe_live_by_description(live)
 }
 
+/// Rows the Subagents list actually paints: L2 live list, or nested
+/// specialists when that L2 filter is empty (overlay with only L3 rows).
+/// Header sparkler, Subagents N, and footer N subagents use this same
+/// running-only filter.
+pub(crate) fn listed_live_subagents<'a, I>(infos: I) -> Vec<&'a SubagentInfo>
+where
+    I: IntoIterator<Item = &'a SubagentInfo>,
+{
+    let all: Vec<_> = infos.into_iter().collect();
+    let live = live_subagent_list(all.iter().copied());
+    if live.is_empty() {
+        live_nested_specialist_list(all)
+    } else {
+        live
+    }
+}
+
 fn dedupe_live_by_description<'a>(live: Vec<&'a SubagentInfo>) -> Vec<&'a SubagentInfo> {
     let mut seen = std::collections::HashSet::<&str>::new();
     let mut out = Vec::new();
@@ -1934,6 +1951,23 @@ mod tests {
             overlay_ids,
             ["l3-grep", "l3-edit", "l3-live"],
             "nested overlay list must show live L3 specialists, got {overlay_ids:?}"
+        );
+        let listed = listed_live_subagents([&l2_a, &l2_b, &l3_a, &l3_b, &l3_done, &l3_c]);
+        let listed_ids: Vec<&str> = listed.iter().map(|r| r.child_session_id.as_ref()).collect();
+        assert_eq!(
+            listed_ids,
+            ["l2-coord", "l2-other"],
+            "listed live rows must match the L1 L2 list when L2s are running, got {listed_ids:?}"
+        );
+        let overlay_only = listed_live_subagents([&l3_a, &l3_b, &l3_done, &l3_c]);
+        let overlay_only_ids: Vec<&str> = overlay_only
+            .iter()
+            .map(|r| r.child_session_id.as_ref())
+            .collect();
+        assert_eq!(
+            overlay_only_ids,
+            ["l3-grep", "l3-edit", "l3-live"],
+            "listed live rows fall back to live nested specialists when the L2 list is empty, got {overlay_only_ids:?}"
         );
     }
 

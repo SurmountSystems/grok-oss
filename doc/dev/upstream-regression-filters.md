@@ -672,19 +672,61 @@ cargo test -p xai-grok-pager --lib -- \
   isolated_preview_after_mill_completion_must_not_paint_leftover_present_or_tech_md
 ```
 
-#### L2 spawn prompt (2026-08-20)
+#### L2 spawn prompt (GitHub #141, 2026-09-20)
 
 Process law stays in AGENTS. These cargo names keep the product prompt from
-teaching "MUST spawn L3 for all tool work" after a restack.
+teaching easy-work-on-L2 after a restack. An L2 coordinator for implement
+work must spawn L3 for greps, reads, and product edits. L2 does not fill
+200k implementing. Compact on that L2 is a product miss when the cause is
+L2-solo implement tools. `CHILD_TASK_DESCRIPTION` must contain those
+Operator strings. It must not teach "Easy work can stay on L2", "Including
+implement loops", or "Spawn L3 only if the problem is actually hard" for
+greps, reads, or product edits. Hierarchical fast path stays L1-only. Do
+not put Hierarchical fast path into `CHILD_TASK_DESCRIPTION`. A restack
+can keep AGENTS via `FORK_PATHS` and still drop `CHILD_TASK_DESCRIPTION`.
+Product cargo is the seam.
 
 | path::test | Contract |
 |------------|----------|
-| `xai-grok-agent` `child_task_description_is_concise` | L2 task description says spawn L3 only if actually hard; easy work can stay on L2 |
+| `xai-grok-agent` `child_task_description_is_concise` | L2 spawn-tool copy says an L2 coordinator for implement work must spawn L3 for greps, reads, and product edits; forbids easy-work-on-L2 licenses |
 | `xai-grok-tools` `default_max_allows_l2_to_spawn_l3` | Default max depth lets a depth-1 agent spawn L3 |
 
 ```bash
 cargo test -p xai-grok-agent --lib -- child_task_description_is_concise
 cargo test -p xai-grok-tools --lib -- default_max_allows_l2_to_spawn_l3
+```
+
+#### `apply_child_tool_policy` (GitHub #141)
+
+Surmount L2 grok-build/general-purpose implement coordinator
+(`allow_nested_subagents` true, `capability_mode` None, toolset ships Edit)
+strips Grep/Read/Edit/Write and keeps `spawn_subagent`. SpaceXAI nested L2
+is a full-tool worker (grep/read/edit allowed). `SubagentCapabilityMode::All`
+is the existing upstream/full-tool escape. Do not invent a second permission
+system. Ordinary L2 still AUTO compact at 95% of nested 200k. Do not fold
+implement L2 into never_auto_compact. L3 never compact. L3 at max depth keeps
+search_replace and grep without Task. KEEP
+`l2_auto_compact_still_fires_at_95_percent_of_200k`. KEEP #140:
+`click_tasks_open_on_compacting_row_opens_subagent`,
+`click_tasks_open_on_last_painted_row_opens_subagent`,
+`click_tasks_kill_on_compacting_row_emits_kill`,
+`open_subagent_fullscreen_sets_active_while_child_is_auto_compacting`.
+
+| path::test | Contract |
+|------------|----------|
+| `xai-grok-subagent-resolution` `l2_implement_coordinator_capability_none_strips_search_replace` | L2 implement coordinator with capability_mode None strips search_replace |
+| `xai-grok-subagent-resolution` `l2_implement_coordinator_capability_none_strips_grep_and_read_file` | Same policy strips grep and read_file |
+| `xai-grok-subagent-resolution` `l2_implement_coordinator_still_keeps_spawn_subagent` | L2 still keeps spawn_subagent |
+| `xai-grok-subagent-resolution` `l3_at_max_depth_keeps_search_replace_and_grep_without_task` | L3 at max depth keeps edit/grep; no Task |
+| `xai-grok-subagent-resolution` `l2_capability_mode_all_keeps_edit_grep_read` | SubagentCapabilityMode::All is the full-tool escape |
+
+```bash
+cargo test -p xai-grok-subagent-resolution --lib -- \
+  l2_implement_coordinator_capability_none_strips_search_replace \
+  l2_implement_coordinator_capability_none_strips_grep_and_read_file \
+  l2_implement_coordinator_still_keeps_spawn_subagent \
+  l3_at_max_depth_keeps_search_replace_and_grep_without_task \
+  l2_capability_mode_all_keeps_edit_grep_read
 ```
 
 #### `/goal` parent coordinates (Surmount fork of the injected prompt)
@@ -728,6 +770,47 @@ fork contracts.
 ```bash
 cargo test -p xai-tool-types --lib -- parent_spawn_subagent_second_l2_while_first_still_running_without_wait
 cargo test -p xai-grok-tools --lib -- parent_spawn_subagent_second_l2_while_first_still_running_without_wait
+```
+
+#### Parent follow-up onto a running nested L2 (GitHub #143)
+
+Surmount / grok-oss fork. L1 can enqueue additive work onto a still-running
+nested L2. It does not kill that L2, does not respawn it, and does not wait
+for it to exit. `resume_from` stays completed-only. Operator overlay typing
+stays. Off (`[subagents] parent_follow_up = false`) is SpaceXAI spawn, wait,
+and `resume_from` after exit. No new `[auth]` key. Named tests are contracts.
+Do not fit tests to code. KEEP fire-and-return spawn, overlay interject, and
+`nested_spawner_can_resume_from_completed_reparented_child`.
+
+| path::test | Contract |
+|------------|----------|
+| `xai-grok-tools` `parent_cannot_talk_to_own_l2s_follow_up_enqueues_interject_on_running_l2_without_kill_or_respawn` | L1 follow-up enqueues Interject on a running L2; no kill, no second spawn |
+| `xai-grok-tools` `parent_follow_up_does_not_inject_into_live_l3_unless_operator_targeted_that_specialist` | Live L3 stays unbothered unless the Operator targeted that specialist |
+| `xai-grok-tools` `resume_from_of_running_l2_still_fails_active` | `resume_from` of an Active L2 stays the fail-closed completed-only error |
+| `xai-grok-tools` `parent_follow_up_off_is_upstream_spawn_wait_resume_from_completed_only` | Off is SpaceXAI spawn/wait/`resume_from` completed-only; no Interject enqueue |
+| `xai-grok-tools` `parent_follow_up_onto_running_l2_with_live_l3_hits_l2_not_l3` | Follow-up onto a running L2 that already has a live L3 enqueues Interject on the L2, not the L3; no kill, no second spawn |
+| `xai-grok-tools` `parent_cannot_talk_to_own_l2s_task_tool_run_follow_up_returns_queued_and_does_not_spawn` | `TaskTool::run` with `follow_up` set returns queued Text and does not spawn or `spawn_registered` |
+| `xai-grok-tools` `parent_cannot_talk_to_own_l2s_task_tool_run_follow_up_and_resume_from_are_mutually_exclusive` | `TaskTool::run` with both `follow_up` and `resume_from` is `invalid_arguments`; no follow-up, no spawn |
+| `xai-tool-types` `parent_cannot_talk_to_own_l2s_follow_up_field_is_optional_and_distinct_from_resume_from` | `TaskToolInput.follow_up` is optional and distinct from `resume_from` |
+| `xai-grok-shell` `shell_child_follow_up_sends_session_command_interject_on_child_session` | Shell `ChildControl::follow_up` sends `SessionCommand::Interject` on the nested session; not Cancel, not Prompt |
+| `xai-grok-shell` `subagents_config_parent_follow_up_false_parses_and_omitted_defaults_true` | Omitted `[subagents] parent_follow_up` parses true; toml false is SpaceXAI spawn/wait/`resume_from` completed-only |
+| `xai-grok-shell` `resolve_subagents_copies_parent_follow_up` | `resolve_subagents` copies `parent_follow_up` onto live Config so the coordinator honors toml; omitted stays on |
+
+```bash
+cargo test -p xai-tool-types --lib -- \
+  parent_cannot_talk_to_own_l2s_follow_up_field_is_optional_and_distinct_from_resume_from
+cargo test -p xai-grok-tools --lib -- \
+  parent_cannot_talk_to_own_l2s_follow_up_enqueues_interject_on_running_l2_without_kill_or_respawn \
+  parent_follow_up_does_not_inject_into_live_l3_unless_operator_targeted_that_specialist \
+  resume_from_of_running_l2_still_fails_active \
+  parent_follow_up_off_is_upstream_spawn_wait_resume_from_completed_only \
+  parent_follow_up_onto_running_l2_with_live_l3_hits_l2_not_l3 \
+  parent_cannot_talk_to_own_l2s_task_tool_run_follow_up_returns_queued_and_does_not_spawn \
+  parent_cannot_talk_to_own_l2s_task_tool_run_follow_up_and_resume_from_are_mutually_exclusive
+cargo test -p xai-grok-shell --lib -- \
+  shell_child_follow_up_sends_session_command_interject_on_child_session \
+  subagents_config_parent_follow_up_false_parses_and_omitted_defaults_true \
+  resolve_subagents_copies_parent_follow_up
 ```
 
 #### File-level infer-from-path verify
@@ -1114,6 +1197,47 @@ L3 count. L3 specialists do not get their own L1 rows or names.
 cargo test -p xai-grok-pager --lib -- \
   live_subagent_list_shows_only_l2_and_reports_live_l3_count \
   l2_row_shows_live_l3_count_not_specialist_names
+```
+
+#### Live Subagents list is still-running only
+
+Host exit sets `finished` the same turn. Kill `already_exited` still
+dismisses the paused Implementer overlay. `/rebuild` occupancy restore
+must not un-finish or revive a dead host. Header, Subagents N, and footer
+N subagents share one running-only filter.
+
+| path::test | Contract |
+|------------|----------|
+| `xai-grok-pager` `kill_already_exited_dismisses_paused_implementer_overlay` | already_exited kill drops the paused Implementer overlay |
+| `xai-grok-pager` `restore_nested_occupancy_does_not_unfinish_or_revive_dead_host` | occupancy restore does not un-finish or revive a dead host |
+| `xai-grok-pager` `running_count_matches_listed_live_l2_not_l3` | one count: listed live L2 rows, not L2 plus L3 |
+
+```bash
+cargo test -p xai-grok-pager --lib -- \
+  kill_already_exited_dismisses_paused_implementer_overlay \
+  restore_nested_occupancy_does_not_unfinish_or_revive_dead_host \
+  running_count_matches_listed_live_l2_not_l3
+```
+
+#### Compacting Subagents row `[↗]` still opens
+
+A Compacting row still opens on `[↗]` on any painted row, including the
+top and the last. `[X]` on a Compacting row still kills. AutoCompactStarted
+does not auto-steal the parent TUI.
+
+| path::test | Contract |
+|------------|----------|
+| `xai-grok-pager` `click_tasks_open_on_compacting_row_opens_subagent` | Compacting `[↗]` opens the L2 window |
+| `xai-grok-pager` `click_tasks_open_on_last_painted_row_opens_subagent` | last painted `[↗]` still opens |
+| `xai-grok-pager` `click_tasks_kill_on_compacting_row_emits_kill` | Compacting `[X]` still kills |
+| `xai-grok-pager` `open_subagent_fullscreen_sets_active_while_child_is_auto_compacting` | Operator open sets the overlay while AutoCompacting |
+
+```bash
+cargo test -p xai-grok-pager --lib -- \
+  click_tasks_open_on_compacting_row_opens_subagent \
+  click_tasks_open_on_last_painted_row_opens_subagent \
+  click_tasks_kill_on_compacting_row_emits_kill \
+  open_subagent_fullscreen_sets_active_while_child_is_auto_compacting
 ```
 
 #### Nested L2 measured tokens (not billing meters)
@@ -2303,6 +2427,7 @@ cargo test -p xai-grok-pager --lib -- exit_plan_mode_present_is_not_operator_app
   user_guide_limits_names_fail_open_and_named_commands window_title titles_on_session
 cargo test -p xai-grok-tools --lib -- exit_plan_mode_tool_result_does_not_claim_operator_approval \
   default_max_allows_l2_to_spawn_l3 rust_edit_verify dangerous_cargo
+# GitHub #141: child_task_description_is_concise is L2 must spawn L3 for greps/reads/edits (not easy-work-on-L2)
 cargo test -p xai-grok-agent --lib -- child_task_description_is_concise
 cargo test -p xai-grok-tools-api --lib -- \
   goal_instruction_parent_coordinates_and_l2_must_spawn_l3_for_tools \
@@ -2310,7 +2435,10 @@ cargo test -p xai-grok-tools-api --lib -- \
 cargo test -p xai-grok-tools --lib -- \
   sequential_search_replace_succeeds_after_the_first_tool_call_returns_when_both_agents_were_assigned_the_same_write_paths \
   search_replace_succeeds_when_a_sibling_only_has_a_soft_write_paths_assignment \
-  spawn_write_paths_overlap_is_a_soft_assignment_not_a_spawn_error
+  spawn_write_paths_overlap_is_a_soft_assignment_not_a_spawn_error \
+  after_write_returns_held_is_empty_lock_must_be_released \
+  reader_during_held_write_gets_published_pre_write_bytes_current_atomic_snapshot \
+  two_live_agents_with_the_same_write_paths_spawn_without_error_l2_and_l3_may_be_assigned_the_same_file
 cargo test -p xai-grok-shell --lib -- \
   migrate_v5_file_to_v6_adds_session_plans_without_dropping_v5_tables \
   plan_soft_sets_dock_open_without_requiring_markdown_write_lock \
@@ -2413,6 +2541,13 @@ cargo test -p xai-grok-pager --lib -- \
   format_activity_label_unlimited_retry_has_no_u32_max_fraction \
   live_subagent_list_shows_only_l2_and_reports_live_l3_count \
   l2_row_shows_live_l3_count_not_specialist_names \
+  kill_already_exited_dismisses_paused_implementer_overlay \
+  restore_nested_occupancy_does_not_unfinish_or_revive_dead_host \
+  running_count_matches_listed_live_l2_not_l3 \
+  click_tasks_open_on_compacting_row_opens_subagent \
+  click_tasks_open_on_last_painted_row_opens_subagent \
+  click_tasks_kill_on_compacting_row_emits_kill \
+  open_subagent_fullscreen_sets_active_while_child_is_auto_compacting \
   parent_must_not_wait_for_the_model_after_waited_nested_already_completed \
   waiting_for_the_model_is_not_idle_when_nested_subagent_still_running \
   waiting_for_the_model_is_not_idle_when_prompt_is_queued \
@@ -2594,6 +2729,66 @@ cargo test -p grok-nix-helper --lib -- workspace_lockfile_has_no_unmaintained_sm
 
 xai-workflow named tests stay. Do not
 `cargo audit --ignore RUSTSEC-2026-0249`.
+
+### CoT death spiral stop + compact not 75k (GitHub #133)
+
+Surmount fork of SpaceXAI stream + compact. Isolated Preview looped
+`Spawn dests of dest encoder skip` for 19m18s; compact then painted
+`75.2k → 75.2k`. Client `StreamRepetitionGuard` is Fatal
+(`RepetitiveGeneration`). Fixture `DEST_ENCODER_SKIP_LOOP` must be used
+by tests. Compact summary 8192, reseed 32768. Oh My Pi is not in this
+tree; do not invent internals. Upstream `[doom_loop_recovery]` stays
+the SpaceXAI thinking-resample option.
+
+| path::test | Contract |
+|------------|----------|
+| `xai-grok-sampler` `stream::dest_encoder_skip_repetition_tests::dest_encoder_skip_loop_is_repetitive` | Three copies of `DEST_ENCODER_SKIP_LOOP` count as a loop |
+| `xai-grok-sampler` `stream::dest_encoder_skip_repetition_tests::dest_encoder_skip_single_sentence_four_times_is_repetitive` | Four copies of the first dest-encoder-skip sentence count as a loop |
+| `xai-grok-sampler` `stream::dest_encoder_skip_repetition_tests::thought_line_loop_is_repetitive` | Thought-line copies of `DEST_ENCODER_SKIP_LOOP` count as a loop |
+| `xai-grok-sampler` `stream::chat_completions::tests::chat_completions_stops_dest_encoder_skip_loop` | Chat Completions stops the dest-encoder-skip wall (Fatal) |
+| `xai-grok-sampler` `stream::messages_tests::messages_stops_dest_encoder_skip_loop` | Messages stream uses the same Fatal breaker |
+| `xai-grok-sampler` `stream::responses::tests::responses_stops_dest_encoder_skip_loop` | Responses stream uses the same Fatal breaker |
+| `xai-grok-sampler` `retry::tests::classify_repetitive_generation_is_fatal` | Sentence loop is Fatal, not resample |
+| `xai-chat-state` `actor::tests::compaction_reseed_of_unique_75k_history_must_not_leave_wasteful_75k_context` | Unique 75k history reseeds at most 32768 |
+| `xai-chat-state` `compaction_utils_tests::compact_summary_budget_is_8192_tokens_and_reseed_reserve_is_32768` | Caps are 8192 and 32768 |
+
+```bash
+cargo test -p xai-grok-sampler --lib -- dest_encoder_skip_loop_is_repetitive \
+  dest_encoder_skip_single_sentence_four_times_is_repetitive \
+  thought_line_loop_is_repetitive \
+  chat_completions_stops_dest_encoder_skip_loop \
+  chat_completions_stops_dest_encoder_skip_loop_in_thought \
+  messages_stops_dest_encoder_skip_loop \
+  responses_stops_dest_encoder_skip_loop \
+  classify_repetitive_generation_is_fatal
+cargo test -p xai-chat-state --lib -- \
+  compaction_reseed_drops_dest_encoder_skip_loop_below_75_2k \
+  compaction_reseed_of_unique_75k_history_must_not_leave_wasteful_75k_context \
+  compact_summary_budget_is_8192_tokens_and_reseed_reserve_is_32768 \
+  format_compact_summary_caps_unique_75k_body_to_compact_summary_budget \
+  build_compacted_history_unique_75k_summary_stays_within_compact_summary_budget
+```
+
+### ACP per-path write lock CoW + share is allowed (GitHub #129)
+
+Keywords: `try_acquire_write`, `try_acquire_read`, `write_paths`, CoW
+`published` (`published_cow_snapshot`), `held()`, release after tool
+return. Share is allowed. Exclusive is one edit-tool call, then Drop.
+Surmount vs SpaceXAI: SpaceXAI does not encode this CoW reader plus
+share-is-allowed assignment.
+
+| path::test | Contract |
+|------------|----------|
+| `xai-grok-tools` `after_write_returns_held_is_empty_lock_must_be_released` | After write returns, `held()` is empty |
+| `xai-grok-tools` `reader_during_held_write_gets_published_pre_write_bytes_current_atomic_snapshot` | Reader during held write gets CoW published pre-write bytes |
+| `xai-grok-tools` `two_live_agents_with_the_same_write_paths_spawn_without_error_l2_and_l3_may_be_assigned_the_same_file` | Two live agents with the same `write_paths` spawn without error |
+
+```bash
+cargo test -p xai-grok-tools --lib -- \
+  after_write_returns_held_is_empty_lock_must_be_released \
+  reader_during_held_write_gets_published_pre_write_bytes_current_atomic_snapshot \
+  two_live_agents_with_the_same_write_paths_spawn_without_error_l2_and_l3_may_be_assigned_the_same_file
+```
 
 ---
 

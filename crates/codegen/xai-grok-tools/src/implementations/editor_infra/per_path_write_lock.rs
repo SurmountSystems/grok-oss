@@ -194,6 +194,15 @@ pub fn published_cow_snapshot(path: &Path) -> Option<Arc<[u8]>> {
     lock_table().published.get(&key).cloned()
 }
 
+/// In-flight exclusive write holds.
+///
+/// After `search_replace` / `write` / `apply_patch` returns, the written
+/// path is absent: the lock must be released. The table is process-wide, so
+/// other in-flight paths may still appear.
+pub fn held() -> HashMap<PathBuf, String> {
+    lock_table().held.clone()
+}
+
 /// RAII CoW snapshot. Dropping it does not block or unblock writers.
 #[derive(Debug, Clone)]
 pub struct PerPathReadGuard {
@@ -306,7 +315,9 @@ pub fn format_soft_assignment_reminder(except_holder: Option<&str>) -> Option<St
             .map(|path| path.display().to_string())
             .collect::<Vec<_>>()
             .join(", ");
-        lines.push(format!("L2 {holder} is assigned these paths: {listed}."));
+        lines.push(format!(
+            "L2 {holder} is assigned these paths: {listed}. Share is allowed. Exclusive write is one edit then release."
+        ));
     }
     Some(lines.join("\n"))
 }
@@ -611,5 +622,94 @@ mod tests {
         drop(reader_during_write);
         drop(reader_after_commit);
         release_holder(&assignee);
+    }
+
+    #[test]
+    fn after_write_returns_held_is_empty_lock_must_be_released() {
+        // GitHub #129. After write returns, `held` is empty. Lock must be
+        // released. Exclusive write is per search_replace / write /
+        // apply_patch, then release.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("released.txt");
+        std::fs::write(&path, "x\n").unwrap();
+        let key = normalize_lock_path(&path);
+        let guard = try_acquire_write(&path, "writer-release").unwrap();
+        assert!(
+            held().contains_key(&key),
+            "in-flight write must occupy held"
+        );
+        drop(guard);
+        assert!(
+            !held().contains_key(&key),
+            "after write returns, held is empty for this path; lock must be released"
+        );
+        assert!(
+            published_cow_snapshot(&path).is_none(),
+            "CoW published must drop with the exclusive hold"
+        );
+    }
+
+    #[test]
+    fn reader_during_held_write_gets_published_pre_write_bytes_current_atomic_snapshot() {
+        // GitHub #129. Reader during held write gets published pre-write
+        // bytes. Current atomic snapshot (CoW `published`). Snapshot does
+        // not wait on a writer and does not block a writer.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("atomic-snapshot.txt");
+        std::fs::write(&path, "published-before\n").unwrap();
+        let writer = try_acquire_write(&path, "writer-during-read").unwrap();
+        std::fs::write(&path, "disk-after\n").unwrap();
+        let published =
+            published_cow_snapshot(&path).expect("writer must publish a current atomic snapshot");
+        assert_eq!(
+            published.as_ref(),
+            b"published-before\n",
+            "current atomic snapshot (CoW published) is pre-write bytes"
+        );
+        let reader = try_acquire_read(&path).expect("snapshot does not wait on a writer");
+        assert_eq!(
+            reader.as_bytes(),
+            b"published-before\n",
+            "reader during held write gets published pre-write bytes"
+        );
+        let second = try_acquire_write(&path, "other-writer");
+        assert!(
+            second.is_err(),
+            "a snapshot reader must not block the exclusive writer"
+        );
+        drop(writer);
+        drop(reader);
+    }
+
+    #[test]
+    fn two_live_agents_with_the_same_write_paths_spawn_without_error_l2_and_l3_may_be_assigned_the_same_file()
+     {
+        // GitHub #129. Two live agents with the same write_paths spawn
+        // without error. L2 and L3 may be assigned the same file. Soft
+        // write_paths is a reminder, not a lifetime exclusive lock.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("l2-l3-shared.txt");
+        std::fs::write(&path, "shared\n").unwrap();
+        let l2 = format!("l2-{}", path.display());
+        let l3 = format!("l3-{}", path.display());
+        try_reserve_writes([&path], &l2);
+        try_reserve_writes([&path], &l3);
+        let holders = lock_table()
+            .assigned
+            .get(&normalize_lock_path(&path))
+            .cloned()
+            .unwrap_or_default();
+        assert!(
+            holders.contains(&l2) && holders.contains(&l3),
+            "L2 and L3 may be assigned the same file: {holders:?}"
+        );
+        let write = try_acquire_write(&path, &l3);
+        assert!(
+            write.is_ok(),
+            "two live agents with the same write_paths spawn without error"
+        );
+        drop(write);
+        release_holder(&l2);
+        release_holder(&l3);
     }
 }

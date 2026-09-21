@@ -151,3 +151,27 @@ fn loop_fires_hold_concurrency_slots() {
         AdmissionDecision::Reject(AdmissionError::ConcurrentLimitReached { limit: 1 })
     );
 }
+
+#[test]
+fn process_rule_reminder_configured_third_l2_still_spawns() {
+    // Configured process-rule text is not MAX_LIVE_L2S=2 and not a deny.
+    crate::reminders::ProcessRuleReminders::clear_live();
+    crate::reminders::ProcessRuleReminders::set_live(
+        crate::reminders::ProcessRuleReminders::from_ui(true, "only two implementor L2s allowed"),
+    );
+    let admission = Admission::new(SubagentLimits::default());
+    assert_eq!(
+        admission.admit(&request("parent"), /*running*/ 0),
+        AdmissionDecision::Start
+    );
+    assert_eq!(
+        admission.admit(&request("parent"), /*running*/ 1),
+        AdmissionDecision::Start
+    );
+    assert_eq!(
+        admission.admit(&request("parent"), /*running*/ 2),
+        AdmissionDecision::Start,
+        "a third implementor L2 must still spawn when process-rule reminders are on"
+    );
+    crate::reminders::ProcessRuleReminders::clear_live();
+}

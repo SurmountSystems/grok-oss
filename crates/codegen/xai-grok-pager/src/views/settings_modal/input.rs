@@ -250,7 +250,7 @@ fn handle_picking_group(state: &mut SettingsModalState, key: &KeyEvent) -> Setti
                 _ => return SettingsKeyOutcome::Unchanged,
             };
             match action_for_bool(child_key, !cur) {
-                Some(action) => SettingsKeyOutcome::Action(action),
+                Some(action) => SettingsKeyOutcome::from_typed_setter(action),
                 None => SettingsKeyOutcome::Unchanged,
             }
         }
@@ -336,7 +336,7 @@ fn handle_editing_value(state: &mut SettingsModalState, key: &KeyEvent) -> Setti
         let action = action_for_string(setting_key, text, &state.pager_snapshot);
         state.transition_to_browse();
         return match action {
-            Some(action) => SettingsKeyOutcome::Action(action),
+            Some(action) => SettingsKeyOutcome::from_typed_setter(action),
             None => {
                 tracing::error!(
                     target: "settings",
@@ -691,7 +691,7 @@ fn handle_browse(state: &mut SettingsModalState, key: &KeyEvent) -> SettingsKeyO
         }
         KeyCode::Char(' ') => {
             if let Some(action) = state.toggle_focused_bool() {
-                SettingsKeyOutcome::Action(action)
+                SettingsKeyOutcome::from_typed_setter(action)
             } else {
                 SettingsKeyOutcome::Unchanged
             }
@@ -704,7 +704,7 @@ fn handle_browse(state: &mut SettingsModalState, key: &KeyEvent) -> SettingsKeyO
             // For Bool, Enter behaves like Space (the keyboard
             // map gives both keys the toggle semantics).
             if let Some(action) = state.toggle_focused_bool() {
-                return SettingsKeyOutcome::Action(action);
+                return SettingsKeyOutcome::from_typed_setter(action);
             }
             // Enum row → enter PickingEnum mode. The picker's chooser
             // sub-pane takes over rendering and key routing from here.
@@ -1045,7 +1045,7 @@ pub fn handle_settings_mouse(
                     return SettingsKeyOutcome::Changed;
                 }
                 if let Some(action) = state.toggle_focused_bool() {
-                    return SettingsKeyOutcome::Action(action);
+                    return SettingsKeyOutcome::from_typed_setter(action);
                 }
                 if state.try_enter_picking_enum() || state.try_enter_editing_value() {
                     return SettingsKeyOutcome::Changed;
@@ -1197,7 +1197,7 @@ fn handle_group_mouse(
     };
     let cur = matches!(state.value_for(child_key), Some(SettingValue::Bool(true)));
     match action_for_bool(child_key, !cur) {
-        Some(action) => SettingsKeyOutcome::Action(action),
+        Some(action) => SettingsKeyOutcome::from_typed_setter(action),
         None => SettingsKeyOutcome::Changed,
     }
 }

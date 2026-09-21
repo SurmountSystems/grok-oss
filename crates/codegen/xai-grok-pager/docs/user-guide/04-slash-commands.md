@@ -194,7 +194,7 @@ This is **not** `/polish` (a polish pass) and **not** `/implement` (plan handoff
 
 ### `/what`
 
-Restate this session when you cannot parse the last agent chat. Not an apology. The agent replies with four labeled complete thoughts only: **Job**, **State**, **Operator** (or `nothing`), **Next**. Speaker labels are Operator not You or Human, and Agent not Me or Grok when Grok means the assistant. Optional focus text is passed through. Follow Concise American Technical English as specified in Surmount `0005_CATE.md`. Never mix Grok Build version with grok-oss product version. grok-oss is `grok-oss --version` (`1.0.3` plus git SHA). Grok Build is `grok --version`. Isolated Preview and plan chrome are grok-oss unless this process was launched as `grok` from downloads. Remaining-work and this restatement must probe this turn if they state which binary this window is. Do not reuse a leftover Grok Build version as grok-oss.
+Restate this session when you cannot parse the last agent chat. Not an apology. The agent replies with four labeled complete thoughts only: **Job**, **State**, **Operator** (or `nothing`), **Next**. Speaker labels are Operator not You or Human, and Agent not Me or Grok when Grok means the assistant. Optional focus text is passed through. Follow Concise American Technical English as specified in Surmount `0005_CATE.md`. Never mix Grok Build version with grok-oss product version. grok-oss is `grok-oss --version` (`1.0.3` plus git SHA). Grok Build is the `grok` binary `--version` output. Isolated Preview and plan chrome are grok-oss unless this process was launched as `grok` from downloads. Remaining-work and this restatement must probe this turn if they state which binary this window is. Do not reuse a leftover Grok Build version as grok-oss.
 
 This is **not** `/recap` (a short chat recap), **not** `/finish` (session post-mortem), and **not** `/reports` (a checkpoint file). Complete American English thoughts. No leftover board ids as the body.
 
@@ -295,6 +295,8 @@ Archive completed and cancelled rows off the live session board. Pending and in-
 ### `/model <name>`
 
 Switch models. Accepts a model ID or display name (case-insensitive), and for reasoning models you can add an effort level as a second argument. Alias: `/m`.
+
+When the slash dropdown is `/model` or `/m` and exactly one model row is highlighted, Tab (and Enter) apply the switch immediately. The composer clears. That is not Operator chat. If more than one model row remains, Tab keeps completing. A unique complete effort row such as `Grok 4.6 xhigh` also switches now with that effort. Command-phase unique `/model` (cursor still in the command name) still completes `/model `. `Ctrl+M` still opens the model picker.
 
 ```
 /model grok-build

@@ -8,6 +8,7 @@ pub mod meta;
 pub mod model_state;
 pub mod spawn;
 pub mod tracker;
+pub mod turbo_planning;
 mod version_mismatch;
 
 pub(crate) use version_mismatch::{is_version_mismatch_banner, version_mismatch_banner};

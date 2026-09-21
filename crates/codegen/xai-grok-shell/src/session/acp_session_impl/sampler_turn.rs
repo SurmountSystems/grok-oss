@@ -534,7 +534,9 @@ impl SessionActor {
             env_http_headers: cfg.env_http_headers.clone(),
             context_window: cfg.context_window.get(),
             client_version: creds.client_version,
-            reasoning_effort: cfg.reasoning_effort,
+            reasoning_effort: crate::util::config::apply_live_plan_turn_effort(
+                cfg.reasoning_effort,
+            ),
             force_http1: false,
             max_retries: Some(self.max_retries),
             stream_tool_calls: cfg.stream_tool_calls.unwrap_or(false),

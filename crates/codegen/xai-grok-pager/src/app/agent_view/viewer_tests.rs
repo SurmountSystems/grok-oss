@@ -4,14 +4,22 @@
 //! so dragging the thumb selected plan lines for a comment instead of
 //! scrolling (GB-4579: "can't click and drag scrollbar to view plan").
 
+use std::path::Path;
+
 use crossterm::event::{
     Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
+use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 
 use crate::actions::ActionRegistry;
+use crate::app::actions::Action;
+use crate::app::agent::AgentState;
 use crate::app::agent_view::AgentView;
 use crate::app::agent_view::test_fixtures::make_agent;
+use crate::app::app_view::InputOutcome;
+use crate::views::file_search::line_viewer::{LineViewerKind, LineViewerState};
+use crate::views::list_pane::InputBarMode;
 use crate::views::plan_approval_view::{
     PLAN_APPROVED_REVIEW_COMMENTS_LEAD, PlanApprovalFocus, PlanPromptIntent,
 };
@@ -2454,5 +2462,343 @@ fn exclusive_covering_exit_cta_leaves_plan_exit_will_not_work_stuck() {
     assert!(
         !matches!(agent.key_owner(), KeyOwner::LineViewer),
         "Exit will not work / stuck: leftover exclusive covering must not own keys"
+    );
+}
+
+fn ctrl_c() -> Event {
+    Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL))
+}
+
+fn seed_grok_models(agent: &mut AgentView) {
+    use agent_client_protocol as acp;
+    use std::sync::Arc;
+    let insert = |agent: &mut AgentView, id: &str, name: &str| {
+        let mid = acp::ModelId::new(Arc::from(id));
+        agent.session.models.available.insert(
+            mid.clone(),
+            acp::ModelInfo::new(mid, name.to_string()).meta(
+                serde_json::json!({ "supportsReasoningEffort": true })
+                    .as_object()
+                    .cloned(),
+            ),
+        );
+    };
+    insert(agent, "grok-4.6", "Grok 4.6");
+    insert(agent, "grok-4.5", "Grok 4.5");
+}
+
+fn park_leftover_isolated_preview(agent: &mut AgentView) {
+    let mut viewer = LineViewerState::open_markdown_content(
+        "plan.md",
+        "# Isolated Preview\nleftover after Plan Exit\n".to_string(),
+        None,
+    )
+    .expect("leftover Isolated Preview fixture must open");
+    viewer.kind = LineViewerKind::PlanPreview;
+    agent.line_viewer = Some(viewer);
+    agent.plan_approval_view = None;
+    assert!(
+        agent.is_plan_viewer(),
+        "fixture must be leftover Isolated Preview"
+    );
+}
+
+fn render_isolated_preview_title_bar(agent: &mut AgentView) -> Buffer {
+    let full = Rect::new(0, 0, 80, 24);
+    let mut buf = Buffer::empty(full);
+    let theme = crate::theme::Theme::current();
+    let viewer = agent
+        .line_viewer
+        .as_mut()
+        .expect("Isolated Preview must be open to paint the title bar");
+    crate::views::file_search::line_viewer::render_line_viewer(
+        &mut buf,
+        full,
+        viewer,
+        Path::new("/tmp"),
+        &theme,
+        0,
+    );
+    buf
+}
+
+/// Operator: "ctrl-c should have cleared this prompt but instead it exited
+/// the plan." Isolated Preview `handle_input` first Ctrl+C with text
+/// clears. Isolated Preview stays.
+#[test]
+fn isolated_preview_handle_input_ctrl_c_with_text_clears_and_stays() {
+    let mut agent = agent_with_scrollable_plan();
+    agent
+        .prompt
+        .set_text("ctrl-c should have cleared this prompt");
+    {
+        let pav = agent.plan_approval_view.as_mut().unwrap();
+        pav.focus = PlanApprovalFocus::Preview;
+    }
+    let first = agent.handle_input(&ctrl_c(), &ActionRegistry::defaults());
+    assert!(
+        matches!(first, InputOutcome::Changed),
+        "Operator: first Ctrl+C with a draft must clear, not Exit; got {first:?}"
+    );
+    assert!(
+        agent.plan_approval_view.is_some() && agent.line_viewer.is_some(),
+        "first Ctrl+C must not Exit Isolated Preview"
+    );
+    assert!(
+        agent.prompt.text().is_empty(),
+        "first Ctrl+C must clear the Isolated Preview composer; got {:?}",
+        agent.prompt.text()
+    );
+    assert!(
+        !matches!(first, InputOutcome::Action(Action::CancelTurn)),
+        "first Ctrl+C with a draft must not CancelTurn"
+    );
+}
+
+/// Operator: "ctrl-c in every prompt input always clears first, then
+/// exits only when ctrl-c is issued again." Second empty Ctrl+C via
+/// `handle_input` then exits Isolated Preview / abandons the plan.
+#[test]
+fn isolated_preview_handle_input_second_empty_ctrl_c_exits() {
+    let mut agent = agent_with_scrollable_plan();
+    agent.prompt.set_text("draft");
+    let _ = agent.handle_input(&ctrl_c(), &ActionRegistry::defaults());
+    assert!(agent.prompt.text().is_empty());
+    assert!(agent.plan_approval_view.is_some());
+    let second = agent.handle_input(&ctrl_c(), &ActionRegistry::defaults());
+    assert!(
+        agent.plan_approval_view.is_none(),
+        "second empty Ctrl+C must Exit Isolated Preview / abandon; got {second:?}"
+    );
+    assert!(
+        agent.line_viewer.is_none(),
+        "second empty Ctrl+C must not keep Isolated Preview covering"
+    );
+}
+
+/// Isolated Preview plus a running turn plus a draft: first Ctrl+C
+/// clears and must not CancelTurn.
+#[test]
+fn isolated_preview_handle_input_running_turn_draft_ctrl_c_does_not_cancel_turn() {
+    let mut agent = agent_with_scrollable_plan();
+    agent.session.state = AgentState::TurnRunning;
+    agent.prompt.set_text("do not cancel this turn");
+    let first = agent.handle_input(&ctrl_c(), &ActionRegistry::defaults());
+    assert!(
+        !matches!(first, InputOutcome::Action(Action::CancelTurn)),
+        "Isolated Preview + running turn + draft must not CancelTurn; got {first:?}"
+    );
+    assert!(
+        agent.prompt.text().is_empty(),
+        "first Ctrl+C must still clear; got {:?}",
+        agent.prompt.text()
+    );
+    assert!(
+        agent.plan_approval_view.is_some() && agent.line_viewer.is_some(),
+        "first Ctrl+C must not Exit Isolated Preview while the turn is running"
+    );
+    assert_eq!(agent.session.state, AgentState::TurnRunning);
+}
+
+/// Leftover Isolated Preview after Plan Exit: first Ctrl+C with text
+/// clears and stays. Second empty Ctrl+C leaves the parked viewer.
+#[test]
+fn leftover_isolated_preview_handle_input_ctrl_c_clears_then_exits() {
+    let mut agent = make_agent();
+    park_leftover_isolated_preview(&mut agent);
+    agent.prompt.set_text("leftover draft");
+    let first = agent.handle_input(&ctrl_c(), &ActionRegistry::defaults());
+    assert!(
+        matches!(first, InputOutcome::Changed),
+        "leftover first Ctrl+C with draft must clear; got {first:?}"
+    );
+    assert!(
+        agent.line_viewer.is_some() && agent.is_plan_viewer(),
+        "leftover first Ctrl+C must not close Isolated Preview"
+    );
+    assert!(agent.prompt.text().is_empty());
+    let second = agent.handle_input(&ctrl_c(), &ActionRegistry::defaults());
+    assert!(
+        agent.line_viewer.is_none(),
+        "leftover second empty Ctrl+C must leave Isolated Preview; got {second:?}"
+    );
+}
+
+/// Operator: "The last tab when only the single model is highlighted
+/// should switch it, but it doesn't." Isolated Preview unique `/model`
+/// Tab must SwitchModel now and must not RowWalk focus.
+#[test]
+fn isolated_preview_unique_model_tab_switches_now_does_not_rowwalk() {
+    let mut agent = agent_with_scrollable_plan();
+    seed_grok_models(&mut agent);
+    {
+        let pav = agent.plan_approval_view.as_mut().unwrap();
+        pav.focus = PlanApprovalFocus::Preview;
+    }
+    agent.prompt.set_text("/model Grok 4.6");
+    agent.prompt.set_cursor("/model Grok 4.6".len());
+    agent.prompt.refresh_slash(&agent.session.models);
+    assert!(
+        agent.prompt.slash_open(),
+        "Isolated Preview unique /model dropdown must be open"
+    );
+    assert_eq!(agent.prompt.slash_snapshot().matches.len(), 1);
+    let outcome = agent.handle_input(
+        &Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+        &ActionRegistry::defaults(),
+    );
+    match outcome {
+        InputOutcome::Action(Action::SwitchModel { model_id, effort }) => {
+            use agent_client_protocol as acp;
+            use std::sync::Arc;
+            assert_eq!(model_id, acp::ModelId::new(Arc::from("grok-4.6")));
+            assert_eq!(effort, None);
+        }
+        other => panic!(
+            "Operator: Isolated Preview unique /model Tab must SwitchModel now, not {other:?}; prompt={:?}",
+            agent.prompt.text()
+        ),
+    }
+    assert!(
+        agent.prompt.text().is_empty(),
+        "composer must clear; got {:?}",
+        agent.prompt.text()
+    );
+    assert_eq!(
+        agent.plan_approval_view.as_ref().unwrap().focus,
+        PlanApprovalFocus::Preview,
+        "unique /model Tab must not RowWalk Isolated Preview focus"
+    );
+    assert!(
+        agent.line_viewer.is_some() && agent.plan_approval_view.is_some(),
+        "SwitchModel must not Exit Isolated Preview"
+    );
+}
+
+/// Magnifying glass is clickable next to copy and the fullscreen arrow.
+#[test]
+fn isolated_preview_search_glass_clickable_next_to_copy_and_expand() {
+    let mut agent = agent_with_scrollable_plan();
+    let _buf = render_isolated_preview_title_bar(&mut agent);
+    let search = agent
+        .line_viewer
+        .as_ref()
+        .and_then(|v| v.plan_ref())
+        .and_then(|p| p.search_button_area)
+        .expect("glass must be a clickable hit target next to copy");
+    let copy = agent
+        .line_viewer
+        .as_ref()
+        .and_then(|v| v.plan_ref())
+        .and_then(|p| p.copy_button_area)
+        .expect("copy stays next to enlarge");
+    assert_eq!(
+        search.x + search.width,
+        copy.x,
+        "glass must sit immediately left of copy"
+    );
+    let _ = agent.handle_input(
+        &mouse(MouseEventKind::Down(MouseButton::Left), search.x, search.y),
+        &ActionRegistry::defaults(),
+    );
+    assert_eq!(
+        agent.line_viewer.as_ref().unwrap().list_state.input_mode(),
+        Some(InputBarMode::Search),
+        "glass click must open LineViewerState search, not a second engine"
+    );
+}
+
+/// Isolated Preview composer `/` stays slash. Glass opens search.
+#[test]
+fn isolated_preview_composer_slash_stays_slash_not_line_search() {
+    let mut agent = agent_with_scrollable_plan();
+    {
+        let pav = agent.plan_approval_view.as_mut().unwrap();
+        pav.focus = PlanApprovalFocus::Preview;
+    }
+    let _ = agent.handle_input(
+        &Event::Key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE)),
+        &ActionRegistry::defaults(),
+    );
+    assert_eq!(
+        agent.prompt.text(),
+        "/",
+        "Isolated Preview composer `/` stays slash; got {:?}",
+        agent.prompt.text()
+    );
+    assert!(
+        agent
+            .line_viewer
+            .as_ref()
+            .is_some_and(|v| v.list_state.input_mode().is_none()),
+        "composer `/` must not open line-viewer search"
+    );
+}
+
+/// After glass search is accepted, Isolated Preview n/N jump hits and
+/// must not type into the Operator box.
+#[test]
+fn isolated_preview_handle_input_n_jumps_hits_after_search() {
+    let mut agent = agent_with_scrollable_plan();
+    {
+        let viewer = agent.line_viewer.as_mut().unwrap();
+        viewer.list_state.open_search(&viewer.lines);
+        for ch in ['s', 't', 'e', 'p'] {
+            viewer.list_state.handle_key_event(
+                &KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE),
+                &viewer.lines,
+            );
+        }
+        viewer.list_state.handle_key_event(
+            &KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &viewer.lines,
+        );
+        assert!(viewer.list_state.input_mode().is_none());
+        assert!(
+            viewer.list_state.match_count() >= 2,
+            "fixture steps must match query step; got {}",
+            viewer.list_state.match_count()
+        );
+    }
+    let first = agent
+        .line_viewer
+        .as_ref()
+        .unwrap()
+        .list_state
+        .matcher()
+        .and_then(|m| m.current_match);
+    let _ = agent.handle_input(
+        &Event::Key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE)),
+        &ActionRegistry::defaults(),
+    );
+    let second = agent
+        .line_viewer
+        .as_ref()
+        .unwrap()
+        .list_state
+        .matcher()
+        .and_then(|m| m.current_match);
+    assert_ne!(first, second, "n must jump to the next search hit");
+    assert!(
+        agent.prompt.text().is_empty() && agent.prompt.images.is_empty(),
+        "n/N jump hits, not typing into the Operator box; got {:?}",
+        agent.prompt.text()
+    );
+    let _ = agent.handle_input(
+        &Event::Key(KeyEvent::new(KeyCode::Char('N'), KeyModifiers::SHIFT)),
+        &ActionRegistry::defaults(),
+    );
+    let back = agent
+        .line_viewer
+        .as_ref()
+        .unwrap()
+        .list_state
+        .matcher()
+        .and_then(|m| m.current_match);
+    assert_eq!(back, first, "N must jump to the previous search hit");
+    assert!(
+        agent.prompt.text().is_empty() && agent.prompt.images.is_empty(),
+        "n/N jump hits, not typing into the Operator box; got {:?}",
+        agent.prompt.text()
     );
 }

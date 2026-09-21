@@ -1,6 +1,5 @@
 //! Top-level input routing for [`AgentView`]: `handle_input` fans events
 //! out to the active pane/overlay handlers; pane and input-mode setters.
-use super::bracketed_paste_should_probe;
 #[cfg(test)]
 use super::paste::paste_key_tests;
 #[cfg(test)]
@@ -473,9 +472,7 @@ impl AgentView {
                 _ => self.clear_stuck_scrollback_drag(),
             }
         }
-        if let Some(ref child_sid) = self.active_subagent.clone()
-            && !self.child_is_auto_compacting(child_sid)
-        {
+        if let Some(child_sid) = self.visible_nested_overlay_sid().map(str::to_owned) {
             if let Event::Key(key) = ev
                 && key.kind != KeyEventKind::Release
                 && key!('q', CONTROL).matches(key)
@@ -488,10 +485,10 @@ impl AgentView {
                     .hit_subagent_frame_close
                     .contains(mouse.column, mouse.row)
             {
-                let kill_idle_listed = self.subagent_sessions.get(child_sid).and_then(|info| {
+                let kill_idle_listed = self.subagent_sessions.get(&child_sid).and_then(|info| {
                     let idle = self
                         .subagent_views
-                        .get(child_sid)
+                        .get(&child_sid)
                         .is_some_and(|child| !child.session.state.is_busy());
                     (info.is_running() && idle).then(|| info.subagent_id.to_string())
                 });
@@ -529,7 +526,7 @@ impl AgentView {
             if let Event::Mouse(mouse) = ev
                 && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
             {
-                if let Some(child) = self.subagent_views.get(child_sid) {
+                if let Some(child) = self.subagent_views.get(&child_sid) {
                     let rects = child.tasks.view_button_rects.clone();
                     for (entry_id, rect) in rects {
                         if !rect.contains((mouse.column, mouse.row).into()) {
@@ -545,7 +542,7 @@ impl AgentView {
             }
             let child_in_scrollback = self
                 .subagent_views
-                .get(child_sid)
+                .get(&child_sid)
                 .is_some_and(|c| c.is_bare_scrollback());
             if let Event::Key(key) = ev
                 && key.kind != KeyEventKind::Release
@@ -553,7 +550,7 @@ impl AgentView {
                 && key.modifiers.is_empty()
                 && self
                     .subagent_views
-                    .get(child_sid)
+                    .get(&child_sid)
                     .is_some_and(|c| c.nested_overlay_esc_dismisses())
             {
                 self.dismiss_nested_overlay();
@@ -567,10 +564,10 @@ impl AgentView {
                 self.dismiss_nested_overlay();
                 return InputOutcome::Changed;
             }
-            if let Some(child_view) = self.subagent_views.get_mut(child_sid) {
+            if let Some(child_view) = self.subagent_views.get_mut(&child_sid) {
                 if !crate::app::subagent::overlay_child_is_l2_coordinator(
                     &self.subagent_sessions,
-                    child_sid,
+                    &child_sid,
                 ) {
                     child_view.mark_as_subagent_view();
                 }
@@ -837,11 +834,18 @@ impl AgentView {
                                 );
                             return self.handle_paste_key_deferred(clipboard_text);
                         }
+                        if let Some(outcome) = self.isolated_preview_slash_tab_enter(key, registry)
+                        {
+                            return outcome;
+                        }
                         self.handle_line_viewer_key(key)
                     }
                     Event::Paste(text) => {
                         if self.plan_overlay_owns_composer_paste() {
-                            return self.route_popup_paste(text);
+                            if let Some((outcome, _)) = self.try_handle_dropped_paths_paste(text) {
+                                return outcome;
+                            }
+                            return self.insert_or_defer_bracketed_prompt_paste(text);
                         }
                         self.line_viewer
                             .as_mut()
@@ -877,13 +881,24 @@ impl AgentView {
                     if let Some(outcome) = self.try_plan_overlay_agent_action(key, registry, true) {
                         return outcome;
                     }
+                    if super::viewer::isolated_preview_search_owns_key(self, key) {
+                        return self.handle_line_viewer_key(key);
+                    }
+                    if let Some(outcome) = self.isolated_preview_slash_tab_enter(key, registry) {
+                        return outcome;
+                    }
                     if casual_commenting {
                         self.handle_casual_plan_feedback_key(key)
                     } else {
                         self.handle_plan_feedback_key(key)
                     }
                 }
-                Event::Paste(text) => self.route_popup_paste(text),
+                Event::Paste(text) => {
+                    if let Some((outcome, _)) = self.try_handle_dropped_paths_paste(text) {
+                        return outcome;
+                    }
+                    self.insert_or_defer_bracketed_prompt_paste(text)
+                }
                 Event::Mouse(mouse) => {
                     let in_prompt = self
                         .pane_areas
@@ -1068,15 +1083,10 @@ impl AgentView {
                     self.handle_plan_feedback_key(key)
                 }
                 Event::Paste(text) => {
-                    if self
-                        .plan_approval_view
-                        .as_ref()
-                        .is_some_and(|view| view.focus != PlanApprovalFocus::Preview)
-                    {
-                        self.route_popup_paste(text)
-                    } else {
-                        InputOutcome::Unchanged
+                    if let Some((outcome, _)) = self.try_handle_dropped_paths_paste(text) {
+                        return outcome;
                     }
+                    self.insert_or_defer_bracketed_prompt_paste(text)
                 }
                 Event::Mouse(mouse) => {
                     let mut changed = false;
@@ -1253,23 +1263,7 @@ impl AgentView {
                     if let Some((outcome, _)) = self.try_handle_dropped_paths_paste(text) {
                         return outcome;
                     }
-                    let attachment_change_count = if bracketed_paste_should_probe(text) {
-                        crate::clipboard::attachment_probe_gate(Some(text))
-                    } else {
-                        None
-                    };
-                    let (outcome, synchronous_text_insertion) =
-                        self.insert_bracketed_prompt_text(text);
-                    if let Some(change_count) = attachment_change_count {
-                        self.enqueue_clipboard_attachment_probe(
-                            crate::app::actions::ClipboardPasteSource::BracketedInserted {
-                                text: text.to_owned(),
-                                insertion: synchronous_text_insertion,
-                            },
-                            change_count,
-                        );
-                    }
-                    outcome
+                    self.insert_or_defer_bracketed_prompt_paste(text)
                 } else {
                     let consumed = match self.active_pane {
                         AgentPane::Todo => self.todo.handle_paste(text),
@@ -1437,6 +1431,34 @@ impl AgentView {
         }
         InputOutcome::Unchanged
     }
+
+    /// Isolated Preview slash Tab/Enter must reuse mill `handle_prompt_key`
+    /// after overlay and before RowWalk / leftover list capture. Search
+    /// input bar owns keys while it is open.
+    fn isolated_preview_slash_tab_enter(
+        &mut self,
+        key: &crossterm::event::KeyEvent,
+        registry: &ActionRegistry,
+    ) -> Option<InputOutcome> {
+        if !self.prompt.slash_open() {
+            return None;
+        }
+        if self
+            .line_viewer
+            .as_ref()
+            .is_some_and(|v| v.list_state.input_mode().is_some())
+        {
+            return None;
+        }
+        if !key.modifiers.is_empty() {
+            return None;
+        }
+        if !matches!(key.code, KeyCode::Tab | KeyCode::Enter) {
+            return None;
+        }
+        Some(self.handle_prompt_key(key, registry, false))
+    }
+
     /// Handle an agent-level action using the compatibility fullscreen registry.
     /// Runtime key dispatch uses [`Self::handle_agent_action_with_registry`].
     #[cfg(test)]
@@ -1458,10 +1480,16 @@ impl AgentView {
         ) {
             return Some(InputOutcome::Unchanged);
         }
-        // Preview line-viewer swallows Ctrl+C as a no-op. A running or
-        // cancelling turn must still CancelTurn (plan present plus queue
-        // edit must not freeze stop). Idle empty-composer Ctrl+C abandons.
+        // Two-stage Ctrl+C on every prompt: a non-empty draft (text or
+        // image chips) clears first. Do not Exit Isolated Preview, cancel
+        // the turn, quit, or leave plan mode on that first press. Empty
+        // plus a running turn still CancelTurn so stop does not freeze.
+        // Idle empty Ctrl+C abandons / Isolated Preview Exit.
         if registry.matches_id(ActionId::CancelTurn, key) {
+            let has_draft = !self.prompt.text().is_empty() || !self.prompt.images.is_empty();
+            if has_draft {
+                return None;
+            }
             let overlay_busy = self.active_subagent.as_ref().is_some_and(|sid| {
                 self.subagent_views.get(sid.as_str()).is_some_and(|child| {
                     child.stoppable_activity_running() || child.any_cancel_pending()

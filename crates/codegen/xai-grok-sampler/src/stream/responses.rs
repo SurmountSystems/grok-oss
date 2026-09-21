@@ -858,6 +858,50 @@ mod tests {
         }
     }
 
+    /// Surmount fork: same `StreamRepetitionGuard` as Chat Completions
+    /// (GitHub #133). SpaceXAI Responses resamples confident thinking via
+    /// `x-grok-doom-loop-check`; visible dest-encoder-skip is Fatal here.
+    /// Uses `DEST_ENCODER_SKIP_LOOP` so `-D warnings` keeps that const live.
+    #[tokio::test]
+    async fn responses_stops_dest_encoder_skip_loop() {
+        let looping = format!("{} ", crate::stream::DEST_ENCODER_SKIP_LOOP);
+        assert!(
+            looping.contains(crate::stream::DEST_ENCODER_SKIP_LOOP),
+            "Responses fixture must carry DEST_ENCODER_SKIP_LOOP"
+        );
+        let mut chunks: Vec<Result<rs::ResponseStreamEvent, SamplingError>> =
+            (0..20).map(|_| Ok(text_delta_event(&looping))).collect();
+        chunks.push(Ok(completed_event()));
+        let raw = stream::iter(chunks).boxed();
+        let events = collect(stream_responses(
+            raw,
+            None,
+            rid(),
+            Duration::from_secs(60),
+            None,
+        ))
+        .await;
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, SamplingEvent::Completed { .. })),
+            "looping dest-encoder-skip Responses stream must not complete as a normal stop"
+        );
+        match events.last().unwrap() {
+            SamplingEvent::Failed { error, .. } => {
+                assert_eq!(
+                    error.kind,
+                    crate::events::SamplingErrorKind::RepetitiveGeneration
+                );
+                assert!(
+                    !error.is_retryable,
+                    "sentence loop must stop the turn, not resample"
+                );
+            }
+            other => panic!("expected Failed(RepetitiveGeneration), got {other:?}"),
+        }
+    }
+
     #[test]
     fn empty_failed_response_is_not_treated_as_output() {
         let event = rs::ResponseStreamEvent::ResponseFailed(rs_types::ResponseFailedEvent {

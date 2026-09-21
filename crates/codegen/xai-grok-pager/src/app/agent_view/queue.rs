@@ -262,7 +262,7 @@ impl AgentView {
         }
         watchers.loops = self.session.scheduled_tasks.len();
         watchers.subagents =
-            crate::app::subagent::live_subagent_list(self.subagent_sessions.values()).len();
+            crate::app::subagent::listed_live_subagents(self.subagent_sessions.values()).len();
         watchers.workflows = self
             .workflow_runs
             .iter()

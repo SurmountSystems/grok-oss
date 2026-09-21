@@ -1289,6 +1289,96 @@ pub(in crate::app::dispatch) fn set_confirm_before_rewind(
     }]
 }
 
+fn refresh_process_rule_reminders_live(app: &AppView) {
+    xai_grok_tools::reminders::ProcessRuleReminders::set_live(
+        xai_grok_tools::reminders::ProcessRuleReminders::from_ui(
+            app.current_ui.process_rule_reminders_enabled(),
+            app.current_ui.process_rule_reminders_text(),
+        ),
+    );
+}
+
+pub(in crate::app::dispatch) fn set_turbo_planning_inner(app: &mut AppView, new: bool) {
+    app.current_ui.turbo_planning = Some(new);
+    crate::appearance::cache::set_turbo_planning(new);
+    xai_grok_shell::util::config::set_turbo_planning_live(new);
+}
+
+/// SHARED: `[ui].turbo_planning` via `Effect::PersistSetting`. Default ON.
+pub(in crate::app::dispatch) fn set_turbo_planning(app: &mut AppView, new: bool) -> Vec<Effect> {
+    let prev = crate::appearance::cache::load_turbo_planning();
+    if prev == new {
+        return vec![];
+    }
+    set_turbo_planning_inner(app, new);
+    refresh_open_settings_modals(app);
+    tracing::info!(target: "settings", key = "turbo_planning", value = new, "setting changed");
+    app.show_toast(&save_success_toast("Turbo planning", new));
+    vec![Effect::PersistSetting {
+        key: "turbo_planning",
+        value: crate::settings::SettingValue::Bool(new),
+        rollback_value: crate::settings::SettingValue::Bool(prev),
+    }]
+}
+
+pub(in crate::app::dispatch) fn set_process_rule_reminders_enabled_inner(
+    app: &mut AppView,
+    new: bool,
+) {
+    app.current_ui.process_rule_reminders_enabled = Some(new);
+    refresh_process_rule_reminders_live(app);
+}
+
+/// SHARED: `[ui].process_rule_reminders_enabled` via `Effect::PersistSetting`.
+pub(in crate::app::dispatch) fn set_process_rule_reminders_enabled(
+    app: &mut AppView,
+    new: bool,
+) -> Vec<Effect> {
+    let prev = app.current_ui.process_rule_reminders_enabled();
+    if prev == new {
+        return vec![];
+    }
+    set_process_rule_reminders_enabled_inner(app, new);
+    refresh_open_settings_modals(app);
+    tracing::info!(
+        target: "settings",
+        key = "process_rule_reminders_enabled",
+        value = new,
+        "setting changed"
+    );
+    app.show_toast(&save_success_toast("Process-rule reminders", new));
+    vec![Effect::PersistSetting {
+        key: "process_rule_reminders_enabled",
+        value: crate::settings::SettingValue::Bool(new),
+        rollback_value: crate::settings::SettingValue::Bool(prev),
+    }]
+}
+
+pub(in crate::app::dispatch) fn set_process_rule_reminders_inner(app: &mut AppView, new: String) {
+    app.current_ui.process_rule_reminders = if new.is_empty() { None } else { Some(new) };
+    refresh_process_rule_reminders_live(app);
+}
+
+/// SHARED: `[ui].process_rule_reminders` newline-separated list. Empty clears.
+pub(in crate::app::dispatch) fn set_process_rule_reminders(
+    app: &mut AppView,
+    new: String,
+) -> Vec<Effect> {
+    let prev = app.current_ui.process_rule_reminders_text().to_string();
+    if prev == new {
+        return vec![];
+    }
+    set_process_rule_reminders_inner(app, new.clone());
+    refresh_open_settings_modals(app);
+    tracing::info!(target: "settings", key = "process_rule_reminders", "setting changed");
+    app.show_toast("\u{2713} Process-rule reminder list saved");
+    vec![Effect::PersistSetting {
+        key: "process_rule_reminders",
+        value: crate::settings::SettingValue::String(new),
+        rollback_value: crate::settings::SettingValue::String(prev),
+    }]
+}
+
 pub(super) fn set_combine_queued_prompts_inner(app: &mut AppView, new: bool) {
     app.current_ui.combine_queued_prompts = Some(new);
     crate::appearance::cache::set_combine_queued_prompts(new);

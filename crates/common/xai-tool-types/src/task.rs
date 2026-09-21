@@ -75,10 +75,25 @@ pub struct TaskToolInput {
             Pass the subagent_id returned by a prior task call. The new subagent \
             continues the previous one's raw transcript with the new task prompt \
             appended. The source must be completed (not running), belong to the \
-            current session, and use the same subagent_type."
+            current session, and use the same subagent_type. Mutually exclusive \
+            with follow_up."
     )]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resume_from: Option<String>,
+
+    /// Follow up to a still-running nested L2 instead of spawning a new one.
+    ///
+    /// Pass that L2's `subagent_id`. Additional prompt text stays in `prompt`.
+    /// Mutually exclusive with `resume_from`. A running id uses `follow_up`.
+    /// A completed id uses `resume_from`. Do not kill or respawn.
+    #[schemars(
+        description = "Follow up to a still-running nested L2. Pass that subagent_id. \
+            Additional prompt text stays in prompt. Mutually exclusive with resume_from. \
+            A running id uses follow_up. A completed id uses resume_from. Do not kill or \
+            respawn."
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub follow_up: Option<String>,
 
     /// Explicit working directory for the subagent. When set, the child
     /// session operates in this directory instead of the parent's cwd.
@@ -1183,14 +1198,18 @@ pub fn build_task_description(subagents: &[SubagentDescriptor], naming: &TaskToo
          Agent types:\n\n\
          {agent_lines}\n\n\
          ## Usage notes\n\
-         - When the agent is done, it returns a single message with its agent ID. Use that ID to resume the agent later for follow-up work.\n\
+         - When the agent is done, it returns a single message with its agent ID. Use that ID with {resume_from_param} for a completed subagent. Use follow_up for a still-running nested L2. Do not kill or respawn.\n\
          - {run_in_background_param}: Returns immediately with a subagent_id. Keep working; completion is a notification. Optional snapshot via {background_retrieval_tool}. A blocking wait is only for when you must join. This is set to true by default.\n\
          - Subagents receive a compacted version of project instructions (AGENTS.md). If the task requires detailed conventions (e.g., build rules, testing patterns), include the relevant rules directly in the prompt.\n\
          - When using the {task_tool} tool, you must specify a {subagent_type_param} parameter to select which agent type to use.\n\
          - When launching independent subagents, you MUST incorporate the results into the task based on requirements BEFORE concluding.\n\n\
          Resuming a previous agent (resume_from):\n\
          - Use {resume_from_param} to continue a previously completed subagent's conversation. Pass the subagent_id returned by a prior {task_tool} call. A resumed agent keeps its full transcript and tool state, so you only need to describe what changed since the last run — don't re-explain the original task.\n\
-         - The resumed agent must use the same subagent_type as the source.\n\n\
+         - The resumed agent must use the same subagent_type as the source.\n\
+         - {resume_from_param} is mutually exclusive with follow_up.\n\n\
+         Follow up to a still-running nested L2 (follow_up):\n\
+         - Use follow_up to target a still-running nested L2. Pass that subagent_id. Put the additional prompt text in prompt. Do not kill or respawn.\n\
+         - follow_up and {resume_from_param} are mutually exclusive. A running id uses follow_up. A completed id uses {resume_from_param}.\n\n\
          Isolation mode:\n\
          - Use {isolation_param} to control the child's execution environment. With \"worktree\", the child runs in an isolated git worktree whose edits don't affect the parent workspace; the worktree is preserved after completion and its path is returned in the output.\n\n\
          Assigned write paths:\n\
@@ -1533,6 +1552,7 @@ mod tests {
             capability_mode: None,
             isolation: None,
             resume_from: None,
+            follow_up: None,
             cwd: None,
             model: None,
             task_id: None,
@@ -1540,6 +1560,67 @@ mod tests {
         };
         let value = serde_json::to_value(&input).unwrap();
         assert!(value.get("model").is_none());
+        assert!(value.get("follow_up").is_none());
+        assert!(value.get("resume_from").is_none());
+    }
+
+    #[test]
+    fn parent_cannot_talk_to_own_l2s_follow_up_field_is_optional_and_distinct_from_resume_from() {
+        let omitted: TaskToolInput =
+            serde_json::from_str(r#"{"description": "d", "prompt": "p"}"#).unwrap();
+        assert!(omitted.follow_up.is_none());
+        assert!(omitted.resume_from.is_none());
+
+        let follow: TaskToolInput = serde_json::from_str(
+            r#"{"description": "d", "prompt": "keep going", "follow_up": "running-l2-id"}"#,
+        )
+        .unwrap();
+        assert_eq!(follow.follow_up.as_deref(), Some("running-l2-id"));
+        assert!(follow.resume_from.is_none());
+        assert_eq!(follow.prompt, "keep going");
+
+        let resume: TaskToolInput = serde_json::from_str(
+            r#"{"description": "d", "prompt": "continue", "resume_from": "completed-l2-id"}"#,
+        )
+        .unwrap();
+        assert_eq!(resume.resume_from.as_deref(), Some("completed-l2-id"));
+        assert!(resume.follow_up.is_none());
+
+        let both: TaskToolInput = serde_json::from_str(
+            r#"{"description": "d", "prompt": "p", "follow_up": "running", "resume_from": "done"}"#,
+        )
+        .unwrap();
+        assert_eq!(both.follow_up.as_deref(), Some("running"));
+        assert_eq!(both.resume_from.as_deref(), Some("done"));
+
+        let serialized = serde_json::to_value(&TaskToolInput {
+            prompt: "p".into(),
+            description: "d".into(),
+            subagent_type: default_subagent_type(),
+            run_in_background: true,
+            capability_mode: None,
+            isolation: None,
+            resume_from: Some("done".into()),
+            follow_up: Some("running".into()),
+            cwd: None,
+            model: None,
+            task_id: None,
+            write_paths: Vec::new(),
+        })
+        .unwrap();
+        assert_eq!(
+            serialized.get("follow_up").and_then(|v| v.as_str()),
+            Some("running")
+        );
+        assert_eq!(
+            serialized.get("resume_from").and_then(|v| v.as_str()),
+            Some("done")
+        );
+        assert_ne!(
+            serialized.get("follow_up"),
+            serialized.get("resume_from"),
+            "follow_up and resume_from must serialize as separate Option fields"
+        );
     }
 
     #[test]
@@ -1641,6 +1722,11 @@ mod tests {
             "delegation timing belongs in the shared system prompt, not the task contract: {desc}"
         );
         assert!(desc.contains("Use resume_from to continue"));
+        assert!(desc.contains("Use follow_up to target a still-running nested L2"));
+        assert!(desc.contains("follow_up and resume_from are mutually exclusive"));
+        assert!(desc.contains("A running id uses follow_up. A completed id uses resume_from."));
+        assert!(desc.contains("Do not kill or respawn."));
+        assert!(desc.contains("Put the additional prompt text in prompt."));
     }
 
     #[test]

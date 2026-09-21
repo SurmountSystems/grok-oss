@@ -939,6 +939,88 @@ mod tests {
         );
     }
 
+    /// Operator: first Ctrl+C with a draft clears; Isolated Preview stays.
+    /// Second empty Ctrl+C then exits.
+    #[test]
+    fn user_guide_ctrl_c_two_stage_clears_then_exits() {
+        let keys = USER_GUIDE
+            .iter()
+            .find(|d| d.filename == "03-keyboard-shortcuts.md")
+            .expect("03-keyboard-shortcuts.md is embedded");
+        let content = keys.content;
+        assert!(
+            content.contains("Clears the Isolated Preview / mill composer draft")
+                && content.contains("Isolated Preview stays")
+                && content.contains("Second press: Isolated Preview Exit"),
+            "03-keyboard-shortcuts.md must document two-stage Ctrl+C: {content}"
+        );
+    }
+
+    /// Operator: last Tab on a unique /model row switches now, no Operator chat.
+    #[test]
+    fn user_guide_unique_model_tab_switches_now() {
+        let keys = USER_GUIDE
+            .iter()
+            .find(|d| d.filename == "03-keyboard-shortcuts.md")
+            .expect("03-keyboard-shortcuts.md is embedded");
+        let slash = USER_GUIDE
+            .iter()
+            .find(|d| d.filename == "04-slash-commands.md")
+            .expect("04-slash-commands.md is embedded");
+        assert!(
+            keys.content
+                .contains("exactly one model row is highlighted")
+                && keys.content.contains("does not send Operator chat"),
+            "03-keyboard-shortcuts.md must say unique /model Tab switches now: {}",
+            keys.content
+        );
+        assert!(
+            slash
+                .content
+                .contains("exactly one model row is highlighted")
+                && slash.content.contains("apply the switch immediately")
+                && slash.content.contains("That is not Operator chat")
+                && slash
+                    .content
+                    .contains("`Ctrl+M` still opens the model picker"),
+            "04-slash-commands.md must say unique /model Tab/Enter SwitchModel now: {}",
+            slash.content
+        );
+    }
+
+    /// Isolated Preview magnifying-glass search next to copy and enlarge.
+    #[test]
+    fn user_guide_isolated_preview_search_glass() {
+        let keys = USER_GUIDE
+            .iter()
+            .find(|d| d.filename == "03-keyboard-shortcuts.md")
+            .expect("03-keyboard-shortcuts.md is embedded");
+        let content = keys.content;
+        assert!(
+            content.contains("magnifying-glass search")
+                && content.contains("immediately left of copy")
+                && content.contains("`plan` matches `Plan` and `PLAN`")
+                && content.contains("composer `/` stays slash"),
+            "03-keyboard-shortcuts.md must document Isolated Preview glass search: {content}"
+        );
+    }
+
+    /// GNOME All Markup Copy is an image, not the dialog title.
+    #[test]
+    fn user_guide_gnome_all_markup_copy_is_image() {
+        let keys = USER_GUIDE
+            .iter()
+            .find(|d| d.filename == "03-keyboard-shortcuts.md")
+            .expect("03-keyboard-shortcuts.md is embedded");
+        let content = keys.content;
+        assert!(
+            content.contains("GNOME All Markup Copy is an image")
+                && content.contains("not the dialog title")
+                && content.contains("must not put that paste into line-viewer search"),
+            "03-keyboard-shortcuts.md must say GNOME All Markup Copy is an image chip: {content}"
+        );
+    }
+
     /// Grok OSS Named contract (G1): user-guide 19 idle CTAs are Approve / Comment /
     /// Revise / Exit. Clarify is the comment-flow action. Letter A types.
     /// Notes (`A`) is gone. Empty `a` does not Approve. This diverges from upstream
@@ -1101,8 +1183,9 @@ mod tests {
         );
         assert!(
             slash.content.contains("grok-oss --version")
-                && slash.content.contains("grok --version"),
-            "04-slash-commands.md must name both grok-oss --version and grok --version"
+                && slash.content.contains("Grok Build is the `grok` binary")
+                && slash.content.contains("`--version`"),
+            "04-slash-commands.md must name grok-oss --version and Grok Build as the grok binary --version, not as an operator grok -- CLI example"
         );
         assert!(
             slash
@@ -1112,9 +1195,7 @@ mod tests {
             "04-slash-commands.md must name Isolated Preview chrome as grok-oss and probe this turn"
         );
         assert!(
-            !slash
-                .content
-                .contains("This debugger is Grok Build 1.0.13"),
+            !slash.content.contains("This debugger is Grok Build 1.0.13"),
             "04-slash-commands.md must not teach leftover Grok Build 1.0.13 as grok-oss"
         );
     }

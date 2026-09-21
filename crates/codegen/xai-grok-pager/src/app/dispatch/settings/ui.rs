@@ -15,12 +15,13 @@ use super::setters::{
     set_invert_scroll_inner, set_keep_text_selection_inner, set_max_thoughts_width_inner,
     set_multiline_mode, set_notifications_session_recap_inner,
     set_notifications_session_recap_threshold_secs_inner, set_page_flip_on_send_inner,
-    set_plan_approval_park_inner, set_prompt_suggestions_inner, set_remember_tool_approvals_inner,
-    set_render_mermaid_inner, set_respect_manual_folds_inner, set_screen_mode_inner,
-    set_scroll_lines_inner, set_scroll_mode_inner, set_scroll_speed_inner,
+    set_plan_approval_park_inner, set_process_rule_reminders_enabled_inner,
+    set_process_rule_reminders_inner, set_prompt_suggestions_inner,
+    set_remember_tool_approvals_inner, set_render_mermaid_inner, set_respect_manual_folds_inner,
+    set_screen_mode_inner, set_scroll_lines_inner, set_scroll_mode_inner, set_scroll_speed_inner,
     set_scrub_ascii_punct_inner, set_show_thinking_blocks_inner, set_show_tips_inner,
     set_simple_mode_inner, set_theme_inner, set_timeline_inner, set_timestamps,
-    set_timestamps_inner, set_ulid_session_ids_inner, set_vim_mode_inner,
+    set_timestamps_inner, set_turbo_planning_inner, set_ulid_session_ids_inner, set_vim_mode_inner,
     set_voice_capture_mode_inner, set_voice_keybind_enabled_inner, set_voice_stt_language_inner,
 };
 use crate::app::actions::{Action, Effect};
@@ -821,6 +822,13 @@ pub(in crate::app::dispatch) fn action_for_reset(
         ("confirm_before_rewind", SettingValue::Bool(b)) => {
             Some(Action::SetConfirmBeforeRewind(*b))
         }
+        ("turbo_planning", SettingValue::Bool(b)) => Some(Action::SetTurboPlanning(*b)),
+        ("process_rule_reminders_enabled", SettingValue::Bool(b)) => {
+            Some(Action::SetProcessRuleRemindersEnabled(*b))
+        }
+        ("process_rule_reminders", SettingValue::String(s)) => {
+            Some(Action::SetProcessRuleReminders(s.clone()))
+        }
         ("combine_queued_prompts", SettingValue::Bool(b)) => {
             Some(Action::SetCombineQueuedPrompts(*b))
         }
@@ -1315,6 +1323,13 @@ pub(in crate::app::dispatch) fn apply_setting_rollback(
         ("prompt_suggestions", SettingValue::Bool(b)) => set_prompt_suggestions_inner(app, *b),
         ("auto_run_implement", SettingValue::Bool(b)) => set_auto_run_implement_inner(app, *b),
         ("economic_mode", SettingValue::Bool(b)) => set_economic_mode_inner(app, *b),
+        ("turbo_planning", SettingValue::Bool(b)) => set_turbo_planning_inner(app, *b),
+        ("process_rule_reminders_enabled", SettingValue::Bool(b)) => {
+            set_process_rule_reminders_enabled_inner(app, *b)
+        }
+        ("process_rule_reminders", SettingValue::String(s)) => {
+            set_process_rule_reminders_inner(app, s.clone())
+        }
         ("resume_canceled_turn_on_restart", SettingValue::Bool(b)) => {
             super::setters::set_resume_canceled_turn_on_restart_inner(app, *b)
         }

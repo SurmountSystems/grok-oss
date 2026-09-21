@@ -446,6 +446,11 @@ less than product code and tests. Do not invent long essays or git nags.
    **Never name that Anthropic assistant (pinned 2026-09-09):** Operator:
    never name that Anthropic assistant product. See the named subsection.
    Host dual-pin: `~/.grok/AGENTS.md` same heading.
+   **Layers, not parent or child (pinned 2026-09-21):** Nested agents are
+   **L1**, **L2**, and **L3**. Coordinator and specialist are fine. Do not
+   call L1 a parent of L2, or L2 a child of L1, or L3 a child of L2. Do
+   not analogize nested agents to OS process trees. See § *Layers, not
+   parent or child*. Host dual-pin: `~/.grok/AGENTS.md` same heading.
    **ISA vs cores vs cargo targets (pinned 2026-08-23).** aarch64 versus
    x86_64 is instruction-set architecture (ISA), not "extra CPUs." CPU in
    that sentence reads as cores or VM size (GitHub `CI_LOW_MEM` versus
@@ -477,12 +482,14 @@ less than product code and tests. Do not invent long essays or git nags.
    product defect under § *Wasted human time* (hard constraint 24).
    Operator speech is work. Never ignore the Operator. Take the
    Operator seriously. Prefer Operator and Agent as speaker labels.
-   Never name that Anthropic assistant. Report finished nested work
-   the same turn the host says the nested agent exited. Full host pin:
+   Nested agents are L1, L2, and L3, not parent or child. Never name
+   that Anthropic assistant. Report finished nested work the same turn
+   the host says the nested agent exited. Full host pin:
    `~/.grok/AGENTS.md` § *Self-improving feedback loop*, § *Operator
    speech is work*, § *Never ignore the Operator*, § *Take the Operator
-   seriously*, § *Operator and Agent*, § *Never name that Anthropic
-   assistant*, § *Report finished nested work the same turn*.
+   seriously*, § *Operator and Agent*, § *Layers, not parent or child*,
+   § *Never name that Anthropic assistant*, § *Report finished nested
+   work the same turn*.
    **Write that down (pinned 2026-08-22; L2 writes 2026-08-28):** when
    the operator explicitly says "write that down", L1 tracks the board
    and spawns; L2 puts the fact in the useful place (report, plan,
@@ -878,6 +885,34 @@ constraint 4) and host `~/.grok/AGENTS.md` same heading. This pin does
 not weaken Job / State / Operator / Next. It supersedes the 2026-09-01
 line that left the composer named Human box.
 
+## Layers, not parent or child (pinned 2026-09-21)
+
+Operator: use layer terminology, not parent or child. Nested agents are
+**L1**, **L2**, and **L3**. Coordinator and specialist are fine. Be
+thoughtful in this language always.
+
+Do not call L1 a parent of L2, or L2 a child of L1, or L3 a child of L2,
+in chat, board titles, spawn descriptions, residual, plans, reports,
+user-guide, or comments humans read. Do not analogize nested agents to
+OS process trees (killing children, orphans, zombies, parent reaping).
+**Child process** remains allowed only for a real OS process in
+technical docs, with that sense explicit.
+
+The existing ban on bare child or children as nicknames for subagents
+stays. This pin adds: do not use **parent** as the speaker or hierarchy
+label for L1 either. Job / State / Operator / Next stays. Speaker labels
+stay Operator and Agent.
+
+Rust identifiers the product already has (`parent_id`, `child_view`,
+`finalize_finished_child_view`) may stay unless a user-visible string is
+attached. User-facing copy uses layers. GitHub issue 143 is titled
+"Parent cannot send a follow-up to a running nested L2". New prose
+describes that work as **L1 follow-up to a running L2**. Do not
+mass-rename GitHub.
+
+This pin does not weaken § *Operator and Agent*. Dual-pin: this file
+(hard constraint 4) and host `~/.grok/AGENTS.md` same heading.
+
 ## Never name that Anthropic assistant (pinned 2026-09-09)
 
 Operator: never name that Anthropic assistant product. Always remember.
@@ -1077,12 +1112,16 @@ wasteful; L2 kills it (see § *Kill a think-only L3 after about 15 minutes*).
 Host: § *Hard stop* default loop.
 
 - **User-facing language** (mirror of host `~/.grok/AGENTS.md` § Language,
-  2026-07-26): never bare **child/children** as a nickname for subagents
-  (“Child finished green” is wrong). Prefer **subagent**, **implementer**,
+  2026-07-26; layers 2026-09-21): never bare **child/children** as a nickname
+  for subagents (“Child finished green” is wrong). Nested agents are **L1**,
+  **L2**, and **L3**. Coordinator and specialist are fine. Do not call L1 a
+  parent of L2, or L2 a child of L1, or L3 a child of L2. Do not analogize
+  nested agents to OS process trees. Prefer **subagent**, **implementer**,
   **explore agent**, **worker**, or a role name. Keep ban on “kids” + “cheap.”
-  “Child process” = OS process only, in technical docs.
+  “Child process” = OS process only, in technical docs. See § *Layers, not
+  parent or child*.
 - **CI fail, regression, multi-file diagnosis, non-trivial fix, skills-location
-  claims:** L1’s first tool turn is `spawn_subagent`, not parent `grep` / `gh`
+  claims:** L1’s first tool turn is `spawn_subagent`, not L1 `grep` / `gh`
   log pull / unnamed test-file reads / “I’ll check the docs.” L2 then
   spawns L3 specialists. L2 does not grep, walk the hot path, or implement.
   Hierarchical fast path stays on L1.

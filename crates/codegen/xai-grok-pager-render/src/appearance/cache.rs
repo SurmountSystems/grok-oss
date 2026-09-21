@@ -60,6 +60,8 @@ const ALLOW_SESSION_MULTILINE_DEFAULT: bool = UiConfig::ALLOW_SESSION_MULTILINE_
 const AUTO_RUN_IMPLEMENT_DEFAULT: bool = true;
 /// Soft-cap context at the 200K pricing tier; default ON when unset.
 const ECONOMIC_MODE_DEFAULT: bool = true;
+/// Live exclusive / Isolated Preview plan turns use xhigh. Default ON.
+const TURBO_PLANNING_DEFAULT: bool = UiConfig::TURBO_PLANNING_DEFAULT;
 const KEEP_TEXT_SELECTION_DEFAULT: TextSelection = TextSelection::Flash;
 /// Scroll speed default (1-100 scale, matches the legacy `[ui].scroll_speed`).
 const SCROLL_SPEED_DEFAULT: u8 = 50;
@@ -719,6 +721,35 @@ pub fn set_economic_mode(enabled: bool) {
     ECONOMIC_MODE_LOADED.with(|l| l.set(true));
 }
 
+// -- turbo_planning ----------------------------------------------------------
+
+thread_local! {
+    static TURBO_PLANNING_CURRENT: Cell<bool> = const { Cell::new(TURBO_PLANNING_DEFAULT) };
+    static TURBO_PLANNING_LOADED: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Cached `[ui].turbo_planning`. Default ON when unset.
+pub fn load_turbo_planning() -> bool {
+    TURBO_PLANNING_LOADED.with(|loaded| {
+        if !loaded.get() {
+            TURBO_PLANNING_CURRENT.with(|c| {
+                c.set(load_bool_from_effective_config(
+                    "turbo_planning",
+                    TURBO_PLANNING_DEFAULT,
+                ))
+            });
+            loaded.set(true);
+        }
+    });
+    TURBO_PLANNING_CURRENT.with(|c| c.get())
+}
+
+/// Replace cached `turbo_planning`.
+pub fn set_turbo_planning(enabled: bool) {
+    TURBO_PLANNING_CURRENT.with(|c| c.set(enabled));
+    TURBO_PLANNING_LOADED.with(|l| l.set(true));
+}
+
 // -- keep_text_selection (`flash` | `hold`) ----------------------------------
 
 thread_local! {
@@ -971,6 +1002,7 @@ pub fn prime(ui: &UiConfig) {
     set_allow_session_multiline(ui.allow_session_multiline_enabled());
     let _ = load_auto_run_implement();
     let _ = load_economic_mode();
+    set_turbo_planning(ui.turbo_planning_enabled());
     // `default_selected_permission` owns its own cache in `permission_cursor`.
     crate::appearance::permission_cursor::prime();
 }

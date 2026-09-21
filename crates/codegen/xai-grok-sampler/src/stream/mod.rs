@@ -299,7 +299,8 @@ fn is_loop_phrase(unit: &str) -> bool {
 }
 
 /// Operator screenshot 2026-09-20 Isolated Preview: the stream looped this
-/// pair until cancel at 19m18s.
+/// pair until cancel at 19m18s. GitHub #133. Named tests must reference this
+/// const so quality `-D warnings` does not fail on unused.
 #[cfg(test)]
 pub(crate) const DEST_ENCODER_SKIP_LOOP: &str =
     "Spawn dests of dest encoder skip. I'll spawn dests of dest encoder skip.";
@@ -309,6 +310,14 @@ mod dest_encoder_skip_repetition_tests {
     use super::*;
     use xai_grok_sampling_types::REPETITIVE_GENERATION_USER_MESSAGE;
 
+    /// Surmount fork of SpaceXAI stream handling. Upstream server
+    /// `x-grok-doom-loop-check` resamples confident *thinking* loops on
+    /// Responses and leaves visible-output loops for the operator to
+    /// cancel. Isolated Preview Chat Completions never reports those
+    /// triggers, so this client `StreamRepetitionGuard` is Fatal
+    /// (`SamplingError::RepetitiveGeneration`, not retried). Do not add a
+    /// second breaker. Upstream server resample stays
+    /// `[doom_loop_recovery]`.
     #[test]
     fn dest_encoder_skip_loop_is_repetitive() {
         assert_eq!(

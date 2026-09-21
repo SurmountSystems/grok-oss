@@ -121,6 +121,73 @@ impl AgentView {
         self.handle_prompt_key(key, registry, false)
     }
 
+    /// Last Tab / Enter on a unique `/model` or `/m` args-phase row applies
+    /// SwitchModel immediately. Composer clears. No Operator chat line.
+    /// Unique trailing-space reasoning rows switch NOW (do not chain to
+    /// effort). Command-phase unique `/model` is not a model row. A fully
+    /// typed model-plus-effort command (`/model Grok 4.6 xhigh`) switches
+    /// NOW even when the effort dropdown still lists every level.
+    fn try_apply_unique_model_slash_row(&mut self) -> Option<InputOutcome> {
+        let snap = self.prompt.slash_snapshot();
+        if !snap.open || snap.cursor_in_command {
+            return None;
+        }
+        if snap.query != "model" && snap.query != "m" {
+            return None;
+        }
+        let insert = if snap.matches.len() == 1 {
+            snap.selection()?.insert_text.trim().to_string()
+        } else {
+            // Iso 20:16: Tab did not switch; Return sent
+            // `/model Grok 4.6 xhigh` as Operator chat. Complete typed
+            // effort must SwitchModel now, not SendPrompt.
+            let typed = self.prompt.text().to_string();
+            let rest = typed.strip_prefix('/')?;
+            let args = rest
+                .strip_prefix("model ")
+                .or_else(|| rest.strip_prefix("m "))
+                .map(str::trim)
+                .filter(|s| !s.is_empty())?
+                .to_string();
+            match crate::slash::commands::model::ModelCommand::action_for_args(
+                &self.session.models,
+                &args,
+            ) {
+                crate::slash::command::CommandResult::Action(Action::SwitchModel {
+                    effort: Some(_),
+                    ..
+                }) => args,
+                _ => return None,
+            }
+        };
+        if insert.is_empty() {
+            return None;
+        }
+        let result = crate::slash::commands::model::ModelCommand::action_for_args(
+            &self.session.models,
+            &insert,
+        );
+        let action = match result {
+            crate::slash::command::CommandResult::Action(Action::SetDefaultModel(id)) => {
+                Action::SwitchModel {
+                    model_id: id,
+                    effort: None,
+                }
+            }
+            crate::slash::command::CommandResult::Action(Action::SwitchModel {
+                model_id,
+                effort,
+            }) => Action::SwitchModel { model_id, effort },
+            _ => return None,
+        };
+        self.prompt.slash_cancel_preview();
+        self.prompt.set_text("");
+        self.prompt.slash_close();
+        self.snapshot_or_clear_plan_feedback_draft();
+        self.persist_unsent_composer_draft();
+        Some(InputOutcome::Action(action))
+    }
+
     // `pub(super)`: also called by `AppView::minimal_key_intercept` to route
     // Apple Terminal's Ctrl+O interject chord straight to the prompt path —
     // minimal's prompt is conceptually always focused, but `active_pane` can be
@@ -236,8 +303,12 @@ impl AgentView {
                     self.prompt.slash_preview_current_selection();
                     return InputOutcome::Changed;
                 }
-                // Tab: accept completion (text only, no execute).
+                // Tab: unique `/model` / `/m` row switches NOW. Otherwise
+                // accept completion (text only, no execute).
                 KeyCode::Tab => {
+                    if let Some(outcome) = self.try_apply_unique_model_slash_row() {
+                        return outcome;
+                    }
                     self.prompt.slash_commit_preview();
                     self.prompt.accept_slash_completion(&self.session.models);
                     return InputOutcome::Changed;
@@ -248,9 +319,26 @@ impl AgentView {
                     self.prompt.slash_close();
                     return InputOutcome::Changed;
                 }
-                // Enter: accept completion, then send (terminal row) or
-                // stay open (row's insert_text ends with space => chains).
+                // Enter: unique `/model` / `/m` row switches NOW and must
+                // not SendPrompt the slash as Operator chat. Otherwise
+                // accept completion, then send (terminal row) or stay open
+                // (row's insert_text ends with space => chains).
                 KeyCode::Enter if key.modifiers.is_empty() => {
+                    // Isolated Preview idle leftover slash-palette `/`
+                    // plus Operator notes: Enter Approves with those
+                    // notes. The leftover snapshot still thinks the
+                    // composer is `/`, so accept would insert `/quit`
+                    // over the first letter of `keep` (`/quiteep`).
+                    // Unique `/model` still switches: that typed slash
+                    // is not idle notes.
+                    if self.isolated_preview_idle_enter_approves_with_notes() {
+                        self.snapshot_or_clear_plan_feedback_draft();
+                        self.prompt.slash_close();
+                        return self.approve_plan();
+                    }
+                    if let Some(outcome) = self.try_apply_unique_model_slash_row() {
+                        return outcome;
+                    }
                     let snap = self.prompt.slash_snapshot();
                     let exact_command = crate::slash::is_typed_slash_selected(
                         &snap,
@@ -794,13 +882,14 @@ impl AgentView {
         // Mouse toggle is scrollback-only (Ctrl+R); the prompt leaves Ctrl+R unbound.
         if !is_text_char && let Some(action_id) = registry.lookup(key, When::AgentScreen) {
             // Ctrl+C is a two-step "clear, then cancel" gesture when the
-            // prompt has a draft: the first press clears the textarea, the
-            // second (now on an empty prompt) cancels the running turn.
-            // Skipping the agent-screen promotion here lets Ctrl+C fall
-            // through to the widget's clear path; an empty prompt re-enters
-            // this block and runs CancelTurn as usual.
-            let cancel_with_draft =
-                matches!(action_id, ActionId::CancelTurn) && !self.prompt.text().is_empty();
+            // prompt has a draft (typed text or image chips): the first
+            // press clears, the second (now on an empty prompt) cancels
+            // the running turn. Image chips alone are a draft. Skipping
+            // the agent-screen promotion here lets Ctrl+C fall through to
+            // the widget's clear path; an empty prompt re-enters this
+            // block and runs CancelTurn as usual.
+            let cancel_with_draft = matches!(action_id, ActionId::CancelTurn)
+                && (!self.prompt.text().is_empty() || !self.prompt.images.is_empty());
             if !cancel_with_draft {
                 let outcome = self.handle_agent_action_with_registry(action_id, registry);
                 // Only consume the key if the agent action actually did
@@ -1776,6 +1865,214 @@ mod slash_menu_enter_tests {
         assert!(
             matches!(outcome, InputOutcome::Action(Action::SendPrompt(ref text)) if text == "/log"),
             "got {outcome:?}; prompt={:?}",
+            agent.prompt.text()
+        );
+    }
+
+    fn tab() -> KeyEvent {
+        KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)
+    }
+
+    fn seed_grok_models(agent: &mut crate::app::agent_view::AgentView) {
+        use agent_client_protocol as acp;
+        use std::sync::Arc;
+        let insert = |agent: &mut crate::app::agent_view::AgentView, id: &str, name: &str| {
+            let mid = acp::ModelId::new(Arc::from(id));
+            agent.session.models.available.insert(
+                mid.clone(),
+                acp::ModelInfo::new(mid, name.to_string()).meta(
+                    serde_json::json!({ "supportsReasoningEffort": true })
+                        .as_object()
+                        .cloned(),
+                ),
+            );
+        };
+        insert(agent, "grok-4.6", "Grok 4.6");
+        insert(agent, "grok-4.5", "Grok 4.5");
+    }
+
+    fn agent_with_model_slash(text: &str) -> crate::app::agent_view::AgentView {
+        let mut agent = super::test_fixtures::make_agent();
+        seed_grok_models(&mut agent);
+        agent.prompt.set_text(text);
+        agent.prompt.set_cursor(text.len());
+        agent.prompt.refresh_slash(&agent.session.models);
+        assert!(
+            agent.prompt.slash_open(),
+            "slash dropdown must open for {text:?}"
+        );
+        agent
+    }
+
+    fn assert_switch_model(
+        outcome: InputOutcome,
+        expected_id: &str,
+        expected_effort: Option<xai_grok_shell::sampling::types::ReasoningEffort>,
+        prompt: &str,
+    ) {
+        use agent_client_protocol as acp;
+        use std::sync::Arc;
+        match outcome {
+            InputOutcome::Action(Action::SwitchModel { model_id, effort }) => {
+                assert_eq!(
+                    model_id,
+                    acp::ModelId::new(Arc::from(expected_id)),
+                    "SwitchModel id; prompt={prompt:?}"
+                );
+                assert_eq!(
+                    effort, expected_effort,
+                    "SwitchModel effort; prompt={prompt:?}"
+                );
+            }
+            other => panic!(
+                "Operator: last Tab on a unique /model row must SwitchModel now, not {other:?}; prompt={prompt:?}"
+            ),
+        }
+    }
+
+    /// Operator: "The last tab when only the single model is highlighted
+    /// should switch it, but it doesn't." Unique `/model` row Tab applies
+    /// SwitchModel now. Composer clears. No SendPrompt.
+    #[test]
+    fn unique_model_slash_tab_switches_now_empty_composer_no_send() {
+        let mut agent = agent_with_model_slash("/model Grok 4.6");
+        let snap = agent.prompt.slash_snapshot();
+        assert_eq!(
+            snap.matches.len(),
+            1,
+            "unique remaining highlight; got {:?}",
+            snap.matches.iter().map(|r| &r.display).collect::<Vec<_>>()
+        );
+        assert!(
+            snap.selection()
+                .is_some_and(|row| row.insert_text.ends_with(' ')),
+            "reasoning unique row insert_text trails a space so Enter used to chain; Tab must still switch NOW"
+        );
+        let outcome = agent.handle_prompt_key_for_test(&tab());
+        assert_switch_model(outcome, "grok-4.6", None, agent.prompt.text());
+        assert!(
+            agent.prompt.text().is_empty(),
+            "composer must clear; got {:?}",
+            agent.prompt.text()
+        );
+        assert!(
+            !agent.prompt.slash_open(),
+            "slash dropdown must close after SwitchModel"
+        );
+    }
+
+    /// Operator: "Return does embed it into the prompt but it doesn't work."
+    /// Iso 20:16 Return sent `/model Grok 4.6 xhigh` as Operator chat.
+    /// Unique-row Enter switches now and must not SendPrompt the slash.
+    #[test]
+    fn unique_model_slash_enter_switches_now_no_operator_model_chat() {
+        let mut agent = agent_with_model_slash("/model Grok 4.6");
+        assert_eq!(agent.prompt.slash_snapshot().matches.len(), 1);
+        let outcome = agent.handle_prompt_key_for_test(&enter());
+        assert_switch_model(outcome, "grok-4.6", None, agent.prompt.text());
+        assert!(
+            agent.prompt.text().is_empty(),
+            "composer must clear; got {:?}",
+            agent.prompt.text()
+        );
+        assert!(
+            !matches!(
+                agent.handle_prompt_key_for_test(&enter()),
+                InputOutcome::Action(Action::SendPrompt(ref text)) if text.contains("/model")
+            ),
+            "Enter on the unique row must not later SendPrompt /model as Operator chat"
+        );
+    }
+
+    /// Alias `/m` unique row Tab is the same SwitchModel path.
+    #[test]
+    fn unique_m_slash_tab_switches_now() {
+        let mut agent = agent_with_model_slash("/m Grok 4.6");
+        assert_eq!(agent.prompt.slash_snapshot().matches.len(), 1);
+        let outcome = agent.handle_prompt_key_for_test(&tab());
+        assert_switch_model(outcome, "grok-4.6", None, agent.prompt.text());
+        assert!(agent.prompt.text().is_empty());
+    }
+
+    /// Iso 20:16 complete typed `/model Grok 4.6 xhigh`. Effort dropdown
+    /// still lists every level. Tab/Enter SwitchModel with xhigh now.
+    #[test]
+    fn complete_typed_model_xhigh_tab_switches_now_with_effort() {
+        use xai_grok_shell::sampling::types::ReasoningEffort;
+        let mut agent = agent_with_model_slash("/model Grok 4.6 xhigh");
+        let outcome = agent.handle_prompt_key_for_test(&tab());
+        assert_switch_model(
+            outcome,
+            "grok-4.6",
+            Some(ReasoningEffort::Xhigh),
+            agent.prompt.text(),
+        );
+        assert!(
+            agent.prompt.text().is_empty(),
+            "composer must clear; got {:?}",
+            agent.prompt.text()
+        );
+        assert!(
+            !matches!(
+                agent.handle_prompt_key_for_test(&enter()),
+                InputOutcome::Action(Action::SendPrompt(_))
+            ),
+            "must not SendPrompt the slash after the switch"
+        );
+    }
+
+    /// Command-phase unique `/model` is not a model row. Tab still completes
+    /// `/model `.
+    #[test]
+    fn command_phase_unique_model_tab_still_completes() {
+        let mut agent = agent_with_model_slash("/model");
+        let snap = agent.prompt.slash_snapshot();
+        assert!(
+            snap.cursor_in_command,
+            "command-phase unique /model is not a model row"
+        );
+        let outcome = agent.handle_prompt_key_for_test(&tab());
+        assert!(
+            matches!(outcome, InputOutcome::Changed),
+            "command-phase Tab must complete, not SwitchModel; got {outcome:?}"
+        );
+        assert!(
+            agent.prompt.text().starts_with("/model"),
+            "Tab must keep /model in the composer; got {:?}",
+            agent.prompt.text()
+        );
+        assert!(
+            !matches!(
+                outcome,
+                InputOutcome::Action(Action::SwitchModel { .. } | Action::SendPrompt(_))
+            ),
+            "command-phase Tab must not SwitchModel or SendPrompt; got {outcome:?}"
+        );
+    }
+
+    /// More than one model row: Tab keeps completing/filtering.
+    #[test]
+    fn multi_row_model_tab_stays_complete_not_switch() {
+        let mut agent = agent_with_model_slash("/model Grok");
+        let snap = agent.prompt.slash_snapshot();
+        assert!(
+            snap.matches.len() > 1,
+            "Grok 4.6 and Grok 4.5 must both remain; got {:?}",
+            snap.matches.iter().map(|r| &r.display).collect::<Vec<_>>()
+        );
+        let before = agent.prompt.text().to_string();
+        let outcome = agent.handle_prompt_key_for_test(&tab());
+        assert!(
+            matches!(outcome, InputOutcome::Changed),
+            "multi-row Tab must complete/filter, not SwitchModel; got {outcome:?}"
+        );
+        assert!(
+            !matches!(outcome, InputOutcome::Action(Action::SwitchModel { .. })),
+            "multi-row Tab must not SwitchModel"
+        );
+        assert!(
+            agent.prompt.text().starts_with("/model"),
+            "composer must stay a slash completion; before={before:?} after={:?}",
             agent.prompt.text()
         );
     }

@@ -677,6 +677,15 @@ pub fn current_value_for(
             crate::appearance::cache::load_combine_queued_prompts(),
         )),
         "confirm_before_rewind" => Some(SettingValue::Bool(ui.confirm_before_rewind_enabled())),
+        "turbo_planning" => Some(SettingValue::Bool(
+            crate::appearance::cache::load_turbo_planning(),
+        )),
+        "process_rule_reminders_enabled" => {
+            Some(SettingValue::Bool(ui.process_rule_reminders_enabled()))
+        }
+        "process_rule_reminders" => Some(SettingValue::String(
+            ui.process_rule_reminders_text().to_string(),
+        )),
         "simple_mode" => Some(SettingValue::Bool(ui.simple_mode.unwrap_or(true))),
         // Per-tip contextual hints — `None` (inherit) reads as the default ON.
         "contextual_hints.undo" => {
@@ -1575,6 +1584,25 @@ mod tests {
                     );
                     assert!(*default, "economic_mode must default ON");
                 }
+                ("turbo_planning", SettingKind::Bool { default }) => {
+                    assert_eq!(
+                        *default,
+                        ui.turbo_planning_enabled(),
+                        "turbo_planning default drifts from UiConfig::default()"
+                    );
+                    assert!(*default, "turbo_planning must default ON");
+                }
+                ("process_rule_reminders_enabled", SettingKind::Bool { default }) => {
+                    assert_eq!(
+                        *default,
+                        ui.process_rule_reminders_enabled(),
+                        "process_rule_reminders_enabled default drifts from UiConfig::default()"
+                    );
+                    assert!(*default, "process_rule_reminders_enabled must default ON");
+                }
+                ("process_rule_reminders", SettingKind::String { default, .. }) => {
+                    assert_eq!(*default, "", "process_rule_reminders default must be empty");
+                }
                 ("resume_canceled_turn_on_restart", SettingKind::Bool { default }) => {
                     assert_eq!(
                         *default,
@@ -1664,6 +1692,105 @@ mod tests {
                     meta.key
                 ),
             }
+        }
+    }
+
+    /// `/settings` turbo planning (F) and process-rule reminder (I) rows: on/off
+    /// plus the reminder list, with the named help copy. Not a spawn reject.
+    #[test]
+    fn turbo_planning_and_process_rule_reminder_settings_help() {
+        let reg = SettingsRegistry::defaults();
+        let turbo = reg
+            .all()
+            .iter()
+            .find(|m| m.key == "turbo_planning")
+            .expect("turbo_planning /settings row");
+        assert_eq!(turbo.label, "Turbo planning");
+        assert!(
+            turbo.description.contains("xhigh"),
+            "turbo help must name xhigh, got {}",
+            turbo.description
+        );
+        assert!(
+            turbo.description.contains("lower-right yellow"),
+            "turbo help must name only the lower-right yellow model/effort line, got {}",
+            turbo.description
+        );
+        assert!(
+            turbo.description.contains("No TURBO badge"),
+            "turbo help must forbid a TURBO badge, got {}",
+            turbo.description
+        );
+        assert!(
+            turbo.description.contains("session effort"),
+            "turbo help must say off keeps session effort, got {}",
+            turbo.description
+        );
+        match &turbo.kind {
+            SettingKind::Bool { default } => {
+                assert!(*default, "turbo_planning must default ON");
+            }
+            other => panic!("turbo_planning must be Bool, got {other:?}"),
+        }
+
+        let enabled = reg
+            .all()
+            .iter()
+            .find(|m| m.key == "process_rule_reminders_enabled")
+            .expect("process_rule_reminders_enabled /settings row");
+        assert_eq!(enabled.label, "Process-rule reminders");
+        assert!(
+            enabled.description.contains("Spawn still succeeds"),
+            "reminder on/off help must say spawn still succeeds, got {}",
+            enabled.description
+        );
+        assert!(
+            enabled
+                .description
+                .contains("Keep such reminders soft for now"),
+            "reminder on/off help must keep reminders soft, got {}",
+            enabled.description
+        );
+        assert!(
+            enabled.description.contains("Off or empty injects nothing"),
+            "reminder on/off help must say off/empty injects nothing, got {}",
+            enabled.description
+        );
+        match &enabled.kind {
+            SettingKind::Bool { default } => {
+                assert!(*default, "process_rule_reminders_enabled must default ON");
+            }
+            other => panic!("process_rule_reminders_enabled must be Bool, got {other:?}"),
+        }
+
+        let list = reg
+            .all()
+            .iter()
+            .find(|m| m.key == "process_rule_reminders")
+            .expect("process_rule_reminders /settings row");
+        assert_eq!(list.label, "Process-rule reminder list");
+        assert!(
+            list.description
+                .contains("only two implementor L2s allowed"),
+            "reminder list help must use the example copy, got {}",
+            list.description
+        );
+        assert!(
+            list.description.contains("Share is allowed"),
+            "reminder list help must say share is allowed, got {}",
+            list.description
+        );
+        assert!(
+            list.description
+                .contains("exclusive is one tool call then release"),
+            "reminder list help must say exclusive is one tool call then release, got {}",
+            list.description
+        );
+        match &list.kind {
+            SettingKind::String { default, .. } => {
+                assert_eq!(*default, "", "process_rule_reminders default must be empty");
+            }
+            other => panic!("process_rule_reminders must be String, got {other:?}"),
         }
     }
 

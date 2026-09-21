@@ -38,7 +38,7 @@ let
       perl
       makeWrapper
     ]
-    ++ lib.optionals stdenv.isLinux [
+    ++ lib.optionals stdenv.hostPlatform.isLinux [
       # Faster, leaner final links on Linux (helps free GHA RAM peaks).
       mold
     ];
@@ -46,14 +46,14 @@ let
   buildInputs =
     with pkgs;
     [ openssl ]
-    ++ lib.optionals stdenv.isLinux [ dbus ]
-    ++ lib.optionals stdenv.isDarwin [
+    ++ lib.optionals stdenv.hostPlatform.isLinux [ dbus ]
+    ++ lib.optionals stdenv.hostPlatform.isDarwin [
       darwin.apple_sdk.frameworks.Security
       darwin.apple_sdk.frameworks.SystemConfiguration
     ];
 
   # Linux: prefer mold for links inside pure crane builds.
-  moldRustflags = lib.optionalString pkgs.stdenv.isLinux "-C link-arg=-fuse-ld=mold";
+  moldRustflags = lib.optionalString pkgs.stdenv.hostPlatform.isLinux "-C link-arg=-fuse-ld=mold";
 
   commonArgs = {
     inherit src nativeBuildInputs buildInputs;

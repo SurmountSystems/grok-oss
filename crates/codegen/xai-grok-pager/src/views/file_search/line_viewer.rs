@@ -711,6 +711,9 @@ pub struct PlanViewerExtras {
     pub abandon_hovered: bool,
     pub copy_button_area: Option<Rect>,
     pub copy_hovered: bool,
+    /// Magnifying-glass hit target immediately left of copy.
+    pub search_button_area: Option<Rect>,
+    pub search_hovered: bool,
     pub last_click_at: Option<std::time::Instant>,
     pub gutter_drag_start: Option<usize>,
     pub gutter_drag_end: Option<usize>,
@@ -1767,9 +1770,33 @@ pub fn render_line_viewer(
                 ));
             }
             viewer.plan_mut().copy_button_area = Some(Rect::new(copy_x, popup_area.y, copy_w, 1));
+            // Magnifying glass immediately left of copy (copy stays
+            // immediately left of `[↗]`).
+            let search_w: u16 = 1;
+            if copy_x > popup_area.x + search_w + 2 {
+                let search_x = copy_x - search_w;
+                let search_hovered = viewer.plan_ref().is_some_and(|p| p.search_hovered);
+                let search_style = if search_hovered {
+                    Style::default()
+                        .fg(theme.text_primary)
+                        .bg(theme.bg_base)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(theme.gray).bg(theme.bg_base)
+                };
+                let search_span = Span::styled(crate::glyphs::search_icon(), search_style);
+                buf.set_span(search_x, popup_area.y, &search_span, search_w);
+                viewer.plan_mut().search_button_area =
+                    Some(Rect::new(search_x, popup_area.y, search_w, 1));
+            } else {
+                viewer.plan_mut().search_button_area = None;
+            }
         } else {
             viewer.plan_mut().copy_button_area = None;
+            viewer.plan_mut().search_button_area = None;
         }
+    } else if let Some(plan) = viewer.plan.as_mut() {
+        plan.search_button_area = None;
     }
 
     // The legacy top-border "send" button is gone — both plan-approval
@@ -2203,6 +2230,27 @@ mod tests {
             buf[(bracket_x.saturating_add(1), area.y)].symbol(),
             crate::glyphs::enlarge(),
             "copy glyph must sit immediately left of [↗]"
+        );
+    }
+
+    /// Glass is immediately left of copy. Copy stays immediately left of `[↗]`.
+    fn assert_title_bar_search_left_of_copy(buf: &Buffer, plan: &PlanViewerExtras) {
+        let search = plan
+            .search_button_area
+            .expect("magnifying glass must be a clickable hit target");
+        let copy = plan
+            .copy_button_area
+            .expect("copy must stay next to enlarge");
+        assert_eq!(
+            search.x + search.width,
+            copy.x,
+            "glass must sit immediately left of copy"
+        );
+        assert_eq!(search.y, copy.y, "glass shares the title-bar row with copy");
+        assert_eq!(
+            buf[(search.x, search.y)].symbol(),
+            crate::glyphs::search_icon(),
+            "search_button_area must cover the title-bar glass glyph"
         );
     }
 
@@ -2949,5 +2997,88 @@ mod tests {
 
         assert_eq!(viewer.selected_line_range(), Some(1..4));
         assert_eq!(viewer.line_range_suffix(), Some(":1-3".to_owned()));
+    }
+
+    /// Glass sits immediately left of copy; copy stays immediately left of
+    /// `[↗]`. Do not steal `assert_title_bar_copy_left_of_enlarge`.
+    #[test]
+    fn plan_preview_title_bar_search_glass_immediately_left_of_copy() {
+        let mut viewer = LineViewerState::open_markdown_content(
+            "plan.md",
+            "# Plan\n\nThen PLAN is next\n".to_owned(),
+            None,
+        )
+        .expect("open plan");
+        viewer.kind = LineViewerKind::PlanPreview;
+        viewer.fullscreen = true;
+        viewer.plan_mut().feedback_active = true;
+        viewer.plan_mut().show_action_buttons = false;
+
+        let full = Rect::new(0, 0, 80, 24);
+        let mut buf = Buffer::empty(full);
+        let theme = crate::theme::Theme::current();
+        render_line_viewer(&mut buf, full, &mut viewer, Path::new("/tmp"), &theme, 0);
+
+        let modal = viewer.last_modal_area.expect("title bar needs a modal");
+        let footer_y = modal.y + modal.height.saturating_sub(1);
+        let plan = viewer.plan_ref().expect("plan extras");
+        assert_title_bar_copy_left_of_enlarge(&buf, plan, footer_y);
+        assert_title_bar_search_left_of_copy(&buf, plan);
+    }
+
+    /// Query `plan` matches `Plan` and `PLAN`. Reuse LineViewerState search.
+    /// n/N jump after Enter accepts the search.
+    #[test]
+    fn isolated_preview_search_query_plan_matches_plan_and_plan() {
+        use crate::views::list_pane::InputBarMode;
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let mut viewer = LineViewerState::open_markdown_content(
+            "plan.md",
+            "# Plan\n\nThen PLAN is next\n".to_owned(),
+            None,
+        )
+        .expect("open plan");
+        viewer.kind = LineViewerKind::PlanPreview;
+        viewer.prepare_layout(80, 24);
+        viewer.list_state.open_search(&viewer.lines);
+        assert_eq!(
+            viewer.list_state.input_mode(),
+            Some(InputBarMode::Search),
+            "open_search must reuse :search, not a second engine"
+        );
+        for ch in ['p', 'l', 'a', 'n'] {
+            viewer.list_state.handle_key_event(
+                &KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE),
+                &viewer.lines,
+            );
+        }
+        assert_eq!(viewer.list_state.input_textarea().text(), "plan");
+        viewer.list_state.handle_key_event(
+            &KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &viewer.lines,
+        );
+        assert!(
+            viewer.list_state.input_mode().is_none(),
+            "Enter accepts search and closes the input bar"
+        );
+        assert!(
+            viewer.list_state.match_count() >= 2,
+            "query plan must match Plan and PLAN; got {}",
+            viewer.list_state.match_count()
+        );
+        let first = viewer.list_state.matcher().and_then(|m| m.current_match);
+        viewer.list_state.handle_key_event(
+            &KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE),
+            &viewer.lines,
+        );
+        let second = viewer.list_state.matcher().and_then(|m| m.current_match);
+        assert_ne!(first, second, "n jumps to the next hit");
+        viewer.list_state.handle_key_event(
+            &KeyEvent::new(KeyCode::Char('N'), KeyModifiers::SHIFT),
+            &viewer.lines,
+        );
+        let back = viewer.list_state.matcher().and_then(|m| m.current_match);
+        assert_eq!(back, first, "N jumps to the previous hit");
     }
 }

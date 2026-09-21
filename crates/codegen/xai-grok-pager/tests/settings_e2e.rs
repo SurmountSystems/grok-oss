@@ -68,6 +68,9 @@ const ALL_SETTINGS_EXERCISED: &[&str] = &[
     "scrub_ascii_punct",
     "ulid_session_ids",
     "allow_worktree",
+    "turbo_planning",
+    "process_rule_reminders_enabled",
+    "process_rule_reminders",
     "bubble_copy_buttons",
     "plan_approval_park",
     "economic_mode",
@@ -173,9 +176,115 @@ fn matrix_is_subset_of_registry() {
     }
 }
 
+/// Keyboard Space on `turbo_planning` (Bool, default ON) emits the typed setter.
+/// Product `from_typed_setter` maps `SetTurboPlanning` to `SetBool`.
+#[test]
+fn turbo_planning_keyboard_space_emits_typed_setter() {
+    let mut s = make_state();
+    navigate_to(&mut s, "turbo_planning");
+    let outcome = handle_settings_key(&mut s, &press(KeyCode::Char(' ')));
+    match outcome {
+        SettingsKeyOutcome::SetBool {
+            key: "turbo_planning",
+            value: false,
+        } => {}
+        other => panic!("expected SetBool for turbo_planning, got {other:?}"),
+    }
+}
+
+/// Mouse click on `turbo_planning` emits the same typed setter as Space.
+#[test]
+fn turbo_planning_mouse_click_emits_typed_setter() {
+    let mut s = make_state();
+    navigate_to(&mut s, "turbo_planning");
+    let outcome = click_selected_row(&mut s);
+    match outcome {
+        SettingsKeyOutcome::SetBool {
+            key: "turbo_planning",
+            value: false,
+        } => {}
+        other => panic!("expected SetBool for turbo_planning from mouse, got {other:?}"),
+    }
+}
+
+/// Keyboard Space on `process_rule_reminders_enabled` (Bool) emits the typed setter.
+#[test]
+fn process_rule_reminders_enabled_keyboard_space_emits_typed_setter() {
+    let mut s = make_state();
+    navigate_to(&mut s, "process_rule_reminders_enabled");
+    let outcome = handle_settings_key(&mut s, &press(KeyCode::Char(' ')));
+    match outcome {
+        SettingsKeyOutcome::SetBool {
+            key: "process_rule_reminders_enabled",
+            value: false,
+        } => {}
+        other => panic!("expected SetBool for process_rule_reminders_enabled, got {other:?}"),
+    }
+}
+
+/// Mouse click on `process_rule_reminders_enabled` emits the same typed setter as Space.
+#[test]
+fn process_rule_reminders_enabled_mouse_click_emits_typed_setter() {
+    let mut s = make_state();
+    navigate_to(&mut s, "process_rule_reminders_enabled");
+    let outcome = click_selected_row(&mut s);
+    match outcome {
+        SettingsKeyOutcome::SetBool {
+            key: "process_rule_reminders_enabled",
+            value: false,
+        } => {}
+        other => {
+            panic!("expected SetBool for process_rule_reminders_enabled from mouse, got {other:?}")
+        }
+    }
+}
+
+/// Keyboard Enter on `process_rule_reminders` (String) starts value edit.
+#[test]
+fn process_rule_reminders_keyboard_enter_starts_edit() {
+    let mut s = make_state();
+    navigate_to(&mut s, "process_rule_reminders");
+    let outcome = handle_settings_key(&mut s, &press(KeyCode::Enter));
+    assert!(
+        matches!(outcome, SettingsKeyOutcome::Changed),
+        "Enter on process_rule_reminders must start edit, got {outcome:?}"
+    );
+    assert!(
+        !matches!(s.mode(), SettingsModalMode::Browse),
+        "expected value-edit mode after Enter on process_rule_reminders"
+    );
+}
+
+/// Mouse click on `process_rule_reminders` starts the same value edit as Enter.
+#[test]
+fn process_rule_reminders_mouse_click_starts_edit() {
+    let mut s = make_state();
+    navigate_to(&mut s, "process_rule_reminders");
+    let outcome = click_selected_row(&mut s);
+    assert!(
+        matches!(outcome, SettingsKeyOutcome::Changed),
+        "mouse on process_rule_reminders must start edit, got {outcome:?}"
+    );
+    assert!(
+        !matches!(s.mode(), SettingsModalMode::Browse),
+        "expected value-edit mode after mouse on process_rule_reminders"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+fn click_selected_row(s: &mut SettingsModalState) -> SettingsKeyOutcome {
+    synth_rects(s);
+    let mouse = crossterm::event::MouseEvent {
+        kind: MouseEventKind::Down(crossterm::event::MouseButton::Left),
+        column: 8,
+        row: s.selected as u16,
+        modifiers: KeyModifiers::NONE,
+    };
+    handle_settings_mouse(s, mouse.kind, mouse.column, mouse.row)
+}
 
 fn make_state() -> SettingsModalState {
     // Voice rows are hidden when the process gate is off (default until startup).
@@ -1053,6 +1162,18 @@ fn slash_enters_filter_mode_and_chars_go_to_query_no_action_leak() {
             }
             SettingsKeyOutcome::ActionThenClose(a) => {
                 panic!("filter mode leaked ActionThenClose({a:?}) for char {c:?}");
+            }
+            SettingsKeyOutcome::SetBool { key, value } => {
+                let outcome = SettingsKeyOutcome::SetBool { key, value };
+                if let Some(a) = outcome.typed_dispatch_action() {
+                    panic!("filter mode leaked Action({a:?}) via SetBool for char {c:?}");
+                }
+            }
+            SettingsKeyOutcome::SetString { key, value } => {
+                let outcome = SettingsKeyOutcome::SetString { key, value };
+                if let Some(a) = outcome.typed_dispatch_action() {
+                    panic!("filter mode leaked Action({a:?}) via SetString for char {c:?}");
+                }
             }
             SettingsKeyOutcome::Close => {
                 panic!("filter mode unexpectedly closed on char {c:?}");
@@ -2007,6 +2128,8 @@ fn registry_kind_membership_through_pr_14() {
             "scrub_ascii_punct",
             "ulid_session_ids",
             "allow_worktree",
+            "turbo_planning",
+            "process_rule_reminders_enabled",
             "bubble_copy_buttons",
             "auto_run_implement",
             "economic_mode",
@@ -2073,10 +2196,10 @@ fn registry_kind_membership_through_pr_14() {
     );
 
     let string_keys = by_kind.remove("String").unwrap_or_default();
-    assert!(
-        string_keys.is_empty(),
-        "no String-kind settings should remain — `default_model` + `fork_secondary_model` \
-         migrated to DynamicEnum; got: {string_keys:?}",
+    assert_eq!(
+        string_keys,
+        vec!["process_rule_reminders"],
+        "String kind membership drift",
     );
 
     let dynamic_enum_keys = by_kind.remove("DynamicEnum").unwrap_or_default();
@@ -2174,6 +2297,7 @@ fn defaults_round_trip_through_registry() {
     xai_grok_pager::appearance::cache::set_scrub_ascii_punct(true);
     xai_grok_pager::appearance::cache::set_ulid_session_ids(true);
     xai_grok_pager::appearance::cache::set_allow_worktree(false);
+    xai_grok_pager::appearance::cache::set_turbo_planning(true);
     xai_grok_pager::appearance::cache::set_bubble_copy_buttons(true);
     xai_grok_pager::appearance::cache::set_plan_approval_force_modal(false);
     xai_grok_pager::appearance::cache::set_prompt_suggestions(true);
@@ -2243,6 +2367,9 @@ fn defaults_round_trip_through_registry() {
             "scrub_ascii_punct" => SettingValue::Bool(true),
             "ulid_session_ids" => SettingValue::Bool(true),
             "allow_worktree" => SettingValue::Bool(false),
+            "turbo_planning" => SettingValue::Bool(true),
+            "process_rule_reminders_enabled" => SettingValue::Bool(true),
+            "process_rule_reminders" => SettingValue::String(String::new()),
             "bubble_copy_buttons" => SettingValue::Bool(true),
             "plan_approval_park" => SettingValue::Enum("soft"),
             "prompt_suggestions" => SettingValue::Bool(true),
@@ -2349,6 +2476,14 @@ fn settings_value_payload_matches_kind() {
             | SettingsKeyOutcome::Action(Action::SetScrubAsciiPunct(_))
             | SettingsKeyOutcome::Action(Action::SetUlidSessionIds(_))
             | SettingsKeyOutcome::Action(Action::SetAllowWorktree(_))
+            | SettingsKeyOutcome::SetBool {
+                key: "turbo_planning",
+                ..
+            }
+            | SettingsKeyOutcome::SetBool {
+                key: "process_rule_reminders_enabled",
+                ..
+            }
             | SettingsKeyOutcome::Action(Action::SetBubbleCopyButtons(_))
             | SettingsKeyOutcome::Action(Action::SetPromptSuggestions(_))
             | SettingsKeyOutcome::Action(Action::SetAutoRunImplement(_))

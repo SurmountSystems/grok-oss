@@ -5,7 +5,17 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
 ## Dependency tree
 
 - L1 main session
+  - L2 Add FollowUp event and backend
+    - L3 specialists (when spawned)
+  - L2 Add TaskTool run follow_up named test
+    - L3 specialists (when spawned)
   - L2 Add fail-open module and wrap edit.rs
+    - L3 specialists (when spawned)
+  - L2 Add follow_up schema field
+    - L3 specialists (when spawned)
+  - L2 Add paste insert helper
+    - L3 specialists (when spawned)
+  - L2 Add turbo and reminder settings rows
     - L3 specialists (when spawned)
   - L2 Approve paste-chip TDD fresh
     - L3 specialists (when spawned)
@@ -16,6 +26,10 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
   - L2 Bound first-token retry
     - L3 specialists (when spawned)
   - L2 Bump rustls past advisory
+    - L3 specialists (when spawned)
+  - L2 Check if tests landed
+    - L3 specialists (when spawned)
+  - L2 Check tests and coordinator
     - L3 specialists (when spawned)
   - L2 Check-remote and Isolated Preview paths
     - L3 specialists (when spawned)
@@ -31,35 +45,115 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
     - L3 specialists (when spawned)
   - L2 Compact must shrink loop garbage
     - L3 specialists (when spawned)
+  - L2 Compacting open click hit
+    - L3 specialists (when spawned)
+  - L2 Compile follow-up tests and request_is_l3
+    - L3 specialists (when spawned)
+  - L2 Confirm settings e2e if-let
+    - L3 specialists (when spawned)
   - L2 Continue quality sequence after first gate
+    - L3 specialists (when spawned)
+  - L2 Cover SettingsKeyOutcome match
     - L3 specialists (when spawned)
   - L2 Crate-build bundled fd
     - L3 specialists (when spawned)
   - L2 Crate-build bundled ripgrep
     - L3 specialists (when spawned)
+  - L2 D mill chip Ctrl+C
+    - L3 specialists (when spawned)
+  - L2 D mill chip finish
+    - L3 specialists (when spawned)
+  - L2 D+H Ctrl+C and /model Tab
+    - L3 specialists (when spawned)
+  - L2 D+H Ctrl+C model Tab
+    - L3 specialists (when spawned)
+  - L2 D+H implement now
+    - L3 specialists (when spawned)
+  - L2 D+H land tests product
+    - L3 specialists (when spawned)
+  - L2 D+H write report now
+    - L3 specialists (when spawned)
   - L2 Diagnose grok-oss /rebuild
     - L3 specialists (when spawned)
   - L2 Diagnose grok-oss hang
     - L3 specialists (when spawned)
+  - L2 Diagnose missing request_is_l3
+    - L3 specialists (when spawned)
   - L2 Diagnose rebuild resume drain
+    - L3 specialists (when spawned)
+  - L2 Distinct polish version pointer
     - L3 specialists (when spawned)
   - L2 Drop looping compact garbage
     - L3 specialists (when spawned)
+  - L2 E+G implement now
+    - L3 specialists (when spawned)
+  - L2 E+G land tests product
+    - L3 specialists (when spawned)
+  - L2 E+G leftover named tests
+    - L3 specialists (when spawned)
+  - L2 E+G preview search and paste
+    - L3 specialists (when spawned)
+  - L2 E+G search paste chip
+    - L3 specialists (when spawned)
+  - L2 E+G write report now
+    - L3 specialists (when spawned)
   - L2 Embed ripgrep in tools
     - L3 specialists (when spawned)
+  - L2 Encrypt stale subagent prompt
+    - L3 specialists (when spawned)
+  - L2 Enroll leftover follow-up tests in FORK
+    - L3 specialists (when spawned)
   - L2 Explore /rebuild exec path
+    - L3 specialists (when spawned)
+  - L2 Extract green gate nextest summary
+    - L3 specialists (when spawned)
+  - L2 FORK.md after slice reports
+    - L3 specialists (when spawned)
+  - L2 FORK.md slice keywords
+    - L3 specialists (when spawned)
+  - L2 Fill settings inventory lists
+    - L3 specialists (when spawned)
+  - L2 Fill tests and wire follow-up
+    - L3 specialists (when spawned)
+  - L2 Find L2 compact sampling seam
+    - L3 specialists (when spawned)
+  - L2 Find L2 spawn tool-policy seam
     - L3 specialists (when spawned)
   - L2 Finish 403 paint product
     - L3 specialists (when spawned)
   - L2 Finish 403 paint slice
     - L3 specialists (when spawned)
+  - L2 Finish D-G via L3
+    - L3 specialists (when spawned)
+  - L2 Finish F I leftover wiring
+    - L3 specialists (when spawned)
+  - L2 Finish F request stamp
+    - L3 specialists (when spawned)
   - L2 Finish Isolated Preview report
+    - L3 specialists (when spawned)
+  - L2 Finish asserts and product
     - L3 specialists (when spawned)
   - L2 Finish goal card wiring
     - L3 specialists (when spawned)
   - L2 Finish goal-clear report
     - L3 specialists (when spawned)
+  - L2 Finish live Subagents list
+    - L3 specialists (when spawned)
+  - L2 Finish live Subagents list
+    - L3 specialists (when spawned)
+  - L2 Finish paste helper edit
+    - L3 specialists (when spawned)
+  - L2 Finish preview paste slash
+    - L3 specialists (when spawned)
+  - L2 Finish settings inventory
+    - L3 specialists (when spawned)
+  - L2 Finish soft reminder spawn inject
+    - L3 specialists (when spawned)
   - L2 Finish totals report
+    - L3 specialists (when spawned)
+  - L2 Finish turbo planning wiring
+    - L3 specialists (when spawned)
+  - L2 Finish typed bool setter
     - L3 specialists (when spawned)
   - L2 Fix /plan already-in-plan submit
     - L3 specialists (when spawned)
@@ -115,6 +209,8 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
     - L3 specialists (when spawned)
   - L2 Fix chip stay folded after reentry
     - L3 specialists (when spawned)
+  - L2 Fix compact const assert form
+    - L3 specialists (when spawned)
   - L2 Fix compact idle-timeout contract
     - L3 specialists (when spawned)
   - L2 Fix from_ref SubagentInfo types
@@ -133,6 +229,8 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
     - L3 specialists (when spawned)
   - L2 Fix last 2 nextest fails
     - L3 specialists (when spawned)
+  - L2 Fix leftover from quality report
+    - L3 specialists (when spawned)
   - L2 Fix let_underscore_future clippy
     - L3 specialists (when spawned)
   - L2 Fix manual_range_contains clippy
@@ -140,6 +238,8 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
   - L2 Fix mut rx plan_stale_prompt
     - L3 specialists (when spawned)
   - L2 Fix next implement auto-run
+    - L3 specialists (when spawned)
+  - L2 Fix pager dead_code and E0507
     - L3 specialists (when spawned)
   - L2 Fix pager follow-tail
     - L3 specialists (when spawned)
@@ -169,11 +269,15 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
     - L3 specialists (when spawned)
   - L2 Fix session_plans tempdir compile
     - L3 specialists (when spawned)
+  - L2 Fix settings_e2e compile leftovers
+    - L3 specialists (when spawned)
   - L2 Fix soft plan secondary
     - L3 specialists (when spawned)
   - L2 Fix stale plan panel snapshot
     - L3 specialists (when spawned)
   - L2 Fix stale prompt hang
+    - L3 specialists (when spawned)
+  - L2 Fix stdenv.hostPlatform isLinux
     - L3 specialists (when spawned)
   - L2 Fix stuck first-token retry
     - L3 specialists (when spawned)
@@ -191,6 +295,8 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
     - L3 specialists (when spawned)
   - L2 Format mutations.rs rustfmt
     - L3 specialists (when spawned)
+  - L2 Fresh mill chip Ctrl+C
+    - L3 specialists (when spawned)
   - L2 Goal card clickable clear
     - L3 specialists (when spawned)
   - L2 Goal check-remote closeout
@@ -207,9 +313,13 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
     - L3 specialists (when spawned)
   - L2 Idle mill plan vanish
     - L3 specialists (when spawned)
+  - L2 If-let settings_e2e single-match
+    - L3 specialists (when spawned)
   - L2 Implement Isolated Preview --soft tests
     - L3 specialists (when spawned)
   - L2 Implement Isolated Preview plan dispatch
+    - L3 specialists (when spawned)
+  - L2 Implement cot death spiral
     - L3 specialists (when spawned)
   - L2 Implement goal card clicks
     - L3 specialists (when spawned)
@@ -221,13 +331,21 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
     - L3 specialists (when spawned)
   - L2 Implement soft-plan skills ULID
     - L3 specialists (when spawned)
+  - L2 Implement turbo planning and soft reminders
+    - L3 specialists (when spawned)
+  - L2 Implement turbo planning reminders
+    - L3 specialists (when spawned)
   - L2 Inline fail-open into tracked files
     - L3 specialists (when spawned)
   - L2 Inventory Isolated Preview --soft
     - L3 specialists (when spawned)
+  - L2 Inventory later quality gates
+    - L3 specialists (when spawned)
   - L2 Isolated Preview exclusive plan
     - L3 specialists (when spawned)
   - L2 Isolated Preview soft tests
+    - L3 specialists (when spawned)
+  - L2 L2 must spawn L3 product
     - L3 specialists (when spawned)
   - L2 L2 present-past token totals
     - L3 specialists (when spawned)
@@ -235,13 +353,43 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
     - L3 specialists (when spawned)
   - L2 L2 present-plus-past token totals
     - L3 specialists (when spawned)
+  - L2 Land F and I product
+    - L3 specialists (when spawned)
+  - L2 Land FORK and user-guide
+    - L3 specialists (when spawned)
+  - L2 Land Isolated Preview paste
+    - L3 specialists (when spawned)
+  - L2 Land L2 spawn prompt tests
+    - L3 specialists (when spawned)
+  - L2 Land L2 tool-policy tests
+    - L3 specialists (when spawned)
+  - L2 Land coordinator and real tests
+    - L3 specialists (when spawned)
+  - L2 Land leftover slash Approve
+    - L3 specialists (when spawned)
+  - L2 Land live Subagents list
+    - L3 specialists (when spawned)
+  - L2 Land nextest leftovers from report
+    - L3 specialists (when spawned)
+  - L2 Land parent L2 follow-up
+    - L3 specialists (when spawned)
   - L2 Land rebuild resume tests
+    - L3 specialists (when spawned)
+  - L2 Land settings inventory rows
+    - L3 specialists (when spawned)
+  - L2 Land stale Subagents closeout
     - L3 specialists (when spawned)
   - L2 Land totals and report
     - L3 specialists (when spawned)
   - L2 Land truncation tests and fix
     - L3 specialists (when spawned)
+  - L2 List rustfmt Diff in files
+    - L3 specialists (when spawned)
   - L2 Locate goal card files
+    - L3 specialists (when spawned)
+  - L2 Map FORK follow-up keywords
+    - L3 specialists (when spawned)
+  - L2 Map L2 follow-up seams
     - L3 specialists (when spawned)
   - L2 Move fail-open into tracked file
     - L3 specialists (when spawned)
@@ -249,11 +397,15 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
     - L3 specialists (when spawned)
   - L2 One check-remote after GoalDetailHovers
     - L3 specialists (when spawned)
+  - L2 One check-remote after Nix isLinux
+    - L3 specialists (when spawned)
   - L2 One check-remote after chip-fold
     - L3 specialists (when spawned)
   - L2 One check-remote after compact wrap
     - L3 specialists (when spawned)
   - L2 One check-remote after dead-code
+    - L3 specialists (when spawned)
+  - L2 One check-remote after docs.rs wrap
     - L3 specialists (when spawned)
   - L2 One check-remote after draft-vs-Approve
     - L3 specialists (when spawned)
@@ -293,9 +445,21 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
     - L3 specialists (when spawned)
   - L2 One check-remote wrap is done
     - L3 specialists (when spawned)
+  - L2 Paren SetBool dispatch match
+    - L3 specialists (when spawned)
+  - L2 Parent follow-up to live L2
+    - L3 specialists (when spawned)
+  - L2 Parse subagents parent_follow_up config
+    - L3 specialists (when spawned)
   - L2 Paste chip Approve notes
     - L3 specialists (when spawned)
   - L2 Path CoW rwlock TDD
+    - L3 specialists (when spawned)
+  - L2 Per-path write lock CoW
+    - L3 specialists (when spawned)
+  - L2 Pin #141 FORK keywords
+    - L3 specialists (when spawned)
+  - L2 Pin L1 L2 L3 language
     - L3 specialists (when spawned)
   - L2 Pin L1 never edits
     - L3 specialists (when spawned)
@@ -307,6 +471,8 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
     - L3 specialists (when spawned)
   - L2 Pin never ignore Operator
     - L3 specialists (when spawned)
+  - L2 Pin one-version upstream merge
+    - L3 specialists (when spawned)
   - L2 Pin then fix lock install
     - L3 specialists (when spawned)
   - L2 Plan Revise Exit unstick
@@ -315,11 +481,27 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
     - L3 specialists (when spawned)
   - L2 Post-compact summary size cap
     - L3 specialists (when spawned)
+  - L2 Preview paste leftover slash
+    - L3 specialists (when spawned)
+  - L2 Prompt Ctrl+C model Tab search
+    - L3 specialists (when spawned)
+  - L2 Quality L2 spawn L3s only
+    - L3 specialists (when spawned)
+  - L2 Quality after leftover land
+    - L3 specialists (when spawned)
+  - L2 Quality check-remote then install
+    - L3 specialists (when spawned)
+  - L2 Quality owns red until install
+    - L3 specialists (when spawned)
+  - L2 Quote four follow-up tests
+    - L3 specialists (when spawned)
   - L2 Rebuild nested resume tests
     - L3 specialists (when spawned)
   - L2 Rebuild resume nested implementors
     - L3 specialists (when spawned)
   - L2 Rebuild resume nested work
+    - L3 specialists (when spawned)
+  - L2 Reconcile settings e2e collision
     - L3 specialists (when spawned)
   - L2 Red tests then fix soft plan
     - L3 specialists (when spawned)
@@ -327,15 +509,53 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
     - L3 specialists (when spawned)
   - L2 Remove in-tree bug dump
     - L3 specialists (when spawned)
+  - L2 Remove unused SubagentBackend import
+    - L3 specialists (when spawned)
   - L2 Repetition stream stop
     - L3 specialists (when spawned)
   - L2 Restore modal park fullscreen
     - L3 specialists (when spawned)
+  - L2 Resume 141 wait L3s
+    - L3 specialists (when spawned)
+  - L2 Resume A plus compacting open
+    - L3 specialists (when spawned)
   - L2 Resume Approve paste-chip TDD
+    - L3 specialists (when spawned)
+  - L2 Resume D+H implement now
+    - L3 specialists (when spawned)
+  - L2 Resume E+G implement now
+    - L3 specialists (when spawned)
+  - L2 Resume L2 coordinator product land
+    - L3 specialists (when spawned)
+  - L2 Resume inject soft reminders
+    - L3 specialists (when spawned)
+  - L2 Resume parent L2 follow-up
+    - L3 specialists (when spawned)
+  - L2 Resume quality after other nix
+    - L3 specialists (when spawned)
+  - L2 Resume stamp plan xhigh
+    - L3 specialists (when spawned)
+  - L2 Resume turbo wire after 500
+    - L3 specialists (when spawned)
+  - L2 Resume wire turbo and reminders
+    - L3 specialists (when spawned)
+  - L2 Retry check-remote then install
+    - L3 specialists (when spawned)
+  - L2 Retry quality after const assert
+    - L3 specialists (when spawned)
+  - L2 Retry quality after pager compile
+    - L3 specialists (when spawned)
+  - L2 Retry stale Subagents list
+    - L3 specialists (when spawned)
+  - L2 Review leftover follow-up closeout
+    - L3 specialists (when spawned)
+  - L2 Review parent follow-up land
     - L3 specialists (when spawned)
   - L2 Review rebuild identity slice
     - L3 specialists (when spawned)
   - L2 Review soft-plan skills ULID
+    - L3 specialists (when spawned)
+  - L2 Revise sequential xAI onto docs
     - L3 specialists (when spawned)
   - L2 Run just check-remote
     - L3 specialists (when spawned)
@@ -355,17 +575,45 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
     - L3 specialists (when spawned)
   - L2 Run just install
     - L3 specialists (when spawned)
+  - L2 Runner one check-remote then install
+    - L3 specialists (when spawned)
   - L2 Runner surmount-1 quality install
     - L3 specialists (when spawned)
   - L2 Rustfmt chat_completions Nix form
+    - L3 specialists (when spawned)
+  - L2 Rustfmt follow-up wrapping leftovers
+    - L3 specialists (when spawned)
+  - L2 Rustfmt pager leftover files
     - L3 specialists (when spawned)
   - L2 Rustfmt pager nav.rs Nix form
     - L3 specialists (when spawned)
   - L2 Screenshot paste composer
     - L3 specialists (when spawned)
+  - L2 Search GitHub follow-up issue
+    - L3 specialists (when spawned)
   - L2 Second just check-remote
     - L3 specialists (when spawned)
+  - L2 Send Interject from shell child follow_up
+    - L3 specialists (when spawned)
+  - L2 SetBool from_typed_setter
+    - L3 specialists (when spawned)
+  - L2 Settings inventory turbo reminders
+    - L3 specialists (when spawned)
+  - L2 Slice A stale Subagents list
+    - L3 specialists (when spawned)
+  - L2 Slice B rwlock release CoW
+    - L3 specialists (when spawned)
+  - L2 Slice C CoT death spirals
+    - L3 specialists (when spawned)
+  - L2 Slice F turbo planning xhigh
+    - L3 specialists (when spawned)
+  - L2 Slices D E G Isolated Preview
+    - L3 specialists (when spawned)
   - L2 Soft plan tests then product
+    - L3 specialists (when spawned)
+  - L2 Stamp F plan xhigh
+    - L3 specialists (when spawned)
+  - L2 Stamp xhigh on plan send
     - L3 specialists (when spawned)
   - L2 Stay until handle_mouse then gate
     - L3 specialists (when spawned)
@@ -379,6 +627,12 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
     - L3 specialists (when spawned)
   - L2 TDD subagent path rwlock
     - L3 specialists (when spawned)
+  - L2 Turbo leftover via L3 only
+    - L3 specialists (when spawned)
+  - L2 Turbo planning soft reminders
+    - L3 specialists (when spawned)
+  - L2 Typed bool turbo setter
+    - L3 specialists (when spawned)
   - L2 Unstick Isolated Preview resume
     - L3 specialists (when spawned)
   - L2 Unstick plan Revise and Exit
@@ -389,6 +643,12 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
     - L3 specialists (when spawned)
   - L2 User-guide exclusive plan stay
     - L3 specialists (when spawned)
+  - L2 User-guide grok-oss CLI
+    - L3 specialists (when spawned)
+  - L2 Verify leftover follow-up land closed
+    - L3 specialists (when spawned)
+  - L2 Verify parent follow-up product land
+    - L3 specialists (when spawned)
   - L2 Wait then one check-remote
     - L3 specialists (when spawned)
   - L2 Wait then one check-remote
@@ -397,13 +657,35 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
     - L3 specialists (when spawned)
   - L2 Wire Subagents list helpers
     - L3 specialists (when spawned)
+  - L2 Wire TaskTool follow_up run
+    - L3 specialists (when spawned)
   - L2 Wire goal-clear no-interject
     - L3 specialists (when spawned)
   - L2 Wire or drop unused commenting fn
     - L3 specialists (when spawned)
+  - L2 Wire paste Event paths
+    - L3 specialists (when spawned)
+  - L2 Wire shell Interject follow-up delivery
+    - L3 specialists (when spawned)
+  - L2 Wire soft process-rule reminders
+    - L3 specialists (when spawned)
+  - L2 Wire turbo planning and soft reminders
+    - L3 specialists (when spawned)
+  - L2 Wire turbo planning module
+    - L3 specialists (when spawned)
+  - L2 Wire unused paste probe
+    - L3 specialists (when spawned)
   - L2 Wire unused subagent list helpers
     - L3 specialists (when spawned)
+  - L2 Wrap parent_follow_up rustfmt
+    - L3 specialists (when spawned)
+  - L2 Wrap rustfmt render.rs hunk
+    - L3 specialists (when spawned)
   - L2 Wrap sampling-types; inline repetition
+    - L3 specialists (when spawned)
+  - L2 Wrap task mod rustfmt
+    - L3 specialists (when spawned)
+  - L2 Wrap-only rustfmt docs.rs
     - L3 specialists (when spawned)
   - L2 Wrap-only rustfmt goal card
     - L3 specialists (when spawned)
@@ -419,7 +701,11 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
     - L3 specialists (when spawned)
   - L2 Write goal card tests
     - L3 specialists (when spawned)
+  - L2 Write implement aggregate report
+    - L3 specialists (when spawned)
   - L2 Write rebuild resume contracts
+    - L3 specialists (when spawned)
+  - L2 Write tests then product
     - L3 specialists (when spawned)
   - L2 Write truncation tests and product
     - L3 specialists (when spawned)
@@ -476,12 +762,19 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
 
 | id | contract/aspect | owner | measured tokens | estimate | status |
 | --- | --- | --- | --- | --- | --- |
+| Add FollowUp event and backend | nested L2 session usage | L2 | 108631 | estimate | exited |
+| Add TaskTool run follow_up named test | nested L2 session usage | L2 | 128771 | estimate | exited |
 | Add fail-open module and wrap edit.rs | nested L2 session usage | L2 | 110747 | estimate | exited |
+| Add follow_up schema field | nested L2 session usage | L2 | 118884 | estimate | exited |
+| Add paste insert helper | nested L2 session usage | L2 | 199034 | estimate | exited |
+| Add turbo and reminder settings rows | nested L2 session usage | L2 | 166737 | estimate | exited |
 | Approve paste-chip TDD fresh | nested L2 session usage | L2 | 78828 | estimate | exited |
 | Approve paste-chip comment | nested L2 session usage | L2 | 121302 | estimate | exited |
 | Approve paste-chip review notes | nested L2 session usage | L2 | 130860 | estimate | exited |
 | Bound first-token retry | nested L2 session usage | L2 | 199588 | estimate | exited |
 | Bump rustls past advisory | nested L2 session usage | L2 | 82648 | estimate | exited |
+| Check if tests landed | nested L2 session usage | L2 | 84898 | estimate | exited |
+| Check tests and coordinator | nested L2 session usage | L2 | 97392 | estimate | exited |
 | Check-remote and Isolated Preview paths | nested L2 session usage | L2 | 149501 | estimate | exited |
 | Clear composer after send | nested L2 session usage | L2 | 156108 | estimate | exited |
 | Clear persist after Isolated send | nested L2 session usage | L2 | 132983 | estimate | exited |
@@ -489,21 +782,61 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
 | Collect quality-fix playbook | nested L2 session usage | L2 | 96860 | estimate | exited |
 | Compact must not leave 75k | nested L2 session usage | L2 | 90119 | estimate | exited |
 | Compact must shrink loop garbage | nested L2 session usage | L2 | 130019 | estimate | exited |
+| Compacting open click hit | nested L2 session usage | L2 | 185117 | estimate | exited |
+| Compile follow-up tests and request_is_l3 | nested L2 session usage | L2 | 193515 | estimate | exited |
+| Confirm settings e2e if-let | nested L2 session usage | L2 | 74113 | estimate | exited |
 | Continue quality sequence after first gate | nested L2 session usage | L2 | 169857 | estimate | exited |
+| Cover SettingsKeyOutcome match | nested L2 session usage | L2 | 124582 | estimate | exited |
 | Crate-build bundled fd | nested L2 session usage | L2 | 126994 | estimate | exited |
 | Crate-build bundled ripgrep | nested L2 session usage | L2 | 157847 | estimate | exited |
+| D mill chip Ctrl+C | nested L2 session usage | L2 | 200096 | estimate | exited |
+| D mill chip finish | nested L2 session usage | L2 | 209019 | estimate | exited |
+| D+H Ctrl+C and /model Tab | nested L2 session usage | L2 | 189541 | estimate | exited |
+| D+H Ctrl+C model Tab | nested L2 session usage | L2 | 202863 | estimate | exited |
+| D+H implement now | nested L2 session usage | L2 | 214535 | estimate | exited |
+| D+H land tests product | nested L2 session usage | L2 | 198106 | estimate | exited |
+| D+H write report now | nested L2 session usage | L2 | 210703 | estimate | exited |
 | Diagnose grok-oss /rebuild | nested L2 session usage | L2 | 185221 | estimate | exited |
 | Diagnose grok-oss hang | nested L2 session usage | L2 | 223030 | estimate | exited |
+| Diagnose missing request_is_l3 | nested L2 session usage | L2 | 115516 | estimate | exited |
 | Diagnose rebuild resume drain | nested L2 session usage | L2 | 157032 | estimate | exited |
+| Distinct polish version pointer | nested L2 session usage | L2 | 120081 | estimate | exited |
 | Drop looping compact garbage | nested L2 session usage | L2 | 190595 | estimate | exited |
+| E+G implement now | nested L2 session usage | L2 | 221380 | estimate | exited |
+| E+G land tests product | nested L2 session usage | L2 | 194416 | estimate | exited |
+| E+G leftover named tests | nested L2 session usage | L2 | 179402 | estimate | exited |
+| E+G preview search and paste | nested L2 session usage | L2 | 198869 | estimate | exited |
+| E+G search paste chip | nested L2 session usage | L2 | 199851 | estimate | exited |
+| E+G write report now | nested L2 session usage | L2 | 209220 | estimate | exited |
 | Embed ripgrep in tools | nested L2 session usage | L2 | 259890 | estimate | exited |
+| Encrypt stale subagent prompt | nested L2 session usage | L2 | 129682 | estimate | exited |
+| Enroll leftover follow-up tests in FORK | nested L2 session usage | L2 | 143506 | estimate | exited |
 | Explore /rebuild exec path | nested L2 session usage | L2 | 143364 | estimate | exited |
+| Extract green gate nextest summary | nested L2 session usage | L2 | 152002 | estimate | exited |
+| FORK.md after slice reports | nested L2 session usage | L2 | 76501 | estimate | exited |
+| FORK.md slice keywords | nested L2 session usage | L2 | 192131 | estimate | exited |
+| Fill settings inventory lists | nested L2 session usage | L2 | 123980 | estimate | exited |
+| Fill tests and wire follow-up | nested L2 session usage | L2 | 211596 | estimate | exited |
+| Find L2 compact sampling seam | nested L2 session usage | L2 | 167315 | estimate | exited |
+| Find L2 spawn tool-policy seam | nested L2 session usage | L2 | 181405 | estimate | exited |
 | Finish 403 paint product | nested L2 session usage | L2 | 180278 | estimate | exited |
 | Finish 403 paint slice | nested L2 session usage | L2 | 151260 | estimate | exited |
+| Finish D-G via L3 | nested L2 session usage | L2 | 199752 | estimate | exited |
+| Finish F I leftover wiring | nested L2 session usage | L2 | 208636 | estimate | exited |
+| Finish F request stamp | nested L2 session usage | L2 | 161738 | estimate | exited |
 | Finish Isolated Preview report | nested L2 session usage | L2 | 133004 | estimate | exited |
+| Finish asserts and product | nested L2 session usage | L2 | 199632 | estimate | exited |
 | Finish goal card wiring | nested L2 session usage | L2 | 204391 | estimate | exited |
 | Finish goal-clear report | nested L2 session usage | L2 | 202356 | estimate | exited |
+| Finish live Subagents list | nested L2 session usage | L2 | 198958 | estimate | exited |
+| Finish live Subagents list | nested L2 session usage | L2 | 195874 | estimate | exited |
+| Finish paste helper edit | nested L2 session usage | L2 | 209028 | estimate | exited |
+| Finish preview paste slash | nested L2 session usage | L2 | 213092 | estimate | exited |
+| Finish settings inventory | nested L2 session usage | L2 | 208984 | estimate | exited |
+| Finish soft reminder spawn inject | nested L2 session usage | L2 | 181506 | estimate | exited |
 | Finish totals report | nested L2 session usage | L2 | 201460 | estimate | exited |
+| Finish turbo planning wiring | nested L2 session usage | L2 | 203397 | estimate | exited |
+| Finish typed bool setter | nested L2 session usage | L2 | 210981 | estimate | exited |
 | Fix /plan already-in-plan submit | nested L2 session usage | L2 | 141546 | estimate | exited |
 | Fix /plan ignored after Exit | nested L2 session usage | L2 | 205062 | estimate | exited |
 | Fix /plan sentence vanish | nested L2 session usage | L2 | 199080 | estimate | exited |
@@ -531,6 +864,7 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
 | Fix blank transcript on start | nested L2 session usage | L2 | 250157 | estimate | exited |
 | Fix chip fold after reentry | nested L2 session usage | L2 | 134672 | estimate | exited |
 | Fix chip stay folded after reentry | nested L2 session usage | L2 | 97248 | estimate | exited |
+| Fix compact const assert form | nested L2 session usage | L2 | 89151 | estimate | exited |
 | Fix compact idle-timeout contract | nested L2 session usage | L2 | 117677 | estimate | exited |
 | Fix from_ref SubagentInfo types | nested L2 session usage | L2 | 89943 | estimate | exited |
 | Fix goal clear and clickable card | nested L2 session usage | L2 | 145928 | estimate | exited |
@@ -540,10 +874,12 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
 | Fix interject elapsed bound | nested L2 session usage | L2 | 131141 | estimate | exited |
 | Fix just install ripgrep | nested L2 session usage | L2 | 125135 | estimate | exited |
 | Fix last 2 nextest fails | nested L2 session usage | L2 | 175479 | estimate | exited |
+| Fix leftover from quality report | nested L2 session usage | L2 | 96597 | estimate | exited |
 | Fix let_underscore_future clippy | nested L2 session usage | L2 | 82225 | estimate | exited |
 | Fix manual_range_contains clippy | nested L2 session usage | L2 | 77224 | estimate | exited |
 | Fix mut rx plan_stale_prompt | nested L2 session usage | L2 | 77993 | estimate | exited |
 | Fix next implement auto-run | nested L2 session usage | L2 | 229477 | estimate | exited |
+| Fix pager dead_code and E0507 | nested L2 session usage | L2 | 125198 | estimate | exited |
 | Fix pager follow-tail | nested L2 session usage | L2 | 195084 | estimate | exited |
 | Fix pager follow-tail scroll | nested L2 session usage | L2 | 121099 | estimate | exited |
 | Fix paste chip Enter send | nested L2 session usage | L2 | 237589 | estimate | exited |
@@ -558,9 +894,11 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
 | Fix replay.rs format string | nested L2 session usage | L2 | 86714 | estimate | exited |
 | Fix resume 403 chrome | nested L2 session usage | L2 | 199325 | estimate | exited |
 | Fix session_plans tempdir compile | nested L2 session usage | L2 | 82961 | estimate | exited |
+| Fix settings_e2e compile leftovers | nested L2 session usage | L2 | 116547 | estimate | exited |
 | Fix soft plan secondary | nested L2 session usage | L2 | 240595 | estimate | exited |
 | Fix stale plan panel snapshot | nested L2 session usage | L2 | 166403 | estimate | exited |
 | Fix stale prompt hang | nested L2 session usage | L2 | 166405 | estimate | exited |
+| Fix stdenv.hostPlatform isLinux | nested L2 session usage | L2 | 102183 | estimate | exited |
 | Fix stuck first-token retry | nested L2 session usage | L2 | 111134 | estimate | exited |
 | Fix subagent token chrome | nested L2 session usage | L2 | 0 | estimate | exited |
 | Fix three named quality fails | nested L2 session usage | L2 | 82219 | estimate | exited |
@@ -569,6 +907,7 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
 | Fix truncated output-limit chrome | nested L2 session usage | L2 | 102215 | estimate | exited |
 | Fix write preview not a git diff | nested L2 session usage | L2 | 178268 | estimate | exited |
 | Format mutations.rs rustfmt | nested L2 session usage | L2 | 79334 | estimate | exited |
+| Fresh mill chip Ctrl+C | nested L2 session usage | L2 | 171886 | estimate | exited |
 | Goal card clickable clear | nested L2 session usage | L2 | 199757 | estimate | exited |
 | Goal check-remote closeout | nested L2 session usage | L2 | 85842 | estimate | exited |
 | Goal quality then install | nested L2 session usage | L2 | 83971 | estimate | exited |
@@ -577,30 +916,53 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
 | Harden 500 token-generation harness | nested L2 session usage | L2 | 200384 | estimate | exited |
 | Harden API 500 token generation | nested L2 session usage | L2 | 141584 | estimate | exited |
 | Idle mill plan vanish | nested L2 session usage | L2 | 107469 | estimate | exited |
+| If-let settings_e2e single-match | nested L2 session usage | L2 | 78827 | estimate | exited |
 | Implement Isolated Preview --soft tests | nested L2 session usage | L2 | 95359 | estimate | exited |
 | Implement Isolated Preview plan dispatch | nested L2 session usage | L2 | 202803 | estimate | exited |
+| Implement cot death spiral | nested L2 session usage | L2 | 193772 | estimate | exited |
 | Implement goal card clicks | nested L2 session usage | L2 | 198624 | estimate | exited |
 | Implement grok-oss rebuild plan | nested L2 session usage | L2 | 202953 | estimate | exited |
 | Implement rebuild disconnect resume | nested L2 session usage | L2 | 183209 | estimate | exited |
 | Implement rewrite-wait Isolated Preview | nested L2 session usage | L2 | 197335 | estimate | exited |
 | Implement soft-plan skills ULID | nested L2 session usage | L2 | 247948 | estimate | exited |
+| Implement turbo planning and soft reminders | nested L2 session usage | L2 | 191432 | estimate | exited |
+| Implement turbo planning reminders | nested L2 session usage | L2 | 205215 | estimate | exited |
 | Inline fail-open into tracked files | nested L2 session usage | L2 | 78220 | estimate | exited |
 | Inventory Isolated Preview --soft | nested L2 session usage | L2 | 166169 | estimate | exited |
+| Inventory later quality gates | nested L2 session usage | L2 | 179833 | estimate | exited |
 | Isolated Preview exclusive plan | nested L2 session usage | L2 | 196783 | estimate | exited |
 | Isolated Preview soft tests | nested L2 session usage | L2 | 143378 | estimate | exited |
+| L2 must spawn L3 product | nested L2 session usage | L2 | 109824 | estimate | exited |
 | L2 present-past token totals | nested L2 session usage | L2 | 107984 | estimate | exited |
 | L2 present-plus-past token totals | nested L2 session usage | L2 | 78050 | estimate | exited |
 | L2 present-plus-past token totals | nested L2 session usage | L2 | 83961 | estimate | exited |
+| Land F and I product | nested L2 session usage | L2 | 200586 | estimate | exited |
+| Land FORK and user-guide | nested L2 session usage | L2 | 168435 | estimate | exited |
+| Land Isolated Preview paste | nested L2 session usage | L2 | 200163 | estimate | exited |
+| Land L2 spawn prompt tests | nested L2 session usage | L2 | 107912 | estimate | exited |
+| Land L2 tool-policy tests | nested L2 session usage | L2 | 100444 | estimate | exited |
+| Land coordinator and real tests | nested L2 session usage | L2 | 246280 | estimate | exited |
+| Land leftover slash Approve | nested L2 session usage | L2 | 175060 | estimate | exited |
+| Land live Subagents list | nested L2 session usage | L2 | 217013 | estimate | exited |
+| Land nextest leftovers from report | nested L2 session usage | L2 | 195032 | estimate | exited |
+| Land parent L2 follow-up | nested L2 session usage | L2 | 199866 | estimate | exited |
 | Land rebuild resume tests | nested L2 session usage | L2 | 202916 | estimate | exited |
+| Land settings inventory rows | nested L2 session usage | L2 | 197010 | estimate | exited |
+| Land stale Subagents closeout | nested L2 session usage | L2 | 196438 | estimate | exited |
 | Land totals and report | nested L2 session usage | L2 | 162630 | estimate | exited |
 | Land truncation tests and fix | nested L2 session usage | L2 | 201497 | estimate | exited |
+| List rustfmt Diff in files | nested L2 session usage | L2 | 111463 | estimate | exited |
 | Locate goal card files | nested L2 session usage | L2 | 146163 | estimate | exited |
+| Map FORK follow-up keywords | nested L2 session usage | L2 | 146606 | estimate | exited |
+| Map L2 follow-up seams | nested L2 session usage | L2 | 197893 | estimate | exited |
 | Move fail-open into tracked file | nested L2 session usage | L2 | 85804 | estimate | exited |
 | One check-remote after Approve split | nested L2 session usage | L2 | 118279 | estimate | exited |
 | One check-remote after GoalDetailHovers | nested L2 session usage | L2 | 110243 | estimate | exited |
+| One check-remote after Nix isLinux | nested L2 session usage | L2 | 86563 | estimate | exited |
 | One check-remote after chip-fold | nested L2 session usage | L2 | 100631 | estimate | exited |
 | One check-remote after compact wrap | nested L2 session usage | L2 | 115213 | estimate | exited |
 | One check-remote after dead-code | nested L2 session usage | L2 | 111510 | estimate | exited |
+| One check-remote after docs.rs wrap | nested L2 session usage | L2 | 82998 | estimate | exited |
 | One check-remote after draft-vs-Approve | nested L2 session usage | L2 | 119614 | estimate | exited |
 | One check-remote after fail-open module | nested L2 session usage | L2 | 90661 | estimate | exited |
 | One check-remote after from_ref | nested L2 session usage | L2 | 94239 | estimate | exited |
@@ -620,28 +982,62 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
 | One check-remote after wrap | nested L2 session usage | L2 | 76101 | estimate | exited |
 | One check-remote then install | nested L2 session usage | L2 | 87251 | estimate | exited |
 | One check-remote wrap is done | nested L2 session usage | L2 | 92720 | estimate | exited |
+| Paren SetBool dispatch match | nested L2 session usage | L2 | 81664 | estimate | exited |
+| Parent follow-up to live L2 | nested L2 session usage | L2 | 199226 | estimate | exited |
+| Parse subagents parent_follow_up config | nested L2 session usage | L2 | 187168 | estimate | exited |
 | Paste chip Approve notes | nested L2 session usage | L2 | 155229 | estimate | exited |
 | Path CoW rwlock TDD | nested L2 session usage | L2 | 140339 | estimate | exited |
+| Per-path write lock CoW | nested L2 session usage | L2 | 135318 | estimate | exited |
+| Pin #141 FORK keywords | nested L2 session usage | L2 | 178641 | estimate | exited |
+| Pin L1 L2 L3 language | nested L2 session usage | L2 | 116701 | estimate | exited |
 | Pin L1 never edits | nested L2 session usage | L2 | 80286 | estimate | exited |
 | Pin Operator Agent terminology | nested L2 session usage | L2 | 194470 | estimate | exited |
 | Pin grok-oss vs Grok Build versions | nested L2 session usage | L2 | 132114 | estimate | exited |
 | Pin jobs queue orchestration | nested L2 session usage | L2 | 86438 | estimate | exited |
 | Pin never ignore Operator | nested L2 session usage | L2 | 82013 | estimate | exited |
+| Pin one-version upstream merge | nested L2 session usage | L2 | 78719 | estimate | exited |
 | Pin then fix lock install | nested L2 session usage | L2 | 131658 | estimate | exited |
 | Plan Revise Exit unstick | nested L2 session usage | L2 | 199533 | estimate | exited |
 | Plan stale-prompt TDD | nested L2 session usage | L2 | 158750 | estimate | exited |
 | Post-compact summary size cap | nested L2 session usage | L2 | 166690 | estimate | exited |
+| Preview paste leftover slash | nested L2 session usage | L2 | 199087 | estimate | exited |
+| Prompt Ctrl+C model Tab search | nested L2 session usage | L2 | 199987 | estimate | exited |
+| Quality L2 spawn L3s only | nested L2 session usage | L2 | 180991 | estimate | exited |
+| Quality after leftover land | nested L2 session usage | L2 | 197563 | estimate | exited |
+| Quality check-remote then install | nested L2 session usage | L2 | 132246 | estimate | exited |
+| Quality owns red until install | nested L2 session usage | L2 | 199525 | estimate | exited |
+| Quote four follow-up tests | nested L2 session usage | L2 | 83172 | estimate | exited |
 | Rebuild nested resume tests | nested L2 session usage | L2 | 199776 | estimate | exited |
 | Rebuild resume nested implementors | nested L2 session usage | L2 | 199614 | estimate | exited |
 | Rebuild resume nested work | nested L2 session usage | L2 | 77441 | estimate | exited |
+| Reconcile settings e2e collision | nested L2 session usage | L2 | 114205 | estimate | exited |
 | Red tests then fix soft plan | nested L2 session usage | L2 | 75657 | estimate | exited |
 | Reliability unit integration tests | nested L2 session usage | L2 | 264256 | estimate | exited |
 | Remove in-tree bug dump | nested L2 session usage | L2 | 69726 | estimate | exited |
+| Remove unused SubagentBackend import | nested L2 session usage | L2 | 95997 | estimate | exited |
 | Repetition stream stop | nested L2 session usage | L2 | 201861 | estimate | exited |
 | Restore modal park fullscreen | nested L2 session usage | L2 | 103219 | estimate | exited |
+| Resume 141 wait L3s | nested L2 session usage | L2 | 199915 | estimate | exited |
+| Resume A plus compacting open | nested L2 session usage | L2 | 199871 | estimate | exited |
 | Resume Approve paste-chip TDD | nested L2 session usage | L2 | 107709 | estimate | exited |
+| Resume D+H implement now | nested L2 session usage | L2 | 206082 | estimate | exited |
+| Resume E+G implement now | nested L2 session usage | L2 | 216791 | estimate | exited |
+| Resume L2 coordinator product land | nested L2 session usage | L2 | 216053 | estimate | exited |
+| Resume inject soft reminders | nested L2 session usage | L2 | 217938 | estimate | exited |
+| Resume parent L2 follow-up | nested L2 session usage | L2 | 212581 | estimate | exited |
+| Resume quality after other nix | nested L2 session usage | L2 | 146952 | estimate | exited |
+| Resume stamp plan xhigh | nested L2 session usage | L2 | 212942 | estimate | exited |
+| Resume turbo wire after 500 | nested L2 session usage | L2 | 194980 | estimate | exited |
+| Resume wire turbo and reminders | nested L2 session usage | L2 | 0 | estimate | exited |
+| Retry check-remote then install | nested L2 session usage | L2 | 108552 | estimate | exited |
+| Retry quality after const assert | nested L2 session usage | L2 | 140629 | estimate | exited |
+| Retry quality after pager compile | nested L2 session usage | L2 | 135915 | estimate | exited |
+| Retry stale Subagents list | nested L2 session usage | L2 | 195623 | estimate | exited |
+| Review leftover follow-up closeout | nested L2 session usage | L2 | 161132 | estimate | exited |
+| Review parent follow-up land | nested L2 session usage | L2 | 173980 | estimate | exited |
 | Review rebuild identity slice | nested L2 session usage | L2 | 121386 | estimate | exited |
 | Review soft-plan skills ULID | nested L2 session usage | L2 | 145127 | estimate | exited |
+| Revise sequential xAI onto docs | nested L2 session usage | L2 | 104508 | estimate | exited |
 | Run just check-remote | nested L2 session usage | L2 | 84177 | estimate | exited |
 | Run just check-remote | nested L2 session usage | L2 | 83297 | estimate | exited |
 | Run just check-remote 1b | nested L2 session usage | L2 | 88004 | estimate | exited |
@@ -651,31 +1047,62 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
 | Run just check-remote 1f | nested L2 session usage | L2 | 110377 | estimate | exited |
 | Run just check-remote 2 | nested L2 session usage | L2 | 116284 | estimate | exited |
 | Run just install | nested L2 session usage | L2 | 77310 | estimate | exited |
+| Runner one check-remote then install | nested L2 session usage | L2 | 77400 | estimate | exited |
 | Runner surmount-1 quality install | nested L2 session usage | L2 | 92031 | estimate | exited |
 | Rustfmt chat_completions Nix form | nested L2 session usage | L2 | 82457 | estimate | exited |
+| Rustfmt follow-up wrapping leftovers | nested L2 session usage | L2 | 118829 | estimate | exited |
+| Rustfmt pager leftover files | nested L2 session usage | L2 | 83956 | estimate | exited |
 | Rustfmt pager nav.rs Nix form | nested L2 session usage | L2 | 83221 | estimate | exited |
 | Screenshot paste composer | nested L2 session usage | L2 | 166450 | estimate | exited |
+| Search GitHub follow-up issue | nested L2 session usage | L2 | 124068 | estimate | exited |
 | Second just check-remote | nested L2 session usage | L2 | 83414 | estimate | exited |
+| Send Interject from shell child follow_up | nested L2 session usage | L2 | 172892 | estimate | exited |
+| SetBool from_typed_setter | nested L2 session usage | L2 | 174496 | estimate | exited |
+| Settings inventory turbo reminders | nested L2 session usage | L2 | 197461 | estimate | exited |
+| Slice A stale Subagents list | nested L2 session usage | L2 | 80032 | estimate | exited |
+| Slice B rwlock release CoW | nested L2 session usage | L2 | 81262 | estimate | exited |
+| Slice C CoT death spirals | nested L2 session usage | L2 | 92016 | estimate | exited |
+| Slice F turbo planning xhigh | nested L2 session usage | L2 | 76332 | estimate | exited |
+| Slices D E G Isolated Preview | nested L2 session usage | L2 | 86653 | estimate | exited |
 | Soft plan tests then product | nested L2 session usage | L2 | 86959 | estimate | exited |
+| Stamp F plan xhigh | nested L2 session usage | L2 | 198124 | estimate | exited |
+| Stamp xhigh on plan send | nested L2 session usage | L2 | 216571 | estimate | exited |
 | Stay until handle_mouse then gate | nested L2 session usage | L2 | 92504 | estimate | exited |
 | Stay until wrap then one gate | nested L2 session usage | L2 | 97692 | estimate | exited |
 | Subagents L2 token totals | nested L2 session usage | L2 | 199285 | estimate | exited |
 | TDD plan exit stale panel | nested L2 session usage | L2 | 184069 | estimate | exited |
 | TDD stop runaway repetition | nested L2 session usage | L2 | 99166 | estimate | exited |
 | TDD subagent path rwlock | nested L2 session usage | L2 | 77323 | estimate | exited |
+| Turbo leftover via L3 only | nested L2 session usage | L2 | 198239 | estimate | exited |
+| Turbo planning soft reminders | nested L2 session usage | L2 | 199744 | estimate | exited |
+| Typed bool turbo setter | nested L2 session usage | L2 | 198656 | estimate | exited |
 | Unstick Isolated Preview resume | nested L2 session usage | L2 | 196993 | estimate | exited |
 | Unstick plan Revise and Exit | nested L2 session usage | L2 | 138765 | estimate | exited |
 | Unwedge parked Isolated Preview | nested L2 session usage | L2 | 112874 | estimate | exited |
 | Use dest encoder skip const | nested L2 session usage | L2 | 83695 | estimate | exited |
 | User-guide exclusive plan stay | nested L2 session usage | L2 | 129812 | estimate | exited |
+| User-guide grok-oss CLI | nested L2 session usage | L2 | 136389 | estimate | exited |
+| Verify leftover follow-up land closed | nested L2 session usage | L2 | 157048 | estimate | exited |
+| Verify parent follow-up product land | nested L2 session usage | L2 | 174934 | estimate | exited |
 | Wait then one check-remote | nested L2 session usage | L2 | 114808 | estimate | exited |
 | Wait then one check-remote | nested L2 session usage | L2 | 87994 | estimate | exited |
 | Wire DEST_ENCODER_SKIP_LOOP tests | nested L2 session usage | L2 | 77843 | estimate | exited |
 | Wire Subagents list helpers | nested L2 session usage | L2 | 118938 | estimate | exited |
+| Wire TaskTool follow_up run | nested L2 session usage | L2 | 177147 | estimate | exited |
 | Wire goal-clear no-interject | nested L2 session usage | L2 | 196106 | estimate | exited |
 | Wire or drop unused commenting fn | nested L2 session usage | L2 | 106056 | estimate | exited |
+| Wire paste Event paths | nested L2 session usage | L2 | 178804 | estimate | exited |
+| Wire shell Interject follow-up delivery | nested L2 session usage | L2 | 200250 | estimate | exited |
+| Wire soft process-rule reminders | nested L2 session usage | L2 | 200459 | estimate | exited |
+| Wire turbo planning and soft reminders | nested L2 session usage | L2 | 196222 | estimate | exited |
+| Wire turbo planning module | nested L2 session usage | L2 | 200541 | estimate | exited |
+| Wire unused paste probe | nested L2 session usage | L2 | 126706 | estimate | exited |
 | Wire unused subagent list helpers | nested L2 session usage | L2 | 103808 | estimate | exited |
+| Wrap parent_follow_up rustfmt | nested L2 session usage | L2 | 89990 | estimate | exited |
+| Wrap rustfmt render.rs hunk | nested L2 session usage | L2 | 85768 | estimate | exited |
 | Wrap sampling-types; inline repetition | nested L2 session usage | L2 | 100166 | estimate | exited |
+| Wrap task mod rustfmt | nested L2 session usage | L2 | 84782 | estimate | exited |
+| Wrap-only rustfmt docs.rs | nested L2 session usage | L2 | 80823 | estimate | exited |
 | Wrap-only rustfmt goal card | nested L2 session usage | L2 | 81443 | estimate | exited |
 | Wrap-only rustfmt rebuild 403 | nested L2 session usage | L2 | 86635 | estimate | exited |
 | Wrap-only rustfmt three files | nested L2 session usage | L2 | 78355 | estimate | exited |
@@ -683,7 +1110,9 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
 | Wrap-only rustfmt viewer_tests.rs | nested L2 session usage | L2 | 86461 | estimate | exited |
 | Wrap-only session_compact.rs | nested L2 session usage | L2 | 77424 | estimate | exited |
 | Write goal card tests | nested L2 session usage | L2 | 202779 | estimate | exited |
+| Write implement aggregate report | nested L2 session usage | L2 | 106553 | estimate | exited |
 | Write rebuild resume contracts | nested L2 session usage | L2 | 195270 | estimate | exited |
+| Write tests then product | nested L2 session usage | L2 | 200203 | estimate | exited |
 | Write truncation tests and product | nested L2 session usage | L2 | 193842 | estimate | exited |
 | cargo update then cargo audit | nested L2 session usage | L2 | 100524 | estimate | exited |
 | goal achievement skeptic | nested L2 session usage | L2 | 105347 | estimate | exited |

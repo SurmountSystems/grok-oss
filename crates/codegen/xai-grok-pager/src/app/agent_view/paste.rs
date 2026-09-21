@@ -12,7 +12,15 @@ use crate::key;
 use crate::theme::Theme;
 use crate::views::prompt_widget::{PromptEvent, PromptWidget};
 #[cfg(test)]
-use crossterm::event::{Event, KeyEvent};
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+
+/// Empty screenshot paste and the GNOME All Markup Copy dialog title wait
+/// for the raster probe. IME commits and ordinary text insert immediately.
+fn bracketed_paste_defers_caption_until_image_probe(text: &str) -> bool {
+    let t = text.trim();
+    t.is_empty() || t.eq_ignore_ascii_case("All Markup Copy")
+}
+
 impl AgentView {
     /// Insert a plain-text (caption) clipboard paste into the prompt, matching
     /// the bracketed arm's whitespace policy + slash/suggestion refresh. The
@@ -302,20 +310,57 @@ impl AgentView {
         if let Some((outcome, _)) = self.try_handle_dropped_paths_paste(text) {
             return outcome;
         }
+        self.insert_or_defer_bracketed_prompt_paste(text)
+    }
+
+    /// Empty screenshot paste and GNOME All Markup Copy wait for the raster
+    /// probe (image wins as a chip; caption lands only on a miss). Ordinary
+    /// text and IME commits insert first and stamp `BracketedInserted`. Linux
+    /// always opens the snapshot gate (`clipboard_image_probe_supported` is
+    /// false), so deferring every gated paste would drop composer text.
+    /// `bracketed_paste_should_probe` skips long, multi-line, and lone-http
+    /// payloads before that snapshot gate.
+    pub(super) fn insert_or_defer_bracketed_prompt_paste(&mut self, text: &str) -> InputOutcome {
+        if bracketed_paste_defers_caption_until_image_probe(text)
+            && super::bracketed_paste_should_probe(text)
+        {
+            if let Some(change_count) = crate::clipboard::attachment_probe_gate(Some(text)) {
+                self.enqueue_clipboard_attachment_probe(
+                    crate::app::actions::ClipboardPasteSource::BracketedDeferred {
+                        text: text.to_owned(),
+                    },
+                    change_count,
+                );
+                return InputOutcome::Changed;
+            }
+        }
+        self.insert_bracketed_prompt_paste_stamping_inserted(text)
+    }
+
+    /// Insert Event::Paste text into the composer. When the payload should
+    /// probe and the clipboard snapshot gate is open, stamp
+    /// `BracketedInserted` so scrollback round-trip, IME commits, and a shut
+    /// plan panel do not leave the composer empty on Linux (the snapshot
+    /// gate is always open there).
+    pub(super) fn insert_bracketed_prompt_paste_stamping_inserted(
+        &mut self,
+        text: &str,
+    ) -> InputOutcome {
         let attachment_change_count = if super::bracketed_paste_should_probe(text) {
             crate::clipboard::attachment_probe_gate(Some(text))
         } else {
             None
         };
-        let (outcome, synchronous_text_insertion) = self.insert_bracketed_prompt_text(text);
+        let (outcome, insertion) = self.insert_bracketed_prompt_text(text);
         if let Some(change_count) = attachment_change_count {
             self.enqueue_clipboard_attachment_probe(
                 crate::app::actions::ClipboardPasteSource::BracketedInserted {
                     text: text.to_owned(),
-                    insertion: synchronous_text_insertion,
+                    insertion,
                 },
                 change_count,
             );
+            return InputOutcome::Changed;
         }
         outcome
     }
@@ -1435,6 +1480,192 @@ pub(super) mod paste_key_tests {
             ctx.is_some(),
             "exclusive covering Ctrl+V cannot paste screenshots unless it probes"
         );
+    }
+
+    /// GNOME All Markup Copy is an image, not the dialog title. Isolated
+    /// Preview Event::Paste of that title with a raster must not dump the
+    /// title into the composer or the line-viewer search bar.
+    #[test]
+    fn isolated_preview_gnome_all_markup_copy_title_with_raster_is_image_chip() {
+        let mut agent = make_agent();
+        agent.set_active_pane(ActivePane::Prompt, true);
+        park_isolated_preview_without_approval(&mut agent, false);
+        crate::clipboard::set_clipboard_probe_hook(
+            crate::clipboard::ClipboardProbeHook::with_raster(None),
+        );
+        let _ = agent.handle_input(
+            &Event::Paste("All Markup Copy".to_string()),
+            &ActionRegistry::defaults(),
+        );
+        let ctx = deferred_probe_ctx(&agent);
+        crate::clipboard::clear_clipboard_probe_hook();
+        assert!(
+            !agent.prompt.text().contains("All Markup"),
+            "GNOME All Markup Copy title must not land in the composer; got {:?}",
+            agent.prompt.text()
+        );
+        let ctx =
+            ctx.expect("GNOME All Markup Copy with a raster must defer a clipboard image probe");
+        assert!(
+            agent
+                .line_viewer
+                .as_ref()
+                .is_some_and(|v| v.list_state.input_mode().is_none()
+                    && !v.list_state.input_textarea().text().contains("All Markup")),
+            "screenshot paste must not dump into Isolated Preview search"
+        );
+        let pasted = crate::prompt_images::from_clipboard_data(&test_image_data());
+        agent.complete_clipboard_attachment_paste(
+            ctx,
+            crate::app::actions::ProbedAttachment::Image(pasted),
+            None,
+        );
+        assert_eq!(agent.prompt.images.len(), 1);
+        assert!(
+            agent.prompt.text().contains("[Image #1]"),
+            "GNOME All Markup Copy must attach as an image chip; got {:?}",
+            agent.prompt.text()
+        );
+        assert!(
+            !agent.prompt.text().contains("All Markup"),
+            "image chip must not keep the dialog title; got {:?}",
+            agent.prompt.text()
+        );
+        assert!(
+            agent.is_plan_viewer(),
+            "Isolated Preview must stay open after screenshot paste"
+        );
+    }
+
+    /// Clipboard image / GNOME All Markup while Isolated Preview search is
+    /// open must not dump into the search bar. Image chip in the Operator
+    /// box is OK. Search query must not become the dialog title or raw
+    /// image bytes.
+    #[test]
+    fn isolated_preview_search_open_paste_does_not_fill_search() {
+        let mut agent = make_agent();
+        agent.set_active_pane(ActivePane::Prompt, true);
+        park_isolated_preview_without_approval(&mut agent, false);
+        {
+            let viewer = agent.line_viewer.as_mut().unwrap();
+            viewer.list_state.open_search(&viewer.lines);
+            for ch in ['p', 'r', 'e', 'v'] {
+                viewer.list_state.handle_key_event(
+                    &KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE),
+                    &viewer.lines,
+                );
+            }
+            assert_eq!(
+                viewer.list_state.input_mode(),
+                Some(crate::views::list_pane::InputBarMode::Search),
+                "fixture must keep Isolated Preview search open"
+            );
+            assert_eq!(viewer.list_state.input_textarea().text(), "prev");
+        }
+        crate::clipboard::set_clipboard_probe_hook(
+            crate::clipboard::ClipboardProbeHook::with_raster(None),
+        );
+        let _ = agent.handle_input(
+            &Event::Paste("All Markup Copy".to_string()),
+            &ActionRegistry::defaults(),
+        );
+        let ctx = deferred_probe_ctx(&agent);
+        crate::clipboard::clear_clipboard_probe_hook();
+        let search_text = agent
+            .line_viewer
+            .as_ref()
+            .unwrap()
+            .list_state
+            .input_textarea()
+            .text()
+            .to_string();
+        assert_eq!(
+            search_text, "prev",
+            "search query must not become the dialog title or raw image bytes; got {search_text:?}"
+        );
+        assert!(
+            !search_text.contains("All Markup")
+                && !search_text.contains("PNG")
+                && !search_text.contains("[Image"),
+            "GNOME All Markup / clipboard image must not dump into Isolated Preview search; got {search_text:?}"
+        );
+        assert!(
+            !agent.prompt.text().contains("All Markup"),
+            "GNOME All Markup Copy title must not land in the Operator box; got {:?}",
+            agent.prompt.text()
+        );
+        let ctx =
+            ctx.expect("GNOME All Markup Copy with a raster must defer a clipboard image probe");
+        let pasted = crate::prompt_images::from_clipboard_data(&test_image_data());
+        agent.complete_clipboard_attachment_paste(
+            ctx,
+            crate::app::actions::ProbedAttachment::Image(pasted),
+            None,
+        );
+        assert_eq!(agent.prompt.images.len(), 1);
+        assert!(
+            agent.prompt.text().contains("[Image #1]"),
+            "image chip in the Operator box is OK; got {:?}",
+            agent.prompt.text()
+        );
+        assert!(
+            !agent.prompt.text().contains("All Markup"),
+            "image chip must not keep the dialog title; got {:?}",
+            agent.prompt.text()
+        );
+        let search_after = agent
+            .line_viewer
+            .as_ref()
+            .unwrap()
+            .list_state
+            .input_textarea()
+            .text()
+            .to_string();
+        assert_eq!(
+            search_after, "prev",
+            "completing the image chip must not fill Isolated Preview search; got {search_after:?}"
+        );
+        assert_eq!(
+            agent.line_viewer.as_ref().unwrap().list_state.input_mode(),
+            Some(crate::views::list_pane::InputBarMode::Search),
+            "search must stay open after screenshot paste"
+        );
+        assert!(
+            agent.is_plan_viewer(),
+            "Isolated Preview must stay open after screenshot paste"
+        );
+    }
+
+    /// Mill composer Event::Paste of the GNOME All Markup dialog title
+    /// with a raster must probe first and not insert the title.
+    #[test]
+    fn mill_event_paste_gnome_all_markup_copy_title_with_raster_does_not_insert_title() {
+        let mut agent = make_agent();
+        agent.set_active_pane(ActivePane::Prompt, true);
+        crate::clipboard::set_clipboard_probe_hook(
+            crate::clipboard::ClipboardProbeHook::with_raster(None),
+        );
+        let _ = agent.handle_input(
+            &Event::Paste("All Markup Copy".to_string()),
+            &ActionRegistry::defaults(),
+        );
+        let ctx = deferred_probe_ctx(&agent);
+        crate::clipboard::clear_clipboard_probe_hook();
+        assert!(
+            !agent.prompt.text().contains("All Markup"),
+            "mill Event::Paste must not insert the GNOME title first; got {:?}",
+            agent.prompt.text()
+        );
+        let ctx = ctx.expect("mill Event::Paste of All Markup Copy with a raster must probe");
+        let pasted = crate::prompt_images::from_clipboard_data(&test_image_data());
+        agent.complete_clipboard_attachment_paste(
+            ctx,
+            crate::app::actions::ProbedAttachment::Image(pasted),
+            None,
+        );
+        assert_eq!(agent.prompt.images.len(), 1);
+        assert!(agent.prompt.text().contains("[Image #1]"));
+        assert!(!agent.prompt.text().contains("All Markup"));
     }
 
     /// Grok Build debugger is the same pager family (`xai-grok-pager`).

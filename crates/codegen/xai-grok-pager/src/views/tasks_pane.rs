@@ -20,7 +20,7 @@ use unicode_width::UnicodeWidthStr;
 use crate::app::agent::{BgTaskState, BgTaskStatus, ScheduledTaskInfo};
 use crate::app::subagent::{
     SubagentInfo, format_context_badge, format_live_l3_count, format_subagent_label_parts_among,
-    is_l2_list_row, live_l3_count, live_nested_specialist_list, live_subagent_list,
+    is_l2_list_row, listed_live_subagents, live_l3_count,
 };
 use crate::appearance::LayoutConfig;
 use crate::scrollback::layout::HorizontalLayout;
@@ -961,12 +961,7 @@ impl TasksPane {
             .values()
             .map(|info| info.child_session_id.as_ref())
             .collect();
-        let live = live_subagent_list(subagents.values());
-        let live = if live.is_empty() {
-            live_nested_specialist_list(subagents.values())
-        } else {
-            live
-        };
+        let live = listed_live_subagents(subagents.values());
         let all: Vec<&SubagentInfo> = subagents.values().collect();
         for info in live {
             let n = live_l3_count(subagents.values(), info.child_session_id.as_ref());
@@ -1011,8 +1006,8 @@ impl TasksPane {
 
         // Sort: group by type first (subagents → tasks → monitors →
         // scheduled) so each kind is one contiguous block, then running
-        // before done within each group, then newest-first, then a stable
-        // id tiebreak. Monitors and scheduled/loops render under one shared
+        // before done within each group, then time, then a stable id
+        // tiebreak. Monitors and scheduled/loops render under one shared
         // "Watchers" header but keep distinct ranks (monitors first).
         self.items.sort_by(|a, b| {
             // 1. Group by type so each kind is one contiguous block:
@@ -1022,9 +1017,12 @@ impl TasksPane {
                 // 2. Running before done *within* each group.
                 .then_with(|| b.is_running().cmp(&a.is_running()))
                 // 3. Within a (group, run-state): subagents order by agent
-                //    type (alphabetical) then newest-first; tasks/monitors/
-                //    loops order newest-first. Avoids mixing SystemTime and
-                //    Instant across types.
+                //    type (alphabetical) then earliest-started first, so the
+                //    last painted `[↗]` is the latest-started unique row
+                //    (`click_tasks_open_on_last_painted_row_opens_subagent`).
+                //    Compacting `[↗]` can then sit above that last row.
+                //    Tasks/monitors/loops stay newest-first. Avoids mixing
+                //    SystemTime and Instant across types.
                 .then_with(|| match (a, b) {
                     (
                         TaskEntry::Agent {
@@ -1037,7 +1035,7 @@ impl TasksPane {
                             started_at: sb,
                             ..
                         },
-                    ) => ta.cmp(tb).then_with(|| sb.cmp(sa)),
+                    ) => ta.cmp(tb).then_with(|| sa.cmp(sb)),
                     (
                         TaskEntry::Scheduled { started_at: a, .. },
                         TaskEntry::Scheduled { started_at: b, .. },
@@ -1082,10 +1080,7 @@ impl TasksPane {
             .values()
             .filter(|t| t.status == BgTaskStatus::Running && !t.restored_from_replay)
             .count()
-            + subagents
-                .values()
-                .filter(|s| s.is_running() && s.workflow_run_id.is_none())
-                .count()
+            + listed_live_subagents(subagents.values()).len()
             + scheduled.len()
             + workflow_runs.iter().filter(|run| run.is_active()).count();
 
@@ -1188,10 +1183,7 @@ impl TasksPane {
             .values()
             .filter(|t| t.status == BgTaskStatus::Running)
             .count()
-            + subagents
-                .values()
-                .filter(|s| s.is_running() && s.workflow_run_id.is_none())
-                .count()
+            + listed_live_subagents(subagents.values()).len()
             + scheduled.len()
             + workflow_runs.iter().filter(|run| run.is_active()).count()
     }
@@ -3775,6 +3767,73 @@ mod tests {
         assert_eq!(
             pane.running_count(&BTreeMap::new(), &subagents, &HashMap::new(), &runs),
             1
+        );
+    }
+
+    /// Header sparkler, Subagents N, and footer N subagents share one
+    /// running-only filter. An L2 plus its live L3 counts as one listed
+    /// row, not two.
+    #[test]
+    fn running_count_matches_listed_live_l2_not_l3() {
+        let mut pane = TasksPane::new();
+        let mut l2 = make_info();
+        l2.subagent_id = Arc::from("l2-coord");
+        l2.child_session_id = Arc::from("l2-coord");
+        l2.description = Arc::from("coordinate the slice");
+        l2.parent_session_id = Some(Arc::from("sess-l1"));
+        l2.depth = Some(1);
+        l2.finished = false;
+        let mut l3 = make_info();
+        l3.subagent_id = Arc::from("l3-grep");
+        l3.child_session_id = Arc::from("l3-grep");
+        l3.description = Arc::from("search the crate");
+        l3.parent_session_id = Some(Arc::from("l2-coord"));
+        l3.depth = Some(2);
+        l3.finished = false;
+        let mut done = make_info();
+        done.subagent_id = Arc::from("l2-done");
+        done.child_session_id = Arc::from("l2-done");
+        done.description = Arc::from("already exited");
+        done.parent_session_id = Some(Arc::from("sess-l1"));
+        done.depth = Some(1);
+        done.finished = true;
+        let mut subagents = HashMap::new();
+        subagents.insert("l2-coord".to_string(), l2);
+        subagents.insert("l3-grep".to_string(), l3);
+        subagents.insert("l2-done".to_string(), done);
+        pane.sync(
+            &BTreeMap::new(),
+            &subagents,
+            &HashMap::new(),
+            None,
+            &HashSet::new(),
+            &[],
+        );
+        let listed = listed_live_subagents(subagents.values());
+        assert_eq!(
+            listed.len(),
+            1,
+            "listed live rows must be the L2 only, got {:?}",
+            listed
+                .iter()
+                .map(|i| i.child_session_id.as_ref())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(listed[0].child_session_id.as_ref(), "l2-coord");
+        assert_eq!(
+            pane.running_count(&BTreeMap::new(), &subagents, &HashMap::new(), &[]),
+            1,
+            "running_count must match listed live L2 rows, not L2+L3"
+        );
+        let subagent_items: Vec<_> = pane
+            .items
+            .iter()
+            .filter(|e| matches!(e, TaskEntry::Agent { .. }))
+            .collect();
+        assert_eq!(
+            subagent_items.len(),
+            1,
+            "Subagents group must paint one live L2 row, got {subagent_items:?}"
         );
     }
 

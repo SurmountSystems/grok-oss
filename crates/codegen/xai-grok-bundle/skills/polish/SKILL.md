@@ -42,10 +42,10 @@ user asked for a project override.
    Never `merge: false` wipe.
 3. **Disk pointer.** Write or update a remaining-work report under
    `~/.agents/reports/` on this machine so compaction cannot drop the
-   list. Call it a report, not a join. Chat is not enough. Never mix
-   Grok Build version with grok-oss product version. grok-oss is
-   `grok-oss --version` (`1.0.3` plus git SHA). Grok Build is
-   `grok --version`. Isolated Preview and plan chrome are grok-oss
+   list. Call it a report, not a join. Chat is not enough.
+   Never mix Grok Build version with grok-oss product version.
+   grok-oss is `grok-oss --version` (`1.0.3` plus git SHA). Grok Build
+   is `grok --version`. Isolated Preview and plan chrome are grok-oss
    unless this process was launched as `grok` from downloads. Probe
    this turn if stating which binary this window is. Do not reuse a
    leftover Grok Build version as grok-oss.

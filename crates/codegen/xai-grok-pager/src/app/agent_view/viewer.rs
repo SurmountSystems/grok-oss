@@ -77,6 +77,18 @@ pub(super) fn plan_preview_key_is_composer_text(key: &KeyEvent) -> bool {
     )
 }
 
+/// Isolated Preview search owns keys while the search bar is open, and
+/// n/N after the query is accepted. Composer `/` stays slash.
+pub(super) fn isolated_preview_search_owns_key(agent: &AgentView, key: &KeyEvent) -> bool {
+    let Some(viewer) = agent.line_viewer.as_ref() else {
+        return false;
+    };
+    if viewer.list_state.input_mode().is_some() {
+        return true;
+    }
+    viewer.list_state.matcher().is_some() && (key!('n').matches(key) || key!('N').matches(key))
+}
+
 impl AgentView {
     // ── Line viewer methods ────────────────────────────────────────────
 
@@ -203,7 +215,8 @@ impl AgentView {
     /// overlay still saves. Prompt-focused Revise / Questions keep those
     /// intents. Vanished Isolated Preview (pane shut, live waiter,
     /// Preview focus) still Approves with those notes. Leftover
-    /// slash-palette `/` is not notes.
+    /// slash-palette `/` is not notes. Leftover `/` plus notes is still
+    /// those notes: Enter must not accept leftover slash as `/quit`.
     pub(crate) fn isolated_preview_idle_enter_approves_with_notes(&self) -> bool {
         if self.plan_decision_resolved {
             return false;
@@ -389,24 +402,15 @@ impl AgentView {
         let in_plan_approval = self.plan_approval_view.is_some();
         let plan_present = in_plan_approval || self.is_plan_viewer();
 
-        // Idle or cancelling plan present: `x`/`e`/`j`/`k` type in the Human
-        // box. They must not become list capture (delete / edit / row walk).
-        if plan_present
-            && matches!(key.code, KeyCode::Char('x' | 'e' | 'j' | 'k'))
-            && (key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT)
-        {
-            return self.handle_plan_feedback_key(key);
-        }
-
         let input_bar_active = self
             .line_viewer
             .as_ref()
             .is_some_and(|v| v.list_state.input_mode().is_some());
 
         // When the search/filter/goto input bar is active, let ListPane
-        // handle everything. Comment mode is special: Enter/Esc are not
-        // consumed by the list state (it returns false), so we handle
-        // save/cancel here.
+        // handle everything first so x/e/j/k type into the search bar.
+        // Comment mode is special: Enter/Esc are not consumed by the list
+        // state (it returns false), so we handle save/cancel here.
         if input_bar_active {
             let is_comment_mode = self.line_viewer.as_ref().is_some_and(|v| {
                 v.list_state.input_mode() == Some(crate::views::list_pane::InputBarMode::Comment)
@@ -423,6 +427,32 @@ impl AgentView {
                 viewer.list_state.handle_key_event(key, &viewer.lines);
             }
             return InputOutcome::Changed;
+        }
+
+        // After search is accepted (matcher live, bar closed), n/N jump
+        // hits. Isolated Preview composer `/` stays slash; n/N must not
+        // type into the Operator box while a search is live.
+        if plan_present
+            && self
+                .line_viewer
+                .as_ref()
+                .is_some_and(|v| v.list_state.matcher().is_some())
+            && (key!('n').matches(key) || key!('N').matches(key))
+        {
+            if let Some(ref mut viewer) = self.line_viewer {
+                viewer.list_state.handle_key_event(key, &viewer.lines);
+            }
+            return InputOutcome::Changed;
+        }
+
+        // Idle or cancelling plan present: `x`/`e`/`j`/`k` type in the
+        // Human box. They must not become list capture (delete / edit /
+        // row walk). Search bar already consumed those letters above.
+        if plan_present
+            && matches!(key.code, KeyCode::Char('x' | 'e' | 'j' | 'k'))
+            && (key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT)
+        {
+            return self.handle_plan_feedback_key(key);
         }
 
         // Isolated plan.md / side panel is visual. Printable keys and
@@ -631,18 +661,18 @@ impl AgentView {
             }
             return InputOutcome::Changed;
         }
-        if key!(Esc).matches(key) || key!('q').matches(key) || key!('c', CONTROL).matches(key) {
+        // Two-stage Ctrl+C on every Isolated Preview prompt: first press
+        // with a draft clears; empty second press Exits / abandons. Do not
+        // map first Ctrl+C to leftover close.
+        if key!('c', CONTROL).matches(key) {
+            return self.handle_plan_feedback_key(key);
+        }
+        if key!(Esc).matches(key) || key!('q').matches(key) {
             if in_plan_approval {
-                // Ctrl+C must reach the plan feedback path: empty composer
-                // abandons (like panel `q`); non-empty clears the draft.
-                // Do not return Changed and swallow the chord.
-                if key!('c', CONTROL).matches(key) {
-                    return self.handle_plan_feedback_key(key);
-                }
                 return InputOutcome::Changed;
             }
-            // In the plan viewer, Esc first clears visual selection / search
-            // before closing. q and Ctrl-C always close immediately.
+            // Leftover Isolated Preview: Esc first clears visual selection /
+            // search before closing. q closes immediately.
             if key!(Esc).matches(key)
                 && let Some(ref mut viewer) = self.line_viewer
             {
@@ -816,6 +846,7 @@ impl AgentView {
         let questions_area = viewer.plan_ref().and_then(|p| p.questions_button_area);
         let comment_btn_area = viewer.plan_ref().and_then(|p| p.comment_button_area);
         let copy_btn_area = viewer.plan_ref().and_then(|p| p.copy_button_area);
+        let search_btn_area = viewer.plan_ref().and_then(|p| p.search_button_area);
         // Cached `is_plan_viewer()` so we don't need to call self while
         // the line_viewer is mutably borrowed below.
         let is_plan_preview =
@@ -903,6 +934,12 @@ impl AgentView {
                     // Return here to make the dead fall-through
                     // explicit and to match the abandon/approve hit
                     // patterns just above.
+                    return InputOutcome::Changed;
+                }
+                if search_btn_area.is_some_and(|a| a.contains((mouse.column, mouse.row).into())) {
+                    if let Some(ref mut viewer) = self.line_viewer {
+                        viewer.list_state.open_search(&viewer.lines);
+                    }
                     return InputOutcome::Changed;
                 }
                 if copy_btn_area.is_some_and(|a| a.contains((mouse.column, mouse.row).into())) {
@@ -1038,6 +1075,13 @@ impl AgentView {
                 let prev_copy_btn = viewer.plan_ref().is_some_and(|p| p.copy_hovered);
                 if copy_btn_hover != prev_copy_btn {
                     viewer.plan_mut().copy_hovered = copy_btn_hover;
+                    changed = true;
+                }
+                let search_btn_hover =
+                    search_btn_area.is_some_and(|a| a.contains((mouse.column, mouse.row).into()));
+                let prev_search_btn = viewer.plan_ref().is_some_and(|p| p.search_hovered);
+                if search_btn_hover != prev_search_btn {
+                    viewer.plan_mut().search_hovered = search_btn_hover;
                     changed = true;
                 }
                 if self.plan_approval_view.is_some()

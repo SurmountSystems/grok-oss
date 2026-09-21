@@ -42,6 +42,13 @@ pub(super) async fn record_subagent_usage(
         }
     }
 }
+/// `resume_from` of a still-running nested session stays fail-closed.
+pub(super) fn resume_from_still_running_error(resume_id: &str) -> String {
+    format!(
+        "Cannot resume from subagent '{resume_id}': it is still running. \
+         Wait for it to complete before resuming."
+    )
+}
 pub(super) fn task_model_override_error(
     requested: Option<&str>,
     provenance: ModelOverrideProvenance,
@@ -166,10 +173,7 @@ pub(crate) async fn run_shell_child(
             .await
         {
             SubagentResumeLookup::Active => {
-                let msg = format!(
-                    "Cannot resume from subagent '{resume_id}': it is still running. \
-                     Wait for it to complete before resuming."
-                );
+                let msg = resume_from_still_running_error(resume_id);
                 return child_run_output(failure_result(&request, &msg), completion_data, None);
             }
             SubagentResumeLookup::Completed(info) => Some(ResumeSourceData {
@@ -1196,7 +1200,8 @@ pub(crate) async fn run_shell_child(
             effective_model_id: tracker_model_id.clone(),
             definition_background,
             control: ShellChildRuntime {
-                child_handle: child_handle.clone(),
+                child_cmd_tx: child_handle.cmd_tx.clone(),
+                signals_handle: child_handle.signals_handle.clone(),
                 _child_thread: child_thread,
             },
         })
@@ -1929,4 +1934,19 @@ pub(crate) async fn run_shell_child(
         })),
     );
     child_run_output(result, completion_data, disposed_snapshot_ref)
+}
+
+#[cfg(test)]
+mod resume_from_active_tests {
+    use super::*;
+
+    /// Operator: resume_from of a running id still fails. Wait for it to complete before resuming.
+    #[test]
+    fn resume_from_of_running_id_still_fails_it_is_still_running() {
+        assert_eq!(
+            resume_from_still_running_error("l2"),
+            "Cannot resume from subagent 'l2': it is still running. \
+             Wait for it to complete before resuming."
+        );
+    }
 }

@@ -96,18 +96,28 @@ pub(crate) fn finalize_killed_subagent(
     let Some(SessionMatch::Root(agent_id)) = find_session_match(app, session_id) else {
         return false;
     };
-    let Some(agent) = app.agents.get(&agent_id) else {
+    let Some((child_session_id, already_finished)) = app.agents.get(&agent_id).and_then(|agent| {
+        agent
+            .subagent_sessions
+            .values()
+            .find(|i| i.subagent_id.as_ref() == subagent_id)
+            .map(|i| (i.child_session_id.to_string(), i.finished))
+    }) else {
         return false;
     };
-    // Idempotency: skip if already finished.
-    let Some(child_session_id) = agent
-        .subagent_sessions
-        .values()
-        .find(|i| i.subagent_id.as_ref() == subagent_id && !i.finished)
-        .map(|i| i.child_session_id.to_string())
-    else {
-        return false;
-    };
+
+    // already_exited: the host already set finished. Do not re-synthesize
+    // SubagentFinished. Still idle leftover chrome and dismiss the paused
+    // Implementer overlay so kill can make that tab disappear.
+    if already_finished {
+        if let Some(agent) = app.agents.get_mut(&agent_id) {
+            crate::app::subagent::idle_finished_nested_overlay(agent, &child_session_id);
+            if agent.active_subagent.as_deref() == Some(child_session_id.as_str()) {
+                agent.dismiss_nested_overlay();
+            }
+        }
+        return true;
+    }
 
     let payload = SessionNotification {
         session_id: session_id.clone(),
