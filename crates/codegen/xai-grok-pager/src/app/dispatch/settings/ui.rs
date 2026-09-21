@@ -18,7 +18,7 @@ use super::setters::{
     set_scroll_lines_inner, set_scroll_mode_inner, set_scroll_speed_inner,
     set_scrub_ascii_punct_inner, set_show_thinking_blocks_inner, set_show_tips_inner,
     set_simple_mode_inner, set_theme_inner, set_timeline_inner, set_timestamps,
-    set_timestamps_inner, set_ulid_session_ids_inner, set_vim_mode_inner,
+    set_timestamps_inner, set_turbo_planning_inner, set_ulid_session_ids_inner, set_vim_mode_inner,
     set_voice_capture_mode_inner, set_voice_keybind_enabled_inner, set_voice_stt_language_inner,
 };
 use crate::app::actions::{Action, Effect, ModelChoice};
@@ -685,6 +685,13 @@ pub(in crate::app::dispatch) fn action_for_reset(
         ("confirm_before_rewind", SettingValue::Bool(b)) => {
             Some(Action::SetConfirmBeforeRewind(*b))
         }
+        ("turbo_planning", SettingValue::Bool(b)) => Some(Action::SetTurboPlanning(*b)),
+        ("process_rule_reminders_enabled", SettingValue::Bool(b)) => {
+            Some(Action::SetProcessRuleRemindersEnabled(*b))
+        }
+        ("process_rule_reminders", SettingValue::String(s)) => {
+            Some(Action::SetProcessRuleReminders(s.clone()))
+        }
         ("combine_queued_prompts", SettingValue::Bool(b)) => {
             Some(Action::SetCombineQueuedPrompts(*b))
         }
@@ -743,6 +750,9 @@ pub(in crate::app::dispatch) fn action_for_reset(
         }
         ("hide_header", SettingValue::Bool(b)) => Some(Action::SetHideHeader(*b)),
         ("composer_multiline", SettingValue::Bool(b)) => Some(Action::SetComposerMultiline(*b)),
+        ("allow_session_multiline", SettingValue::Bool(b)) => {
+            Some(Action::SetAllowSessionMultiline(*b))
+        }
         ("scrub_ascii_punct", SettingValue::Bool(b)) => Some(Action::SetScrubAsciiPunct(*b)),
         ("ulid_session_ids", SettingValue::Bool(b)) => Some(Action::SetUlidSessionIds(*b)),
         ("allow_worktree", SettingValue::Bool(b)) => Some(Action::SetAllowWorktree(*b)),
@@ -1149,6 +1159,9 @@ pub(in crate::app::dispatch) fn apply_setting_rollback(
         }
         ("hide_header", SettingValue::Bool(b)) => set_hide_header_inner(app, *b),
         ("composer_multiline", SettingValue::Bool(b)) => set_composer_multiline_inner(app, *b),
+        ("allow_session_multiline", SettingValue::Bool(b)) => {
+            set_allow_session_multiline_inner(app, *b)
+        }
         ("scrub_ascii_punct", SettingValue::Bool(b)) => set_scrub_ascii_punct_inner(app, *b),
         ("ulid_session_ids", SettingValue::Bool(b)) => set_ulid_session_ids_inner(app, *b),
         ("allow_worktree", SettingValue::Bool(b)) => set_allow_worktree_inner(app, *b),
@@ -1161,6 +1174,13 @@ pub(in crate::app::dispatch) fn apply_setting_rollback(
         ("prompt_suggestions", SettingValue::Bool(b)) => set_prompt_suggestions_inner(app, *b),
         ("auto_run_implement", SettingValue::Bool(b)) => set_auto_run_implement_inner(app, *b),
         ("economic_mode", SettingValue::Bool(b)) => set_economic_mode_inner(app, *b),
+        ("turbo_planning", SettingValue::Bool(b)) => set_turbo_planning_inner(app, *b),
+        ("process_rule_reminders_enabled", SettingValue::Bool(b)) => {
+            set_process_rule_reminders_enabled_inner(app, *b)
+        }
+        ("process_rule_reminders", SettingValue::String(s)) => {
+            set_process_rule_reminders_inner(app, s.clone())
+        }
         ("resume_canceled_turn_on_restart", SettingValue::Bool(b)) => {
             super::setters::set_resume_canceled_turn_on_restart_inner(app, *b)
         }

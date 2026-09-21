@@ -1160,7 +1160,7 @@ mod tests {
     }
 
     #[test]
-    fn still_running_wait_hint_omitted_invites_timeout_ms() {
+    fn still_running_wait_hint_omitted_is_snapshot_not_a_blocking_wait() {
         assert_eq!(
             still_running_wait_hint(WaitHint::NotRequested, WaitSubject::Task),
             "Use timeout_ms to wait for completion. Unless the user specified, do not kill this task just because this wait returned. It is still working. You will be notified automatically when it completes. Do other work, or wait again with a longer timeout_ms."
@@ -2203,8 +2203,10 @@ mod tests {
                     r.output
                 );
                 assert!(
-                    r.output.contains("timeout_ms"),
-                    "output should suggest timeout_ms: {}",
+                    r.output.contains("Snapshot only")
+                        && r.output.contains("Do not start a blocking wait")
+                        && r.output.contains("notified automatically"),
+                    "snapshot must not teach a blocking wait: {}",
                     r.output
                 );
             }

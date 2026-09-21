@@ -580,7 +580,7 @@ mod tests {
     /// first, then SuperGrok top-up dollars before console when those included
     /// SuperGrok period limits are full; off path says how to set false / classic dual-auth.
     #[test]
-    fn format_human_auto_use_names_extras_before_console_after_included_full() {
+    fn format_human_auto_use_names_dollar_credits_before_console_after_included_full() {
         let st = DualAuthStatus {
             session_present: true,
             session_mode: Some("oidc"),

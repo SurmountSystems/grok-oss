@@ -537,6 +537,27 @@ impl SubagentSpawnContext {
     pub(crate) fn resolve_subagent_worktree_snapshot_enabled(&self) -> bool {
         self.resolve_feature(crate::agent::config::Feature::SubagentWorktreeSnapshot)
     }
+    fn follow_up(&self, text: String) {
+        // Same path overlay `x.ai/interject` uses: child session cmd_tx + Interject
+        // text. Not overlay typing (`id: None`). Not cancel. Not a second spawn.
+        let _ = self.child_cmd_tx.send(SessionCommand::Interject {
+            text,
+            id: None,
+            images: Vec::new(),
+        });
+    }
+}
+#[cfg(test)]
+impl ShellChildRuntime {
+    /// Channel-only runtime so the named follow-up test can call [`ChildControl::follow_up`].
+    fn for_follow_up_test(cmd_tx: mpsc::UnboundedSender<SessionCommand>) -> Self {
+        let (signals_handle, _actor) = crate::session::signals::SessionSignalsActor::new();
+        Self {
+            child_cmd_tx: cmd_tx,
+            signals_handle,
+            _child_thread: SessionThread::from_handle(std::thread::spawn(|| {})),
+        }
+    }
 }
 #[derive(Default)]
 struct ShellCompletionState {

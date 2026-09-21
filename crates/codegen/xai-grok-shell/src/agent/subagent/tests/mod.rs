@@ -24,7 +24,7 @@ use crate::agent::remote_config::task_model_policy::TaskModelSelection;
 use crate::test_support::lsp_runtime::{ctx_with_toggle, test_gateway_with_receiver};
 use xai_grok_subagent_resolution::resolve_effective_overrides;
 use xai_grok_tools::implementations::grok_build::task::coordinator::{
-    ChildCompletion, CompletionDisposition,
+    ChildCompletion, ChildControl, CompletionDisposition,
 };
 use xai_grok_tools::implementations::grok_build::task::terminal_snapshot;
 use xai_grok_tools::reminders::task_completion::INLINE_SUBAGENT_OUTPUT_BYTES;

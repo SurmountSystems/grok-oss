@@ -337,6 +337,19 @@ pub(super) fn handle_exit_plan_mode(
     } else {
         agent.clear_kept_plan();
     }
+    if let Some(ref body) = state.plan_content {
+        if agent.isolated_preview_shows_secondary_plan && source == PlanReviewSource::Inline {
+            agent.persist_session_plan_body_for(
+                xai_grok_shell::grok_oss::SECONDARY_PLAN_IDENTITY,
+                body,
+            );
+        } else {
+            if source == PlanReviewSource::FileBacked {
+                agent.isolated_preview_shows_secondary_plan = false;
+            }
+            agent.persist_session_plan_body(body);
+        }
+    }
     // Live present re-arms decision CTAs after a prior Approve/Quit and
     // clears Revise/Clarify in-flight so CTAs arm once. Restore must not
     // clear sticky resolved (leftover/approved plan.md stays decided).
@@ -361,6 +374,11 @@ pub(super) fn handle_exit_plan_mode(
     // `a` / `s` / `q` stay accelerators.
     if keep_draft {
         agent.prompt.set_cursor(live_cursor);
+        if is_restore && let Some(ref mut pav) = agent.plan_approval_view {
+            pav.stashed_prompt.text = agent.prompt.text().to_string();
+            pav.stashed_prompt.cursor = live_cursor;
+            pav.keep_draft_is_next_operator_turn = true;
+        }
     }
 
     agent.casual_commenting_range = None;

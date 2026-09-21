@@ -248,5 +248,5 @@ Each error or warning appears as a notification in the conversation.
 - **Use `monitor` for real-time event streams** (log tailing, file watching)
 - **Use `scheduler_create` with `recurring: false`** for delayed one-shot tasks
 - **Keep monitor filters tight** — prefer `grep --line-buffered` over raw log streams
-- **Do not use sleep loops** in normal commands to poll — use `get_command_or_subagent_output` with `timeout_ms` instead
+- **Do not use sleep loops** in normal commands to poll. Use `get_command_or_subagent_output` with omit/`timeout_ms=0` for a snapshot. Use a positive `timeout_ms` only when you must join.
 - **Set reasonable poll intervals** — 30s+ for remote APIs to avoid rate limits, shorter for local checks

@@ -477,16 +477,46 @@ impl AgentView {
             }
             if let Event::Mouse(mouse) = ev
                 && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
-                && self.hit_goal_close.contains(mouse.column, mouse.row)
             {
-                self.show_goal_detail = false;
-                return InputOutcome::Changed;
+                if self.hit_goal_close.contains(mouse.column, mouse.row)
+                    || self.hit_goal_clear.contains(mouse.column, mouse.row)
+                {
+                    self.show_goal_detail = false;
+                    if let Some(g) = self.goal_state.take() {
+                        self.last_cleared_goal_id = Some(g.goal_id);
+                    }
+                    return InputOutcome::Action(Action::SendPrompt("/goal clear".into()));
+                }
+                if self.hit_goal_esc_close.contains(mouse.column, mouse.row) {
+                    self.show_goal_detail = false;
+                    return InputOutcome::Changed;
+                }
+                if self.hit_goal_resume.contains(mouse.column, mouse.row) {
+                    return InputOutcome::Action(Action::SendPrompt("/goal resume".into()));
+                }
+                if self.hit_goal_pause.contains(mouse.column, mouse.row) {
+                    return InputOutcome::Action(Action::SendPrompt("/goal pause".into()));
+                }
+                if self.hit_goal_status_cmd.contains(mouse.column, mouse.row) {
+                    return InputOutcome::Action(Action::SendPrompt("/goal status".into()));
+                }
             }
             if let Event::Mouse(mouse) = ev
                 && matches!(mouse.kind, MouseEventKind::Moved)
-                && self.hit_goal_close.update_hover(mouse.column, mouse.row)
             {
-                return InputOutcome::Changed;
+                let changed = self.hit_goal_close.update_hover(mouse.column, mouse.row)
+                    | self.hit_goal_clear.update_hover(mouse.column, mouse.row)
+                    | self
+                        .hit_goal_esc_close
+                        .update_hover(mouse.column, mouse.row)
+                    | self.hit_goal_resume.update_hover(mouse.column, mouse.row)
+                    | self.hit_goal_pause.update_hover(mouse.column, mouse.row)
+                    | self
+                        .hit_goal_status_cmd
+                        .update_hover(mouse.column, mouse.row);
+                if changed {
+                    return InputOutcome::Changed;
+                }
             }
             if matches!(ev, Event::Mouse(_) | Event::Paste(_)) {
                 return InputOutcome::Changed;
@@ -596,8 +626,11 @@ impl AgentView {
                         self.handle_line_viewer_key(key)
                     }
                     Event::Paste(text) => {
-                        if self.plan_approval_view.is_some() {
-                            return self.route_popup_paste(text);
+                        if self.plan_overlay_owns_composer_paste() {
+                            if let Some((outcome, _)) = self.try_handle_dropped_paths_paste(text) {
+                                return outcome;
+                            }
+                            return self.insert_or_defer_bracketed_prompt_paste(text);
                         }
                         self.line_viewer
                             .as_mut()
@@ -646,7 +679,12 @@ impl AgentView {
                         self.handle_plan_feedback_key(key)
                     }
                 }
-                Event::Paste(text) => self.route_popup_paste(text),
+                Event::Paste(text) => {
+                    if let Some((outcome, _)) = self.try_handle_dropped_paths_paste(text) {
+                        return outcome;
+                    }
+                    self.insert_or_defer_bracketed_prompt_paste(text)
+                }
                 Event::Mouse(mouse) => {
                     let in_prompt = self
                         .pane_areas
@@ -844,15 +882,10 @@ impl AgentView {
                     self.handle_plan_feedback_key(key)
                 }
                 Event::Paste(text) => {
-                    if self
-                        .plan_approval_view
-                        .as_ref()
-                        .is_some_and(|view| view.focus != PlanApprovalFocus::Preview)
-                    {
-                        self.route_popup_paste(text)
-                    } else {
-                        InputOutcome::Unchanged
+                    if let Some((outcome, _)) = self.try_handle_dropped_paths_paste(text) {
+                        return outcome;
                     }
+                    self.insert_or_defer_bracketed_prompt_paste(text)
                 }
                 Event::Mouse(mouse) => {
                     let mut changed = false;
@@ -1208,6 +1241,34 @@ impl AgentView {
         }
         InputOutcome::Unchanged
     }
+
+    /// Isolated Preview slash Tab/Enter must reuse mill `handle_prompt_key`
+    /// after overlay and before RowWalk / leftover list capture. Search
+    /// input bar owns keys while it is open.
+    fn isolated_preview_slash_tab_enter(
+        &mut self,
+        key: &crossterm::event::KeyEvent,
+        registry: &ActionRegistry,
+    ) -> Option<InputOutcome> {
+        if !self.prompt.slash_open() {
+            return None;
+        }
+        if self
+            .line_viewer
+            .as_ref()
+            .is_some_and(|v| v.list_state.input_mode().is_some())
+        {
+            return None;
+        }
+        if !key.modifiers.is_empty() {
+            return None;
+        }
+        if !matches!(key.code, KeyCode::Tab | KeyCode::Enter) {
+            return None;
+        }
+        Some(self.handle_prompt_key(key, registry, false))
+    }
+
     /// Handle an agent-level action using the compatibility fullscreen registry.
     /// Runtime key dispatch uses [`Self::handle_agent_action_with_registry`].
     #[cfg(test)]

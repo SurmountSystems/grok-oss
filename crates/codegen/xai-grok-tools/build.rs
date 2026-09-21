@@ -1,42 +1,16 @@
-//! Build script for bundling ripgrep for the xai-grok-tools crate.
+//! Build script for bundling fd (optional) and bfs/ugrep for xai-grok-tools.
 //!
-//! - If `GROK_TOOLS_BUNDLE_RG_PATH` is set, always bundle it
-//! - Otherwise, only bundle in release builds
+//! grok-oss grep is embedded Rust (`grep` crate + `ignore`), not a sidecar
+//! `rg`. This script does not cargo-install ripgrep and does not copy a
+//! bundled `rg` binary.
 use std::env;
 use std::fs;
-use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 
-const RG_VER: &str = "15.0.0";
 const BFS_VER: &str = "4.1";
 const UGREP_VER: &str = "7.7.0";
 const FD_VER: &str = "10.4.2";
-// fd stopped publishing x86_64-apple-darwin assets after 10.3.0.
-const FD_VER_MACOS_X64: &str = "10.3.0";
-
-/// Pinned SHA-256 of each `(version, triple)` fd release tarball we embed.
-const FD_TARBALL_SHA256: &[(&str, &str, &str)] = &[
-    (
-        "10.4.2",
-        "x86_64-unknown-linux-musl",
-        "e3257d48e29a6be965187dbd24ce9af564e0fe67b3e73c9bdcd180f4ec11bdde",
-    ),
-    (
-        "10.4.2",
-        "aarch64-unknown-linux-musl",
-        "f32d3657473fba74e2600babc8db0b93420d51169223b7e8143b2ed55d8fd9e8",
-    ),
-    (
-        "10.4.2",
-        "aarch64-apple-darwin",
-        "623dc0afc81b92e4d4606b380d7bc91916ba7b97814263e554d50923a39e480a",
-    ),
-    (
-        "10.3.0",
-        "x86_64-apple-darwin",
-        "50d30f13fe3d5914b14c4fff5abcbd4d0cdab4b855970a6956f4f006c17117a3",
-    ),
-];
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     bundle_rg()?;
@@ -60,42 +34,25 @@ fn bundle_fd() -> Result<(), Box<dyn std::error::Error>> {
     let gen_dir = PathBuf::from(env::var("OUT_DIR")?).join("bundle-fd");
     fs::create_dir_all(&gen_dir)?;
 
-    // The consuming vendor extraction is unix-only — never bundle on
-    // Windows targets, mirroring the bfs/ugrep skip.
+    // The consuming vendor extraction is unix-only. Never bundle on Windows.
     let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     if target_os == "windows" {
         return Ok(());
     }
 
-    let path_override = env::var("GROK_TOOLS_BUNDLE_FD_PATH").ok();
+    let path_override = env::var("GROK_TOOLS_BUNDLE_FD_PATH")
+        .ok()
+        .filter(|s| !s.is_empty());
     let is_release = env::var("PROFILE").as_deref() == Ok("release");
     if path_override.is_none() && !is_release {
         return Ok(());
     }
 
-    // Per-target version: macOS x86_64 pins the last release with that asset.
-    let target_arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
-    let (ver, asset_triple) = match (target_os.as_str(), target_arch.as_str()) {
-        ("macos", "aarch64") => (FD_VER, "aarch64-apple-darwin"),
-        ("macos", "x86_64") => (FD_VER_MACOS_X64, "x86_64-apple-darwin"),
-        ("linux", "x86_64") => (FD_VER, "x86_64-unknown-linux-musl"),
-        ("linux", "aarch64") => (FD_VER, "aarch64-unknown-linux-musl"),
-        _ => {
-            if path_override.is_none() {
-                return Err(format!(
-                    "Unsupported target for fd bundling: {target_os}-{target_arch}. Set GROK_TOOLS_BUNDLE_FD_PATH to a local fd binary for offline or unsupported builds.",
-                )
-                .into());
-            }
-            (FD_VER, "override")
-        }
-    };
-
     println!("cargo:rustc-cfg=bundle_fd");
-    println!("cargo:rustc-env=GROK_TOOLS_FD_VER={ver}");
+    println!("cargo:rustc-env=GROK_TOOLS_FD_VER={FD_VER}");
 
     if let Some(path) = path_override {
-        let dest = gen_dir.join(format!("fd-{ver}-override.bin"));
+        let dest = gen_dir.join(format!("fd-{FD_VER}-override.bin"));
         println!("cargo:rustc-env=GROK_TOOLS_FD_TARGET=override");
         let _ = fs::remove_file(&dest);
         fs::copy(PathBuf::from(path.clone()), &dest).map_err(|e| {
@@ -108,9 +65,12 @@ fn bundle_fd() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    println!("cargo:rustc-env=GROK_TOOLS_FD_TARGET={asset_triple}");
-    let dest = gen_dir.join(format!("fd-{ver}-{asset_triple}.bin"));
+    println!("cargo:rustc-env=GROK_TOOLS_FD_TARGET=cargo-built");
+    let dest = gen_dir.join(format!("fd-{FD_VER}-cargo-built.bin"));
     let _ = fs::remove_file(&dest);
+    cargo_install_fd_find(&dest)?;
+    Ok(())
+}
 
     let url = format!(
         "https://github.com/sharkdp/fd/releases/download/v{ver}/fd-v{ver}-{asset_triple}.tar.gz"
@@ -169,9 +129,12 @@ fn bundle_fd() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    if !found {
+    let status = cmd
+        .status()
+        .map_err(|e| format!("failed to spawn cargo install fd-find {FD_VER}: {e}"))?;
+    if !status.success() {
         return Err(format!(
-            "Could not find 'fd' in fd archive {url}. Set GROK_TOOLS_BUNDLE_FD_PATH for offline builds."
+            "cargo install fd-find {FD_VER} failed with {status}. Bundled fd is cargo-built from the fd-find crate; GitHub musl tarball is not the install path."
         )
         .into());
     }

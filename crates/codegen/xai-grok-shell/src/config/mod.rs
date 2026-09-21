@@ -82,6 +82,23 @@ pub struct SubagentsConfig {
     #[serde(default)]
     pub personas: std::collections::HashMap<String, SubagentPersona>,
 }
+impl Default for SubagentsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            allow_worktree: false,
+            parent_follow_up: true,
+            max_depth: None,
+            max_concurrent: None,
+            limit_behavior: None,
+            workflow_max_concurrent: None,
+            models: std::collections::HashMap::new(),
+            toggle: std::collections::HashMap::new(),
+            roles: std::collections::HashMap::new(),
+            personas: std::collections::HashMap::new(),
+        }
+    }
+}
 use xai_grok_subagent_resolution::config::{SubagentPersona, SubagentRole};
 impl Default for SubagentsConfig {
     fn default() -> Self {

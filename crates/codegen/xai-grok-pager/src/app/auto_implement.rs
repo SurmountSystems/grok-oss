@@ -233,6 +233,41 @@ pub fn extract_auto_implement_followup(prior_prompt: &str) -> Option<String> {
     extract_implement_block_at(prior_prompt, start)
 }
 
+/// True when `line` is a Next implement prompt heading, including the
+/// painted mill heading without markdown hashes.
+pub fn is_next_implement_prompt_heading(line: &str) -> bool {
+    line.trim()
+        .trim_start_matches('#')
+        .trim()
+        .eq_ignore_ascii_case("next implement prompt")
+}
+
+/// Trailing `## Next implement prompt` (or the painted mill heading)
+/// whose body starts with `/implement`. Bare `implement` without the
+/// slash is not auto-run.
+pub fn extract_trailing_next_implement_prompt(text: &str) -> Option<String> {
+    let mut after_heading: Option<usize> = None;
+    let mut pos = 0usize;
+    while pos <= text.len() {
+        let nl = text[pos..].find('\n').map(|i| pos + i);
+        let end = nl.unwrap_or(text.len());
+        if is_next_implement_prompt_heading(&text[pos..end]) {
+            after_heading = Some(nl.map(|i| i + 1).unwrap_or(text.len()));
+        }
+        if nl.is_none() {
+            break;
+        }
+        pos = end + 1;
+    }
+    let start = after_heading?;
+    let rest = text[start..].trim_start();
+    if !is_implement_command_sentence(rest) {
+        return None;
+    }
+    let abs = text.len() - rest.len();
+    extract_implement_block_at(text, abs)
+}
+
 /// Extract the **last** full multi-line `/implement` block from `text`
 /// (prefer residual “next implement” near the end of a report).
 pub fn extract_last_implement_block(text: &str) -> Option<String> {
@@ -289,9 +324,10 @@ pub fn last_turn_assistant_text(agent: &AgentView) -> Option<String> {
 }
 
 /// After a successful non-cancel agent turn, maybe queue a multi-line
-/// `/implement` block. Returns `Some(toast)` when enqueued (caller should
-/// show toast + drain), or `None` when nothing was queued.
-pub fn maybe_enqueue_auto_implement(agent: &mut AgentView, enabled: bool) -> Option<String> {
+/// `/implement` block. Returns toast and local queue id when enqueued
+/// (caller should show toast + drain, protecting that id from occupancy
+/// drop), or `None` when nothing was queued.
+pub fn maybe_enqueue_auto_implement(agent: &mut AgentView, enabled: bool) -> Option<(String, u64)> {
     if !enabled {
         return None;
     }
@@ -312,32 +348,59 @@ pub fn maybe_enqueue_auto_implement(agent: &mut AgentView, enabled: bool) -> Opt
     let from_user = prior.as_deref().and_then(extract_auto_implement_followup);
 
     // 2) Trailing residual block in the assistant’s just-finished turn.
-    let from_assistant = last_turn_assistant_text(agent)
+    // A Next implement prompt heading is a new turn even when the body
+    // matches the prompt that just ran (mill loop). Echo skip stays for
+    // quoted `/implement` without that heading.
+    let assistant = last_turn_assistant_text(agent);
+    let from_heading = assistant
         .as_deref()
-        .and_then(extract_last_implement_block)
-        .filter(|cmd| {
-            // Don't re-queue an exact echo of the prompt that just ran, or
-            // an `/implement` block that prompt already contained (approval
-            // review comments, quoted original implement body).
-            match prior.as_deref() {
+        .and_then(extract_trailing_next_implement_prompt);
+    let from_assistant = from_heading.or_else(|| {
+        assistant
+            .as_deref()
+            .and_then(extract_last_implement_block)
+            .filter(|cmd| match prior.as_deref() {
                 None => true,
                 Some(p) => !prior_already_contains_implement_block(p, cmd),
-            }
-        });
+            })
+    });
 
     let raw = from_user.or(from_assistant)?;
+    Some(enqueue_implement_command(agent, raw))
+}
 
+fn enqueue_implement_command(agent: &mut AgentView, raw: String) -> (String, u64) {
     let economic = crate::appearance::cache::load_economic_mode();
     let rewrite = apply_implement_effort_for_product(&raw, economic);
     let cmd = rewrite.command;
     let toast = auto_implement_toast_for(&raw, &cmd, economic, rewrite.toast.as_deref());
-
     let ranges = agent
         .prompt
         .slash_controller
         .recognized_token_ranges(&cmd, &agent.session.models);
-    agent.session.enqueue_prompt_with_skill_tokens(cmd, ranges);
-    Some(toast)
+    let id = agent.session.enqueue_prompt_with_skill_tokens(cmd, ranges);
+    (toast, id)
+}
+
+/// Nested mill L2 never receives `PromptResponse`. After that L2 finishes
+/// with a trailing Next implement prompt whose body starts with
+/// `/implement`, enqueue it on the parent so grok-oss sends the turn.
+/// Occupancy still running on a sibling L2 does not skip this.
+/// Returns the local queue id so drain occupancy does not drop a mill
+/// loop whose body matches the prompt that just ran.
+pub fn enqueue_nested_l2_next_implement(agent: &mut AgentView, child_sid: &str) -> Option<u64> {
+    let enabled = crate::appearance::cache::load_auto_run_implement();
+    if !enabled || agent.attached_as_viewer || agent.bash_turn || agent.session.loading_replay {
+        return None;
+    }
+    let text = agent
+        .subagent_views
+        .get(child_sid)
+        .and_then(|child| last_turn_assistant_text(child))?;
+    let raw = extract_trailing_next_implement_prompt(&text)?;
+    let (toast, id) = enqueue_implement_command(agent, raw);
+    agent.show_toast(&toast);
+    Some(id)
 }
 
 /// Toast when a follow-up was auto-queued.
@@ -362,11 +425,13 @@ pub fn auto_implement_toast_for(
 /// `/implement` when the setting is on, and toast.
 ///
 /// Call only on successful, non-cancel, non-bash turn ends.
-pub fn on_successful_turn_end(agent: &mut AgentView) {
+/// Returns the local queue id so drain occupancy does not drop a mill
+/// loop whose body matches the Human turn that just finished.
+pub fn on_successful_turn_end(agent: &mut AgentView) -> Option<u64> {
     let enabled = crate::appearance::cache::load_auto_run_implement();
-    if let Some(toast) = maybe_enqueue_auto_implement(agent, enabled) {
-        agent.show_toast(&toast);
-    }
+    let (toast, id) = maybe_enqueue_auto_implement(agent, enabled)?;
+    agent.show_toast(&toast);
+    Some(id)
 }
 
 #[cfg(test)]
@@ -602,6 +667,46 @@ more review notes";
         assert!(
             !compact_complete.contains("enqueue_prompt"),
             "compact complete must not copy occupancy onto pending_prompts"
+        );
+    }
+
+    #[test]
+    fn trailing_next_implement_heading_matches_painted_mill_heading() {
+        assert!(is_next_implement_prompt_heading("## Next implement prompt"));
+        assert!(is_next_implement_prompt_heading("Next implement prompt"));
+        assert!(is_next_implement_prompt_heading(
+            "  ### Next implement prompt  "
+        ));
+        assert!(!is_next_implement_prompt_heading(
+            "Next implement prompt leftover"
+        ));
+        let painted = "\
+Mill 70 GREEN.
+
+Next implement prompt
+/implement --effort 3 Keep at least two L2s running
+1) next mill row";
+        let got = extract_trailing_next_implement_prompt(painted).expect("painted heading");
+        assert!(
+            got.starts_with("/implement --effort 3 Keep at least two L2s"),
+            "{got}"
+        );
+        assert!(got.contains("1) next mill row"));
+        let hashed = "## Next implement prompt\n/implement leftover after mill\n1) keep going";
+        assert!(
+            extract_trailing_next_implement_prompt(hashed)
+                .is_some_and(|b| b.starts_with("/implement leftover after mill"))
+        );
+        assert_eq!(
+            extract_trailing_next_implement_prompt(
+                "Next implement prompt\nimplement leftover without slash"
+            ),
+            None,
+            "bare implement without the slash must not auto-run"
+        );
+        assert_eq!(
+            extract_trailing_next_implement_prompt("/implement no heading"),
+            None
         );
     }
 

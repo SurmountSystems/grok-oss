@@ -262,12 +262,15 @@ pub const FORBIDDEN_INCLUDED_BURN_CLAIMS: &[&str] = &[
 /// names Grok Build product % and SuperGrok dollar credits when those fields were
 /// present on every sample in the flat window. Does **not** claim Build or
 /// SuperGrok dollar credits stayed flat when they were never on the wire.
-pub fn flat_poll_unproven_debit_note(observed_build: bool, observed_extras: bool) -> String {
+pub fn flat_poll_unproven_debit_note(
+    observed_build: bool,
+    observed_dollar_credits: bool,
+) -> String {
     let mut parts: Vec<&str> = vec!["SuperGrok included %"];
     if observed_build {
         parts.push("Grok Build product %");
     }
-    if observed_extras {
+    if observed_dollar_credits {
         parts.push("SuperGrok dollar credits");
     }
     let meters = match parts.as_slice() {
@@ -299,7 +302,7 @@ pub struct LimitsHonestyInput {
     /// True when every sample in the flat window carried SuperGrok dollar credits
     /// (and it stayed flat). Only meaningful when
     /// [`Self::flat_poll_unproven_debit`] is true.
-    pub flat_poll_observed_extras: bool,
+    pub flat_poll_observed_dollar_credits: bool,
     /// True when Management postpaid preview shows OAuth class dominating
     /// API class (caller-supplied; do not invent from SuperGrok % alone).
     pub oauth_postpaid_dominates: bool,
@@ -393,7 +396,7 @@ pub fn honesty_notes_for_limits(input: LimitsHonestyInput) -> Vec<String> {
     if input.flat_poll_unproven_debit {
         notes.push(flat_poll_unproven_debit_note(
             input.flat_poll_observed_build,
-            input.flat_poll_observed_extras,
+            input.flat_poll_observed_dollar_credits,
         ));
     }
     if input.oauth_postpaid_dominates {
@@ -430,7 +433,7 @@ mod tests {
             has_included_reading: true,
             flat_poll_unproven_debit: false,
             flat_poll_observed_build: false,
-            flat_poll_observed_extras: false,
+            flat_poll_observed_dollar_credits: false,
             oauth_postpaid_dominates: false,
             has_console_team_prepaid_reading: false,
             has_team_default_credits_reading: false,
@@ -1045,7 +1048,7 @@ mod tests {
             has_included_reading: true,
             flat_poll_unproven_debit: true,
             flat_poll_observed_build: true,
-            flat_poll_observed_extras: true,
+            flat_poll_observed_dollar_credits: true,
             oauth_postpaid_dominates: true,
             has_console_team_prepaid_reading: false,
             has_team_default_credits_reading: false,
@@ -1094,7 +1097,7 @@ mod tests {
     fn flat_poll_note_when_evidence_flag_set() {
         let notes = honesty_notes_for_limits(LimitsHonestyInput {
             flat_poll_unproven_debit: true,
-            flat_poll_observed_extras: true,
+            flat_poll_observed_dollar_credits: true,
             ..input_base()
         });
         assert!(
@@ -1139,7 +1142,7 @@ mod tests {
             has_included_reading: false,
             flat_poll_unproven_debit: true,
             flat_poll_observed_build: false,
-            flat_poll_observed_extras: false,
+            flat_poll_observed_dollar_credits: false,
             oauth_postpaid_dominates: false,
             has_console_team_prepaid_reading: false,
             has_team_default_credits_reading: false,
@@ -1167,7 +1170,7 @@ mod tests {
             has_included_reading: true,
             flat_poll_unproven_debit: true,
             flat_poll_observed_build: false,
-            flat_poll_observed_extras: true,
+            flat_poll_observed_dollar_credits: true,
             oauth_postpaid_dominates: true,
             has_console_team_prepaid_reading: false,
             has_team_default_credits_reading: false,
@@ -1200,7 +1203,7 @@ mod tests {
             has_included_reading: true,
             flat_poll_unproven_debit: true,
             flat_poll_observed_build: false,
-            flat_poll_observed_extras: true,
+            flat_poll_observed_dollar_credits: true,
             oauth_postpaid_dominates: true,
             has_console_team_prepaid_reading: false,
             has_team_default_credits_reading: false,
@@ -1228,7 +1231,7 @@ mod tests {
             has_included_reading: true,
             flat_poll_unproven_debit: true,
             flat_poll_observed_build: false,
-            flat_poll_observed_extras: false,
+            flat_poll_observed_dollar_credits: false,
             oauth_postpaid_dominates: false,
             has_console_team_prepaid_reading: false,
             has_team_default_credits_reading: false,
@@ -1268,7 +1271,7 @@ mod tests {
         let notes = honesty_notes_for_limits(LimitsHonestyInput {
             flat_poll_unproven_debit: true,
             flat_poll_observed_build: false,
-            flat_poll_observed_extras: false,
+            flat_poll_observed_dollar_credits: false,
             ..input_base()
         });
         let flat = notes
@@ -1284,7 +1287,7 @@ mod tests {
     /// Named contract: when Build and SuperGrok dollar credits were observed
     /// flat, name them.
     #[test]
-    fn flat_poll_note_names_build_and_extras_when_observed() {
+    fn flat_poll_note_names_build_and_dollar_credits_when_observed() {
         let note = flat_poll_unproven_debit_note(true, true);
         assert!(
             note.contains("Grok Build product %"),
@@ -1301,7 +1304,7 @@ mod tests {
         let notes = honesty_notes_for_limits(LimitsHonestyInput {
             flat_poll_unproven_debit: true,
             flat_poll_observed_build: true,
-            flat_poll_observed_extras: true,
+            flat_poll_observed_dollar_credits: true,
             ..input_base()
         });
         assert!(
@@ -1373,7 +1376,7 @@ mod tests {
         let notes = honesty_notes_for_limits(LimitsHonestyInput {
             flat_poll_unproven_debit: true,
             flat_poll_observed_build: true,
-            flat_poll_observed_extras: true,
+            flat_poll_observed_dollar_credits: true,
             oauth_postpaid_dominates: true,
             ..input_base()
         });

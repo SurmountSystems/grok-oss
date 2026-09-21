@@ -6,7 +6,8 @@
 //!   [`load_updates_for_replay_at`] stays a typed materialize-all reference for tests.
 
 use std::collections::HashMap;
-use std::io;
+use std::fs::File;
+use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Component, Path, PathBuf};
 
 use agent_client_protocol as acp;
@@ -18,6 +19,7 @@ use super::{
 };
 use crate::extensions::notification::SessionNotification;
 use crate::extensions::notification::SessionUpdate as XaiUpdate;
+use crate::sampling::ConversationItem;
 use crate::session::wire_tags::{
     AVAILABLE_COMMANDS_UPDATE, TOOL_CALL_STATUS_IN_PROGRESS, TOOL_CALL_UPDATE,
 };
@@ -307,12 +309,15 @@ pub fn stream_replay_updates_at_hinted<F: FnMut(ReplayedUpdate)>(
     let Some(updates_path) = resolve_replay_updates_path(session_id, grok_home, hint)? else {
         return Ok(ReplayEmission::Empty);
     };
-    let raw_contents = std::fs::read_to_string(&updates_path)?;
-    let live = rewind_filtered_live(&raw_contents);
+    let plan = plan_replay_file(&updates_path, None)?;
+    let mut file = File::open(&updates_path)?;
+    let mut buf = String::new();
     let mut collapser = ReplayToolCollapser::new();
     let mut forwarded = false;
-    for line in live {
-        if line_is_dropped_on_replay(line) {
+    for loc in plan.lines {
+        read_replay_line_at(&mut file, loc, &mut buf)?;
+        let line = buf.trim();
+        if line.is_empty() || line_is_dropped_on_replay(line) {
             continue;
         }
         match SessionUpdateEnvelope::from_str(line) {
@@ -345,10 +350,16 @@ pub(crate) fn for_each_replay_update_in_file<F: FnMut(acp::SessionUpdate)>(
     updates_path: &std::path::Path,
     mut f: F,
 ) -> std::io::Result<bool> {
-    let raw_contents = std::fs::read_to_string(updates_path)?;
-    let live = rewind_filtered_live(&raw_contents);
+    let plan = plan_replay_file_inner(updates_path, None, false)?;
+    let mut file = File::open(updates_path)?;
+    let mut buf = String::new();
     let mut forwarded = false;
-    for line in live {
+    for loc in plan.lines {
+        read_replay_line_at(&mut file, loc, &mut buf)?;
+        let line = buf.trim();
+        if line.is_empty() {
+            continue;
+        }
         match SessionUpdateEnvelope::from_str(line) {
             Ok(SessionUpdate::Acp(notif)) => {
                 forwarded = true;

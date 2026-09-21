@@ -39,11 +39,13 @@ pub struct TaskToolInput {
 
     /// Whether to run the subagent in the background.
     ///
-    /// Returns immediately with a subagent_id. Use the task output tool to
-    /// retrieve results. This is set to true by default.
+    /// Returns immediately with a subagent_id. Keep working; completion is a
+    /// notification. Optional snapshot via the task output tool. A blocking
+    /// wait is only for when you must join. This is set to true by default.
     #[schemars(
-        description = "Returns immediately with a subagent_id. Use the task output tool to \
-            retrieve results. This is set to true by default."
+        description = "Returns immediately with a subagent_id. Keep working; completion is a \
+            notification. Optional snapshot via the task output tool. A blocking wait is only \
+            for when you must join. This is set to true by default."
     )]
     #[serde(
         default = "default_true",
@@ -87,6 +89,20 @@ pub struct TaskToolInput {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resume_from: Option<String>,
 
+    /// Follow up to a still-running nested L2 instead of spawning a new one.
+    ///
+    /// Pass that L2's `subagent_id`. Additional prompt text stays in `prompt`.
+    /// Mutually exclusive with `resume_from`. A running id uses `follow_up`.
+    /// A completed id uses `resume_from`. Do not kill or respawn.
+    #[schemars(
+        description = "Follow up to a still-running nested L2. Pass that subagent_id. \
+            Additional prompt text stays in prompt. Mutually exclusive with resume_from. \
+            A running id uses follow_up. A completed id uses resume_from. Do not kill or \
+            respawn."
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub follow_up: Option<String>,
+
     /// Explicit working directory for the subagent. When set, the child
     /// session operates in this directory instead of the parent's cwd.
     /// Mutually exclusive with `isolation: "worktree"` (both set the
@@ -124,15 +140,20 @@ pub struct TaskToolInput {
     #[serde(default)]
     pub task_id: Option<String>,
 
-    /// Files this subagent is assigned to write. Spawn fails if another live
-    /// subagent already claimed one of these paths. The claim lasts until the
-    /// child finishes. Omit this to skip spawn-time claims; edit tools still
-    /// refuse two agents writing the same file at the same time.
+    /// Files this subagent is assigned to write. Assignment is a soft lock:
+    /// other nested agents get a reminder that this subagent is assigned those
+    /// paths. Spawn does not fail when another live subagent already has the
+    /// same paths. The hard exclusive lock lasts only for one search_replace,
+    /// write, or apply_patch call. Omit this to skip spawn-time assignment;
+    /// edit tools still refuse two agents writing the same file at the same
+    /// instant.
     #[schemars(
-        description = "Files this subagent is assigned to write. Spawn fails if another live \
-            subagent already claimed one of these paths. The claim lasts until the child \
-            finishes. Omit this when paths are unknown; edit tools still refuse overlapping \
-            writes on the same file."
+        description = "Files this subagent is assigned to write. Assignment is a soft lock: \
+            other agents get a reminder that this subagent is assigned those paths. Spawn does \
+            not fail when another live subagent already has the same paths. The hard exclusive \
+            lock lasts only for one search_replace, write, or apply_patch call. Omit this when \
+            paths are unknown; edit tools still refuse two agents writing the same file at the \
+            same instant."
     )]
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub write_paths: Vec<String>,
@@ -550,7 +571,8 @@ impl BackgroundNoticeNaming<'static> {
 }
 
 /// Shared retrieval line for background notices: names this id and the
-/// host-facing get-output tool/params. Polling policy lives in the system prompt.
+/// host-facing get-output tool/params. Fire-and-return is the default:
+/// keep working, completion is a notification, snapshot is optional.
 fn background_result_line(subagent_id: &str, naming: &BackgroundNoticeNaming) -> String {
     let BackgroundNoticeNaming {
         task_output_tool,
@@ -558,7 +580,7 @@ fn background_result_line(subagent_id: &str, naming: &BackgroundNoticeNaming) ->
         timeout_ms_param,
     } = *naming;
     format!(
-        "When you need its result, use {task_output_tool} with {task_ids_param}=[\"{subagent_id}\"] and a positive {timeout_ms_param}."
+        "Keep working. Completion is a notification. Optional snapshot: {task_output_tool} with {task_ids_param}=[\"{subagent_id}\"] (omit {timeout_ms_param} or pass 0). Use a positive {timeout_ms_param} only when you must join this result before continuing."
     )
 }
 
@@ -922,7 +944,7 @@ pub struct TaskOutputToolInput {
     /// with "Provide a non-empty task_ids list", after which they abandoned
     /// the background-task workflow for shell polling.
     #[schemars(
-        description = "Task IDs to get output from. Pass one or more; for a single task use a one-element array. With a positive timeout_ms, multiple ids wait until all complete. Omit timeout_ms or pass 0 for a non-blocking snapshot."
+        description = "Task IDs to get output from. Pass one or more; for a single task use a one-element array. Omit timeout_ms or pass 0 for a non-blocking snapshot (the default for a long-running builder). With a positive timeout_ms, multiple ids wait until all complete; use that only when you must join."
     )]
     #[serde(
         default,
@@ -937,7 +959,7 @@ pub struct TaskOutputToolInput {
     /// which also pins it as the schema `maximum` — the tool description cannot
     /// carry the bound alone, since randomization may replace it wholesale.
     #[schemars(
-        description = "Max wait time in milliseconds, up to {max_wait_ms}. A positive value waits for completion; omit or pass 0 for a non-blocking status poll."
+        description = "Max wait time in milliseconds, up to {max_wait_ms}. Omit or pass 0 for a non-blocking snapshot. A positive value waits for completion only when you must join; do not use a blocking wait as the default for a long-running builder."
     )]
     #[serde(default)]
     pub timeout_ms: Option<u64>,
@@ -1520,8 +1542,8 @@ pub fn build_task_description(naming: &TaskToolNaming) -> String {
     format!(
         "Start a subagent that works on a task independently and reports back.\n\n\
          ## Usage notes\n\
-         - When the agent is done, it returns a single message with its agent ID. Use that ID to resume the agent later for follow-up work.\n\
-         - {run_in_background_param}: Returns immediately with a subagent_id. Use {background_retrieval_tool} to retrieve results. This is set to true by default.\n\
+         - When the agent is done, it returns a single message with its agent ID. Use that ID with {resume_from_param} for a completed subagent. Use follow_up for a still-running nested L2. Do not kill or respawn.\n\
+         - {run_in_background_param}: Returns immediately with a subagent_id. Keep working; completion is a notification. Optional snapshot via {background_retrieval_tool}. A blocking wait is only for when you must join. This is set to true by default.\n\
          - Subagents receive a compacted version of project instructions (AGENTS.md). If the task requires detailed conventions (e.g., build rules, testing patterns), include the relevant rules directly in the prompt.\n\
          - When launching independent subagents, you MUST incorporate the results into the task based on requirements BEFORE concluding.\n\n\
          Resuming a previous agent ({resume_from_param}):\n\
@@ -1672,7 +1694,7 @@ pub fn build_task_output_description(naming: &TaskOutputToolNaming) -> String {
         "Get output and status from a background task{target_suffix}.\n\n\
          Usage notes:\n\
          - Pass {task_ids_param} with one or more ids from {sources}{monitor_note}; for a single task use a one-element array. Multiple ids with a positive {timeout_ms_param} wait until all complete\n\
-         - Omit {timeout_ms_param} or pass 0 for a non-blocking status snapshot; set a positive {timeout_ms_param} to wait up to that many milliseconds, capped at {wait_cap}\n\
+         - Omit {timeout_ms_param} or pass 0 for a non-blocking status snapshot; set a positive {timeout_ms_param} only when you must join this result before continuing, capped at {wait_cap}\n\
          - Returns current output, status, and exit code if completed{read_note}"
     )
 }
@@ -1740,7 +1762,7 @@ pub fn build_wait_tasks_description(naming: &WaitTasksToolNaming) -> String {
 
     format!(
         "Wait for multiple background tasks or subagents to complete.\n\n\
-         Prefer {background_retrieval_tool} with task_ids and a positive timeout_ms. This tool is kept for compatibility.\n\n\
+         Prefer {background_retrieval_tool} with task_ids (omit timeout_ms or pass 0 for a snapshot). A positive timeout_ms waits only when you must join. This tool is kept for compatibility.\n\n\
          Usage notes:\n\
          - task_ids: list of task IDs from {sources}\n\
          - mode: 'wait_all' or 'wait_any'\n\
@@ -1890,6 +1912,7 @@ mod tests {
             capability_mode: None,
             isolation: None,
             resume_from: None,
+            follow_up: None,
             cwd: None,
             model: None,
             workspace: None,
@@ -2135,7 +2158,7 @@ mod tests {
         assert!(!desc.contains("subagent_type"));
         assert!(desc.contains("## Usage notes"));
         assert!(desc.contains(
-            "run_in_background: Returns immediately with a subagent_id. Use get_task_output to retrieve results. This is set to true by default."
+            "run_in_background: Returns immediately with a subagent_id. Keep working; completion is a notification. Optional snapshot via get_task_output. A blocking wait is only for when you must join. This is set to true by default."
         ));
         assert!(desc.contains(
             "When launching independent subagents, you MUST incorporate the results into the task based on requirements BEFORE concluding."
@@ -2146,6 +2169,11 @@ mod tests {
             "delegation timing belongs in the shared system prompt, not the task contract: {desc}"
         );
         assert!(desc.contains("Use resume_from to continue"));
+        assert!(desc.contains("Use follow_up to target a still-running nested L2"));
+        assert!(desc.contains("follow_up and resume_from are mutually exclusive"));
+        assert!(desc.contains("A running id uses follow_up. A completed id uses resume_from."));
+        assert!(desc.contains("Do not kill or respawn."));
+        assert!(desc.contains("Put the additional prompt text in prompt."));
     }
 
     #[test]
@@ -2157,7 +2185,7 @@ mod tests {
         assert!(desc.contains("Isolation mode:"));
         assert!(desc.contains("Use isolation to control the child's execution environment."));
         assert!(desc.contains("Assigned write paths:"));
-        assert!(desc.contains("Use write_paths to claim files this subagent will write."));
+        assert!(desc.contains("Use write_paths to assign files this subagent will write."));
     }
 
     #[test]
@@ -2340,7 +2368,7 @@ mod tests {
         assert!(desc.contains("prior ${{ tools.by_kind.task }} call"));
         assert!(desc.contains("Use ${{ params.task.resume_from }} to continue"));
         assert!(desc.contains(
-            "${{ params.task.run_in_background }}: Returns immediately with a subagent_id. Use ${{ tools.by_kind.background_task_action }} to retrieve results. This is set to true by default."
+            "${{ params.task.run_in_background }}: Returns immediately with a subagent_id. Keep working; completion is a notification. Optional snapshot via ${{ tools.by_kind.background_task_action }}. A blocking wait is only for when you must join. This is set to true by default."
         ));
         assert!(desc.contains("Use ${{ params.task.isolation }} to control"));
         assert!(!desc.contains("subagent_type"));
@@ -2455,7 +2483,8 @@ mod tests {
             "renamed task_ids must appear: {desc}"
         );
         assert!(
-            desc.contains("positive max_wait wait") && desc.contains("Omit max_wait or pass 0"),
+            desc.contains("positive max_wait only when you must join")
+                && desc.contains("Omit max_wait or pass 0"),
             "renamed timeout_ms must appear: {desc}"
         );
         assert!(
@@ -2485,7 +2514,7 @@ mod tests {
             "Get output and status from a background task, monitor, or subagent.\n\n\
              Usage notes:\n\
              - Pass task_ids with one or more ids from background=true commands or subagents (a monitor's task_id is returned by monitor); for a single task use a one-element array. Multiple ids with a positive timeout_ms wait until all complete\n\
-             - Omit timeout_ms or pass 0 for a non-blocking status snapshot; set a positive timeout_ms to wait up to that many milliseconds, capped at {max_wait_ms}\n\
+             - Omit timeout_ms or pass 0 for a non-blocking status snapshot; set a positive timeout_ms only when you must join this result before continuing, capped at {max_wait_ms}\n\
              - Returns current output, status, and exit code if completed\n\
              - If output is large, use read_file on the output_file path"
         );
@@ -2508,7 +2537,7 @@ mod tests {
             "Get output and status from a background task or subagent.\n\n\
              Usage notes:\n\
              - Pass task_ids with one or more ids from run_in_background=true subagents; for a single task use a one-element array. Multiple ids with a positive timeout_ms wait until all complete\n\
-             - Omit timeout_ms or pass 0 for a non-blocking status snapshot; set a positive timeout_ms to wait up to that many milliseconds, capped at {max_wait_ms}\n\
+             - Omit timeout_ms or pass 0 for a non-blocking status snapshot; set a positive timeout_ms only when you must join this result before continuing, capped at {max_wait_ms}\n\
              - Returns current output, status, and exit code if completed\n\
              - If output is large, use read_file on the output_file path"
         );
@@ -2525,7 +2554,7 @@ mod tests {
         assert_eq!(
             desc,
             "Wait for multiple background tasks or subagents to complete.\n\n\
-             Prefer get_command_or_subagent_output with task_ids and a positive timeout_ms. This tool is kept for compatibility.\n\n\
+             Prefer get_command_or_subagent_output with task_ids (omit timeout_ms or pass 0 for a snapshot). A positive timeout_ms waits only when you must join. This tool is kept for compatibility.\n\n\
              Usage notes:\n\
              - task_ids: list of task IDs from background=true commands or subagents\n\
              - mode: 'wait_all' or 'wait_any'\n\
@@ -2590,6 +2619,53 @@ mod tests {
         assert!(desc.contains("Prefer get_task_output with task_ids"));
     }
 
+    /// Operator: parent serializes on `get_command_or_subagent_output` 10-minute
+    /// waits while mill L2 runs 40+ minutes. Only one subagent row.
+    ///
+    /// Fire-and-return: A nested L2 that is a long builder (compile, lake, mill)
+    /// must not occupy the parent as a blocking 10-minute wait loop. Parent starts
+    /// it, keeps working, completion is a notification. Named test: parent can
+    /// spawn a second L2 while the first is still running without waiting for the
+    /// first to exit.
+    #[test]
+    fn parent_spawn_subagent_second_l2_while_first_still_running_without_wait() {
+        let naming = BackgroundNoticeNaming {
+            task_output_tool: "get_command_or_subagent_output",
+            ..BackgroundNoticeNaming::CANONICAL
+        };
+        let mill = format_subagent_started_background(
+            "mill-l2",
+            "general-purpose",
+            "mill compile on nixbuilder",
+            &naming,
+            false,
+        );
+        let second = format_subagent_started_background(
+            "just-module",
+            "general-purpose",
+            "next-row just module while mill runs",
+            &naming,
+            false,
+        );
+        for notice in [&mill, &second] {
+            assert!(
+                notice.contains("Keep working")
+                    && (notice.contains("notification") || notice.contains("notified")),
+                "spawn notice must tell the parent to keep working; completion is a notification, got {notice}"
+            );
+            assert!(
+                notice.contains("omit timeout_ms or pass 0"),
+                "snapshot (omit timeout_ms or pass 0) must stay allowed, got {notice}"
+            );
+            assert!(
+                !notice.contains("When you need its result")
+                    && !notice.contains("and a positive timeout_ms."),
+                "spawn notice must not teach a blocking positive timeout_ms as the default retrieval, got {notice}"
+            );
+        }
+        assert!(mill.contains("mill-l2") && second.contains("just-module"));
+    }
+
     #[test]
     fn background_spawn_notice_keeps_poll_hint_and_open_parent_work() {
         let naming = BackgroundNoticeNaming {
@@ -2603,14 +2679,16 @@ mod tests {
             "id must stay pollable: {with_cta}"
         );
         assert!(
-            with_cta.contains("get_command_or_subagent_output") && with_cta.contains("timeout_ms"),
-            "poll instruction must remain: {with_cta}"
+            with_cta.contains("get_command_or_subagent_output")
+                && with_cta.contains("omit timeout_ms or pass 0"),
+            "optional snapshot instruction must remain: {with_cta}"
         );
         assert!(
-            !with_cta.contains("to wait for results")
+            !with_cta.contains("When you need its result")
+                && !with_cta.contains("to wait for results")
                 && !with_cta.contains("finish remaining independent work first")
                 && !with_cta.contains("Continue other work"),
-            "spawn notice must stay factual and not restate polling policy: {with_cta}"
+            "spawn notice must not teach a blocking wait as the default retrieval: {with_cta}"
         );
         assert!(
             !with_cta.contains("<system-reminder>") && !with_cta.contains("<system_reminder>"),
@@ -2640,8 +2718,9 @@ mod tests {
         };
         let spawn = format_subagent_started_background("sa-9", "scan", &naming, false);
         assert!(
-            spawn.contains("use FetchJobResult with job_ids=[\"sa-9\"]")
-                && spawn.contains("a positive max_wait"),
+            spawn.contains("FetchJobResult with job_ids=[\"sa-9\"]")
+                && spawn.contains("omit max_wait or pass 0")
+                && spawn.contains("a positive max_wait only when you must join"),
             "renamed tool/params must appear: {spawn}"
         );
         assert!(
@@ -2653,8 +2732,9 @@ mod tests {
         assert!(
             auto.contains("moved to the background")
                 && auto.contains("you will be notified when it completes")
-                && auto.contains("use FetchJobResult with job_ids=[\"sa-9\"]")
-                && auto.contains("a positive max_wait"),
+                && auto.contains("FetchJobResult with job_ids=[\"sa-9\"]")
+                && auto.contains("omit max_wait or pass 0")
+                && auto.contains("a positive max_wait only when you must join"),
             "auto-bg notice must share the renamed retrieval line: {auto}"
         );
         assert!(

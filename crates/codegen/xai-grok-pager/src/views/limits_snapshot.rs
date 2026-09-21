@@ -57,10 +57,10 @@ pub struct PrincipalLimitsSlot {
     /// Included allowance (weekly/monthly %), if known.
     pub included: Option<IncludedAllowanceMeter>,
     /// SuperGrok dollar credits, if known and positive.
-    pub dollar_extras: Option<DollarExtrasMeter>,
+    pub dollar_credits: Option<DollarCreditsMeter>,
     /// When false, SuperGrok dollar credits were never observed for this principal
     /// (sibling included-only poll). Format as honest absence, not "none on file".
-    pub dollar_extras_observed: bool,
+    pub dollar_credits_observed: bool,
     /// Grok Build `productUsage` % when observed on a credits poll for this
     /// principal. `None` when not on wire / sibling cache-only.
     pub grok_build_usage_pct: Option<f64>,
@@ -106,7 +106,7 @@ impl IncludedAllowanceMeter {
 
 /// SuperGrok dollar credits (session billing path only).
 #[derive(Debug, Clone, PartialEq)]
-pub struct DollarExtrasMeter {
+pub struct DollarCreditsMeter {
     /// Absolute USD cents (billing may store negative accounting cents).
     pub balance_cents: i64,
     /// Auto top-up summary line without the leading label, or `None` when unknown.
@@ -346,7 +346,7 @@ pub struct LimitsSnapshot {
     pub flat_poll_observed_build: bool,
     /// True when the flat window observed SuperGrok dollar credits. Ignored when
     /// [`Self::flat_poll_unproven_debit`] is false.
-    pub flat_poll_observed_extras: bool,
+    pub flat_poll_observed_dollar_credits: bool,
     /// Stored SuperGrok logins and console key fingerprints (no secrets).
     pub discovered_identities: DiscoveredIdentities,
 }
@@ -531,10 +531,10 @@ impl LimitsSnapshot {
         autotopup: Option<&AutoTopupInfo>,
         live_identity: SamplingIdentityKind,
     ) -> Self {
-        let (included, dollar_extras) = match balance {
+        let (included, dollar_credits) = match balance {
             Some(bal) => (
                 Some(included_from_balance(bal)),
-                dollar_extras_from_balance(bal, autotopup),
+                dollar_credits_from_balance(bal, autotopup),
             ),
             None => (None, None),
         };
@@ -561,9 +561,9 @@ impl LimitsSnapshot {
             primary: PrincipalLimitsSlot {
                 label: "SuperGrok".into(),
                 included,
-                dollar_extras,
+                dollar_credits,
                 // Single-login path: full billing cache or cold "none on file".
-                dollar_extras_observed: true,
+                dollar_credits_observed: true,
                 grok_build_usage_pct: balance.and_then(|b| b.grok_build_usage_pct),
                 poll_succeeded: balance.is_some(),
                 included_source,
@@ -593,7 +593,7 @@ impl LimitsSnapshot {
             shared_unified_supergrok_pool: false,
             flat_poll_unproven_debit: false,
             flat_poll_observed_build: false,
-            flat_poll_observed_extras: false,
+            flat_poll_observed_dollar_credits: false,
             discovered_identities,
         }
     }
@@ -642,7 +642,7 @@ impl LimitsSnapshot {
         self.flat_poll_unproven_debit = flat;
         if !flat {
             self.flat_poll_observed_build = false;
-            self.flat_poll_observed_extras = false;
+            self.flat_poll_observed_dollar_credits = false;
         }
         self
     }
@@ -651,9 +651,9 @@ impl LimitsSnapshot {
     ///
     /// Only names Build / SuperGrok dollar credits in honesty copy when the matching
     /// flag is true. Safe default for both is false.
-    pub fn with_flat_poll_observed_meters(mut self, build: bool, extras: bool) -> Self {
+    pub fn with_flat_poll_observed_meters(mut self, build: bool, dollar_credits: bool) -> Self {
         self.flat_poll_observed_build = build;
-        self.flat_poll_observed_extras = extras;
+        self.flat_poll_observed_dollar_credits = dollar_credits;
         self
     }
 
@@ -736,7 +736,7 @@ impl LimitsSnapshot {
         let mut slots: Vec<PrincipalLimitsSlot> = principals
             .iter()
             .map(|p| {
-                let (included, dollar_extras, dollar_extras_observed, included_source) = match p
+                let (included, dollar_credits, dollar_credits_observed, included_source) = match p
                     .balance
                     .as_ref()
                 {
@@ -744,18 +744,18 @@ impl LimitsSnapshot {
                         // Sibling process-cache path: included from remember.
                         // SuperGrok dollar credits only when prepaidBalance was
                         // observed on this principal's credits poll (not invented).
-                        let extras = dollar_extras_from_balance(bal, p.autotopup.as_ref());
-                        let extras_observed = bal.prepaid_balance_cents.is_some();
+                        let dollar_credits = dollar_credits_from_balance(bal, p.autotopup.as_ref());
+                        let dollar_credits_observed = bal.prepaid_balance_cents.is_some();
                         (
                             Some(included_from_balance(bal)),
-                            extras,
-                            extras_observed,
+                            dollar_credits,
+                            dollar_credits_observed,
                             IncludedSource::ProcessCache,
                         )
                     }
                     Some(bal) => (
                         Some(included_from_balance(bal)),
-                        dollar_extras_from_balance(bal, p.autotopup.as_ref()),
+                        dollar_credits_from_balance(bal, p.autotopup.as_ref()),
                         true,
                         IncludedSource::LivePoll,
                     ),
@@ -773,8 +773,8 @@ impl LimitsSnapshot {
                 PrincipalLimitsSlot {
                     label: p.label.clone(),
                     included,
-                    dollar_extras,
-                    dollar_extras_observed,
+                    dollar_credits,
+                    dollar_credits_observed,
                     grok_build_usage_pct: p.balance.as_ref().and_then(|b| b.grok_build_usage_pct),
                     poll_succeeded,
                     included_source,
@@ -818,7 +818,7 @@ impl LimitsSnapshot {
             shared_unified_supergrok_pool: false,
             flat_poll_unproven_debit: false,
             flat_poll_observed_build: false,
-            flat_poll_observed_extras: false,
+            flat_poll_observed_dollar_credits: false,
             discovered_identities: DiscoveredIdentities::from_principal_inputs(principals),
         }
     }
@@ -904,13 +904,17 @@ pub fn active_driver_line_for_snapshot_with_meter_source(
     use super::credit_bar::active_spend_driver;
     use xai_grok_shell::auth::limits_pins::MeterSource;
 
-    let extras_cents = snap.primary.dollar_extras.as_ref().map(|d| d.balance_cents);
+    let dollar_credits_cents = snap
+        .primary
+        .dollar_credits
+        .as_ref()
+        .map(|d| d.balance_cents);
     let (included_known, included_pct) = chrome_included_from_limits_snapshot(snap);
     let driver = active_spend_driver(
         snap.live_identity,
         included_known,
         included_pct,
-        extras_cents,
+        dollar_credits_cents,
     );
     let label = match source {
         Some(MeterSource::Combined) => {
@@ -920,6 +924,7 @@ pub fn active_driver_line_for_snapshot_with_meter_source(
                 driver.as_human()
             }
         }
+        Some(MeterSource::Included) => driver.as_human(),
         Some(src) => src.as_human(),
         None => driver.as_human(),
     };
@@ -1001,10 +1006,10 @@ impl AllowanceMeterTone {
     }
 }
 
-fn dollar_extras_from_balance(
+fn dollar_credits_from_balance(
     bal: &CreditBalance,
     autotopup: Option<&AutoTopupInfo>,
-) -> Option<DollarExtrasMeter> {
+) -> Option<DollarCreditsMeter> {
     let balance_cents = bal.prepaid_balance_cents.map(i64::abs).filter(|c| *c > 0)?;
     let auto_topup = autotopup.map(|at| {
         if at.enabled {
@@ -1016,7 +1021,7 @@ fn dollar_extras_from_balance(
             AutoTopupLine::Disabled
         }
     });
-    Some(DollarExtrasMeter {
+    Some(DollarCreditsMeter {
         balance_cents,
         auto_topup,
     })
@@ -1218,7 +1223,7 @@ pub fn honesty_notes_for_snapshot(snap: &LimitsSnapshot) -> Vec<String> {
         has_included_reading: has_included,
         flat_poll_unproven_debit: snap.flat_poll_unproven_debit,
         flat_poll_observed_build: snap.flat_poll_observed_build,
-        flat_poll_observed_extras: snap.flat_poll_observed_extras,
+        flat_poll_observed_dollar_credits: snap.flat_poll_observed_dollar_credits,
         oauth_postpaid_dominates,
         has_console_team_prepaid_reading: snap.console.balance_cents.is_some(),
         has_team_default_credits_reading: has_team_default_credits,
@@ -1369,7 +1374,7 @@ fn format_principal(lines: &mut Vec<String>, p: &PrincipalLimitsSlot, console_li
         ));
     }
 
-    match &p.dollar_extras {
+    match &p.dollar_credits {
         Some(d) => {
             lines.push(format!(
                 "  SuperGrok dollar credits: {}",
@@ -1392,7 +1397,7 @@ fn format_principal(lines: &mut Vec<String>, p: &PrincipalLimitsSlot, console_li
                 }
             }
         }
-        None if p.dollar_extras_observed => {
+        None if p.dollar_credits_observed => {
             lines.push("  SuperGrok dollar credits: none on file".to_string());
         }
         None => {
@@ -1644,7 +1649,7 @@ mod tests {
             LimitsSnapshot::from_billing(Some(&bal), None, SamplingIdentityKind::SuperGrokSession);
         assert_eq!(
             active_driver_line_for_snapshot(&snap),
-            "Active: included SuperGrok period limits"
+            "Active: SuperGrok period"
         );
         assert_eq!(
             active_driver_line_for_snapshot_with_meter_source(
@@ -1659,7 +1664,7 @@ mod tests {
         );
         assert_eq!(
             active_driver_line_for_snapshot_with_meter_source(&snap, Some(MeterSource::Included)),
-            "Active: included SuperGrok period limits"
+            "Active: SuperGrok period"
         );
         let out = format_limits_detail_with_meter_source(&snap, Some(MeterSource::DollarCredits));
         assert!(
@@ -1667,14 +1672,14 @@ mod tests {
             "dollar-credits pin must name SuperGrok dollar credits on Active: {out}"
         );
         assert!(
-            !out.contains("Active: included SuperGrok period limits"),
+            !out.contains("Active: SuperGrok period"),
             "dollar-credits pin must not keep included SuperGrok period limits as Active: {out}"
         );
 
         let one_pool =
             active_driver_line_for_snapshot_with_meter_source(&snap, Some(MeterSource::Combined));
         assert_eq!(
-            one_pool, "Active: included SuperGrok period limits",
+            one_pool, "Active: SuperGrok period",
             "combined pin plus a single-principal from_billing snapshot must stay on the honest pool"
         );
         assert!(
@@ -1705,7 +1710,7 @@ mod tests {
             !one_line.to_ascii_lowercase().contains("combined"),
             "combined pin with one honest pool must not name combined: {one_line}"
         );
-        assert_eq!(one_line, "Active: included SuperGrok period limits");
+        assert_eq!(one_line, "Active: SuperGrok period");
 
         let personal = PrincipalLimitsInput {
             label: "SuperGrok (personal)".into(),
@@ -1748,7 +1753,7 @@ mod tests {
     }
 
     #[test]
-    fn format_supergrok_session_with_weekly_and_extras() {
+    fn format_supergrok_session_with_weekly_and_dollar_credits() {
         let bal = weekly(24.0, "Jul 30, 12:00", Some(1250));
         let topup = AutoTopupInfo {
             enabled: true,
@@ -1775,7 +1780,7 @@ mod tests {
             "live identity: {out}"
         );
         assert!(
-            out.contains("Active: included SuperGrok period limits"),
+            out.contains("Active: SuperGrok period"),
             "active driver with included-period headroom: {out}"
         );
         assert!(
@@ -2229,7 +2234,7 @@ mod tests {
     }
 
     #[test]
-    fn format_zero_prepaid_omits_extras_amount() {
+    fn format_zero_prepaid_omits_dollar_credits_amount() {
         let bal = weekly(10.0, "Aug 1, 00:00", Some(0));
         let snap =
             LimitsSnapshot::from_billing(Some(&bal), None, SamplingIdentityKind::SuperGrokSession);
@@ -2300,8 +2305,8 @@ mod tests {
                 next_reset_display: Some("soon".into()),
                 next_reset_at: None,
             }),
-            dollar_extras: None,
-            dollar_extras_observed: true,
+            dollar_credits: None,
+            dollar_credits_observed: true,
             grok_build_usage_pct: None,
             poll_succeeded: true,
             included_source: IncludedSource::Unknown,
@@ -2672,7 +2677,7 @@ mod tests {
     /// Named contract: matching independent polls must not copy SuperGrok
     /// dollar credits onto a sibling that did not observe prepaid.
     #[test]
-    fn format_unified_shares_observed_dollar_extras_across_principals() {
+    fn format_unified_shares_observed_dollar_credits_across_principals() {
         let mut business_bal = weekly(65.0, "August 3, 19:25", Some(10029));
         business_bal.is_unified_billing_user = Some(true);
         let business = PrincipalLimitsInput {
@@ -2730,7 +2735,7 @@ mod tests {
     /// Sibling included-only poll fills included % but must not claim SuperGrok
     /// dollar credits are known empty ("none on file") when not unified / no template.
     #[test]
-    fn format_sibling_included_only_extras_honest_absence() {
+    fn format_sibling_included_only_dollar_credits_honest_absence() {
         let active = PrincipalLimitsInput {
             label: "SuperGrok (personal)".into(),
             role_label: Some("personal".into()),
@@ -2798,8 +2803,8 @@ mod tests {
                 next_reset_display: Some("Aug 3, 19:25".into()),
                 next_reset_at: None,
             }),
-            dollar_extras: None,
-            dollar_extras_observed: false,
+            dollar_credits: None,
+            dollar_credits_observed: false,
             grok_build_usage_pct: None,
             poll_succeeded: true,
             included_source: IncludedSource::Unknown,
@@ -2816,11 +2821,11 @@ mod tests {
                     next_reset_display: Some("August 3, 19:25".into()),
                     next_reset_at: None,
                 }),
-                dollar_extras: Some(DollarExtrasMeter {
+                dollar_credits: Some(DollarCreditsMeter {
                     balance_cents: 10029,
                     auto_topup: Some(AutoTopupLine::Disabled),
                 }),
-                dollar_extras_observed: true,
+                dollar_credits_observed: true,
                 grok_build_usage_pct: None,
                 poll_succeeded: true,
                 included_source: IncludedSource::Unknown,
@@ -2843,7 +2848,7 @@ mod tests {
             shared_unified_supergrok_pool: false,
             flat_poll_unproven_debit: false,
             flat_poll_observed_build: false,
-            flat_poll_observed_extras: false,
+            flat_poll_observed_dollar_credits: false,
             discovered_identities: DiscoveredIdentities::default(),
         };
         let out = format_limits_detail(&snap);
@@ -3123,10 +3128,10 @@ mod tests {
             .find(|p| p.label.contains("personal"))
             .expect("personal json");
         assert!(
-            personal_json.dollar_extras_usd.is_none(),
+            personal_json.dollar_credits_usd.is_none(),
             "JSON must not copy SuperGrok dollar credits onto the sibling"
         );
-        assert!(!personal_json.dollar_extras_observed);
+        assert!(!personal_json.dollar_credits_observed);
     }
 
     /// Named contract: compact remaining / Active driver must not collapse
@@ -3181,7 +3186,7 @@ mod tests {
         );
         let line = active_driver_line_for_snapshot(&snap);
         assert!(
-            line.contains("included SuperGrok period limits"),
+            line.contains("SuperGrok period"),
             "Active driver must stay on included SuperGrok period limits: {line}"
         );
     }
@@ -3231,7 +3236,7 @@ mod tests {
             "must not copy included % / next reset onto the unpolled principal"
         );
         assert!(
-            personal_slot.dollar_extras.is_none() && !personal_slot.dollar_extras_observed,
+            personal_slot.dollar_credits.is_none() && !personal_slot.dollar_credits_observed,
             "must not copy SuperGrok dollar credits onto the unpolled principal"
         );
         let report = crate::limits_cmd::report_from_snapshot(&snap, vec![]);
@@ -3244,8 +3249,8 @@ mod tests {
             .expect("personal json");
         assert!(personal_json.included_used_pct.is_none());
         assert!(personal_json.next_reset.is_none());
-        assert!(personal_json.dollar_extras_usd.is_none());
-        assert!(!personal_json.dollar_extras_observed);
+        assert!(personal_json.dollar_credits_usd.is_none());
+        assert!(!personal_json.dollar_credits_observed);
         let out = format_limits_detail(&snap);
         let personal_sec = out.split("SuperGrok (personal):").nth(1).unwrap_or("");
         assert!(

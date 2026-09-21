@@ -9,10 +9,9 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use tokio::process::Command;
 use tokio::time::timeout;
 
-use crate::implementations::grok_build::grep::ripgrep::rg_path;
+use crate::implementations::grok_build::grep::embedded::{self, PrintMode, SearchRequest};
 use crate::types::output::CodexGrepFilesOutput;
 use crate::types::requirements::Expr;
 #[allow(unused_imports)]
@@ -64,9 +63,10 @@ pub struct CodexGrepFilesTool;
 
 // ─── rg execution ───────────────────────────────────────────────────
 
-/// Run `rg --files-with-matches` and return matching file paths.
+/// Run an embedded `--files-with-matches` search and return matching file paths.
 ///
-/// Direct port from `codex-rs/core/src/tools/handlers/grep_files.rs`.
+/// Same contract as `codex-rs/core/src/tools/handlers/grep_files.rs`, without
+/// exec'ing sidecar `rg`.
 async fn run_rg_search(
     pattern: &str,
     include: Option<&str>,
@@ -255,7 +255,6 @@ impl xai_tool_runtime::Tool for CodexGrepFilesTool {
 mod tests {
     use super::*;
     use crate::types::resources::Resources;
-    use std::process::Command as StdCommand;
     use tempfile::TempDir;
 
     /// Build a runtime `ToolCallContext` with the given resources.

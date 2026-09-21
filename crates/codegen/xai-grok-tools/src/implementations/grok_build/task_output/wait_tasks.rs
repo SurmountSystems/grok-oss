@@ -1,8 +1,9 @@
 //! `wait_tasks` tool — blocks until multiple background tasks complete.
 //!
 //! Prefer `get_task_output` / `get_command_or_subagent_output` with `task_ids`
-//! and a positive `timeout_ms` (wait-all). This tool remains as a thin alias
-//! for older prompts that still emit `wait_tasks` / `wait_commands_or_subagents`.
+//! (omit `timeout_ms` or pass 0 for a snapshot). A positive `timeout_ms` waits
+//! only when you must join. This tool remains as a thin alias for older
+//! prompts that still emit `wait_tasks` / `wait_commands_or_subagents`.
 //!
 //! `mode: wait_any` is still honored here for compatibility; the unified get
 //! tool only supports wait-all for multi-id waits.

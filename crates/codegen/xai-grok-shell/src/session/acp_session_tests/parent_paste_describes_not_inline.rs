@@ -150,6 +150,7 @@ fn request_has_image_part(req: &ConversationRequest) -> bool {
 /// has no `ContentPart::Image`. Persist, `<image_files>`, and AttachedImages
 /// stay.
 #[test]
+// Grok OSS: a parent grok-oss paste transcribes; the parent ConversationRequest has no ContentPart::Image. This diverges from upstream xAI because parent paste must not inline data-url image parts.
 fn parent_grok_oss_paste_conversation_request_has_no_image_part() {
     run_on_large_stack("parent-paste-describes-not-inline", || {
         block_on_local(false, async {
@@ -208,6 +209,7 @@ fn parent_grok_oss_paste_conversation_request_has_no_image_part() {
 /// Nested grok-oss still inlines via `add_image` so the nested request can
 /// inflate `file://` to `input_image`.
 #[test]
+// Grok OSS: nested grok-oss paste still inlines via add_image so the nested request can inflate file:// to input_image. This diverges from upstream xAI because parent paste transcribes while nested may send input_image from session files.
 fn nested_grok_oss_paste_conversation_request_keeps_image_part() {
     run_on_large_stack("nested-paste-keeps-inline", || {
         block_on_local(false, async {

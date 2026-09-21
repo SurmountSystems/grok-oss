@@ -10,6 +10,7 @@ pub mod billing_credits_card;
 pub mod conversation;
 pub mod doom_loop;
 pub mod error;
+pub mod language_models;
 pub mod messages;
 pub mod provider_error;
 pub mod serde_helpers;
@@ -39,6 +40,10 @@ pub use self::error::{
 pub use self::tool_overrides::{
     ClearableField, MAX_WEB_SEARCH_DOMAINS, SearchDateBound, SearchDateBoundError, ToolOverrides,
     ToolOverridesUpdate, WebSearchOptions, WebSearchOptionsError, XSearchOptions,
+};
+pub use self::language_models::{
+    LanguageModelServing, LanguageModelsList, language_models_url_from_models_list_url,
+    parse_language_models_json,
 };
 pub use self::tool_overrides::{
     ClearableField, SearchDateBound, SearchDateBoundError, ToolOverrides, ToolOverridesUpdate,

@@ -1,11 +1,5 @@
-//! Build script for bundling ripgrep for the grok-shell crate.
-//!
-//! - If `GROK_SHELL_BUNDLE_RG_PATH` is set, always bundle it
-//! - Otherwise, only bundle in release builds
-use std::env;
-use std::fs;
-use std::io;
-use std::path::{Path, PathBuf};
+//! grok-oss grep is embedded in `xai-grok-tools` (`grep` crate + `ignore`).
+//! This crate does not cargo-install ripgrep and does not bundle a sidecar `rg`.
 
 const RG_VER: &str = "15.0.0";
 

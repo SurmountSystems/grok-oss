@@ -464,6 +464,7 @@ mod tests {
             ("\u{2713}", "\u{221A}"), // check_mark
             ("\u{2197}", "o"),        // enlarge
             ("\u{29C9}", "c"),        // copy_icon
+            ("\u{2315}", "s"),        // search_icon
             ("\u{21E3}", "\u{2193}"), // token_arrow
         ] {
             assert_eq!(fancy.width(), 1, "icon {fancy:?} must be 1 column");

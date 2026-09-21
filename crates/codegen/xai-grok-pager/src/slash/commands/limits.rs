@@ -24,7 +24,7 @@ impl SlashCommand for LimitsCommand {
     }
 
     fn usage(&self) -> &str {
-        "/limits [--json | stay-supergrok | use-console | meter included|dollar-credits|console|combined | refresh]"
+        "/limits [--help | --json | stay-supergrok | use-console | use-personal | use-business | --use-credits | meter included|dollar-credits|console|combined | refresh]"
     }
 
     /// Works once an agent view exists (billing cache is app/agent scoped).
@@ -57,6 +57,20 @@ impl SlashCommand for LimitsCommand {
                 description: "Ask for the console key (sidecar pin)".into(),
             },
             ArgItem {
+                display: crate::limits_cmd::LIMITS_WORD_USE_PERSONAL.into(),
+                match_text: crate::limits_cmd::LIMITS_WORD_USE_PERSONAL.into(),
+                insert_text: crate::limits_cmd::LIMITS_WORD_USE_PERSONAL.into(),
+                description: "Ask for personal SuperGrok as the paying identity (sidecar pin)"
+                    .into(),
+            },
+            ArgItem {
+                display: crate::limits_cmd::LIMITS_WORD_USE_BUSINESS.into(),
+                match_text: crate::limits_cmd::LIMITS_WORD_USE_BUSINESS.into(),
+                insert_text: crate::limits_cmd::LIMITS_WORD_USE_BUSINESS.into(),
+                description: "Ask for Business SuperGrok as the paying identity (sidecar pin)"
+                    .into(),
+            },
+            ArgItem {
                 display: crate::limits_cmd::LIMITS_WORD_METER.into(),
                 match_text: crate::limits_cmd::LIMITS_WORD_METER.into(),
                 insert_text: crate::limits_cmd::LIMITS_WORD_METER.into(),
@@ -69,6 +83,18 @@ impl SlashCommand for LimitsCommand {
                 insert_text: crate::limits_cmd::LIMITS_WORD_REFRESH.into(),
                 description: "Force-refresh live meters".into(),
             },
+            ArgItem {
+                display: "--help".into(),
+                match_text: "--help".into(),
+                insert_text: "--help".into(),
+                description: "List /limits named words and hyphenated aliases".into(),
+            },
+            ArgItem {
+                display: crate::limits_cmd::LIMITS_WORD_USE_CREDITS.into(),
+                match_text: crate::limits_cmd::LIMITS_WORD_USE_CREDITS.into(),
+                insert_text: crate::limits_cmd::LIMITS_WORD_USE_CREDITS.into(),
+                description: "Pin meter chrome to SuperGrok dollar credits".into(),
+            },
         ])
     }
 
@@ -77,6 +103,9 @@ impl SlashCommand for LimitsCommand {
             Ok(crate::limits_cmd::LimitsNamedAction::Show)
             | Ok(crate::limits_cmd::LimitsNamedAction::Refresh) => {
                 CommandResult::Action(Action::ShowLimits)
+            }
+            Ok(crate::limits_cmd::LimitsNamedAction::Help) => {
+                CommandResult::Message(crate::limits_cmd::limits_help_text())
             }
             Ok(crate::limits_cmd::LimitsNamedAction::Json) => {
                 CommandResult::Action(Action::ShowLimitsJson)
@@ -149,11 +178,20 @@ mod tests {
     fn limits_command_rejects_unknown_args() {
         let models = ModelState::default();
         let mut ctx = make_ctx(&models);
+        let usage = LimitsCommand.usage();
+        assert!(
+            usage.contains("use-console")
+                && usage.contains("use-personal")
+                && usage.contains("use-business"),
+            "slash usage must list use-personal and use-business next to use-console: {usage}"
+        );
         let result = LimitsCommand.run(&mut ctx, "extra");
         assert!(
             matches!(result, CommandResult::Error(ref e) if e.contains("--json")
                 && e.contains("stay-supergrok")
                 && e.contains("use-console")
+                && e.contains("use-personal")
+                && e.contains("use-business")
                 && e.contains("meter")
                 && e.contains("refresh")),
             "expected usage error listing the named words, got {result:?}"
@@ -241,14 +279,48 @@ mod tests {
 
         let stay = crate::limits_cmd::LIMITS_WORD_STAY_SUPERGROK;
         let use_console = crate::limits_cmd::LIMITS_WORD_USE_CONSOLE;
+        let use_personal = crate::limits_cmd::LIMITS_WORD_USE_PERSONAL;
+        let use_business = crate::limits_cmd::LIMITS_WORD_USE_BUSINESS;
         let meter = crate::limits_cmd::LIMITS_WORD_METER;
         let refresh = crate::limits_cmd::LIMITS_WORD_REFRESH;
         assert_eq!(stay, "stay-supergrok");
         assert_eq!(use_console, "use-console");
+        assert_eq!(use_personal, "use-personal");
+        assert_eq!(use_business, "use-business");
         assert_eq!(meter, "meter");
         assert_eq!(refresh, "refresh");
 
+        let usage = LimitsCommand.usage();
+        assert!(
+            usage.contains(use_console)
+                && usage.contains(use_personal)
+                && usage.contains(use_business),
+            "slash usage must list use-personal and use-business next to use-console: {usage}"
+        );
         let models = ModelState::default();
+        let app_ctx = crate::slash::command::AppCtx {
+            models: &models,
+            cwd: std::path::Path::new("."),
+            has_session_announcements: false,
+            billing_surface_visible: true,
+            usage_command_visible: true,
+            workflows_available: false,
+            screen_mode: crate::app::ScreenMode::Inline,
+            current_title: None,
+        };
+        let suggested: Vec<String> = LimitsCommand
+            .suggest_args(&app_ctx, "")
+            .expect("slash /limits suggestions")
+            .into_iter()
+            .map(|item| item.insert_text)
+            .collect();
+        assert!(
+            suggested.iter().any(|w| w == use_personal)
+                && suggested.iter().any(|w| w == use_business)
+                && suggested.iter().any(|w| w == use_console),
+            "suggest_args must offer use-personal and use-business next to use-console, got {suggested:?}"
+        );
+
         let mut ctx = make_ctx(&models);
         for (args, label) in [
             (stay, "stay-supergrok"),
@@ -269,6 +341,8 @@ mod tests {
         for args in [
             vec!["grok-oss", "limits", stay],
             vec!["grok-oss", "limits", use_console],
+            vec!["grok-oss", "limits", use_personal],
+            vec!["grok-oss", "limits", use_business],
             vec!["grok-oss", "limits", refresh],
             vec!["grok-oss", "limits", meter, "included"],
             vec!["grok-oss", "limits", meter, "dollar-credits"],
@@ -313,5 +387,77 @@ mod tests {
             !desc.to_ascii_lowercase().contains("extras"),
             "slash picker must not teach extras as a nickname: {desc}"
         );
+    }
+
+    /// Operator: "would be nice if the limits command took help". `/limits
+    /// --help` used to print `Unknown argument: --help`. Help must list the
+    /// named words and hyphenated aliases.
+    #[test]
+    fn limits_help_lists_named_words_and_hyphenated_aliases() {
+        let models = ModelState::default();
+        let mut ctx = make_ctx(&models);
+        for args in ["--help", "help", "-h"] {
+            let result = LimitsCommand.run(&mut ctx, args);
+            match result {
+                CommandResult::Message(msg) => {
+                    assert!(
+                        msg.contains("stay-supergrok")
+                            && msg.contains("--stay-supergrok")
+                            && msg.contains("use-console")
+                            && msg.contains("--use-console")
+                            && msg.contains("use-personal")
+                            && msg.contains("use-business")
+                            && msg.contains("--use-credits")
+                            && msg.contains("meter")
+                            && msg.contains("refresh")
+                            && msg.contains("included SuperGrok period limits")
+                            && msg.contains("SuperGrok dollar credits"),
+                        "/limits {args} help must list named words and hyphen aliases: {msg}"
+                    );
+                    assert!(
+                        !msg.contains("Unknown argument"),
+                        "/limits {args} must not print Unknown argument: {msg}"
+                    );
+                    assert!(
+                        !msg.contains("free SuperGrok")
+                            && !msg.to_ascii_lowercase().contains("extras"),
+                        "help must not call SuperGrok free or teach extras: {msg}"
+                    );
+                }
+                other => panic!("/limits {args} must print help, got {other:?}"),
+            }
+        }
+    }
+
+    /// Operator: `/limits use credits` printed unknown argument. Hyphenated
+    /// options must match the unhyphenated words. `--use-credits` pins
+    /// SuperGrok dollar credits.
+    #[test]
+    fn limits_hyphenated_aliases_match_unhyphenated_words() {
+        use crate::limits_cmd::{LimitsMeterWord, LimitsNamedAction, parse_limits_named_args};
+
+        let pairs = [
+            ("stay-supergrok", "--stay-supergrok"),
+            ("use-console", "--use-console"),
+            ("use-personal", "--use-personal"),
+            ("use-business", "--use-business"),
+            ("refresh", "--refresh"),
+        ];
+        for (bare, hyphen) in pairs {
+            let a = parse_limits_named_args(bare).expect(bare);
+            let b = parse_limits_named_args(hyphen).expect(hyphen);
+            assert_eq!(a, b, "{bare} must match {hyphen}");
+        }
+        assert_eq!(
+            parse_limits_named_args("meter included").unwrap(),
+            parse_limits_named_args("--meter included").unwrap()
+        );
+        for credits in ["--use-credits", "use-credits", "use credits"] {
+            assert_eq!(
+                parse_limits_named_args(credits).expect(credits),
+                LimitsNamedAction::Meter(LimitsMeterWord::DollarCredits),
+                "{credits} must pin SuperGrok dollar credits"
+            );
+        }
     }
 }

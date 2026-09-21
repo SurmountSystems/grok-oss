@@ -1144,6 +1144,7 @@ fn dispatch_confirm_reset_setting_cancel_preserves_modal_state() {
 fn dispatch_confirm_reset_setting_reset_dispatches_typed_setter_for_pager_bool() {
     use crate::views::modal::ResetSettingsResult;
     let mut app = test_app_with_agent();
+    crate::appearance::cache::set_allow_session_multiline(true);
     let _ = dispatch(Action::SetMultilineMode(true), &mut app);
     assert!(expect_agent(&app, AgentId(0)).multiline_mode);
     setup_reset_confirm_open(&mut app, "multiline_mode");
@@ -1774,6 +1775,9 @@ fn move_setting_away_from_default(app: &mut AppView, key: crate::settings::Setti
         "composer_multiline" => {
             let _ = dispatch(Action::SetComposerMultiline(false), app);
         }
+        "allow_session_multiline" => {
+            let _ = dispatch(Action::SetAllowSessionMultiline(false), app);
+        }
         "render_mermaid" => {
             let _ = dispatch(
                 Action::SetRenderMermaid(crate::appearance::RenderMermaid::Off),
@@ -1875,6 +1879,20 @@ fn move_setting_away_from_default(app: &mut AppView, key: crate::settings::Setti
         }
         "allow_worktree" => {
             let _ = dispatch(Action::SetAllowWorktree(true), app);
+        }
+        "turbo_planning" => {
+            let away = !crate::appearance::cache::load_turbo_planning();
+            let _ = dispatch(Action::SetTurboPlanning(away), app);
+        }
+        "process_rule_reminders_enabled" => {
+            let away = !app.current_ui.process_rule_reminders_enabled();
+            let _ = dispatch(Action::SetProcessRuleRemindersEnabled(away), app);
+        }
+        "process_rule_reminders" => {
+            let _ = dispatch(
+                Action::SetProcessRuleReminders("only two implementor L2s allowed".to_string()),
+                app,
+            );
         }
         "bubble_copy_buttons" => {
             let _ = dispatch(Action::SetBubbleCopyButtons(false), app);

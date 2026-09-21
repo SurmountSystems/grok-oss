@@ -231,6 +231,7 @@ pub enum SamplingErrorKind {
     EmptyResponse,
     MaxTokensTruncation,
     DoomLoopDetected,
+    RepetitiveGeneration,
 }
 /// [`SamplingErrorKind::from_str`] error: the wire string matched no known kind (a newer peer's kind); callers degrade to untyped via `.ok()`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -301,6 +302,9 @@ impl From<&SamplingError> for SamplingErrorInfo {
             }
             SamplingError::DoomLoopDetected { .. } => {
                 (SamplingErrorKind::DoomLoopDetected, None, None, None)
+            }
+            SamplingError::RepetitiveGeneration { .. } => {
+                (SamplingErrorKind::RepetitiveGeneration, None, None, None)
             }
         };
 

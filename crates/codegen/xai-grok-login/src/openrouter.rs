@@ -61,6 +61,7 @@ mod attribution_tests {
     use super::*;
 
     #[test]
+    // Grok OSS: OpenRouter HTTP-Referer is Surmount Grok OSS, not https://x.ai. This diverges from upstream xAI because OpenRouter attribution headers must identify this unofficial fork.
     fn referer_is_surmount_not_xai() {
         assert!(OPENROUTER_HTTP_REFERER.contains("SurmountSystems/grok-oss"));
         assert_ne!(OPENROUTER_HTTP_REFERER, "https://x.ai");
@@ -68,6 +69,7 @@ mod attribution_tests {
     }
 
     #[test]
+    // Grok OSS: OpenRouter app title is Grok OSS (Surmount). This diverges from upstream xAI because OpenRouter attribution headers must identify this unofficial fork.
     fn title_is_grok_oss() {
         assert_eq!(OPENROUTER_X_TITLE, "Grok OSS");
         assert_eq!(OPENROUTER_X_OPENROUTER_TITLE_HEADER, "X-OpenRouter-Title");
@@ -76,6 +78,7 @@ mod attribution_tests {
     }
 
     #[test]
+    // Grok OSS: OpenRouter catalog id is openrouter-grok-4.5 with slug x-ai/grok-4.5. This diverges from upstream xAI because OpenRouter attribution and catalog rows must identify this unofficial fork.
     fn model_slug_is_openrouter_xai_path() {
         assert_eq!(OPENROUTER_GROK_45_MODEL, "x-ai/grok-4.5");
         assert_eq!(OPENROUTER_GROK_45_CATALOG_ID, "openrouter-grok-4.5");

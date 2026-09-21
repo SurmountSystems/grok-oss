@@ -1560,7 +1560,7 @@ pub(crate) struct RawChunkMetaPeek {
 
 /// Role of one item in the rewind timeline, as seen by [`filter_rewind_by`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum RewindStep {
+pub(crate) enum RewindStep {
     /// Rewind marker: truncate survivors back to `target`'s prompt boundary.
     Rewind { target: usize },
     /// User-message chunk opening (or continuing) a prompt run.

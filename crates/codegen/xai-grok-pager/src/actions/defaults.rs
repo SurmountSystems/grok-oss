@@ -662,16 +662,14 @@ pub(super) fn default_actions(
                 // Ctrl+L is a stable C0 form feed on xterm.js; the user guide's interject section explains the choice
                 key!('l', CONTROL)
             } else {
-                key!(Enter, CONTROL)
+                key!('i', CONTROL)
             },
             // Windows: Ctrl+Enter may drop Ctrl, so Ctrl+I is an alt
             // VS Code family: no alts (Ctrl+L sole chord; OpenExtensions unbound so it does not steal)
             alt_keys: if in_apple_terminal {
-                vec![key!(Enter, CONTROL), key!('i', CONTROL)]
-            } else if in_vscode_family {
-                vec![]
-            } else {
                 vec![key!('i', CONTROL)]
+            } else {
+                vec![]
             },
             category: Category::Input,
             context: When::PromptFocused,

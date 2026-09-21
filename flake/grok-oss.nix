@@ -36,10 +36,9 @@ let
       protobuf
       cmake
       perl
-      ripgrep
       makeWrapper
     ]
-    ++ lib.optionals stdenv.isLinux [
+    ++ lib.optionals stdenv.hostPlatform.isLinux [
       # Faster, leaner final links on Linux (helps free GHA RAM peaks).
       mold
     ];
@@ -47,14 +46,14 @@ let
   buildInputs =
     with pkgs;
     [ openssl ]
-    ++ lib.optionals stdenv.isLinux [ dbus ]
-    ++ lib.optionals stdenv.isDarwin [
+    ++ lib.optionals stdenv.hostPlatform.isLinux [ dbus ]
+    ++ lib.optionals stdenv.hostPlatform.isDarwin [
       darwin.apple_sdk.frameworks.Security
       darwin.apple_sdk.frameworks.SystemConfiguration
     ];
 
   # Linux: prefer mold for links inside pure crane builds.
-  moldRustflags = lib.optionalString pkgs.stdenv.isLinux "-C link-arg=-fuse-ld=mold";
+  moldRustflags = lib.optionalString pkgs.stdenv.hostPlatform.isLinux "-C link-arg=-fuse-ld=mold";
 
   commonArgs = {
     inherit src nativeBuildInputs buildInputs;
@@ -66,8 +65,6 @@ let
       }).version;
     PROTOC = "${pkgs.protobuf}/bin/protoc";
     OPENSSL_NO_VENDOR = "1";
-    GROK_TOOLS_BUNDLE_RG_PATH = "${pkgs.ripgrep}/bin/rg";
-    GROK_SHELL_BUNDLE_RG_PATH = "${pkgs.ripgrep}/bin/rg";
     GROK_GIT_SHA = self.shortRev or self.dirtyShortRev or "unknown";
     # Cap cargo fan-out inside the pure sandbox (free GHA ~16GB).
     CARGO_BUILD_JOBS = "2";

@@ -43,6 +43,12 @@ user asked for a project override.
 3. **Disk pointer.** Write or update a remaining-work report under
    `~/.agents/reports/` on this machine so compaction cannot drop the
    list. Call it a report, not a join. Chat is not enough.
+   Never mix Grok Build version with grok-oss product version.
+   grok-oss is `grok-oss --version` (`1.0.3` plus git SHA). Grok Build
+   is `grok --version`. Isolated Preview and plan chrome are grok-oss
+   unless this process was launched as `grok` from downloads. Probe
+   this turn if stating which binary this window is. Do not reuse a
+   leftover Grok Build version as grok-oss.
 4. **Fan out.** For each disjoint slice, L1 spawns L2. L2 spawns L3
    only if the problem is actually hard. Easy work can stay on L2. No
    L4. The product tool is `spawn_subagent`.

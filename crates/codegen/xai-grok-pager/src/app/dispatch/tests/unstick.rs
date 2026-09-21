@@ -26,6 +26,7 @@ fn unstick_resend_text(effects: &[Effect]) -> Option<&str> {
 
 /// Operator: resend the last L1 prompt as if the network had been interrupted.
 /// Not a duplicate prompt (do not paint a second Human line).
+// Grok OSS: /unstick resends the last L1 prompt and must not paint a second Human line. This diverges from upstream xAI because FORK.md and catalog pin /unstick as a grok-oss slash, not /resume.
 #[test]
 #[serial_test::serial(GROK_HOME)]
 fn unstick_resends_last_l1_prompt_without_duplicate_human_line() {
@@ -117,9 +118,67 @@ fn unstick_resends_last_l1_prompt_without_duplicate_human_line() {
     );
 }
 
+/// Operator: after Plan Exit, `/unstick` on a hung parent prompt must leave
+/// parked Isolated Preview. Not `/resume`.
+#[test]
+#[serial_test::serial(GROK_HOME)]
+fn unstick_leaves_parked_isolated_preview_when_hung() {
+    let grok_home = tempfile::tempdir().unwrap();
+    let _home = xai_grok_test_support::EnvGuard::set("GROK_HOME", grok_home.path());
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let sid = "unstick-leave-iso-sess";
+    let cwd = grok_home.path().join("iso");
+    let cwd_str = cwd.to_string_lossy().into_owned();
+    let hung = "continue the mill WATCHER plan";
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.session_id = Some(sid.into());
+        agent.session.cwd = cwd.clone();
+        agent.session.state = AgentState::TurnRunning;
+        agent.session.current_prompt_id = Some("prompt-hung".into());
+        agent.scrollback.push_block(RenderBlock::user_prompt(hung));
+        agent.plan_decision_resolved = true;
+        let mut viewer =
+            crate::views::file_search::line_viewer::LineViewerState::open_markdown_content(
+                "plan.md",
+                "# TECH.md leftover\nstale Isolated Preview\n".to_owned(),
+                None,
+            )
+            .expect("Isolated Preview body");
+        viewer.kind = crate::views::file_search::line_viewer::LineViewerKind::PlanPreview;
+        agent.line_viewer = Some(viewer);
+    }
+    let send = xai_grok_shell::session::prompt_wal::PromptWalRecord::new(
+        sid,
+        xai_grok_shell::session::prompt_wal::PromptWalKind::Send,
+        hung,
+        vec![],
+    );
+    xai_grok_shell::session::prompt_wal::append_prompt_wal(&cwd_str, sid, &send).expect("wal send");
+
+    let effects = dispatch(Action::SendPrompt("/unstick".into()), &mut app);
+
+    let agent = app.agents.get(&id).unwrap();
+    assert!(
+        agent.line_viewer.is_none(),
+        "/unstick must leave parked Isolated Preview after Plan Exit"
+    );
+    assert_eq!(
+        unstick_resend_text(&effects),
+        Some(hung),
+        "must resend the hung mill prompt; effects={effects:?}"
+    );
+    assert!(
+        !app.session_picker_loading,
+        "/unstick must not open the session picker"
+    );
+}
+
 /// Operator: without unwinding any work or tokens. Do not cancel nested
 /// agents, rewind tool results, drop the transcript, reset sampler usage
 /// meters, or compact-away the turn.
+// Grok OSS: /unstick must not cancel nested work, rewind, or reset usage meters. This diverges from upstream xAI because FORK.md and catalog pin /unstick as resend-not-unwind, not send-now cancel.
 #[test]
 fn unstick_does_not_cancel_nested_subagents_or_rewind_tokens() {
     let mut app = test_app_with_agent();
@@ -212,6 +271,7 @@ fn unstick_does_not_cancel_nested_subagents_or_rewind_tokens() {
 
 /// Operator: must not conflict with resume. `/resume` / continue interrupted
 /// turn stay as they are.
+// Grok OSS: /unstick is not /resume (session picker). This diverges from upstream xAI because FORK.md and catalog pin /unstick as a distinct grok-oss slash.
 #[test]
 fn unstick_does_not_collide_with_resume_slash() {
     let mut app = test_app_with_agent();
@@ -259,6 +319,7 @@ fn unstick_does_not_collide_with_resume_slash() {
 
 /// Operator: if there is no last L1 prompt, fail loud with a short toast.
 /// Do not invent text.
+// Grok OSS: /unstick with no last prompt fails loud and must not invent text. This diverges from upstream xAI because FORK.md and catalog pin that no-last-prompt toast as the grok-oss contract.
 #[test]
 fn unstick_with_no_last_prompt_fails_loud() {
     let mut app = test_app_with_agent();
@@ -295,6 +356,7 @@ fn unstick_with_no_last_prompt_fails_loud() {
 
 /// Operator: WAL image file ids resend as resource links, not only
 /// `[Image #N]` text, and never as data URLs.
+// Grok OSS: /unstick resends WAL image file ids as resource links, never data URLs. This diverges from upstream xAI because FORK.md and catalog pin WAL image resend as a grok-oss /unstick contract.
 #[test]
 #[serial_test::serial(GROK_HOME)]
 fn unstick_resends_wal_images_as_resource_blocks_not_data_urls() {

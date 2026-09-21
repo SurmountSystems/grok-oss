@@ -4,6 +4,8 @@ use std::path::PathBuf;
 
 /// Allowlisted script path segment (host implement skill + bundled mirror).
 const MEMORY_PY_MARKER: &str = "implement/scripts/memory.py";
+/// Shipped CLI bin of the same Rust function (Grok Build compatibility).
+const MEMORY_CLI_BIN: &str = "grok-oss-implement-memory";
 
 /// Parsed allowlisted memory.py invocation.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -71,10 +73,22 @@ fn is_python_bin(tok: &str) -> bool {
     }
 }
 
+fn path_basename(path: &str) -> &str {
+    std::path::Path::new(path)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or(path)
+}
+
 fn is_allowlisted_memory_py(path: &str) -> bool {
     // Normalize backslashes just in case; host is POSIX.
     let p = path.replace('\\', "/");
     p.ends_with(MEMORY_PY_MARKER) || p.contains(&format!("/{MEMORY_PY_MARKER}"))
+}
+
+fn is_memory_stub_or_cli_bin(path: &str) -> bool {
+    let base = path_basename(path);
+    base == "memory.py" || base == MEMORY_CLI_BIN || is_allowlisted_memory_py(path)
 }
 
 fn parse_subcmd(s: &str) -> Option<fn(UpdateStdinSource) -> MemorySubcommand> {
@@ -133,7 +147,7 @@ fn simple_tokens(s: &str) -> Vec<String> {
 
 fn try_parse_direct(cmd: &str) -> Option<MemoryIntercept> {
     let tokens = simple_tokens(cmd);
-    if tokens.len() < 3 {
+    if tokens.len() < 2 {
         return None;
     }
 
@@ -151,28 +165,36 @@ fn try_parse_direct(cmd: &str) -> Option<MemoryIntercept> {
         break;
     }
 
-    if i >= tokens.len() || !is_python_bin(&tokens[i]) {
-        return None;
-    }
-    i += 1;
-
-    // Optional -u / -B flags commonly used with python
-    while i < tokens.len() && tokens[i].starts_with('-') && tokens[i] != "-" {
-        // Do not accept -c (that is inline code — never intercept)
-        if tokens[i] == "-c" || tokens[i].starts_with("-c") {
-            return None;
-        }
-        i += 1;
-    }
-
     if i >= tokens.len() {
         return None;
     }
-    let script = tokens[i].clone();
-    if !is_allowlisted_memory_py(&script) {
+
+    let script = if is_python_bin(&tokens[i]) {
+        i += 1;
+        // Optional -u / -B flags commonly used with python
+        while i < tokens.len() && tokens[i].starts_with('-') && tokens[i] != "-" {
+            // Do not accept -c (that is inline code — never intercept)
+            if tokens[i] == "-c" || tokens[i].starts_with("-c") {
+                return None;
+            }
+            i += 1;
+        }
+        if i >= tokens.len() {
+            return None;
+        }
+        let script = tokens[i].clone();
+        if !is_allowlisted_memory_py(&script) {
+            return None;
+        }
+        i += 1;
+        script
+    } else if is_memory_stub_or_cli_bin(&tokens[i]) {
+        let script = tokens[i].clone();
+        i += 1;
+        script
+    } else {
         return None;
-    }
-    i += 1;
+    };
 
     if i >= tokens.len() {
         return None;

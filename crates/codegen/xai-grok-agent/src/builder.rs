@@ -1407,9 +1407,11 @@ const TASK_TOOL_NAMING: xai_tool_types::TaskToolNaming<'static> = xai_tool_types
 const CHILD_TASK_DESCRIPTION: &str = "\
 Launch a specialist (L3) for an independent sub-task.\n\
 \n\
-Spawn L3 only if the problem is actually hard. Easy work can stay on L2. \
-Including implement loops. L2 may compact. L3 must not compact-and-continue. \
-Give each L3 a distinct description. One reviewer unless the operator asked for more. \
+An L2 coordinator for implement work must spawn L3 for greps, reads, and product edits. \
+L2 does not fill 200k implementing. Compact on that L2 is a product miss when the cause is L2-solo implement tools. \
+L2 may compact (ordinary AUTO compact still fires at 95% of nested 200k). \
+L3 must not compact-and-continue. No L4. \
+Give each L3 a distinct description. One reviewer unless the Operator asked for more. \
 Token Economy effort is not reviewer count.\n\
 \n\
 Usage: specify a short ${{ params.task.description }} and a detailed ${{ params.task.prompt }}.\n\
@@ -1836,6 +1838,10 @@ mod tests {
             "child task description must require distinct L3 descriptions"
         );
     }
+    // Grok OSS: nested L2 spawn_subagent copy. An L2 coordinator for
+    // implement work must spawn L3 for greps, reads, and product edits.
+    // Compact from L2-solo implement tools is a product miss. L2 may
+    // compact. L3 must not compact-and-continue.
     #[test]
     fn child_task_description_is_concise() {
         assert!(!CHILD_TASK_DESCRIPTION.contains("subagent_type"));
@@ -1843,7 +1849,7 @@ mod tests {
         assert!(CHILD_TASK_DESCRIPTION.contains("${{ params.task.prompt }}"));
         assert!(CHILD_TASK_DESCRIPTION.contains("${{ params.task.run_in_background }}"));
         assert!(
-            CHILD_TASK_DESCRIPTION.len() < 700,
+            CHILD_TASK_DESCRIPTION.len() < 800,
             "child description should be compact, got {} chars",
             CHILD_TASK_DESCRIPTION.len()
         );

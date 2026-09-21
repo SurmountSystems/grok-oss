@@ -37,7 +37,7 @@ let
         "fortify3"
       ];
       enableParallelBuilding = true;
-      CARGO_BUILD_JOBS = "32";
+      CARGO_BUILD_JOBS = "64";
       CARGO_PROFILE = "dev";
       nativeBuildInputs = nativeBuildInputs ++ [
         pkgs.cargo-nextest
@@ -82,7 +82,7 @@ let
             workspace_run_make_jobserver cargo test --locked --profile "$CARGO_PROFILE" --jobs "$CARGO_LINK_JOBS" "''${remote_args[@]}"
             ;;
           nextest)
-            CARGO_BUILD_JOBS="$CARGO_LINK_JOBS" cargo nextest run --locked --build-jobs "$CARGO_LINK_JOBS" -j "$CARGO_BUILD_JOBS" "''${remote_args[@]}"
+            CARGO_BUILD_JOBS="$CARGO_LINK_JOBS" nice -n 19 cargo nextest run --locked --build-jobs "$CARGO_LINK_JOBS" -j "$CARGO_BUILD_JOBS" "''${remote_args[@]}"
             ;;
           clippy)
             clippyDriver="$(command -v clippy-driver)"

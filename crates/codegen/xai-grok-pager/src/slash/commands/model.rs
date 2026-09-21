@@ -65,6 +65,14 @@ impl SlashCommand for ModelCommand {
     }
 
     fn run(&self, ctx: &mut CommandExecCtx, args: &str) -> CommandResult {
+        Self::action_for_args(ctx.models, args)
+    }
+}
+
+impl ModelCommand {
+    /// Parse `/model` args into the same action `run` would return.
+    /// Unique-row Tab/Enter reuses this instead of SendPrompt.
+    pub(crate) fn action_for_args(models: &ModelState, args: &str) -> CommandResult {
         let trimmed = args.trim();
         if trimmed.is_empty() {
             return CommandResult::Error("Usage: /model <name> [window] [effort]".into());

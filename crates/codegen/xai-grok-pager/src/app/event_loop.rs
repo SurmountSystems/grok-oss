@@ -1966,6 +1966,9 @@ pub(crate) async fn run(
                 app.voice_auth = Some(stt_routes.auth.clone());
                 let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel(32);
                 let (event_tx, event_rx) = tokio::sync::mpsc::channel(128);
+                // Grok OSS: Until the Operator stops recording, PCM forks to
+                // audio WAL beside prompt_wal.jsonl. Temp fallback if no session.
+                app.voice_config.audio_wal_session_dir = app.audio_wal_session_dir_for(target);
                 let voice_config = app.voice_config.clone();
                 tokio::spawn(xai_grok_voice::run_voice_pipeline(
                     voice_config,
@@ -4122,6 +4125,42 @@ mod tests {
     }
     use crate::render::draw::WriterSync;
     use crossterm::event::{KeyEvent, KeyEventState};
+    #[test]
+    fn billing_poll_interval_is_one_hour_honor_ttl_not_thirty_second_http() {
+        assert_eq!(
+            BILLING_POLL_INTERVAL,
+            Duration::from_secs(xai_grok_shell::auth::SNAPSHOT_TTL_SECS)
+        );
+        assert_eq!(
+            BILLING_POLL_INTERVAL,
+            Duration::from_secs(3600),
+            "near-full included SuperGrok period background poll must not HTTP every 30s"
+        );
+        assert_eq!(
+            dispatch::background_billing_poll_snapshot_mode(),
+            xai_grok_shell::auth::LimitsSnapshotMode::HonorTtl,
+            "background FetchBilling is HonorTtl, not ForceRefresh"
+        );
+        let Effect::FetchBilling {
+            force_refresh,
+            silent,
+            nonce,
+            ..
+        } = dispatch::background_billing_poll_fetch_billing(crate::app::agent::AgentId(0))
+        else {
+            panic!("background billing poll must queue FetchBilling");
+        };
+        assert!(
+            !force_refresh,
+            "background FetchBilling is HonorTtl, not ForceRefresh"
+        );
+        assert!(silent, "background billing poll is silent chrome refresh");
+        assert_eq!(
+            nonce, 0,
+            "background billing poll is not a usage-modal fetch"
+        );
+    }
+
     #[test]
     fn typeahead_classification_keeps_text_drops_noise_and_control() {
         use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};

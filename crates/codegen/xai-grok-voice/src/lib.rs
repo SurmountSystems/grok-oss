@@ -9,6 +9,7 @@
 
 #[cfg(feature = "audio")]
 pub mod audio;
+pub mod audio_wal;
 pub mod auth;
 // The clip route only runs with capture compiled in; its tests need no device.
 #[cfg(any(test, feature = "audio"))]

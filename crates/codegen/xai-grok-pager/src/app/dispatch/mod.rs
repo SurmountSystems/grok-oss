@@ -28,12 +28,16 @@ mod prompt;
 mod prompt_ack;
 mod queue;
 pub(crate) mod rebuild;
+#[cfg(test)]
+mod rebuild_wal_already_issued;
 mod rewind;
 mod router;
 mod running;
 mod session;
 mod settings;
 mod soft_stop;
+#[cfg(test)]
+mod stale_queue_occupancy;
 mod start;
 mod status;
 mod task_result;

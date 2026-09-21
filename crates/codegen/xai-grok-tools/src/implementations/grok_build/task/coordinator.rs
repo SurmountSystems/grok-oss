@@ -657,6 +657,7 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                 });
                 let _ = request.respond_to.send(is_active);
             }
+            SubagentEvent::FollowUp(request) => self.handle_follow_up(request),
         }
     }
 

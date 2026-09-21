@@ -666,9 +666,7 @@ impl AgentView {
             self.inline_media_ids.clear();
             self.inline_media_iterm_emitted.clear();
         }
-        if let Some(ref child_sid) = self.active_subagent.clone()
-            && !self.child_is_auto_compacting(child_sid)
-        {
+        if let Some(child_sid) = self.visible_nested_overlay_sid().map(str::to_owned) {
             if let Some(esc) = self.take_own_inline_media_clear_escapes() {
                 xai_grok_shell::util::with_locked_stderr(|stderr| {
                     let _ = std::io::Write::write_all(stderr, esc.as_bytes());
@@ -830,6 +828,10 @@ impl AgentView {
             self.ephemeral_tip_renderable(area.height) && self.ephemeral_tip.is_active();
         let banner_height = banner_height.max(u16::from(tip_row_visible));
         let max_prompt_height = area.height / 2;
+        // Grok OSS: While recording, the prompt box grows with the transcript
+        // and must not clip spoken text. Overlay Some is the live recording path.
+        self.prompt
+            .set_voice_recording_grow(voice_listening, voice_interim);
         let base_prompt_height = if !prompt_focused && appearance.prompt.collapse_unfocused {
             self.prompt
                 .desired_height(inner_width, &prompt_style, true, max_prompt_height)
@@ -4406,9 +4408,21 @@ impl AgentView {
                 tick,
                 self.context_state.as_ref().map(|c| c.used),
                 active_subagent_tokens,
-                self.hit_goal_close.hovered,
+                crate::views::goal_detail::GoalDetailHovers {
+                    close: self.hit_goal_close.hovered,
+                    esc_close: self.hit_goal_esc_close.hovered,
+                    resume: self.hit_goal_resume.hovered,
+                    pause: self.hit_goal_pause.hovered,
+                    status: self.hit_goal_status_cmd.hovered,
+                    clear: self.hit_goal_clear.hovered,
+                },
             );
-            self.hit_goal_close.rect = close_rect;
+            self.hit_goal_close.rect = hits.close;
+            self.hit_goal_esc_close.rect = hits.esc_close;
+            self.hit_goal_resume.rect = hits.resume;
+            self.hit_goal_pause.rect = hits.pause;
+            self.hit_goal_status_cmd.rect = hits.status;
+            self.hit_goal_clear.rect = hits.clear;
             self.frame_occluder_rects.push(overlay_rect);
         }
         if self.show_workflows {

@@ -1,16 +1,12 @@
 //! `glob` tool — OpenCode architecture (`Tool` trait).
 //!
-//! File pattern matching using ripgrep's `--files` mode with glob filters.
-//! Returns matching file paths sorted by modification time (most recent first),
-//! capped at 100 results.
+//! File pattern matching using the `ignore` walker (the same walk ripgrep
+//! `--files` uses) with glob filters. Returns matching file paths sorted by
+//! modification time (most recent first), capped at 100 results.
 
 use std::path::PathBuf;
-use std::process::Stdio;
 
-use tokio::io::AsyncReadExt;
-use tokio::process::Command;
-
-use crate::implementations::grok_build::grep::ripgrep::rg_path;
+use crate::implementations::grok_build::grep::embedded;
 use crate::types::output::ToolOutput;
 #[allow(unused_imports)]
 use crate::types::resources::{
@@ -22,9 +18,6 @@ use crate::types::tool_io::ToolInput;
 // ─── Constants ──────────────────────────────────────────────────────
 
 const RESULT_LIMIT: usize = 100;
-
-/// Hard cap on bytes read from ripgrep's stdout (5 MB).
-const MAX_STDOUT_BYTES: usize = 5_000_000;
 
 // ─── Description ────────────────────────────────────────────────────
 
@@ -253,11 +246,7 @@ impl xai_tool_runtime::Tool for GlobTool {
         // lines past the cap so the truncation marker can report the real overflow.
         let mut entries: Vec<FileEntry> = Vec::new();
         let mut total_count: usize = 0;
-        for line in stdout.lines() {
-            let line = line.trim();
-            if line.is_empty() {
-                continue;
-            }
+        for full_path in listed {
             total_count += 1;
 
             if entries.len() >= RESULT_LIMIT {
@@ -265,7 +254,6 @@ impl xai_tool_runtime::Tool for GlobTool {
                 continue;
             }
 
-            let full_path = search_dir.join(line);
             let mtime_ms = std::fs::metadata(&full_path)
                 .ok()
                 .and_then(|m| m.modified().ok())

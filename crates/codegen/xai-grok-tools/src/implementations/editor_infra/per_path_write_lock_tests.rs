@@ -1,23 +1,25 @@
-//! ACP edit-tool contracts for the per-path write lock.
+//! ACP edit-tool contracts for the per-path write lock and CoW snapshot read.
 //!
-//! These tests call `search_replace`, `apply_patch`, `write`, and
-//! `hashline_edit`. They are the product red/green proof. The lock table
-//! unit tests live next to the helper module.
+//! These tests call `search_replace`, `apply_patch`, `write`,
+//! `hashline_edit`, and `read_file`. They are the product red/green proof.
+//! The lock table unit tests live next to the helper module.
 
 use std::sync::Arc;
 
 use crate::computer::local::LocalFs;
 use crate::implementations::codex::apply_patch::{ApplyPatchInput, ApplyPatchTool};
 use crate::implementations::editor_infra::per_path_write_lock::{
-    release_holder, try_acquire_write, try_reserve_writes,
+    format_soft_assignment_reminder, held, normalize_lock_path, release_holder, try_acquire_read,
+    try_acquire_write, try_reserve_writes,
 };
+use crate::implementations::grok_build::read_file::{ReadFileInput, ReadFileTool};
 use crate::implementations::grok_build::search_replace::{SearchReplaceInput, SearchReplaceTool};
 use crate::implementations::grok_build_hashline::edit::{
     HashlineEditInput, HashlineEditTool, HashlineOp,
 };
 use crate::implementations::opencode::write::{WriteInput, WriteTool};
 use crate::notification::types::ToolNotificationHandle;
-use crate::types::output::SearchReplaceOutput;
+use crate::types::output::{ReadFileOutput, SearchReplaceOutput};
 use crate::types::resources::{Cwd, FileSystem, NotificationHandle, OwnerSessionId, Resources};
 use crate::types::template_renderer::TemplateRenderer;
 use crate::types::tool::ToolKind;
@@ -90,6 +92,7 @@ fn assert_no_human_lock_menu(message: &str) {
     );
 }
 
+// Grok OSS: ACP per-path write lock extra. This diverges from upstream xAI because FORK.md pins exclusive writes so two agents cannot edit the same path at once.
 #[tokio::test]
 async fn two_agents_cannot_write_the_same_path_at_once() {
     let tmp = TempDir::new().unwrap();
@@ -122,6 +125,7 @@ async fn two_agents_cannot_write_the_same_path_at_once() {
     );
 }
 
+// Grok OSS: ACP per-path write lock extra. This diverges from upstream xAI because FORK.md pins a silent happy path when the first writer holds the path.
 #[tokio::test]
 async fn happy_path_first_writer_succeeds_silently() {
     let tmp = TempDir::new().unwrap();
@@ -150,6 +154,7 @@ async fn happy_path_first_writer_succeeds_silently() {
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "goodbye\n");
 }
 
+// Grok OSS: ACP per-path write lock extra. This diverges from upstream xAI because FORK.md pins the lock to the tool call, then a later call may write.
 #[tokio::test]
 async fn lock_releases_after_the_tool_call_so_a_later_call_can_write() {
     let tmp = TempDir::new().unwrap();
@@ -176,6 +181,34 @@ async fn lock_releases_after_the_tool_call_so_a_later_call_can_write() {
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "three\n");
 }
 
+// Grok OSS: ACP per-path write lock extra. GitHub #129. After write returns,
+// `held` is empty. Lock must be released.
+#[tokio::test]
+async fn after_write_returns_held_is_empty_lock_must_be_released() {
+    let tmp = TempDir::new().unwrap();
+    let path = tmp.path().join("held-empty.txt");
+    std::fs::write(&path, "before\n").unwrap();
+
+    let result = xai_tool_runtime::Tool::run(
+        &WriteTool,
+        test_ctx(write_resources(tmp.path(), "write-then-release")),
+        WriteInput {
+            file_path: path.to_string_lossy().into_owned(),
+            content: "after write\n".to_string(),
+        },
+    )
+    .await
+    .unwrap();
+    assert!(matches!(result, SearchReplaceOutput::EditsApplied(_)));
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "after write\n");
+    let key = normalize_lock_path(&path);
+    assert!(
+        !held().contains_key(&key),
+        "after write returns, held is empty; lock must be released"
+    );
+}
+
+// Grok OSS: ACP per-path write lock extra. This diverges from upstream xAI because FORK.md pins search_replace, apply_patch, and write to the same exclusive lock.
 #[tokio::test]
 async fn search_replace_apply_patch_and_write_all_take_the_lock() {
     let tmp = TempDir::new().unwrap();
@@ -250,6 +283,7 @@ async fn search_replace_apply_patch_and_write_all_take_the_lock() {
     );
 }
 
+// Grok OSS: ACP per-path write lock extra. This diverges from upstream xAI because FORK.md pins a named holder and file, not a steal/skip/wait menu.
 #[tokio::test]
 async fn held_path_error_names_holder_and_file_without_a_steal_skip_wait_menu() {
     let tmp = TempDir::new().unwrap();
@@ -271,34 +305,75 @@ async fn held_path_error_names_holder_and_file_without_a_steal_skip_wait_menu() 
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "keep\n");
 }
 
+// Grok OSS: ACP per-path write lock extra. This diverges from upstream xAI because FORK.md pins sequential writes after the first tool call returns, even when both agents share write_paths.
 #[tokio::test]
-async fn search_replace_refuses_a_path_reserved_by_another_agent() {
+async fn sequential_search_replace_succeeds_after_the_first_tool_call_returns_when_both_agents_were_assigned_the_same_write_paths()
+ {
+    // Operator: write locks must be hard at the tool-call level, not at
+    // the agent/layer level. Two agents sequential writes to the same
+    // file after first tool call returns must succeed.
+    let tmp = TempDir::new().unwrap();
+    let path = tmp.path().join("shared-seq.txt");
+    std::fs::write(&path, "one\n").unwrap();
+    let first = format!("seq-sr-a-{}", path.display());
+    let second = format!("seq-sr-b-{}", path.display());
+    try_reserve_writes([&path], &first);
+    try_reserve_writes([&path], &second);
+
+    let first_result = xai_tool_runtime::Tool::run(
+        &SearchReplaceTool,
+        test_ctx(search_replace_resources(tmp.path(), &first)),
+        search_replace_input("shared-seq.txt", "one\n", "two\n"),
+    )
+    .await
+    .expect("first agent's tool call must succeed");
+    assert!(matches!(first_result, SearchReplaceOutput::EditsApplied(_)));
+
+    let second_result = xai_tool_runtime::Tool::run(
+        &SearchReplaceTool,
+        test_ctx(search_replace_resources(tmp.path(), &second)),
+        search_replace_input("shared-seq.txt", "two\n", "three\n"),
+    )
+    .await
+    .expect("after the first tool call returns, the sibling write must succeed");
+    assert!(matches!(
+        second_result,
+        SearchReplaceOutput::EditsApplied(_)
+    ));
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "three\n");
+    release_holder(&first);
+    release_holder(&second);
+}
+
+// Grok OSS: ACP per-path write lock extra. This diverges from upstream xAI because FORK.md pins spawn-time write_paths as a reminder, not an exclusive block.
+#[tokio::test]
+async fn search_replace_succeeds_when_a_sibling_only_has_a_soft_write_paths_assignment() {
     let tmp = TempDir::new().unwrap();
     let path = tmp.path().join("reserved.txt");
     std::fs::write(&path, "keep\n").unwrap();
     let holder = format!("spawn-claim-{}", path.display());
-    try_reserve_writes([&path], &holder).unwrap();
+    try_reserve_writes([&path], &holder);
 
-    let err = xai_tool_runtime::Tool::run(
+    let note = format_soft_assignment_reminder(Some("other-writer"))
+        .expect("soft-lock reminder must be observable");
+    assert!(
+        note.contains(&format!("L2 {holder} is assigned these paths")),
+        "reminder must name the assigned sibling: {note}"
+    );
+    assert!(
+        note.contains("reserved.txt"),
+        "reminder must name the file: {note}"
+    );
+
+    let result = xai_tool_runtime::Tool::run(
         &SearchReplaceTool,
         test_ctx(search_replace_resources(tmp.path(), "other-writer")),
         search_replace_input("reserved.txt", "keep\n", "overwrite\n"),
     )
     .await
-    .expect_err("a spawn-time claim must block another agent's edit");
-
-    assert!(
-        err.detail.contains(&holder),
-        "error must name the holder: {}",
-        err.detail
-    );
-    assert!(
-        err.detail.contains("reserved.txt"),
-        "error must name the file: {}",
-        err.detail
-    );
-    assert_no_human_lock_menu(&err.detail);
-    assert_eq!(std::fs::read_to_string(&path).unwrap(), "keep\n");
+    .expect("a spawn-time write_paths assignment must not exclusive-block another agent's edit");
+    assert!(matches!(result, SearchReplaceOutput::EditsApplied(_)));
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "overwrite\n");
     release_holder(&holder);
 }
 
@@ -311,6 +386,7 @@ fn hashline_write_input(file_path: &str, content: &str) -> HashlineEditInput {
     }
 }
 
+// Grok OSS: ACP per-path write lock extra. This diverges from upstream xAI because FORK.md pins hashline_edit to the same exclusive lock.
 #[tokio::test]
 async fn hashline_edit_refuses_when_another_agent_holds_the_path() {
     let tmp = TempDir::new().unwrap();
@@ -344,6 +420,7 @@ async fn hashline_edit_refuses_when_another_agent_holds_the_path() {
     );
 }
 
+// Grok OSS: ACP per-path write lock extra. This diverges from upstream xAI because FORK.md pins a silent hashline happy path.
 #[tokio::test]
 async fn hashline_edit_happy_path_does_not_mention_the_lock() {
     let tmp = TempDir::new().unwrap();
@@ -370,4 +447,50 @@ async fn hashline_edit_happy_path_does_not_mention_the_lock() {
         other => panic!("expected EditsApplied, got {other:?}"),
     }
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "goodbye\n");
+}
+
+// Grok OSS: ACP per-path lock extra. This diverges from upstream xAI because the Operator contract is a CoW snapshot read lock, ephemeral, many readers, one writer.
+#[tokio::test]
+async fn read_file_uses_cow_snapshot_and_does_not_take_the_exclusive_write_lock() {
+    // Operator: read lock is a snapshot read (CoW), separate from the write
+    // lock, ephemeral, does not interfere with writers. Readers must not take
+    // the exclusive write lock.
+    let tmp = TempDir::new().unwrap();
+    let path = tmp.path().join("cow-read.txt");
+    std::fs::write(&path, "before\n").unwrap();
+    let snapshot = try_acquire_read(&path).expect("CoW snapshot read must succeed");
+    let _held = try_acquire_write(&path, "explore-agent-a")
+        .expect("a snapshot reader must not exclusive-block a writer");
+    std::fs::write(&path, "after\n").unwrap();
+
+    let result = xai_tool_runtime::Tool::run(
+        &ReadFileTool,
+        test_ctx(search_replace_resources(tmp.path(), "reader-b")),
+        ReadFileInput {
+            path: "cow-read.txt".to_string(),
+            offset: None,
+            limit: None,
+            pages: None,
+            format: None,
+        },
+    )
+    .await
+    .expect("read_file must not take the exclusive write lock");
+
+    match result {
+        ReadFileOutput::FileContent(content) => {
+            assert!(
+                content.content.contains("before"),
+                "CoW snapshot while a writer holds must be the pre-write point in time: {}",
+                content.content
+            );
+            assert!(
+                !content.content.contains("after"),
+                "in-flight disk mutation must not leak into the snapshot: {}",
+                content.content
+            );
+        }
+        other => panic!("expected FileContent, got {other:?}"),
+    }
+    assert_eq!(snapshot.as_bytes(), b"before\n");
 }

@@ -449,7 +449,8 @@ pub enum Action {
     /// Set the permission mode by canonical kind (`always-approve` / `ask` / `default`).
     /// Typed wrapper over [`Action::SetYoloMode`] that preserves the `default` canonical (the `bool` variant collapses `default` to `ask`).
     SetPermissionMode(PermissionModeKind),
-    /// Toggle multiline input mode (swap Enter and Shift+Enter behavior).
+    /// Toggle multiline input mode (mid-line Enter inserts a newline;
+    /// Enter at the end of the last line still sends).
     ToggleMultiline,
     /// Set multiline input mode (swap Enter and Shift+Enter behavior).
     /// Pager-owned, NOT persisted to disk; reset each session.
@@ -753,6 +754,8 @@ pub enum Action {
     /// Finish current turn then hold the queue (Ctrl+Shift+S).
     ToggleSoftStop,
     /// Show the current plan: preview popover if exists, toast if not.
+    /// `/view-plan` uses this. Isolated Preview for a new feature is
+    /// [`Self::DockIsolatedPreview`], not this variant.
     ShowPlan,
     /// Enter plan mode. If a description is provided, also start a turn with that text as the prompt.
     EnterPlanMode {

@@ -839,12 +839,18 @@ impl ScrollbackState {
     /// Scroll to put a specific entry at the top of the viewport.
     /// Unlike ensure_selected_visible (which only scrolls if entry is outside viewport), this always scrolls to position the entry at the top.
     /// Used for 'l' (next turn) navigation where we want the prompt at the very top.
+    ///
+    /// Leaves follow on when the target is already the tail (cursor in the
+    /// transcript / activating the last row). Dropping follow there makes
+    /// streaming fill below the viewport and look like silence.
     pub fn scroll_to_entry_top(&mut self, entry_idx: usize) {
         let Some(scroll) = self.entry_top_scroll_offset(entry_idx) else {
             return;
         };
         self.scroll_offset = scroll;
-        self.follow_mode = false;
+        if self.scroll_offset < self.max_scroll_offset() {
+            self.follow_mode = false;
+        }
         self.bump_generation();
     }
 
@@ -1144,6 +1150,101 @@ mod tests {
         assert!(state.is_follow_mode());
         assert!(state.is_follow_preserve_scroll());
         assert_eq!(state.scroll_offset(), reading);
+    }
+
+    fn last_entry_in_paint_window(state: &ScrollbackState, height: u16) -> bool {
+        let last_idx = state.len().saturating_sub(1);
+        let visible = state.visible_entry_range();
+        let (window, _) = state.paint_window(visible, state.scroll_offset, height as usize);
+        window.contains(&last_idx)
+    }
+
+    /// Scrollback follows new assistant output unless the Operator has
+    /// scrolled away. Cursor in the transcript, an armed page-flip pin, or
+    /// pager prev/next restore must not hide the live tail.
+    #[test]
+    fn live_output_follows_unless_operator_scrolled_away() {
+        let mut h = ScrollTestHarness::new(80, 8);
+        for i in 0..20 {
+            h.push_agent(&format!("history {i}"));
+        }
+        h.send_prompt("next question");
+        let id = h.state.start_streaming_agent();
+        for i in 0..25 {
+            assert!(
+                h.state
+                    .push_chunk_to_agent(id, &format!("paragraph {i}\n\n"))
+            );
+        }
+        h.state.finish_running(id);
+        h.frame();
+        assert!(
+            last_entry_in_paint_window(&h.state, h.height),
+            "pager scrolling broken: new output looks like the model is ignoring the Operator"
+        );
+        h.assert_at_bottom("overflowed stream must consume the page-flip pin and sit on the tail");
+
+        // Cursor in the transcript (select an on-screen row) while still on
+        // the tail: that is not scrolling away.
+        let tail = h.state.scroll_offset();
+        h.state.set_selected(Some(h.state.len().saturating_sub(1)));
+        h.state.follow_mode = false;
+        assert_eq!(
+            h.state.scroll_offset(),
+            tail,
+            "selection must not move the viewport"
+        );
+        for i in 0..12 {
+            h.push_agent(&format!("live nested output {i}"));
+        }
+        assert!(
+            last_entry_in_paint_window(&h.state, h.height),
+            "pager scrolling broken: new output looks like the model is ignoring the Operator"
+        );
+        h.assert_at_bottom(
+            "cursor in the transcript must still follow live output while on the tail",
+        );
+        assert!(
+            h.is_follow(),
+            "arriving assistant rows while on the tail re-arm follow"
+        );
+
+        // Overlay / peek restore re-pinning the prompt with preserve after
+        // the stream already overflowed must not hide the tail.
+        let prompt_idx = h
+            .state
+            .turns()
+            .last()
+            .map(|t| t.prompt_index)
+            .expect("running turn has a prompt");
+        h.state.scroll_to_entry_top(prompt_idx);
+        h.state.enable_follow_with_preserve();
+        h.frame();
+        assert!(
+            last_entry_in_paint_window(&h.state, h.height),
+            "pager scrolling broken: new output looks like the model is ignoring the Operator"
+        );
+        h.assert_at_bottom(
+            "pager prev/next restore must not leave live output pinned above the viewport",
+        );
+
+        // Operator actually scrolled away: stay put.
+        h.state.scroll_up(6);
+        let reading = h.state.scroll_offset();
+        assert!(
+            h.state.has_content_below(),
+            "setup: scrolled away with content still below"
+        );
+        h.push_agent("output while reading history");
+        assert_eq!(
+            h.state.scroll_offset(),
+            reading,
+            "scrolled-away viewport must not jump to the tail"
+        );
+        assert!(
+            !last_entry_in_paint_window(&h.state, h.height),
+            "new tail rows stay below while the Operator is reading above them"
+        );
     }
 
     #[test]

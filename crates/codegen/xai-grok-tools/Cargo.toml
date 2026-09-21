@@ -4,6 +4,9 @@ edition.workspace = true
 name = "xai-grok-tools"
 version = "0.1.220-alpha.4"
 description = "Grok tools library"
+# Explicit [[bin]] names below. Without this, src/bin/grok_oss_skill_cli.rs is
+# also autodiscovered as grok_oss_skill_cli.
+autobins = false
 
 [dependencies]
 anyhow = { workspace = true }
@@ -36,6 +39,7 @@ xai-grok-image = { workspace = true }
 ignore = { workspace = true }
 infer = { workspace = true }
 globset = { workspace = true }
+grep = { workspace = true }
 image = { workspace = true, features = ["png", "jpeg", "gif", "webp", "bmp", "tiff", "ico"] }
 kamadak-exif = { workspace = true, optional = true }
 pdf_oxide = { workspace = true }

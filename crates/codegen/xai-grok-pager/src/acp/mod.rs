@@ -11,6 +11,7 @@ pub mod spawn;
 pub(crate) mod subagent_label_registry;
 mod subagent_message;
 pub mod tracker;
+pub mod turbo_planning;
 mod version_mismatch;
 pub(crate) use version_mismatch::{is_version_mismatch_banner, version_mismatch_banner};
 /// Ext methods that carry a session-scoped update and may stamp `isReplay`.

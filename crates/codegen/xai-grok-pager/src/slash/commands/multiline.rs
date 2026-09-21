@@ -1,8 +1,10 @@
 //! `/multiline`: toggle multiline input mode.
 //!
-//! In multiline mode, Enter inserts a newline and Shift+Enter sends the
-//! prompt (the inverse of normal mode). Empty-composer mid-turn Enter still
-//! force-sends the top queued follow-up (send now), same as normal mode.
+//! In multiline mode, Enter in the middle of a draft inserts a newline and
+//! Shift+Enter sends the prompt. Enter at the end of the last line still
+//! sends (or interjects if a turn is running). Empty-composer mid-turn Enter
+//! still force-sends the top queued follow-up (send now), same as normal
+//! mode.
 //! Toggled via `Ctrl+M`, this slash command, or the settings modal.
 //!
 //! Dispatches `Action::SetMultilineMode(!current)`. Per-session only (no disk persistence).
@@ -26,6 +28,14 @@ impl SlashCommand for MultilineCommand {
 
     fn run(&self, ctx: &mut CommandExecCtx, _args: &str) -> CommandResult {
         let new = !ctx.pager_state.multiline_mode;
+        // Grok OSS: Operator: refuse enabling session Multiline when
+        // `[ui] allow_session_multiline` is false (Settings → Editor).
+        if new && !crate::appearance::cache::load_allow_session_multiline() {
+            return CommandResult::Message(
+                "Session Multiline is disabled in Settings → Editor (`allow_session_multiline`)."
+                    .to_string(),
+            );
+        }
         CommandResult::Action(Action::SetMultilineMode(new))
     }
 }
@@ -60,6 +70,7 @@ mod tests {
     /// Off dispatches `SetMultilineMode(true)`.
     #[test]
     fn run_when_off_dispatches_set_to_true() {
+        crate::appearance::cache::set_allow_session_multiline(true);
         let cmd = MultilineCommand;
         let models = ModelState::default();
         let bundle = BundleState::default();
@@ -76,6 +87,7 @@ mod tests {
     /// `/multiline` when on dispatches `Action::SetMultilineMode(false)`.
     #[test]
     fn run_when_on_dispatches_set_to_false() {
+        crate::appearance::cache::set_allow_session_multiline(false);
         let cmd = MultilineCommand;
         let models = ModelState::default();
         let bundle = BundleState::default();
@@ -87,11 +99,13 @@ mod tests {
             }
             other => panic!("expected Action::SetMultilineMode(false), got {other:?}"),
         }
+        crate::appearance::cache::set_allow_session_multiline(true);
     }
 
     /// `/multiline` ignores args (no-arg command).
     #[test]
     fn run_ignores_args() {
+        crate::appearance::cache::set_allow_session_multiline(true);
         let cmd = MultilineCommand;
         let models = ModelState::default();
         let bundle = BundleState::default();

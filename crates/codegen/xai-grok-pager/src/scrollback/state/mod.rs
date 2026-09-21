@@ -532,6 +532,7 @@ impl ScrollbackState {
     ///
     /// Returns the assigned EntryId which can be used to access this entry later.
     pub fn push(&mut self, entry: ScrollbackEntry) -> EntryId {
+        self.follow_tail_if_operator_still_there();
         let id = EntryId::new(self.next_id);
         self.next_id += 1;
 

@@ -58,6 +58,21 @@ pub struct UiConfig {
     /// Written by the pager's settings modal / rewind "Yes, and don't ask again".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub confirm_before_rewind: Option<bool>,
+    /// While exclusive `/plan` or Isolated Preview `/plan --soft` is the live
+    /// plan turn, use xhigh effort. `None` = on (default). Off keeps the
+    /// stored session effort (upstream / SpaceXAI-like). Does not mutate
+    /// stored `session.models.reasoning_effort`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turbo_planning: Option<bool>,
+    /// Soft process-rule reminders injected into nested spawn. `None` = on.
+    /// Off injects no extra reminder text. Not a deny and not a spawn cap.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process_rule_reminders_enabled: Option<bool>,
+    /// Newline-separated process-rule reminder strings. `None` / empty = no
+    /// extra text even when enabled. Example help copy only: "At most two
+    /// implementor L2s."
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process_rule_reminders: Option<String>,
     /// Theme to use when the OS is in dark mode. Written by the pager's theme persist module.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_dark_theme: Option<String>,
@@ -302,6 +317,9 @@ impl Default for UiConfig {
             scrub_ascii_punct: None,
             ulid_session_ids: None,
             confirm_before_rewind: None,
+            turbo_planning: None,
+            process_rule_reminders_enabled: None,
+            process_rule_reminders: None,
             auto_dark_theme: None,
             auto_light_theme: None,
             scroll_speed: None,
@@ -330,6 +348,7 @@ impl Default for UiConfig {
             cursor_blink: None,
             screen_mode: None,
             composer_multiline: None,
+            allow_session_multiline: None,
             double_click_action: None,
             contextual_hints: ContextualHints::default(),
             combine_queued_prompts: None,
@@ -440,6 +459,17 @@ impl UiConfig {
     pub fn composer_multiline_enabled(&self) -> bool {
         self.composer_multiline
             .unwrap_or(Self::COMPOSER_MULTILINE_DEFAULT)
+    }
+
+    /// Default for [`Self::allow_session_multiline`] when unset (on: slash,
+    /// Ctrl+M, and settings may enable session Multiline).
+    pub const ALLOW_SESSION_MULTILINE_DEFAULT: bool = true;
+
+    /// Whether session Multiline may be enabled. When false, `/multiline`,
+    /// Ctrl+M, and the Multiline settings row cannot set it on.
+    pub fn allow_session_multiline_enabled(&self) -> bool {
+        self.allow_session_multiline
+            .unwrap_or(Self::ALLOW_SESSION_MULTILINE_DEFAULT)
     }
 }
 
@@ -594,6 +624,27 @@ mod tests {
             serde_json::from_value(serde_json::json!({ "composer_multiline": false }))
                 .expect("deserializes composer_multiline false");
         assert!(!off_parsed.composer_multiline_enabled());
+    }
+
+    #[test]
+    fn allow_session_multiline_defaults_on() {
+        assert!(UiConfig::default().allow_session_multiline_enabled());
+        let off = UiConfig {
+            allow_session_multiline: Some(false),
+            ..Default::default()
+        };
+        assert!(!off.allow_session_multiline_enabled());
+        let on: UiConfig =
+            serde_json::from_value(serde_json::json!({ "allow_session_multiline": true }))
+                .expect("deserializes allow_session_multiline true");
+        assert!(on.allow_session_multiline_enabled());
+        let missing: UiConfig =
+            serde_json::from_value(serde_json::json!({})).expect("defaults missing key");
+        assert!(missing.allow_session_multiline_enabled());
+        let off_parsed: UiConfig =
+            serde_json::from_value(serde_json::json!({ "allow_session_multiline": false }))
+                .expect("deserializes allow_session_multiline false");
+        assert!(!off_parsed.allow_session_multiline_enabled());
     }
 
     #[test]

@@ -180,7 +180,7 @@ impl MvpAgent {
     }
 
     /// Replay updates from disk and drain completions.
-    /// Returns `(initial_total_tokens, end_offset, unfinished_subagents)`.
+    /// Returns `(initial_total_tokens, end_offset, unfinished_subagents, has_user_or_agent_chunk)`.
     pub(super) async fn replay_session_updates(
         &self,
         session_id: &acp::SessionId,
@@ -219,7 +219,7 @@ impl MvpAgent {
 
         let Some(updates_path) = updates_file_path.as_ref() else {
             tracing::warn!(session_id = %session_id.0, "replay: no updates file path");
-            return Ok((0, 0, Vec::new()));
+            return Ok((0, 0, Vec::new(), false));
         };
 
         let file_size = std::fs::metadata(updates_path)
@@ -258,11 +258,11 @@ impl MvpAgent {
             .entered();
             crate::session::storage::prepare_replay_lines(&file_contents, cursor)
         };
-        let unfinished_subagents = std::mem::take(&mut prepared.unfinished_subagents);
+        let unfinished_subagents = plan.unfinished_subagents.clone();
 
         if cursor.is_some() {
-            let sending = prepared.lines.len();
-            if prepared.mark_replay {
+            let sending = plan.lines.len();
+            if plan.mark_replay {
                 tracing::warn!(
                     session_id = %session_id.0,
                     "replay: cursor not found, falling back to full replay"
@@ -270,23 +270,24 @@ impl MvpAgent {
             } else {
                 tracing::info!(
                     session_id = %session_id.0,
-                    skipped = prepared.total_live - sending,
+                    skipped = plan.total_live.saturating_sub(sending),
                     remaining = sending,
                     "replay: cursor found, skipping events"
                 );
             }
         }
 
-        let last_tokens = prepared.last_tokens;
-        let mark_replay = prepared.mark_replay;
+        let last_tokens = plan.last_tokens;
+        let mark_replay = plan.mark_replay;
+        let end_offset = plan.end_offset;
 
-        if let Some(max_seq) = prepared.max_event_seq {
+        if let Some(max_seq) = plan.max_event_seq {
             crate::util::event_id::ensure_event_counter_at_least(max_seq + 1);
         }
 
-        let lines_to_send = prepared.lines;
-        let updates_count = lines_to_send.len() as u64;
+        let updates_count = plan.lines.len() as u64;
         let mut drain = ReplayCompletionDrain::new();
+        let mut painted_ua = false;
 
         {
             let _timer = replay_step_timer!(
@@ -349,7 +350,7 @@ impl MvpAgent {
 
         replay_timer.with_field("updates_count", updates_count);
 
-        Ok((last_tokens, end_offset, unfinished_subagents))
+        Ok((last_tokens, end_offset, unfinished_subagents, painted_ua))
     }
 
     /// Enqueue replay notifications for updates appended after `from_offset`. Intentionally sync (not async) so no prompt task can make progress before the gate flips.

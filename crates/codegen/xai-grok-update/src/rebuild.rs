@@ -5,8 +5,10 @@
 //! `just install` → `${CARGO_HOME:-$HOME/.cargo}/bin/grok-oss`.
 //!
 //! Identity SHA in `version (sha)` is a **git object id**, not a SHA-1
-//! security hash of a downloaded artifact. Verify is `binary --version`.
-//! Failed verify must not signal peers.
+//! security hash of a downloaded artifact. Verify is `binary --version`,
+//! then that SHA must match this workspace `git rev-parse --short=12 HEAD`.
+//! A leftover cargo-bin identity is not an acceptable exec target.
+//! Failed verify or SHA mismatch must not signal peers.
 //!
 //! After install it:
 //! 1. Soft-signals reachable leaders (`RelaunchForUpdate`).
@@ -20,7 +22,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::thread;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -40,6 +42,10 @@ const REBUILD_RELAUNCH_REQUEST_FILENAME: &str = "rebuild_relaunch_request.json";
 
 /// Ignore requests older than this so a stale file cannot thrash forever.
 const REBUILD_RELAUNCH_REQUEST_MAX_AGE_SECS: u64 = 15 * 60;
+
+/// Nested work can keep a leader draining indefinitely. The TUI that ran
+/// `/rebuild` must still return so it can exec-replace onto the new binary.
+pub const REBUILD_LEADER_SIGNAL_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Summary of one rebuild + relaunch attempt (for CLI, slash scrollback, tests).
 #[derive(Debug, Clone)]
@@ -98,6 +104,22 @@ impl InstallBackend {
             Self::CargoFixedArgv => "cargo build + install (fixed argv)",
         }
     }
+}
+
+/// Relative path of TUI `/limits` words (`use-personal` / `use-business`).
+const LIMITS_CMD_REL: &str = "crates/codegen/xai-grok-pager/src/limits_cmd.rs";
+
+/// Compile start dir for `/rebuild`: prefer the session workspace when it is a
+/// Grok OSS root or walks up to one (`justfile` plus pager-bin manifest).
+/// Fall back to process cwd only when the session path cannot resolve a tree.
+pub fn rebuild_compile_start_dir(session_cwd: Option<&Path>, process_cwd: &Path) -> PathBuf {
+    if let Some(session) = session_cwd
+        && !session.as_os_str().is_empty()
+        && resolve_source_root(session).is_ok()
+    {
+        return session.to_path_buf();
+    }
+    process_cwd.to_path_buf()
 }
 
 /// Walk from `start` upward until a checkout with this repo's install recipe
@@ -1115,6 +1137,83 @@ pub fn verify_installed_identity(binary: &Path) -> Result<String> {
     })
 }
 
+/// Parenthetical git SHA from an identity such as `1.0.3 (157f1746)`.
+pub fn identity_git_sha(identity: &str) -> Option<String> {
+    leader::parse_binary_identity(identity)?.git_sha
+}
+
+/// True when `identity` parenthetical SHA equals workspace `git rev-parse --short=12 HEAD`.
+pub fn installed_identity_matches_workspace_git_sha(identity: &str, workspace_sha: &str) -> bool {
+    let Some(sha) = identity_git_sha(identity) else {
+        return false;
+    };
+    sha.eq_ignore_ascii_case(workspace_sha.trim())
+}
+
+/// Workspace HEAD short SHA, same width as pager-bin `build.rs` (`--short=12`).
+pub fn workspace_git_short_sha(source_root: &Path) -> Result<String> {
+    let output = Command::new("git")
+        .args(["rev-parse", "--short=12", "HEAD"])
+        .current_dir(source_root)
+        .output()
+        .with_context(|| format!("git rev-parse --short=12 HEAD in {}", source_root.display()))?;
+    if !output.status.success() {
+        bail!(
+            "git rev-parse --short=12 HEAD failed in {}: {}",
+            source_root.display(),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let sha = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if sha.is_empty() {
+        bail!(
+            "git rev-parse --short=12 HEAD produced an empty SHA in {}",
+            source_root.display()
+        );
+    }
+    Ok(sha)
+}
+
+/// True when this tree's `limits_cmd.rs` already names `use-personal` and `use-business`.
+pub fn source_tree_has_limits_identity_words(source_root: &Path) -> bool {
+    let path = source_root.join(LIMITS_CMD_REL);
+    std::fs::read_to_string(path)
+        .map(|text| text.contains("use-personal") && text.contains("use-business"))
+        .unwrap_or(false)
+}
+
+/// Acceptable `/rebuild` exec identity: workspace git SHA, not a leftover cargo-bin.
+///
+/// If `source_root` already contains `use-personal` and `use-business`, a leftover
+/// cargo-bin identity is still not an acceptable exec target.
+pub fn rebuild_exec_target_is_workspace_binary(
+    installed_identity: &str,
+    workspace_short_sha: &str,
+    source_root: &Path,
+) -> bool {
+    let matches =
+        installed_identity_matches_workspace_git_sha(installed_identity, workspace_short_sha);
+    if source_tree_has_limits_identity_words(source_root) && !matches {
+        return false;
+    }
+    matches
+}
+
+/// Fail before fleet signal / exec when the installed identity is not this workspace.
+pub fn require_installed_identity_matches_workspace(
+    identity: &str,
+    workspace_sha: &str,
+) -> Result<()> {
+    if installed_identity_matches_workspace_git_sha(identity, workspace_sha) {
+        return Ok(());
+    }
+    bail!(
+        "installed grok-oss identity is leftover cargo-bin {identity}; \
+         this workspace git SHA is {workspace_sha}. \
+         /rebuild must exec the binary produced from this workspace, not an older cargo-bin."
+    );
+}
+
 /// Extract `0.1.100 (sha)` from lines like `grok-oss 0.1.100 (sha)`.
 pub fn parse_version_output(stdout: &str) -> Option<String> {
     let line = stdout.lines().next()?.trim();
@@ -1267,11 +1366,13 @@ pub fn should_peer_relaunch_for_request(
     request: &RebuildRelaunchRequest,
     now_secs: u64,
 ) -> bool {
-    should_peer_relaunch_for_request_with_current_exe(
+    should_peer_relaunch_for_request_with_current_exe_and_image(
         self_identity,
         request,
         now_secs,
         std::env::current_exe().ok().as_deref(),
+        running_image_dev_ino(),
+        file_dev_ino(&request.installed_exe),
     )
 }
 
@@ -1292,6 +1393,27 @@ pub fn should_peer_relaunch_for_request_with_current_exe(
     now_secs: u64,
     current_exe: Option<&Path>,
 ) -> bool {
+    should_peer_relaunch_for_request_with_current_exe_and_image(
+        self_identity,
+        request,
+        now_secs,
+        current_exe,
+        None,
+        None,
+    )
+}
+
+/// Like [`should_peer_relaunch_for_request_with_current_exe`], with running vs
+/// installed `(dev, ino)` so a replaced cargo-bin image is detected when
+/// Linux `readlink(/proc/self/exe)` omits `(deleted)`.
+pub fn should_peer_relaunch_for_request_with_current_exe_and_image(
+    self_identity: &str,
+    request: &RebuildRelaunchRequest,
+    now_secs: u64,
+    current_exe: Option<&Path>,
+    running_image: Option<(u64, u64)>,
+    installed_image: Option<(u64, u64)>,
+) -> bool {
     if !peer_rebuild_request_is_actionable(request, now_secs) {
         return false;
     }
@@ -1299,13 +1421,34 @@ pub fn should_peer_relaunch_for_request_with_current_exe(
         return true;
     }
     // Same compile-time identity (or unknown SHA) but still on a replaced
-    // binary: Linux `/proc/self/exe` keeps the deleted inode after install.
-    running_exe_needs_relaunch_onto(current_exe, &request.installed_exe)
+    // binary: Linux `/proc/self/exe` keeps the old inode after install.
+    running_exe_needs_relaunch_onto_with_image(
+        current_exe,
+        &request.installed_exe,
+        running_image,
+        installed_image,
+    )
 }
 
 /// True when this process should re-exec onto `installed_exe` because the
 /// running image is gone/replaced (deleted inode) or is a different path.
 pub fn running_exe_needs_relaunch_onto(current_exe: Option<&Path>, installed_exe: &Path) -> bool {
+    running_exe_needs_relaunch_onto_with_image(current_exe, installed_exe, None, None)
+}
+
+/// Linux `readlink(/proc/pid/exe)` often omits `(deleted)` once a new file
+/// occupies the same path. Compare the mapped image inode to the install.
+pub fn running_exe_needs_relaunch_onto_with_image(
+    current_exe: Option<&Path>,
+    installed_exe: &Path,
+    running_image: Option<(u64, u64)>,
+    installed_image: Option<(u64, u64)>,
+) -> bool {
+    if let (Some(running), Some(installed)) = (running_image, installed_image)
+        && running != installed
+    {
+        return true;
+    }
     let Some(current) = current_exe else {
         return false;
     };
@@ -1319,6 +1462,34 @@ pub fn running_exe_needs_relaunch_onto(current_exe: Option<&Path>, installed_exe
     let cur = dunce::canonicalize(current).unwrap_or_else(|_| current.to_path_buf());
     let inst = dunce::canonicalize(installed_exe).unwrap_or_else(|_| installed_exe.to_path_buf());
     cur != inst
+}
+
+/// Device and inode of the image this process is still running. On Linux
+/// that is `/proc/self/exe`, which stats the mapped inode even when the
+/// directory entry was replaced.
+fn running_image_dev_ino() -> Option<(u64, u64)> {
+    #[cfg(target_os = "linux")]
+    {
+        file_dev_ino(Path::new("/proc/self/exe"))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
+    }
+}
+
+fn file_dev_ino(path: &Path) -> Option<(u64, u64)> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let meta = std::fs::metadata(path).ok()?;
+        Some((meta.dev(), meta.ino()))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        None
+    }
 }
 
 /// Pure: PID set rebuild should SIGUSR1 after the composite `(pid, session_id)`
@@ -1543,6 +1714,24 @@ where
         }
     };
 
+    let workspace_sha = match workspace_git_short_sha(&source_root) {
+        Ok(sha) => sha,
+        Err(e) => {
+            debug_assert!(!RebuildFleetPlan::after_install(false).should_replace_fleet());
+            return Err(
+                e.context("could not read this workspace git SHA; not signaling peers or leaders")
+            );
+        }
+    };
+    if let Err(e) =
+        require_installed_identity_matches_workspace(&installed_identity, &workspace_sha)
+    {
+        debug_assert!(!RebuildFleetPlan::after_install(false).should_replace_fleet());
+        return Err(e.context(
+            "installed binary git SHA does not match this workspace; not signaling peers or leaders",
+        ));
+    }
+
     let plan = RebuildFleetPlan::after_install(true);
     debug_assert!(plan.should_replace_fleet());
 
@@ -1574,7 +1763,22 @@ where
             }
             RebuildFleetSignalStep::Leaders => {
                 if plan.signal_leaders {
-                    leader_outcomes = leader::signal_leaders_to_relaunch(&installed_identity).await;
+                    // Do not wait for nested-work drain. Operator ran rebuild
+                    // and the grok-oss TUI did not restart while this await
+                    // sat on a live leader.
+                    leader_outcomes = match tokio::time::timeout(
+                        REBUILD_LEADER_SIGNAL_TIMEOUT,
+                        leader::signal_leaders_to_relaunch(&installed_identity),
+                    )
+                    .await
+                    {
+                        Ok(outcomes) => outcomes,
+                        Err(_) => vec![LeaderRelaunchOutcome::Skipped {
+                            reason: "leader signal timed out; this TUI still re-execs onto the new binary"
+                                .into(),
+                            pid: None,
+                        }],
+                    };
                 }
             }
         }
@@ -1763,6 +1967,150 @@ mod tests {
         assert!(
             err.contains("Could not find a Grok OSS source tree"),
             "{err}"
+        );
+    }
+
+    /// Operator: "rebuild is supposed to use a binary. This is a bug, not a
+    /// product miss I have to accept."
+    /// Leftover cargo-bin identity `1.0.3 (157f1746)` must not match a
+    /// different workspace short SHA. Matching workspace SHA is accepted.
+    /// If this tree's `limits_cmd.rs` already has `use-personal` and
+    /// `use-business`, a leftover cargo-bin is not an acceptable exec target.
+    #[test]
+    fn rebuild_must_exec_workspace_binary_not_stale_cargo_bin() {
+        let leftover = "1.0.3 (157f1746)";
+        let workspace = "cafebabedead";
+        assert!(
+            !installed_identity_matches_workspace_git_sha(leftover, workspace),
+            "leftover identity 1.0.3 (157f1746) must not match a different workspace SHA"
+        );
+        assert!(
+            installed_identity_matches_workspace_git_sha("1.0.3 (cafebabedead)", workspace),
+            "matching workspace short SHA in version (sha) is an acceptable rebuild exec target"
+        );
+
+        let tmp = TempDir::new().unwrap();
+        let limits = tmp
+            .path()
+            .join("crates/codegen/xai-grok-pager/src/limits_cmd.rs");
+        fs::create_dir_all(limits.parent().unwrap()).unwrap();
+        fs::write(
+            &limits,
+            "pub const LIMITS_WORD_USE_PERSONAL: &str = \"use-personal\";\n\
+             pub const LIMITS_WORD_USE_BUSINESS: &str = \"use-business\";\n",
+        )
+        .unwrap();
+        assert!(
+            source_tree_has_limits_identity_words(tmp.path()),
+            "fixture limits_cmd.rs must contain use-personal and use-business"
+        );
+        assert!(
+            !rebuild_exec_target_is_workspace_binary(leftover, workspace, tmp.path()),
+            "leftover cargo-bin identity is not an acceptable rebuild exec target when this tree already has use-personal and use-business"
+        );
+        assert!(
+            rebuild_exec_target_is_workspace_binary("1.0.3 (cafebabedead)", workspace, tmp.path()),
+            "workspace-matching identity is accepted even when the tree already has those slash words"
+        );
+    }
+
+    /// Identity SHA must equal workspace `git rev-parse --short=12 HEAD`.
+    /// Mismatch fails before fleet signal / exec. Do not SIGUSR1 peers.
+    #[test]
+    fn installed_identity_must_match_workspace_git_sha() {
+        require_installed_identity_matches_workspace("1.0.3 (deadbeefcafe)", "deadbeefcafe")
+            .expect("matching SHA must pass the gate");
+        let err = require_installed_identity_matches_workspace("1.0.3 (157f1746)", "deadbeefcafe")
+            .expect_err("leftover cargo-bin SHA must fail before fleet signal");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("leftover cargo-bin") && msg.contains("157f1746"),
+            "error must name leftover cargo-bin identity, got {msg}"
+        );
+        assert!(
+            msg.contains("deadbeefcafe"),
+            "error must name the workspace SHA, got {msg}"
+        );
+        assert!(
+            !msg.to_lowercase().contains("just install first"),
+            "must not tell the operator to just install first: {msg}"
+        );
+        assert!(
+            !RebuildFleetPlan::after_install(false).should_replace_fleet(),
+            "mismatch must not SIGUSR1 peers or leaders"
+        );
+
+        let dir = TempDir::new().unwrap();
+        let root = dir.path();
+        init_git_repo(root);
+        fs::write(root.join("src.txt"), b"index\n").unwrap();
+        let add = Command::new("git")
+            .args(["add", "src.txt"])
+            .current_dir(root)
+            .status()
+            .unwrap();
+        assert!(add.success());
+        let cfg = Command::new("git")
+            .args(["config", "commit.gpgsign", "false"])
+            .current_dir(root)
+            .status()
+            .unwrap();
+        assert!(cfg.success());
+        let commit = Command::new("git")
+            .env("ALLOW_UNSIGNED_COMMIT", "1")
+            .args(["commit", "-m", "index"])
+            .current_dir(root)
+            .status()
+            .unwrap();
+        assert!(commit.success());
+        let sha = workspace_git_short_sha(root).expect("workspace short SHA");
+        assert!(
+            sha.len() >= 12,
+            "pager-bin build.rs uses git rev-parse --short=12 HEAD; got {sha}"
+        );
+        let identity = format!("1.0.3 ({sha})");
+        require_installed_identity_matches_workspace(&identity, &sha)
+            .expect("workspace-built identity must match HEAD short SHA");
+        assert!(installed_identity_matches_workspace_git_sha(
+            &identity, &sha
+        ));
+        assert!(!installed_identity_matches_workspace_git_sha(
+            "1.0.3 (157f1746)",
+            &sha
+        ));
+    }
+
+    #[test]
+    fn rebuild_compile_start_dir_prefers_session_workspace() {
+        let tmp = TempDir::new().unwrap();
+        let session = tmp.path().join("workspace");
+        fs::create_dir_all(session.join("crates/codegen/xai-grok-pager-bin")).unwrap();
+        fs::write(session.join("justfile"), "install:\n").unwrap();
+        fs::write(
+            session.join("crates/codegen/xai-grok-pager-bin/Cargo.toml"),
+            "[package]\nname=\"xai-grok-pager-bin\"\n",
+        )
+        .unwrap();
+        let process = tmp.path().join("process-cwd");
+        fs::create_dir_all(&process).unwrap();
+        assert_eq!(
+            rebuild_compile_start_dir(Some(&session), &process),
+            session,
+            "session workspace that is a Grok OSS root must win over process cwd"
+        );
+        let nested = session.join("crates/codegen/xai-grok-pager/src");
+        fs::create_dir_all(&nested).unwrap();
+        assert_eq!(
+            rebuild_compile_start_dir(Some(&nested), &process),
+            nested,
+            "session cwd that walks up to a Grok OSS root must still be preferred"
+        );
+        let elsewhere = tmp.path().join("not-a-tree");
+        fs::create_dir_all(&elsewhere).unwrap();
+        assert_eq!(
+            rebuild_compile_start_dir(Some(&elsewhere), &process),
+            process,
+            "process cwd is the fallback only when session cwd cannot resolve a source tree"
         );
     }
 
@@ -2297,6 +2645,56 @@ mod tests {
             1_000,
             Some(exe.as_path()),
         ));
+    }
+
+    /// Operator: "Wait, that process hasn't restarted? I literally ran rebuild.
+    /// Maybe the bug is in the rebuild command?"
+    /// After `just install` replaced `~/.cargo/bin/grok-oss`, Linux
+    /// `readlink(/proc/pid/exe)` still showed that path without `(deleted)`
+    /// while `stat` inodes differed. The live grok-oss process did not restart.
+    #[test]
+    fn operator_ran_rebuild_and_the_grok_oss_process_did_not_restart() {
+        let path = Path::new("/home/hunter/.cargo/bin/grok-oss");
+        let req = make_rebuild_relaunch_request(
+            path.to_path_buf(),
+            "1.0.3 (825986fefeea) [stable]",
+            1_000,
+        );
+        assert!(
+            running_exe_needs_relaunch_onto_with_image(
+                Some(path),
+                path,
+                Some((8, 3_240_185)),
+                Some((8, 160_803_642)),
+            ),
+            "operator ran rebuild and the grok-oss process did not restart: \
+             a replaced cargo-bin inode must exec-replace even when the path \
+             matches and there is no (deleted) marker"
+        );
+        assert!(
+            should_peer_relaunch_for_request_with_current_exe_and_image(
+                "1.0.3 (825986fefeea) [stable]",
+                &req,
+                1_000,
+                Some(path),
+                Some((8, 3_240_185)),
+                Some((8, 160_803_642)),
+            ),
+            "equal compile-time identity is not proof the live image is the new install"
+        );
+        assert!(
+            !running_exe_needs_relaunch_onto_with_image(
+                Some(path),
+                path,
+                Some((8, 160_803_642)),
+                Some((8, 160_803_642)),
+            ),
+            "matching inodes on the same path must not thrash re-exec"
+        );
+        assert!(
+            REBUILD_LEADER_SIGNAL_TIMEOUT <= Duration::from_secs(5),
+            "waiting on nested leader drain must not block the TUI that ran /rebuild"
+        );
     }
 
     /// Contract: after install replaces the binary, Linux shows `(deleted)` on

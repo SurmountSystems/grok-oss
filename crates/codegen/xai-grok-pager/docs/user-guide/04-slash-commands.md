@@ -135,7 +135,7 @@ This is **not** `/polish` (a polish pass) and **not** `/implement` (plan handoff
 
 ### `/what`
 
-Restate this session when you cannot parse the last agent chat. Not an apology. The agent replies with four labeled complete thoughts only: **Job**, **State**, **Operator** (or `nothing`), **Next**. Speaker labels are Operator not You or Human, and Agent not Me or Grok when Grok means the assistant. Optional focus text is passed through. Follow Concise American Technical English as specified in Surmount `0005_CATE.md`.
+Restate this session when you cannot parse the last agent chat. Not an apology. The agent replies with four labeled complete thoughts only: **Job**, **State**, **Operator** (or `nothing`), **Next**. Speaker labels are Operator not You or Human, and Agent not Me or Grok when Grok means the assistant. Optional focus text is passed through. Follow Concise American Technical English as specified in Surmount `0005_CATE.md`. Never mix Grok Build version with grok-oss product version. grok-oss is `grok-oss --version` (`1.0.3` plus git SHA). Grok Build is the `grok` binary `--version` output. Isolated Preview and plan chrome are grok-oss unless this process was launched as `grok` from downloads. Remaining-work and this restatement must probe this turn if they state which binary this window is. Do not reuse a leftover Grok Build version as grok-oss.
 
 This is **not** `/recap` (a short chat recap), **not** `/finish` (session post-mortem), and **not** `/reports` (a checkpoint file). Complete American English thoughts. No leftover board ids as the body.
 
@@ -159,7 +159,7 @@ The named tool is `pull_remote_tree`. Direction is `HOST:SRC` (or a local source
 
 ### `/metadata`
 
-Show live session context: grok-oss ULID, Grok Build / ACP UUID, working directory, model, when this window started, and this process id. Fields that are not known are omitted rather than invented. `/settings` **ULID session ids** (default on) chooses which id is listed first. The map still exists when that toggle is off. Not `/session-info` (auth, turn count, and context usage).
+Show live session context: grok-oss ULID, Grok Build / ACP UUID, working directory, model, when this window started, and this process id. For the current sampling model it also shows last Chat Completions `system_fingerprint` and last language-models `{id, fingerprint, version, created}` with when those were observed. Those fingerprints are serving-path configuration, not a SHA of the weights, and they are not on the status bar. Fields that are not known are omitted rather than invented. Do not invent dated slugs such as `grok-4.6-20260812` unless `/v1/language-models` lists them. `/settings` **ULID session ids** (default on) chooses which id is listed first. The map still exists when that toggle is off. Not `/session-info` (auth, turn count, and context usage).
 
 ### `/fork`
 
@@ -220,6 +220,8 @@ Rename the current session. Alias: `/title`.
 ### `/model <name>`
 
 Switch models. Accepts a model ID or display name (case-insensitive). When the model offers more than one context window, you can add a window size next. For reasoning models you can add an effort level last. The picker asks in the same order: model, then window, then effort. Alias: `/m`.
+
+When the slash dropdown is `/model` or `/m` and exactly one model row is highlighted, Tab (and Enter) apply the switch immediately. The composer clears. That is not Operator chat. If more than one model row remains, Tab keeps completing. A unique complete effort row such as `Grok 4.6 xhigh` also switches now with that effort. Command-phase unique `/model` (cursor still in the command name) still completes `/model `. `Ctrl+M` still opens the model picker.
 
 ```
 /model grok-4.6
@@ -290,19 +292,23 @@ A handful of commands only work in one of the two modes, because the surface the
 
 ### `/plan`
 
-Enter plan mode. Immediate `/plan` (optionally with a description) still enters plan mode when you want it now.
+Exclusive `/plan` (bare `/plan` without `--soft`) enters plan mode. Exclusive `/plan` exclusive-blocks nested implementers. Immediate exclusive `/plan` (optionally with a description) enters plan mode when you want it now. `/plan` with extra Operator text (for example `/plan update the plan with what was accomplished and all that remains please`) submits that as a plan-update turn. It does not only dock Isolated Preview of a leftover plan. That submit writes the prompt write-ahead log. While that plan-update turn is running, Isolated Preview stays docked as rewriting-wait and quotes that Operator prompt. Idle Approve / Comment / Revise / Exit do not arm on leftover stale `plan.md`. Empty Enter never Approves. Clickable Approve only ([GitHub #122](https://github.com/SurmountSystems/grok-oss/issues/122)). When `exit_plan_mode` writes current disk `plan.md`, Isolated Preview presents that file and idle CTAs arm. Exclusive `/plan` with no extra text exclusive-blocks nested implementers. It does not dock leftover primary `plan.md`. `/view-plan` docks Isolated Preview from this session's current disk `plan.md`, not leftover "why the agent stopped" or a TECH.md persist overwrite.
 
-To schedule plan mode on the existing composer prompt queue without entering it this turn, use first-arg `queue` or `later`, or `/queue /plan`. That is the same prompt queue as ordinary follow-ups, not a second queue. Present is not Approve. Empty Enter never Approves.
+`/plan --soft` docks Isolated Preview on the right for a new feature. It does not enter plan mode. It does not park L1. Nested implementers stay Working. Soft planning does not reset the primary plan. It makes a secondary plan. Isolated Preview does not immediately pull up leftover current `plan.md`. Isolated Preview does not dock leftover primary `plan.md`. Isolated Preview does not close when nested implementers continue. Isolated Preview stays until Esc, Exit, or Approve. Isolated Preview is not a Plan Exit timer. Present is not Approve. Empty Enter never Approves. Clickable Approve only ([GitHub #122](https://github.com/SurmountSystems/grok-oss/issues/122)). Comment then Approve still works on a real present of that secondary plan after `exit_plan_mode` writes it. The Isolated Preview composer is an Operator box unless you click Comment. Isolated Preview idle after present, a non-empty Operator box (including a paste chip), plus Enter Approves with those notes. It does not Plan-Exit and leave the paste. `--soft` is not the queue hold token. `/plan --soft add feature` seeds Isolated Preview with that description and does not enqueue it as a Prompt. Exclusive `/plan` without `--soft` enters plan mode and exclusive-blocks nested implementers. Approve still files a GitHub issue with the plan text as documented in GitHub tracking. Comment then Approve carries notes.
+
+To schedule plan mode on the existing composer prompt queue without entering it this turn, use first-arg `queue` or `later`, or `/queue /plan`. That is the same prompt queue as ordinary follow-ups, not a second queue.
 
 ```
-/plan [description]
+/plan [--soft] [description]
+/plan --soft
+/plan --soft add feature
 /plan queue
 /queue /plan
 ```
 
 ### `/view-plan`
 
-Open the current saved plan in the right pane. The pane uses the same four idle actions as a live present: **Approve**, **Comment**, **Revise**, **Exit**. Copy, search, and Esc stay available. If grok-oss.db has an explicit recorded choice for this session, a dot marks that option. Clicking Approve is a real Approve only while a live waiter is parked; after Approve or Exit it does not re-arm Plan ready. Aliases: `/show-plan`, `/plan-view`.
+Open Isolated Preview for the current saved plan in the right pane. Isolated Preview stays until Esc, Exit, or Approve. Isolated Preview is not a Plan Exit timer. Isolated Preview does not close when nested implementers continue. The pane uses the same four idle actions as a live present: **Approve**, **Comment**, **Revise**, **Exit**. Copy, search, and Esc stay available. If grok-oss.db has an explicit recorded choice for this session, a dot marks that option. Empty Enter never Approves. Clickable Approve only ([GitHub #122](https://github.com/SurmountSystems/grok-oss/issues/122)). Clicking Approve is a real Approve only while a live waiter is parked; after Approve or Exit it does not re-arm Plan ready. Aliases: `/show-plan`, `/plan-view`.
 
 ---
 
@@ -525,16 +531,16 @@ The dual-auth block also lists SuperGrok principal(s) (role plus fingerprint onl
 
 ### `/rebuild`
 
-Rebuild this checkout's `grok-oss` binary and gracefully relaunch live instances on this machine. Not SpaceXAI download, and not worktree database rebuild.
+Rebuild this session's Grok OSS workspace into a `grok-oss` binary and gracefully relaunch live instances on this machine. Not SpaceXAI download, and not worktree database rebuild.
 
-1. Finds a Grok OSS source tree (`justfile` plus `crates/codegen/xai-grok-pager-bin`).
+1. Finds this session's Grok OSS workspace (the session working directory, walking up to `justfile` plus `crates/codegen/xai-grok-pager-bin`). Process current directory is used only when that session path cannot resolve a source tree.
 2. Copies the current installed `grok-oss` binary, when it exists, to a sibling file named `grok-oss.prev` next to it (under `${CARGO_HOME:-$HOME/.cargo}/bin/`).
 3. Compiles from the git index (staged files). Unstaged working-tree edits are not part of that compile. Then runs `just install` (or a fixed cargo install when `just` is missing).
-4. Verifies package version plus git SHA.
+4. Verifies the installed binary's `--version` identity git SHA matches `git rev-parse --short=12 HEAD` of that workspace (same width as pager-bin `build.rs`). A leftover cargo-bin identity such as `1.0.3 (157f1746)` is not an acceptable exec target when this workspace SHA differs. Stale cargo-bin contents are a bug.
 5. Signals other live grok-oss TUIs so they re-exec onto the new binary with the same session. Stock `grok` is not signaled. After two windows can share one conversation, rebuild still signals each live grok-oss PID once (dedupe by PID).
-6. Re-execs this TUI. Mid-turn work uses continue interrupted turn (`canceled_turn_resume.json`), not invent success. An unsent composer draft, queued prompts (including mid-turn interject text), plan Human-box notes, and session `plan.md` survive that relaunch the same way they survive a disconnect. This TUI persist path does not cancel nested subagent ids, and `/rebuild` is not blocked until nested work finishes. Ctrl-C quits and does not re-exec peers. Operator Enter send, mid-turn interject, queued prompts, and plan Human-box notes that ride Approve are also appended to the session-local write-ahead log (`prompt_wal.jsonl`) before the model is asked and before this re-exec. That file is how a dropped prompt can be restored as a pending Human turn. `/rebuild` persist writes the same record format (`rebuild-flush`).
+6. Re-execs this TUI onto that just-produced file. Same PID is fine. Unix `exec` keeps the same PID and `ps` start time; that is not proof this process is still the old image. Trust the post-relaunch identity chrome (`grok-oss` version plus git SHA) and the inode of `/proc/<pid>/exe` versus `${CARGO_HOME:-$HOME/.cargo}/bin/grok-oss`. `ps` fork time is not the signal. Stock Grok Build is a different binary and is not updated by grok-oss `/rebuild`. Mid-turn `/rebuild` does not cancel the parent; the new TUI adopts the live turn the same way a TUI disconnect / network interruption does. Nested ids are not cancelled. `/rebuild` is not a nested-work gate. Idle completed turns do not re-fire the last prompt. Do not re-queue an Operator turn that is already in chat history. An unsent composer draft, queued prompts (including mid-turn interject text), plan Operator-box notes, and session `plan.md` survive that relaunch the same way they survive a disconnect. This TUI persist path does not cancel nested subagent ids, and `/rebuild` is not blocked until nested work finishes. This TUI still exec-replaces while nested work is live. Ctrl-C quits and does not re-exec peers. Operator Enter send, mid-turn interject, queued prompts, and plan Operator-box notes that ride Approve are also appended to the session-local write-ahead log (`prompt_wal.jsonl`) before the model is asked and before this re-exec. That file is how a dropped prompt can be restored as a pending Operator turn. `/rebuild` persist writes the same record format (`rebuild-flush`).
 
-Nested work on the leader survives `/rebuild` the same way it survives a TUI disconnect: the leader process stays up while nested ids are live, and those ids are not cancelled. After nested ids finish, this leader process stays up while the parent turn is still busy, the same way a dropped TUI leaves the leader up until that turn is idle. There is no five-second parent-turn cap. Then the leader may relaunch onto the new binary. Named tests: `relaunch_drain_keeps_nested_ids_alive_after_grace_like_disconnect`, `relaunch_drain_keeps_parent_turn_until_idle_like_disconnect`.
+Nested work on the leader survives `/rebuild` the same way it survives a TUI disconnect: the leader process stays up while nested ids are live, and those ids are not cancelled. After nested ids finish, this leader process stays up while the parent turn is still busy, the same way a dropped TUI leaves the leader up until that turn is idle. There is no five-second parent-turn cap. Then the leader may relaunch onto the new binary. This TUI does not wait for that drain before it exec-replaces. Named tests: `relaunch_drain_keeps_nested_ids_alive_after_grace_like_disconnect`, `relaunch_drain_keeps_parent_turn_until_idle_like_disconnect`, `operator_ran_rebuild_and_the_grok_oss_process_did_not_restart`.
 
 To roll back after a successful install, copy `${CARGO_HOME:-$HOME/.cargo}/bin/grok-oss.prev` over `${CARGO_HOME:-$HOME/.cargo}/bin/grok-oss` and make that file executable. That sibling file is the previous grok-oss binary from the last `/rebuild` that found an existing install.
 

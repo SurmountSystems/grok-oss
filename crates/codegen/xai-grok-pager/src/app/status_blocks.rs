@@ -5,7 +5,7 @@
 use crate::app::agent::{BgTaskState, BgTaskStatus};
 use crate::app::agent_view::AgentView;
 use crate::app::subagent::{
-    format_live_l3_count, format_subagent_label, is_l2_list_row, live_l3_count,
+    format_live_l3_count, format_subagent_label_among, is_l2_list_row, live_l3_count,
 };
 use crate::util::{format_duration, group_thousands};
 impl BgTaskState {
@@ -88,6 +88,7 @@ pub(crate) fn tasks_block_text(agent: &AgentView) -> String {
             .then(b.attempt.started_at.cmp(&a.attempt.started_at))
             .then(a.child_session_id.cmp(&b.child_session_id))
     });
+    let all: Vec<_> = agent.subagent_sessions.values().collect();
     for info in subs {
         let (type_label, desc) = format_subagent_label(info);
         let status = if info.attempt.pending_kill {

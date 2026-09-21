@@ -733,6 +733,15 @@ pub fn current_value_for(
             crate::appearance::cache::load_follow_up_behavior().as_canonical(),
         )),
         "confirm_before_rewind" => Some(SettingValue::Bool(ui.confirm_before_rewind_enabled())),
+        "turbo_planning" => Some(SettingValue::Bool(
+            crate::appearance::cache::load_turbo_planning(),
+        )),
+        "process_rule_reminders_enabled" => {
+            Some(SettingValue::Bool(ui.process_rule_reminders_enabled()))
+        }
+        "process_rule_reminders" => Some(SettingValue::String(
+            ui.process_rule_reminders_text().to_string(),
+        )),
         "simple_mode" => Some(SettingValue::Bool(ui.simple_mode.unwrap_or(true))),
         // Per-tip contextual hints: `None` (inherit) reads as the default ON
         "contextual_hints.undo" => {
@@ -797,6 +806,9 @@ pub fn current_value_for(
         )),
         "composer_multiline" => Some(SettingValue::Bool(
             crate::appearance::cache::load_composer_multiline(),
+        )),
+        "allow_session_multiline" => Some(SettingValue::Bool(
+            crate::appearance::cache::load_allow_session_multiline(),
         )),
         "scrub_ascii_punct" => Some(SettingValue::Bool(
             crate::appearance::cache::load_scrub_ascii_punct(),
@@ -1063,6 +1075,7 @@ pub fn default_value_for(meta: &SettingMeta) -> SettingValue {
 mod tests {
     use super::*;
 
+    // Grok OSS: /settings theme picker includes DOGE and the default is doge, not groknight. This diverges from upstream xAI because FORK.md land class 2 and catalog § 2 pin theme as a shipped surface.
     #[test]
     fn theme_choices_include_doge_and_default_is_doge() {
         let reg = SettingsRegistry::defaults();
@@ -1616,6 +1629,25 @@ mod tests {
                         "economic_mode default drifts from UiConfig::default()"
                     );
                     assert!(*default, "economic_mode must default ON");
+                }
+                ("turbo_planning", SettingKind::Bool { default }) => {
+                    assert_eq!(
+                        *default,
+                        ui.turbo_planning_enabled(),
+                        "turbo_planning default drifts from UiConfig::default()"
+                    );
+                    assert!(*default, "turbo_planning must default ON");
+                }
+                ("process_rule_reminders_enabled", SettingKind::Bool { default }) => {
+                    assert_eq!(
+                        *default,
+                        ui.process_rule_reminders_enabled(),
+                        "process_rule_reminders_enabled default drifts from UiConfig::default()"
+                    );
+                    assert!(*default, "process_rule_reminders_enabled must default ON");
+                }
+                ("process_rule_reminders", SettingKind::String { default, .. }) => {
+                    assert_eq!(*default, "", "process_rule_reminders default must be empty");
                 }
                 ("resume_canceled_turn_on_restart", SettingKind::Bool { default }) => {
                     assert_eq!(

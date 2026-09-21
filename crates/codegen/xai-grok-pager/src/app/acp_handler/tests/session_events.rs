@@ -379,6 +379,40 @@
         }
     }
 
+    /// Attempt 2 after StreamResumed must keep `waiting for first token`
+    /// so leftover chrome matches `Retrying the model request (attempt 2):
+    /// waiting for first token`. Nested implementors stay running; this
+    /// is not a failed request.
+    #[test]
+    fn apply_retry_state_stream_resumed_attempt_two_keeps_first_token_wait() {
+        use crate::acp::tracker::TurnActivity;
+        let mut session = make_session(Some("s1"));
+        let mut scrollback = ScrollbackState::new();
+        session.set_retry_activity(Some(TurnActivity::Retrying {
+            attempt: 2,
+            max_retries: u32::MAX,
+            reason: "first token timed out · next try in 2s".into(),
+        }));
+        apply_retry_state(&RetryState::StreamResumed, &mut session, &mut scrollback, false);
+        match session.tracker.activity() {
+            Some(TurnActivity::Retrying {
+                attempt: 2,
+                reason,
+                ..
+            }) => {
+                assert_eq!(reason, "waiting for first token");
+                let chrome = format!("Retrying the model request (attempt 2): {reason}");
+                assert!(chrome.contains("Retrying the model request"));
+                assert!(chrome.contains("waiting for first token"));
+            }
+            other => panic!("expected Retrying attempt 2 first-token wait, got {other:?}"),
+        }
+        assert!(
+            session.in_flight_prompt.is_none(),
+            "/compact queued on L1 must not be treated as a failed in-flight prompt"
+        );
+    }
+
     #[test]
     fn retry_exhausted_rate_limited_sets_flag() {
         let mut session = make_session(Some("s1"));

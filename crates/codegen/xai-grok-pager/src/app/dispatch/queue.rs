@@ -316,7 +316,7 @@ pub(super) fn maybe_drain_queue(agent: &mut AgentView, notices: &mut Vec<String>
     use crate::app::agent::QueueEntryKind;
     use crate::unified_log as ulog;
 
-    let sid = agent.session.session_id.as_ref().map(|s| s.0.as_ref());
+    let sid = agent.session.session_id.as_ref().map(|s| s.0.to_string());
     let queue_depth = agent.session.pending_prompts.len();
 
     let log_blocked = |reason: &str, sid: Option<&str>| {
@@ -329,8 +329,10 @@ pub(super) fn maybe_drain_queue(agent: &mut AgentView, notices: &mut Vec<String>
         }
     };
 
+    agent.drop_stale_queue_occupancy_protecting(protect_queue_id);
+
     if !agent.session.state.is_idle() {
-        log_blocked("turn_running", sid);
+        log_blocked("turn_running", sid.as_deref());
         return QueueDrain::blocked();
     }
     // The pane stays Idle around a non-adopted wake; draining here would
@@ -342,11 +344,11 @@ pub(super) fn maybe_drain_queue(agent: &mut AgentView, notices: &mut Vec<String>
     // Hold the drain during an in-flight model switch
     // See the `model_switch_pending` field doc for why a reconnect must clear it
     if agent.session.model_switch_pending {
-        log_blocked("model_switch_pending", sid);
+        log_blocked("model_switch_pending", sid.as_deref());
         return QueueDrain::blocked();
     }
     if agent.session.loading_replay {
-        log_blocked("loading_replay", sid);
+        log_blocked("loading_replay", sid.as_deref());
         return QueueDrain::blocked();
     }
     // A hook blocked the previous prompt: park the local drip-feed queue until the user re-engages (see `hook_block_hold`)
@@ -363,7 +365,7 @@ pub(super) fn maybe_drain_queue(agent: &mut AgentView, notices: &mut Vec<String>
         .iter()
         .any(|e| Some(e.id.as_str()) != running)
     {
-        log_blocked("server_queue_owns_next_turn", sid);
+        log_blocked("server_queue_owns_next_turn", sid.as_deref());
         return QueueDrain::blocked();
     }
     let Some(session_id) = agent.session.session_id.clone() else {
@@ -454,7 +456,7 @@ pub(super) fn maybe_drain_queue(agent: &mut AgentView, notices: &mut Vec<String>
     // Ours means drive it, and drop a stale post-rewind chunk on a mismatch
     agent.note_self_originated_prompt(&prompt_id);
 
-    match queued.kind {
+    let drain = match queued.kind {
         QueueEntryKind::Prompt => {
             agent.begin_local_turn(&prompt_id);
             // Scrollback shows display text (never raw skill XML)
@@ -1104,6 +1106,17 @@ pub(crate) fn note_peek_page_flip(
 
 /// Drain the next queued prompt and, when that page-flips under a lease, note it.
 pub(crate) fn maybe_drain_queue_and_note_peek(app: &mut AppView, agent_id: AgentId) -> Vec<Effect> {
+    maybe_drain_queue_and_note_peek_protecting(app, agent_id, None)
+}
+
+/// Same as [`maybe_drain_queue_and_note_peek`], keeping `protect_queue_id`
+/// so a just-enqueued mill Next implement prompt is not occupancy-dropped
+/// when its body matches the Human turn that just finished.
+pub(crate) fn maybe_drain_queue_and_note_peek_protecting(
+    app: &mut AppView,
+    agent_id: AgentId,
+    protect_queue_id: Option<u64>,
+) -> Vec<Effect> {
     if app.global_work_pause.is_active() || app.soft_stop.blocks_drain() {
         return vec![];
     }

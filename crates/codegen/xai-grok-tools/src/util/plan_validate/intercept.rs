@@ -4,6 +4,8 @@ use std::path::PathBuf;
 
 /// Allowlisted script path segment (host execute-plan skill + bundled mirror).
 const VALIDATE_PLAN_PY_MARKER: &str = "execute-plan/scripts/validate-plan.py";
+/// Shipped CLI bin of the same Rust function (Grok Build compatibility).
+const VALIDATE_PLAN_CLI_BIN: &str = "grok-oss-plan-validate";
 
 /// Parsed allowlisted validate-plan.py invocation.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,9 +45,23 @@ fn is_python_bin(tok: &str) -> bool {
     }
 }
 
+fn path_basename(path: &str) -> &str {
+    std::path::Path::new(path)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or(path)
+}
+
 fn is_allowlisted_validate_plan_py(path: &str) -> bool {
     let p = path.replace('\\', "/");
     p.ends_with(VALIDATE_PLAN_PY_MARKER) || p.contains(&format!("/{VALIDATE_PLAN_PY_MARKER}"))
+}
+
+fn is_validate_plan_stub_or_cli_bin(path: &str) -> bool {
+    let base = path_basename(path);
+    base == "validate-plan.py"
+        || base == VALIDATE_PLAN_CLI_BIN
+        || is_allowlisted_validate_plan_py(path)
 }
 
 /// Tokenize a simple shell fragment: whitespace split, keeping single/double
@@ -94,7 +110,7 @@ fn simple_tokens(s: &str) -> Vec<String> {
 
 fn try_parse_direct(cmd: &str) -> Option<PlanValidateIntercept> {
     let tokens = simple_tokens(cmd);
-    if tokens.len() < 3 {
+    if tokens.len() < 2 {
         return None;
     }
 
@@ -111,27 +127,34 @@ fn try_parse_direct(cmd: &str) -> Option<PlanValidateIntercept> {
         break;
     }
 
-    if i >= tokens.len() || !is_python_bin(&tokens[i]) {
-        return None;
-    }
-    i += 1;
-
-    // Optional -u / -B flags; never intercept -c
-    while i < tokens.len() && tokens[i].starts_with('-') && tokens[i] != "-" {
-        if tokens[i] == "-c" || tokens[i].starts_with("-c") {
-            return None;
-        }
-        i += 1;
-    }
-
     if i >= tokens.len() {
         return None;
     }
-    let script = tokens[i].clone();
-    if !is_allowlisted_validate_plan_py(&script) {
+
+    let script = if is_python_bin(&tokens[i]) {
+        i += 1;
+        while i < tokens.len() && tokens[i].starts_with('-') && tokens[i] != "-" {
+            if tokens[i] == "-c" || tokens[i].starts_with("-c") {
+                return None;
+            }
+            i += 1;
+        }
+        if i >= tokens.len() {
+            return None;
+        }
+        let script = tokens[i].clone();
+        if !is_allowlisted_validate_plan_py(&script) {
+            return None;
+        }
+        i += 1;
+        script
+    } else if is_validate_plan_stub_or_cli_bin(&tokens[i]) {
+        let script = tokens[i].clone();
+        i += 1;
+        script
+    } else {
         return None;
-    }
-    i += 1;
+    };
 
     if i >= tokens.len() {
         return None;

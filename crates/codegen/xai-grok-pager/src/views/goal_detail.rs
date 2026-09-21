@@ -410,11 +410,11 @@ pub fn render_goal_detail(
     tick: usize,
     context_used: Option<u64>,
     active_subagent_tokens: u64,
-    close_hovered: bool,
-) -> Option<Rect> {
+    hovers: GoalDetailHovers,
+) -> GoalDetailHits {
     let theme = Theme::current();
     if area.width < 20 || area.height < 6 {
-        return None;
+        return GoalDetailHits::default();
     }
 
     // Clear the popup area.
@@ -480,7 +480,7 @@ pub fn render_goal_detail(
         title_cols as u16,
     );
 
-    let close_style = if close_hovered {
+    let close_style = if hovers.close {
         Style::default()
             .fg(theme.text_primary)
             .bg(theme.bg_base)
@@ -521,7 +521,7 @@ pub fn render_goal_detail(
     y += 1;
 
     if y >= inner.y + inner.height {
-        return Some(close_rect);
+        return close_only_hits(close_rect);
     }
 
     if goal.status.is_paused() {
@@ -555,7 +555,7 @@ pub fn render_goal_detail(
         y += 1;
 
         if y >= inner.y + inner.height {
-            return Some(close_rect);
+            return close_only_hits(close_rect);
         }
     }
 
@@ -570,7 +570,7 @@ pub fn render_goal_detail(
         let formatted = format_pause_reason(msg);
         for line in wrap_pause_message_lines(&formatted, w) {
             if y >= inner.y + inner.height {
-                return Some(close_rect);
+                return close_only_hits(close_rect);
             }
             buf.set_line_safe(
                 x,
@@ -613,7 +613,7 @@ pub fn render_goal_detail(
     y += 1;
 
     if y >= inner.y + inner.height {
-        return Some(close_rect);
+        return close_only_hits(close_rect);
     }
 
     // Progress bar, only when a budget is set
@@ -635,13 +635,13 @@ pub fn render_goal_detail(
     }
 
     if y >= inner.y + inner.height {
-        return Some(close_rect);
+        return close_only_hits(close_rect);
     }
 
     y += 1;
 
     if y >= inner.y + inner.height {
-        return Some(close_rect);
+        return close_only_hits(close_rect);
     }
 
     if todos.is_empty() {
@@ -709,14 +709,14 @@ pub fn render_goal_detail(
     }
 
     if y >= inner.y + inner.height {
-        return Some(close_rect);
+        return close_only_hits(close_rect);
     }
 
     if let Some(ref role) = goal.current_subagent_role {
         // Leading blank, budgeted in `subagent_lines` (renders only with the block)
         y += 1;
         if y >= inner.y + inner.height {
-            return Some(close_rect);
+            return close_only_hits(close_rect);
         }
         let mut subagent_spans = vec![
             Span::styled("Active Subagent: ", Style::default().fg(theme.gray)),
@@ -773,7 +773,7 @@ pub fn render_goal_detail(
             use unicode_width::UnicodeWidthStr;
             for (model_id, tokens) in goal.live_tokens_by_model.iter().take(MAX_MODEL_DISPLAY) {
                 if y >= inner.y + inner.height {
-                    return Some(close_rect);
+                    return close_only_hits(close_rect);
                 }
                 let tokens_str = format_tokens_compact((*tokens).min(i64::MAX as u64) as i64);
                 // Budget the model id to the columns left after the "  " indent and the "  <tokens>" suffix
@@ -810,14 +810,14 @@ pub fn render_goal_detail(
     }
 
     if y >= inner.y + inner.height {
-        return Some(close_rect);
+        return close_only_hits(close_rect);
     }
 
     if has_classifier_activity(goal) {
         // Blank separator.
         y += 1;
         if y >= inner.y + inner.height {
-            return Some(close_rect);
+            return close_only_hits(close_rect);
         }
 
         buf.set_line_safe(
@@ -889,14 +889,14 @@ pub fn render_goal_detail(
     }
 
     if y >= inner.y + inner.height {
-        return Some(close_rect);
+        return close_only_hits(close_rect);
     }
 
     if goal.last_event.is_some() {
         // Leading blank, budgeted in `history_lines` (renders only with the block)
         y += 1;
         if y >= inner.y + inner.height {
-            return Some(close_rect);
+            return close_only_hits(close_rect);
         }
         buf.set_line_safe(
             x,
@@ -936,18 +936,63 @@ pub fn render_goal_detail(
 
     if y < inner.y + inner.height {
         let hint_style = Style::default().fg(theme.gray_dim);
-        let hint = if matches!(
+        let failed = matches!(
             goal.status,
             GoalDisplayStatus::Failed | GoalDisplayStatus::Interrupted
-        ) {
-            "Esc: close  /goal clear, then start a new goal"
+        );
+        let mut cx = x;
+        let mut rem = w;
+        let (tw, rect) =
+            paint_footer_token(buf, cx, y, rem, "Esc: close", hovers.esc_close, &theme);
+        hits.esc_close = Some(rect);
+        cx = cx.saturating_add(tw);
+        rem = rem.saturating_sub(tw);
+        if failed {
+            let (tw, _) = paint_footer_token(buf, cx, y, rem, "  ", false, &theme);
+            cx = cx.saturating_add(tw);
+            rem = rem.saturating_sub(tw);
+            let (tw, rect) =
+                paint_footer_token(buf, cx, y, rem, "/goal clear", hovers.clear, &theme);
+            hits.clear = Some(rect);
+            cx = cx.saturating_add(tw);
+            rem = rem.saturating_sub(tw);
+            buf.set_span_safe(
+                cx,
+                y,
+                &Span::styled(", then start a new goal", hint_style),
+                rem,
+            );
         } else {
-            "Esc: close  /goal resume | pause | status | clear"
-        };
-        buf.set_line_safe(x, y, &Line::from(Span::styled(hint, hint_style)), w);
+            let (tw, _) = paint_footer_token(buf, cx, y, rem, "  /goal ", false, &theme);
+            cx = cx.saturating_add(tw);
+            rem = rem.saturating_sub(tw);
+            let (tw, rect) = paint_footer_token(buf, cx, y, rem, "resume", hovers.resume, &theme);
+            hits.resume = Some(rect);
+            cx = cx.saturating_add(tw);
+            rem = rem.saturating_sub(tw);
+            let (tw, _) = paint_footer_token(buf, cx, y, rem, " | ", false, &theme);
+            cx = cx.saturating_add(tw);
+            rem = rem.saturating_sub(tw);
+            let (tw, rect) = paint_footer_token(buf, cx, y, rem, "pause", hovers.pause, &theme);
+            hits.pause = Some(rect);
+            cx = cx.saturating_add(tw);
+            rem = rem.saturating_sub(tw);
+            let (tw, _) = paint_footer_token(buf, cx, y, rem, " | ", false, &theme);
+            cx = cx.saturating_add(tw);
+            rem = rem.saturating_sub(tw);
+            let (tw, rect) = paint_footer_token(buf, cx, y, rem, "status", hovers.status, &theme);
+            hits.status = Some(rect);
+            cx = cx.saturating_add(tw);
+            rem = rem.saturating_sub(tw);
+            let (tw, _) = paint_footer_token(buf, cx, y, rem, " | ", false, &theme);
+            cx = cx.saturating_add(tw);
+            rem = rem.saturating_sub(tw);
+            let (_tw, rect) = paint_footer_token(buf, cx, y, rem, "clear", hovers.clear, &theme);
+            hits.clear = Some(rect);
+        }
     }
 
-    Some(close_rect)
+    hits
 }
 
 #[cfg(test)]
@@ -1062,7 +1107,16 @@ mod tests {
         let screen = Rect::new(0, 0, 100, 40);
         let mut buf = ratatui::buffer::Buffer::empty(screen);
         let area = goal_detail_area(screen, goal, &[]);
-        render_goal_detail(&mut buf, area, goal, &[], 0, None, 0, false);
+        render_goal_detail(
+            &mut buf,
+            area,
+            goal,
+            &[],
+            0,
+            None,
+            0,
+            GoalDetailHovers::default(),
+        );
         let mut s = String::new();
         for y in 0..screen.height {
             for x in 0..screen.width {
@@ -1225,7 +1279,16 @@ mod tests {
         let mut buf = ratatui::buffer::Buffer::empty(screen);
         let goal = make_goal();
         let area = goal_detail_area(screen, &goal, &[]);
-        render_goal_detail(&mut buf, area, &goal, &[], 0, None, 0, false);
+        render_goal_detail(
+            &mut buf,
+            area,
+            &goal,
+            &[],
+            0,
+            None,
+            0,
+            GoalDetailHovers::default(),
+        );
     }
 
     #[test]
@@ -1278,7 +1341,16 @@ mod tests {
         let mut goal = make_goal();
         goal.token_budget = None;
         let area = goal_detail_area(screen, &goal, &[]);
-        render_goal_detail(&mut buf, area, &goal, &[], 0, None, 0, false);
+        render_goal_detail(
+            &mut buf,
+            area,
+            &goal,
+            &[],
+            0,
+            None,
+            0,
+            GoalDetailHovers::default(),
+        );
     }
 
     #[test]
@@ -1292,7 +1364,16 @@ mod tests {
         goal.current_deliverable_title = None;
         goal.deliverables.clear();
         let area = goal_detail_area(screen, &goal, &[]);
-        render_goal_detail(&mut buf, area, &goal, &[], 0, None, 0, false);
+        render_goal_detail(
+            &mut buf,
+            area,
+            &goal,
+            &[],
+            0,
+            None,
+            0,
+            GoalDetailHovers::default(),
+        );
     }
 
     #[test]
@@ -1306,7 +1387,16 @@ mod tests {
         goal.live_turn_count = None;
         goal.live_tool_call_count = None;
         let area = goal_detail_area(screen, &goal, &[]);
-        render_goal_detail(&mut buf, area, &goal, &[], 0, None, 0, false);
+        render_goal_detail(
+            &mut buf,
+            area,
+            &goal,
+            &[],
+            0,
+            None,
+            0,
+            GoalDetailHovers::default(),
+        );
     }
 
     #[test]
@@ -1319,7 +1409,16 @@ mod tests {
         goal.current_deliverable_id = None;
         goal.current_subagent_role = None;
         let area = goal_detail_area(screen, &goal, &[]);
-        render_goal_detail(&mut buf, area, &goal, &[], 0, None, 0, false);
+        render_goal_detail(
+            &mut buf,
+            area,
+            &goal,
+            &[],
+            0,
+            None,
+            0,
+            GoalDetailHovers::default(),
+        );
     }
 
     /// Count rendered rows whose text contains `needle`.
@@ -1568,7 +1667,16 @@ mod tests {
         let mut goal = make_goal();
         goal.status = GoalDisplayStatus::UserPaused;
         let area = goal_detail_area(screen, &goal, &[]);
-        render_goal_detail(&mut buf, area, &goal, &[], 0, None, 0, false);
+        render_goal_detail(
+            &mut buf,
+            area,
+            &goal,
+            &[],
+            0,
+            None,
+            0,
+            GoalDetailHovers::default(),
+        );
 
         let text = buffer_text(&buf);
         assert!(text.contains("Type /goal resume to continue"));
@@ -1580,7 +1688,16 @@ mod tests {
         let mut buf = ratatui::buffer::Buffer::empty(screen);
         let goal = make_goal();
         let area = goal_detail_area(screen, &goal, &[]);
-        render_goal_detail(&mut buf, area, &goal, &[], 0, None, 0, false);
+        render_goal_detail(
+            &mut buf,
+            area,
+            &goal,
+            &[],
+            0,
+            None,
+            0,
+            GoalDetailHovers::default(),
+        );
 
         let text = buffer_text(&buf);
         assert!(!text.contains("Type /goal resume to continue"));
@@ -1592,7 +1709,16 @@ mod tests {
         let mut buf = ratatui::buffer::Buffer::empty(screen);
         let goal = make_goal();
         let area = goal_detail_area(screen, &goal, &[]);
-        render_goal_detail(&mut buf, area, &goal, &[], 0, None, 0, false);
+        render_goal_detail(
+            &mut buf,
+            area,
+            &goal,
+            &[],
+            0,
+            None,
+            0,
+            GoalDetailHovers::default(),
+        );
 
         let text = buffer_text(&buf);
         assert!(
@@ -1609,7 +1735,16 @@ mod tests {
         goal.status = GoalDisplayStatus::InfraPaused;
         goal.pause_message = Some("Turn failed: upstream unavailable".into());
         let area = goal_detail_area(screen, &goal, &[]);
-        render_goal_detail(&mut buf, area, &goal, &[], 0, None, 0, false);
+        render_goal_detail(
+            &mut buf,
+            area,
+            &goal,
+            &[],
+            0,
+            None,
+            0,
+            GoalDetailHovers::default(),
+        );
 
         let text = buffer_text(&buf);
         assert!(
@@ -1634,7 +1769,16 @@ mod tests {
         goal.status = GoalDisplayStatus::Blocked;
         goal.pause_message = Some("no windows sdk".into());
         let area = goal_detail_area(screen, &goal, &[]);
-        render_goal_detail(&mut buf, area, &goal, &[], 0, None, 0, false);
+        render_goal_detail(
+            &mut buf,
+            area,
+            &goal,
+            &[],
+            0,
+            None,
+            0,
+            GoalDetailHovers::default(),
+        );
 
         let text = buffer_text(&buf);
         assert!(
@@ -1661,7 +1805,16 @@ mod tests {
         goal.status = GoalDisplayStatus::Blocked;
         goal.pause_message = None;
         let area = goal_detail_area(screen, &goal, &[]);
-        render_goal_detail(&mut buf, area, &goal, &[], 0, None, 0, false);
+        render_goal_detail(
+            &mut buf,
+            area,
+            &goal,
+            &[],
+            0,
+            None,
+            0,
+            GoalDetailHovers::default(),
+        );
 
         let text = buffer_text(&buf);
         assert!(
@@ -1686,7 +1839,16 @@ mod tests {
             goal.status = status;
             goal.pause_message = Some("stale reason".into());
             let area = goal_detail_area(screen, &goal, &[]);
-            render_goal_detail(&mut buf, area, &goal, &[], 0, None, 0, false);
+            render_goal_detail(
+                &mut buf,
+                area,
+                &goal,
+                &[],
+                0,
+                None,
+                0,
+                GoalDetailHovers::default(),
+            );
 
             let text = buffer_text(&buf);
             assert!(
@@ -1706,7 +1868,16 @@ mod tests {
         goal.status = GoalDisplayStatus::Blocked;
         goal.pause_message = Some("no windows sdk".into());
         let area = goal_detail_area(screen, &goal, &[]);
-        render_goal_detail(&mut buf, area, &goal, &[], 0, None, 0, false);
+        render_goal_detail(
+            &mut buf,
+            area,
+            &goal,
+            &[],
+            0,
+            None,
+            0,
+            GoalDetailHovers::default(),
+        );
 
         let text = buffer_text(&buf);
         let hint_pos = text
@@ -1859,7 +2030,16 @@ mod tests {
             make_todo("Cancelled task", TodoStatus::Cancelled),
         ];
         let area = goal_detail_area(screen, &goal, &todos);
-        render_goal_detail(&mut buf, area, &goal, &todos, 0, None, 0, false);
+        render_goal_detail(
+            &mut buf,
+            area,
+            &goal,
+            &todos,
+            0,
+            None,
+            0,
+            GoalDetailHovers::default(),
+        );
 
         let text = buffer_text(&buf);
         assert!(text.contains("Progress:"), "must render progress header");
@@ -1881,7 +2061,16 @@ mod tests {
             make_todo("skip", TodoStatus::Cancelled),
         ];
         let area = goal_detail_area(screen, &goal, &todos);
-        render_goal_detail(&mut buf, area, &goal, &todos, 0, None, 0, false);
+        render_goal_detail(
+            &mut buf,
+            area,
+            &goal,
+            &todos,
+            0,
+            None,
+            0,
+            GoalDetailHovers::default(),
+        );
 
         let text = buffer_text(&buf);
         // Completed = ✓, InProgress = ▶, Pending = □, Cancelled = ✗
@@ -1901,7 +2090,16 @@ mod tests {
             .map(|i| make_todo(&format!("Task {i}"), TodoStatus::Pending))
             .collect();
         let area = goal_detail_area(screen, &goal, &todos);
-        render_goal_detail(&mut buf, area, &goal, &todos, 0, None, 0, false);
+        render_goal_detail(
+            &mut buf,
+            area,
+            &goal,
+            &todos,
+            0,
+            None,
+            0,
+            GoalDetailHovers::default(),
+        );
 
         let text = buffer_text(&buf);
         assert!(
@@ -1984,7 +2182,16 @@ mod tests {
         let screen = Rect::new(0, 0, 100, 40);
         let mut buf = ratatui::buffer::Buffer::empty(screen);
         let area = goal_detail_area(screen, &goal, &[]);
-        render_goal_detail(&mut buf, area, &goal, &[], 0, None, 0, false);
+        render_goal_detail(
+            &mut buf,
+            area,
+            &goal,
+            &[],
+            0,
+            None,
+            0,
+            GoalDetailHovers::default(),
+        );
         let text = buffer_text(&buf);
         assert!(
             !text.contains(&"宽".repeat(120)),
@@ -2019,7 +2226,16 @@ mod tests {
 
         let area = goal_detail_area(screen, &goal, &[]);
         let mut buf = ratatui::buffer::Buffer::empty(screen);
-        render_goal_detail(&mut buf, area, &goal, &[], 0, None, 0, false);
+        render_goal_detail(
+            &mut buf,
+            area,
+            &goal,
+            &[],
+            0,
+            None,
+            0,
+            GoalDetailHovers::default(),
+        );
         let text = buffer_text(&buf);
         assert!(
             text.contains("Esc: close"),
@@ -2266,7 +2482,16 @@ mod tests {
         goal.live_turn_count = None;
         let area = goal_detail_area(screen, &goal, &[]);
         let mut buf = ratatui::buffer::Buffer::empty(screen);
-        render_goal_detail(&mut buf, area, &goal, &[], 0, None, 0, false);
+        render_goal_detail(
+            &mut buf,
+            area,
+            &goal,
+            &[],
+            0,
+            None,
+            0,
+            GoalDetailHovers::default(),
+        );
         assert!(
             buffer_text(&buf).contains("Esc: close"),
             "commands hint must render for a just-spawned subagent"
@@ -2291,7 +2516,16 @@ mod tests {
         // And it renders fully alongside the commands hint (no clip).
         let area = goal_detail_area(screen, &goal, &[]);
         let mut buf = ratatui::buffer::Buffer::empty(screen);
-        render_goal_detail(&mut buf, area, &goal, &[], 0, None, 0, false);
+        render_goal_detail(
+            &mut buf,
+            area,
+            &goal,
+            &[],
+            0,
+            None,
+            0,
+            GoalDetailHovers::default(),
+        );
         let t = buffer_text(&buf);
         assert!(t.contains("Completion review:") && t.contains("Esc: close"));
     }

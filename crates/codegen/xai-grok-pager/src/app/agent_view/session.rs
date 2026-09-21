@@ -93,6 +93,93 @@ impl AgentView {
         ) {
             tracing::warn!(?e, "failed to persist unsent prompt draft");
         }
+        self.persist_nested_occupancy_to_disk();
+        self.persist_isolated_preview_open_marker();
+    }
+
+    /// Write live nested implementor occupancy so `/rebuild` session load
+    /// can resume the same way a TUI disconnect adopts nested work.
+    fn persist_nested_occupancy_to_disk(&self) {
+        let Some(session_id) = self.session.session_id.as_ref() else {
+            return;
+        };
+        let cwd = self.session.cwd.to_string_lossy();
+        let Some(path) = nested_occupancy_path(&cwd, session_id.0.as_ref()) else {
+            return;
+        };
+        let rows: Vec<PersistedNestedOccupancy> = self
+            .subagent_sessions
+            .values()
+            .filter(|info| !info.finished)
+            .map(occupancy_from_nested_info)
+            .collect();
+        if rows.is_empty() {
+            let _ = std::fs::remove_file(&path);
+            return;
+        }
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Ok(body) = serde_json::to_vec_pretty(&rows) {
+            let _ = std::fs::write(&path, body);
+        }
+    }
+
+    /// Tests skip this wrapper so they do not read the operator grok home.
+    pub(crate) fn restore_nested_occupancy(&mut self) {
+        if cfg!(test) {
+            return;
+        }
+        self.restore_nested_occupancy_from_disk();
+    }
+
+    /// Load `nested_occupancy.json` into empty Subagents occupancy. Still-running
+    /// nested work is not occupancy-dropped.
+    pub(crate) fn restore_nested_occupancy_from_disk(&mut self) {
+        let Some(session_id) = self.session.session_id.as_ref() else {
+            return;
+        };
+        let cwd = self.session.cwd.to_string_lossy();
+        let Some(path) = nested_occupancy_path(&cwd, session_id.0.as_ref()) else {
+            return;
+        };
+        let Ok(body) = std::fs::read_to_string(&path) else {
+            return;
+        };
+        let Ok(rows) = serde_json::from_str::<Vec<PersistedNestedOccupancy>>(&body) else {
+            return;
+        };
+        for row in rows {
+            if row.child_session_id.trim().is_empty() {
+                continue;
+            }
+            // Occupied rows stay as-is, including finished. The occupancy
+            // snapshot always has finished: false, so overwriting would
+            // un-finish a dead host. Vacant insert is still-running resume.
+            self.subagent_sessions
+                .entry(row.child_session_id.clone())
+                .or_insert_with(|| nested_info_from_occupancy(&row));
+        }
+        self.retain_still_running_nested_occupancy();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn live_nested_occupancy_row_for_tests(
+        child_session_id: &str,
+        subagent_id: &str,
+        description: &str,
+        role: Option<&str>,
+    ) -> SubagentInfo {
+        nested_info_from_occupancy(&PersistedNestedOccupancy {
+            child_session_id: child_session_id.into(),
+            subagent_id: subagent_id.into(),
+            description: description.into(),
+            subagent_type: "general-purpose".into(),
+            role: role.map(str::to_string),
+            parent_session_id: Some("sess-parent".into()),
+            depth: Some(1),
+            activity_label: Some("search_replace".into()),
+        })
     }
 
     /// Clear durable unsent draft after a successful submit (or explicit discard).
@@ -184,9 +271,11 @@ impl AgentView {
             }
             self.session.enqueue_prompt(rec.text);
         }
-        if !self.session.pending_prompts.is_empty() {
-            self.sync_queue_pane();
-        }
+        // Chat history / scrollback occupancy only. WAL Send/Interject is how
+        // a missing Human turn is restored; treating that same WAL as
+        // "already issued" drops the row we just restored.
+        self.drop_stale_queue_occupancy();
+        self.sync_queue_pane();
     }
 
     /// After draft, queue, and WAL restore: the operator prompt appears once.
@@ -221,6 +310,7 @@ impl AgentView {
             .pending_prompts
             .retain(|p| !matches_draft(&p.text));
         self.shared_queue.retain(|w| !matches_draft(&w.text));
+        self.drop_stale_queue_occupancy();
         self.sync_queue_pane();
         self.persist_pending_prompts();
     }
@@ -477,6 +567,11 @@ impl AgentView {
             hit_bg_status: Default::default(),
             hit_goal_status: Default::default(),
             hit_goal_close: Default::default(),
+            hit_goal_resume: Default::default(),
+            hit_goal_pause: Default::default(),
+            hit_goal_status_cmd: Default::default(),
+            hit_goal_clear: Default::default(),
+            hit_goal_esc_close: Default::default(),
             hit_bg_button: Default::default(),
             last_bg_click: None,
             hit_queue_close: Default::default(),
@@ -3285,8 +3380,9 @@ mod resume_restore_occupancy_tests {
     use crate::acp::tracker::{TurnActivity, WaitingReason};
     use crate::actions::ActionRegistry;
     use crate::app::actions::{Action, Effect, TaskResult};
-    use crate::app::agent::{AgentId, AgentState};
+    use crate::app::agent::{AgentId, AgentState, QueueEntryKind, QueuedPrompt};
     use crate::app::dispatch::dispatch;
+    use crate::scrollback::block::RenderBlock;
     use agent_client_protocol as acp;
     use xai_grok_shell::session::pending_prompts::PersistedQueuedPrompt;
 
@@ -3480,6 +3576,27 @@ mod resume_restore_occupancy_tests {
         write_queue_row(&cwd_str, sid, BODY);
 
         let mut app = primed_resume_app(cwd, sid, true);
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            const ALREADY_HUMAN: &str = "already a Human turn after rebuild";
+            agent
+                .scrollback
+                .push_block(RenderBlock::user_prompt(ALREADY_HUMAN));
+            agent.session.pending_prompts.push_back(QueuedPrompt::plain(
+                3,
+                ALREADY_HUMAN,
+                QueueEntryKind::Prompt,
+            ));
+            agent.restore_pending_prompts_from_disk();
+            assert!(
+                agent
+                    .session
+                    .pending_prompts
+                    .iter()
+                    .all(|p| p.text.trim() != ALREADY_HUMAN),
+                "post-rebuild load must drop a queue row that is already a Human turn"
+            );
+        }
         let _ = session_loaded(&mut app, sid, None);
         let agent = app.agents.get(&AgentId(0)).unwrap();
         let activity = agent.resolve_turn_activity();

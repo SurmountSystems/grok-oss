@@ -1196,6 +1196,7 @@ impl MvpAgent {
                 &session_id,
                 &cwd,
                 &updates_file_path,
+                &chat_history,
                 ReplayRouting {
                     persist_data: persist_data.as_ref(),
                     target_client_id: target_client_id.as_ref(),
@@ -1528,6 +1529,7 @@ impl MvpAgent {
         session_id: &acp::SessionId,
         cwd: &AbsPathBuf,
         updates_file_path: &Option<PathBuf>,
+        chat_history: &[crate::sampling::ConversationItem],
         routing: ReplayRouting<'_>,
         no_replay: bool,
         skip_local_background_tasks_replay: bool,
@@ -1549,7 +1551,7 @@ impl MvpAgent {
                 Vec::new(),
             )
         } else {
-            let (tokens, replay_end_offset, unfinished_subagents) = self
+            let (tokens, replay_end_offset, unfinished_subagents, has_ua) = self
                 .replay_session_updates(
                     &session_id,
                     &cwd,
@@ -1560,6 +1562,15 @@ impl MvpAgent {
                     skip_local_background_tasks_replay,
                 )
                 .await?;
+            if !has_ua {
+                self.forward_chat_history_replay(
+                    &session_id,
+                    chat_history,
+                    persist_data.as_ref(),
+                    target_client_id.as_ref(),
+                )
+                .await;
+            }
             let cursor_mark_replay = cursor.is_none();
             let _timer = crate::instrumentation_timer!("session.delta_flush_replay");
             let completions = match self.flush_session(&session_id).await {

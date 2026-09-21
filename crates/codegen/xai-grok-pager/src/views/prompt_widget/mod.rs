@@ -16,8 +16,9 @@
 //! The accent line (┃) and selection box are rendered by the caller.
 
 use std::path::Path;
+use std::time::Instant;
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind};
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
@@ -47,6 +48,10 @@ pub const KIND_IMAGE: ElementKind = ElementKind(3);
 
 /// Byte size at which a single-line paste is chipped (display only, not an offload threshold).
 const PASTE_CHIP_DISPLAY_BYTES: usize = 10_000;
+/// Double-click window for expanding a `[Pasted: N lines]` chip. Matches
+/// the textarea multi-click tracker. Enter on the chip submits; expand is
+/// paste-again or double-click.
+const PASTE_CHIP_DOUBLE_CLICK_MS: u128 = 500;
 
 pub use crate::prompt_images::PROMPT_IMAGES_TRACING_TARGET;
 
@@ -75,7 +80,7 @@ fn text_without_image_chips(
 /// What kind of element interaction occurred when pressing Enter on a chip.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ElementInteraction {
-    /// Paste or file-ref element was inlined (expanded).
+    /// File-ref element was inlined (expanded). Paste chips submit on Enter.
     Inlined,
     /// Image chip was activated (caller should open preview).
     ImagePreview,
@@ -703,6 +708,15 @@ pub struct PromptWidget {
     /// One-shot: the last `handle_key` accepted an @-file completion, which can shrink a long `@query` into a short ref/chip.
     /// That big shrink is NOT a user wipe, so the clear detector must skip observing it (it resyncs on the next genuine edit).
     completion_accepted: bool,
+
+    // Grok OSS: While recording, the prompt box grows with incoming transcript.
+    voice_recording_grow: bool,
+    /// Live interim used only to size the recording box (not committed text).
+    voice_recording_interim: Option<String>,
+
+    /// Last left-click on a paste chip. A second click on that chip inside
+    /// [`PASTE_CHIP_DOUBLE_CLICK_MS`] expands it. Enter still submits.
+    last_paste_chip_click: Option<(ElementId, Instant)>,
 }
 
 /// Prefix display width (`"❯ "` or `"> "`, both 2 columns).
@@ -1622,6 +1636,27 @@ impl PromptWidget {
         } else {
             self.textarea.desired_height(text_width).max(1)
         };
+        // Grok OSS: While recording (grow flag, or overlay-stamped interim),
+        // grow with wrapped transcript rows. Do not ellipsize spoken text.
+        // Cap only at the caller's widget max_height.
+        if self.voice_recording_grow || self.voice_recording_interim.is_some() {
+            let wrap_w = text_width.max(1);
+            // Chrome + prefix can leave a wrap width that packs one extra
+            // word versus a slightly narrower inner column. Grow to the
+            // conservative wrap so spoken text is not clipped.
+            let conservative = wrap_w.saturating_sub(3).max(1);
+            let rows = recording_frame::wrapped_transcript_rows(
+                self.textarea.text(),
+                self.voice_recording_interim.as_deref(),
+                wrap_w,
+            )
+            .max(recording_frame::wrapped_transcript_rows(
+                self.textarea.text(),
+                self.voice_recording_interim.as_deref(),
+                conservative,
+            ));
+            text_height = text_height.max(rows.max(1));
+        }
         let vpad_top = style.vpad_top;
         let info_block = style.info_block(has_info);
         let total = vpad_top + text_height + info_block;
@@ -1823,7 +1858,7 @@ impl PromptWidget {
 
         // Clear: Ctrl-C (empty yields Ignored so the caller can handle)
         if key!('c', CONTROL).matches(key) {
-            return if self.textarea.text().is_empty() {
+            return if self.textarea.text().is_empty() && self.images.is_empty() {
                 PromptEvent::Ignored
             } else {
                 self.set_text("");
@@ -2223,6 +2258,12 @@ impl PromptWidget {
         true
     }
 
+    /// Drop a half-finished paste-chip double-click. Leaving Isolated
+    /// Preview or question InputMode must not pair with the next click.
+    pub fn clear_paste_chip_double_click(&mut self) {
+        self.last_paste_chip_click = None;
+    }
+
     /// Handle a mouse event.
     pub fn handle_mouse(&mut self, mouse: &crossterm::event::MouseEvent) -> PromptEvent {
         self.handle_mouse_inner(mouse).0
@@ -2240,6 +2281,7 @@ impl PromptWidget {
             .textarea
             .handle_mouse(*mouse, self.textarea_area, self.textarea_state);
 
+        let mut paste_click_id = None;
         while let Some(event) = self.textarea.poll_element_event() {
             match event.kind {
                 TextElementEventKind::HoverEnter => {
@@ -2257,8 +2299,32 @@ impl PromptWidget {
                         self.hovered_image_element_id = None;
                     }
                 }
-                TextElementEventKind::Click => {}
+                TextElementEventKind::Click => {
+                    if self
+                        .textarea
+                        .elements()
+                        .iter()
+                        .any(|e| e.id == event.id && e.kind == KIND_PASTE)
+                    {
+                        paste_click_id = Some(event.id);
+                    }
+                }
             }
+        }
+
+        if let Some(id) = paste_click_id {
+            let now = Instant::now();
+            let is_double = self.last_paste_chip_click.is_some_and(|(prev_id, t)| {
+                prev_id == id && now.duration_since(t).as_millis() < PASTE_CHIP_DOUBLE_CLICK_MS
+            });
+            if is_double {
+                self.expand_element(id);
+                self.last_paste_chip_click = None;
+            } else {
+                self.last_paste_chip_click = Some((id, now));
+            }
+        } else if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+            self.last_paste_chip_click = None;
         }
 
         let did_scroll = matches!(action, MouseAction::Scrolled);
@@ -2890,13 +2956,8 @@ impl PromptWidget {
         let chord = Style::default()
             .fg(theme.fuzzy_accent)
             .add_modifier(Modifier::BOLD);
-        let action = if self.paste_element_at_cursor().is_some() {
-            "enter"
-        } else {
-            "paste again"
-        };
         Line::from(vec![
-            Span::styled(action, chord),
+            Span::styled("paste again", chord),
             Span::styled(" or ", dim),
             Span::styled("double-click", chord),
             Span::styled(" to expand", dim),
@@ -2934,7 +2995,8 @@ impl PromptWidget {
             return None;
         }
         match elem.kind {
-            k if k == KIND_PASTE || k == KIND_FILE_REF => {
+            k if k == KIND_PASTE => None,
+            k if k == KIND_FILE_REF => {
                 let id = elem.id;
                 self.expand_element(id);
                 Some(ElementInteraction::Inlined)
@@ -2992,11 +3054,15 @@ impl PromptWidget {
         let theme = Theme::current();
         let bg = style.bg.color(theme.bg_base);
 
-        let border_color = style.border_color_override.unwrap_or(if style.focused {
+        let idle_white = style.border_color_override.unwrap_or(if style.focused {
             theme.prompt_border_active
         } else {
             theme.prompt_border
         });
+        // Grok OSS: While recording, the composer frame paints red
+        // (`theme.accent_error`). When not recording, it is not red.
+        let border_color =
+            recording_frame::composer_frame_color(voice.is_some(), &theme, idle_white);
 
         // Fill the entire area with fg and bg so every cell has RGB colors (needed for blending)
         buf.set_style(area, Style::default().fg(theme.text_primary).bg(bg));
@@ -3292,7 +3358,11 @@ impl PromptWidget {
                 let lines =
                     wrap_voice_interim(interim, ta_area.width as usize, ta_area.height as usize);
                 for (i, line) in lines.iter().enumerate() {
-                    buf.set_string(ta_area.x, ta_area.y + i as u16, line, interim_style);
+                    let y = ta_area.y.saturating_add(i as u16);
+                    if y >= bottom {
+                        break;
+                    }
+                    buf.set_string(ta_area.x, y, line, interim_style);
                 }
                 if let Some(last) = lines.last() {
                     let end_x =

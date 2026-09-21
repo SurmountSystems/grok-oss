@@ -9,6 +9,12 @@ const NOTHING_HELD_TOAST: &str = "There is no paused or interrupted work to star
 
 /// Start held work. Never toggles pause on. Never opens the session picker.
 pub(super) fn dispatch_start_paused_or_interrupted(app: &mut AppView) -> Vec<Effect> {
+    // After Plan Exit, parked Isolated Preview must not trap `/start`.
+    if let ActiveView::Agent(id) = app.active_view
+        && let Some(agent) = app.agents.get_mut(&id)
+    {
+        agent.leave_parked_isolated_preview();
+    }
     if app.global_work_pause.is_active() {
         return super::global_pause::dispatch_resume_global_pause(app);
     }
@@ -46,8 +52,14 @@ fn try_continue_canceled_turn(app: &mut AppView) -> Option<Vec<Effect>> {
     if text.trim().is_empty() {
         return None;
     }
+    if agent.operator_prompt_already_issued_as_human_turn(&text) {
+        // `/start` must not requeue a finished Human turn as continue_prior_work.
+        // Occupancy drop spares that flag, so chat-history skip lives here.
+        let _ = clear_canceled_turn_resume(&cwd, &sid);
+        return None;
+    }
     agent.show_toast(auto_resume_toast());
-    agent.session.enqueue_prompt_front(text);
+    agent.session.enqueue_continue_prior_work_front(text);
     let _ = clear_canceled_turn_resume(&cwd, &sid);
     Some(maybe_drain_queue_and_note_peek(app, id))
 }

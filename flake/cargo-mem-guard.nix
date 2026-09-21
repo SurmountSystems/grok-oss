@@ -87,7 +87,7 @@ EOF
   # Bake mold into the runtime closure on Linux so CARGO_MEM_USE_MOLD
   # works without relying on the ambient host PATH.
   cargo-mem-guard =
-    if pkgs.stdenv.isLinux then
+    if pkgs.stdenv.hostPlatform.isLinux then
       pkgs.symlinkJoin {
         name = "${memGuardCrate.pname}-${memGuardCrate.version}";
         paths = [ cargo-mem-guard-unwrapped ];

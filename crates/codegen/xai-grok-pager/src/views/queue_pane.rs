@@ -564,6 +564,11 @@ impl QueuePane {
         self.entries.iter().map(|e| e.id).collect()
     }
 
+    /// Painted row bodies in display order (`#N` `[Send now]`).
+    pub fn entry_texts(&self) -> Vec<&str> {
+        self.entries.iter().map(|e| e.text.as_str()).collect()
+    }
+
     /// Resolve a row's origin metadata by its selection id (for edit routing).
     pub fn row_ref(&self, id: u64) -> Option<QueueRowRef> {
         self.entries
@@ -624,6 +629,12 @@ impl QueuePane {
             return capabilities
                 .can_send_now()
                 .then_some(QueueEvent::ForceInterject { id });
+        }
+        // Overlay send-now: Ctrl+Enter targets the selected confirmed row.
+        // Composer Ctrl+Enter stays newline (`When::PromptFocused`). Bare
+        // Enter still opens edit.
+        if key.code == KeyCode::Enter && key.modifiers.contains(KeyModifiers::CONTROL) {
+            return Some(QueueEvent::ForceInterject { id });
         }
         match key.code {
             KeyCode::Char('x') | KeyCode::Delete | KeyCode::Backspace => capabilities

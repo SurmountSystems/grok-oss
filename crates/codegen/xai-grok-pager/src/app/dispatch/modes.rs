@@ -4,6 +4,7 @@ use super::ctx::{NO_SESSION_NOTICE, with_active_agent};
 use super::queue::{maybe_drain_queue, note_peek_page_flip};
 use super::settings::ui::{refresh_open_settings_modals, save_success_toast};
 use crate::app::actions::Effect;
+use crate::app::agent_view::AgentView;
 use crate::app::app_view::{ActiveView, AppView};
 use agent_client_protocol as acp;
 use xai_grok_telemetry::session_ctx::log_event;
@@ -36,6 +37,7 @@ pub(super) fn dispatch_show_plan(app: &mut AppView) -> Vec<Effect> {
     let Some(agent) = app.agents.get_mut(&id) else {
         return vec![];
     };
+    agent.clear_leftover_view_plan_slash_palette();
     agent.open_plan_from_view_plan_or_status();
     vec![]
 }
@@ -50,17 +52,42 @@ pub(super) fn dispatch_enter_plan_mode(
     let ActiveView::Agent(id) = app.active_view else {
         return vec![];
     };
+    let description = description.filter(|s| !s.trim().is_empty());
+    if description.is_none() {
+        let Some(agent) = app.agents.get_mut(&id) else {
+            return vec![];
+        };
+        let in_plan = agent.plan_mode_pending.unwrap_or(agent.plan_mode_active);
+        // Bare `/plan` exclusive covering from current disk plan.md.
+        // Exclusive-blocks nested implementers. Empty Enter never Approves.
+        // Compact must not swallow this. Isolated Preview leftover dock is
+        // `/plan --soft`, not this path.
+        agent.enter_exclusive_plan_covering();
+        stamp_live_plan_request(agent, true);
+        let mut effects = agent.exclusive_block_nested_implementers();
+        if !in_plan {
+            let Some(session_id) = agent.session.session_id.clone() else {
+                agent.show_toast("No active session");
+                return effects;
+            };
+            agent.plan_mode_pending = Some(true);
+            tracing::info!("Plan mode entered via /plan slash command");
+            effects.push(Effect::SetSessionMode {
+                session_id,
+                mode_id: acp::SessionModeId::new("plan"),
+            });
+        }
+        return effects;
+    }
+    let in_plan = {
+        let Some(agent) = app.agents.get_mut(&id) else {
+            return vec![];
+        };
+        agent.plan_mode_pending.unwrap_or(agent.plan_mode_active)
+    };
     let Some(agent) = app.agents.get_mut(&id) else {
         return vec![];
     };
-
-    let in_plan = agent.plan_mode_pending.unwrap_or(agent.plan_mode_active);
-    if in_plan {
-        app.show_toast("Already in plan mode. Use /view-plan to view the current plan.");
-        return vec![];
-    }
-
-    let agent = app.agents.get_mut(&id).unwrap();
     let Some(session_id) = agent.session.session_id.clone() else {
         agent.show_toast(NO_SESSION_NOTICE);
         return vec![];
@@ -80,7 +107,7 @@ pub(super) fn dispatch_enter_plan_mode(
             .prompt
             .slash_controller
             .recognized_token_ranges(&desc, &agent.session.models);
-        agent
+        let qid = agent
             .session
             .enqueue_prompt_with_skill_tokens(desc, skill_token_ranges);
         let drain = maybe_drain_queue(agent, &mut app.pending_image_notices);
@@ -94,7 +121,7 @@ pub(super) fn dispatch_enter_plan_mode(
                     prompt_id,
                     skill_token_ranges,
                     ..
-                } => {
+                } if !in_plan => {
                     effects.push(Effect::SetModeThenPrompt {
                         session_id: session_id.clone(),
                         mode_id: mode_id.clone(),
@@ -109,18 +136,37 @@ pub(super) fn dispatch_enter_plan_mode(
         }
         // If drain was empty (not idle), emit only the mode switch; the prompt stays queued and will drain naturally when the agent idles
         if effects.is_empty() {
-            effects.push(Effect::SetSessionMode {
-                session_id,
-                mode_id,
-            });
+            agent.session.pending_prompts.retain(|p| p.id != qid);
+            let prompt_id = uuid::Uuid::new_v4().to_string();
+            agent.note_self_originated_prompt(&prompt_id);
+            if agent.session.state.is_idle() {
+                agent.start_turn_boundary(Some(&prompt_id));
+                agent.session.current_prompt_id = Some(prompt_id.clone());
+            }
+            let agent_id = agent.session.id;
+            if !in_plan {
+                effects.push(Effect::SetModeThenPrompt {
+                    session_id,
+                    mode_id,
+                    agent_id,
+                    text: desc,
+                    prompt_id,
+                    skill_token_ranges: Vec::new(),
+                });
+            } else {
+                effects.push(Effect::SendPrompt {
+                    agent_id,
+                    session_id,
+                    text: desc,
+                    prompt_id,
+                    skill_token_ranges: Vec::new(),
+                });
+            }
         }
-        effects
-    } else {
-        vec![Effect::SetSessionMode {
-            session_id,
-            mode_id,
-        }]
-    }
+        (effects, page_flip_entry)
+    };
+    note_peek_page_flip(app, id, page_flip_entry);
+    effects
 }
 
 /// Set plan mode (on / off).
@@ -161,6 +207,40 @@ pub(super) fn set_plan_mode(
     // Mirrors `dispatch_cycle_mode`'s `in_plan` read so rapid toggles don't double-send
     let prev = agent.plan_mode_pending.unwrap_or(agent.plan_mode_active);
     let new = kind.to_bool();
+
+    // Operator: after Plan Exit, `/plan` must not be ignored. Shell plan
+    // mode can still be on. Bare `/plan` paints covering exclusive present
+    // from current disk plan.md and exclusive-blocks nested implementers.
+    // Empty Enter never Approves. Compact must not swallow this. After
+    // Plan Exit with plan mode still on, covering is still required; it
+    // is not leftover Isolated Preview (`fullscreen = false`).
+    if new {
+        agent.enter_exclusive_plan_covering();
+        stamp_live_plan_request(agent, true);
+        let covering = agent.exclusive_block_nested_implementers();
+        if prev == new {
+            // Idempotent ON still toasts. Covering exclusive `/plan` still
+            // exclusive-blocks nested implementers; skip the ACP round-trip.
+            agent.show_toast(&plan_mode_toast(kind));
+            return covering;
+        }
+        agent.plan_mode_pending = Some(new);
+        refresh_open_settings_modals(app);
+        app.show_toast(&plan_mode_toast(kind));
+        tracing::info!(
+            target: "settings",
+            key = "plan_mode",
+            value = new,
+            "setting changed",
+        );
+        let mode_id = acp::SessionModeId::new(xai_grok_tools::types::SessionMode::Plan.as_id());
+        let mut effects = covering;
+        effects.push(Effect::SetSessionMode {
+            session_id,
+            mode_id,
+        });
+        return effects;
+    }
 
     // Idempotent: toast but skip the ACP round-trip.
     if prev == new {

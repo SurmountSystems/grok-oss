@@ -35,6 +35,12 @@ fn slash_report_for_agent(agent: &crate::app::agent_view::AgentView) -> String {
         }
     };
     let model = agent.session.models.current_model_name();
+    let model_id = agent
+        .session
+        .models
+        .current_model_id_str()
+        .map(str::to_owned);
+    let serving = serving_snapshot_for_keys(model_id.as_deref(), model.as_deref());
     let pid = std::process::id();
     let started = this_window_opened_at(pid);
     let fields = SessionMetadataFields {
@@ -45,8 +51,43 @@ fn slash_report_for_agent(agent: &crate::app::agent_view::AgentView) -> String {
         started,
         pid,
         ulid_primary: crate::appearance::cache::load_ulid_session_ids(),
+        serving_public_id: serving.as_ref().map(|s| s.public_id.clone()).or(model_id),
+        completion_system_fingerprint: serving
+            .as_ref()
+            .and_then(|s| s.completion_system_fingerprint.clone()),
+        completion_observed_at: serving
+            .as_ref()
+            .and_then(|s| s.completion_observed_at.clone()),
+        language_models_id: serving.as_ref().and_then(|s| s.language_models_id.clone()),
+        language_models_fingerprint: serving
+            .as_ref()
+            .and_then(|s| s.language_models_fingerprint.clone()),
+        language_models_version: serving
+            .as_ref()
+            .and_then(|s| s.language_models_version.clone()),
+        language_models_created: serving.as_ref().and_then(|s| s.language_models_created),
+        language_models_observed_at: serving
+            .as_ref()
+            .and_then(|s| s.language_models_observed_at.clone()),
     };
     format_session_metadata(&fields)
+}
+
+fn serving_snapshot_for_keys(
+    model_id: Option<&str>,
+    model_name: Option<&str>,
+) -> Option<xai_grok_shell::grok_oss::ServingMetadataSnapshot> {
+    if let Some(id) = model_id.filter(|s| !s.is_empty())
+        && let Some(snap) = xai_grok_shell::grok_oss::lookup_serving_snapshot_fail_open(id)
+    {
+        return Some(snap);
+    }
+    if let Some(name) = model_name.filter(|s| !s.is_empty())
+        && let Some(snap) = xai_grok_shell::grok_oss::lookup_serving_snapshot_fail_open(name)
+    {
+        return Some(snap);
+    }
+    None
 }
 
 fn lookup_or_map_session_ulid(session_uuid: &str) -> Option<String> {

@@ -1246,7 +1246,7 @@ impl AgentView {
             }
             2 => {
                 if foldable {
-                    self.scrollback.toggle_fold_selected();
+                    self.expand_or_toggle_selected_fold();
                 }
             }
             3.. if !is_prompt => {

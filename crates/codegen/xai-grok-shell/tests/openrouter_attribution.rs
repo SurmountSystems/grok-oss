@@ -12,6 +12,7 @@ use xai_grok_shell::auth::openrouter::{
 };
 
 #[test]
+// Grok OSS: OpenRouter HTTP-Referer is Surmount Grok OSS, not https://x.ai. This diverges from upstream xAI because OpenRouter attribution headers must identify this unofficial fork.
 fn referer_is_surmount_grok_oss_not_xai() {
     assert!(OPENROUTER_HTTP_REFERER.contains("SurmountSystems/grok-oss"));
     assert_ne!(OPENROUTER_HTTP_REFERER, "https://x.ai");
@@ -25,6 +26,7 @@ fn referer_is_surmount_grok_oss_not_xai() {
 }
 
 #[test]
+// Grok OSS: OpenRouter request headers set Surmount referer and Grok OSS title. This diverges from upstream xAI because OpenRouter attribution headers must identify this unofficial fork.
 fn inject_url_derived_headers_sets_openrouter_attribution() {
     let mut headers = IndexMap::new();
     inject_url_derived_headers(&mut headers, None, OPENROUTER_API_URL);

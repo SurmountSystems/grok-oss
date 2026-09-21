@@ -72,6 +72,9 @@ pub trait ChildControl: 'static {
     }
 
     fn cancel(&self);
+    /// Enqueue a follow-up on the live child session (`SessionCommand::Interject`).
+    /// Default is a no-op so test doubles that only cancel still compile.
+    fn follow_up(&self, _text: String) {}
 }
 
 /// Data reported when runtime initialization has produced a live child.
@@ -257,6 +260,9 @@ pub struct CoordinatorConfig {
     /// Buffered entries pin the child's output `Arc` until drained; hosts whose reminder rendering never inlines the output
     /// (a polling tool exists, e.g. the callback tools-server) should bound it.
     pub buffered_completion_output_cap: Option<usize>,
+    /// L1 parent-tool follow-up onto a running L2. Default true.
+    /// Off is SpaceXAI spawn/wait/`resume_from` completed-only.
+    pub parent_follow_up: bool,
 }
 
 impl Default for CoordinatorConfig {
@@ -267,6 +273,7 @@ impl Default for CoordinatorConfig {
             limit_sink: None,
             buffer_completions: false,
             buffered_completion_output_cap: None,
+            parent_follow_up: true,
         }
     }
 }
@@ -282,6 +289,7 @@ impl std::fmt::Debug for CoordinatorConfig {
                 "buffered_completion_output_cap",
                 &self.buffered_completion_output_cap,
             )
+            .field("parent_follow_up", &self.parent_follow_up)
             .finish()
     }
 }

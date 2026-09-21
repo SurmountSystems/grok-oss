@@ -17,7 +17,7 @@ scrollback gets a selection you can move with the arrow keys.
   prompt, no focus change needed.
 - **`←`/`→`** — collapse/expand the selected entry; long tool output stays
   out of your way until you want it.
-- **`Enter`** — open the selected entry in a fullscreen viewer.
+- **`Enter`** expands a selected collapsed or hidden block (same as `:expand`). Double-click does the same. On an already-expanded selected entry, `Enter` opens the fullscreen viewer. Composer `Enter` with text still sends.
 - **`Ctrl+T`** — expand or collapse thinking (chain of thought). Same chord
   with the composer focused or in a nested overlay.
 

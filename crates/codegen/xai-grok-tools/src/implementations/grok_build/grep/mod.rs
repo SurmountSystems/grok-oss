@@ -1,10 +1,9 @@
 //! `grep` tool — new architecture (`Tool` trait).
 //!
-//! Wraps ripgrep to search file contents. Reads `Cwd` from Resources and
-//! truncation settings from its own `Params<GrepParams>`.
-//!
-//! The ripgrep binary resolution logic (`rg_path()`) is shared with the
-//! old implementation via `implementations::grep::ripgrep`.
+//! Searches file contents with the `grep` crate plus `ignore` (embedded
+//! ripgrep). Reads `Cwd` from Resources and truncation settings from its
+//! own `Params<GrepParams>`. grok-oss grep is embedded Rust, not a sidecar
+//! `rg`.
 
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
@@ -40,6 +39,7 @@ mod offer;
 mod rg_heading;
 mod rg_runner;
 pub mod ripgrep;
+pub use ripgrep as embedded;
 
 pub use crate::implementations::grok_build::grep::card::{
     count_matches, format_content_output, format_count_output, format_files_with_matches_output,
@@ -47,7 +47,6 @@ pub use crate::implementations::grok_build::grep::card::{
 };
 // Re-export the shared GrokIntegerSchema from types module
 pub use crate::types::GrokIntegerSchema;
-use ripgrep::rg_path;
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, PartialEq, Default)]
 #[serde(rename_all = "snake_case")]
@@ -431,8 +430,8 @@ impl xai_tool_runtime::Tool for GrepTool {
     }
 }
 
-/// Streaming grep pipeline: spawn ripgrep, project each match line via
-/// `BodyStreamer`, and emit deltas before the terminal card.
+/// Streaming grep pipeline: run the embedded search, project each match line
+/// via `BodyStreamer`, and emit deltas before the terminal card.
 fn grep_progress_stream(
     ctx: xai_tool_runtime::ToolCallContext,
     input: GrepSearchInput,
@@ -740,6 +739,7 @@ async fn prepare_grep(
         .max_output_bytes
         .unwrap_or(DEFAULT_TOOL_OUTPUT_BYTES);
 
+    let exit_code = if out.truncated { 0 } else { out.exit_code };
     Ok(GrepStep::Ready(GrepReady {
         source,
         config: GrepFormatConfig {
@@ -1652,15 +1652,12 @@ mod tests {
         );
     }
 
-    /// A cancelled tool future drops the `Child` before any wait/kill path
-    /// runs; the spawn config must kill rg on drop.
-    #[cfg(unix)]
+    /// grok-oss grep is embedded Rust, not a sidecar `rg`. prepare_grep
+    /// returns search bytes, not a spawned child.
     #[tokio::test]
-    async fn dropping_spawned_grep_child_kills_rg() {
+    async fn prepare_grep_is_embedded_rust_not_a_sidecar_rg() {
         let tmp = TempDir::new().unwrap();
-        // Overflow the stdout pipe so rg blocks on write and stays alive until killed.
-        let line = format!("needle {}\n", "x".repeat(120));
-        fs::write(tmp.path().join("big.txt"), line.repeat(20_000)).unwrap();
+        fs::write(tmp.path().join("a.txt"), "needle\n").unwrap();
 
         let mut resources = Resources::new();
         resources.insert(Cwd(tmp.path().to_path_buf()));
@@ -1671,24 +1668,13 @@ mod tests {
             .expect("prepare_grep");
         let ready = match step {
             GrepStep::Ready(r) => r,
-            GrepStep::Early(out) => panic!("expected spawned rg, got early output: {out:?}"),
+            GrepStep::Early(out) => panic!("expected embedded search, got early output: {out:?}"),
         };
-        let pid = ready.child.id().expect("child pid");
-
-        // Hold the read end open (no EPIPE death) and drop the child mid-run.
-        let GrepReady {
-            child, stdout_pipe, ..
-        } = ready;
-        drop(child);
-
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        while !xai_tty_utils::process_not_running(pid) {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "rg (pid {pid}) still running 5s after its Child was dropped — leaked"
-            );
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-        drop(stdout_pipe);
+        let text = String::from_utf8_lossy(&ready.stdout_buf);
+        assert!(
+            text.contains("needle"),
+            "embedded grep must find the line without exec'ing rg: {text}"
+        );
+        assert_eq!(ready.exit_code, 0);
     }
 }

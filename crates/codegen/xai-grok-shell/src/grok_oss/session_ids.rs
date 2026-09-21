@@ -89,6 +89,47 @@ impl GrokOssStore {
             .optional()
             .context("load session_id_map")
     }
+
+    /// grok-oss sqlite store key: ULID. UUID stays the Grok Build / ACP wire
+    /// id. Non-uuid test fixtures keep their literal id.
+    pub fn grok_oss_store_session_key(&self, session_id: &str) -> String {
+        if session_id.is_empty() {
+            return session_id.to_owned();
+        }
+        if xai_grok_tools::util::ulid::is_valid(session_id) {
+            return session_id.to_owned();
+        }
+        if uuid::Uuid::parse_str(session_id).is_ok() {
+            match self.ensure_session_ids(session_id) {
+                Ok(pair) => pair.session_ulid,
+                Err(_) => session_id.to_owned(),
+            }
+        } else {
+            session_id.to_owned()
+        }
+    }
+
+    /// Lookup keys: mapped ULID first, then the raw id so leftover UUID rows
+    /// still load.
+    pub fn grok_oss_session_lookup_keys(&self, session_id: &str) -> Vec<String> {
+        let mut keys = Vec::new();
+        if uuid::Uuid::parse_str(session_id).is_ok() {
+            if let Ok(Some(pair)) = self.lookup_by_uuid(session_id) {
+                keys.push(pair.session_ulid);
+            }
+        } else if xai_grok_tools::util::ulid::is_valid(session_id) {
+            keys.push(session_id.to_owned());
+            if let Ok(Some(pair)) = self.lookup_by_ulid(session_id) {
+                if !keys.iter().any(|k| k == &pair.session_uuid) {
+                    keys.push(pair.session_uuid);
+                }
+            }
+        }
+        if !keys.iter().any(|k| k == session_id) {
+            keys.push(session_id.to_owned());
+        }
+        keys
+    }
 }
 
 /// Fail-open map insert for a new ACP session UUID.

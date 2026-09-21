@@ -1245,6 +1245,7 @@ mod tests {
 
     /// Human prompts always paint a static left rail (`┃` via EntryRenderer),
     /// same geometry as Recap. Colour is the Human token (`accent_user`).
+    // Grok OSS: Human prompt kinds paint a static left rail in the Human token. This diverges from upstream xAI because FORK.md land class 4 and catalog § 4 pin Human green rail as grok-oss DOGE chrome.
     #[test]
     fn user_prompt_block_accent_is_static_human_rail() {
         use ratatui::style::Color;
@@ -1287,6 +1288,7 @@ mod tests {
     /// `Theme::current()` after pinning `ThemeKind::Doge` (not `pin_theme()`,
     /// which forces GrokNight). Under `NO_COLOR`, slots are Reset and the
     /// product falls back to Cyan (same as the pointer).
+    // Grok OSS: DOGE Human rail is pure green. This diverges from upstream xAI because FORK.md land class 4 and catalog § 4 pin DOGE Human chrome as grok-oss paint.
     #[test]
     fn user_prompt_block_accent_is_green_rail_under_doge_default() {
         use ratatui::style::Color;
@@ -1346,6 +1348,29 @@ mod tests {
         assert_eq!(prefix_fg, expected, "pointer uses Human accent_user");
         let rail = block.accent(&accent_test_ctx()).expect("rail on").color;
         assert_eq!(Some(rail), expected, "rail matches pointer Human colour");
+    }
+
+    /// Operator: stop calling that Human. Scrollback operator prompt prefix
+    /// is the prompt arrow, not the word Human, User, or Grok.
+    #[test]
+    fn user_prompt_prefix_is_not_the_word_human() {
+        let block = UserPromptBlock::new("hello from the operator");
+        let lines = block.wrap_prompt_lines(80, None, true, false);
+        let prefix = lines[0].content.spans[0].content.as_ref();
+        assert!(
+            !prefix.contains("Human") && !prefix.contains("User") && !prefix.contains("Grok"),
+            "operator prompt prefix must not paint Human/User/Grok as a speaker, got {prefix:?}"
+        );
+        assert_eq!(
+            prefix,
+            crate::glyphs::prompt_arrow(),
+            "operator prompt prefix stays the prompt arrow"
+        );
+        let body = line_text(&lines[0].content);
+        assert!(
+            body.contains("hello from the operator"),
+            "prompt body must stay, got {body}"
+        );
     }
 
     /// Fullscreen paint: Human prompt left cell is `┃` in `accent_user`.

@@ -12,6 +12,15 @@ use crate::implementations::grok_build::task::types::{
 };
 use tokio_util::sync::CancellationToken;
 
+#[path = "parent_follow_up_tests.rs"]
+mod parent_follow_up_tests;
+
+/// Interject text recorded by [`TestControl::follow_up`].
+struct FollowUpDelivery {
+    child_session_id: String,
+    text: String,
+}
+
 #[derive(Clone)]
 struct AdmissionGate {
     entered: mpsc::UnboundedSender<()>,
@@ -71,6 +80,13 @@ impl ChildControl for TestControl {
 
     fn cancel(&self) {
         self.cancellation.cancel();
+    }
+
+    fn follow_up(&self, text: String) {
+        let _ = self.follow_ups.send(FollowUpDelivery {
+            child_session_id: self.child_session_id.clone(),
+            text,
+        });
     }
 }
 

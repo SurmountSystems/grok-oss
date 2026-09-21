@@ -6,8 +6,12 @@
 //! (tokens, honest wall, model, estimates, Token Economy cost ticks) are
 //! additive schema v3. Explicit plan-review choices (Approve, Comment, Revise,
 //! Exit) are additive schema v4. ACP session UUID ↔ grok-oss session ULID
-//! pairs are additive schema v5. Later Surmount-only durable state can keep
-//! adding tables via additive migrations.
+//! pairs are additive schema v5. Live session plan documents (Isolated
+//! Preview body, dock_open, comments) are additive schema v6. Official
+//! serving-path fingerprints (Chat Completions `system_fingerprint` and
+//! `GET /v1/language-models` id, fingerprint, version, created) are
+//! additive schema v7. Later Surmount-only durable state can keep adding
+//! tables via additive migrations.
 //!
 //! Open is multiproc-safe (busy timeout via journal helper) and **fail-open**
 //! for callers that treat open/write errors as non-fatal.
@@ -22,8 +26,12 @@ mod plan_choice;
 mod prompt_exec;
 mod prompt_task_metrics;
 mod prompt_tasks;
+pub(crate) mod serving_fingerprint;
 mod session_ids;
-pub use plan_choice::{PlanRecordedChoice, PlanRecordedChoiceRow, SESSION_PLAN_IDENTITY};
+pub(crate) mod session_plans;
+pub use plan_choice::{
+    PlanRecordedChoice, PlanRecordedChoiceRow, SECONDARY_PLAN_IDENTITY, SESSION_PLAN_IDENTITY,
+};
 pub use prompt_exec::{
     HonestWorkClock, LivePromptTask, PromptExecEstimate, PromptExecMetrics, PromptExecRecord,
     tokens_per_dollar,
@@ -32,10 +40,15 @@ pub use prompt_tasks::{
     PromptTask, PromptTaskDraft, PromptTemplate, STORED_PROMPT_SUGGEST_MIN_CHARS, StoredPromptKind,
     StoredPromptSuggestion, accept_stored_prompt_suggestion, suggest_most_complete_stored_prompt,
 };
+pub use serving_fingerprint::{
+    SOURCE_COMPLETION, SOURCE_LANGUAGE_MODELS, ServingMetadataSnapshot,
+    lookup_serving_snapshot_fail_open, record_completion_system_fingerprint_fail_open,
+};
 pub use session_ids::{SessionIdPair, ensure_session_ids_fail_open};
+pub use session_plans::prefer_sql_plan_body_fail_open;
 
 /// Current schema version stamped in `meta`.
-pub const SCHEMA_VERSION: i64 = 5;
+pub const SCHEMA_VERSION: i64 = 7;
 
 /// Default filename under `$GROK_HOME`.
 pub const GROK_OSS_DB_FILE: &str = "grok_oss.db";
@@ -172,6 +185,12 @@ CREATE TABLE IF NOT EXISTS meta (
                 .execute_batch(SCHEMA_V5)
                 .context("apply schema v5")?;
         }
+        if version < 6 {
+            session_plans::apply_schema_v6(self)?;
+        }
+        if version < 7 {
+            serving_fingerprint::apply_schema_v7(self)?;
+        }
         if version < SCHEMA_VERSION {
             self.conn
                 .execute(
@@ -186,7 +205,7 @@ CREATE TABLE IF NOT EXISTS meta (
 }
 
 /// Token Economy tables (schema version 1). Additive only.
-const SCHEMA_V1: &str = r#"
+pub(crate) const SCHEMA_V1: &str = r#"
 CREATE TABLE IF NOT EXISTS local_usage_event (
   event_ulid TEXT PRIMARY KEY,
   session_id TEXT NOT NULL,
@@ -237,7 +256,7 @@ CREATE TABLE IF NOT EXISTS reconciliation_run (
 
 /// Prompt-task drafts, templates, and prompt-as-task rows (schema version 2).
 /// Additive only. Does not rewrite Token Economy tables.
-const SCHEMA_V2: &str = r#"
+pub(crate) const SCHEMA_V2: &str = r#"
 CREATE TABLE IF NOT EXISTS prompt_task_drafts (
   id TEXT PRIMARY KEY,
   text TEXT NOT NULL,
@@ -266,7 +285,7 @@ CREATE TABLE IF NOT EXISTS prompt_tasks (
 
 /// Prompt-task exec metrics (schema version 3). Additive only.
 /// Cost uses Token Economy `cost_usd_ticks` (same ticks as `/spend`).
-const SCHEMA_V3: &str = r#"
+pub(crate) const SCHEMA_V3: &str = r#"
 CREATE TABLE IF NOT EXISTS prompt_exec_metrics (
   id TEXT PRIMARY KEY,
   prompt_task_id TEXT NOT NULL,
@@ -292,7 +311,7 @@ CREATE INDEX IF NOT EXISTS idx_prompt_exec_metrics_task
 "#;
 
 /// Explicit plan-review choices (schema version 4). Additive only.
-const SCHEMA_V4: &str = r#"
+pub(crate) const SCHEMA_V4: &str = r#"
 CREATE TABLE IF NOT EXISTS plan_recorded_choice (
   id TEXT PRIMARY KEY,
   session_id TEXT NOT NULL,
@@ -307,7 +326,7 @@ CREATE INDEX IF NOT EXISTS idx_plan_recorded_choice_session_plan
 
 /// ACP session UUID ↔ grok-oss session ULID map (schema version 5). Additive only.
 /// Not `{session_dir}/work_ulid`. Wire session id stays UUID.
-const SCHEMA_V5: &str = r#"
+pub(crate) const SCHEMA_V5: &str = r#"
 CREATE TABLE IF NOT EXISTS session_id_map (
   session_uuid TEXT NOT NULL UNIQUE,
   session_ulid TEXT NOT NULL UNIQUE,
@@ -373,6 +392,10 @@ mod tests {
             "prompt_exec_metrics",
             "plan_recorded_choice",
             "session_id_map",
+            "session_plans",
+            "completion_system_fingerprint",
+            "language_model_serving",
+            "serving_fingerprint_flip",
         ] {
             let n: i64 = store
                 .connection()
@@ -382,9 +405,12 @@ mod tests {
                     |r| r.get(0),
                 )
                 .unwrap();
-            assert_eq!(n, 1, "fresh open must apply v2/v3/v4/v5 table {name}");
+            assert_eq!(n, 1, "fresh open must apply v2/v3/v4/v5/v6/v7 table {name}");
         }
-        assert_eq!(SCHEMA_VERSION, 5, "session UUID to ULID map is schema v5");
+        assert_eq!(
+            SCHEMA_VERSION, 7,
+            "serving fingerprints are additive schema v7"
+        );
     }
 
     #[test]
@@ -404,6 +430,10 @@ mod tests {
             "prompt_exec_metrics",
             "plan_recorded_choice",
             "session_id_map",
+            "session_plans",
+            "completion_system_fingerprint",
+            "language_model_serving",
+            "serving_fingerprint_flip",
         ] {
             let n: i64 = s2
                 .connection()

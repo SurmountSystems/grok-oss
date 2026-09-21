@@ -984,6 +984,11 @@ pub struct Config {
     /// none. `true` opts in. Copied from `[subagents] allow_worktree`.
     #[serde(skip)]
     pub subagent_allow_worktree: bool,
+    /// L1 follow-up onto a still-running nested L2. Default true.
+    /// Copied from `[subagents] parent_follow_up`. Off is SpaceXAI
+    /// spawn/wait/`resume_from` completed-only.
+    #[serde(skip)]
+    pub subagent_parent_follow_up: bool,
     /// Whether web search is force-disabled via `--disable-web-search` CLI flag.
     /// When true, the web search tool is never added to the agent toolset regardless of available credentials.
     #[serde(default)]
@@ -1265,6 +1270,7 @@ impl Default for Config {
             subagent_roles: std::collections::HashMap::new(),
             subagent_personas: std::collections::HashMap::new(),
             subagent_allow_worktree: false,
+            subagent_parent_follow_up: true,
             disable_web_search: false,
             todo_gate: false,
             laziness_debug_log: None,

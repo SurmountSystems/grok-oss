@@ -72,7 +72,11 @@ pub struct SubagentAttemptInfo {
     /// Live progress from `SubagentProgress`.
     pub turn_count: Option<u32>,
     pub tool_call_count: Option<u32>,
+    /// Present usage: this nested session's live sampling window.
     pub tokens_used: Option<u64>,
+    /// Past usage dropped by compact (`tokens_before - tokens_after` each time).
+    /// Present plus past is this session's atomic total. Each unit once.
+    pub tokens_past: u64,
     pub context_window_tokens: Option<u64>,
     /// 0-100.
     pub context_usage_pct: Option<u8>,
@@ -343,6 +347,17 @@ impl SubagentInfo {
         } else {
             self.elapsed()
         }
+    }
+
+    /// Fold a compact into present plus past. Dropped units move to `tokens_past`
+    /// so the surviving window is not counted twice.
+    pub(crate) fn record_compact(&mut self, tokens_before: Option<u64>, tokens_after: u64) {
+        if let Some(before) = tokens_before {
+            self.tokens_past = self
+                .tokens_past
+                .saturating_add(before.saturating_sub(tokens_after));
+        }
+        self.tokens_used = Some(tokens_after);
     }
 
     /// Last operator-visible tool or progress for wait chrome.
@@ -1030,6 +1045,79 @@ pub(crate) fn format_subagent_label(info: &SubagentInfo) -> (String, String) {
     };
 
     (label, clean_desc.to_string())
+}
+
+/// Present plus past for one nested session. Each unit once.
+///
+/// `None` before the first usage tick and before any compact.
+pub(crate) fn nested_session_present_plus_past(info: &SubagentInfo) -> Option<u64> {
+    match (info.tokens_used, info.tokens_past) {
+        (None, 0) => None,
+        (present, past) => Some(present.unwrap_or(0).saturating_add(past)),
+    }
+}
+
+/// L2 Subagents list row: that L2's present plus past plus every specialist
+/// it spawned, each unit once.
+///
+/// Does not add a specialist that is already stored in the L2 window (L2
+/// `tokens_used` / `tokens_past` stay this L2 only; specialists are extra
+/// rows). Finished specialists still count: every specialist it spawned.
+pub(crate) fn l2_present_plus_past_atomic_total<'a, I>(l2: &SubagentInfo, infos: I) -> Option<u64>
+where
+    I: IntoIterator<Item = &'a SubagentInfo>,
+{
+    let own = nested_session_present_plus_past(l2);
+    let mut specialist_total = 0u64;
+    let mut any_specialist = false;
+    for info in infos {
+        if info.workflow_run_id.is_some() {
+            continue;
+        }
+        if info.parent_session_id.as_deref() != Some(l2.child_session_id.as_ref()) {
+            continue;
+        }
+        if let Some(usage) = nested_session_present_plus_past(info) {
+            specialist_total = specialist_total.saturating_add(usage);
+            any_specialist = true;
+        }
+    }
+    match (own, any_specialist) {
+        (None, false) => None,
+        (own, _) => Some(own.unwrap_or(0).saturating_add(specialist_total)),
+    }
+}
+
+/// Compact count for a Subagents list row.
+///
+/// L2: present plus past including specialists. L3: that specialist only.
+pub(crate) fn subagent_list_row_usage(info: &SubagentInfo, all: &[&SubagentInfo]) -> Option<u64> {
+    let child_ids: std::collections::HashSet<&str> = all
+        .iter()
+        .map(|row| row.child_session_id.as_ref())
+        .collect();
+    if is_l2_list_row(info, &child_ids) {
+        l2_present_plus_past_atomic_total(info, all.iter().copied())
+    } else {
+        nested_session_present_plus_past(info)
+    }
+}
+
+/// Sum each live nested session window once.
+///
+/// L1, L2, and L3 are separate sampling windows. One unit belongs to one
+/// window. This total adds every live non-workflow nested session once. It
+/// does not add an L3 both inside an L2 Subagents list figure and again here.
+/// Do not feed this sum into the parent `239K / 500K` L1 context chip.
+pub(crate) fn sum_live_nested_session_windows<'a, I>(infos: I) -> u64
+where
+    I: IntoIterator<Item = &'a SubagentInfo>,
+{
+    infos
+        .into_iter()
+        .filter(|info| info.is_running() && info.workflow_run_id.is_none())
+        .filter_map(nested_session_present_plus_past)
+        .fold(0u64, u64::saturating_add)
 }
 
 pub(crate) fn format_subagent_meta(

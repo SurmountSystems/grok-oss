@@ -96,7 +96,7 @@ fn broadcast_acks_watch(
         .is_some_and(|watch| crate::app::prompt_ack::queue_changed_acks(changed, watch.prompt_id()))
 }
 
-pub(super) fn handle_queue_changed(notif: &acp::ExtNotification, app: &mut AppView) -> bool {
+pub(crate) fn handle_queue_changed(notif: &acp::ExtNotification, app: &mut AppView) -> bool {
     let Ok(changed) =
         serde_json::from_str::<crate::app::prompt_queue::QueueChanged>(notif.params.get())
     else {
@@ -216,6 +216,7 @@ pub(super) fn handle_queue_changed(notif: &acp::ExtNotification, app: &mut AppVi
             .get(&aid)
             .map(|p| p.prompt_id.clone());
         if let Some(agent) = app.agents.get_mut(&aid) {
+            let incoming_ids: Vec<String> = snapshot.iter().map(|e| e.id.clone()).collect();
             agent.shared_queue = snapshot;
             if acks_watch {
                 agent.note_prompt_ack(

@@ -85,6 +85,18 @@ pub(super) fn plan_preview_key_is_composer_text(key: &KeyEvent) -> bool {
     )
 }
 
+/// Isolated Preview search owns keys while the search bar is open, and
+/// n/N after the query is accepted. Composer `/` stays slash.
+pub(super) fn isolated_preview_search_owns_key(agent: &AgentView, key: &KeyEvent) -> bool {
+    let Some(viewer) = agent.line_viewer.as_ref() else {
+        return false;
+    };
+    if viewer.list_state.input_mode().is_some() {
+        return true;
+    }
+    viewer.list_state.matcher().is_some() && (key!('n').matches(key) || key!('N').matches(key))
+}
+
 impl AgentView {
     // ── Line viewer methods ────────────────────────────────────────────
 
@@ -150,11 +162,104 @@ impl AgentView {
     }
 
     fn plan_cta_has_comment_payload(&self) -> bool {
-        !self.prompt.text().trim().is_empty()
+        self.composer_has_operator_notes()
             || self
                 .plan_approval_view
                 .as_ref()
                 .is_some_and(|pav| !pav.comments.is_empty())
+    }
+
+    pub(super) fn composer_has_operator_notes(&self) -> bool {
+        !self.prompt.text().trim().is_empty()
+            || !self.prompt.images.is_empty()
+            || self
+                .prompt
+                .textarea
+                .elements()
+                .iter()
+                .any(|e| e.kind == crate::views::prompt_widget::KIND_PASTE)
+    }
+
+    /// Leftover slash-palette `/` (or `/view-plan`) is not review notes.
+    pub(super) fn composer_is_leftover_slash_palette_only(&self) -> bool {
+        matches!(
+            self.prompt.text().trim(),
+            "/" | "/view-plan" | "/show-plan" | "/plan-view"
+        )
+    }
+
+    pub(super) fn composer_is_recognized_slash_command(&self) -> bool {
+        // A `[Pasted: N lines]` chip is review notes even if the folded
+        // body starts with `/implement`. Typed `/implement` without a
+        // paste chip is still a slash / continue-nested-work path.
+        // `/implement` is a skill, not a pager builtin, so registry
+        // membership alone would Approve-with-comment that typed slash.
+        if self
+            .prompt
+            .textarea
+            .elements()
+            .iter()
+            .any(|e| e.kind == crate::views::prompt_widget::KIND_PASTE)
+        {
+            return false;
+        }
+        let trimmed = self.prompt.text().trim();
+        if crate::app::auto_implement::is_implement_command_sentence(trimmed) {
+            return true;
+        }
+        let Some(invocation) = crate::slash::parse_invocation(trimmed) else {
+            return false;
+        };
+        let reg = self.prompt.slash_controller.registry();
+        reg.get_for_dispatch(invocation.token).is_some() || reg.is_builtin(invocation.token)
+    }
+
+    /// Isolated Preview idle after present: a non-empty Operator box
+    /// (typed notes or a paste chip) plus Enter Approves with those notes.
+    /// A `[Pasted: 13 lines]` chip whose body starts with `/implement`
+    /// is still Approve-with-comment, not Plan Exit. Empty Enter never
+    /// Approves. Keep-draft from before present still SendPrompt. Typed
+    /// slash commands without a paste chip still send. Line-comment
+    /// overlay still saves. Prompt-focused Revise / Questions keep those
+    /// intents. Vanished Isolated Preview (pane shut, live waiter,
+    /// Preview focus) still Approves with those notes. Leftover
+    /// slash-palette `/` is not notes. Leftover `/` plus notes is still
+    /// those notes: Enter must not accept leftover slash as `/quit`.
+    pub(crate) fn isolated_preview_idle_enter_approves_with_notes(&self) -> bool {
+        if self.plan_decision_resolved {
+            return false;
+        }
+        if self.plan_feedback_in_flight.is_some() {
+            return false;
+        }
+        let Some(pav) = self.plan_approval_view.as_ref() else {
+            return false;
+        };
+        if pav.focus == PlanApprovalFocus::Commenting {
+            return false;
+        }
+        if !self.is_plan_viewer() && pav.focus != PlanApprovalFocus::Preview {
+            return false;
+        }
+        if !self.composer_has_operator_notes() {
+            return false;
+        }
+        if self.composer_is_leftover_slash_palette_only() {
+            return false;
+        }
+        if self.composer_is_keep_draft_from_before_present() {
+            return false;
+        }
+        if self.composer_is_recognized_slash_command() {
+            return false;
+        }
+        if pav.focus == PlanApprovalFocus::Prompt {
+            return matches!(
+                pav.prompt_intent,
+                PlanPromptIntent::Comment | PlanPromptIntent::ApproveNotes
+            );
+        }
+        true
     }
 
     /// Click marks the CTA and runs it. Enter also submits the marked CTA.
@@ -167,10 +272,29 @@ impl AgentView {
 
     /// Enter (and a second click) run the marked idle CTA.
     fn activate_selected_plan_cta(&mut self, choice: SelectedPlanCta) -> InputOutcome {
+        // Operator: "I can't even revise plans now... exit won't work too.
+        // it's fucking stuck!!" Rewrite-wait must not swallow Exit. Revise
+        // still waits for a live park (`send_plan_feedback` takes
+        // `plan_approval_view`). Empty Enter never Approves.
+        if self.plan_feedback_in_flight.is_some() && choice != SelectedPlanCta::Exit {
+            return InputOutcome::Changed;
+        }
         self.mark_selected_plan_cta(choice);
         match choice {
             SelectedPlanCta::Approve => self.approve_plan(),
-            SelectedPlanCta::Comment => self.focus_plan_prompt(PlanPromptIntent::Comment),
+            SelectedPlanCta::Comment => {
+                // Isolated Preview Comment CTA still arms a line range.
+                // Empty-prompt `c` types in the Human box; it is not this path.
+                // Restore the stashed Human box so Comment-then-Approve stays
+                // Prompt + Comment intent, not a wiped line-note overlay.
+                let _ = self.enter_plan_commenting();
+                if let Some(pav) = self.plan_approval_view.as_mut() {
+                    if let Some(stashed) = pav.stashed_feedback_prompt.take() {
+                        self.prompt.restore(stashed);
+                    }
+                }
+                self.focus_plan_prompt(PlanPromptIntent::Comment)
+            }
             SelectedPlanCta::Clarify => {
                 if self.plan_cta_has_comment_payload() {
                     let text = self.prompt.text().to_string();
@@ -209,19 +333,82 @@ impl AgentView {
         }
     }
 
+    /// Keep-draft from before live present: Isolated Preview Enter still
+    /// SendPrompt. Isolated Preview Preview Human text is also SendPrompt.
+    fn composer_is_keep_draft_from_before_present(&self) -> bool {
+        let Some(pav) = self.plan_approval_view.as_ref() else {
+            return false;
+        };
+        let notes = self.prompt.text();
+        pav.stashed_prompt.text.trim() == notes.trim()
+            && pav.stashed_prompt.images.len() == self.prompt.images.len()
+            && (!notes.trim().is_empty() || !self.prompt.images.is_empty())
+    }
+
+    /// Isolated Preview composer is a Human box unless Comment was clicked.
+    /// Operator: soft planning is broken; lost that prompt; nothing happened;
+    /// cannot submit the prompt now. Human text while Isolated Preview is
+    /// open is a Human turn, not only plan comment 1. Comment CTA is the
+    /// comment path. Ride-Approve chrome must not block a later non-empty
+    /// Enter. Empty Enter never Approves. Keep-draft from before live
+    /// present still SendPrompt. Line-comment overlay Enter still saves.
+    /// Session Multiline Enter still inserts a newline.
+    pub(super) fn hold_parked_plan_review_comments_from_enter(&mut self) -> bool {
+        let text = self.prompt.text().to_string();
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            return false;
+        }
+        // Recognized slash commands are not plan review comments.
+        // `/plan queue` must still hold on the prompt queue; `--soft` is
+        // not the queue hold token. Typed `/implement` without a paste
+        // chip is still that slash, not a parked Isolated Preview comment.
+        if self.composer_is_recognized_slash_command() {
+            return false;
+        }
+        let allow_newlines = crate::appearance::cache::load_composer_multiline();
+        if self.multiline_mode && allow_newlines {
+            return false;
+        }
+        let Some(pav) = self.plan_approval_view.as_ref() else {
+            return false;
+        };
+        if pav.focus == PlanApprovalFocus::Commenting {
+            return false;
+        }
+        if self.composer_is_keep_draft_from_before_present() {
+            return false;
+        }
+        let already_stashed = pav.comment_held_from_enter
+            && pav
+                .feedback_draft
+                .as_deref()
+                .is_some_and(|draft| draft.trim() == trimmed);
+        // Isolated Preview Preview is a Human send. Comment CTA stashes
+        // once. A matching ride-Approve draft must not recapture Enter.
+        // Keystroke snapshots of `feedback_draft` are not that Enter.
+        let hold = match pav.prompt_intent {
+            PlanPromptIntent::Comment => !already_stashed,
+            PlanPromptIntent::Revise
+            | PlanPromptIntent::Questions
+            | PlanPromptIntent::ApproveNotes => false,
+        };
+        if !hold {
+            return false;
+        }
+        if let Some(pav) = self.plan_approval_view.as_mut() {
+            pav.feedback_draft = Some(text);
+            pav.comment_held_from_enter = true;
+        }
+        self.persist_unsent_composer_draft_now();
+        self.show_toast("This comment will ride Approve. Click Approve, Clarify, or Revise.");
+        true
+    }
+
     /// Handle a key event while the line viewer is open.
     pub(super) fn handle_line_viewer_key(&mut self, key: &KeyEvent) -> InputOutcome {
         let in_plan_approval = self.plan_approval_view.is_some();
         let plan_present = in_plan_approval || self.is_plan_viewer();
-
-        // Idle or cancelling plan present: `x`/`e`/`j`/`k` type in the Human
-        // box. They must not become list capture (delete / edit / row walk).
-        if plan_present
-            && matches!(key.code, KeyCode::Char('x' | 'e' | 'j' | 'k'))
-            && (key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT)
-        {
-            return self.handle_plan_feedback_key(key);
-        }
 
         let input_bar_active = self
             .line_viewer
@@ -265,6 +452,12 @@ impl AgentView {
                     viewer.list_state.handle_key_event(key, &viewer.lines);
                     return InputOutcome::Changed;
                 }
+            }
+            // Esc closes ride-Approve capture. It does not Approve, and it
+            // does not wipe a mid-compose Human draft.
+            if let Some(pav) = self.plan_approval_view.as_mut() {
+                pav.feedback_draft = None;
+                pav.comment_held_from_enter = false;
             }
             self.cancel_line_viewer();
             return InputOutcome::Changed;
@@ -344,8 +537,11 @@ impl AgentView {
                 if focus == Some(PlanApprovalFocus::Prompt) {
                     return self.handle_plan_feedback_key(key);
                 }
-                // Preview: empty Enter never Approves. A draft submits as
-                // a normal prompt so present cannot steal the composer.
+                if self.hold_parked_plan_review_comments_from_enter() {
+                    return InputOutcome::Changed;
+                }
+                // Preview: empty Enter never Approves. A non-empty draft
+                // already stashed above so it can ride Approve.
                 return self.send_composer_as_normal_prompt();
             }
             if self.is_plan_viewer() {
@@ -421,14 +617,14 @@ impl AgentView {
             }
             return InputOutcome::Changed;
         }
-        if key!(Esc).matches(key) || key!('q').matches(key) || key!('c', CONTROL).matches(key) {
+        // Two-stage Ctrl+C on every Isolated Preview prompt: first press
+        // with a draft clears; empty second press Exits / abandons. Do not
+        // map first Ctrl+C to leftover close.
+        if key!('c', CONTROL).matches(key) {
+            return self.handle_plan_feedback_key(key);
+        }
+        if key!(Esc).matches(key) || key!('q').matches(key) {
             if in_plan_approval {
-                // Ctrl+C must reach the plan feedback path: empty composer
-                // abandons (like panel `q`); non-empty clears the draft.
-                // Do not return Changed and swallow the chord.
-                if key!('c', CONTROL).matches(key) {
-                    return self.handle_plan_feedback_key(key);
-                }
                 return InputOutcome::Changed;
             }
             // In the plan viewer, Esc first clears visual selection / search before closing
@@ -502,6 +698,14 @@ impl AgentView {
     pub(crate) fn cancel_line_viewer(&mut self) {
         self.line_viewer = None;
         self.view_plan_requested = false;
+        self.persist_session_plan_dock_open(false);
+        if let Some(sid) = self.session.session_id.as_ref() {
+            crate::slash::commands::plan::persist_isolated_preview_open(
+                &self.session.cwd.to_string_lossy(),
+                sid.0.as_ref(),
+                false,
+            );
+        }
         if self.plan_approval_view.is_some() {
             // Keep Revise / Comment box text. `cancel_undo_group` reverts the
             // open group and drops Undo, which is why revision notes vanished.
@@ -521,6 +725,7 @@ impl AgentView {
         }
         self.casual_commenting_range = None;
         self.casual_editing_comment_id = None;
+        self.clear_prompt_double_click_pairing();
     }
 
     /// Dismiss the /btw panel. If Done, flush response to scrollback first.
@@ -669,6 +874,12 @@ impl AgentView {
                     }
                     // The comment button is only set on plan viewers, so the two arms above are exhaustive in practice
                     // Return here to make the dead fall-through explicit and to match the abandon/approve hit patterns just above
+                    return InputOutcome::Changed;
+                }
+                if search_btn_area.is_some_and(|a| a.contains((mouse.column, mouse.row).into())) {
+                    if let Some(ref mut viewer) = self.line_viewer {
+                        viewer.list_state.open_search(&viewer.lines);
+                    }
                     return InputOutcome::Changed;
                 }
                 if copy_btn_area.is_some_and(|a| a.contains((mouse.column, mouse.row).into())) {

@@ -215,6 +215,10 @@ The `resume_from` parameter lets a new subagent continue where a completed subag
 
 The new subagent inherits the source's transcript, tool state, and model; its system prompt and tools are re-rendered from the current agent definition. The source must be completed (not running), belong to the current session, and use the same agent type.
 
+### follow_up (L1 onto a running L2)
+
+The spawn tool's `follow_up` field is L1 enqueue onto a **still-running** nested L2. Pass that L2's subagent ID. Extra prompt text stays in `prompt`. That enqueue is additive: not kill, not respawn, not a wait for exit. It is not Operator overlay typing (open the L2 framed view and type; that is `x.ai/interject` on that L2). It is not `resume_from`, which still continues a **completed** nested L2 only. `resume_from` of a running L2 still fails. The follow-up must not inject into a live L3 unless the Operator explicitly targeted that specialist. Default on. `[subagents] parent_follow_up = false` is the SpaceXAI option (spawn, wait, `resume_from` after exit). Overlay compose stays. No new `[auth]` key.
+
 ### MCP inheritance
 
 The primary session overlays the active agent’s `mcpServers` frontmatter onto the disk/client merge by name (agent.md headers beat `config.toml`). Switching the primary agent replaces that overlay with the new seat only. Child inline `mcpServers` still become owned clients and beat inherited shared clients. Plugin agents cannot declare `mcpServers`.
@@ -421,7 +425,7 @@ The default nesting limit is two. The main thread (L1) can spawn subagents (L2).
 
 ## Token efficiency
 
-Whenever implement work, multi-file diagnosis, CI, or a regression needs tools, spawn an L2 so the main thread stays a coordinator. L2 spawns L3 only if the problem is actually hard. Easy work can stay on L2. That includes implement loops.
+Whenever implement work, multi-file diagnosis, CI, or a regression needs tools, spawn an L2 so the main thread stays a coordinator. An L2 coordinator for implement work must spawn L3 for greps, reads, and product edits. L2 does not fill 200k implementing.
 
 **Hierarchical fast path.** The main thread may do these three things without spawning a subagent:
 
@@ -436,18 +440,18 @@ That is not a license to diagnose or implement in the main thread.
 | Depth | Does | Does not |
 | ----- | ---- | -------- |
 | **L1 main** | Status to you. Spawn L2. Wait. Read short reports. Update the session board. Hierarchical fast path. | Diagnose, implement, multi-file reads, CI logs |
-| **L2 subagent** | Parallelize. Spawn L3 specialists only if the problem is actually hard. Easy work can stay on L2. Stay token-efficient. Discard context after a report goes up. Operator-facing nested view: you can ask or clarify in that L2 overlay. | Spawn L4. Show raw edits as if this were the main thread. |
+| **L2 subagent** | Parallelize. Spawn L3 for greps, reads, and product edits; do not fill 200k implementing. Explore and plan L2 stay read-only specialists that may still grep and read. Stay token-efficient. Discard context after a report goes up. Operator-facing nested view: you can ask or clarify in that L2 overlay. | Spawn L4. Show raw edits as if this were the main thread. |
 | **L3 specialist** | All actual tools and work, in parallel. Same agency as L2 except it cannot spawn. | Spawn L4 (forbidden). Operator chat does not barge into a live L3. |
 
-L3 is not a weaker agent. It has the same tools as L2 except spawn. The hard cap is no L4. L2's extra job versus L3 is spawning L3 specialists and being the nested view you talk to. L3's extra job versus L2 is doing the tools.
+L3 is not a weaker agent. L3 still does the tools. The hard cap is no L4. L2's extra job versus L3 is spawning L3 specialists and being the nested view you talk to. L3's extra job versus L2 is doing the tools.
 
 Spawn an L2 when the job needs isolation from the main thread: implement work, multi-file diagnosis, CI, regressions, skill-maintenance, or any tool work that would fill the parent. The Hierarchical fast path does not spawn an L2. An additive "also" or "btw" ask spawns another L2, or queues if it would write the same files. Do not kill a healthy L2 that is already running.
 
-L2 parallelizes, spawns L3 only if the problem is actually hard, waits, reads the L3 short reports, and writes one L2 report under `~/.agents/reports/` on this machine. Easy work can stay on L2. The main thread reads that L2 report only and talks to you. It does not re-do the L3 greps. Those files are reports, not joins. They are not part of the git tree.
+L2 parallelizes, spawns L3 for greps, reads, and product edits, waits, reads the L3 short reports, and writes one L2 report under `~/.agents/reports/` on this machine. L2 does not fill 200k implementing. The main thread reads that L2 report only and talks to you. It does not re-do the L3 greps. Those files are reports, not joins. They are not part of the git tree.
 
-The main (L1) session uses the catalog 500k sampling window. AUTO compact on L1 uses that window, not the old 200k knee. Nested L2 sampling stays 200k. L2 may compact. Nested L3 sampling also stays 200k, but L3 never compact. An L3 is disposable. If it stalls or spirals, stop it. When an L3 is near 200k, it summarizes, reports to L2, and stops. Do not compact-and-continue on L3. Keep about 40% of the window that session is running: 40% of 500k on L1, 40% of 200k on nested agents. Nested agents throw context away after a report, so they do not need 500k. The footer context chip names the sampling window that session actually uses.
+The main (L1) session uses the catalog 500k sampling window. AUTO compact on L1 uses that window, not the old 200k knee. Nested L2 sampling stays 200k. L2 may compact (95% of nested 200k). Nested L3 sampling also stays 200k, but L3 never compact. An L3 is disposable. If it stalls or spirals, stop it. When an L3 is near 200k, it summarizes, reports to L2, and stops. Do not compact-and-continue on L3. Keep about 40% of the window that session is running: 40% of 500k on L1, 40% of 200k on nested agents. Nested agents throw context away after a report, so they do not need 500k. The footer context chip names the sampling window that session actually uses.
 
-L1 and L2 may still spawn subagents, update the session board, wait on specialists, and read the short on-disk report they asked for. That is coordination, not work. L2 exists so its context can be thrown away after the report. Doing easy work on L2 fills L2 and may cause compaction. That is allowed on L2. Spawn L3 only if the problem is actually hard.
+L1 and L2 may still spawn subagents, update the session board, wait on specialists, and read the short on-disk report they asked for. That is coordination, not work. L2 exists so its context can be thrown away after the report. An L2 coordinator for implement work must spawn L3 for greps, reads, and product edits. L2 does not fill 200k implementing. Ordinary L2 still AUTO compact at 95% of nested 200k. L3 never compact.
 
 See [Configuration → Token Economy](05-configuration.md#token-economy) for economic mode, implement-effort Settings, and ASCII scrub. `/spend` and `/limits` are the live views. Isolated Agents are not free. They help when the parent stays small.
 

@@ -7,7 +7,7 @@
 //!
 //! ## Resources
 //!
-//! - `SubagentBackendResource` — backend for spawn/query/cancel (required)
+//! - `SubagentBackendResource` — backend for spawn/query/cancel/follow_up (required)
 //! - `SubagentDepthCounter` — current nesting depth (optional, defaults to 0)
 //! - `MaxSubagentDepth` — max nesting (optional, defaults to [`MAX_SUBAGENT_DEPTH`])
 //! - `SessionIdResource` — current session ID for parent scoping (optional)
@@ -347,6 +347,60 @@ impl Drop for LiveWriteClaim {
     }
 }
 
+fn with_sibling_write_path_reminder(text: String, holder: &str) -> String {
+    let text = match crate::implementations::editor_infra::per_path_write_lock::format_soft_assignment_reminder(
+        Some(holder),
+    ) {
+        Some(note) => format!("{text}\n\n{}", crate::reminders::wrap_reminder(&note)),
+        None => text,
+    };
+    crate::reminders::with_process_rule_spawn_reminder(text)
+}
+
+/// Map a coordinator follow-up outcome to a `task` tool result.
+///
+/// GitHub #143: L1 follow-up onto a still-running nested L2. Not spawn.
+/// Not `resume_from`.
+fn map_follow_up_outcome(
+    outcome: SubagentFollowUpOutcome,
+    id: &str,
+) -> Result<ToolOutput, xai_tool_runtime::ToolError> {
+    match outcome {
+        SubagentFollowUpOutcome::Queued { child_session_id } => Ok(ToolOutput::Text(
+            format!(
+                "Follow-up queued onto still-running nested L2 '{id}' \
+                 (child session {child_session_id}). status: queued. \
+                 The nested L2 is still running. Do not kill or respawn."
+            )
+            .into(),
+        )),
+        SubagentFollowUpOutcome::NotRunning => Err(xai_tool_runtime::ToolError::invalid_arguments(
+            format!(
+                "Cannot follow up onto subagent '{id}': it is not running. \
+                 Use resume_from for a completed id. A running id uses follow_up."
+            ),
+        )),
+        SubagentFollowUpOutcome::NotFound => Err(xai_tool_runtime::ToolError::invalid_arguments(
+            format!("Cannot follow up onto subagent '{id}': not found."),
+        )),
+        SubagentFollowUpOutcome::NotThisParentsL2 => {
+            Err(xai_tool_runtime::ToolError::invalid_arguments(format!(
+                "Cannot follow up onto subagent '{id}': it is not this parent's L2."
+            )))
+        }
+        SubagentFollowUpOutcome::LiveL3Unbothered => {
+            Err(xai_tool_runtime::ToolError::invalid_arguments(format!(
+                "Cannot follow up onto subagent '{id}': parent-tool follow-up must refuse a live L3 \
+                 unless the Operator targeted that specialist."
+            )))
+        }
+        SubagentFollowUpOutcome::Disabled => Err(xai_tool_runtime::ToolError::invalid_arguments(
+            "[subagents] parent_follow_up = false is SpaceXAI spawn/wait/resume_from completed-only"
+                .to_string(),
+        )),
+    }
+}
+
 impl xai_tool_runtime::Tool for TaskTool {
     type Args = TaskToolInput;
     type Output = ToolOutput;
@@ -457,6 +511,29 @@ impl xai_tool_runtime::Tool for TaskTool {
                 foreground_wait,
             )
         };
+
+        // Follow-up onto a still-running nested L2: not spawn, not resume_from.
+        // Blank/empty/"null" follow_up is absent (same sentinel rule as resume_from).
+        let follow_up = input.follow_up.and_then(|s| {
+            let trimmed = s.trim();
+            is_valid_resume_id(trimmed).then(|| trimmed.to_string())
+        });
+        let resume_from_set = input
+            .resume_from
+            .as_deref()
+            .is_some_and(|s| is_valid_resume_id(s.trim()));
+        if follow_up.is_some() && resume_from_set {
+            return Err(xai_tool_runtime::ToolError::invalid_arguments(
+                "follow_up and resume_from are mutually exclusive. \
+                 A running id uses follow_up. A completed id uses resume_from.",
+            ));
+        }
+        if let Some(id) = follow_up {
+            return map_follow_up_outcome(
+                backend.backend().follow_up(&id, &input.prompt).await,
+                &id,
+            );
+        }
 
         if depth >= max_depth {
             return Err(xai_tool_runtime::ToolError::invalid_arguments(format!(
@@ -645,17 +722,18 @@ impl xai_tool_runtime::Tool for TaskTool {
             .collect();
         let mut write_claim = LiveWriteClaim::none();
         if !write_paths.is_empty() {
+            // Soft assignment: overlapping write_paths do not fail spawn.
+            // Hard exclusive lock is only the in-flight edit-tool call.
             crate::implementations::editor_infra::per_path_write_lock::try_reserve_writes(
                 write_paths,
                 &id,
-            )
-            .map_err(|held| held.into_tool_error("task"))?;
+            );
             write_claim = LiveWriteClaim::armed(id.clone());
         }
 
         let request = SubagentRequest {
             id: id.clone(),
-            prompt: input.prompt.clone(),
+            prompt: crate::reminders::with_process_rule_spawn_reminder(&input.prompt),
             description: input.description.clone(),
             subagent_type: subagent_type.clone(),
             parent_session_id,
@@ -756,7 +834,14 @@ impl xai_tool_runtime::Tool for TaskTool {
             let continue_parent =
                 detect_continue_parent_work(&resources, &input.description, &input.prompt).await;
             return Ok(ToolOutput::Text(
-                xai_tool_types::format_subagent_started_background(
+                with_sibling_write_path_reminder(
+                    xai_tool_types::format_subagent_started_background(
+                        &id,
+                        &input.subagent_type,
+                        &input.description,
+                        &naming,
+                        continue_parent,
+                    ),
                     &id,
                     &input.description,
                     &naming,
@@ -789,7 +874,15 @@ impl xai_tool_runtime::Tool for TaskTool {
             let continue_parent =
                 detect_continue_parent_work(&resources, &input.description, &input.prompt).await;
 
-            let text = xai_tool_types::format_subagent_auto_backgrounded(
+            let text = with_sibling_write_path_reminder(
+                xai_tool_types::format_subagent_auto_backgrounded(
+                    &id,
+                    &input.subagent_type,
+                    &input.description,
+                    &naming,
+                    notified_on_completion,
+                    continue_parent,
+                ),
                 &id,
                 &input.description,
                 &naming,
@@ -1058,6 +1151,188 @@ mod tests {
         }
     }
 
+    /// Records `follow_up` versus spawn so `TaskTool::run` with `follow_up`
+    /// set cannot silently start a second nested session.
+    struct RecordingFollowUpBackend {
+        follow_ups: std::sync::Mutex<Vec<(String, String)>>,
+        spawned: AtomicBool,
+        spawn_registered: AtomicBool,
+    }
+
+    impl RecordingFollowUpBackend {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                follow_ups: std::sync::Mutex::new(Vec::new()),
+                spawned: AtomicBool::new(false),
+                spawn_registered: AtomicBool::new(false),
+            })
+        }
+
+        fn follow_ups(&self) -> Vec<(String, String)> {
+            self.follow_ups
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl SubagentBackend for RecordingFollowUpBackend {
+        async fn spawn(
+            &self,
+            _request: SubagentRequest,
+        ) -> Result<SubagentResult, xai_tool_runtime::ToolError> {
+            self.spawned.store(true, Ordering::SeqCst);
+            Err(xai_tool_runtime::ToolError::custom(
+                "unexpected_spawn",
+                "follow_up must not spawn",
+            ))
+        }
+
+        async fn spawn_registered(
+            &self,
+            _request: SubagentRequest,
+        ) -> Result<(), xai_tool_runtime::ToolError> {
+            self.spawn_registered.store(true, Ordering::SeqCst);
+            Err(xai_tool_runtime::ToolError::custom(
+                "unexpected_spawn_registered",
+                "follow_up must not spawn_registered",
+            ))
+        }
+
+        async fn query(
+            &self,
+            _id: &str,
+            _block: bool,
+            _timeout_ms: Option<u64>,
+        ) -> Option<SubagentSnapshot> {
+            None
+        }
+
+        async fn cancel(&self, _id: &str) -> SubagentCancelOutcome {
+            SubagentCancelOutcome::NotFound
+        }
+
+        async fn validate_type(
+            &self,
+            _subagent_type: &str,
+            _parent_session_id: &str,
+        ) -> SubagentValidateTypeOutcome {
+            SubagentValidateTypeOutcome::Ok
+        }
+
+        async fn describe_subagent_type(
+            &self,
+            _subagent_type: &str,
+            _harness_agent_type: Option<&str>,
+            _parent_session_id: &str,
+        ) -> SubagentDescribeOutcome {
+            SubagentDescribeOutcome::Unavailable
+        }
+
+        async fn follow_up(&self, id: &str, text: &str) -> SubagentFollowUpOutcome {
+            self.follow_ups
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push((id.to_owned(), text.to_owned()));
+            SubagentFollowUpOutcome::Queued {
+                child_session_id: format!("{id}-session"),
+            }
+        }
+    }
+
+    /// Operator: "You can't talk to your own L2s? And you're fine with that? Why?"
+    /// GitHub #143: `TaskTool::run` with `follow_up` set returns queued and
+    /// does not spawn. Existing spawn tests pass `follow_up: None`.
+    #[tokio::test]
+    async fn parent_cannot_talk_to_own_l2s_task_tool_run_follow_up_returns_queued_and_does_not_spawn()
+     {
+        let backend = RecordingFollowUpBackend::new();
+        let resources = resources_for_task(SubagentBackendResource(backend.clone()));
+        let mut input = task_input("general-purpose", true);
+        input.prompt = "additive follow-up, not kill, not respawn".into();
+        input.follow_up = Some("running-l2".into());
+
+        let result =
+            xai_tool_runtime::Tool::run(&TaskTool, test_ctx(resources.into_shared()), input)
+                .await
+                .expect("follow_up onto a running L2 must succeed");
+
+        assert_eq!(
+            backend.follow_ups(),
+            vec![(
+                "running-l2".to_owned(),
+                "additive follow-up, not kill, not respawn".to_owned()
+            )],
+            "TaskTool::run must call backend.follow_up with the running L2 id and prompt"
+        );
+        assert!(
+            !backend.spawned.load(Ordering::SeqCst),
+            "follow_up must not call spawn"
+        );
+        assert!(
+            !backend.spawn_registered.load(Ordering::SeqCst),
+            "follow_up must not call spawn_registered"
+        );
+
+        let ToolOutput::Text(text) = result else {
+            panic!("map_follow_up_outcome queued must be Text, got {result:?}");
+        };
+        let expected = map_follow_up_outcome(
+            SubagentFollowUpOutcome::Queued {
+                child_session_id: "running-l2-session".to_owned(),
+            },
+            "running-l2",
+        )
+        .expect("queued maps to Ok");
+        let ToolOutput::Text(expected_text) = expected else {
+            panic!("map_follow_up_outcome queued must be Text, got {expected:?}");
+        };
+        assert_eq!(text.text, expected_text.text);
+        assert!(
+            text.text.contains("queued"),
+            "success text must include queued: {}",
+            text.text
+        );
+        assert!(
+            text.text.contains("still running"),
+            "success text must include still running: {}",
+            text.text
+        );
+    }
+
+    #[tokio::test]
+    async fn parent_cannot_talk_to_own_l2s_task_tool_run_follow_up_and_resume_from_are_mutually_exclusive()
+     {
+        let backend = RecordingFollowUpBackend::new();
+        let resources = resources_for_task(SubagentBackendResource(backend.clone()));
+        let mut input = task_input("general-purpose", true);
+        input.follow_up = Some("running-l2".into());
+        input.resume_from = Some("completed-l2".into());
+
+        let result =
+            xai_tool_runtime::Tool::run(&TaskTool, test_ctx(resources.into_shared()), input).await;
+        let err = result
+            .expect_err("follow_up and resume_from together must be invalid_arguments")
+            .to_string();
+        assert!(
+            err.contains("follow_up and resume_from are mutually exclusive"),
+            "invalid_arguments must name both fields: {err}"
+        );
+        assert!(
+            backend.follow_ups().is_empty(),
+            "mutually exclusive args must not call backend.follow_up"
+        );
+        assert!(
+            !backend.spawned.load(Ordering::SeqCst),
+            "mutually exclusive args must not spawn"
+        );
+        assert!(
+            !backend.spawn_registered.load(Ordering::SeqCst),
+            "mutually exclusive args must not spawn_registered"
+        );
+    }
+
     #[tokio::test]
     async fn depth_limit_exceeded() {
         let (backend, _rx) = make_backend();
@@ -1080,6 +1355,7 @@ mod tests {
                 capability_mode: None,
                 isolation: None,
                 resume_from: None,
+                follow_up: None,
                 cwd: None,
                 model: None,
                 workspace: None,
@@ -1116,6 +1392,7 @@ mod tests {
         );
     }
 
+    // Grok OSS: default max depth lets L2 spawn L3. This diverges from upstream xAI because FORK.md agent-depth is L1 / L2 / L3 max.
     #[tokio::test]
     async fn raised_max_depth_allows_nested_spawn() {
         let (backend, mut rx) = make_backend();
@@ -1144,6 +1421,7 @@ mod tests {
                 capability_mode: None,
                 isolation: None,
                 resume_from: None,
+                follow_up: None,
                 cwd: None,
                 model: None,
                 workspace: None,
@@ -1182,6 +1460,7 @@ mod tests {
                 capability_mode: None,
                 isolation: None,
                 resume_from: None,
+                follow_up: None,
                 cwd: None,
                 model: None,
                 workspace: None,
@@ -1216,6 +1495,7 @@ mod tests {
                 capability_mode: None,
                 isolation: None,
                 resume_from: None,
+                follow_up: None,
                 cwd: None,
                 model: None,
                 workspace: None,
@@ -1277,6 +1557,7 @@ mod tests {
                 capability_mode: None,
                 isolation: None,
                 resume_from: None,
+                follow_up: None,
                 cwd: None,
                 model: None,
                 workspace: None,
@@ -1336,6 +1617,7 @@ mod tests {
                 capability_mode: None,
                 isolation: None,
                 resume_from: None,
+                follow_up: None,
                 cwd: None,
                 model: None,
                 workspace: None,
@@ -1382,6 +1664,7 @@ mod tests {
                 capability_mode: None,
                 isolation: None,
                 resume_from: None,
+                follow_up: None,
                 cwd: None,
                 model: None,
                 workspace: None,
@@ -1455,8 +1738,10 @@ mod tests {
                     text.text
                 );
                 assert!(
-                    text.text.contains("timeout_ms"),
-                    "should instruct the model to wait: {}",
+                    text.text.contains("timeout_ms")
+                        && text.text.contains("Keep working")
+                        && !text.text.contains("When you need its result"),
+                    "auto-bg notice must be fire-and-return, not a blocking wait: {}",
                     text.text
                 );
                 assert!(
@@ -1493,6 +1778,7 @@ mod tests {
             capability_mode: None,
             isolation: None,
             resume_from: None,
+            follow_up: None,
             cwd: None,
             model: None,
             workspace: None,
@@ -2120,7 +2406,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn spawn_rejects_when_write_paths_overlap_a_live_claim() {
+    async fn spawn_write_paths_overlap_is_a_soft_assignment_not_a_spawn_error() {
+        // Operator: layer/L2 write_paths claims must be a soft lock. Other
+        // agents get an automated reminder that a sibling is working on that
+        // path. Spawn must not exclusive-block for the child's lifetime.
         let tmp = tempfile::TempDir::new().unwrap();
         let path = tmp.path().join("shared.rs");
         std::fs::write(&path, "fn x() {}\n").unwrap();
@@ -2144,32 +2433,37 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(80)).await;
         assert!(
             !run_a.is_finished(),
-            "first spawn must still be waiting on admit after claiming write_paths"
+            "first spawn must still be waiting on admit after assigning write_paths"
         );
 
-        let (backend_b, _rx) = make_backend();
+        let (backend_b, rx_b) = make_backend();
+        let drain_b = drain_spawn_ok(rx_b);
         let mut input_b = task_input("explore", true);
         input_b.task_id = Some(second_id);
         input_b.write_paths = vec![path.to_string_lossy().into_owned()];
-        let err = xai_tool_runtime::Tool::run(
+        let result = xai_tool_runtime::Tool::run(
             &TaskTool,
             test_ctx(resources_for_task(backend_b).into_shared()),
             input_b,
         )
         .await
-        .expect_err("second spawn must fail when write_paths overlap");
-        let detail = err.to_string();
+        .expect("second spawn must succeed when write_paths overlap");
+        let text = match result {
+            ToolOutput::Text(text) => text.text,
+            other => panic!("expected text output, got {other:?}"),
+        };
         assert!(
-            detail.contains(&first_id_for_run),
-            "error must name the live holder: {detail}"
+            text.contains(&format!("L2 {first_id_for_run} is assigned these paths")),
+            "soft-lock reminder must be observable on the sibling spawn: {text}"
         );
         assert!(
-            detail.contains("shared.rs"),
-            "error must name the file: {detail}"
+            text.contains("shared.rs"),
+            "reminder must name the file: {text}"
         );
 
         let _ = admit_tx.send(());
         let _ = tokio::time::timeout(std::time::Duration::from_secs(2), run_a).await;
+        let _ = tokio::time::timeout(std::time::Duration::from_millis(500), drain_b).await;
         crate::implementations::editor_infra::per_path_write_lock::release_holder(&first_id);
     }
 
@@ -2497,6 +2791,7 @@ mod tests {
             capability_mode: Some(SubagentCapabilityMode::ReadOnly),
             isolation: Some(SubagentIsolationMode::Worktree),
             resume_from: None,
+            follow_up: None,
             cwd: None,
             model: Some("test-model".into()),
             workspace: None,
@@ -2785,6 +3080,7 @@ mod tests {
             capability_mode: None,
             isolation: None,
             resume_from: None,
+            follow_up: None,
             cwd: None,
             model: None,
             workspace: None,
@@ -2837,6 +3133,7 @@ mod tests {
                 capability_mode: None,
                 isolation: None,
                 resume_from: None,
+                follow_up: None,
                 cwd: None,
                 model: None,
                 workspace: None,
@@ -2876,6 +3173,7 @@ mod tests {
             capability_mode: None,
             isolation: None,
             resume_from: None,
+            follow_up: None,
             cwd: None,
             model: None,
             workspace: None,
@@ -2925,6 +3223,7 @@ mod tests {
                 capability_mode: None,
                 isolation: None,
                 resume_from: Some("prev-id".into()),
+                follow_up: None,
                 cwd: None,
                 model: None,
                 workspace: None,
@@ -2994,6 +3293,7 @@ mod tests {
                     capability_mode: None,
                     isolation: None,
                     resume_from: Some(sentinel.into()),
+                    follow_up: None,
                     cwd: None,
                     model: None,
                     workspace: None,
@@ -3043,6 +3343,7 @@ mod tests {
             capability_mode: None,
             isolation: None,
             resume_from: None,
+            follow_up: None,
             cwd: None,
             model: None,
             workspace: None,
@@ -3074,6 +3375,7 @@ mod tests {
                 capability_mode: None,
                 isolation: Some(SubagentIsolationMode::Worktree),
                 resume_from: None,
+                follow_up: None,
                 cwd: Some("/tmp".into()),
                 model: None,
                 workspace: None,
@@ -3131,6 +3433,7 @@ mod tests {
                 capability_mode: None,
                 isolation: Some(SubagentIsolationMode::Worktree),
                 resume_from: None,
+                follow_up: None,
                 cwd: Some("".into()),
                 model: None,
                 workspace: None,
@@ -3184,6 +3487,7 @@ mod tests {
                 capability_mode: None,
                 isolation: Some(SubagentIsolationMode::Worktree),
                 resume_from: None,
+                follow_up: None,
                 cwd: Some("null".into()),
                 model: None,
                 workspace: None,
@@ -3237,6 +3541,7 @@ mod tests {
                 capability_mode: None,
                 isolation: Some(SubagentIsolationMode::Worktree),
                 resume_from: None,
+                follow_up: None,
                 cwd: Some("  ".into()),
                 model: None,
                 workspace: None,
@@ -3293,6 +3598,7 @@ mod tests {
                 capability_mode: None,
                 isolation: Some(SubagentIsolationMode::Worktree),
                 resume_from: None,
+                follow_up: None,
                 cwd: Some("/nonexistent/path/that/does/not/exist".into()),
                 model: None,
                 workspace: None,
@@ -3330,6 +3636,7 @@ mod tests {
                 capability_mode: None,
                 isolation: None,
                 resume_from: None,
+                follow_up: None,
                 cwd: Some("/nonexistent/path/that/does/not/exist".into()),
                 model: None,
                 workspace: None,
@@ -3388,6 +3695,7 @@ mod tests {
                     capability_mode: None,
                     isolation: None,
                     resume_from: None,
+                    follow_up: None,
                     cwd: Some(sentinel.into()),
                     model: None,
                     workspace: None,
@@ -3444,6 +3752,7 @@ mod tests {
                 capability_mode: None,
                 isolation: None,
                 resume_from: None,
+                follow_up: None,
                 cwd: Some("/tmp".into()),
                 model: None,
                 workspace: None,
@@ -3504,6 +3813,7 @@ mod tests {
                 capability_mode: None,
                 isolation: None,
                 resume_from: None,
+                follow_up: None,
                 cwd: Some("\"/tmp".into()),
                 model: None,
                 workspace: None,
@@ -3559,6 +3869,7 @@ mod tests {
                 capability_mode: None,
                 isolation: Some(SubagentIsolationMode::None),
                 resume_from: None,
+                follow_up: None,
                 cwd: Some("/tmp".into()),
                 model: None,
                 workspace: None,
@@ -3610,6 +3921,7 @@ mod tests {
                 capability_mode: None,
                 isolation: None,
                 resume_from: Some("prev-id".into()),
+                follow_up: None,
                 cwd: Some("/tmp/some-dir".into()),
                 model: None,
                 workspace: None,

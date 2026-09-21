@@ -245,6 +245,7 @@ pub(crate) fn stream_responses_tracked<'a>(
         let mut message_chunk_count: u64 = 0;
         let mut first_token_emitted = false;
         let mut reasoning_acc = String::new();
+        let mut repetition = super::StreamRepetitionGuard::default();
         let mut last_content_chunk_at = Instant::now();
         let first_token_budget = super::first_token_wait(idle_timeout);
         let first_token_deadline = Instant::now() + first_token_budget;
@@ -258,9 +259,13 @@ pub(crate) fn stream_responses_tracked<'a>(
 
         let mut stream = raw_stream;
         loop {
+            // First-token budget stays until a real token / tool output.
+            // Reasoning OutputItemAdded and Created/InProgress keepalives
+            // must not switch this wait to idle (that sat Retrying chrome
+            // on "waiting for first token" for 11+ minutes).
             let event_result = match super::next_or_timeout(
                 &mut stream,
-                saw_progress,
+                first_token_emitted,
                 first_token_deadline,
                 idle_timeout,
             )
@@ -361,12 +366,22 @@ pub(crate) fn stream_responses_tracked<'a>(
                         chunk_timestamps.push(Instant::now());
                         chunk_index += 1;
                         message_chunk_count += 1;
+                        repetition.append(SamplingChannel::Text, &delta);
+                        let looping = repetition.is_looping(SamplingChannel::Text);
                         yield SamplingEvent::ChannelToken {
                             request_id: request_id.clone(),
                             channel: SamplingChannel::Text,
                             text: delta,
                             chunk_index,
                         };
+                        if looping {
+                            let err = repetition.error(SamplingChannel::Text, chunk_index);
+                            yield SamplingEvent::Failed {
+                                request_id: request_id.clone(),
+                                error: SamplingErrorInfo::from(&err),
+                            };
+                            return;
+                        }
                     }
                 }
 
@@ -380,12 +395,22 @@ pub(crate) fn stream_responses_tracked<'a>(
                             };
                         }
                         chunk_index += 1;
+                        repetition.append(SamplingChannel::Reasoning, &delta);
+                        let looping = repetition.is_looping(SamplingChannel::Reasoning);
                         yield SamplingEvent::ChannelToken {
                             request_id: request_id.clone(),
                             channel: SamplingChannel::Reasoning,
                             text: delta,
                             chunk_index,
                         };
+                        if looping {
+                            let err = repetition.error(SamplingChannel::Reasoning, chunk_index);
+                            yield SamplingEvent::Failed {
+                                request_id: request_id.clone(),
+                                error: SamplingErrorInfo::from(&err),
+                            };
+                            return;
+                        }
                     }
                 }
 
@@ -400,12 +425,22 @@ pub(crate) fn stream_responses_tracked<'a>(
                         }
                         chunk_index += 1;
                         reasoning_acc.push_str(&delta);
+                        repetition.append(SamplingChannel::Reasoning, &delta);
+                        let looping = repetition.is_looping(SamplingChannel::Reasoning);
                         yield SamplingEvent::ChannelToken {
                             request_id: request_id.clone(),
                             channel: SamplingChannel::Reasoning,
                             text: delta,
                             chunk_index,
                         };
+                        if looping {
+                            let err = repetition.error(SamplingChannel::Reasoning, chunk_index);
+                            yield SamplingEvent::Failed {
+                                request_id: request_id.clone(),
+                                error: SamplingErrorInfo::from(&err),
+                            };
+                            return;
+                        }
                     }
                 }
 
@@ -416,6 +451,12 @@ pub(crate) fn stream_responses_tracked<'a>(
                         next_tool_index += 1;
                         output_to_tool_index.insert(added_event.output_index, tool_index);
 
+                        if !first_token_emitted {
+                            first_token_emitted = true;
+                            yield SamplingEvent::FirstToken {
+                                request_id: request_id.clone(),
+                            };
+                        }
                         yield SamplingEvent::ToolCallDelta {
                             request_id: request_id.clone(),
                             tool_index,
@@ -434,6 +475,12 @@ pub(crate) fn stream_responses_tracked<'a>(
                         && let Some(&tool_index) =
                             output_to_tool_index.get(&args_event.output_index)
                     {
+                        if !first_token_emitted {
+                            first_token_emitted = true;
+                            yield SamplingEvent::FirstToken {
+                                request_id: request_id.clone(),
+                            };
+                        }
                         yield SamplingEvent::ToolCallDelta {
                             request_id: request_id.clone(),
                             tool_index,
@@ -509,6 +556,12 @@ pub(crate) fn stream_responses_tracked<'a>(
 
                 // Web search
                 ResponseStreamEvent::ResponseWebSearchCallInProgress(ev) => {
+                    if !first_token_emitted {
+                        first_token_emitted = true;
+                        yield SamplingEvent::FirstToken {
+                            request_id: request_id.clone(),
+                        };
+                    }
                     yield SamplingEvent::BackendToolCallStarted {
                         request_id: request_id.clone(),
                         call_id: ev.item_id.clone(),
@@ -523,6 +576,12 @@ pub(crate) fn stream_responses_tracked<'a>(
                 // The shell renders that as a client `tool_use` and `user` `tool_result` split grok has no HostedTool::CodeInterpreter, so these events never arrive under the current hosted-tool set
                 // The started event fires on InProgress; the full payload (code and outputs) rides ResponseOutputItemDone(CodeInterpreterCall) below
                 ResponseStreamEvent::ResponseCodeInterpreterCallInProgress(ev) => {
+                    if !first_token_emitted {
+                        first_token_emitted = true;
+                        yield SamplingEvent::FirstToken {
+                            request_id: request_id.clone(),
+                        };
+                    }
                     yield SamplingEvent::BackendToolCallStarted {
                         request_id: request_id.clone(),
                         call_id: ev.item_id.clone(),
@@ -577,6 +636,12 @@ pub(crate) fn stream_responses_tracked<'a>(
                 // CustomToolCallInputDelta is x_search in-progress streaming.
                 // Emit a started event on first delta per item_id.
                 ResponseStreamEvent::ResponseCustomToolCallInputDone(ev) => {
+                    if !first_token_emitted {
+                        first_token_emitted = true;
+                        yield SamplingEvent::FirstToken {
+                            request_id: request_id.clone(),
+                        };
+                    }
                     yield SamplingEvent::BackendToolCallStarted {
                         request_id: request_id.clone(),
                         call_id: ev.item_id.clone(),
@@ -863,6 +928,34 @@ mod tests {
         })
     }
 
+    fn created_event() -> rs::ResponseStreamEvent {
+        rs::ResponseStreamEvent::ResponseCreated(rs_types::ResponseCreatedEvent {
+            response: empty_completed_response(),
+            sequence_number: 0,
+        })
+    }
+
+    fn in_progress_event() -> rs::ResponseStreamEvent {
+        rs::ResponseStreamEvent::ResponseInProgress(rs_types::ResponseInProgressEvent {
+            response: empty_completed_response(),
+            sequence_number: 0,
+        })
+    }
+
+    fn reasoning_item_added() -> rs::ResponseStreamEvent {
+        rs::ResponseStreamEvent::ResponseOutputItemAdded(rs_types::ResponseOutputItemAddedEvent {
+            sequence_number: 0,
+            output_index: 0,
+            item: rs_types::OutputItem::Reasoning(rs_types::ReasoningItem {
+                id: "reasoning_1".into(),
+                summary: vec![],
+                content: None,
+                encrypted_content: None,
+                status: None,
+            }),
+        })
+    }
+
     async fn collect(s: impl Stream<Item = SamplingEvent>) -> Vec<SamplingEvent> {
         let mut out = Vec::new();
         let mut s = pin!(s);
@@ -1141,6 +1234,50 @@ mod tests {
         }
     }
 
+    /// Surmount fork: same `StreamRepetitionGuard` as Chat Completions
+    /// (GitHub #133). SpaceXAI Responses resamples confident thinking via
+    /// `x-grok-doom-loop-check`; visible dest-encoder-skip is Fatal here.
+    /// Uses `DEST_ENCODER_SKIP_LOOP` so `-D warnings` keeps that const live.
+    #[tokio::test]
+    async fn responses_stops_dest_encoder_skip_loop() {
+        let looping = format!("{} ", crate::stream::DEST_ENCODER_SKIP_LOOP);
+        assert!(
+            looping.contains(crate::stream::DEST_ENCODER_SKIP_LOOP),
+            "Responses fixture must carry DEST_ENCODER_SKIP_LOOP"
+        );
+        let mut chunks: Vec<Result<rs::ResponseStreamEvent, SamplingError>> =
+            (0..20).map(|_| Ok(text_delta_event(&looping))).collect();
+        chunks.push(Ok(completed_event()));
+        let raw = stream::iter(chunks).boxed();
+        let events = collect(stream_responses(
+            raw,
+            None,
+            rid(),
+            Duration::from_secs(60),
+            None,
+        ))
+        .await;
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, SamplingEvent::Completed { .. })),
+            "looping dest-encoder-skip Responses stream must not complete as a normal stop"
+        );
+        match events.last().unwrap() {
+            SamplingEvent::Failed { error, .. } => {
+                assert_eq!(
+                    error.kind,
+                    crate::events::SamplingErrorKind::RepetitiveGeneration
+                );
+                assert!(
+                    !error.is_retryable,
+                    "sentence loop must stop the turn, not resample"
+                );
+            }
+            other => panic!("expected Failed(RepetitiveGeneration), got {other:?}"),
+        }
+    }
+
     #[test]
     fn empty_failed_response_is_not_treated_as_output() {
         let event = rs::ResponseStreamEvent::ResponseFailed(rs_types::ResponseFailedEvent {
@@ -1262,6 +1399,82 @@ mod tests {
             }
             other => panic!("expected Failed(IdleTimeout), got {other:?}"),
         }
+    }
+
+    fn assert_retryable_first_token_timeout(events: &[SamplingEvent]) {
+        match events.last().unwrap() {
+            SamplingEvent::Failed { error, .. } => {
+                assert_ne!(
+                    error.kind,
+                    crate::events::SamplingErrorKind::IdleTimeout,
+                    "first-token stall must not wait the full idle then Fatal, got {}",
+                    error.message
+                );
+                assert!(
+                    error.is_retryable,
+                    "first-token timeout must retry with Retrying the model request chrome, got {}",
+                    error.message
+                );
+                let lower = error.message.to_ascii_lowercase();
+                assert!(
+                    lower.contains("first token"),
+                    "timeout must name the missing first token, got {}",
+                    error.message
+                );
+            }
+            other => panic!("expected Failed(first token timeout), got {other:?}"),
+        }
+    }
+
+    /// Headers can arrive (StreamStarted / StreamResumed paints
+    /// `Retrying the model request (attempt 2): waiting for first token`)
+    /// while the SSE body never yields a token. Bound that wait to the
+    /// headers budget, not eleven minutes.
+    #[tokio::test(start_paused = true)]
+    async fn first_token_timeout_when_stream_never_yields() {
+        let raw = stream::pending::<Result<rs::ResponseStreamEvent, SamplingError>>().boxed();
+        let events = collect(stream_responses(
+            raw,
+            None,
+            rid(),
+            Duration::from_secs(300),
+            None,
+        ))
+        .await;
+        assert_retryable_first_token_timeout(&events);
+        let budget = super::super::first_token_wait(Duration::from_secs(300));
+        assert!(
+            budget < Duration::from_secs(11 * 60),
+            "waiting for first token must stay under 11 minutes, got {budget:?}"
+        );
+    }
+
+    /// Isolated Preview hang: Created / InProgress / reasoning item added
+    /// with no text delta must not count as first-token progress.
+    #[tokio::test(start_paused = true)]
+    async fn reasoning_scaffolding_still_times_out_waiting_for_first_token() {
+        let raw = stream::iter(vec![
+            Ok(created_event()),
+            Ok(in_progress_event()),
+            Ok(reasoning_item_added()),
+        ])
+        .chain(stream::pending())
+        .boxed();
+        let events = collect(stream_responses(
+            raw,
+            None,
+            rid(),
+            Duration::from_secs(300),
+            None,
+        ))
+        .await;
+        assert_retryable_first_token_timeout(&events);
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, SamplingEvent::FirstToken { .. })),
+            "scaffolding must not emit FirstToken, got {events:?}"
+        );
     }
 
     #[tokio::test]

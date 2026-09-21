@@ -154,6 +154,18 @@ pub fn limits_snapshot_mode_for_get_billing(
     }
 }
 
+/// Whether the hub leader fetch should bust Management process caches.
+///
+/// True only for explicit ForceRefresh when a management key is present.
+/// Background HonorTtl polls must not clear those caches (they are 60s
+/// in-process paint helpers, not the shared hourly snapshot TTL).
+pub fn should_clear_management_caches_on_billing_leader_fetch(
+    force_refresh: bool,
+    has_management_key: bool,
+) -> bool {
+    force_refresh && has_management_key
+}
+
 /// Parse `forceRefresh` from the billing extension params JSON.
 pub fn force_refresh_from_billing_params(params_json: &str) -> bool {
     serde_json::from_str::<GetBillingParams>(params_json)
@@ -269,7 +281,7 @@ pub fn limits_identity_from_credits_config(
             .current_period
             .as_ref()
             .and_then(|p| p.period_type.clone()),
-        extras_cents: config.prepaid_balance.as_ref().map(|c| c.val),
+        dollar_credits_cents: config.prepaid_balance.as_ref().map(|c| c.val),
         grok_build_usage_pct: grok_build_usage_percent(config),
         is_unified_billing_user: config.is_unified_billing_user,
         poll_outcome: poll_outcome.to_owned(),
@@ -306,7 +318,7 @@ pub fn billing_response_from_limits_snapshot(
             used: None,
             on_demand_cap: None,
             on_demand_used: None,
-            prepaid_balance: row.extras_cents.map(|val| Cent { val }),
+            prepaid_balance: row.dollar_credits_cents.map(|val| Cent { val }),
             is_unified_billing_user: row.is_unified_billing_user,
             product_usage: row
                 .grok_build_usage_pct
@@ -360,7 +372,7 @@ pub async fn fetch_supergrok_credits_snapshot_document(
                     usage_pct: None,
                     period_end: None,
                     period_type: None,
-                    extras_cents: None,
+                    dollar_credits_cents: None,
                     grok_build_usage_pct: None,
                     is_unified_billing_user: None,
                     poll_outcome: poll_outcome_class_from_error(&e).to_owned(),
@@ -404,7 +416,7 @@ pub async fn fetch_supergrok_credits_snapshot_document(
                     usage_pct: None,
                     period_end: None,
                     period_type: None,
-                    extras_cents: None,
+                    dollar_credits_cents: None,
                     grok_build_usage_pct: None,
                     is_unified_billing_user: None,
                     poll_outcome: poll_outcome_class_from_error(&e).to_owned(),
@@ -419,7 +431,7 @@ pub async fn fetch_supergrok_credits_snapshot_document(
 /// Fetch `GetGrokCreditsConfig` for one SuperGrok session token (included-safe).
 ///
 /// Same CLI proxy path as the active `x.ai/billing` handler:
-/// `GET {proxy}/billing?format=credits`. Does not burn SuperGrok dollar extras
+/// `GET {proxy}/billing?format=credits`. Does not burn SuperGrok dollar credits
 /// (not an inference call). Used for non-active dual-principal polls.
 ///
 /// Multi-principal / multi-process collect must go through
@@ -528,7 +540,10 @@ pub async fn poll_and_remember_non_active_supergrok_included_billing(
                 // Prepaid (Extra Usage Credits) is independent of included % —
                 // remember when present even if usage % is absent.
                 if let Some(prepaid) = config.prepaid_balance.as_ref() {
-                    crate::auth::remember_supergrok_dollar_extras(&target.identity_id, prepaid.val);
+                    crate::auth::remember_supergrok_dollar_credits(
+                        &target.identity_id,
+                        prepaid.val,
+                    );
                 }
                 let Some(pct) = usage_pct else {
                     tracing::debug!(
@@ -844,6 +859,7 @@ mod tests {
 
     #[tokio::test]
     #[allow(clippy::await_holding_lock)] // SharedSnapshotEnvGuard serializes GROK_HOME.
+    // Grok OSS: x.ai/billing uses the snapshot hub instead of unconditionally HTTP-ing siblings. This diverges from upstream xAI because automatic limits fetch is at most once an hour per machine through the snapshot hub.
     async fn billing_handler_uses_snapshot_hub_instead_of_unconditional_sibling_http() {
         use crate::auth::limits_snapshot_hub::SharedSnapshotEnvGuard;
         use crate::auth::{
@@ -865,7 +881,7 @@ mod tests {
             usage_pct: Some(18.0),
             period_end: Some("2026-09-01T00:00:00Z".into()),
             period_type: Some("USAGE_PERIOD_TYPE_WEEKLY".into()),
-            extras_cents: Some(0),
+            dollar_credits_cents: Some(0),
             grok_build_usage_pct: None,
             is_unified_billing_user: Some(false),
             poll_outcome: POLL_OUTCOME_OK.into(),
@@ -888,7 +904,7 @@ mod tests {
                         usage_pct: Some(90.0),
                         period_end: None,
                         period_type: None,
-                        extras_cents: None,
+                        dollar_credits_cents: None,
                         grok_build_usage_pct: None,
                         is_unified_billing_user: None,
                         poll_outcome: POLL_OUTCOME_OK.into(),
@@ -930,6 +946,32 @@ mod tests {
         assert!(!force_refresh_from_billing_params("not-json"));
     }
 
+    /// Background billing poll HonorTtl does not clear Management caches
+    /// and does not ForceRefresh.
+    #[test]
+    fn background_billing_poll_honor_ttl_does_not_force_refresh_or_clear_management_caches() {
+        assert_eq!(
+            limits_snapshot_mode_for_get_billing(false),
+            crate::auth::LimitsSnapshotMode::HonorTtl
+        );
+        assert!(
+            !should_clear_management_caches_on_billing_leader_fetch(false, true),
+            "HonorTtl background poll must not clear Management process caches"
+        );
+        assert!(
+            !should_clear_management_caches_on_billing_leader_fetch(false, false),
+            "HonorTtl without a management key must not clear"
+        );
+        assert!(
+            should_clear_management_caches_on_billing_leader_fetch(true, true),
+            "ForceRefresh with a management key still busts process caches"
+        );
+        assert!(
+            !should_clear_management_caches_on_billing_leader_fetch(true, false),
+            "ForceRefresh without a management key must not clear"
+        );
+    }
+
     /// Explicit `/limits` collect must ForceRefresh a fresh-by-TTL disk
     /// snapshot whose `usagePct` is 100. That disk field is not Usage and
     /// must not fill the remember map as included SuperGrok period exhaust.
@@ -956,7 +998,7 @@ mod tests {
             usage_pct: Some(100.0),
             period_end: Some("2026-09-01T00:00:00Z".into()),
             period_type: Some("USAGE_PERIOD_TYPE_WEEKLY".into()),
-            extras_cents: Some(10_029),
+            dollar_credits_cents: Some(10_029),
             grok_build_usage_pct: None,
             is_unified_billing_user: Some(false),
             poll_outcome: POLL_OUTCOME_OK.into(),
@@ -966,7 +1008,7 @@ mod tests {
             usage_pct: Some(100.0),
             period_end: Some("2026-09-01T00:00:00Z".into()),
             period_type: Some("USAGE_PERIOD_TYPE_WEEKLY".into()),
-            extras_cents: None,
+            dollar_credits_cents: None,
             grok_build_usage_pct: None,
             is_unified_billing_user: Some(false),
             poll_outcome: POLL_OUTCOME_OK.into(),
@@ -988,7 +1030,7 @@ mod tests {
                         usage_pct: Some(100.0),
                         period_end: Some("2026-09-01T00:00:00Z".into()),
                         period_type: Some("USAGE_PERIOD_TYPE_WEEKLY".into()),
-                        extras_cents: Some(10_029),
+                        dollar_credits_cents: Some(10_029),
                         grok_build_usage_pct: None,
                         is_unified_billing_user: Some(false),
                         poll_outcome: POLL_OUTCOME_OK.into(),
@@ -998,7 +1040,7 @@ mod tests {
                         usage_pct: Some(41.0),
                         period_end: Some("2026-09-01T00:00:00Z".into()),
                         period_type: Some("USAGE_PERIOD_TYPE_WEEKLY".into()),
-                        extras_cents: None,
+                        dollar_credits_cents: None,
                         grok_build_usage_pct: None,
                         is_unified_billing_user: Some(false),
                         poll_outcome: POLL_OUTCOME_OK.into(),
@@ -1282,12 +1324,12 @@ mod tests {
         };
         let row = limits_identity_from_credits_config("principal-1", &config, "ok");
         assert_eq!(
-            row.extras_cents,
+            row.dollar_credits_cents,
             Some(4703),
             "prepaidBalance.val is SuperGrok dollar credits"
         );
         assert_eq!(
-            billing_credits_card_from_supergrok_prepaid_balance(row.extras_cents.unwrap()),
+            billing_credits_card_from_supergrok_prepaid_balance(row.dollar_credits_cents.unwrap()),
             BillingCreditsCard::NotFetched
         );
         assert_eq!(

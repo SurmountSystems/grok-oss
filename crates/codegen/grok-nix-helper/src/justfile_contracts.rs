@@ -306,6 +306,107 @@ fn check_remote_prints_quality_receipt_on_cache_hit() {
 }
 
 #[test]
+fn just_install_does_not_cargo_install_ripgrep() {
+    let Some(root) = skip_or_root() else {
+        return;
+    };
+    let just = read(&root, "justfile");
+    let install = recipe_body(&just, "install");
+    assert!(
+        !(install.contains("cargo install") && install.contains("ripgrep")),
+        "just install does not cargo-install ripgrep:\n{install}"
+    );
+    assert!(
+        !install.contains("GROK_TOOLS_BUNDLE_RG_PATH")
+            && !install.contains("GROK_SHELL_BUNDLE_RG_PATH")
+            && !install.contains("target/bundle-rg"),
+        "just install must not point GROK_TOOLS_BUNDLE_RG_PATH at a sidecar rg:\n{install}"
+    );
+    assert!(
+        install.contains("cargo build --release -p xai-grok-pager-bin"),
+        "just install is cargo build --release of the pager:\n{install}"
+    );
+    assert!(
+        !install.contains("github.com/BurntSushi"),
+        "just install must not curl GitHub for ripgrep:\n{install}"
+    );
+}
+
+#[test]
+fn grok_oss_grep_is_embedded_rust_not_a_sidecar_rg() {
+    let Some(root) = skip_or_root() else {
+        return;
+    };
+    let tools = read(&root, "crates/codegen/xai-grok-tools/build.rs");
+    let shell = read(&root, "crates/codegen/xai-grok-shell/build.rs");
+    let grep_mod = read(
+        &root,
+        "crates/codegen/xai-grok-tools/src/implementations/grok_build/grep/mod.rs",
+    );
+    for (name, src) in [
+        ("xai-grok-tools/build.rs", tools.as_str()),
+        ("xai-grok-shell/build.rs", shell.as_str()),
+    ] {
+        assert!(
+            !src.contains("cargo_install_ripgrep")
+                && !(src.contains("arg(\"ripgrep\")") && src.contains("--bin")),
+            "grok-oss grep is embedded Rust, not a sidecar rg ({name})"
+        );
+        assert!(
+            !src.contains("github.com/BurntSushi/ripgrep/releases")
+                && !src.contains("ripgrep/releases/download"),
+            "{name} must not download a GitHub musl ripgrep tarball"
+        );
+    }
+    assert!(
+        grep_mod.contains("embedded::search_to_rg_stdout")
+            && !grep_mod.contains("Command::new(rg_exec)"),
+        "grok-oss grep is embedded Rust, not a sidecar rg"
+    );
+}
+
+#[test]
+fn install_recipe_does_not_download_github_musl_fd_tarball() {
+    let Some(root) = skip_or_root() else {
+        return;
+    };
+    let just = read(&root, "justfile");
+    let install = recipe_body(&just, "install");
+    assert!(
+        !install.contains("github.com/sharkdp")
+            && !install.contains("fd/releases/download")
+            && !install.contains("fd-v"),
+        "bundled fd is cargo-built from the fd-find crate; GitHub musl tarball is not the install path:\n{install}"
+    );
+}
+
+#[test]
+fn tools_build_rs_cargo_build_fd_from_crate_not_github_musl_tarball() {
+    let Some(root) = skip_or_root() else {
+        return;
+    };
+    let tools = read(&root, "crates/codegen/xai-grok-tools/build.rs");
+    assert!(
+        tools.contains("cargo")
+            && tools.contains("install")
+            && tools.contains("fd-find")
+            && tools.contains("--bin")
+            && tools.contains("fd"),
+        "bundled fd is cargo-built from the fd-find crate; GitHub musl tarball is not the install path"
+    );
+    assert!(
+        !tools.contains("github.com/sharkdp/fd/releases")
+            && !tools.contains("fd/releases/download"),
+        "xai-grok-tools/build.rs must not download a GitHub musl fd tarball"
+    );
+    assert!(
+        !tools.contains("GROK_TOOLS_FD_TARGET=x86_64-unknown-linux-musl")
+            && !tools.contains("x86_64-unknown-linux-musl"),
+        "xai-grok-tools/build.rs must not default GROK_TOOLS_FD_TARGET to musl"
+    );
+}
+
+#[test]
 fn nix_retry_flake_meta_and_check_remote_do_not_require_helper_binary() {
     let Some(root) = skip_or_root() else {
         return;
@@ -552,6 +653,10 @@ fn workspace_quality_source_matches_just_test() {
         "quality must not invoke cargo clippy (external dispatcher)"
     );
     assert!(
+        quality.contains("workspace_run_make_jobserver cargo check"),
+        "clippy-as-check must be wrapped: workspace_run_make_jobserver cargo check (not an unused helper next to a bare cargo check)"
+    );
+    assert!(
         quality.contains("workspace_run_make_jobserver"),
         "quality must run clippy under workspace_run_make_jobserver"
     );
@@ -598,8 +703,12 @@ fn workspace_quality_source_matches_just_test() {
         "workspace rustc must require surmount-remote"
     );
     assert!(
-        quality.contains("CARGO_BUILD_JOBS = \"32\""),
-        "workspace-cargo-quality must set CARGO_BUILD_JOBS = \"32\""
+        quality.contains("CARGO_BUILD_JOBS = \"64\""),
+        "workspace-cargo-quality must set CARGO_BUILD_JOBS = \"64\""
+    );
+    assert!(
+        !quality.contains("CARGO_BUILD_JOBS = \"32\""),
+        "quality / artifacts / named-test owned by this helper must not keep CARGO_BUILD_JOBS = \"32\""
     );
     assert!(
         quality.contains("CARGO_PROFILE = \"dev\""),
@@ -614,8 +723,18 @@ fn workspace_quality_source_matches_just_test() {
         "cargo --jobs must be taken from NIX_BUILD_CORES"
     );
     assert!(
-        quality.contains("unset MAKEFLAGS"),
-        "must unset MAKEFLAGS/CARGO_MAKEFLAGS so a 1-token jobserver cannot ignore cargo --jobs"
+        quality.contains("unset MAKEFLAGS MFLAGS CARGO_MAKEFLAGS"),
+        "must unset MAKEFLAGS MFLAGS CARGO_MAKEFLAGS so a 1-token jobserver cannot ignore cargo --jobs"
+    );
+    assert!(
+        quality.contains("env -u MAKEFLAGS")
+            && quality.contains("-u CARGO_MAKEFLAGS")
+            && quality.contains("-u MFLAGS"),
+        "make recipe must env -u MAKEFLAGS -u MFLAGS -u CARGO_MAKEFLAGS so cargo owns --jobs \"$CARGO_BUILD_JOBS\" (does not join make's jobserver)"
+    );
+    assert!(
+        quality.contains("env -u MAKEFLAGS -u MFLAGS -u CARGO_MAKEFLAGS nice -n 19"),
+        "make recipe must drop the inherited jobserver, then nice -n 19, then cargo: +env -u MAKEFLAGS -u MFLAGS -u CARGO_MAKEFLAGS nice -n 19 cargo"
     );
     for line in quality.lines() {
         let t = line.trim();
@@ -632,13 +751,55 @@ fn workspace_quality_source_matches_just_test() {
         "do not floor cargo jobs from CARGO_BUILD_JOBS"
     );
     assert!(
-        quality.contains("\"$cargoJobs\" -lt 2") || quality.contains("cargoJobs\" -lt 2"),
-        "when NIX_BUILD_CORES is 1, cargo jobs must still become 32"
+        !quality.contains("\"$cargoJobs\" -lt 2") && !quality.contains("cargoJobs\" -lt 2"),
+        "old promotion-only-for-0-or-1 must go; 2 through 63 must not remain cargo jobs"
+    );
+    assert!(
+        !quality.contains("\"$cargoJobs\" -le 32")
+            && !quality.contains("cargoJobs\" -le 32")
+            && !quality.contains("\"$cargoJobs\" -gt 32")
+            && !quality.contains("cargoJobs\" -gt 32"),
+        "do not leave a 32 cargo-jobs floor or cap in this helper"
+    );
+    assert!(
+        quality.contains("\"$cargoJobs\" -le 64") || quality.contains("cargoJobs\" -le 64"),
+        "when NIX_BUILD_CORES is 64 or less (including 0, 1, and 2 through 63), cargo jobs must become 64"
+    );
+    assert!(
+        quality.contains("\"$cargoJobs\" -gt 64") || quality.contains("cargoJobs\" -gt 64"),
+        "when NIX_BUILD_CORES is greater than 64, cargo jobs stay capped at 64"
     );
     assert!(
         !quality.contains("-j1") && !quality.contains("--jobs 1"),
         "quality clippy/jobserver must not pass -j1 / --jobs 1"
     );
+    assert!(
+        !quality.lines().any(|line| {
+            let t = line.trim();
+            !t.starts_with('#') && t.contains("for ") && t.contains(" in ") && t.contains("; do")
+        }),
+        "quality must not loop crates with for ... in ...; do"
+    );
+    for line in quality.lines() {
+        let t = line.trim();
+        if t.starts_with('#') || t.starts_with("echo ") || t.starts_with("printf ") {
+            continue;
+        }
+        let is_cargo = t.contains("cargo fmt")
+            || t.contains("cargo check")
+            || t.contains("cargo build")
+            || t.contains("cargo test")
+            || t.contains("cargo nextest")
+            || t.contains("nextest run");
+        if !is_cargo {
+            continue;
+        }
+        let via_helper = t.contains("workspace_run_make_jobserver");
+        assert!(
+            t.contains("nice -n 19") || via_helper,
+            "quality cargo line must be nice -n 19 or go through the helper that prefixes nice: {t}"
+        );
+    }
 }
 
 #[test]
@@ -656,8 +817,8 @@ fn workspace_quality_fmt_then_clippy_then_nextest_and_helper_tests() {
     );
     let ws_clippy = must_contain_at(
         phase,
-        "cargo check --profile \"$CARGO_PROFILE\" --jobs \"$CARGO_BUILD_JOBS\" --workspace --all-targets --locked",
-        "workspace clippy-as-check --all-targets",
+        "workspace_run_make_jobserver cargo check --profile \"$CARGO_PROFILE\" --jobs \"$CARGO_BUILD_JOBS\" --workspace --all-targets --locked",
+        "workspace clippy-as-check --all-targets under workspace_run_make_jobserver",
     );
     let unwrap = must_contain_at(
         phase,
@@ -1405,5 +1566,74 @@ fn just_update_refreshes_workspace_and_flake_locks() {
             && !code.contains("cargo check")
             && !code.contains("rustc"),
         "just update must not compile and must not run just check-remote:\n{update}"
+    );
+}
+
+/// Nixpkgs deprecates `stdenv.isLinux` / `stdenv.isDarwin`. Evaluation
+/// prints those warnings unless flake modules use `stdenv.hostPlatform`.
+fn flake_nix_paths(root: &Path) -> Vec<PathBuf> {
+    let mut out = vec![root.join("flake.nix")];
+    for dir in ["flake", "packaging/nixos"] {
+        let d = root.join(dir);
+        let Ok(rd) = fs::read_dir(&d) else {
+            continue;
+        };
+        let mut files: Vec<PathBuf> = rd
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.extension().is_some_and(|e| e == "nix"))
+            .collect();
+        files.sort();
+        out.extend(files);
+    }
+    out
+}
+
+fn production_nix_line(line: &str) -> bool {
+    let t = line.trim();
+    !t.is_empty() && !t.starts_with('#')
+}
+
+#[test]
+fn flake_modules_use_stdenv_host_platform_not_deprecated_stdenv_is_os() {
+    let Some(root) = skip_or_root() else {
+        return;
+    };
+    let mut hits = Vec::new();
+    let mut saw_host_linux = false;
+    let mut saw_host_darwin = false;
+    for path in flake_nix_paths(&root) {
+        let rel = path
+            .strip_prefix(&root)
+            .unwrap_or(&path)
+            .display()
+            .to_string();
+        let src = fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {rel}: {e}"));
+        if src.contains("stdenv.hostPlatform.isLinux") {
+            saw_host_linux = true;
+        }
+        if src.contains("stdenv.hostPlatform.isDarwin") {
+            saw_host_darwin = true;
+        }
+        for (i, line) in src.lines().enumerate() {
+            if !production_nix_line(line) {
+                continue;
+            }
+            if line.contains("stdenv.isLinux") || line.contains("stdenv.isDarwin") {
+                hits.push(format!("{rel}:{}:{line}", i + 1));
+            }
+        }
+    }
+    assert!(
+        hits.is_empty(),
+        "flake and Nix modules must use stdenv.hostPlatform.isLinux / stdenv.hostPlatform.isDarwin, not deprecated stdenv.isLinux / stdenv.isDarwin (evaluation warning):\n{}",
+        hits.join("\n")
+    );
+    assert!(
+        saw_host_linux,
+        "flake modules still need at least one stdenv.hostPlatform.isLinux (Linux mold/dbus)"
+    );
+    assert!(
+        saw_host_darwin,
+        "flake modules still need at least one stdenv.hostPlatform.isDarwin (Darwin frameworks)"
     );
 }

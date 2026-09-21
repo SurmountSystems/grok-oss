@@ -1,9 +1,10 @@
+use std::collections::BTreeMap;
 use std::path::Path;
-use std::process::Stdio;
 use std::time::Instant;
 
-use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::process::Command;
+use xai_grok_tools::implementations::grok_build::grep::embedded::{
+    PrintMode, SearchRequest, search_line_hits,
+};
 
 // Canonical in xai-grok-workspace-types; re-exported for existing paths.
 pub use xai_grok_workspace_types::rpc::search::{
@@ -34,6 +35,7 @@ pub struct ContentSearchBatch {
 const BATCH_INTERVAL_MS: u64 = 50;
 const DEFAULT_MAX_FILES: usize = 100;
 const DEFAULT_MAX_MATCHES: usize = 1000;
+const MAX_COUNT_PER_FILE: usize = 50;
 
 fn build_ripgrep_command(root: &Path, params: &ContentSearchParams) -> anyhow::Result<Command> {
     let rg_path = crate::util::ripgrep::rg_path()?;
@@ -138,6 +140,50 @@ where
 {
     let max_files = params.max_files.unwrap_or(DEFAULT_MAX_FILES);
     let max_matches = params.max_matches.unwrap_or(DEFAULT_MAX_MATCHES);
+    let mut extra_globs = vec![
+        "!.git/**".to_string(),
+        "!submodules/**".to_string(),
+        "!vendor/**".to_string(),
+    ];
+    extra_globs.extend(params.globs.iter().cloned());
+    let req = SearchRequest {
+        pattern: params.pattern.clone(),
+        path: root.to_path_buf(),
+        case_insensitive: params.case_insensitive,
+        literal: params.literal,
+        glob: None,
+        extra_globs,
+        deny_globs: Vec::new(),
+        file_type: None,
+        hidden: false,
+        no_ignore: !params.respect_gitignore,
+        multiline: false,
+        before_context: 0,
+        after_context: 0,
+        max_filesize: Some(1024 * 1024),
+        max_columns: Some(500),
+        print: PrintMode::Content,
+        max_output_lines: None,
+    };
+
+    let hits = tokio::task::spawn_blocking(move || search_line_hits(&req))
+        .await
+        .map_err(|e| anyhow::anyhow!("embedded grep join: {e}"))?
+        .map_err(|e| anyhow::anyhow!("embedded grep: {e}"))?;
+
+    let mut per_file: BTreeMap<String, Vec<ContentMatch>> = BTreeMap::new();
+    for hit in hits {
+        let entry = per_file.entry(hit.path).or_default();
+        if entry.len() >= MAX_COUNT_PER_FILE {
+            continue;
+        }
+        entry.push(ContentMatch {
+            line: hit.line_number,
+            content: hit.line_text,
+            match_start: hit.match_start,
+            match_end: hit.match_end,
+        });
+    }
 
     let mut cmd = build_ripgrep_command(root, params)?;
     #[allow(clippy::disallowed_methods)] // waited on below; killed on drop (cancellation)
@@ -152,63 +198,30 @@ where
 
     let mut reader = BufReader::new(stdout).lines();
     let mut files: Vec<ContentMatchFile> = Vec::new();
-    let mut current_file: Option<ContentMatchFile> = None;
-    let mut total_matches = 0usize;
     let mut pending_files: Vec<ContentMatchFile> = Vec::new();
+    let mut total_matches = 0usize;
     let mut last_notify = Instant::now();
-    let mut hit_limit = false;
+    let mut truncated = false;
 
-    while let Ok(Some(line)) = reader.next_line().await {
-        if line.is_empty() {
-            continue;
-        }
-
-        let json: serde_json::Value = match serde_json::from_str(&line) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-
-        match json.get("type").and_then(|t| t.as_str()) {
-            Some("begin") => {
-                if let Some(file) = current_file.take()
-                    && !file.matches.is_empty()
-                {
-                    pending_files.push(file.clone());
-                    files.push(file);
-                }
-                if let Some(path) = parse_file_path_from_json(root, &json) {
-                    current_file = Some(ContentMatchFile::new(path));
-                }
-            }
-            Some("match") => {
-                if let Some(ref mut file) = current_file
-                    && let Some(data) = json.get("data")
-                    && let Some(m) = parse_match_from_json(data)
-                {
-                    file.matches.push(m);
-                    total_matches += 1;
-                }
-            }
-            Some("end") => {
-                if let Some(file) = current_file.take()
-                    && !file.matches.is_empty()
-                {
-                    pending_files.push(file.clone());
-                    files.push(file);
-                }
-            }
-            _ => {}
-        }
-
+    for (path, matches) in per_file {
         if files.len() >= max_files || total_matches >= max_matches {
-            hit_limit = true;
+            truncated = true;
             break;
         }
+        let take = matches.len().min(max_matches.saturating_sub(total_matches));
+        if take == 0 {
+            truncated = true;
+            break;
+        }
+        total_matches += take;
+        let mut file = ContentMatchFile::new(path);
+        file.matches = matches.into_iter().take(take).collect();
+        pending_files.push(file.clone());
+        files.push(file);
 
-        let should_notify = !pending_files.is_empty()
-            && last_notify.elapsed().as_millis() >= BATCH_INTERVAL_MS as u128;
-
-        if should_notify {
+        if !pending_files.is_empty()
+            && last_notify.elapsed().as_millis() >= BATCH_INTERVAL_MS as u128
+        {
             on_status(ContentSearchBatch {
                 files: std::mem::take(&mut pending_files),
                 total_matches,
@@ -221,25 +234,7 @@ where
         }
     }
 
-    if hit_limit {
-        let _ = child.start_kill();
-        // Bounded reap: a D-state rg must not stall this future forever.
-        xai_grok_tools::util::reap_killed_search_child(&mut child).await;
-    } else {
-        let _ = child.wait().await;
-    }
-
-    if let Some(file) = current_file
-        && !file.matches.is_empty()
-        && files.len() < max_files
-    {
-        pending_files.push(file.clone());
-        files.push(file);
-    }
-
-    let truncated = hit_limit;
     let total_files = files.len();
-
     on_status(ContentSearchBatch {
         files: pending_files,
         total_matches,
@@ -264,7 +259,7 @@ mod tests {
     /// Cancellation is dropping the future; commands from `build_ripgrep_command` must kill rg on drop.
     #[cfg(unix)]
     #[tokio::test]
-    async fn dropping_spawned_search_child_kills_rg() {
+    async fn embedded_content_search_finds_a_line_without_execing_rg() {
         let tmp = tempfile::TempDir::new().unwrap();
         // Overflow the stdout pipe (rg caps 50 matches/file, so use many files) so rg blocks on write and stays alive until killed
         let line = format!("needle {}\n", "x".repeat(120));

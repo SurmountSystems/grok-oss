@@ -47,6 +47,10 @@ pub enum SettingsKeyOutcome {
     ActionPair(Action, Action),
     /// Close the modal and dispatch `Action` (deep-link Esc revert or Enter commit).
     ActionThenClose(Action),
+    /// Typed Bool-kind setter. Distinct from wrapping `Action::SetX(bool)`.
+    SetBool { key: SettingKey, value: bool },
+    /// Typed String-kind setter. Distinct from wrapping `Action::SetX(String)`.
+    SetString { key: SettingKey, value: String },
     /// Internal state mutation, no action.
     Changed,
     /// No-op.
@@ -1024,6 +1028,7 @@ pub(super) fn action_for_bool(key: SettingKey, new: bool) -> Option<Action> {
         "respect_manual_folds" => Some(Action::SetRespectManualFolds(new)),
         "hide_header" => Some(Action::SetHideHeader(new)),
         "composer_multiline" => Some(Action::SetComposerMultiline(new)),
+        "allow_session_multiline" => Some(Action::SetAllowSessionMultiline(new)),
         "always_expand_thinking" => Some(Action::SetAlwaysExpandThinking(new)),
         "allow_worktree" => Some(Action::SetAllowWorktree(new)),
         "scrub_ascii_punct" => Some(Action::SetScrubAsciiPunct(new)),
@@ -1031,6 +1036,8 @@ pub(super) fn action_for_bool(key: SettingKey, new: bool) -> Option<Action> {
         "bubble_copy_buttons" => Some(Action::SetBubbleCopyButtons(new)),
         "page_flip_on_send" => Some(Action::SetPageFlipOnSend(new)),
         "confirm_before_rewind" => Some(Action::SetConfirmBeforeRewind(new)),
+        "turbo_planning" => Some(Action::SetTurboPlanning(new)),
+        "process_rule_reminders_enabled" => Some(Action::SetProcessRuleRemindersEnabled(new)),
         "combine_queued_prompts" => Some(Action::SetCombineQueuedPrompts(new)),
         "invert_scroll" => Some(Action::SetInvertScroll(new)),
         "show_tips" => Some(Action::SetShowTips(new)),
@@ -1164,6 +1171,7 @@ pub(super) fn action_for_string(
                     .map(Action::SetForkSecondaryModel)
             }
         }
+        "process_rule_reminders" => Some(Action::SetProcessRuleReminders(value)),
 
         _ => {
             let _ = value;

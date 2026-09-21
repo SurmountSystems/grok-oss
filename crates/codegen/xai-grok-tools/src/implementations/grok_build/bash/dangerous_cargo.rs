@@ -374,6 +374,7 @@ mod unit_tests {
         );
     }
 
+    // Grok OSS: file-level infer-from-path verify. This diverges from upstream xAI because env-prefixed cargo fmt --all is still crate-wide and must be refused.
     #[test]
     fn env_prefixed_fmt_all_is_refused() {
         let msg =

@@ -14,7 +14,39 @@ use crate::scrollback::block::RenderBlock;
 use crate::views::prompt_widget::PromptEvent;
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
+/// True when the caret is at the end of the last logical line (buffer end).
+/// Visual wrap does not insert a newline, so a wrapped last line is still
+/// this position. Mid-line Enter in a multiline draft is a different path.
+fn composer_cursor_at_end_of_last_line(prompt: &PromptWidget) -> bool {
+    prompt.cursor() == prompt.text().len()
+}
+
 impl AgentView {
+    /// When Ctrl+Enter must interject (`x.ai/interject`) instead of inserting
+    /// a newline. Appropriate: a sampler turn is running, the Human box has
+    /// text or images, and the target can take it (L1 or L2 overlay). Not
+    /// appropriate: idle, empty composer, L3 specialist overlay. Cancel-and-send
+    /// is a different chord.
+    pub(crate) fn interjection_is_appropriate(&self) -> bool {
+        let has_payload = !self.prompt.text().trim().is_empty() || !self.prompt.images.is_empty();
+        if !has_payload {
+            return false;
+        }
+        if !self.session.state.is_turn_running() {
+            return false;
+        }
+        if let Some(child_sid) = self.active_subagent.as_deref()
+            && self.subagent_views.contains_key(child_sid)
+            && !crate::app::subagent::overlay_child_is_l2_coordinator(
+                &self.subagent_sessions,
+                child_sid,
+            )
+        {
+            return false;
+        }
+        true
+    }
+
     pub fn prompt_history_loading(&self) -> bool {
         self.session.prompt_history_loading && self.prompt.text().is_empty()
     }
@@ -197,8 +229,12 @@ impl AgentView {
                     self.prompt.slash_preview_current_selection();
                     return InputOutcome::Changed;
                 }
-                // Tab: accept completion (text only, no execute).
+                // Tab: unique `/model` / `/m` row switches NOW. Otherwise
+                // accept completion (text only, no execute).
                 KeyCode::Tab => {
+                    if let Some(outcome) = self.try_apply_unique_model_slash_row() {
+                        return outcome;
+                    }
                     self.prompt.slash_commit_preview();
                     self.prompt.accept_slash_completion(&self.session.models);
                     return InputOutcome::Changed;
@@ -211,6 +247,21 @@ impl AgentView {
                 }
                 // Enter: accept completion, then send (terminal row) or stay open (a row whose insert_text ends with a space chains)
                 KeyCode::Enter if key.modifiers.is_empty() => {
+                    // Isolated Preview idle leftover slash-palette `/`
+                    // plus Operator notes: Enter Approves with those
+                    // notes. The leftover snapshot still thinks the
+                    // composer is `/`, so accept would insert `/quit`
+                    // over the first letter of `keep` (`/quiteep`).
+                    // Unique `/model` still switches: that typed slash
+                    // is not idle notes.
+                    if self.isolated_preview_idle_enter_approves_with_notes() {
+                        self.snapshot_or_clear_plan_feedback_draft();
+                        self.prompt.slash_close();
+                        return self.approve_plan();
+                    }
+                    if let Some(outcome) = self.try_apply_unique_model_slash_row() {
+                        return outcome;
+                    }
                     let snap = self.prompt.slash_snapshot();
                     let exact_command = crate::slash::is_typed_slash_selected(
                         &snap,
@@ -494,14 +545,43 @@ impl AgentView {
         //    Apple Terminal: bare Enter may actually be Cmd/Opt+Enter.
         //    `[ui] composer_multiline = false`: Shift+Enter also sends
         //    (never a second line).
-        if crate::input::is_mod_enter(key)
-            && (self.multiline_mode || !crate::appearance::cache::load_composer_multiline())
-        {
-            if let Some(text) = self.prompt.try_send() {
-                let action = self.prompt_input_mode.send_action(text);
-                self.prompt_input_mode = PromptInputMode::Normal;
-                return InputOutcome::Action(action);
+        // Grok OSS: Shift+Enter is newline so they can write a multiline
+        // prompt without submitting. Session Multiline used to send on
+        // that chord. Bare Enter at the end of the last line still
+        // submits (idle send / mid-turn interject). Do not steal #85.
+        if crate::input::is_mod_enter(key) {
+            if !crate::appearance::cache::load_composer_multiline() {
+                if let Some(text) = self.prompt.try_send() {
+                    let action = self.prompt_input_mode.send_action(text);
+                    self.prompt_input_mode = PromptInputMode::Normal;
+                    return InputOutcome::Action(action);
+                }
+                return InputOutcome::Changed;
             }
+            self.prompt.textarea.insert_str("\n");
+            return InputOutcome::Changed;
+        }
+
+        // Ctrl+Enter is newline (Shift+Enter analog) only when interject is
+        // not appropriate. Mid-turn with text to a turn that can take
+        // x.ai/interject: Ctrl+Enter interjects. Idle, empty, or L3 overlay:
+        // newline. Cancel-and-send is SendPromptNow (parked wait / queued
+        // /goal), not this chord. Handle before InterjectPrompt.
+        if key.code == KeyCode::Enter && key.modifiers.contains(KeyModifiers::CONTROL) {
+            if self.interjection_is_appropriate() {
+                if let Some(outcome) = self.interject_editing_queued_intercept() {
+                    return outcome;
+                }
+                let text = self.prompt.text().trim().to_string();
+                if self.paste_probe_in_flight > 0 {
+                    self.deferred_send = Some(AgentDeferredSend::Interject);
+                    return InputOutcome::Changed;
+                }
+                let images = self.prompt.drain_images();
+                self.prompt.set_text("");
+                return InputOutcome::Action(Action::Interject { text, images });
+            }
+            self.prompt.textarea.insert_str("\n");
             return InputOutcome::Changed;
         }
 
@@ -1084,6 +1164,39 @@ mod shift_tab_cycle_mode_tests {
         }
     }
 
+    /// Do not steal composer Enter when the composer is focused and has text
+    /// (do not break send). A collapsed `[Image #1]` transcript item may be
+    /// selected; Enter in the Human box still sends.
+    #[test]
+    fn composer_enter_with_text_still_sends_when_collapsed_image_is_selected() {
+        let mut agent = super::test_fixtures::make_agent();
+        agent
+            .scrollback
+            .push_block(crate::scrollback::block::RenderBlock::user_prompt(
+                "Here.\n\n1. [Image #1]\n2. hidden\n3. hidden\n4. hidden",
+            ));
+        agent.scrollback.prepare_layout(80, 40);
+        agent.scrollback.set_selected(Some(0));
+        agent.active_pane = super::AgentPane::Prompt;
+        agent.prompt.set_text("follow up");
+        let outcome =
+            agent.handle_prompt_key_for_test(&KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        match outcome {
+            InputOutcome::Action(Action::SendPrompt(text)) => {
+                assert_eq!(text, "follow up");
+            }
+            other => panic!(
+                "composer Enter with text must send, not expand the selected collapsed image, got {other:?}"
+            ),
+        }
+        let entry = agent.scrollback.entry(0).expect("user prompt");
+        assert_ne!(
+            entry.display_mode,
+            crate::scrollback::types::DisplayMode::Expanded,
+            "send must not expand the selected collapsed transcript item"
+        );
+    }
+
     /// `[ui] composer_multiline = false`: Shift+Enter sends, never a second line.
     #[test]
     fn composer_multiline_off_shift_enter_sends_not_newline() {
@@ -1122,6 +1235,350 @@ mod shift_tab_cycle_mode_tests {
             agent.prompt.text()
         );
         crate::appearance::cache::set_composer_multiline(true);
+    }
+
+    /// Operator contract: Composer Ctrl+Enter inserts a newline and does not
+    /// submit, same as Shift+Enter. Idle composer with text: outcome is
+    /// Changed (not SendPrompt / Interject / SendPromptNow); prompt.text()
+    /// equals original plus "\n". Bare Enter at the end of the last line
+    /// still submits.
+    #[test]
+    fn ctrl_enter_idle_inserts_newline_not_send() {
+        crate::appearance::cache::set_composer_multiline(true);
+        let mut agent = super::test_fixtures::make_agent();
+        agent.multiline_mode = false;
+        let body = "hello";
+        agent.prompt.set_text(body);
+        agent.prompt.set_cursor(body.len());
+        let outcome =
+            agent.handle_prompt_key_for_test(&KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL));
+        assert!(
+            matches!(outcome, InputOutcome::Changed),
+            "idle Ctrl+Enter must insert a newline (Changed), not send, got {outcome:?}"
+        );
+        assert!(
+            !matches!(
+                outcome,
+                InputOutcome::Action(Action::SendPrompt(_))
+                    | InputOutcome::Action(Action::Interject { .. })
+                    | InputOutcome::Action(Action::SendPromptNow { .. })
+            ),
+            "idle Ctrl+Enter must not submit, got {outcome:?}"
+        );
+        assert_eq!(agent.prompt.text(), format!("{body}\n"));
+        crate::appearance::cache::set_composer_multiline(true);
+    }
+
+    /// Operator contract: Ctrl+Enter stays newline when session Multiline is
+    /// on. Session Multiline must not make Ctrl+Enter send.
+    #[test]
+    fn ctrl_enter_with_session_multiline_on_still_inserts_newline() {
+        crate::appearance::cache::set_composer_multiline(true);
+        let mut agent = super::test_fixtures::make_agent();
+        agent.multiline_mode = true;
+        let body = "line one";
+        agent.prompt.set_text(body);
+        agent.prompt.set_cursor(body.len());
+        let outcome =
+            agent.handle_prompt_key_for_test(&KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL));
+        assert!(
+            matches!(outcome, InputOutcome::Changed),
+            "Ctrl+Enter with session Multiline on must still insert a newline, got {outcome:?}"
+        );
+        assert_eq!(agent.prompt.text(), format!("{body}\n"));
+        crate::appearance::cache::set_composer_multiline(true);
+    }
+
+    /// Operator contract: Ctrl+Enter is always newline even when
+    /// `[ui] composer_multiline = false` (that flag makes Shift+Enter send).
+    #[test]
+    fn ctrl_enter_inserts_newline_when_composer_multiline_off() {
+        crate::appearance::cache::set_composer_multiline(false);
+        let mut agent = super::test_fixtures::make_agent();
+        agent.multiline_mode = false;
+        let body = "hello";
+        agent.prompt.set_text(body);
+        agent.prompt.set_cursor(body.len());
+        let outcome =
+            agent.handle_prompt_key_for_test(&KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL));
+        assert!(
+            matches!(outcome, InputOutcome::Changed),
+            "Ctrl+Enter must insert a newline even when composer_multiline is off, got {outcome:?}"
+        );
+        assert_eq!(agent.prompt.text(), format!("{body}\n"));
+        crate::appearance::cache::set_composer_multiline(true);
+    }
+
+    /// Operator: "I have a theory that if I hit enter at the end of this
+    /// sentence, it won't immediately submit, but if I use arrows, it will
+    /// kinda work different... Let's see..."
+    ///
+    /// Enter at the end of the last composer line must submit immediately
+    /// (idle send). It must not insert a silent extra newline that delays
+    /// submit. Session Multiline may still insert a newline when the caret
+    /// is in the middle of a multiline draft. That is already product law
+    /// and is not a third Enter chord. After a successful send the composer
+    /// must be empty. Do not steal expand-on-selected-row when the composer
+    /// is focused with text.
+    ///
+    /// Red before product (code reading): `ActionId::SendPrompt` with
+    /// session Multiline and `[ui] composer_multiline` always
+    /// `insert_str("\n")` and returned `Changed`, even with the caret at
+    /// `text.len()`. `PromptWidget::set_text` / `TextArea::set_text` keep
+    /// the previous cursor clamped, so tests must place the caret at the
+    /// end the way a typer would.
+    #[test]
+    fn enter_at_end_of_last_composer_line_must_submit_immediately_not_silent_newline() {
+        use crate::app::actions::Effect;
+        use crate::app::agent::AgentId;
+        use crate::app::agent_view::ActivePane;
+        use crate::app::app_view::tests::test_app_with_agent;
+        use crate::app::dispatch::dispatch;
+
+        crate::appearance::cache::set_composer_multiline(true);
+        let body = "I have a theory that if I hit enter at the end of this sentence, it won't immediately submit, but if I use arrows, it will kinda work different... Let's see...";
+        let mut app = test_app_with_agent();
+        let id = AgentId(0);
+        let action = {
+            let agent = app.agents.get_mut(&id).unwrap();
+            agent.multiline_mode = true;
+            agent.set_active_pane(ActivePane::Prompt, true);
+            place_typer_at_end_of_last_line(agent, body);
+            match agent
+                .handle_prompt_key_for_test(&KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            {
+                InputOutcome::Action(action) => action,
+                other => panic!(
+                    "Enter at end of last line must send immediately, not insert a silent newline, got {other:?}; composer={:?}",
+                    agent.prompt.text()
+                ),
+            }
+        };
+        assert!(
+            matches!(&action, Action::SendPrompt(text) if text == body),
+            "idle Enter at end of last line must be SendPrompt of the typed body, got {action:?}"
+        );
+        let effects = dispatch(action, &mut app);
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, Effect::SendPrompt { text, .. } if text == body)),
+            "idle Enter must ask the model, got {effects:?}"
+        );
+        assert!(
+            app.agents[&id].prompt.text().is_empty(),
+            "after Enter that sends, the composer must not still hold that same body; got {:?}",
+            app.agents[&id].prompt.text()
+        );
+
+        let wrapped_last = format!(
+            "Short first line.\n{body} {}",
+            "wrap ".repeat(24).trim_end()
+        );
+        let mut app = test_app_with_agent();
+        let action = {
+            let agent = app.agents.get_mut(&id).unwrap();
+            agent.multiline_mode = true;
+            agent.set_active_pane(ActivePane::Prompt, true);
+            place_typer_at_end_of_last_line(agent, &wrapped_last);
+            match agent
+                .handle_prompt_key_for_test(&KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            {
+                InputOutcome::Action(action) => action,
+                other => panic!(
+                    "Enter at end of a wrapped last line must send immediately, got {other:?}; composer={:?}",
+                    agent.prompt.text()
+                ),
+            }
+        };
+        assert!(
+            matches!(&action, Action::SendPrompt(text) if text == wrapped_last.as_str()),
+            "wrapped last line must send the same body, got {action:?}"
+        );
+        let _ = dispatch(action, &mut app);
+        assert!(
+            app.agents[&id].prompt.text().is_empty(),
+            "composer must be empty after send, got {:?}",
+            app.agents[&id].prompt.text()
+        );
+
+        let mut agent = super::test_fixtures::make_agent();
+        agent.multiline_mode = true;
+        agent.prompt.set_text(body);
+        agent
+            .prompt
+            .set_cursor(body.find("sentence").expect("sentence"));
+        let outcome =
+            agent.handle_prompt_key_for_test(&KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(
+            matches!(outcome, InputOutcome::Changed),
+            "mid-line Enter in a multiline draft still inserts a newline, got {outcome:?}"
+        );
+        assert!(
+            agent.prompt.text().contains('\n'),
+            "mid-line Enter must insert a newline, got {:?}",
+            agent.prompt.text()
+        );
+        crate::appearance::cache::set_composer_multiline(true);
+    }
+
+    /// Same owed UX mid-turn: Enter at the end of the last line soft-interjects
+    /// immediately. It must not insert a silent extra newline. After success
+    /// the composer must be empty.
+    #[test]
+    fn enter_at_end_of_last_composer_line_mid_turn_must_interject_immediately_not_silent_newline() {
+        use crate::app::actions::Effect;
+        use crate::app::agent::AgentId;
+        use crate::app::agent::AgentState;
+        use crate::app::agent_view::ActivePane;
+        use crate::app::app_view::tests::test_app_with_agent;
+        use crate::app::dispatch::dispatch;
+
+        crate::appearance::cache::set_composer_multiline(true);
+        let body = "I have a theory that if I hit enter at the end of this sentence, it won't immediately submit, but if I use arrows, it will kinda work different... Let's see...";
+        let mut app = test_app_with_agent();
+        let id = AgentId(0);
+        let action = {
+            let agent = app.agents.get_mut(&id).unwrap();
+            agent.multiline_mode = true;
+            agent.session.state = AgentState::TurnRunning;
+            agent.set_active_pane(ActivePane::Prompt, true);
+            place_typer_at_end_of_last_line(agent, body);
+            match agent
+                .handle_prompt_key_for_test(&KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            {
+                InputOutcome::Action(action) => action,
+                other => panic!(
+                    "mid-turn Enter at end of last line must interject immediately, not insert a silent newline, got {other:?}; composer={:?}",
+                    agent.prompt.text()
+                ),
+            }
+        };
+        assert!(
+            matches!(&action, Action::SendPrompt(text) if text == body),
+            "bare Enter is soft interject via SendPrompt, got {action:?}"
+        );
+        let effects = dispatch(action, &mut app);
+        match effects.as_slice() {
+            [Effect::SendInterject { text, .. }] => assert_eq!(text, body),
+            other => panic!("expected SendInterject this turn, got {other:?}"),
+        }
+        assert!(
+            app.agents[&id].prompt.text().is_empty(),
+            "after Enter that interjects, the composer must not still hold that same body; got {:?}",
+            app.agents[&id].prompt.text()
+        );
+        crate::appearance::cache::set_composer_multiline(true);
+    }
+
+    /// Operator theory: arrows then Enter must not take a different submit
+    /// path that duplicates, drops, or delays the same body. Left/Right stay
+    /// in the composer (not Up on empty, which opens history). Right at end
+    /// must not accept a predicted-next-prompt ghost. After submit the
+    /// composer must be empty.
+    #[test]
+    fn arrow_keys_then_enter_must_submit_the_same_body_not_a_different_path() {
+        use crate::app::actions::Effect;
+        use crate::app::agent::AgentId;
+        use crate::app::agent::AgentState;
+        use crate::app::agent_view::ActivePane;
+        use crate::app::app_view::tests::test_app_with_agent;
+        use crate::app::dispatch::dispatch;
+
+        crate::appearance::cache::set_composer_multiline(true);
+        let body = "I have a theory that if I hit enter at the end of this sentence, it won't immediately submit, but if I use arrows, it will kinda work different... Let's see...";
+        let left = KeyEvent::new(KeyCode::Left, KeyModifiers::NONE);
+        let right = KeyEvent::new(KeyCode::Right, KeyModifiers::NONE);
+        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+
+        let mut app = test_app_with_agent();
+        let id = AgentId(0);
+        let idle_action = {
+            let agent = app.agents.get_mut(&id).unwrap();
+            agent.multiline_mode = true;
+            agent.set_active_pane(ActivePane::Prompt, true);
+            place_typer_at_end_of_last_line(agent, body);
+            assert!(
+                !agent.prompt.prompt_suggestion_visible(),
+                "Right must not accept a predicted-next-prompt ghost on this body"
+            );
+            let _ = agent.handle_prompt_key_for_test(&left);
+            assert_eq!(agent.prompt.text(), body);
+            assert_eq!(agent.prompt.cursor(), body.len() - 1);
+            let _ = agent.handle_prompt_key_for_test(&right);
+            assert_eq!(agent.prompt.text(), body);
+            assert_eq!(agent.prompt.cursor(), body.len());
+            match agent.handle_prompt_key_for_test(&enter) {
+                InputOutcome::Action(action) => action,
+                other => panic!(
+                    "arrows then Enter must still send the same body, got {other:?}; composer={:?}",
+                    agent.prompt.text()
+                ),
+            }
+        };
+        assert!(
+            matches!(&idle_action, Action::SendPrompt(text) if text == body),
+            "idle arrows then Enter must be SendPrompt of the same body, got {idle_action:?}"
+        );
+        let effects = dispatch(idle_action, &mut app);
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, Effect::SendPrompt { text, .. } if text == body)),
+            "idle arrows then Enter must ask the model, got {effects:?}"
+        );
+        assert!(
+            app.agents[&id].prompt.text().is_empty(),
+            "composer must be empty after arrows then send, got {:?}",
+            app.agents[&id].prompt.text()
+        );
+
+        let mut app = test_app_with_agent();
+        let mid_action = {
+            let agent = app.agents.get_mut(&id).unwrap();
+            agent.multiline_mode = true;
+            agent.session.state = AgentState::TurnRunning;
+            agent.set_active_pane(ActivePane::Prompt, true);
+            place_typer_at_end_of_last_line(agent, body);
+            let _ = agent.handle_prompt_key_for_test(&left);
+            let _ = agent.handle_prompt_key_for_test(&right);
+            match agent.handle_prompt_key_for_test(&enter) {
+                InputOutcome::Action(action) => action,
+                other => panic!(
+                    "arrows then Enter mid-turn must still interject the same body, got {other:?}; composer={:?}",
+                    agent.prompt.text()
+                ),
+            }
+        };
+        assert!(
+            matches!(&mid_action, Action::SendPrompt(text) if text == body),
+            "mid-turn arrows then Enter must be SendPrompt of the same body, got {mid_action:?}"
+        );
+        let effects = dispatch(mid_action, &mut app);
+        match effects.as_slice() {
+            [Effect::SendInterject { text, .. }] => assert_eq!(text, body),
+            other => panic!("expected SendInterject this turn, got {other:?}"),
+        }
+        assert!(
+            app.agents[&id].prompt.text().is_empty(),
+            "composer must be empty after arrows then interject, got {:?}",
+            app.agents[&id].prompt.text()
+        );
+        crate::appearance::cache::set_composer_multiline(true);
+    }
+
+    /// `TextArea::set_text` keeps the previous cursor clamped. A fresh
+    /// widget starts at 0, so tests must move the caret to `text.len()`
+    /// the way a typer at the end of the sentence would.
+    fn place_typer_at_end_of_last_line(agent: &mut crate::app::agent_view::AgentView, body: &str) {
+        agent.prompt.set_text(body);
+        agent.prompt.set_cursor(body.len());
+        assert_eq!(
+            agent.prompt.cursor(),
+            body.len(),
+            "typer at end of last line must sit at text.len()"
+        );
+        assert_eq!(agent.prompt.text(), body);
     }
 
     #[test]
@@ -1248,6 +1705,214 @@ mod slash_menu_enter_tests {
         assert!(
             matches!(outcome, InputOutcome::Action(Action::SendPrompt(ref text)) if text == "/log"),
             "got {outcome:?}; prompt={:?}",
+            agent.prompt.text()
+        );
+    }
+
+    fn tab() -> KeyEvent {
+        KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)
+    }
+
+    fn seed_grok_models(agent: &mut crate::app::agent_view::AgentView) {
+        use agent_client_protocol as acp;
+        use std::sync::Arc;
+        let insert = |agent: &mut crate::app::agent_view::AgentView, id: &str, name: &str| {
+            let mid = acp::ModelId::new(Arc::from(id));
+            agent.session.models.available.insert(
+                mid.clone(),
+                acp::ModelInfo::new(mid, name.to_string()).meta(
+                    serde_json::json!({ "supportsReasoningEffort": true })
+                        .as_object()
+                        .cloned(),
+                ),
+            );
+        };
+        insert(agent, "grok-4.6", "Grok 4.6");
+        insert(agent, "grok-4.5", "Grok 4.5");
+    }
+
+    fn agent_with_model_slash(text: &str) -> crate::app::agent_view::AgentView {
+        let mut agent = super::test_fixtures::make_agent();
+        seed_grok_models(&mut agent);
+        agent.prompt.set_text(text);
+        agent.prompt.set_cursor(text.len());
+        agent.prompt.refresh_slash(&agent.session.models);
+        assert!(
+            agent.prompt.slash_open(),
+            "slash dropdown must open for {text:?}"
+        );
+        agent
+    }
+
+    fn assert_switch_model(
+        outcome: InputOutcome,
+        expected_id: &str,
+        expected_effort: Option<xai_grok_shell::sampling::types::ReasoningEffort>,
+        prompt: &str,
+    ) {
+        use agent_client_protocol as acp;
+        use std::sync::Arc;
+        match outcome {
+            InputOutcome::Action(Action::SwitchModel { model_id, effort }) => {
+                assert_eq!(
+                    model_id,
+                    acp::ModelId::new(Arc::from(expected_id)),
+                    "SwitchModel id; prompt={prompt:?}"
+                );
+                assert_eq!(
+                    effort, expected_effort,
+                    "SwitchModel effort; prompt={prompt:?}"
+                );
+            }
+            other => panic!(
+                "Operator: last Tab on a unique /model row must SwitchModel now, not {other:?}; prompt={prompt:?}"
+            ),
+        }
+    }
+
+    /// Operator: "The last tab when only the single model is highlighted
+    /// should switch it, but it doesn't." Unique `/model` row Tab applies
+    /// SwitchModel now. Composer clears. No SendPrompt.
+    #[test]
+    fn unique_model_slash_tab_switches_now_empty_composer_no_send() {
+        let mut agent = agent_with_model_slash("/model Grok 4.6");
+        let snap = agent.prompt.slash_snapshot();
+        assert_eq!(
+            snap.matches.len(),
+            1,
+            "unique remaining highlight; got {:?}",
+            snap.matches.iter().map(|r| &r.display).collect::<Vec<_>>()
+        );
+        assert!(
+            snap.selection()
+                .is_some_and(|row| row.insert_text.ends_with(' ')),
+            "reasoning unique row insert_text trails a space so Enter used to chain; Tab must still switch NOW"
+        );
+        let outcome = agent.handle_prompt_key_for_test(&tab());
+        assert_switch_model(outcome, "grok-4.6", None, agent.prompt.text());
+        assert!(
+            agent.prompt.text().is_empty(),
+            "composer must clear; got {:?}",
+            agent.prompt.text()
+        );
+        assert!(
+            !agent.prompt.slash_open(),
+            "slash dropdown must close after SwitchModel"
+        );
+    }
+
+    /// Operator: "Return does embed it into the prompt but it doesn't work."
+    /// Iso 20:16 Return sent `/model Grok 4.6 xhigh` as Operator chat.
+    /// Unique-row Enter switches now and must not SendPrompt the slash.
+    #[test]
+    fn unique_model_slash_enter_switches_now_no_operator_model_chat() {
+        let mut agent = agent_with_model_slash("/model Grok 4.6");
+        assert_eq!(agent.prompt.slash_snapshot().matches.len(), 1);
+        let outcome = agent.handle_prompt_key_for_test(&enter());
+        assert_switch_model(outcome, "grok-4.6", None, agent.prompt.text());
+        assert!(
+            agent.prompt.text().is_empty(),
+            "composer must clear; got {:?}",
+            agent.prompt.text()
+        );
+        assert!(
+            !matches!(
+                agent.handle_prompt_key_for_test(&enter()),
+                InputOutcome::Action(Action::SendPrompt(ref text)) if text.contains("/model")
+            ),
+            "Enter on the unique row must not later SendPrompt /model as Operator chat"
+        );
+    }
+
+    /// Alias `/m` unique row Tab is the same SwitchModel path.
+    #[test]
+    fn unique_m_slash_tab_switches_now() {
+        let mut agent = agent_with_model_slash("/m Grok 4.6");
+        assert_eq!(agent.prompt.slash_snapshot().matches.len(), 1);
+        let outcome = agent.handle_prompt_key_for_test(&tab());
+        assert_switch_model(outcome, "grok-4.6", None, agent.prompt.text());
+        assert!(agent.prompt.text().is_empty());
+    }
+
+    /// Iso 20:16 complete typed `/model Grok 4.6 xhigh`. Effort dropdown
+    /// still lists every level. Tab/Enter SwitchModel with xhigh now.
+    #[test]
+    fn complete_typed_model_xhigh_tab_switches_now_with_effort() {
+        use xai_grok_shell::sampling::types::ReasoningEffort;
+        let mut agent = agent_with_model_slash("/model Grok 4.6 xhigh");
+        let outcome = agent.handle_prompt_key_for_test(&tab());
+        assert_switch_model(
+            outcome,
+            "grok-4.6",
+            Some(ReasoningEffort::Xhigh),
+            agent.prompt.text(),
+        );
+        assert!(
+            agent.prompt.text().is_empty(),
+            "composer must clear; got {:?}",
+            agent.prompt.text()
+        );
+        assert!(
+            !matches!(
+                agent.handle_prompt_key_for_test(&enter()),
+                InputOutcome::Action(Action::SendPrompt(_))
+            ),
+            "must not SendPrompt the slash after the switch"
+        );
+    }
+
+    /// Command-phase unique `/model` is not a model row. Tab still completes
+    /// `/model `.
+    #[test]
+    fn command_phase_unique_model_tab_still_completes() {
+        let mut agent = agent_with_model_slash("/model");
+        let snap = agent.prompt.slash_snapshot();
+        assert!(
+            snap.cursor_in_command,
+            "command-phase unique /model is not a model row"
+        );
+        let outcome = agent.handle_prompt_key_for_test(&tab());
+        assert!(
+            matches!(outcome, InputOutcome::Changed),
+            "command-phase Tab must complete, not SwitchModel; got {outcome:?}"
+        );
+        assert!(
+            agent.prompt.text().starts_with("/model"),
+            "Tab must keep /model in the composer; got {:?}",
+            agent.prompt.text()
+        );
+        assert!(
+            !matches!(
+                outcome,
+                InputOutcome::Action(Action::SwitchModel { .. } | Action::SendPrompt(_))
+            ),
+            "command-phase Tab must not SwitchModel or SendPrompt; got {outcome:?}"
+        );
+    }
+
+    /// More than one model row: Tab keeps completing/filtering.
+    #[test]
+    fn multi_row_model_tab_stays_complete_not_switch() {
+        let mut agent = agent_with_model_slash("/model Grok");
+        let snap = agent.prompt.slash_snapshot();
+        assert!(
+            snap.matches.len() > 1,
+            "Grok 4.6 and Grok 4.5 must both remain; got {:?}",
+            snap.matches.iter().map(|r| &r.display).collect::<Vec<_>>()
+        );
+        let before = agent.prompt.text().to_string();
+        let outcome = agent.handle_prompt_key_for_test(&tab());
+        assert!(
+            matches!(outcome, InputOutcome::Changed),
+            "multi-row Tab must complete/filter, not SwitchModel; got {outcome:?}"
+        );
+        assert!(
+            !matches!(outcome, InputOutcome::Action(Action::SwitchModel { .. })),
+            "multi-row Tab must not SwitchModel"
+        );
+        assert!(
+            agent.prompt.text().starts_with("/model"),
+            "composer must stay a slash completion; before={before:?} after={:?}",
             agent.prompt.text()
         );
     }

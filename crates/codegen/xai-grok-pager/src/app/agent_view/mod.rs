@@ -1139,6 +1139,11 @@ pub struct AgentView {
     pub hit_bg_status: HitArea,
     pub hit_goal_status: HitArea,
     pub hit_goal_close: HitArea,
+    pub hit_goal_resume: HitArea,
+    pub hit_goal_pause: HitArea,
+    pub hit_goal_status_cmd: HitArea,
+    pub hit_goal_clear: HitArea,
+    pub hit_goal_esc_close: HitArea,
     pub hit_bg_button: HitArea,
     pub(crate) last_bg_click: Option<Instant>,
     pub hit_queue_close: HitArea,
@@ -1977,6 +1982,20 @@ pub(super) fn apply_settings_outcome(
             agent.active_modal = None;
             InputOutcome::Action(a)
         }
+        SettingsKeyOutcome::SetBool { key, value } => {
+            let outcome = SettingsKeyOutcome::SetBool { key, value };
+            match outcome.typed_dispatch_action() {
+                Some(a) => InputOutcome::Action(a),
+                None => InputOutcome::Unchanged,
+            }
+        }
+        SettingsKeyOutcome::SetString { key, value } => {
+            let outcome = SettingsKeyOutcome::SetString { key, value };
+            match outcome.typed_dispatch_action() {
+                Some(a) => InputOutcome::Action(a),
+                None => InputOutcome::Unchanged,
+            }
+        }
         SettingsKeyOutcome::Changed => InputOutcome::Changed,
         SettingsKeyOutcome::Unchanged => InputOutcome::Unchanged,
     }
@@ -2631,7 +2650,7 @@ pub(crate) mod test_fixtures {
     }
     /// Interject chord for non–VS Code family tests (`Ctrl+Enter`).
     pub fn force_interject_key() -> KeyEvent {
-        KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL)
+        KeyEvent::new(KeyCode::Char('i'), KeyModifiers::CONTROL)
     }
     /// A `Ctrl+<c>` key press as an input event.
     pub fn ctrl(c: char) -> Event {
@@ -2645,7 +2664,7 @@ pub(crate) mod test_fixtures {
     pub fn vscode_interject_key() -> KeyEvent {
         KeyEvent::new(KeyCode::Char('l'), KeyModifiers::CONTROL)
     }
-    /// Host-independent registry for queue/prompt interject tests (Ctrl+Enter).
+    /// Host-independent registry for queue/prompt interject tests (Ctrl+I send-now).
     pub fn non_vscode_registry() -> ActionRegistry {
         ActionRegistry::non_vscode_for_test()
     }

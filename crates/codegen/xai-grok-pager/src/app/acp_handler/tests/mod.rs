@@ -2308,6 +2308,7 @@ mod scheduled_tasks;
 mod queue_and_adoption;
 mod plan_mode;
 mod plan_approve_lost_prompt;
+mod plan_stale_prompt;
 mod reconnect;
 mod turn_completion;
 mod hooks;

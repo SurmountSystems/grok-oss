@@ -91,8 +91,8 @@ fn pause_mid_turn_then_resume_continues_once() {
 /// Named contract (idle over-window compact-fail unstick): mouse-host idle
 /// `[pause]` after AUTO compact failed for spending-limit, with used tokens
 /// over the sampling window, must not be a no-op empty pause. It must retry
-/// manual `/compact` (AUTO suppress does not apply) and continue the last
-/// user prompt (`/implement` here) so the operator is not stuck at 507K/500K.
+/// manual `/compact` (AUTO suppress does not apply). The last Human turn
+/// (`/implement` here) already issued and must not come back as a Prompt.
 #[test]
 fn idle_pause_on_over_window_compact_fail_retries_compact_and_continues_last_prompt() {
     let mut app = test_app_with_agent();
@@ -132,7 +132,7 @@ fn idle_pause_on_over_window_compact_fail_retries_compact_and_continues_last_pro
         effects.iter().any(|e| matches!(e, Effect::Compact { .. })),
         "pause must retry compact so the session can leave 507K/500K, got {effects:?}"
     );
-    let continued = app.agents[&id]
+    let requeued_human = app.agents[&id]
         .session
         .pending_prompts
         .iter()
@@ -141,8 +141,8 @@ fn idle_pause_on_over_window_compact_fail_retries_compact_and_continues_last_pro
             |e| matches!(e, Effect::SendPrompt { text, .. } if text == "/implement --effort 3"),
         );
     assert!(
-        continued,
-        "pause must continue the interrupted /implement after compact; \
+        !requeued_human,
+        "a prompt that already issued as a Human turn must not come back as a queued stale Prompt; \
          effects={effects:?} queue={:?}",
         app.agents[&id]
             .session
@@ -229,17 +229,18 @@ fn assert_over_window_compact_unstick(app: &AppView, effects: &[Effect], toast: 
         .iter()
         .map(|p| p.text.as_str())
         .collect();
-    let continued_real = queue.contains(&"keep going on the compiler")
-        || effects.iter().any(
-            |e| matches!(e, Effect::SendPrompt { text, .. } if text == "keep going on the compiler"),
-        );
     let invented_implement = queue.iter().any(|t| t.starts_with("/implement"))
         || effects.iter().any(
             |e| matches!(e, Effect::SendPrompt { text, .. } if text.starts_with("/implement")),
         );
+    let requeued_human = queue.contains(&"keep going on the compiler")
+        || effects.iter().any(
+            |e| matches!(e, Effect::SendPrompt { text, .. } if text == "keep going on the compiler"),
+        );
     assert!(
-        continued_real,
-        "must continue the real prior user work after compact; effects={effects:?} queue={queue:?}"
+        !requeued_human,
+        "a prompt that already issued as a Human turn must not come back as a queued stale Prompt; \
+         effects={effects:?} queue={queue:?}"
     );
     assert!(
         !invented_implement,
@@ -526,10 +527,11 @@ fn drain_blocked_while_paused() {
 }
 
 /// Named contract: fearless global pause that cancels a running primary
-/// turn must write `canceled_turn_resume.json` the same way `/rebuild`
-/// mid-turn does, so last-session on start and `/start` can continue the
-/// interrupted prompt after this process is gone. The in-memory pause
-/// gate is still RAM-only; this is only the interrupted-prompt marker.
+/// turn must write `canceled_turn_resume.json` so last-session on start
+/// and `/start` can continue the interrupted prompt after this process
+/// is gone. Mid-turn `/rebuild` does not write this marker (exec adopts
+/// the live turn). The in-memory pause gate is still RAM-only; this is
+/// only the interrupted-prompt marker.
 #[test]
 #[serial_test::serial(GROK_HOME)]
 fn pause_mid_turn_writes_cancel_resume_marker_for_restart() {

@@ -14,6 +14,15 @@ pub struct SessionMetadataFields {
     pub pid: u32,
     /// When true, list the grok-oss ULID before the Grok Build UUID.
     pub ulid_primary: bool,
+    /// Public sampling model id or language-models id (not a dated slug).
+    pub serving_public_id: Option<String>,
+    pub completion_system_fingerprint: Option<String>,
+    pub completion_observed_at: Option<String>,
+    pub language_models_id: Option<String>,
+    pub language_models_fingerprint: Option<String>,
+    pub language_models_version: Option<String>,
+    pub language_models_created: Option<i64>,
+    pub language_models_observed_at: Option<String>,
 }
 
 /// Format a system-block report. Omit unknown fields. Do not invent meters.
@@ -54,6 +63,58 @@ pub fn format_session_metadata(fields: &SessionMetadataFields) -> String {
         lines.push(format!("  started: {started}"));
     }
     lines.push(format!("  pid: {}", fields.pid));
+    if let Some(id) = fields
+        .serving_public_id
+        .as_deref()
+        .filter(|s| !s.is_empty())
+    {
+        lines.push(format!("  serving public id: {id}"));
+    }
+    if let Some(fp) = fields
+        .completion_system_fingerprint
+        .as_deref()
+        .filter(|s| !s.is_empty())
+    {
+        lines.push(format!("  last completion system_fingerprint: {fp}"));
+    }
+    if let Some(at) = fields
+        .completion_observed_at
+        .as_deref()
+        .filter(|s| !s.is_empty())
+    {
+        lines.push(format!("  last completion observed: {at}"));
+    }
+    if let Some(id) = fields
+        .language_models_id
+        .as_deref()
+        .filter(|s| !s.is_empty())
+    {
+        lines.push(format!("  language-models id: {id}"));
+    }
+    if let Some(fp) = fields
+        .language_models_fingerprint
+        .as_deref()
+        .filter(|s| !s.is_empty())
+    {
+        lines.push(format!("  language-models fingerprint: {fp}"));
+    }
+    if let Some(version) = fields
+        .language_models_version
+        .as_deref()
+        .filter(|s| !s.is_empty())
+    {
+        lines.push(format!("  language-models version: {version}"));
+    }
+    if let Some(created) = fields.language_models_created {
+        lines.push(format!("  language-models created: {created}"));
+    }
+    if let Some(at) = fields
+        .language_models_observed_at
+        .as_deref()
+        .filter(|s| !s.is_empty())
+    {
+        lines.push(format!("  language-models observed: {at}"));
+    }
     lines.join("\n")
 }
 
@@ -66,7 +127,7 @@ impl SlashCommand for MetadataCommand {
     }
 
     fn description(&self) -> &str {
-        "Show live session metadata including ULID and UUID"
+        "Show live session metadata including ULID, UUID, and serving fingerprints"
     }
 
     fn usage(&self) -> &str {
@@ -133,6 +194,7 @@ mod tests {
             started: Some("2026-08-20T12:00:00Z".into()),
             pid: 4242,
             ulid_primary: true,
+            ..Default::default()
         });
         let ulid_at = text.find("grok-oss ULID").expect("ulid line");
         let uuid_at = text.find("Grok Build UUID").expect("uuid line");
@@ -157,6 +219,7 @@ mod tests {
             started: None,
             pid: 7,
             ulid_primary: false,
+            ..Default::default()
         });
         let ulid_at = text.find("grok-oss ULID").expect("ulid line");
         let uuid_at = text.find("Grok Build UUID").expect("uuid line");
@@ -177,9 +240,70 @@ mod tests {
             started: None,
             pid: 9,
             ulid_primary: true,
+            ..Default::default()
         });
         assert!(!text.contains("grok-oss ULID"), "{text}");
         assert!(text.contains("Grok Build UUID"), "{text}");
         assert!(text.contains("pid: 9"), "{text}");
+    }
+
+    /// Named contract: `/metadata` includes fingerprint fields from stored
+    /// samples. Fingerprint is serving-path config, not a SHA of the weights.
+    #[test]
+    fn format_includes_stored_serving_fingerprint_fields() {
+        let text = format_session_metadata(&SessionMetadataFields {
+            session_ulid: None,
+            session_uuid: None,
+            cwd: None,
+            model: Some("Grok 4.6".into()),
+            started: None,
+            pid: 1,
+            ulid_primary: true,
+            serving_public_id: Some("grok-4.6".into()),
+            completion_system_fingerprint: Some("fp_84ff176447".into()),
+            completion_observed_at: Some("2026-09-09T12:00:00Z".into()),
+            language_models_id: Some("grok-4.6".into()),
+            language_models_fingerprint: Some("fp_777a9f8466".into()),
+            language_models_version: Some("1.0".into()),
+            language_models_created: Some(1_776_556_800),
+            language_models_observed_at: Some("2026-09-09T12:05:00Z".into()),
+        });
+        assert!(
+            text.contains("serving public id: grok-4.6"),
+            "owed: /metadata shows public id/alias; got {text}"
+        );
+        assert!(
+            text.contains("last completion system_fingerprint: fp_84ff176447"),
+            "owed: /metadata shows last completion system_fingerprint; got {text}"
+        );
+        assert!(
+            text.contains("last completion observed: 2026-09-09T12:00:00Z"),
+            "{text}"
+        );
+        assert!(
+            text.contains("language-models id: grok-4.6"),
+            "owed: /metadata shows language-models id; got {text}"
+        );
+        assert!(
+            text.contains("language-models fingerprint: fp_777a9f8466"),
+            "{text}"
+        );
+        assert!(text.contains("language-models version: 1.0"), "{text}");
+        assert!(
+            text.contains("language-models created: 1776556800"),
+            "{text}"
+        );
+        assert!(
+            text.contains("language-models observed: 2026-09-09T12:05:00Z"),
+            "{text}"
+        );
+        assert!(
+            !text.contains('\u{2014}'),
+            "no em dashes in operator-facing metadata; got {text}"
+        );
+        assert!(
+            !text.to_lowercase().contains("sha"),
+            "must not claim fingerprint is a SHA of the weights; got {text}"
+        );
     }
 }
