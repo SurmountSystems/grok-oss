@@ -741,9 +741,9 @@ grok-oss loads that shared library when it reads the pieces. It does not link th
 
 Recorded observations are ones the product already made: a real model request, a real 500, a timeout, a repeating-sentence stop, a latency, a fetched token count, and an announcement banner the product already showed ("We're currently experiencing issues serving our models" or "A datacenter incident is affecting all Grok models").
 
-If tokens were not fetched, the stored value is not-fetched. The product does not invent a token count.
+When every model observation in the window stored a token count, the window shows that sum. When a count is missing, the window omits the token clause. The product does not invent a token count.
 
-Each row is the time, the outcome, the latency, the token count or not-fetched, the model id, and which local session saw it.
+Each row is the time, the outcome, the latency, the token count when one was stored, the model id, and which local session saw it.
 
 The store is Parquet. Numeric columns use Parquet delta binary packing (DELTA_BINARY_PACKED). That is not Delta Lake.
 

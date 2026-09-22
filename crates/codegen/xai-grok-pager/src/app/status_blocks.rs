@@ -132,7 +132,7 @@ pub(crate) fn tasks_block_text(agent: &AgentView) -> String {
         };
         let elapsed_text = format_duration(info.display_elapsed());
         // Running rows are live job rows. Same formatter as the tasks pane.
-        // A missing host figure stays the formatter's actual-tokens text.
+        // A missing host figure omits the token clause. Do not print a placeholder.
         // Do not add that figure to the L1 total or grok-oss sqlite.
         let (elapsed, live_actual) = if info.is_running() {
             let shown = display_live_job_row(LiveJobRowInput {
@@ -147,8 +147,10 @@ pub(crate) fn tasks_block_text(agent: &AgentView) -> String {
             (
                 shown.elapsed,
                 format!(
-                    " · {} · {} · {}",
-                    shown.estimate_wall, shown.estimate_tokens, shown.actual_tokens
+                    " · {} · {}{}",
+                    shown.estimate_wall,
+                    shown.estimate_tokens,
+                    shown.actual_tokens_clause()
                 ),
             )
         } else {

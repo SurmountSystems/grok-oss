@@ -401,11 +401,11 @@ See [Configuration → Token Economy](05-configuration.md#token-economy) for eco
 
 Actual tokens on a live job row come from the host session-usage figure for that row. That figure is not included SuperGrok period limits, not SuperGrok dollar credits, and not console team prepaid / console API credits. SuperGrok is a paid product.
 
-If the host has not returned a figure yet, the Actual tokens cell says not fetched. The wall-clock estimate and the token estimate stay labeled as estimates. Do not copy the estimate into Actual tokens. A standing estimate such as 19.4 minutes and 167.0k is still an estimate until the host returns a figure. Do not invent a count.
+If the host has not returned a figure yet, the row omits the token clause. It does not print a placeholder. The wall-clock estimate and the token estimate stay labeled as estimates. Do not copy the estimate into the token count. A standing estimate such as 19.4 minutes and 167.0k is still an estimate until the host returns a figure. Do not invent a count.
 
-When the host has returned a figure, the row shows that figure. Showing the row does not add that figure again into the L1 total or into the grok-oss sqlite session record. Nested spend stays on the nested row.
+When the host has returned a figure, the row shows that figure. Showing the row does not add that figure again into the L1 total or into the grok-oss sqlite session record. Nested spend stays on the nested row. The footer sampling window for the main thread is not that figure.
 
-The tasks pane paints each running job row by calling `display_live_job_row` and showing that row's labeled estimates and actual-tokens text. `/tasks` uses the same formatter. Neither path adds the row figure to the L1 total or to the grok-oss sqlite session record.
+The tasks pane paints each running job row by calling `display_live_job_row` and showing that row's labeled estimates and, when the host returned a figure, that figure. `/tasks` uses the same formatter. Neither path adds the row figure to the L1 total or to the grok-oss sqlite session record.
 
 ---
 

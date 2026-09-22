@@ -31,6 +31,8 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
     - L3 specialists (when spawned)
   - L2 Apply the three edits now
     - L3 specialists (when spawned)
+  - L2 Apply uptime header edits
+    - L3 specialists (when spawned)
   - L2 Approve paste-chip TDD fresh
     - L3 specialists (when spawned)
   - L2 Approve paste-chip comment
@@ -141,6 +143,8 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
     - L3 specialists (when spawned)
   - L2 Drop looping compact garbage
     - L3 specialists (when spawned)
+  - L2 Drop not-fetched chrome
+    - L3 specialists (when spawned)
   - L2 Drop unused revise import
     - L3 specialists (when spawned)
   - L2 DuckDB shared library not bundled
@@ -166,6 +170,8 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
   - L2 Edit named hook and search files
     - L3 specialists (when spawned)
   - L2 Edit python3 spawn sites now
+    - L3 specialists (when spawned)
+  - L2 Edit short uptime header
     - L3 specialists (when spawned)
   - L2 Edit spawn depth guard
     - L3 specialists (when spawned)
@@ -298,6 +304,8 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
   - L2 Finish soft reminder spawn inject
     - L3 specialists (when spawned)
   - L2 Finish spawn hierarchy land
+    - L3 specialists (when spawned)
+  - L2 Finish stale prompt fix
     - L3 specialists (when spawned)
   - L2 Finish stale-prompt diagnosis
     - L3 specialists (when spawned)
@@ -451,6 +459,8 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
     - L3 specialists (when spawned)
   - L2 Fix settings_e2e compile leftovers
     - L3 specialists (when spawned)
+  - L2 Fix smashed header uptime
+    - L3 specialists (when spawned)
   - L2 Fix soft plan secondary
     - L3 specialists (when spawned)
   - L2 Fix sqlite L3-before-L2
@@ -459,7 +469,11 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
     - L3 specialists (when spawned)
   - L2 Fix stale prompt hang
     - L3 specialists (when spawned)
+  - L2 Fix stale prompt replay
+    - L3 specialists (when spawned)
   - L2 Fix stale prompts at start
+    - L3 specialists (when spawned)
+  - L2 Fix stale prompts still live
     - L3 specialists (when spawned)
   - L2 Fix static HashMap compile error
     - L3 specialists (when spawned)
@@ -482,6 +496,8 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
   - L2 Fix uptime compile errors
     - L3 specialists (when spawned)
   - L2 Fix uptime compile errors
+    - L3 specialists (when spawned)
+  - L2 Fix uptime header smash
     - L3 specialists (when spawned)
   - L2 Fix wait signature and report
     - L3 specialists (when spawned)
@@ -900,6 +916,8 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
   - L2 Remove in-tree bug dump
     - L3 specialists (when spawned)
   - L2 Remove needless probe return
+    - L3 specialists (when spawned)
+  - L2 Remove not-fetched header chrome
     - L3 specialists (when spawned)
   - L2 Remove python3 from grok-oss
     - L3 specialists (when spawned)
@@ -1375,6 +1393,7 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
 | Apply Isolated Preview revise patch | nested L2 session usage | L2 | 216058 | estimate | exited |
 | Apply exclusive plan dismiss | nested L2 session usage | L2 | 132547 | estimate | exited |
 | Apply the three edits now | nested L2 session usage | L2 | 202387 | estimate | exited |
+| Apply uptime header edits | nested L2 session usage | L2 | 199129 | estimate | exited |
 | Approve paste-chip TDD fresh | nested L2 session usage | L2 | 78767 | estimate | exited |
 | Approve paste-chip comment | nested L2 session usage | L2 | 121302 | estimate | exited |
 | Approve paste-chip review notes | nested L2 session usage | L2 | 130860 | estimate | exited |
@@ -1430,6 +1449,7 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
 | Drop C++ DuckDB use Rust parquet | nested L2 session usage | L2 | 117559 | estimate | exited |
 | Drop duckdb Connection link | nested L2 session usage | L2 | 198721 | estimate | exited |
 | Drop looping compact garbage | nested L2 session usage | L2 | 190595 | estimate | exited |
+| Drop not-fetched chrome | nested L2 session usage | L2 | 88552 | estimate | exited |
 | Drop unused revise import | nested L2 session usage | L2 | 92722 | estimate | exited |
 | DuckDB shared library not bundled | nested L2 session usage | L2 | 206091 | estimate | exited |
 | E+G implement now | nested L2 session usage | L2 | 221380 | estimate | exited |
@@ -1443,6 +1463,7 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
 | Edit composer clear and interject | nested L2 session usage | L2 | 192422 | estimate | exited |
 | Edit named hook and search files | nested L2 session usage | L2 | 198381 | estimate | exited |
 | Edit python3 spawn sites now | nested L2 session usage | L2 | 205092 | estimate | exited |
+| Edit short uptime header | nested L2 session usage | L2 | 200335 | estimate | exited |
 | Edit spawn depth guard | nested L2 session usage | L2 | 200272 | estimate | exited |
 | Edit the four uptime call sites | nested L2 session usage | L2 | 212404 | estimate | exited |
 | Edit three takes, rewrite report | nested L2 session usage | L2 | 202019 | estimate | exited |
@@ -1509,6 +1530,7 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
 | Finish settings inventory | nested L2 session usage | L2 | 208984 | estimate | exited |
 | Finish soft reminder spawn inject | nested L2 session usage | L2 | 181506 | estimate | exited |
 | Finish spawn hierarchy land | nested L2 session usage | L2 | 205422 | estimate | exited |
+| Finish stale prompt fix | nested L2 session usage | L2 | 190975 | estimate | exited |
 | Finish stale-prompt diagnosis | nested L2 session usage | L2 | 206036 | estimate | exited |
 | Finish the image paste land | nested L2 session usage | L2 | 214200 | estimate | exited |
 | Finish the uptime window store | nested L2 session usage | L2 | 203603 | estimate | exited |
@@ -1585,11 +1607,14 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
 | Fix send clear and interject | nested L2 session usage | L2 | 193909 | estimate | exited |
 | Fix session_plans tempdir compile | nested L2 session usage | L2 | 82961 | estimate | exited |
 | Fix settings_e2e compile leftovers | nested L2 session usage | L2 | 116547 | estimate | exited |
+| Fix smashed header uptime | nested L2 session usage | L2 | 192804 | estimate | exited |
 | Fix soft plan secondary | nested L2 session usage | L2 | 240595 | estimate | exited |
 | Fix sqlite L3-before-L2 | nested L2 session usage | L2 | 109194 | estimate | exited |
 | Fix stale plan panel snapshot | nested L2 session usage | L2 | 166403 | estimate | exited |
 | Fix stale prompt hang | nested L2 session usage | L2 | 166405 | estimate | exited |
+| Fix stale prompt replay | nested L2 session usage | L2 | 195599 | estimate | exited |
 | Fix stale prompts at start | nested L2 session usage | L2 | 192891 | estimate | exited |
+| Fix stale prompts still live | nested L2 session usage | L2 | 86682 | estimate | exited |
 | Fix static HashMap compile error | nested L2 session usage | L2 | 82857 | estimate | exited |
 | Fix stdenv.hostPlatform isLinux | nested L2 session usage | L2 | 101821 | estimate | exited |
 | Fix stuck first-token retry | nested L2 session usage | L2 | 110959 | estimate | exited |
@@ -1601,6 +1626,7 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
 | Fix turn completion privacy | nested L2 session usage | L2 | 98260 | estimate | exited |
 | Fix uptime compile errors | nested L2 session usage | L2 | 106055 | estimate | exited |
 | Fix uptime compile errors | nested L2 session usage | L2 | 93668 | estimate | exited |
+| Fix uptime header smash | nested L2 session usage | L2 | 196529 | estimate | exited |
 | Fix wait signature and report | nested L2 session usage | L2 | 192417 | estimate | exited |
 | Fix write preview not a git diff | nested L2 session usage | L2 | 178268 | estimate | exited |
 | Format mutations.rs rustfmt | nested L2 session usage | L2 | 79334 | estimate | exited |
@@ -1810,6 +1836,7 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
 | Remove bundled DuckDB feature | nested L2 session usage | L2 | 196675 | estimate | exited |
 | Remove in-tree bug dump | nested L2 session usage | L2 | 69726 | estimate | exited |
 | Remove needless probe return | nested L2 session usage | L2 | 199913 | estimate | exited |
+| Remove not-fetched header chrome | nested L2 session usage | L2 | 191542 | estimate | exited |
 | Remove python3 from grok-oss | nested L2 session usage | L2 | 85454 | estimate | exited |
 | Remove unused SubagentBackend import | nested L2 session usage | L2 | 95997 | estimate | exited |
 | Repetition stream stop | nested L2 session usage | L2 | 201861 | estimate | exited |

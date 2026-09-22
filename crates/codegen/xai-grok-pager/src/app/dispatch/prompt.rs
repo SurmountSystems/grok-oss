@@ -1294,7 +1294,20 @@ pub(super) fn dispatch_send_prompt_inner(
                 interject::OverlayOperatorClarify::None
             ) && interject::resolve_uniquely_named_live_l2(agent, &text)
                 .is_some();
-            if named_live_l2 || !agent.is_parked_on_sendable_wait() {
+            // Eligible parked send-now stays below. Images ride
+            // SendPromptNow. Plain text rides immediate SendPrompt.
+            // Those named tests stay. Every other mid-turn Enter with
+            // text is a soft interject, including a parked wait that
+            // cannot send-now. That fallthrough used to write a local
+            // queue row and paint "1 queued". Named `/queue` hold is
+            // QueueLater above and still waits.
+            let parked = agent.is_parked_on_sendable_wait();
+            let hold_behind = parked && agent.has_held_user_queue();
+            let defer_to_send_now = parked
+                && !named_live_l2
+                && immediate_server_send_eligible(agent, leader_mode)
+                && (agent.prompt.images.is_empty() || !hold_behind);
+            if !defer_to_send_now {
                 let images = agent.prompt.drain_images();
                 return enqueue_if_interject_dropped(app, id, text, images);
             }
@@ -1471,7 +1484,7 @@ pub(super) fn dispatch_send_prompt_inner(
             .session
             .pending_prompts
             .back()
-            .is_some_and(|p| p.text == text);
+            .is_some_and(|p| p.text == text || p.text.trim() == text.trim());
         // Never wipe the composer unless enqueue (or a later send) succeeded.
         if consume_input && enqueued_ok {
             // Drain prompt images before clearing prompt state.
@@ -1560,8 +1573,23 @@ pub(super) fn dispatch_send_prompt_inner(
     if consume_input {
         let sent = consume_input_model_ask_landed(&effects, &text);
         if let Some(agent) = app.agents.get_mut(&id) {
-            let enqueued = agent.session.pending_prompts.iter().any(|p| p.text == text);
+            let enqueued = agent
+                .session
+                .pending_prompts
+                .iter()
+                .any(|p| p.text == text || p.text.trim() == text.trim());
             if sent || enqueued {
+                // After send, the Operator box clears. Example the Operator
+                // still saw: "I ran it for you, thank me later." A landed
+                // ask or a real queued copy must not leave that body, or
+                // its image chip, in the composer.
+                let live_trim = agent.prompt.text().trim().to_string();
+                let sent_trim = text.trim();
+                let holds_this_send = !live_trim.is_empty()
+                    && (live_trim == sent_trim || live_trim.contains(sent_trim));
+                if holds_this_send {
+                    agent.prompt.set_text("");
+                }
                 agent.clear_sent_human_from_plan_feedback_draft(&text);
             } else if agent.prompt.text().trim().is_empty() {
                 agent.prompt.set_text(&text);

@@ -1657,7 +1657,9 @@ impl AgentView {
             &theme,
             self.chat_kind,
         ) {
-            let beside = crate::app::turn_completion::uptime_text_beside_token_chrome();
+            let beside = crate::uptime::cap_uptime_status_segment(
+                &crate::app::turn_completion::uptime_text_beside_token_chrome(),
+            );
             let dim = Style::default().fg(theme.gray_dim).bg(theme.bg_base);
             ctx_line
                 .spans

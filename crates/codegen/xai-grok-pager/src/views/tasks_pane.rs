@@ -448,7 +448,7 @@ impl TaskEntry {
             spans.push(Span::styled(format!(" ({compact})"), desc_style));
         }
         // Live job row. `TasksPane::render` paints this span via `ListItem::content`.
-        // Host figure only. No figure paints the formatter's actual-tokens text.
+        // Host figure only. No figure omits the token clause. Do not print a placeholder.
         // The standing estimate stays labeled as an estimate. This span must not
         // say tokens: Subagents list chrome omits that word. Do not add the
         // figure to the L1 total or grok-oss sqlite.
@@ -464,8 +464,11 @@ impl TaskEntry {
             debug_assert_eq!(shown.l1_tokens_added, 0);
             debug_assert!(!shown.wrote_grok_oss_sqlite);
             let live_text = format!(
-                " {} · {} · {} · {}",
-                shown.estimate_wall, shown.estimate_tokens, shown.elapsed, shown.actual_tokens
+                " {} · {} · {}{}",
+                shown.estimate_wall,
+                shown.estimate_tokens,
+                shown.elapsed,
+                shown.actual_tokens_clause()
             );
             spans.push(Span::styled(live_text, desc_style));
         }
@@ -852,6 +855,64 @@ impl Default for TasksPane {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Columns the agent overlay paints on the right of one row.
+/// Same sum as `render_agent_overlay`: kill, view, elapsed, model,
+/// forked badge, and one gap.
+fn agent_overlay_columns(info: &SubagentInfo) -> u16 {
+    let right_text = if info.pending_kill {
+        "killing\u{2026} ".to_string()
+    } else {
+        format!("{} ", format_duration(info.display_elapsed()))
+    };
+    let badge = format_context_badge(info);
+    let model_text = info
+        .model
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("");
+    let right_text_w = right_text.width() as u16;
+    let kill_w: u16 = if info.is_running() { 3 } else { 0 };
+    let badge_w: u16 = if badge.is_empty() {
+        0
+    } else {
+        badge.width() as u16 + 1
+    };
+    let model_w: u16 = if model_text.is_empty() {
+        0
+    } else {
+        model_text.width() as u16 + 1
+    };
+    kill_w + 3 + right_text_w + model_w + badge_w + 1
+}
+
+/// Widest right-hand chip strip among the rows the list is about to paint.
+fn agent_chip_reserve(
+    entries: &[TaskEntry],
+    scroll_offset: usize,
+    list_height: u16,
+    subagents: &HashMap<String, SubagentInfo>,
+) -> u16 {
+    let mut reserve = 0u16;
+    for entry in entries
+        .iter()
+        .skip(scroll_offset)
+        .take(list_height as usize)
+    {
+        let TaskEntry::Agent {
+            child_session_id, ..
+        } = entry
+        else {
+            continue;
+        };
+        let Some(info) = subagents.get(child_session_id) else {
+            continue;
+        };
+        reserve = reserve.max(agent_overlay_columns(info));
+    }
+    reserve
 }
 
 /// Fill overlay cells with spaces so label text doesn't bleed through.
@@ -1414,8 +1475,21 @@ impl TasksPane {
             width: inner.width,
             height: inner.height - top - bottom,
         };
+        // Model name, forked badge, elapsed, view, and kill sit in this
+        // right strip. The list must not paint the row there.
+        let chip_reserve = agent_chip_reserve(
+            &self.entries,
+            self.list_state.scroll_offset(),
+            list_area.height,
+            subagents,
+        );
+        let text_width = list_area.width.saturating_sub(chip_reserve);
+        let text_area = Rect {
+            width: text_width,
+            ..list_area
+        };
         self.list_state
-            .prepare_layout(&self.entries, list_area.width, list_area.height);
+            .prepare_layout(&self.entries, text_width, list_area.height);
 
         // ListPane draws its scrollbar in the last column of the area it's
         // given. The overlay (right-aligned kill/view buttons) paints over
@@ -1424,14 +1498,19 @@ impl TasksPane {
         // just past the overlay's right edge.
         //
         // Only widen when the list will *actually* draw a scrollbar there
-        // (content overflows the viewport). When it won't, ListPane gives the
-        // full area to content — so the extra column would be filled with
-        // label text that bleeds one cell past the overlay's `[✗]` button
-        // (the overlay only clears within `list_area`). Keeping `lp_area ==
-        // list_area` in that case lets the overlay truncate the label cleanly
-        // before the button, with nothing rendered to its right.
+        // (content overflows the viewport) and no chip strip is reserved.
+        // When a strip is reserved, widening would paint row text onto the
+        // model and forked columns. When it won't scroll and nothing is
+        // reserved, ListPane gives the full area to content — so the extra
+        // column would be filled with label text that bleeds one cell past
+        // the overlay's `[✗]` button (the overlay only clears within
+        // `list_area`). Keeping `lp_area == list_area` in that case lets the
+        // overlay truncate the label cleanly before the button, with nothing
+        // rendered to its right.
         let needs_scrollbar = total > list_area.height as usize;
-        let lp_area = if needs_scrollbar && list_area.right() < area.right() {
+        let lp_area = if chip_reserve > 0 {
+            text_area
+        } else if needs_scrollbar && list_area.right() < area.right() {
             Rect {
                 width: list_area.width + 1,
                 ..list_area
@@ -1443,6 +1522,14 @@ impl TasksPane {
             .focused(focused)
             .style(self.list_style)
             .render(lp_area, buf, &mut self.list_state);
+        if chip_reserve > 0 && list_area.width > 0 {
+            let clear_w = chip_reserve.min(list_area.width);
+            let clear_x = list_area.x + list_area.width - clear_w;
+            let blanks = " ".repeat(clear_w as usize);
+            for y in list_area.y..list_area.y.saturating_add(list_area.height) {
+                buf.set_span(clear_x, y, &Span::raw(&blanks), clear_w);
+            }
+        }
 
         // The right-corner indicators (▲/▼) are suppressed for this pane;
         // instead we draw the same glyphs, in the same color, centered on the
@@ -3921,5 +4008,81 @@ mod tests {
             }
             _ => panic!("expected a workflow entry"),
         }
+    }
+
+    #[test]
+    fn operator_subagent_row_does_not_paint_on_forked_model_chip() {
+        let mut info = make_info();
+        info.model = Some("grok-4.7".into());
+        info.context_source = Some("forked".into());
+        info.finished = false;
+        let mut subagents = HashMap::new();
+        subagents.insert("cs-1".into(), info);
+        let mut pane = TasksPane::new();
+        pane.overlay.show();
+        pane.sync(
+            &BTreeMap::new(),
+            &subagents,
+            &HashMap::new(),
+            None,
+            &HashSet::new(),
+            &[],
+        );
+
+        let width = 160u16;
+        let height = 6u16;
+        let area = Rect::new(0, 0, width, height);
+        let mut buf = Buffer::empty(area);
+        let layout = crate::appearance::LayoutConfig::default();
+        pane.render(
+            area,
+            &mut buf,
+            false,
+            &layout,
+            &BTreeMap::new(),
+            &subagents,
+            &HashMap::new(),
+        );
+        let rows: Vec<String> = (0..height)
+            .map(|y| {
+                (0..width)
+                    .filter_map(|x| buf.cell((x, y)).map(|cell| cell.symbol().to_string()))
+                    .collect()
+            })
+            .collect();
+        let row = rows
+            .iter()
+            .find(|line| line.contains("grok-4.7"))
+            .expect("forked model chip must be on the row");
+        assert!(
+            row.contains("forked"),
+            "forked badge must stay on the row: {row}"
+        );
+        let model_at = row.find("grok-4.7").expect("model");
+        let model_cols = &row[model_at..model_at + "grok-4.7".len()];
+        assert_eq!(model_cols, "grok-4.7");
+        assert!(
+            !model_cols.contains("(estimate)"),
+            "model columns must not contain the estimate: {row}"
+        );
+        let forked_at = row.find("forked").expect("forked");
+        let chip_start = forked_at.min(model_at);
+        let left = &row[..chip_start];
+        assert!(
+            left.contains("(estimate)"),
+            "estimate stays on the row, left of the chips: {row}"
+        );
+        assert!(
+            !row.contains("not fetched") && !row.contains("tokens not fetched"),
+            "a missing host figure omits the token clause: {row}"
+        );
+        assert!(
+            !row.contains("2.6k") && !row.contains("500k"),
+            "the footer sampling window is not copied onto the row: {row}"
+        );
+        assert!(
+            left.contains("167.0k (estimate)"),
+            "167.0k stays an estimate, left of the chips: {row}"
+        );
     }
 }
