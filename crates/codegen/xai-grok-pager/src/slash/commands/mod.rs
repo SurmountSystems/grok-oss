@@ -79,6 +79,7 @@ pub mod toggle_mouse_reporting;
 pub mod transcript;
 pub mod tutorial;
 pub mod unstick;
+pub mod uptime;
 pub mod usage;
 pub mod view_plan;
 pub mod vim_mode;
@@ -138,6 +139,7 @@ pub fn builtin_commands() -> Vec<Arc<dyn SlashCommand>> {
         Arc::new(theme::ThemeCommand),
         Arc::new(feedback::FeedbackCommand),
         Arc::new(announcements::AnnouncementsCommand),
+        Arc::new(uptime::UptimeCommand),
         Arc::new(remember::RememberCommand),
         Arc::new(plan::PlanCommand),
         Arc::new(view_plan::ViewPlanCommand),

@@ -5,11 +5,11 @@
 //! unit tests.
 
 use crate::app::agent::BgTaskStatus;
-use crate::app::agent_view::AgentView;
 use crate::app::agent_view::l2_token_tracking::{
-    LiveJobRowInput, STANDING_WRAP_ESTIMATE_TOKENS, STANDING_WRAP_ESTIMATE_WALL,
-    display_live_job_row,
+    display_live_job_row, LiveJobRowInput, STANDING_WRAP_ESTIMATE_TOKENS,
+    STANDING_WRAP_ESTIMATE_WALL,
 };
+use crate::app::agent_view::AgentView;
 use crate::app::subagent::{
     format_live_l3_count, format_subagent_label_among, is_l2_list_row, live_l3_count,
     subagent_list_row_usage,
@@ -48,6 +48,74 @@ pub(crate) fn queue_block_text(agent: &AgentView) -> String {
         );
         join_header_rows(header, rows)
     }
+}
+
+/// `106.8k`, `140k`, `1.5M`, or a bare count under 1000. Not a word in parentheses.
+fn is_compact_token_figure(figure: &str) -> bool {
+    if figure.is_empty() {
+        return false;
+    }
+    let (number, suffixed) = if let Some(number) = figure.strip_suffix('k') {
+        (number, true)
+    } else if let Some(number) = figure.strip_suffix('M') {
+        (number, true)
+    } else {
+        (figure, false)
+    };
+    if number.is_empty() {
+        return false;
+    }
+    let mut parts = number.split('.');
+    let Some(whole) = parts.next() else {
+        return false;
+    };
+    if whole.is_empty() || !whole.bytes().all(|b| b.is_ascii_digit()) {
+        return false;
+    }
+    match parts.next() {
+        None => true,
+        Some(frac) if suffixed && frac.len() == 1 && frac.bytes().all(|b| b.is_ascii_digit()) => {
+            parts.next().is_none()
+        }
+        Some(_) => false,
+    }
+}
+
+fn split_trailing_paren(text: &str) -> Option<(&str, &str)> {
+    let trimmed = text.trim_end();
+    let without_close = trimmed.strip_suffix(')')?;
+    let open = without_close.rfind('(')?;
+    let inner = &without_close[open + 1..];
+    if inner.is_empty() || inner.contains('(') || inner.contains(')') {
+        return None;
+    }
+    Some((without_close[..open].trim_end(), inner))
+}
+
+fn strip_trailing_token_tails(text: &str, figure: &str) -> String {
+    if figure.is_empty() || !is_compact_token_figure(figure) {
+        return text.to_string();
+    }
+    let mut rest = text.trim_end().to_string();
+    while let Some((prefix, inner)) = split_trailing_paren(&rest) {
+        let suffixed = inner.ends_with('k') || inner.ends_with('M');
+        let duplicate = is_compact_token_figure(inner) && (suffixed || inner == figure);
+        if !duplicate {
+            break;
+        }
+        rest = prefix.to_string();
+    }
+    rest
+}
+
+/// One compact count at the end. A duplicate token-shaped tail is removed.
+/// `(review notes)` stays.
+fn keep_one_trailing_token_figure(text: &str, figure: &str) -> String {
+    let figure = figure.trim();
+    if figure.is_empty() || !is_compact_token_figure(figure) {
+        return text.to_string();
+    }
+    format!("{} ({figure})", strip_trailing_token_tails(text, figure))
 }
 
 ///
@@ -107,7 +175,7 @@ pub(crate) fn tasks_block_text(agent: &AgentView) -> String {
     });
     let all: Vec<_> = agent.subagent_sessions.values().collect();
     for info in subs {
-        let (type_label, desc) = format_subagent_label_among(info, &all);
+        let (type_label, mut desc) = format_subagent_label_among(info, &all);
         let status = if info.pending_kill {
             "stopping"
         } else if info.is_running() {
@@ -125,38 +193,34 @@ pub(crate) fn tasks_block_text(agent: &AgentView) -> String {
         } else {
             String::new()
         };
+        let elapsed_text = format_duration(info.display_elapsed());
+        // Same formatter as the tasks pane. One host figure on the label.
+        // No host figure omits the count. The labeled estimate is not
+        // painted. Do not add the figure to the L1 total or grok-oss sqlite.
+        let shown = display_live_job_row(LiveJobRowInput {
+            job: &desc,
+            estimate_wall: STANDING_WRAP_ESTIMATE_WALL,
+            estimate_tokens: STANDING_WRAP_ESTIMATE_TOKENS,
+            elapsed: &elapsed_text,
+            host_tokens: subagent_list_row_usage(info, &all),
+        });
+        debug_assert_eq!(shown.l1_tokens_added, 0);
+        debug_assert!(!shown.wrote_grok_oss_sqlite);
+        let _labeled_estimate_not_painted = (shown.estimate_wall, shown.estimate_tokens);
+        if !shown.actual_tokens.is_empty() {
+            desc = keep_one_trailing_token_figure(&desc, &shown.actual_tokens);
+        }
         let label = if desc.is_empty() {
             format!("{type_label}{l3}")
         } else {
             format!("{type_label} · {desc}{l3}")
         };
-        let elapsed_text = format_duration(info.display_elapsed());
-        // Running rows are live job rows. Same formatter as the tasks pane.
-        // A missing host figure omits the token clause. Do not print a placeholder.
-        // Do not add that figure to the L1 total or grok-oss sqlite.
-        let (elapsed, live_actual) = if info.is_running() {
-            let shown = display_live_job_row(LiveJobRowInput {
-                job: &label,
-                estimate_wall: STANDING_WRAP_ESTIMATE_WALL,
-                estimate_tokens: STANDING_WRAP_ESTIMATE_TOKENS,
-                elapsed: &elapsed_text,
-                host_tokens: subagent_list_row_usage(info, &all),
-            });
-            debug_assert_eq!(shown.l1_tokens_added, 0);
-            debug_assert!(!shown.wrote_grok_oss_sqlite);
-            (
-                shown.elapsed,
-                format!(
-                    " · {} · {}{}",
-                    shown.estimate_wall,
-                    shown.estimate_tokens,
-                    shown.actual_tokens_clause()
-                ),
-            )
+        let elapsed = if info.is_running() {
+            shown.elapsed
         } else {
-            (elapsed_text, String::new())
+            elapsed_text
         };
-        rows.push(format!("  {status:<9}{label}  ({elapsed}){live_actual}"));
+        rows.push(format!("  {status:<9}{label}  ({elapsed})"));
     }
 
     // ── Background tasks / monitors ──

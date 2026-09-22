@@ -74,7 +74,7 @@ Do not confuse these:
 | `/start` | Starts paused or interrupted work in the current session. Not the picker. |
 | `/unstick` | Resend the last parent prompt as if the network dropped it. Orphans a hung in-flight prompt. The leader drops that hung `session/prompt` the same way as a disconnected client. WAL images resend as resource links, never data URLs. Not `/resume`. Not a second Operator line. |
 | Running grok-oss sessions | `/running` (alias `/windows`) or `grok-oss running`. Live grok-oss TUI windows on this machine. Not the Agent Dashboard, and not disk history. |
-| L0 GUI | `grok-oss gui`. Laptop coordinator over that window list. Not `/dashboard` and not `/running`. |
+| L0 coordinator | From a laptop, `grok-oss gui --ssh nixbuilder@surmount-1` lists grok-oss windows on that VPS. Not `/dashboard` and not `/running`. This tree does not contain a separate L0 window. |
 
 `summary.json` is the index entry. It records the session summary and generated title, the model ID, the creation and update timestamps, the message counts, and a parent session reference for forked or restored sessions. `updates.jsonl` is the authoritative conversation log that drives `/resume` and session restore.
 
@@ -321,9 +321,14 @@ grok-oss running
 # Same filtered rows, safe fields only
 grok-oss running --json
 
-# L0 coordinator (safe JSON; not /dashboard and not /running)
+# L0 coordinator on this laptop (safe JSON; not /dashboard and not /running)
 grok-oss gui
+
+# List grok-oss windows on surmount-1
+grok-oss gui --ssh nixbuilder@surmount-1
 ```
+
+From a laptop, the travel command is `grok-oss gui --ssh nixbuilder@surmount-1`. That command lists grok-oss windows on surmount-1 and prints safe JSON. It does not print prompt text. Enqueue of a remote row copies the drop file `l0-enqueue/<session id>/enqueue.json` onto that host's grok home. The grok-oss session there drains that file the same way a local enqueue is drained. A remote row does not write that drop file on the laptop. L0 in this tree is `grok-oss gui` plus that pager drain. This tree does not contain a separate L0 window. From a laptop, `grok-oss gui --ssh <user@host> --session <session id>` reads the prompt from stdin and enqueues that one session on the SSH host, does not print the prompt, and does not write the laptop `l0-enqueue/` drop.
 
 `grok-oss running` is not `grok-oss sessions`. The sessions subcommand is disk history (list and search). `/rebuild` still signals each live grok-oss PID once (dedupe by PID) after two windows can share one conversation.
 

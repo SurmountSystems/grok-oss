@@ -564,6 +564,7 @@ pub const PAGER_COMMAND_KEYS: &[&str] = &[
     "t",
     "undo",
     "unstick",
+    "uptime",
     "usage",
     "view-plan",
     "vim-mode",

@@ -133,7 +133,7 @@ pub fn text_beside_status(dir: &Path, now_unix_ms: i64) -> String {
         super::window::format_tracking_off()
     } else {
         match UptimeStore::open(dir).and_then(|store| store.aggregate(now_unix_ms)) {
-            Ok(windows) => super::window::format_uptime_beside_status(&windows),
+            Ok(windows) => super::window::uptime_slash_output(&windows),
             Err(_) => super::window::format_tracking_off(),
         }
     };

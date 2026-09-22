@@ -2169,6 +2169,86 @@ pub(super) mod paste_key_tests {
         );
     }
 
+    /// Ctrl-V of one screenshot into the plan-approval Operator box is a
+    /// chip every time, including a second paste of the same bytes.
+    #[test]
+    fn two_pastes_of_one_image_payload_into_the_plan_approval_box_both_become_chips() {
+        let mut agent = make_agent();
+        agent.set_active_pane(ActivePane::Prompt, true);
+        park_plan_preview(&mut agent);
+        if let Some(ref mut pav) = agent.plan_approval_view {
+            pav.focus = crate::views::plan_approval_view::PlanApprovalFocus::Prompt;
+        }
+        assert!(
+            agent.plan_approval_view.as_ref().is_some_and(|pav| {
+                pav.focus == crate::views::plan_approval_view::PlanApprovalFocus::Prompt
+            }),
+            "the plan-approval Operator box is Prompt focus"
+        );
+        agent.prompt.textarea.insert_str("plan notes");
+        let payload = test_image_data();
+        let before = agent.prompt.images.len();
+        for n in 1..=2 {
+            agent.pending_effects.clear();
+            crate::clipboard::set_clipboard_probe_hook(
+                crate::clipboard::ClipboardProbeHook::with_raster(None),
+            );
+            let outcome =
+                agent.handle_input(&Event::Key(ctrl_v_key()), &ActionRegistry::defaults());
+            let ctx = deferred_probe_ctx(&agent);
+            crate::clipboard::clear_clipboard_probe_hook();
+            assert!(
+                matches!(outcome, InputOutcome::Changed),
+                "paste {n} into the plan-approval Operator box must not be a no-op, got {outcome:?}"
+            );
+            let ctx = ctx.expect("paste {n} must defer an image probe");
+            assert!(
+                matches!(
+                    ctx.target,
+                    crate::app::actions::ClipboardPasteTarget::AgentPrompt { .. }
+                ),
+                "paste {n} must target the Operator box"
+            );
+            let pasted = crate::prompt_images::from_clipboard_data(&payload);
+            agent.complete_clipboard_attachment_paste(
+                ctx,
+                crate::app::actions::ProbedAttachment::Image(pasted),
+                None,
+            );
+            assert_eq!(
+                agent.prompt.images.len(),
+                before + n,
+                "paste {n} must become a chip"
+            );
+        }
+        assert!(
+            agent.prompt.text().contains("[Image #1]")
+                && agent.prompt.text().contains("[Image #2]"),
+            "both pastes must be chips, got {:?}",
+            agent.prompt.text()
+        );
+        assert!(
+            agent.prompt.text().contains("plan notes"),
+            "the draft must stay, got {:?}",
+            agent.prompt.text()
+        );
+        assert_eq!(
+            agent.prompt.images[0].encoded_bytes.as_deref(),
+            agent.prompt.images[1].encoded_bytes.as_deref(),
+            "the second paste is the same image payload, not a different one"
+        );
+        assert_eq!(
+            agent.prompt.images[0].encoded_bytes.as_deref(),
+            Some(payload.data.as_slice()),
+        );
+        assert!(
+            agent.plan_approval_view.as_ref().is_some_and(|pav| {
+                pav.focus == crate::views::plan_approval_view::PlanApprovalFocus::Prompt
+            }),
+            "plan approval must stay on the Operator box"
+        );
+    }
+
     /// Regular file line-viewer paste stays on list search. Empty
     /// screenshot paste must not steal the Isolated Preview probe path.
     #[test]

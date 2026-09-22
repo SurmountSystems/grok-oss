@@ -82,8 +82,14 @@ pub enum Command {
         #[arg(long)]
         host: Option<String>,
         /// Fetch `/running --json` from this SSH target (`grok@surmount-1`).
+        /// With `--session`, this same `user@host` string is the remote enqueue target.
         #[arg(long)]
         ssh: Option<String>,
+        /// Enqueue this one session on the `--ssh` host.
+        /// The prompt is read from stdin and is not printed.
+        /// Does not write the laptop `l0-enqueue/` drop.
+        #[arg(long, value_name = "SESSION_ID")]
+        session: Option<String>,
     },
     /// Fetch and install managed configuration
     Setup {
@@ -1089,6 +1095,146 @@ impl PagerArgs {
             .filter(|s| !s.is_empty())
     }
 }
+
+/// What `grok-oss gui` does with its argv.
+///
+/// Laptop `CoordinatorApp::enqueue_selected` is not a variant. A session id
+/// with `--ssh` selects [`GuiEnqueueDispatch::RemoteEnqueue`], which calls
+/// `enqueue_selected_on_remote`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GuiEnqueueDispatch {
+    /// List windows. Does not enqueue.
+    List {
+        host: Option<String>,
+        ssh: Option<String>,
+    },
+    /// One remote session. Calls `enqueue_selected_on_remote`.
+    RemoteEnqueue {
+        user_at_host: String,
+        session_id: String,
+        host_label: String,
+    },
+}
+
+impl GuiEnqueueDispatch {
+    /// Method this command calls when it enqueues.
+    /// `None` when it only lists. Never `enqueue_selected`.
+    pub fn enqueue_method(&self) -> Option<&'static str> {
+        match self {
+            Self::List { .. } => None,
+            Self::RemoteEnqueue { .. } => Some("enqueue_selected_on_remote"),
+        }
+    }
+}
+
+/// Choose list versus remote enqueue. Does not open a socket and does not
+/// write a drop file.
+pub fn gui_enqueue_dispatch(
+    host: Option<String>,
+    ssh: Option<String>,
+    session: Option<String>,
+) -> Result<GuiEnqueueDispatch, String> {
+    let Some(raw_session) = session else {
+        return Ok(GuiEnqueueDispatch::List { host, ssh });
+    };
+    let session_id = raw_session.trim();
+    if session_id.is_empty() {
+        return Err("grok-oss gui --session needs a session id".to_string());
+    }
+    let Some(raw_ssh) = ssh else {
+        return Err(
+            "grok-oss gui --session needs --ssh USER@HOST; this command does not write the laptop l0-enqueue drop"
+                .to_string(),
+        );
+    };
+    let user_at_host = raw_ssh.trim();
+    if user_at_host.is_empty()
+        || !user_at_host.contains('@')
+        || user_at_host.contains(' ')
+        || user_at_host.contains('\0')
+    {
+        return Err("SSH target must look like user@host".to_string());
+    }
+    let host_part = user_at_host
+        .split_once('@')
+        .map(|(_, name)| name.trim())
+        .unwrap_or("");
+    if host_part.is_empty() {
+        return Err("SSH target must look like user@host".to_string());
+    }
+    let host_label = remote_host_label(host.as_deref(), host_part);
+    Ok(GuiEnqueueDispatch::RemoteEnqueue {
+        user_at_host: user_at_host.to_string(),
+        session_id: session_id.to_string(),
+        host_label,
+    })
+}
+
+fn remote_host_label(host: Option<&str>, host_part: &str) -> String {
+    if let Some(name) = host.map(str::trim).filter(|name| !name.is_empty()) {
+        if !name.eq_ignore_ascii_case("local") {
+            return name.to_string();
+        }
+    }
+    host_part.to_string()
+}
+
+/// Read the prompt from stdin and call `enqueue_selected_on_remote`.
+/// Does not call `enqueue_selected`. Does not print the prompt.
+pub fn run_gui_remote_enqueue(
+    host_label: &str,
+    user_at_host: &str,
+    session_id: &str,
+) -> anyhow::Result<()> {
+    use std::io::{Read, Write};
+
+    let mut raw = String::new();
+    std::io::stdin()
+        .read_to_string(&mut raw)
+        .map_err(|err| anyhow::anyhow!("could not read the enqueue prompt from stdin: {err}"))?;
+    let prompt = raw.trim();
+    if prompt.is_empty() {
+        anyhow::bail!("enqueue prompt is empty");
+    }
+    let remote_json = serde_json::to_string(&serde_json::json!([{
+        "pid": 1,
+        "session_id": session_id,
+        "cwd": ".",
+    }]))
+    .map_err(|err| anyhow::anyhow!("could not encode the remote session row: {err}"))?;
+    let mut app = surmount_coordinator_gui::CoordinatorApp::load(
+        xai_grok_config::grok_home(),
+        "[]",
+        Some((host_label, remote_json.as_str())),
+    )
+    .map_err(|err| anyhow::anyhow!("{err}"))?;
+    app.select(0);
+    if !matches!(
+        app.selected().map(|row| &row.host),
+        Some(surmount_coordinator_gui::SessionHost::Remote(_))
+    ) {
+        anyhow::bail!(
+            "session is not on the remote host; this command does not write the laptop l0-enqueue drop"
+        );
+    }
+    let spec = surmount_coordinator_gui::SshInstallSpec {
+        user_at_host: user_at_host.to_string(),
+        remote_grok_home: std::path::PathBuf::from(
+            surmount_coordinator_gui::DEFAULT_GUEST_GROK_HOME,
+        ),
+    };
+    let installer = surmount_coordinator_gui::SshDeployInstall;
+    let report = app
+        .enqueue_selected_on_remote(prompt, &spec, &installer)
+        .map_err(|err| anyhow::anyhow!("{err}"))?;
+    let line = format!(
+        "enqueued session {} at {}",
+        report.session_id, report.remote_dest
+    );
+    let written = writeln!(std::io::stdout(), "{line}");
+    Ok(crate::util::ignore_broken_pipe(written)?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1605,5 +1751,67 @@ mod tests {
             panic!("expected agent subcommand");
         };
         assert_eq!(agent.reasoning_effort.as_deref(), Some("max"));
+    }
+
+    /// Named contract: `grok-oss gui --ssh USER@HOST --session ID` selects
+    /// remote enqueue (`enqueue_selected_on_remote`) and not laptop
+    /// `enqueue_selected`.
+    #[test]
+    fn gui_ssh_session_argv_dispatches_remote_enqueue_not_laptop_enqueue_selected() {
+        let parsed = PagerArgs::try_parse_from([
+            "grok-oss",
+            "gui",
+            "--ssh",
+            "nixbuilder@surmount-1",
+            "--session",
+            "sess-remote",
+        ])
+        .expect("gui --ssh --session parses");
+        let Some(Command::Gui { host, ssh, session }) = parsed.command else {
+            panic!("expected gui");
+        };
+        let dispatch = gui_enqueue_dispatch(host, ssh, session).expect("remote dispatch");
+        let method = dispatch
+            .enqueue_method()
+            .expect("remote enqueue selects a method");
+        assert_eq!(method, "enqueue_selected_on_remote");
+        assert_ne!(method, "enqueue_selected");
+        assert!(
+            matches!(
+                dispatch,
+                GuiEnqueueDispatch::RemoteEnqueue {
+                    ref user_at_host,
+                    ref session_id,
+                    ref host_label,
+                } if user_at_host == "nixbuilder@surmount-1"
+                    && session_id == "sess-remote"
+                    && host_label == "surmount-1"
+            ),
+            "argv must select remote enqueue, got {dispatch:?}"
+        );
+
+        let listed =
+            PagerArgs::try_parse_from(["grok-oss", "gui", "--ssh", "nixbuilder@surmount-1"])
+                .expect("gui --ssh lists");
+        let Some(Command::Gui { host, ssh, session }) = listed.command else {
+            panic!("expected gui list");
+        };
+        let list = gui_enqueue_dispatch(host, ssh, session).expect("list");
+        assert_eq!(list.enqueue_method(), None);
+        assert!(
+            matches!(list, GuiEnqueueDispatch::List { .. }),
+            "ssh without --session must not enqueue"
+        );
+
+        let err = gui_enqueue_dispatch(None, None, Some("sess-remote".into()))
+            .expect_err("session without ssh must not select laptop enqueue");
+        assert!(
+            !err.contains("enqueue_selected"),
+            "refusing --session without --ssh must not name laptop enqueue_selected; got {err}"
+        );
+        assert!(
+            err.contains("does not write the laptop l0-enqueue drop"),
+            "{err}"
+        );
     }
 }

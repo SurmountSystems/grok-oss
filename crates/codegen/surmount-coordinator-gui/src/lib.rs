@@ -1,19 +1,22 @@
-//! Application state the Surmount GPUI L0 window will call.
+//! Laptop coordinator state for `grok-oss gui`.
 //!
 //! Parses `/running`-shaped JSON (`grok-oss running --json`). Keeps pid,
 //! session id, cwd, and other safe fields. Drops prompt text, tool
-//! arguments, tokens, and JWTs. Tags each row local or remote. Writes a
-//! per-session enqueue drop file. `CoordinatorApp` holds the session list
-//! and selected index for that window. The laptop-side action
-//! **set remote host console API key** writes a staging file for a
-//! machine xAI console API key (console API credits / console team
-//! prepaid). It never prints the key. It does not open git on the guest.
+//! arguments, tokens, and JWTs. Tags each row local or remote. A local
+//! row writes `{grok_home}/l0-enqueue/{session_id}/enqueue.json`. A remote
+//! row copies that same file onto that host's grok home and does not write
+//! the laptop drain path. `CoordinatorApp` holds the session list and the
+//! selected index. The laptop-side action **set remote host console API key**
+//! writes a staging file for a machine xAI console API key (console API
+//! credits / console team prepaid). It never prints the key. It does not
+//! open git on the guest.
 //!
 //! This crate is not a grok-oss TUI dashboard. `/dashboard` stays the
 //! pager Agent Dashboard. `/running` stays this machine's grok-oss
 //! sessions. The `surmount-coordinator-gui` binary reads `/running --json`
-//! and prints safe JSON. It is not a TUI. This crate does not depend on
-//! gpui.
+//! and prints safe JSON. It is not a TUI. L0 in this tree is this state
+//! plus the pager drain that reads the enqueue drop file. This tree does
+//! not contain a separate L0 window. This crate does not depend on gpui.
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -165,7 +168,7 @@ impl From<serde_json::Error> for EnqueueError {
     }
 }
 
-/// Session list and selected row for the GPUI window.
+/// Session list and selected row for the laptop coordinator.
 #[derive(Debug, Clone)]
 pub struct CoordinatorApp {
     grok_home: PathBuf,
@@ -221,10 +224,10 @@ impl CoordinatorApp {
         }
     }
 
-    /// Write the enqueue drop file for the selected **local** session.
-    /// Remote-tagged rows error instead of writing a laptop drop file that
-    /// the remote grok-oss window will never drain. Use
-    /// [`Self::enqueue_selected_on_remote`] to scp onto the guest grok home.
+    /// Write the enqueue drop file for the selected local session.
+    /// A remote-tagged row returns [`EnqueueError::RemoteHost`] and does not
+    /// write `{grok_home}/l0-enqueue/` on this laptop. Copy that same file
+    /// onto the guest with [`Self::enqueue_selected_on_remote`].
     pub fn enqueue_selected(&self, prompt: &str) -> Result<PathBuf, EnqueueError> {
         let session = self.selected().ok_or(EnqueueError::NoSessionSelected)?;
         if let SessionHost::Remote(host) = &session.host {
@@ -317,10 +320,9 @@ struct EnqueueDrop<'a> {
     prompt: &'a str,
 }
 
-/// Path where the GPUI app drops an enqueue file for one session.
-///
-/// `{grok_home}/l0-enqueue/{session_id}/enqueue.json`. `None` when
-/// `session_id` is empty or not a single path component.
+/// `{grok_home}/l0-enqueue/{session_id}/enqueue.json`. The pager drain
+/// reads this path. `None` when `session_id` is empty or not a single
+/// path component.
 pub fn enqueue_drop_path(grok_home: &Path, session_id: &str) -> Option<PathBuf> {
     let sid = sanitize_session_id(session_id)?;
     Some(grok_home.join(ENQUEUE_DIR).join(sid).join(ENQUEUE_FILE))
@@ -390,8 +392,13 @@ pub struct RemoteEnqueueReport {
     pub ssh_copy_commands: Vec<String>,
 }
 
-/// Write a staging drop on the laptop, then copy it to the guest grok home
-/// so that host's grok-oss can drain it. Does not write laptop `l0-enqueue/`.
+/// Stage a drop outside the laptop drain directory, create the guest
+/// directory, then copy `enqueue.json` to
+/// `{remote_grok_home}/l0-enqueue/{session_id}/enqueue.json`.
+///
+/// The SSH target is the same `user@host` string `grok-oss gui --ssh` passes
+/// to [`fetch_remote_running_ssh_argv`]. Does not write laptop `l0-enqueue/`.
+/// Does not put the prompt in the returned report.
 pub fn write_remote_enqueue(
     grok_home: &Path,
     host: &str,
@@ -405,6 +412,21 @@ pub fn write_remote_enqueue(
     }
     let staging = remote_enqueue_staging_path(grok_home, host, session_id)
         .ok_or(EnqueueError::UnsafeSessionId)?;
+    let ssh_argv = fetch_remote_running_ssh_argv(spec.user_at_host.trim())?;
+    let user_at_host = ssh_argv.get(1).cloned().ok_or_else(|| {
+        EnqueueError::RemoteCopy("SSH target must look like user@host".to_string())
+    })?;
+    let sid = sanitize_session_id(session_id).ok_or(EnqueueError::UnsafeSessionId)?;
+    let home = spec
+        .remote_grok_home
+        .to_string_lossy()
+        .trim_end_matches('/')
+        .to_string();
+    let remote_dir = format!("{home}/{ENQUEUE_DIR}/{sid}");
+    let remote_file = format!("{remote_dir}/{ENQUEUE_FILE}");
+    let mkdir = crate::remote_console_key::ssh_mkdir_argv(&user_at_host, &remote_dir)
+        .map_err(EnqueueError::RemoteCopy)?;
+    let dest = format!("{user_at_host}:{remote_file}");
     if let Some(parent) = staging.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -415,27 +437,10 @@ pub fn write_remote_enqueue(
         use std::os::unix::fs::PermissionsExt;
         let _ = std::fs::set_permissions(&staging, std::fs::Permissions::from_mode(0o600));
     }
-    let user_at_host = spec.user_at_host.trim();
-    if user_at_host.is_empty() || !user_at_host.contains('@') {
-        return Err(EnqueueError::RemoteCopy(
-            "SSH target must look like grok@surmount-1".to_string(),
-        ));
-    }
-    let sid = sanitize_session_id(session_id).ok_or(EnqueueError::UnsafeSessionId)?;
-    let home = spec
-        .remote_grok_home
-        .to_string_lossy()
-        .trim_end_matches('/')
-        .to_string();
-    let remote_dir = format!("{home}/{ENQUEUE_DIR}/{sid}");
-    let remote_file = format!("{remote_dir}/{ENQUEUE_FILE}");
-    let dest = format!("{user_at_host}:{remote_file}");
-    let mkdir = [
-        "ssh".to_string(),
-        user_at_host.to_string(),
-        format!("mkdir -p {remote_dir}"),
-    ];
     let scp = crate::remote_console_key::scp_copy_argv(&staging, &dest);
+    installer
+        .prepare_remote_dir(&user_at_host, &remote_dir)
+        .map_err(EnqueueError::RemoteCopy)?;
     installer
         .install_owner_only_file(&staging, &dest)
         .map_err(EnqueueError::RemoteCopy)?;
@@ -871,6 +876,160 @@ mod tests {
         assert_eq!(
             argv,
             ["ssh", "grok@surmount-1", "grok-oss", "running", "--json"]
+        );
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[derive(Debug)]
+    enum DeliveryStep {
+        Prepare {
+            user_at_host: String,
+            remote_dir: String,
+        },
+        Copy {
+            bytes: Vec<u8>,
+            dest: String,
+        },
+    }
+
+    struct DeliveryInstall {
+        steps: std::sync::Mutex<Vec<DeliveryStep>>,
+    }
+
+    impl crate::remote_console_key::HostFileInstall for DeliveryInstall {
+        fn prepare_remote_dir(&self, user_at_host: &str, remote_dir: &str) -> Result<(), String> {
+            self.steps
+                .lock()
+                .expect("steps")
+                .push(DeliveryStep::Prepare {
+                    user_at_host: user_at_host.to_string(),
+                    remote_dir: remote_dir.to_string(),
+                });
+            Ok(())
+        }
+
+        fn install_owner_only_file(&self, local: &Path, dest: &str) -> Result<(), String> {
+            let bytes = fs::read(local).map_err(|err| err.to_string())?;
+            self.steps.lock().expect("steps").push(DeliveryStep::Copy {
+                bytes,
+                dest: dest.to_string(),
+            });
+            Ok(())
+        }
+    }
+
+    /// Remote enqueue copies the drain file for that session id and still
+    /// writes no laptop `l0-enqueue/` drop. The bytes are the JSON the pager
+    /// drain already reads. Coordinator JSON does not include the prompt.
+    #[test]
+    fn remote_enqueue_copies_the_drain_file_onto_the_guest_grok_home() {
+        let home = test_home();
+        let remote_json = r#"[{"pid": 9, "session_id": "sess-remote", "cwd": "/tmp/r"}]"#;
+        let mut app =
+            CoordinatorApp::load(&home, two_session_json(), Some(("surmount-1", remote_json)))
+                .unwrap();
+        app.select(2);
+        let refused = app
+            .enqueue_selected("remote-drop-for-sess-remote-only")
+            .expect_err("laptop enqueue stays refused");
+        match refused {
+            crate::EnqueueError::RemoteHost { host } => assert_eq!(host, "surmount-1"),
+            other => panic!("expected RemoteHost, got {other}"),
+        }
+        assert!(
+            !home.join("l0-enqueue").exists(),
+            "refusing a remote row must not create the laptop drain directory"
+        );
+
+        let installer = DeliveryInstall {
+            steps: std::sync::Mutex::new(Vec::new()),
+        };
+        let spec = crate::remote_console_key::SshInstallSpec {
+            user_at_host: "nixbuilder@surmount-1".into(),
+            remote_grok_home: PathBuf::from(crate::DEFAULT_GUEST_GROK_HOME),
+        };
+        let prompt = "remote-drop-for-sess-remote-only";
+        let report = app
+            .enqueue_selected_on_remote(prompt, &spec, &installer)
+            .expect("remote delivery");
+
+        let remote_dir = format!(
+            "{}/l0-enqueue/sess-remote",
+            crate::DEFAULT_GUEST_GROK_HOME.trim_end_matches('/')
+        );
+        let remote_file = format!("{remote_dir}/enqueue.json");
+        assert_eq!(
+            report.remote_dest,
+            format!("nixbuilder@surmount-1:{remote_file}")
+        );
+        assert_eq!(report.session_id, "sess-remote");
+        assert_eq!(report.host, "surmount-1");
+        let mkdir = crate::remote_console_key::ssh_mkdir_argv("nixbuilder@surmount-1", &remote_dir)
+            .expect("mkdir argv");
+        let mkdir_line = mkdir.join(" ");
+        assert_eq!(
+            report.ssh_copy_commands.first().map(String::as_str),
+            Some(mkdir_line.as_str())
+        );
+        let listed = fetch_remote_running_ssh_argv("nixbuilder@surmount-1").unwrap();
+        assert_eq!(
+            listed.get(1).map(String::as_str),
+            Some("nixbuilder@surmount-1")
+        );
+        assert!(
+            !home.join("l0-enqueue/sess-remote/enqueue.json").exists(),
+            "must not write a laptop drain file for a remote session"
+        );
+        assert!(
+            home.join("l0-remote-enqueue/surmount-1/sess-remote/enqueue.json")
+                .exists(),
+            "staging file is the scp source, not the laptop drain path"
+        );
+
+        let steps = installer.steps.lock().expect("steps");
+        assert_eq!(steps.len(), 2, "mkdir then copy, got {steps:?}");
+        match &steps[0] {
+            DeliveryStep::Prepare {
+                user_at_host,
+                remote_dir: dir,
+            } => {
+                assert_eq!(user_at_host, "nixbuilder@surmount-1");
+                assert_eq!(dir, &remote_dir);
+            }
+            DeliveryStep::Copy { .. } => panic!("directory must be created before the copy"),
+        }
+        match &steps[1] {
+            DeliveryStep::Copy { bytes, dest } => {
+                assert_eq!(dest, &report.remote_dest);
+                let val: Value = serde_json::from_slice(bytes).expect("drop json");
+                assert_eq!(val, serde_json::json!({ "prompt": prompt }));
+                assert_eq!(
+                    val.as_object().expect("object").len(),
+                    1,
+                    "drain reads prompt and nothing else"
+                );
+                let expected = serde_json::to_vec_pretty(&serde_json::json!({ "prompt": prompt }))
+                    .expect("pretty");
+                assert_eq!(bytes, &expected);
+            }
+            DeliveryStep::Prepare { .. } => panic!("copy must follow mkdir"),
+        }
+        drop(steps);
+
+        let shown = format_running_sessions_json(app.displayed_fields()).unwrap();
+        assert!(
+            !shown.contains(prompt),
+            "coordinator JSON must not include the prompt; got {shown}"
+        );
+        let report_debug = format!("{report:?}");
+        assert!(
+            !report_debug.contains(prompt),
+            "enqueue report must not include the prompt; got {report_debug}"
+        );
+        let commands = report.ssh_copy_commands.join("\n");
+        assert!(
+            !commands.contains(prompt),
+            "copy commands must not include the prompt; got {commands}"
         );
         let _ = fs::remove_dir_all(&home);
     }

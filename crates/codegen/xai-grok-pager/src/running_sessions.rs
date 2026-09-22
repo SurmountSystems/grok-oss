@@ -281,7 +281,8 @@ mod tests {
             plain.command,
             Some(Command::Gui {
                 host: None,
-                ssh: None
+                ssh: None,
+                session: None,
             })
         ));
         let remote =
@@ -290,7 +291,8 @@ mod tests {
             remote.command,
             Some(Command::Gui {
                 host: Some(h),
-                ssh: None
+                ssh: None,
+                session: None,
             }) if h == "surmount-1"
         ));
         let running = PagerArgs::try_parse_from(["grok-oss", "running"]).unwrap();

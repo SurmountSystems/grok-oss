@@ -8725,7 +8725,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "567584a3b0e6a8203c23de40b4861497266725eb5363dbfd18a1edd603cca9f0"
 dependencies = [
  "cfg-if",
- "crossterm 0.29.0",
+ "crossterm",
  "instability",
  "ratatui-core",
 ]
@@ -13861,7 +13861,7 @@ dependencies = [
  "anstyle",
  "anstyle-lossy",
  "criterion",
- "crossterm 0.29.0",
+ "crossterm",
  "html-escape",
  "linkify",
  "pretty_assertions",
@@ -14000,7 +14000,7 @@ dependencies = [
  "clap_complete",
  "core-foundation",
  "criterion",
- "crossterm 0.29.0",
+ "crossterm",
  "derive_more",
  "dirs 5.0.1",
  "dunce",
@@ -14133,7 +14133,7 @@ name = "xai-grok-pager-minimal"
 version = "0.1.0"
 dependencies = [
  "chrono",
- "crossterm 0.29.0",
+ "crossterm",
  "ratatui",
  "similar",
  "tokio",
@@ -14180,7 +14180,7 @@ dependencies = [
  "anstyle",
  "anyhow",
  "base64 0.22.1",
- "crossterm 0.29.0",
+ "crossterm",
  "dark-light",
  "dirs 5.0.1",
  "documented",
@@ -15085,7 +15085,7 @@ dependencies = [
  "anyhow",
  "colored_json",
  "criterion",
- "crossterm 0.29.0",
+ "crossterm",
  "lipsum",
  "ratatui",
  "serde_json",
@@ -15099,7 +15099,7 @@ version = "0.1.0"
 dependencies = [
  "arboard",
  "chrono",
- "crossterm 0.29.0",
+ "crossterm",
  "fuzzy-matcher",
  "ignore",
  "itertools 0.14.0",

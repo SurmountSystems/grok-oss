@@ -1908,12 +1908,26 @@ async fn async_main() -> Result<()> {
                 init_tracing_simple("cli");
                 return xai_grok_pager::running_sessions::run_cli(json);
             }
-            Command::Gui { host, ssh } => {
+            Command::Gui { host, ssh, session } => {
                 init_tracing_simple("cli");
-                return xai_grok_pager::running_sessions::run_gui_cli(
-                    host.as_deref(),
-                    ssh.as_deref(),
-                );
+                return match xai_grok_pager::app::cli::gui_enqueue_dispatch(host, ssh, session) {
+                    Ok(xai_grok_pager::app::cli::GuiEnqueueDispatch::List { host, ssh }) => {
+                        xai_grok_pager::running_sessions::run_gui_cli(
+                            host.as_deref(),
+                            ssh.as_deref(),
+                        )
+                    }
+                    Ok(xai_grok_pager::app::cli::GuiEnqueueDispatch::RemoteEnqueue {
+                        user_at_host,
+                        session_id,
+                        host_label,
+                    }) => xai_grok_pager::app::cli::run_gui_remote_enqueue(
+                        &host_label,
+                        &user_at_host,
+                        &session_id,
+                    ),
+                    Err(err) => Err(anyhow::anyhow!("{err}")),
+                };
             }
             Command::Sessions(sessions_args) => {
                 init_tracing_simple("cli");

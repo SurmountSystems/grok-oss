@@ -19,12 +19,12 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::app::agent::{BgTaskState, BgTaskStatus, ScheduledTaskInfo};
 use crate::app::agent_view::l2_token_tracking::{
-    LiveJobRowInput, STANDING_WRAP_ESTIMATE_TOKENS, STANDING_WRAP_ESTIMATE_WALL,
-    display_live_job_row,
+    display_live_job_row, LiveJobRowInput, STANDING_WRAP_ESTIMATE_TOKENS,
+    STANDING_WRAP_ESTIMATE_WALL,
 };
 use crate::app::subagent::{
-    SubagentInfo, format_context_badge, format_live_l3_count, format_subagent_label_parts_among,
-    is_l2_list_row, listed_live_subagents, live_l3_count, subagent_list_row_usage,
+    format_context_badge, format_live_l3_count, format_subagent_label_parts_among, is_l2_list_row,
+    listed_live_subagents, live_l3_count, subagent_list_row_usage, SubagentInfo,
 };
 use crate::appearance::LayoutConfig;
 use crate::scrollback::layout::HorizontalLayout;
@@ -270,6 +270,66 @@ pub enum TaskEntry {
     },
 }
 
+/// `106.8k`, `140k`, `1.5M`, or a bare count under 1000. Not a word in parentheses.
+fn is_compact_token_figure(figure: &str) -> bool {
+    if figure.is_empty() {
+        return false;
+    }
+    let (number, suffixed) = if let Some(number) = figure.strip_suffix('k') {
+        (number, true)
+    } else if let Some(number) = figure.strip_suffix('M') {
+        (number, true)
+    } else {
+        (figure, false)
+    };
+    if number.is_empty() {
+        return false;
+    }
+    let mut parts = number.split('.');
+    let Some(whole) = parts.next() else {
+        return false;
+    };
+    if whole.is_empty() || !whole.bytes().all(|b| b.is_ascii_digit()) {
+        return false;
+    }
+    match parts.next() {
+        None => true,
+        Some(frac) if suffixed && frac.len() == 1 && frac.bytes().all(|b| b.is_ascii_digit()) => {
+            parts.next().is_none()
+        }
+        Some(_) => false,
+    }
+}
+
+fn split_trailing_paren(text: &str) -> Option<(&str, &str)> {
+    let trimmed = text.trim_end();
+    let without_close = trimmed.strip_suffix(')')?;
+    let open = without_close.rfind('(')?;
+    let inner = &without_close[open + 1..];
+    if inner.is_empty() || inner.contains('(') || inner.contains(')') {
+        return None;
+    }
+    Some((without_close[..open].trim_end(), inner))
+}
+
+/// Drop a trailing compact count when this row also paints that figure.
+/// `(106.8k)` goes. `(review notes)` stays. A count that is not a tail stays.
+fn strip_trailing_token_tails(text: &str, figure: &str) -> String {
+    if figure.is_empty() || !is_compact_token_figure(figure) {
+        return text.to_string();
+    }
+    let mut rest = text.trim_end().to_string();
+    while let Some((prefix, inner)) = split_trailing_paren(&rest) {
+        let suffixed = inner.ends_with('k') || inner.ends_with('M');
+        let duplicate = is_compact_token_figure(inner) && (suffixed || inner == figure);
+        if !duplicate {
+            break;
+        }
+        rest = prefix.to_string();
+    }
+    rest
+}
+
 impl TaskEntry {
     fn from_bg_task(
         task: &BgTaskState,
@@ -375,7 +435,38 @@ impl TaskEntry {
         // "general") plus job description with any `[tag]` prefix stripped.
         // Compact count is a separate span so truncation cannot become
         // `112.6k token...`. Unit is implicit. Never the word `tokens`.
-        let (type_label, job_desc, compact) = format_subagent_label_parts_among(info, all);
+        let (type_label, mut job_desc, mut compact) = format_subagent_label_parts_among(info, all);
+        // One host figure, painted later as the compact span. A token-shaped
+        // tail such as `(106.8k)` is removed when that figure is shown.
+        // No host figure omits the count. The labeled estimate is not painted.
+        // Do not add the figure to the L1 total or grok-oss sqlite.
+        let live_elapsed = if info.is_running() {
+            let elapsed_text = format_duration(info.display_elapsed());
+            let shown = display_live_job_row(LiveJobRowInput {
+                job: job_desc.as_str(),
+                estimate_wall: STANDING_WRAP_ESTIMATE_WALL,
+                estimate_tokens: STANDING_WRAP_ESTIMATE_TOKENS,
+                elapsed: &elapsed_text,
+                host_tokens: subagent_list_row_usage(info, all),
+            });
+            debug_assert_eq!(shown.l1_tokens_added, 0);
+            debug_assert!(!shown.wrote_grok_oss_sqlite);
+            let _labeled_estimate_not_painted = (shown.estimate_wall, shown.estimate_tokens);
+            let elapsed = shown.elapsed;
+            if shown.actual_tokens.is_empty() {
+                compact = None;
+            } else {
+                let figure = shown.actual_tokens;
+                job_desc = strip_trailing_token_tails(&job_desc, &figure);
+                compact = Some(figure);
+            }
+            Some(elapsed)
+        } else if let Some(figure) = compact.clone() {
+            job_desc = strip_trailing_token_tails(&job_desc, &figure);
+            None
+        } else {
+            None
+        };
         let model_suffix = info
             .model
             .as_deref()
@@ -447,30 +538,9 @@ impl TaskEntry {
         if let Some(ref compact) = compact {
             spans.push(Span::styled(format!(" ({compact})"), desc_style));
         }
-        // Live job row. `TasksPane::render` paints this span via `ListItem::content`.
-        // Host figure only. No figure omits the token clause. Do not print a placeholder.
-        // The standing estimate stays labeled as an estimate. This span must not
-        // say tokens: Subagents list chrome omits that word. Do not add the
-        // figure to the L1 total or grok-oss sqlite.
-        if info.is_running() {
-            let elapsed_text = format_duration(info.display_elapsed());
-            let shown = display_live_job_row(LiveJobRowInput {
-                job: job_desc.as_str(),
-                estimate_wall: STANDING_WRAP_ESTIMATE_WALL,
-                estimate_tokens: STANDING_WRAP_ESTIMATE_TOKENS,
-                elapsed: &elapsed_text,
-                host_tokens: subagent_list_row_usage(info, all),
-            });
-            debug_assert_eq!(shown.l1_tokens_added, 0);
-            debug_assert!(!shown.wrote_grok_oss_sqlite);
-            let live_text = format!(
-                " {} · {} · {}{}",
-                shown.estimate_wall,
-                shown.estimate_tokens,
-                shown.elapsed,
-                shown.actual_tokens_clause()
-            );
-            spans.push(Span::styled(live_text, desc_style));
+        // Elapsed only. The compact span above is the one host figure.
+        if let Some(elapsed) = live_elapsed {
+            spans.push(Span::styled(format!(" {elapsed}"), desc_style));
         }
         if let Some(count) = format_live_l3_count(live_l3) {
             spans.push(Span::styled(
@@ -3474,6 +3544,50 @@ mod tests {
         );
     }
 
+    /// Description tail `(106.8k)` and atomic figure `106.8k` paint once.
+    /// The standing estimate is not on the line. Unrelated parentheses stay.
+    #[test]
+    fn l2_row_paints_atomic_figure_once_and_strips_duplicate_token_tail() {
+        let mut info = make_info();
+        info.description = Arc::from("Wrap the parser (106.8k)");
+        info.tokens_used = Some(106_800);
+        let joined = styled_agent_line(&entry_from_subagent(&info));
+        assert_eq!(
+            joined.matches("106.8k").count(),
+            1,
+            "atomic figure paints once, got {joined:?}"
+        );
+        assert!(
+            !joined.contains("167.0k") && !joined.contains("19.4 minutes"),
+            "row must not paint the standing estimate, got {joined:?}"
+        );
+
+        info.description = Arc::from("Wrap the parser (review notes) (106.8k)");
+        let joined = styled_agent_line(&entry_from_subagent(&info));
+        assert!(
+            joined.contains("(review notes)"),
+            "unrelated parentheses stay, got {joined:?}"
+        );
+        assert_eq!(
+            joined.matches("106.8k").count(),
+            1,
+            "atomic figure still paints once, got {joined:?}"
+        );
+        assert!(
+            !joined.contains("167.0k") && !joined.contains("19.4 minutes"),
+            "row must not paint the standing estimate, got {joined:?}"
+        );
+    }
+
+    fn styled_agent_line(entry: &TaskEntry) -> String {
+        match entry {
+            TaskEntry::Agent { styled, .. } => {
+                styled.spans.iter().map(|s| s.content.as_ref()).collect()
+            }
+            _ => panic!("expected Agent variant"),
+        }
+    }
+
     #[test]
     fn subagent_activity_suffix_renders_while_running_only() {
         let mut info = make_info();
@@ -3872,11 +3986,10 @@ mod tests {
             &HashSet::new(),
             &runs,
         );
-        assert!(
-            pane.items
-                .iter()
-                .all(|e| !matches!(e, TaskEntry::Agent { .. }))
-        );
+        assert!(pane
+            .items
+            .iter()
+            .all(|e| !matches!(e, TaskEntry::Agent { .. })));
         assert_eq!(
             pane.running_count(&BTreeMap::new(), &subagents, &HashMap::new(), &runs),
             1
@@ -4065,13 +4178,6 @@ mod tests {
             !model_cols.contains("(estimate)"),
             "model columns must not contain the estimate: {row}"
         );
-        let forked_at = row.find("forked").expect("forked");
-        let chip_start = forked_at.min(model_at);
-        let left = &row[..chip_start];
-        assert!(
-            left.contains("(estimate)"),
-            "estimate stays on the row, left of the chips: {row}"
-        );
         assert!(
             !row.contains("not fetched") && !row.contains("tokens not fetched"),
             "a missing host figure omits the token clause: {row}"
@@ -4081,8 +4187,8 @@ mod tests {
             "the footer sampling window is not copied onto the row: {row}"
         );
         assert!(
-            left.contains("167.0k (estimate)"),
-            "167.0k stays an estimate, left of the chips: {row}"
+            !row.contains("19.4 minutes") && !row.contains("167.0k") && !row.contains("(estimate)"),
+            "a missing host figure omits the standing estimate: {row}"
         );
     }
 }

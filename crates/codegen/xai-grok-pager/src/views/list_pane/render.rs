@@ -560,6 +560,13 @@ fn render_bottom_bar(
             super::state::InputBarMode::GotoLine => "go to: ",
             super::state::InputBarMode::Comment => "comment: ",
         };
+        // Search only. `next` and `previous` share this row, to the right
+        // of the query. Filter, go to, and comment stay label plus text.
+        let search_nav = if matches!(mode, super::state::InputBarMode::Search) {
+            " next  previous"
+        } else {
+            ""
+        };
         let label_style = Style::default()
             .fg(style.input_bar_prompt_fg)
             .bg(style.input_bar_bg);
@@ -567,15 +574,34 @@ fn render_bottom_bar(
         let label_w = label.len() as u16;
         buf.set_line_safe(area.x, area.y, &label_line, label_w);
 
-        // Textarea fills the rest. Multi-line for comment mode.
+        let nav_w = search_nav.len() as u16;
+        // Keep one column for the query. A bar that cannot hold the
+        // label, that column, and the hint drops the hint.
+        let nav_w = if area.width.saturating_sub(label_w.saturating_add(1)) >= nav_w {
+            nav_w
+        } else {
+            0
+        };
+
+        // Textarea fills the rest, stopping before the search hint.
+        // Multi-line for comment mode (no hint on that bar).
         let ta_area = Rect {
             x: area.x + label_w,
             y: area.y,
-            width: area.width.saturating_sub(label_w),
+            width: area.width.saturating_sub(label_w).saturating_sub(nav_w),
             height: area.height,
         };
         if ta_area.width > 0 {
             state.render_input_textarea(ta_area, buf);
+        }
+        if nav_w > 0 {
+            let nav_style = Style::default()
+                .fg(style.input_bar_text_fg)
+                .bg(style.input_bar_bg)
+                .add_modifier(Modifier::DIM);
+            let nav_x = area.x.saturating_add(area.width.saturating_sub(nav_w));
+            let nav_line = Line::from(Span::styled(search_nav, nav_style));
+            buf.set_line_safe(nav_x, area.y, &nav_line, nav_w);
         }
     } else if let Some(matcher) = state.matcher() {
         // Accepted matcher — right-aligned, dim.

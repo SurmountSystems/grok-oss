@@ -46,7 +46,7 @@ After Plan Exit, `/unstick` leaves parked Isolated Preview when resending a hung
 
 Open the [Agent Dashboard](23-dashboard.md): live roster of top-level sessions in this pager (peek, reply, dispatch, pin, rename, stop, attach). Aliases: `/agents-dashboard`, `/sessions`.
 
-Not `/config-agents` (alias `/agents`), which manages agent *definitions* and personas. Not `/running` (alias `/windows`), which lists live grok-oss TUI windows on this machine. Not L0: L0 is a Surmount GPUI window, not this pager, and must not merge into `/dashboard`. Hidden in minimal mode; disable with `GROK_AGENT_DASHBOARD=0` or `[dashboard].enabled = false`.
+Not `/config-agents` (alias `/agents`), which manages agent *definitions* and personas. Not `/running` (alias `/windows`), which lists live grok-oss TUI windows on this machine. Not L0: L0 in this tree is `grok-oss gui` and the pager drain of the enqueue drop file, not this pager, and must not merge into `/dashboard`. Hidden in minimal mode; disable with `GROK_AGENT_DASHBOARD=0` or `[dashboard].enabled = false`.
 
 ### `/running`
 
@@ -54,7 +54,7 @@ List live grok-oss TUI windows on this machine. Alias: `/windows`.
 
 This is **Running grok-oss sessions**. It is not the [Agent Dashboard](23-dashboard.md), not `/sessions`, not `/tasks`, not `/resume`, and not `/start`. `/dashboard` still owns the roster inside this pager process. Do not treat `/running` as a second dashboard.
 
-**L0** is a Surmount GPUI window outside this pager. It is not `/dashboard` and not `/running`. Those three must not merge. L0 is a laptop coordinator. It is not a website on the mail host :443. L0 task tracking chrome reads `$GROK_HOME/grok_oss.db` (`prompt_tasks`). Session todos stay in this TUI (`Ctrl+T` and the **tasks N/M** badge). Do not replace that board. The crate `surmount-coordinator-gui` is the application state that GPUI window will call: it keeps pid, session id, and cwd, drops prompt text, tool arguments, tokens, and JWTs, tags each row local or remote, and writes a per-session enqueue drop file. It also has the laptop-side action **set remote host console API key** for a machine xAI console API key on host surmount-1 (console API credits / console team prepaid, not included SuperGrok period limits, not SuperGrok dollar credits). That action writes a staging file the operator copies, or prints `scp` as the existing deploy user. It never prints the key. It does not open git on the guest. Call L0 **`grok-oss gui`** (not `grok-oss running`). That command lists live windows through the coordinator and prints safe JSON (no prompt). `grok-oss running` stays the TUI window table. Binary `surmount-coordinator-gui` still accepts stdin `/running --json` and `set-remote-host-console-api-key`. It is not this TUI and not `/dashboard`. See [Authentication](02-authentication.md#machine-console-api-key-for-host-surmount-1). The GPUI window itself is leftover when this crate has no `gui` feature.
+**L0** in this tree is `grok-oss gui` plus the pager drain that reads `l0-enqueue/<session id>/enqueue.json`. It is not a separate window in this tree. It is not `/dashboard` and not `/running`. Those three must not merge. L0 is a laptop coordinator. It is not a website on the mail host :443. L0 task tracking chrome reads `$GROK_HOME/grok_oss.db` (`prompt_tasks`). Session todos stay in this TUI (`Ctrl+T` and the **tasks N/M** badge). Do not replace that board. The crate `surmount-coordinator-gui` keeps pid, session id, and cwd, drops prompt text, tool arguments, tokens, and JWTs, and tags each row local or remote. A local row writes the enqueue drop file on this laptop. A remote row copies that same file onto that host's grok home and does not write the laptop drain path. The grok-oss session on that host drains it. It also has the laptop-side action **set remote host console API key** for a machine xAI console API key on host surmount-1 (console API credits / console team prepaid, not included SuperGrok period limits, not SuperGrok dollar credits). That action writes a staging file the operator copies, or prints `scp` as the existing deploy user. It never prints the key. It does not open git on the guest. From a laptop, the travel command is `grok-oss gui --ssh nixbuilder@surmount-1`. That command lists grok-oss windows on surmount-1 and prints safe JSON (no prompt). `grok-oss running` stays the TUI window table. Binary `surmount-coordinator-gui` still accepts stdin `/running --json` and `set-remote-host-console-api-key`. It is not this TUI and not `/dashboard`. See [Authentication](02-authentication.md#machine-console-api-key-for-host-surmount-1).
 
 The list comes from `$GROK_HOME/active_sessions.json`. When `GROK_HOME` is unset, that file is `~/.grok/active_sessions.json`. Two grok homes do not see each other. Only live grok-oss processes appear. Two windows on the same conversation both appear. The row for this TUI is marked `(this window)`.
 
@@ -756,6 +756,12 @@ Extra requests to api.x.ai for this window default to zero. A synthetic probe is
 `/announcements hide` hides the banner and does not delete the stored row.
 
 The plan side panel still paints over the transcript behind it.
+
+### `/uptime`
+
+Show the short local 15 minute and 24 hour reading. When those windows have no observations, the reading is `15m none · 24h none`. That is the same short reading that sits beside the status line.
+
+`/uptime` does not open a network connection. It does not send a request to xAI. It reads observations already stored on this machine. If the installed DuckDB shared library is missing, tracking stays off, grok-oss still starts, and `/uptime` says uptime tracking is off because DuckDB is not installed.
 
 ### `/announcements`
 

@@ -483,3 +483,33 @@ fn operator_uptime_status_segment_stays_short_so_supergrok_period_limits_fit() {
         "uptime off, no DuckDB"
     );
 }
+
+#[test]
+fn uptime_slash_output_contains_the_short_window_text_and_does_not_open_a_socket() {
+    let before = extra_api_requests();
+    assert!(
+        !synthetic_probe_enabled(),
+        "Operator: /uptime does not send a request to xAI"
+    );
+    let text = crate::slash::commands::uptime::render_uptime_slash(Some(
+        &crate::uptime::WindowPair::empty(),
+    ));
+    assert!(
+        text.contains("15m") && text.contains("24h"),
+        "Operator: /uptime shows the short 15 minute and 24 hour reading: {text}"
+    );
+    assert_eq!(
+        text, "15m none · 24h none",
+        "Operator: /uptime reuses the short local reading: {text}"
+    );
+    assert!(
+        !text.contains("no observations in the last"),
+        "Operator: /uptime does not print the long sentence: {text}"
+    );
+    assert_eq!(
+        extra_api_requests(),
+        before,
+        "Operator: /uptime does not open a socket to xAI"
+    );
+    assert!(!synthetic_probe_enabled());
+}
