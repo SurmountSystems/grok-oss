@@ -1149,6 +1149,73 @@ pub(in crate::app::dispatch) fn dispatch_load_session_with_restore(
         session_cwd,
     }]
 }
+/// True when every local queue row is an unsent `/rebuild` flush.
+///
+/// Session load must leave those rows queued. They are not a new Human
+/// turn, and they are not a prompt the operator submitted while load was
+/// still open.
+fn session_load_keeps_rebuild_flushed_queue(agent: &AgentView) -> bool {
+    if agent.session.pending_prompts.is_empty() {
+        return false;
+    }
+    let Some(session_id) = agent.session.session_id.as_ref() else {
+        return false;
+    };
+    let cwd = agent.session.cwd.to_string_lossy();
+    let sid = session_id.0.as_ref();
+    let Ok(rows) = xai_grok_shell::session::pending_prompts::load_pending_prompts(&cwd, sid) else {
+        return false;
+    };
+    let Ok(wal) = xai_grok_shell::session::prompt_wal::load_prompt_wal(&cwd, sid) else {
+        return false;
+    };
+    if rows.is_empty() || wal.is_empty() {
+        return false;
+    }
+    let chat_blob = xai_grok_shell::session::prompt_wal::chat_history_path(&cwd, sid)
+        .and_then(|path| std::fs::read_to_string(path).ok());
+    agent.session.pending_prompts.iter().all(|prompt| {
+        let text = prompt.text.trim();
+        if text.is_empty() {
+            return false;
+        }
+        let on_disk = rows.iter().any(|row| row.text.trim() == text);
+        let flushed = wal.iter().any(|rec| {
+            rec.kind == xai_grok_shell::session::prompt_wal::PromptWalKind::RebuildFlush
+                && rec.text.trim() == text
+        });
+        on_disk
+            && flushed
+            && !xai_grok_shell::session::prompt_wal::operator_text_already_recorded(
+                text,
+                &agent.session.prompt_history,
+                &[],
+                chat_blob.as_deref(),
+            )
+            && !scrollback_records_user_text(agent, text)
+    })
+}
+
+fn scrollback_records_user_text(agent: &AgentView, text: &str) -> bool {
+    let needle = text.trim();
+    if needle.is_empty() {
+        return false;
+    }
+    for idx in 0..agent.scrollback.len() {
+        let Some(entry) = agent.scrollback.entry(idx) else {
+            continue;
+        };
+        let RenderBlock::UserPrompt(block) = &entry.block else {
+            continue;
+        };
+        if xai_grok_shell::session::prompt_wal::operator_text_matches_recorded(needle, &block.text)
+        {
+            return true;
+        }
+    }
+    false
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(in crate::app::dispatch) fn handle_session_loaded(
     app: &mut AppView,
@@ -1262,9 +1329,20 @@ pub(in crate::app::dispatch) fn handle_session_loaded(
         crate::app::dispatch::rebuild::announce_rebuild_relaunch_identity(agent);
         agent.reconcile_restored_unsent_occupancy(adopting);
         agent.apply_persisted_plan_decision_on_load();
-        let drain = maybe_drain_queue(agent);
-        let page_flip_entry = drain.page_flip_entry;
-        effects.extend(drain.effects);
+        // A `/rebuild` flush writes the still-queued interject to
+        // `pending_prompts.json` and a RebuildFlush WAL line. Bind already
+        // restored that row. Draining it here paints a Human turn, and the
+        // following queue restore then drops the same body as already issued.
+        // Prompts that are not that flush (a submit while load was open, or
+        // continue-interrupted-turn) still drain.
+        let keep_rebuilt_queue = session_load_keeps_rebuild_flushed_queue(agent);
+        let (page_flip_entry, drain_effects) = if keep_rebuilt_queue {
+            (None, Vec::new())
+        } else {
+            let drain = maybe_drain_queue(agent);
+            (drain.page_flip_entry, drain.effects)
+        };
+        effects.extend(drain_effects);
         let cwd = agent.session.cwd.clone();
         effects.push(Effect::HydrateSessionMetaFromDisk {
             agent_id,

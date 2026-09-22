@@ -173,11 +173,15 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
     - L3 specialists (when spawned)
   - L2 Edit three takes, rewrite report
     - L3 specialists (when spawned)
+  - L2 Edit uptime lifetime and imports
+    - L3 specialists (when spawned)
   - L2 Embed ripgrep in tools
     - L3 specialists (when spawned)
   - L2 Encrypt stale subagent prompt
     - L3 specialists (when spawned)
   - L2 Enforce L2 spawn hierarchy
+    - L3 specialists (when spawned)
+  - L2 Enroll file manager spawn
     - L3 specialists (when spawned)
   - L2 Enroll leftover follow-up tests in FORK
     - L3 specialists (when spawned)
@@ -371,6 +375,8 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
     - L3 specialists (when spawned)
   - L2 Fix compact idle-timeout contract
     - L3 specialists (when spawned)
+  - L2 Fix dead code and enroll
+    - L3 specialists (when spawned)
   - L2 Fix early exit and report
     - L3 specialists (when spawned)
   - L2 Fix from_ref SubagentInfo types
@@ -425,6 +431,8 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
     - L3 specialists (when spawned)
   - L2 Fix rebuild nested resume
     - L3 specialists (when spawned)
+  - L2 Fix rebuild prompt restore
+    - L3 specialists (when spawned)
   - L2 Fix rebuild resume like disconnect
     - L3 specialists (when spawned)
   - L2 Fix remaining 6 nextest fails
@@ -473,6 +481,8 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
     - L3 specialists (when spawned)
   - L2 Fix uptime compile errors
     - L3 specialists (when spawned)
+  - L2 Fix uptime compile errors
+    - L3 specialists (when spawned)
   - L2 Fix wait signature and report
     - L3 specialists (when spawned)
   - L2 Fix write preview not a git diff
@@ -484,6 +494,8 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
   - L2 Format remote gate leftovers
     - L3 specialists (when spawned)
   - L2 Format the new rustfmt files
+    - L3 specialists (when spawned)
+  - L2 Format two load.rs wraps
     - L3 specialists (when spawned)
   - L2 Fresh mill chip Ctrl+C
     - L3 specialists (when spawned)
@@ -887,6 +899,8 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
     - L3 specialists (when spawned)
   - L2 Remove in-tree bug dump
     - L3 specialists (when spawned)
+  - L2 Remove needless probe return
+    - L3 specialists (when spawned)
   - L2 Remove python3 from grok-oss
     - L3 specialists (when spawned)
   - L2 Remove unused SubagentBackend import
@@ -900,6 +914,8 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
   - L2 Report session-search outcome
     - L3 specialists (when spawned)
   - L2 Restore modal park fullscreen
+    - L3 specialists (when spawned)
+  - L2 Restore queued prompts after rebuild
     - L3 specialists (when spawned)
   - L2 Restore uptime status text
     - L3 specialists (when spawned)
@@ -1024,6 +1040,10 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
   - L2 Run just check-remote 2
     - L3 specialists (when spawned)
   - L2 Run just install
+    - L3 specialists (when spawned)
+  - L2 Run one remote quality gate
+    - L3 specialists (when spawned)
+  - L2 Run one remote quality gate
     - L3 specialists (when spawned)
   - L2 Runner one check-remote then install
     - L3 specialists (when spawned)
@@ -1189,6 +1209,8 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
     - L3 specialists (when spawned)
   - L2 Wire soft process-rule reminders
     - L3 specialists (when spawned)
+  - L2 Wire spaced plan action row
+    - L3 specialists (when spawned)
   - L2 Wire turbo planning and soft reminders
     - L3 specialists (when spawned)
   - L2 Wire turbo planning module
@@ -1198,6 +1220,8 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
   - L2 Wire unused subagent list helpers
     - L3 specialists (when spawned)
   - L2 Wire uptime into the status line
+    - L3 specialists (when spawned)
+  - L2 Wire uptime observation symbols
     - L3 specialists (when spawned)
   - L2 Wrap parent_follow_up rustfmt
     - L3 specialists (when spawned)
@@ -1422,9 +1446,11 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
 | Edit spawn depth guard | nested L2 session usage | L2 | 200272 | estimate | exited |
 | Edit the four uptime call sites | nested L2 session usage | L2 | 212404 | estimate | exited |
 | Edit three takes, rewrite report | nested L2 session usage | L2 | 202019 | estimate | exited |
+| Edit uptime lifetime and imports | nested L2 session usage | L2 | 151160 | estimate | exited |
 | Embed ripgrep in tools | nested L2 session usage | L2 | 259890 | estimate | exited |
 | Encrypt stale subagent prompt | nested L2 session usage | L2 | 129682 | estimate | exited |
 | Enforce L2 spawn hierarchy | nested L2 session usage | L2 | 194961 | estimate | exited |
+| Enroll file manager spawn | nested L2 session usage | L2 | 199240 | estimate | exited |
 | Enroll leftover follow-up tests in FORK | nested L2 session usage | L2 | 143506 | estimate | exited |
 | Enroll live-token testing-index row | nested L2 session usage | L2 | 110484 | estimate | exited |
 | Enroll names in catalog filter | nested L2 session usage | L2 | 96763 | estimate | exited |
@@ -1521,6 +1547,7 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
 | Fix chip stay folded after reentry | nested L2 session usage | L2 | 97085 | estimate | exited |
 | Fix compact const assert form | nested L2 session usage | L2 | 89151 | estimate | exited |
 | Fix compact idle-timeout contract | nested L2 session usage | L2 | 117677 | estimate | exited |
+| Fix dead code and enroll | nested L2 session usage | L2 | 92569 | estimate | exited |
 | Fix early exit and report | nested L2 session usage | L2 | 98632 | estimate | exited |
 | Fix from_ref SubagentInfo types | nested L2 session usage | L2 | 89943 | estimate | exited |
 | Fix goal clear and clickable card | nested L2 session usage | L2 | 145928 | estimate | exited |
@@ -1548,6 +1575,7 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
 | Fix plan_stale_prompt rustc | nested L2 session usage | L2 | 79167 | estimate | exited |
 | Fix quality compile errors | nested L2 session usage | L2 | 87986 | estimate | exited |
 | Fix rebuild nested resume | nested L2 session usage | L2 | 130763 | estimate | exited |
+| Fix rebuild prompt restore | nested L2 session usage | L2 | 92558 | estimate | exited |
 | Fix rebuild resume like disconnect | nested L2 session usage | L2 | 105264 | estimate | exited |
 | Fix remaining 6 nextest fails | nested L2 session usage | L2 | 187580 | estimate | exited |
 | Fix remote compile errors | nested L2 session usage | L2 | 94014 | estimate | exited |
@@ -1572,12 +1600,14 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
 | Fix truncated output-limit chrome | nested L2 session usage | L2 | 102197 | estimate | exited |
 | Fix turn completion privacy | nested L2 session usage | L2 | 98260 | estimate | exited |
 | Fix uptime compile errors | nested L2 session usage | L2 | 106055 | estimate | exited |
+| Fix uptime compile errors | nested L2 session usage | L2 | 93668 | estimate | exited |
 | Fix wait signature and report | nested L2 session usage | L2 | 192417 | estimate | exited |
 | Fix write preview not a git diff | nested L2 session usage | L2 | 178268 | estimate | exited |
 | Format mutations.rs rustfmt | nested L2 session usage | L2 | 79334 | estimate | exited |
 | Format one remaining Rust file | nested L2 session usage | L2 | 77025 | estimate | exited |
 | Format remote gate leftovers | nested L2 session usage | L2 | 115883 | estimate | exited |
 | Format the new rustfmt files | nested L2 session usage | L2 | 81614 | estimate | exited |
+| Format two load.rs wraps | nested L2 session usage | L2 | 80392 | estimate | exited |
 | Fresh mill chip Ctrl+C | nested L2 session usage | L2 | 171886 | estimate | exited |
 | GitHub Isolated Preview issue | nested L2 session usage | L2 | 107573 | estimate | exited |
 | Goal card clickable clear | nested L2 session usage | L2 | 199757 | estimate | exited |
@@ -1779,6 +1809,7 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
 | Reliability unit integration tests | nested L2 session usage | L2 | 264256 | estimate | exited |
 | Remove bundled DuckDB feature | nested L2 session usage | L2 | 196675 | estimate | exited |
 | Remove in-tree bug dump | nested L2 session usage | L2 | 69726 | estimate | exited |
+| Remove needless probe return | nested L2 session usage | L2 | 199913 | estimate | exited |
 | Remove python3 from grok-oss | nested L2 session usage | L2 | 85454 | estimate | exited |
 | Remove unused SubagentBackend import | nested L2 session usage | L2 | 95997 | estimate | exited |
 | Repetition stream stop | nested L2 session usage | L2 | 201861 | estimate | exited |
@@ -1786,6 +1817,7 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
 | Replace grok-oss python3 spawn | nested L2 session usage | L2 | 198162 | estimate | exited |
 | Report session-search outcome | nested L2 session usage | L2 | 199916 | estimate | exited |
 | Restore modal park fullscreen | nested L2 session usage | L2 | 103219 | estimate | exited |
+| Restore queued prompts after rebuild | nested L2 session usage | L2 | 199036 | estimate | exited |
 | Restore uptime status text | nested L2 session usage | L2 | 83072 | estimate | exited |
 | Resume 1.0.4 merge carefully | nested L2 session usage | L2 | 184457 | estimate | exited |
 | Resume 141 wait L3s | nested L2 session usage | L2 | 183192 | estimate | exited |
@@ -1848,6 +1880,8 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
 | Run just check-remote 1f | nested L2 session usage | L2 | 110377 | estimate | exited |
 | Run just check-remote 2 | nested L2 session usage | L2 | 116284 | estimate | exited |
 | Run just install | nested L2 session usage | L2 | 77310 | estimate | exited |
+| Run one remote quality gate | nested L2 session usage | L2 | 117196 | estimate | exited |
+| Run one remote quality gate | nested L2 session usage | L2 | 116717 | estimate | exited |
 | Runner one check-remote then install | nested L2 session usage | L2 | 76872 | estimate | exited |
 | Runner surmount-1 quality install | nested L2 session usage | L2 | 92031 | estimate | exited |
 | Rustfmt chat_completions Nix form | nested L2 session usage | L2 | 82457 | estimate | exited |
@@ -1930,11 +1964,13 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
 | Wire remaining prompt image paste | nested L2 session usage | L2 | 183776 | estimate | exited |
 | Wire shell Interject follow-up delivery | nested L2 session usage | L2 | 200250 | estimate | exited |
 | Wire soft process-rule reminders | nested L2 session usage | L2 | 200459 | estimate | exited |
+| Wire spaced plan action row | nested L2 session usage | L2 | 123978 | estimate | exited |
 | Wire turbo planning and soft reminders | nested L2 session usage | L2 | 196222 | estimate | exited |
 | Wire turbo planning module | nested L2 session usage | L2 | 200541 | estimate | exited |
 | Wire unused paste probe | nested L2 session usage | L2 | 126706 | estimate | exited |
 | Wire unused subagent list helpers | nested L2 session usage | L2 | 103808 | estimate | exited |
 | Wire uptime into the status line | nested L2 session usage | L2 | 193094 | estimate | exited |
+| Wire uptime observation symbols | nested L2 session usage | L2 | 178426 | estimate | exited |
 | Wrap parent_follow_up rustfmt | nested L2 session usage | L2 | 89990 | estimate | exited |
 | Wrap rustfmt render.rs hunk | nested L2 session usage | L2 | 85576 | estimate | exited |
 | Wrap sampling-types; inline repetition | nested L2 session usage | L2 | 100166 | estimate | exited |

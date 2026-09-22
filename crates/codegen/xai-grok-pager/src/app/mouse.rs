@@ -31,13 +31,84 @@ pub(crate) fn last_opened_path_for_test() -> Option<std::path::PathBuf> {
 }
 
 fn spawn_file_manager(path: &std::path::Path) {
+    #[cfg(test)]
+    LAST_OPENED_PATH.with(|slot| *slot.borrow_mut() = Some(path.to_path_buf()));
+    // The library test build must not launch a GUI. The grok-oss binary still does.
+    #[cfg(not(test))]
+    launch_enrolled_file_manager(path);
+}
+
+/// Start the system file manager (`open`, `xdg-open`, or `explorer`) and
+/// enroll it. `ProcessScope::spawn` calls `ProcessScope::enroll`.
+#[cfg(not(test))]
+fn launch_enrolled_file_manager(path: &std::path::Path) {
     #[cfg(target_os = "macos")]
     let program = "open";
     #[cfg(target_os = "windows")]
     let program = "explorer";
     #[cfg(all(unix, not(target_os = "macos")))]
     let program = "xdg-open";
-    let _ = std::process::Command::new(program).arg(path).spawn();
+    let mut command = tokio::process::Command::new(program);
+    command
+        .arg(path)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    // `ProcessScope::spawn` is prepare + spawn + `ProcessScope::enroll`.
+    // A raw `Command::spawn` is disallowed and would need an allow.
+    let (child, group) = match xai_tty_utils::global_process_scope().spawn(command) {
+        Ok(enrolled) => enrolled,
+        Err(error) => {
+            tracing::debug!(
+                error = %error,
+                path = %path.display(),
+                "file manager spawn failed"
+            );
+            return;
+        }
+    };
+    reap_enrolled_file_manager(child, group);
+}
+
+/// Hold the process-group owner until the direct child exits, then drop it.
+/// Dropping earlier lets a later `kill_all` signal a recycled pid.
+#[cfg(not(test))]
+fn reap_enrolled_file_manager(
+    mut child: tokio::process::Child,
+    group: std::sync::Arc<xai_tty_utils::ProcessGroup>,
+) {
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        // Detach the task. It keeps the group alive until the direct child exits.
+        let _reaper = handle.spawn(async move {
+            if let Err(error) = child.wait().await {
+                tracing::debug!(error = %error, "file manager wait failed");
+            }
+            drop(group);
+        });
+    } else {
+        let started = std::thread::Builder::new()
+            .name("file-manager-reaper".to_owned())
+            .spawn(move || {
+                loop {
+                    match child.try_wait() {
+                        Ok(Some(_)) => break,
+                        Ok(None) => std::thread::sleep(std::time::Duration::from_millis(40)),
+                        Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                        Err(error) => {
+                            tracing::debug!(error = %error, "file manager wait failed");
+                            break;
+                        }
+                    }
+                }
+                drop(group);
+            });
+        if let Err(error) = started {
+            tracing::debug!(
+                error = %error,
+                "file manager reaper thread failed to start"
+            );
+        }
+    }
 }
 
 impl AgentView {
@@ -62,9 +133,6 @@ impl AgentView {
     /// Open `path` in the file manager and show a brief toast.
     /// Clipboard copy is not the click. Tests record the path and do not spawn.
     pub(crate) fn open_path(&mut self, path: &std::path::Path) {
-        #[cfg(test)]
-        LAST_OPENED_PATH.with(|slot| *slot.borrow_mut() = Some(path.to_path_buf()));
-        #[cfg(not(test))]
         spawn_file_manager(path);
         self.show_toast("Opened the session directory.");
     }

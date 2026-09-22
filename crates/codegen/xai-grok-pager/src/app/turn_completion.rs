@@ -558,6 +558,7 @@ fn fetched_token_count(
     Some(number(input).saturating_add(number(output)))
 }
 
+#[cfg(not(test))]
 fn session_id_of(agent: &AgentView) -> String {
     agent
         .session
@@ -567,6 +568,7 @@ fn session_id_of(agent: &AgentView) -> String {
         .unwrap_or_default()
 }
 
+#[cfg(not(test))]
 fn model_id_of(agent: &AgentView) -> String {
     agent
         .session
@@ -576,6 +578,7 @@ fn model_id_of(agent: &AgentView) -> String {
         .to_string()
 }
 
+#[cfg(not(test))]
 fn latency_ms(elapsed: Option<std::time::Duration>) -> Option<i64> {
     elapsed.and_then(|d| i64::try_from(d.as_millis()).ok())
 }

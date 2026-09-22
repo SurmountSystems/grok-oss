@@ -1956,9 +1956,17 @@ pub fn render_line_viewer(
                 abandon_hovered,
             ];
 
+            // Wide row is the spaced action string. Narrow docks drop
+            // pipes and the extra pad so the four actions still fit.
+            let spaced_row = plan_approval_spaced_action_row(labels);
+            let mut wide_part_iter = spaced_row.split(PLAN_APPROVAL_ACTION_BETWEEN);
+            let wide_parts = [
+                wide_part_iter.next().unwrap_or_default(),
+                wide_part_iter.next().unwrap_or_default(),
+                wide_part_iter.next().unwrap_or_default(),
+                wide_part_iter.next().unwrap_or_default(),
+            ];
             let mut painted = false;
-            // Wide row first. Narrow docks drop pipes and the extra pad
-            // so Approve / Comment / Revise / Exit still fit.
             for &(wide, with_badge) in &[(true, true), (false, true), (false, false)] {
                 let between = if wide {
                     PLAN_APPROVAL_ACTION_BETWEEN
@@ -1966,15 +1974,15 @@ pub fn render_line_viewer(
                     " "
                 };
                 let between_w = between.width() as u16;
-                let pad = if wide { PLAN_APPROVAL_ACTION_PAD } else { "" };
-                let pad_w = pad.width() as u16;
-                let word_widths: Vec<u16> = labels.iter().map(|s| s.width() as u16).collect();
-                let widths: Vec<u16> = word_widths
-                    .iter()
-                    .map(|word_w| word_w.saturating_add(pad_w.saturating_mul(2)))
-                    .collect();
-                let mut total_w = widths.iter().copied().sum::<u16>();
-                total_w = total_w.saturating_add(between_w.saturating_mul(3));
+                let mut total_w = if wide {
+                    spaced_row.width() as u16
+                } else {
+                    labels
+                        .iter()
+                        .map(|word| word.width() as u16)
+                        .sum::<u16>()
+                        .saturating_add(between_w.saturating_mul(3))
+                };
                 if with_badge {
                     total_w = total_w.saturating_add(badge_w);
                 }
@@ -1992,6 +2000,7 @@ pub fn render_line_viewer(
 
                 let mut x = inner.x + (inner.width - total_w) / 2;
                 let mut areas: [Option<Rect>; 4] = [None; 4];
+                let pad_len = PLAN_APPROVAL_ACTION_PAD.len();
                 for i in 0..4 {
                     let start = x;
                     let marked = selected_cta_marks_index(selected, i, comment_flow);
@@ -2003,12 +2012,15 @@ pub fn render_line_viewer(
                     } else {
                         Style::default().fg(theme.text_primary).bg(theme.bg_base)
                     };
-                    if pad_w > 0 {
-                        buf.set_string(x, bottom_y, pad, style);
-                        x += pad_w;
-                    }
-                    buf.set_string(x, bottom_y, labels[i], style);
-                    x += word_widths[i];
+                    let (head, trail) = if wide {
+                        let part = wide_parts[i];
+                        let split_at = part.len().saturating_sub(pad_len.min(part.len()));
+                        part.split_at(split_at)
+                    } else {
+                        (labels[i], "")
+                    };
+                    buf.set_string(x, bottom_y, head, style);
+                    x += head.width() as u16;
                     if marked {
                         buf.set_string(x, bottom_y, &choice_dot, choice_dot_style);
                         x += choice_dot_w;
@@ -2017,9 +2029,9 @@ pub fn render_line_viewer(
                         buf.set_string(x, bottom_y, &badge_text, badge_style);
                         x += badge_w;
                     }
-                    if pad_w > 0 {
-                        buf.set_string(x, bottom_y, pad, style);
-                        x += pad_w;
+                    if !trail.is_empty() {
+                        buf.set_string(x, bottom_y, trail, style);
+                        x += trail.width() as u16;
                     }
                     areas[i] = Some(Rect::new(start, bottom_y, x.saturating_sub(start), 1));
                     if i < 3 {
