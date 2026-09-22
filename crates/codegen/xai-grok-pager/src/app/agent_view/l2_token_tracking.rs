@@ -368,10 +368,6 @@ pub const STANDING_WRAP_ESTIMATE_WALL: &str = "19.4 minutes";
 /// Grok 4.6-era nested-token estimate. Not an actual token count.
 pub const STANDING_WRAP_ESTIMATE_TOKENS: &str = "167.0k";
 
-/// Actual tokens cell when the host has not returned a figure.
-/// Words, not the wire token `not_fetched`.
-pub const ACTUAL_TOKENS_NOT_FETCHED_LABEL: &str = "not fetched";
-
 /// Display text for one live job row. Pure. No L1 total and no grok-oss sqlite.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LiveJobRowDisplay {
@@ -381,12 +377,24 @@ pub struct LiveJobRowDisplay {
     /// Token estimate, labeled as an estimate.
     pub estimate_tokens: String,
     pub elapsed: String,
-    /// Host figure, or [`ACTUAL_TOKENS_NOT_FETCHED_LABEL`].
+    /// Host figure. Empty when the host has not returned a figure.
+    /// Empty omits the token clause. It is not a placeholder and not an estimate.
     pub actual_tokens: String,
     /// Always 0. Display must not add this row into the L1 sampling window.
     pub l1_tokens_added: u64,
     /// Always false. Display must not write grok-oss sqlite.
     pub wrote_grok_oss_sqlite: bool,
+}
+
+impl LiveJobRowDisplay {
+    /// ` · {count}` when the host returned a figure. Empty when it did not.
+    pub fn actual_tokens_clause(&self) -> String {
+        if self.actual_tokens.is_empty() {
+            String::new()
+        } else {
+            format!(" · {}", self.actual_tokens)
+        }
+    }
 }
 
 /// Inputs for [`display_live_job_row`].
@@ -413,16 +421,16 @@ fn label_as_estimate(text: &str) -> String {
 
 /// Paint one live job row.
 ///
-/// No host figure paints [`ACTUAL_TOKENS_NOT_FETCHED_LABEL`] and labels the
-/// estimate as an estimate. A host figure is shown with the same compact
-/// count as Subagents list chrome. This function does not copy
-/// [`STANDING_WRAP_ESTIMATE_WALL`] or [`STANDING_WRAP_ESTIMATE_TOKENS`] into
-/// Actual tokens, does not add the figure into the L1 total, and does not
-/// write grok-oss sqlite.
+/// A host figure is shown with the same compact count as Subagents list
+/// chrome. No host figure leaves the token text empty so the row omits the
+/// token clause. Estimates stay labeled as estimates. This function does not
+/// copy [`STANDING_WRAP_ESTIMATE_WALL`] or [`STANDING_WRAP_ESTIMATE_TOKENS`]
+/// into the token count, does not add the figure into the L1 total, and does
+/// not write grok-oss sqlite.
 pub fn display_live_job_row(input: LiveJobRowInput<'_>) -> LiveJobRowDisplay {
     let actual_tokens = match input.host_tokens {
         Some(figure) => format_measured_tokens_suffix(figure),
-        None => ACTUAL_TOKENS_NOT_FETCHED_LABEL.to_string(),
+        None => String::new(),
     };
     LiveJobRowDisplay {
         job: input.job.to_string(),
@@ -899,14 +907,13 @@ mod tests {
         assert_eq!(format_measured_tokens_suffix(HIGH_WATER), "10.2k");
     }
 
-    /// Operator: Live rows show Actual tokens = not_fetched, so 19.4 minutes
-    /// and 167.0k stay an estimate. KernelLinearTheorems fetched 357.0k. Do
-    /// not invent a count. If there is no figure yet, say not fetched and
-    /// label the estimate as an estimate.
+    /// Operator: when the host has a real token count, the row shows that
+    /// count. An estimate stays labeled as an estimate. When the host has
+    /// no count, the row omits the token clause. Do not invent 167.0k.
+    /// KernelLinearTheorems shows its host figure. Do not copy 2.6k / 500k.
     #[test]
-    fn live_job_row_says_not_fetched_and_labels_the_estimate_without_copying_it_into_actual_tokens()
-    {
-        const CONTRACT: &str = "Live rows show Actual tokens = not_fetched, so 19.4 minutes and 167.0k stay an estimate. KernelLinearTheorems fetched 357.0k. Do not invent a count. If there is no figure yet, say not fetched and label the estimate as an estimate.";
+    fn live_job_row_omits_the_token_clause_without_a_host_figure_and_shows_a_real_count() {
+        const CONTRACT: &str = "When the host has a real token count, the row shows that count. An estimate stays labeled as an estimate and is not copied into the count. When the host has no count, the row omits the token clause. Do not print a placeholder. Do not invent 167.0k. A fetched host figure is shown. Do not copy 2.6k / 500k onto the row.";
 
         let sqlite_path = std::env::temp_dir().join(format!(
             "grok-oss-live-job-row-{}-{}.sqlite",
@@ -930,15 +937,38 @@ mod tests {
             elapsed: "19.4 minutes",
             host_tokens: None,
         });
-        assert_eq!(
-            missing.actual_tokens, ACTUAL_TOKENS_NOT_FETCHED_LABEL,
-            "{CONTRACT} got {:?}",
+        assert!(
+            missing.actual_tokens.is_empty(),
+            "{CONTRACT} omit the token clause when the host has no figure, got {:?}",
             missing.actual_tokens
         );
         assert!(
-            !missing.actual_tokens.contains("not_fetched"),
-            "{CONTRACT} words are not fetched, not the wire token, got {:?}",
+            !missing.actual_tokens.contains("not fetched")
+                && !missing.actual_tokens.contains("not_fetched")
+                && !missing.actual_tokens.contains("tokens not fetched"),
+            "{CONTRACT} do not print a placeholder, got {:?}",
             missing.actual_tokens
+        );
+        let missing_row = format!(
+            "{} · {} · {}{}",
+            missing.estimate_wall,
+            missing.estimate_tokens,
+            missing.elapsed,
+            missing.actual_tokens_clause()
+        );
+        assert!(
+            !missing_row.contains("not fetched") && !missing_row.ends_with(" · "),
+            "{CONTRACT} the row omits the token clause, got {missing_row:?}"
+        );
+        assert!(
+            missing_row.contains("167.0k (estimate)")
+                && missing_row.contains("19.4 minutes (estimate)")
+                && missing_row.matches("167.0k").count() == 1,
+            "{CONTRACT} 167.0k stays an estimate and is not copied into the count, got {missing_row:?}"
+        );
+        assert!(
+            !missing_row.contains("2.6k") && !missing_row.contains("500k"),
+            "{CONTRACT} do not copy the main-thread footer onto the row, got {missing_row:?}"
         );
         assert!(
             missing.estimate_wall.contains("estimate")
@@ -999,8 +1029,22 @@ mod tests {
             evidence_row.actual_tokens, other_row.actual_tokens,
             "{CONTRACT} do not hardcode one success string"
         );
-        assert_ne!(evidence_row.actual_tokens, ACTUAL_TOKENS_NOT_FETCHED_LABEL);
-        assert_ne!(other_row.actual_tokens, ACTUAL_TOKENS_NOT_FETCHED_LABEL);
+        assert!(!evidence_row.actual_tokens.is_empty());
+        assert!(!other_row.actual_tokens.is_empty());
+        assert!(
+            !evidence_row.actual_tokens.contains("not fetched")
+                && !other_row.actual_tokens.contains("not fetched"),
+            "{CONTRACT} a real count is not a placeholder"
+        );
+        let evidence_clause = evidence_row.actual_tokens_clause();
+        assert!(
+            evidence_clause == format!(" · {}", evidence_row.actual_tokens),
+            "{CONTRACT} a real count stays on the row, got {evidence_clause:?}"
+        );
+        assert!(
+            !evidence_clause.contains("2.6k") && !evidence_clause.contains("500k"),
+            "{CONTRACT} do not copy the main-thread footer onto the row"
+        );
         assert!(
             !evidence_row.actual_tokens.contains("19.4")
                 && evidence_row.actual_tokens != STANDING_WRAP_ESTIMATE_TOKENS,
@@ -1068,18 +1112,21 @@ mod tests {
                 && !fn_src.contains("token_baseline"),
             "{CONTRACT} display must not add the row figure into the L1 total"
         );
+        assert!(
+            !fn_src.contains("not fetched") && !fn_src.contains("tokens not fetched"),
+            "{CONTRACT} the row formatter must not paint a placeholder"
+        );
     }
 
-    /// Operator: Live rows show Actual tokens = not_fetched, so 19.4 minutes
-    /// and 167.0k stay an estimate. KernelLinearTheorems fetched 357.0k. Do
-    /// not invent a count. If there is no figure yet, say not fetched and
-    /// label the estimate as an estimate.
+    /// Operator: when the host has a real token count, the row shows that
+    /// count. When the host has no count, the row omits the token clause.
+    /// An estimate stays labeled as an estimate. Do not invent 167.0k.
     ///
     /// The tasks pane row that `TasksPane::render` paints, and the `/tasks`
     /// block, must call [`display_live_job_row`] and use the returned text.
     #[test]
     fn live_job_row_paint_path_calls_display_live_job_row() {
-        const CONTRACT: &str = "Live rows show Actual tokens = not_fetched, so 19.4 minutes and 167.0k stay an estimate. KernelLinearTheorems fetched 357.0k. Do not invent a count. If there is no figure yet, say not fetched and label the estimate as an estimate.";
+        const CONTRACT: &str = "When the host has a real token count, the row shows that count. An estimate stays labeled as an estimate and is not copied into the count. When the host has no count, the row omits the token clause. Do not print a placeholder. Do not invent 167.0k. A fetched host figure is shown. Do not copy 2.6k / 500k onto the row.";
 
         let tasks_src = include_str!("../../views/tasks_pane.rs");
         let tasks_fn = fn_body(
@@ -1115,6 +1162,10 @@ mod tests {
                 && paint_fn.contains("shown.estimate_wall")
                 && paint_fn.contains("shown.estimate_tokens"),
             "{contract} {surface} must use the returned actual tokens and the labeled estimate"
+        );
+        assert!(
+            !paint_fn.contains("not fetched") && !paint_fn.contains("tokens not fetched"),
+            "{contract} {surface} must not paint a placeholder"
         );
         assert!(
             paint_fn.contains("subagent_list_row_usage"),

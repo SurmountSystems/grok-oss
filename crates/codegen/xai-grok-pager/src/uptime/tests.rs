@@ -141,11 +141,15 @@ fn operator_not_fetched_token_count_is_stored_as_not_fetched_and_not_167k() {
     let windows = store.aggregate(NOW_UNIX_MS).expect("aggregate");
     let text = format_uptime_beside_status(&windows);
     assert!(
-        text.contains("not fetched"),
-        "Operator: not_fetched stays the words not fetched: {text}"
+        !text.contains("not fetched") && !text.contains("tokens not fetched"),
+        "Operator: a missing token count omits the token clause: {text}"
     );
     assert!(
-        !text.contains("167.0k") && !text.contains("167000"),
+        !text.contains("tokens"),
+        "Operator: a missing token count does not print a token clause: {text}"
+    );
+    assert!(
+        !text.contains("167.0k") && !text.contains("167000") && !text.contains("167"),
         "Operator: the window does not invent a token total: {text}"
     );
 }
@@ -321,5 +325,161 @@ fn operator_paint_format_does_not_write_a_new_piece() {
     assert!(
         text.contains("15 minutes") && text.contains("24 hours"),
         "Operator: the formatted block still says 15 minutes and 24 hours: {text}"
+    );
+}
+
+#[test]
+fn operator_uptime_shows_a_real_token_sum_and_omits_the_clause_when_a_count_is_missing() {
+    let mut missing = super::window::WindowStats::empty(super::window::SHORT_WINDOW_WORDS);
+    missing.observation_count = 6;
+    missing.succeeded_count = 0;
+    missing.measured_latency_sum_ms = 2_000;
+    missing.measured_latency_count = 1;
+    missing.fetched_token_sum = None;
+    let mut missing_day = missing.clone();
+    missing_day.duration_words = super::window::LONG_WINDOW_WORDS;
+    let absent = format_uptime_beside_status(&super::window::WindowPair {
+        last_15_minutes: missing,
+        last_24_hours: missing_day,
+    });
+    assert!(
+        !absent.contains("not fetched") && !absent.contains("tokens"),
+        "Operator: no count omits the token clause: {absent}"
+    );
+    assert!(
+        absent.contains("15 minutes") && absent.contains("24 hours"),
+        "Operator: a window with observations still names 15 minutes and 24 hours: {absent}"
+    );
+    assert!(
+        !absent.contains("167"),
+        "Operator: do not invent 167.0k: {absent}"
+    );
+
+    let mut fetched = super::window::WindowStats::empty(super::window::SHORT_WINDOW_WORDS);
+    fetched.observation_count = 1;
+    fetched.succeeded_count = 1;
+    fetched.fetched_token_sum = Some(9);
+    let mut fetched_day = fetched.clone();
+    fetched_day.duration_words = super::window::LONG_WINDOW_WORDS;
+    fetched_day.fetched_token_sum = Some(12);
+    let shown = format_uptime_beside_status(&super::window::WindowPair {
+        last_15_minutes: fetched,
+        last_24_hours: fetched_day,
+    });
+    assert!(
+        shown.contains(", tokens 9") && shown.contains(", tokens 12"),
+        "Operator: a real token count is shown: {shown}"
+    );
+    assert!(
+        !shown.contains("not fetched") && !shown.contains("167.0k"),
+        "Operator: a real count is not a placeholder and not 167.0k: {shown}"
+    );
+    assert!(
+        !shown.contains("estimate"),
+        "Operator: a stored token count is not relabeled as an estimate: {shown}"
+    );
+}
+
+#[test]
+fn operator_fetched_token_count_is_shown_and_a_partial_window_omits_the_clause() {
+    let (_dir, store) = open_store();
+    let mut fetched = observation(Outcome::ModelRequestSucceeded, NOW_UNIX_MS - 1_000);
+    fetched.latency_ms = Some(40);
+    fetched.token_count = Some(9);
+    fetched.tokens_not_fetched = false;
+    store.record(fetched).expect("record fetched");
+    let mut also = observation(Outcome::ModelRequestSucceeded, NOW_UNIX_MS - 2_000);
+    also.latency_ms = Some(40);
+    also.token_count = Some(3);
+    also.tokens_not_fetched = false;
+    store.record(also).expect("record also fetched");
+    let windows = store.aggregate(NOW_UNIX_MS).expect("aggregate");
+    let text = format_uptime_beside_status(&windows);
+    assert!(
+        text.contains(", tokens 12"),
+        "Operator: the window shows the sum of stored token counts: {text}"
+    );
+    assert!(
+        !text.contains("not fetched"),
+        "Operator: a real sum does not say not fetched: {text}"
+    );
+    assert_eq!(
+        windows.last_15_minutes.fetched_token_sum,
+        Some(12),
+        "Operator: both windows have the same two stored counts"
+    );
+    assert_eq!(windows.last_24_hours.fetched_token_sum, Some(12));
+
+    let mut banner = observation(Outcome::AnnouncementBanner, NOW_UNIX_MS - 500);
+    banner.banner_text = Some(BANNER_MODEL_SERVING_ISSUES.to_string());
+    store.record(banner).expect("record banner");
+    let with_banner = store.aggregate(NOW_UNIX_MS).expect("aggregate banner");
+    let banner_text = format_uptime_beside_status(&with_banner);
+    assert_eq!(
+        with_banner.last_15_minutes.fetched_token_sum,
+        Some(12),
+        "Operator: an announcement banner does not erase a stored token sum"
+    );
+    assert!(
+        banner_text.contains(", tokens 12") && !banner_text.contains("not fetched"),
+        "Operator: an announcement banner does not hide a stored token sum: {banner_text}"
+    );
+
+    let mut missing = observation(Outcome::Timeout, NOW_UNIX_MS);
+    missing.token_count = None;
+    missing.tokens_not_fetched = true;
+    store.record(missing).expect("record missing");
+    let mixed = store.aggregate(NOW_UNIX_MS).expect("aggregate mixed");
+    let mixed_text = format_uptime_beside_status(&mixed);
+    assert!(
+        mixed.last_15_minutes.fetched_token_sum.is_none(),
+        "Operator: one missing count means the window has no complete sum"
+    );
+    assert!(
+        !mixed_text.contains("not fetched") && !mixed_text.contains("tokens"),
+        "Operator: a partial window omits the token clause: {mixed_text}"
+    );
+    assert!(
+        !mixed_text.contains("167")
+            && !mixed_text.contains("tokens 12")
+            && !mixed_text.contains("tokens 9")
+            && !mixed_text.contains("tokens 3"),
+        "Operator: a partial window does not invent or show a partial sum: {mixed_text}"
+    );
+}
+
+#[test]
+fn operator_empty_uptime_windows_are_a_short_phrase_not_two_sentences() {
+    let text = format_uptime_beside_status(&crate::uptime::WindowPair::empty());
+    assert_eq!(
+        text, "15m none · 24h none",
+        "Operator: empty windows are a few words, not the sentence twice: {text}"
+    );
+    assert!(
+        !text.contains("no observations in the last"),
+        "Operator: the long sentence must not return: {text}"
+    );
+    assert!(!text.contains('\u{2014}'));
+}
+
+#[test]
+fn operator_uptime_status_segment_stays_short_so_supergrok_period_limits_fit() {
+    use crate::uptime::cap_uptime_status_segment;
+    let short = "15m none · 24h none";
+    assert_eq!(cap_uptime_status_segment(short), short);
+    let long = format_uptime_beside_status(&crate::uptime::WindowPair::empty())
+        .replace("none", "no observations in the last 15 minutes");
+    let capped = cap_uptime_status_segment(&long);
+    assert!(
+        unicode_width::UnicodeWidthStr::width(capped.as_str()) <= 24,
+        "{capped}"
+    );
+    assert!(
+        !capped.contains('%'),
+        "do not invent a used percent: {capped}"
+    );
+    assert_eq!(
+        cap_uptime_status_segment("uptime tracking is off because DuckDB is not installed"),
+        "uptime off, no DuckDB"
     );
 }

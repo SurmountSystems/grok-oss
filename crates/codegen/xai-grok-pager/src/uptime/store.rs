@@ -383,6 +383,9 @@ fn summarize(
 ) -> WindowStats {
     let start = now_unix_ms.saturating_sub(span_ms);
     let mut stats = WindowStats::empty(duration_words);
+    let mut missing_model_tokens = false;
+    let mut token_sum: i128 = 0;
+    let mut model_rows_with_tokens: u64 = 0;
     for row in rows {
         if row.time_unix_ms < start || row.time_unix_ms > now_unix_ms {
             continue;
@@ -398,9 +401,20 @@ fn summarize(
             stats.measured_latency_sum_ms += i128::from(latency);
             stats.measured_latency_count += 1;
         }
-        if row.tokens_not_fetched || row.token_count.is_none() {
-            stats.tokens_not_fetched = true;
+        // A banner is not a model observation. It does not hide a real count.
+        if row.outcome == Outcome::AnnouncementBanner.as_str() {
+            continue;
         }
+        match row.token_count {
+            Some(count) if !row.tokens_not_fetched => {
+                token_sum += i128::from(count);
+                model_rows_with_tokens += 1;
+            }
+            _ => missing_model_tokens = true,
+        }
+    }
+    if !missing_model_tokens && model_rows_with_tokens > 0 {
+        stats.fetched_token_sum = Some(token_sum);
     }
     stats
 }
