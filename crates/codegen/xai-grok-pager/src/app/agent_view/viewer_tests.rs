@@ -1557,16 +1557,46 @@ fn enter_while_composing_a_comment_still_saves_the_comment() {
 #[test]
 fn empty_enter_never_approves_even_when_approve_is_marked() {
     let mut agent = agent_with_scrollable_plan();
+    agent.plan_mode_active = true;
+    agent.plan_mode_pending = None;
     agent.prompt.set_text("");
     {
         let viewer = agent.line_viewer.as_mut().expect("plan pane");
         viewer.plan_mut().selected_cta =
             Some(crate::views::file_search::line_viewer::SelectedPlanCta::Approve);
     }
-    press_plan_key(&mut agent, KeyCode::Enter, KeyModifiers::NONE);
+    let outcome = agent.handle_input(
+        &Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        &ActionRegistry::defaults(),
+    );
+    assert!(
+        !matches!(
+            &outcome,
+            InputOutcome::Action(
+                Action::SendPrompt(_) | Action::SendPromptNow { .. } | Action::Interject { .. }
+            ) | InputOutcome::ActionThenForward(
+                Action::SendPrompt(_) | Action::SendPromptNow { .. } | Action::Interject { .. }
+            )
+        ),
+        "empty Enter never Approves; got {outcome:?}"
+    );
     assert!(
         agent.plan_approval_view.is_some() && !agent.plan_decision_resolved,
         "empty Enter must never Approve a parked plan"
+    );
+    assert!(
+        agent.line_viewer.is_some(),
+        "empty Enter never Approves and must leave the plan panel open"
+    );
+    assert_ne!(
+        agent.plan_mode_pending,
+        Some(false),
+        "empty Enter never Approves and must not exit plan mode"
+    );
+    assert!(
+        agent.prompt.text().trim().is_empty(),
+        "empty Enter never Approves and must not invent `Love it! Execute now.` or any other composer text, got {:?}",
+        agent.prompt.text()
     );
 }
 
@@ -2409,14 +2439,8 @@ fn exclusive_covering_revise_cta_rewrites_and_represents_cannot_revise_plans() {
         "cannot revise plans: Revise is not Approve and not Exit"
     );
     assert!(
-        agent.line_viewer.as_ref().is_some_and(|v| v.fullscreen),
-        "cannot revise plans: Isolated Preview stays until Esc, Exit, or Approve"
-    );
-    assert!(
-        agent.line_viewer.as_ref().is_some_and(|v| v
-            .plan_ref()
-            .is_some_and(|p| !p.show_action_buttons && !p.feedback_active)),
-        "cannot revise plans: rewrite-wait must not arm idle Approve on leftover body"
+        agent.line_viewer.is_none(),
+        "After the Operator submits revisions on an exclusive /plan present, the plan view goes away (or is not left up as the idle plan pane) while the revise turn runs. Do not leave plan.md docked after revision submit."
     );
 }
 

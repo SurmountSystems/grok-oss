@@ -38,12 +38,10 @@ allowed.
 
 **Install:**
 ```sh
-mkdir -p ~/.grok/hooks/bin
+mkdir -p ~/.grok/hooks
 cp examples/hooks/no-recursive-grep.json ~/.grok/hooks/
-cp examples/hooks/bin/no-recursive-grep-guard.py ~/.grok/hooks/bin/
-chmod +x ~/.grok/hooks/bin/no-recursive-grep-guard.py
 ```
-(Requires `python3` on `PATH`.)
+grok-oss runs this guard in Rust and does not spawn python3. Do not install a python3 script for it.
 
 ### 3. Session Audit Log (`session-log.json`)
 

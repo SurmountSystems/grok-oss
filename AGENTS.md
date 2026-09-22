@@ -548,7 +548,7 @@ less than product code and tests. Do not invent long essays or git nags.
    scripts**, and must **not invent and execute ad-hoc shell scripts that
    download or run untrusted code**, for agent tasks. Active **supply chain
    attacks on the Python ecosystem** make agent-authored `python3` / `pip` /
-   one-off `.py` payloads a real risk. **Shell tool for named product
+   one-off `.py` payloads a real risk. grok-oss must not execute python3. **Shell tool for named product
    commands** (`cargo`, `just`, `cargo test`/nextest, `rg`, read-only git,
    existing in-tree scripts) is fine. **Writing** a new `.py`/throwaway `.sh`
    (or equivalent heredoc payload) and executing it for agent glue is not.
@@ -910,6 +910,10 @@ attached. User-facing copy uses layers. GitHub issue 143 is titled
 describes that work as **L1 follow-up to a running L2**. Do not
 mass-rename GitHub.
 
+Do not say siblings for other L2s or for L3s. When speaking to an L2,
+say L3s for the specialists that L2 spawns, and say other L2s for the
+other coordinators. Be kind in those notes.
+
 This pin does not weaken § *Operator and Agent*. Dual-pin: this file
 (hard constraint 4) and host `~/.grok/AGENTS.md` same heading.
 
@@ -941,8 +945,27 @@ Do not spawn the next job and only mention the live count. Finished work
 that is only in a later "one L2 running" defense was never reported.
 
 This sits next to § *Finished nested agents must stop* (kill the
-painted-live row). Stopping the row is not the operator report. Dual-pin:
-this file and host `~/.grok/AGENTS.md` same heading.
+painted-live row). Stopping the row is not the operator report. An
+early L2 exit is not finished work. See
+§ *L1 resumes an early L2 exit*. Dual-pin: this file and host
+`~/.grok/AGENTS.md` same heading.
+
+## L1 resumes an early L2 exit (pinned 2026-09-21)
+
+If an L2 exits early, L1 resumes that same L2. Early means about a
+couple of minutes, few or zero tool calls, no land report, or the L2
+stopped for a repeating sentence before work. L1 uses the product
+resume path for that same L2. That path is not a new L2.
+
+Do not treat that exit as done. Do not start a duplicate L2 for the
+same job.
+
+This is an L1 manager rule. It does not license killing a healthy L2
+that is still working, and it does not replace the rule that a truly
+finished L2 must stop. Those rules stay § *Finished nested agents must
+stop*, § *Report finished nested work the same turn*, and the line that
+says do not kill a healthy in-flight L2. Dual-pin: this file and host
+`~/.grok/AGENTS.md` same heading.
 
 ## Subagents — parent is HITL UX only (hard)
 
@@ -973,7 +996,7 @@ joins under project `.agents/joins/`.
 - **L1 sampling** is the catalog 500k window. AUTO compact on L1 uses that window, not 200k. No 40% throttle on the L1 window size. Cancelled compact must not re-arm.
 - **L2 nested** stays 200k. L2 may compact.
 - **L3 never compact.** An L3 is disposable. If it stalls or spirals, kill it. When an L3 is near 200k, it summarizes, reports to L2, and stops. Do not compact-and-continue on L3. Compact on L3 is an error. Think-only stall: see § *Kill a think-only L3 after about 15 minutes*.
-- **Finished nested agents must stop (pinned 2026-08-22).** When the host says a nested agent has exited, L1 must not leave it painted as live. If the Subagents list still shows Responding and a running timer, kill that id the same turn. A finished L2 must not keep its context open. Compaction of a finished L2 is waste. Host dual-pin: `~/.grok/AGENTS.md` § Agent depth. Same turn, **report** that finished work to the operator (§ *Report finished nested work the same turn*). Killing the painted-live row is not the report.
+- **Finished nested agents must stop (pinned 2026-08-22).** When the host says a nested agent has exited, L1 must not leave it painted as live. If the Subagents list still shows Responding and a running timer, kill that id the same turn. A finished L2 must not keep its context open. Compaction of a finished L2 is waste. Host dual-pin: `~/.grok/AGENTS.md` § Agent depth. Same turn, **report** that finished work to the operator (§ *Report finished nested work the same turn*). Killing the painted-live row is not the report. An early L2 exit is not a finished L2. See § *L1 resumes an early L2 exit*.
 - **L1** never does product work and never shows raw edits. Status, spawn L2, wait, short reports, board, Hierarchical fast path. L1 must not edit product code (see § *I hate seeing you edit code at L1*). L1 must not rewrite process-law files (see § *L1 must not rewrite process law*).
 - **L2** is the coordinator and reports back to the operator at L1. L2 decides whether to spawn L3s. Spawn L3 **only if the problem is actually hard**. Easy work can stay on L2. Easy documentation dual-pins stay on L2.
 - **L3** has about as much agency as L2 except no spawn (no L4).
@@ -992,7 +1015,7 @@ goes up. Do not go deeper than L3.
 
 L3 is not a weaker agent. The hard cap is no L4. L2's unique extra versus L3 is spawning L3 plus being the nested view the operator talks to. L3's unique extra versus L2 is doing the tools when spawned. Easy work can stay on L2.
 
-Spawn an L2 when the job needs isolation from L1: implement, multi-file diagnosis, CI, regressions, skill-maintenance, or any tool work that would fill the parent. The Hierarchical fast path does not spawn L2. Additive "also" / "btw" spawns another L2 (or queues same-file). Do not kill a healthy in-flight L2. Builder jobs on surmount-1 go through one runner L2 (see § *Jobs queue*). Do not spawn a swarm of identical Isolated Preview writers on the same files.
+Spawn an L2 when the job needs isolation from L1: implement, multi-file diagnosis, CI, regressions, skill-maintenance, or any tool work that would fill the parent. The Hierarchical fast path does not spawn L2. Additive "also" / "btw" spawns another L2 (or queues same-file). Do not kill a healthy in-flight L2. See § *L1 resumes an early L2 exit*. Builder jobs on surmount-1 go through one runner L2 (see § *Jobs queue*). Do not spawn a swarm of identical Isolated Preview writers on the same files.
 
 L2 waits on L3, reads L3 short reports, and writes one L2 report under `~/.agents/reports/`. L1 reads that L2 report only and speaks to the operator. L1 does not re-do L3 greps. Those files are reports, not joins. They are not project `.agents/reports/` and not git. Operator compose in the nested L2 view resumes that L2. Do not barge into a running L3 with operator text unless the operator explicitly targeted that specialist (they did not; default is unbothered). Keep L1 list L2-only plus a live L3 count. Do not flatten L2/L3 into one list.
 

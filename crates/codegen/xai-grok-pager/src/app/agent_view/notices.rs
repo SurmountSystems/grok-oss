@@ -285,7 +285,18 @@ impl AgentView {
     /// the copy actually landed (clipboard, backup file, or nowhere).
     pub fn copy_to_clipboard(&mut self, text: &str) -> crate::clipboard::CopyDelivery {
         let delivery = crate::clipboard::copy_text_or_file(text);
-        self.show_toast_ticks(delivery.toast_message().as_ref(), delivery.toast_ticks());
+        // Plan copy and `y:copy` both land here. The toast states the character
+        // count. A file fallback keeps the backup path after that sentence.
+        // Image copy does not use this toast (`Copied image` stays on its own path).
+        let count = super::composer_copy::copied_characters_toast(text);
+        let toast = match &delivery {
+            crate::clipboard::CopyDelivery::Clipboard { .. } => count,
+            crate::clipboard::CopyDelivery::File { .. }
+            | crate::clipboard::CopyDelivery::Failed { .. } => {
+                format!("{count} {}", delivery.toast_message())
+            }
+        };
+        self.show_toast_ticks(toast.as_ref(), delivery.toast_ticks());
         delivery
     }
 
@@ -413,6 +424,42 @@ mod mouse_off_banner_tests {
             "show_toast must scrub controls: {msg:?}"
         );
         assert!(msg.contains("https://x.ai"), "{msg:?}");
+    }
+
+    /// Operator: All copy functions should state how many characters were copied.
+    #[test]
+    fn copy_to_clipboard_states_how_many_characters_were_copied() {
+        let mut view = make_running_agent();
+        let text = "wrong prompt";
+        let n = super::super::composer_copy::copied_character_count(text);
+        let delivery = view.copy_to_clipboard(text);
+        let toast = view.active_toast_message().unwrap_or("");
+        let count_sentence = format!("Copied {n} characters.");
+        match &delivery {
+            crate::clipboard::CopyDelivery::Clipboard { .. } => {
+                assert_eq!(
+                    toast, count_sentence,
+                    "clipboard success toast is the character count"
+                );
+            }
+            crate::clipboard::CopyDelivery::File { path } => {
+                assert!(
+                    toast.starts_with(&count_sentence),
+                    "file fallback must start with the character count, got {toast:?}"
+                );
+                let shown = crate::clipboard::display_copy_path(path);
+                assert!(
+                    toast.contains(&shown),
+                    "file fallback must keep the file path, got {toast:?}"
+                );
+            }
+            crate::clipboard::CopyDelivery::Failed { .. } => {
+                assert!(
+                    toast.starts_with(&count_sentence),
+                    "a failed copy must still state the character count, got {toast:?}"
+                );
+            }
+        }
     }
 
     #[test]

@@ -87,6 +87,7 @@ pub enum HookEvent {
     SessionEnd,
     Stop,
     StopFailure,
+    StopCancelled,
     // Tool events
     PreToolUse,
     PostToolUse,
@@ -113,6 +114,7 @@ impl std::fmt::Display for HookEvent {
             Self::SessionEnd => write!(f, "Session End"),
             Self::Stop => write!(f, "Stop"),
             Self::StopFailure => write!(f, "Stop Failure"),
+            Self::StopCancelled => write!(f, "Stop Cancelled"),
             Self::Notification => write!(f, "Notification"),
             Self::UserPromptSubmit => write!(f, "Prompt Submit"),
             Self::PermissionDenied => write!(f, "Permission Denied"),
@@ -862,6 +864,7 @@ mod tests {
             (HookEvent::SessionEnd, r#""session_end""#),
             (HookEvent::Stop, r#""stop""#),
             (HookEvent::StopFailure, r#""stop_failure""#),
+            (HookEvent::StopCancelled, r#""stop_cancelled""#),
             (HookEvent::Notification, r#""notification""#),
             (HookEvent::UserPromptSubmit, r#""user_prompt_submit""#),
             (HookEvent::PermissionDenied, r#""permission_denied""#),

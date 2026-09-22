@@ -18,9 +18,13 @@ use std::time::{Instant, SystemTime};
 use unicode_width::UnicodeWidthStr;
 
 use crate::app::agent::{BgTaskState, BgTaskStatus, ScheduledTaskInfo};
+use crate::app::agent_view::l2_token_tracking::{
+    LiveJobRowInput, STANDING_WRAP_ESTIMATE_TOKENS, STANDING_WRAP_ESTIMATE_WALL,
+    display_live_job_row,
+};
 use crate::app::subagent::{
     SubagentInfo, format_context_badge, format_live_l3_count, format_subagent_label_parts_among,
-    is_l2_list_row, listed_live_subagents, live_l3_count,
+    is_l2_list_row, listed_live_subagents, live_l3_count, subagent_list_row_usage,
 };
 use crate::appearance::LayoutConfig;
 use crate::scrollback::layout::HorizontalLayout;
@@ -442,6 +446,28 @@ impl TaskEntry {
         ];
         if let Some(ref compact) = compact {
             spans.push(Span::styled(format!(" ({compact})"), desc_style));
+        }
+        // Live job row. `TasksPane::render` paints this span via `ListItem::content`.
+        // Host figure only. No figure paints the formatter's actual-tokens text.
+        // The standing estimate stays labeled as an estimate. This span must not
+        // say tokens: Subagents list chrome omits that word. Do not add the
+        // figure to the L1 total or grok-oss sqlite.
+        if info.is_running() {
+            let elapsed_text = format_duration(info.display_elapsed());
+            let shown = display_live_job_row(LiveJobRowInput {
+                job: job_desc.as_str(),
+                estimate_wall: STANDING_WRAP_ESTIMATE_WALL,
+                estimate_tokens: STANDING_WRAP_ESTIMATE_TOKENS,
+                elapsed: &elapsed_text,
+                host_tokens: subagent_list_row_usage(info, all),
+            });
+            debug_assert_eq!(shown.l1_tokens_added, 0);
+            debug_assert!(!shown.wrote_grok_oss_sqlite);
+            let live_text = format!(
+                " {} · {} · {} · {}",
+                shown.estimate_wall, shown.estimate_tokens, shown.elapsed, shown.actual_tokens
+            );
+            spans.push(Span::styled(live_text, desc_style));
         }
         if let Some(count) = format_live_l3_count(live_l3) {
             spans.push(Span::styled(

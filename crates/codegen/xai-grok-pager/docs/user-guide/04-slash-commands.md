@@ -729,6 +729,40 @@ This setting doesn't touch `[features] telemetry`, `trace_upload`, or your exter
 
 ---
 
+## Uptime window
+
+The small window sits beside the status line. It is not a second dashboard, and it does not replace the token chrome.
+
+Over a short window and a longer window, it shows the share of observations that succeeded, the count of HTTP 500s, and latency that was actually measured. Estimates are labeled as estimates.
+
+The window reads local observations through the installed DuckDB shared library. It does not call xAI to paint.
+
+grok-oss loads that shared library when it reads the pieces. It does not link the library in a way that stops process start. If the shared library is missing, grok-oss still starts, uptime tracking stays off, and the window says uptime tracking is off because DuckDB is not installed. The product does not invent samples.
+
+Recorded observations are ones the product already made: a real model request, a real 500, a timeout, a repeating-sentence stop, a latency, a fetched token count, and an announcement banner the product already showed ("We're currently experiencing issues serving our models" or "A datacenter incident is affecting all Grok models").
+
+If tokens were not fetched, the stored value is not-fetched. The product does not invent a token count.
+
+Each row is the time, the outcome, the latency, the token count or not-fetched, the model id, and which local session saw it.
+
+The store is Parquet. Numeric columns use Parquet delta binary packing (DELTA_BINARY_PACKED). That is not Delta Lake.
+
+New observations append as a new Parquet piece. History is not rewritten on every request. The product does not write a row on every paint.
+
+This series is not in the grok-oss sqlite session store. It is not added into the L1 token total or the session ledger.
+
+Extra requests to api.x.ai for this window default to zero. A synthetic probe is off.
+
+`/announcements hide` hides the banner and does not delete the stored row.
+
+The plan side panel still paints over the transcript behind it.
+
+### `/announcements`
+
+Show or hide the announcement banner (`/announcements hide` or `/announcements show`). Hiding the banner does not delete the stored row. The command is offered when this session already has an announcement.
+
+---
+
 ## Configuration and UI
 
 ### `/settings`

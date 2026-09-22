@@ -10,7 +10,7 @@ use crate::result::{HookDecision, StopHookOutcome};
 
 use super::{
     GateHookJson, GateKind, HookRunnerResult, RunContext, StopHookJson, gate_json_to_decision,
-    stop_json_to_outcome,
+    gate_updated_input, stop_json_to_outcome,
 };
 
 /// Maximum bytes to capture from hook stdout or stderr (64 KB).
@@ -516,9 +516,11 @@ fn parse_blocking_result(
     };
 
     if let Some(output) = json_decision {
+        let updated_input = gate_updated_input(&output);
         match gate_json_to_decision(output, hook_name, stderr_first_line(stderr).as_deref()) {
             Ok(HookDecision::Deny { reason, hook_name }) => {
                 // A JSON deny is honored on any exit code (fail-safe).
+                // `updatedInput` is ignored on deny.
                 if exit_code != GATE_EXIT_CODE && exit_code != 0 {
                     tracing::warn!(
                         hook_name,
@@ -535,11 +537,13 @@ fn parse_blocking_result(
                 if exit_code == GATE_EXIT_CODE {
                     // Exit 2 wins over a JSON allow (stdout is not
                     // processed on exit 2); the exit-code ladder below
-                    // denies.
+                    // denies. A rewrite on that allow is ignored.
                     tracing::warn!(
                         hook_name,
                         "JSON decision is 'allow' but exit code is 2 — denying (stdout is ignored on exit 2)"
                     );
+                } else if let Some(value) = updated_input {
+                    return (HookRunnerResult::AllowRewrite(value), elapsed);
                 } else {
                     return (HookRunnerResult::Decision(HookDecision::Allow), elapsed);
                 }
@@ -812,6 +816,8 @@ mod tests {
         let blank = || GateHookJson {
             decision: "deny".to_string(),
             reason: Some("  ".to_string()),
+            updated_input: None,
+            hook_specific_output: None,
         };
         let with_fallback =
             gate_json_to_decision(blank(), "h", Some("quota exceeded")).expect("valid decision");

@@ -2,8 +2,8 @@
 //!
 //! Chat history is JSON-parsed user text. Do not substring-search the raw
 //! JSONL file for decoded WAL bodies (escaped quotes miss; assistant lines
-//! false-hit). `/goal <rest>` matches `A goal has been set: <rest>` after
-//! unwrapping `<user_query>`.
+//! false-hit). `/goal <rest>` matches `A goal has been set: <rest>` in the
+//! user turn, including a system-reminder that sits before `<user_query>`.
 
 const USER_QUERY_OPEN: &str = "<user_query>";
 const USER_QUERY_CLOSE: &str = "</user_query>";
@@ -93,13 +93,24 @@ fn slash_goal_objective(text: &str) -> Option<&str> {
     Some(rest)
 }
 
-/// Objective from `A goal has been set: <rest>` after unwrapping
-/// `<user_query>`.
+/// Objective from `A goal has been set: <rest>`.
+///
+/// Prefer the `<user_query>` body when that body holds the sentence. A
+/// system-reminder before the tag must not hide it, and a same-line
+/// `</user_query>` must not stick to the objective. When the sentence is
+/// only in the reminder, search the whole turn.
 fn recorded_goal_objective(text: &str) -> Option<&str> {
+    let text = text.trim();
     let unwrapped = unwrap_user_query(text);
-    let idx = unwrapped.find(GOAL_SET_PREFIX)?;
-    let after = &unwrapped[idx + GOAL_SET_PREFIX.len()..];
+    let search = if unwrapped.contains(GOAL_SET_PREFIX) {
+        unwrapped
+    } else {
+        text
+    };
+    let idx = search.find(GOAL_SET_PREFIX)?;
+    let after = &search[idx + GOAL_SET_PREFIX.len()..];
     let line = after.lines().next().unwrap_or(after).trim();
+    let line = line.split(USER_QUERY_CLOSE).next().unwrap_or(line).trim();
     if line.is_empty() {
         return None;
     }
@@ -284,6 +295,41 @@ mod tests {
             "only the truly absent WAL send restores, got {:?}",
             missing.iter().map(|r| r.text.as_str()).collect::<Vec<_>>()
         );
+        assert_eq!(missing[0].text, absent.text);
+    }
+
+    /// Operator: "Stale prompts at start are still a problem sadly... And yes, what is running is the latest binary."
+    ///
+    /// WAL send `/goal do the thing`. History is a system-reminder, then
+    /// `<user_query>A goal has been set: do the thing</user_query>` on one
+    /// line. This matcher does not read `canceled_turn_resume.json`. The
+    /// slash must not be missing. A send that is truly absent still is.
+    #[test]
+    fn wal_goal_send_is_not_missing_when_reminder_precedes_user_query() {
+        let history = "<system-reminder>\nThe session is continuing.\n</system-reminder>\n<user_query>A goal has been set: do the thing</user_query>";
+        let goal = rec(
+            crate::session::prompt_wal::PromptWalKind::Send,
+            "/goal do the thing",
+        );
+        let absent = rec(
+            crate::session::prompt_wal::PromptWalKind::Send,
+            "operator send that never reached chat history",
+        );
+        let blob = concat!(
+            r#"{"type":"user","content":[{"type":"text","text":"<system-reminder>\nThe session is continuing.\n</system-reminder>\n<user_query>A goal has been set: do the thing</user_query>"}]}"#,
+            "\n",
+        );
+        assert!(
+            operator_text_matches_recorded("/goal do the thing", history),
+            "Operator: \"Stale prompts at start are still a problem sadly... And yes, what is running is the latest binary.\" A system-reminder before <user_query> must not hide A goal has been set: do the thing"
+        );
+        let missing = wal_sends_missing_from_history(&[goal, absent.clone()], &[], &[], Some(blob));
+        assert!(
+            missing.iter().all(|r| r.text != "/goal do the thing"),
+            "Operator: \"Stale prompts at start are still a problem sadly... And yes, what is running is the latest binary.\" WAL /goal do the thing must not be missing; missing={:?}",
+            missing.iter().map(|r| r.text.as_str()).collect::<Vec<_>>()
+        );
+        assert_eq!(missing.len(), 1, "the absent send still restores");
         assert_eq!(missing[0].text, absent.text);
     }
 }

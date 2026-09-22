@@ -18,6 +18,28 @@ use crate::views::btw_overlay::BTW_OVERLAY_ENTRY_IDX;
 use crate::views::prompt_widget::PromptEvent;
 use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 use std::time::Instant;
+
+#[cfg(test)]
+thread_local! {
+    static LAST_OPENED_PATH: std::cell::RefCell<Option<std::path::PathBuf>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn last_opened_path_for_test() -> Option<std::path::PathBuf> {
+    LAST_OPENED_PATH.with(|slot| slot.borrow().clone())
+}
+
+fn spawn_file_manager(path: &std::path::Path) {
+    #[cfg(target_os = "macos")]
+    let program = "open";
+    #[cfg(target_os = "windows")]
+    let program = "explorer";
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let program = "xdg-open";
+    let _ = std::process::Command::new(program).arg(path).spawn();
+}
+
 impl AgentView {
     /// Time-paired multi-click check for the prompt textarea. Pairing is
     /// time-only (no coordinates); a mispaired action is one undo step.
@@ -37,6 +59,16 @@ impl AgentView {
         self.last_prompt_click_ms = None;
         self.prompt.clear_paste_chip_double_click();
     }
+    /// Open `path` in the file manager and show a brief toast.
+    /// Clipboard copy is not the click. Tests record the path and do not spawn.
+    pub(crate) fn open_path(&mut self, path: &std::path::Path) {
+        #[cfg(test)]
+        LAST_OPENED_PATH.with(|slot| *slot.borrow_mut() = Some(path.to_path_buf()));
+        #[cfg(not(test))]
+        spawn_file_manager(path);
+        self.show_toast("Opened the session directory.");
+    }
+
     /// Handle mouse events: click-to-focus, forward to prompt textarea.
     ///
     /// Scroll events are handled at app level (not here).
@@ -282,8 +314,8 @@ impl AgentView {
                     return InputOutcome::Action(Action::DashboardOverlayNext);
                 }
                 if self.hit_cwd.contains(mouse.column, mouse.row) {
-                    let path = self.session.cwd.display().to_string();
-                    self.copy_to_clipboard(&path);
+                    let cwd = self.session.cwd.clone();
+                    self.open_path(&cwd);
                     return InputOutcome::Changed;
                 }
                 if self.hit_badge.contains(mouse.column, mouse.row) {

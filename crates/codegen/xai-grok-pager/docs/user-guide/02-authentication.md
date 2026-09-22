@@ -105,6 +105,8 @@ Named commands, same words on TUI `/limits` and CLI `grok-oss limits`: `stay-sup
 
 See [Slash Commands → `/limits`](04-slash-commands.md#limits) and [Configuration → Token Economy](05-configuration.md#token-economy).
 
+The small uptime window sits beside the status line. It is not this compact meter, and it does not replace the token chrome. See [Uptime window](04-slash-commands.md#uptime-window).
+
 ---
 
 ## Machine console API key for host surmount-1

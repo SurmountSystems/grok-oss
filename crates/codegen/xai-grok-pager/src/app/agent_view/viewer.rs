@@ -16,6 +16,10 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 
+#[cfg(test)]
+#[path = "isolated_preview_revise_tests.rs"]
+mod isolated_preview_revise_tests;
+
 /// Bare typing while plan.md is open: letters and delete keys go to the
 /// composer. Ctrl+Backspace / Alt+Backspace / Ctrl+Delete are word-edit
 /// on that composer. Left/Right, Ctrl/Alt word-move, and Ctrl-A/E stay
@@ -820,6 +824,16 @@ impl AgentView {
     ) -> InputOutcome {
         use crossterm::event::{MouseButton, MouseEventKind};
 
+        // Header directory click stays live while Isolated Preview is docked.
+        // The line viewer must not swallow it as an outside-modal dismiss.
+        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+            && self.hit_cwd.contains(mouse.column, mouse.row)
+        {
+            let cwd = self.session.cwd.clone();
+            self.open_path(&cwd);
+            return InputOutcome::Changed;
+        }
+
         let Some(ref mut viewer) = self.line_viewer else {
             return InputOutcome::Changed;
         };
@@ -948,6 +962,20 @@ impl AgentView {
                 if send_area.is_some_and(|a| a.contains((mouse.column, mouse.row).into())) {
                     if self.plan_approval_view.is_some() {
                         return self.click_plan_cta(SelectedPlanCta::Revise);
+                    }
+                    // Isolated Preview Revise is not a casual line-comment send.
+                    // Empty notes still revise via PLAN_REVISE_HUMAN_LINE inside
+                    // send_plan_feedback. Comment stays the hub for notes.
+                    if self.isolated_preview_shows_secondary_plan {
+                        self.park_local_idle_plan_decision_if_needed();
+                        self.park_isolated_preview_revise_decision();
+                        let notes = self.isolated_preview_revise_notes_from_comments();
+                        let feedback = if notes.trim().is_empty() {
+                            None
+                        } else {
+                            Some(notes)
+                        };
+                        return self.send_plan_feedback(feedback);
                     }
                     return self.send_casual_plan_comments();
                 }

@@ -684,6 +684,25 @@ fn selected_cta_marks_index(
     }
 }
 
+/// One pad cell on each side of an idle plan action word.
+///
+/// Operator: "plan search works very well, but the buttons are mushed too
+/// close together. Make them a little bigger and spaced out better."
+pub(crate) const PLAN_APPROVAL_ACTION_PAD: &str = " ";
+/// Pipe between padded actions. With the pad cells, each side of the pipe
+/// has two spaces.
+pub(crate) const PLAN_APPROVAL_ACTION_BETWEEN: &str = " | ";
+
+/// Wide idle row. Approve, comment, revise, exit:
+/// ` approve  |  comment  |  revise  |  exit `
+pub(crate) fn plan_approval_spaced_action_row(labels: [&str; 4]) -> String {
+    let padded: Vec<String> = labels
+        .iter()
+        .map(|word| format!("{PLAN_APPROVAL_ACTION_PAD}{word}{PLAN_APPROVAL_ACTION_PAD}"))
+        .collect();
+    padded.join(PLAN_APPROVAL_ACTION_BETWEEN)
+}
+
 #[derive(Default)]
 pub struct PlanViewerExtras {
     pub send_button_area: Option<Rect>,
@@ -1871,14 +1890,16 @@ pub fn render_line_viewer(
     //    divider separates the button row from the content above
     //    (matches modal_window.rs's tab divider style).
     //
-    //    Buttons use the same `key bold + label dim` treatment as
-    //    `render_modal_shortcuts`, sit in a single row separated by
-    //    `  |  `, centered within the modal frame.
+    //    Idle plan actions are a little bigger than the bare words.
+    //    Each word has one pad cell on each side. The pipe between those
+    //    padded actions is ` | `, so the wide row reads
+    //    ` approve  |  comment  |  revise  |  exit `
+    //    with two spaces on each side of every pipe.
     //
-    //    - Plan idle (live present and `/view-plan`):  approve | comment | revise | exit
-    //    - Plan comment flow:  approve | clarify | revise | exit
+    //    - Plan idle (live present and `/view-plan`): that spaced row
+    //    - Plan comment flow: the same spacing, with clarify instead of comment
     //    Copy is the title-bar glyph, not a fifth idle CTA. Search / Esc
-    //    stay on the main hint row.
+    //    stay on the main hint row. Narrow docks still drop the pipes.
     if viewer.show_footer() && inner.height >= 2 {
         let div_y = inner.y + inner.height - 2;
         let div_style = Style::default().fg(theme.gray_dim).bg(theme.bg_base);
@@ -1936,12 +1957,24 @@ pub fn render_line_viewer(
             ];
 
             let mut painted = false;
-            for &(sep, sep_w_here, with_badge) in
-                &[("  |  ", 5u16, true), (" ", 1u16, true), (" ", 1u16, false)]
-            {
-                let widths: Vec<u16> = labels.iter().map(|s| s.width() as u16).collect();
+            // Wide row first. Narrow docks drop pipes and the extra pad
+            // so Approve / Comment / Revise / Exit still fit.
+            for &(wide, with_badge) in &[(true, true), (false, true), (false, false)] {
+                let between = if wide {
+                    PLAN_APPROVAL_ACTION_BETWEEN
+                } else {
+                    " "
+                };
+                let between_w = between.width() as u16;
+                let pad = if wide { PLAN_APPROVAL_ACTION_PAD } else { "" };
+                let pad_w = pad.width() as u16;
+                let word_widths: Vec<u16> = labels.iter().map(|s| s.width() as u16).collect();
+                let widths: Vec<u16> = word_widths
+                    .iter()
+                    .map(|word_w| word_w.saturating_add(pad_w.saturating_mul(2)))
+                    .collect();
                 let mut total_w = widths.iter().copied().sum::<u16>();
-                total_w = total_w.saturating_add(sep_w_here.saturating_mul(3));
+                total_w = total_w.saturating_add(between_w.saturating_mul(3));
                 if with_badge {
                     total_w = total_w.saturating_add(badge_w);
                 }
@@ -1953,7 +1986,7 @@ pub fn render_line_viewer(
                 // Isolated Preview side pane can be narrower than the
                 // preferred footer. Still paint Approve / Comment so the
                 // Comment then Approve workflow is clickable.
-                if total_w > inner.width && sep_w_here > 1 {
+                if total_w > inner.width && wide {
                     continue;
                 }
 
@@ -1970,8 +2003,12 @@ pub fn render_line_viewer(
                     } else {
                         Style::default().fg(theme.text_primary).bg(theme.bg_base)
                     };
+                    if pad_w > 0 {
+                        buf.set_string(x, bottom_y, pad, style);
+                        x += pad_w;
+                    }
                     buf.set_string(x, bottom_y, labels[i], style);
-                    x += widths[i];
+                    x += word_widths[i];
                     if marked {
                         buf.set_string(x, bottom_y, &choice_dot, choice_dot_style);
                         x += choice_dot_w;
@@ -1980,10 +2017,14 @@ pub fn render_line_viewer(
                         buf.set_string(x, bottom_y, &badge_text, badge_style);
                         x += badge_w;
                     }
+                    if pad_w > 0 {
+                        buf.set_string(x, bottom_y, pad, style);
+                        x += pad_w;
+                    }
                     areas[i] = Some(Rect::new(start, bottom_y, x.saturating_sub(start), 1));
                     if i < 3 {
-                        buf.set_string(x, bottom_y, sep, sep_style);
-                        x += sep_w_here;
+                        buf.set_string(x, bottom_y, between, sep_style);
+                        x += between_w;
                     }
                 }
 
@@ -2410,14 +2451,52 @@ mod tests {
 
         let full = Rect::new(0, 0, 80, 24);
         let mut buf = Buffer::empty(full);
+        // `Z` is transcript text. The pane must paint over the columns
+        // behind it. `X` stays on the left, beside the pane.
+        for x in 0..full.width {
+            buf[(x, 12)].set_char('Z');
+        }
         buf[(2, 12)].set_char('X');
         let left_bg_before = buf[(2, 12)].bg;
         let theme = crate::theme::Theme::current();
         render_line_viewer(&mut buf, full, &mut viewer, Path::new("/tmp"), &theme, 0);
 
+        let pane_w = LineViewerState::soft_plan_pane_width(full.width);
+        let pane_x = full.x.saturating_add(full.width.saturating_sub(pane_w));
+        assert!(
+            pane_w > 0 && pane_x > 2 && pane_x < full.width,
+            "soft park pane must overlap the transcript, not replace the whole frame; pane_x={pane_x} pane_w={pane_w}"
+        );
+        for x in pane_x..pane_x.saturating_add(pane_w) {
+            let symbol = buf[(x, 12)].symbol().to_string();
+            assert!(
+                symbol != "Z",
+                "plan pane must cover the transcript text behind it; column {x} still shows {symbol:?}. A narrowed transcript that leaves this text visible beside the pane is too weak."
+            );
+        }
+        for x in 0..pane_x {
+            let expected = if x == 2 { "X" } else { "Z" };
+            assert_eq!(
+                buf[(x, 12)].symbol(),
+                expected,
+                "text beside the pane stays put; the cover is the region behind the pane"
+            );
+        }
+
         let modal = viewer
             .last_modal_area
             .expect("soft park must paint a plan pane");
+        assert!(
+            modal.x >= pane_x && modal.x < pane_x.saturating_add(pane_w),
+            "painted plan modal must sit on the transcript region the pane covers; modal={modal:?} pane_x={pane_x}"
+        );
+        assert!(
+            viewer
+                .plan_ref()
+                .and_then(|plan| plan.search_button_area)
+                .is_some(),
+            "plan search must stay a hit target on the side panel"
+        );
         let centered_75_x =
             full.x + (full.width.saturating_sub((full.width as f32 * 0.75) as u16)) / 2;
         assert!(

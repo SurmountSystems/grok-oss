@@ -395,8 +395,13 @@ pub(crate) async fn run_shell_child(
         .spawn_depth
         .unwrap_or(ctx.parent_depth + 1);
     let tools_before_policy = definition.tool_config.tools.len();
-    let allow_nested_subagents =
-        xai_grok_subagent_resolution::nested_spawn_allowed(child_depth, ctx.subagents_max_depth);
+    // Only L1 grants spawn_subagent. An L2 spawn is an L3 specialist even
+    // when the numeric depth is still under max (a coordinator request).
+    let allow_nested_subagents = xai_grok_subagent_resolution::spawned_agent_may_spawn(
+        ctx.parent_depth,
+        child_depth,
+        ctx.subagents_max_depth,
+    );
     xai_grok_subagent_resolution::apply_child_tool_policy(
         &mut definition,
         effective_runtime.capability_mode,

@@ -472,6 +472,12 @@ impl AgentView {
                 _ => self.clear_stuck_scrollback_drag(),
             }
         }
+        if let Event::Mouse(mouse) = ev
+            && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+            && self.click_composer_copy_button(mouse.column, mouse.row)
+        {
+            return InputOutcome::Changed;
+        }
         if let Some(child_sid) = self.visible_nested_overlay_sid().map(str::to_owned) {
             if let Event::Key(key) = ev
                 && key.kind != KeyEventKind::Release
@@ -564,14 +570,20 @@ impl AgentView {
                 self.dismiss_nested_overlay();
                 return InputOutcome::Changed;
             }
-            if let Some(child_view) = self.subagent_views.get_mut(&child_sid) {
+            let forwarded = if let Some(child_view) = self.subagent_views.get_mut(&child_sid) {
                 if !crate::app::subagent::overlay_child_is_l2_coordinator(
                     &self.subagent_sessions,
                     &child_sid,
                 ) {
                     child_view.mark_as_subagent_view();
                 }
-                return child_view.handle_input_inner(ev, registry, prompt_paging);
+                Some(child_view.handle_input_inner(ev, registry, prompt_paging))
+            } else {
+                None
+            };
+            if let Some(outcome) = forwarded {
+                self.hoist_nested_overlay_composer_effects(&child_sid);
+                return outcome;
             }
             return InputOutcome::Unchanged;
         }
@@ -719,7 +731,15 @@ impl AgentView {
                     return InputOutcome::Changed;
                 }
             }
-            if matches!(ev, Event::Mouse(_) | Event::Paste(_)) {
+            // Goal detail sits on the Operator box. An image paste is a chip
+            // on the same probe path as the main composer, not a drop.
+            if let Event::Paste(text) = ev {
+                if let Some((outcome, _)) = self.try_handle_dropped_paths_paste(text) {
+                    return outcome;
+                }
+                return self.insert_or_defer_bracketed_prompt_paste(text);
+            }
+            if matches!(ev, Event::Mouse(_)) {
                 return InputOutcome::Changed;
             }
         }

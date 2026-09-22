@@ -47,6 +47,7 @@ use crate::types::template_renderer::TemplateRenderer;
 use crate::types::tool::{ToolKind, ToolNamespace};
 
 mod dangerous_cargo;
+mod no_python3;
 
 #[derive(thiserror::Error, Debug)]
 pub enum BashError {
@@ -2081,7 +2082,8 @@ impl xai_tool_runtime::Tool for BashTool {
 
         // --- Skill-script intercepts (embedded Rust; never spawn python) ---
         // Known allowlisted host skill scripts are handled in-process.
-        // Unknown python still shells.
+        // Any other python or python3 exec is refused after this block.
+        // grok-oss does not spawn python3.
         let embedded: Option<(String, String, i32)> = if let Some(hit) =
             crate::util::implement_memory::try_parse_memory_intercept(&input.command)
         {
@@ -2158,8 +2160,16 @@ impl xai_tool_runtime::Tool for BashTool {
             return Ok(BashToolOutput::Foreground(bash));
         }
 
+        // Grok OSS: grok-oss does not spawn python3. This diverges from upstream xAI because python3 must not be part of how grok-oss behaves or executes.
+        if let Some(message) = no_python3::try_parse_python3_refuse(&input.command) {
+            return Err(xai_tool_runtime::ToolError::invalid_arguments(message));
+        }
+
         // --- Prefix ---
         let command = Self::get_prefixed_command(&params.cmd_prefix, &input.command);
+        if let Some(message) = no_python3::try_parse_python3_refuse(&command) {
+            return Err(xai_tool_runtime::ToolError::invalid_arguments(message));
+        }
 
         // No command-wrapping is performed here today; `display_command` is
         // populated only by tools that intentionally surface a friendlier form
@@ -3385,10 +3395,12 @@ mod tests {
         let resources = make_resources(mock);
         let tool = BashTool;
 
+        // grok-oss does not spawn python3. The env injection is for every
+        // background command; this check must not start a Python interpreter.
         let _ = xai_tool_runtime::Tool::run(
             &tool,
             test_ctx(resources.into_shared()),
-            make_bg_input("python3 script.py"),
+            make_bg_input("sleep 3600"),
         )
         .await
         .unwrap();
@@ -5395,43 +5407,50 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn unknown_python_still_reaches_shell() {
-        let called = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let mock = TrackingTerminal {
-            called: called.clone(),
-            inner: MockTerminal::success("from-shell\n", 0),
-        };
-        let mut resources = Resources::new();
-        let backend: Arc<dyn TerminalBackend> = Arc::new(mock);
-        resources.insert(Terminal(backend));
-        resources.insert(Cwd(PathBuf::from("/tmp")));
-        resources.insert(SessionFolder(PathBuf::from("/tmp/session")));
-        resources.insert(SessionEnv(Arc::new(HashMap::new())));
-        resources.insert(NotificationHandle(ToolNotificationHandle::noop()));
-        resources.insert(Params(BashParams::default()));
-        resources.insert(TemplateRenderer::new(HashMap::new(), HashMap::new()));
-
+    /// Operator: grok-oss does not spawn python3.
+    ///
+    /// Allowlisted skill helpers are Rust intercepts earlier in `run`.
+    /// Any other `python` or `python3` exec, foreground or background, must
+    /// be refused before `TerminalBackend`. This fails if python3 is spawned.
+    async fn assert_python3_does_not_spawn(cmd: &str, background: bool) {
+        let (resources, called) =
+            make_tracking_resources_with(MockTerminal::success("from-shell\n", 0));
         let tool = BashTool;
-        let result = xai_tool_runtime::Tool::run(
-            &tool,
-            test_ctx(resources.into_shared()),
-            make_input("python3 /home/u/myproject/foo.py"),
-        )
-        .await
-        .unwrap();
-
+        let input = if background {
+            make_bg_input(cmd)
+        } else {
+            make_input(cmd)
+        };
+        let result =
+            xai_tool_runtime::Tool::run(&tool, test_ctx(resources.into_shared()), input).await;
         assert!(
-            called.load(std::sync::atomic::Ordering::SeqCst),
-            "unknown python must still shell"
+            !called.load(std::sync::atomic::Ordering::SeqCst),
+            "grok-oss does not spawn python3, but TerminalBackend ran for `{cmd}`"
         );
         match result {
-            BashToolOutput::Foreground(bash) => {
-                assert_eq!(bash.exit_code, 0);
-                assert_eq!(String::from_utf8_lossy(&bash.output), "from-shell\n");
+            Err(err) => {
+                let msg = err.to_string();
+                assert!(
+                    msg.contains("grok-oss does not spawn python3"),
+                    "refuse for `{cmd}` must say grok-oss does not spawn python3: {msg}"
+                );
+                assert!(
+                    !msg.contains("from-shell"),
+                    "python3 spawn leaked shell output for `{cmd}`: {msg}"
+                );
             }
-            BashToolOutput::Background(_) => panic!("expected foreground"),
+            Ok(out) => {
+                panic!("grok-oss does not spawn python3, but `{cmd}` returned {out:?}")
+            }
         }
+    }
+
+    #[tokio::test]
+    async fn grok_oss_does_not_spawn_python3() {
+        assert_python3_does_not_spawn("python3 /home/u/myproject/foo.py", false).await;
+        assert_python3_does_not_spawn("python3 -c 'print(1)'", false).await;
+        assert_python3_does_not_spawn("python3 script.py", true).await;
+        assert_python3_does_not_spawn("/usr/bin/python3 -c 'print(1)'", false).await;
     }
 
     // Grok OSS: validate-plan.py is a Rust intercept, not a Python runtime. This diverges from upstream xAI because product skills must not spawn python3 for that CLI stub.
@@ -5527,45 +5546,12 @@ mod tests {
         }
     }
 
-    /// Operator: skills must not generate arbitrary Python or Bash and then
-    /// run it as a skill helper. Generated payloads are not intercepts;
-    /// unknown python still reaches the shell (user project), not a skill
-    /// stub.
+    /// Operator: grok-oss does not spawn python3.
+    /// Generated `python3 -c` is not a skill-stub intercept, and it must not
+    /// reach the shell either.
     #[tokio::test]
     async fn generated_python_payload_is_not_skill_stub_intercept() {
-        let called = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let mock = TrackingTerminal {
-            called: called.clone(),
-            inner: MockTerminal::success("from-shell\n", 0),
-        };
-        let mut resources = Resources::new();
-        let backend: Arc<dyn TerminalBackend> = Arc::new(mock);
-        resources.insert(Terminal(backend));
-        resources.insert(Cwd(PathBuf::from("/tmp")));
-        resources.insert(SessionFolder(PathBuf::from("/tmp/session")));
-        resources.insert(SessionEnv(Arc::new(HashMap::new())));
-        resources.insert(NotificationHandle(ToolNotificationHandle::noop()));
-        resources.insert(Params(BashParams::default()));
-        resources.insert(TemplateRenderer::new(HashMap::new(), HashMap::new()));
-
-        let tool = BashTool;
-        let result = xai_tool_runtime::Tool::run(
-            &tool,
-            test_ctx(resources.into_shared()),
-            make_input("python3 -c 'print(1)'"),
-        )
-        .await
-        .unwrap();
-        assert!(
-            called.load(std::sync::atomic::Ordering::SeqCst),
-            "generated python3 -c must not be treated as a skill stub intercept"
-        );
-        match result {
-            BashToolOutput::Foreground(bash) => {
-                assert_eq!(String::from_utf8_lossy(&bash.output), "from-shell\n");
-            }
-            BashToolOutput::Background(_) => panic!("expected foreground"),
-        }
+        assert_python3_does_not_spawn("python3 -c 'print(1)'", false).await;
     }
 
     // ─── Dangerous crate-wide cargo refuse ───

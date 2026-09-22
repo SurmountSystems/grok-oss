@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bin/no-recursive-grep-guard.py",
+            "command": "bin/no-recursive-grep-guard",
             "timeout": 5
           }
         ]

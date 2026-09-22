@@ -190,6 +190,16 @@ The new subagent inherits the source's transcript, tool state, and model; its sy
 
 The spawn tool's `follow_up` field is L1 enqueue onto a **still-running** nested L2. Pass that L2's subagent ID. Extra prompt text stays in `prompt`. That enqueue is additive: not kill, not respawn, not a wait for exit. It is not Operator overlay typing (open the L2 framed view and type; that is `x.ai/interject` on that L2). It is not `resume_from`, which still continues a **completed** nested L2 only. `resume_from` of a running L2 still fails. The follow-up must not inject into a live L3 unless the Operator explicitly targeted that specialist. Default on. `[subagents] parent_follow_up = false` is the SpaceXAI option (spawn, wait, `resume_from` after exit). Overlay compose stays. No new `[auth]` key.
 
+### Early exit of an L2
+
+If an L2 exits early, L1 resumes that same L2. Early means about a couple of minutes, few or zero tool calls, no report of the work, or a stop on a repeating sentence before the work started. L1 does not treat that exit as done. L1 does not start a second L2 for the same job. This is an L1 manager rule. It is not a follow-up into an L2 that is still running, and it is not a new L2 that only copies a finished transcript.
+
+An L1 can read other L1 sessions on this machine. It can send those sessions a soft message about a resource they are using. A live `just check-remote` is one example. Soft means help. A soft message is not a lock, and it is not a kill.
+
+After a Grok OSS rebuild and process restart, this Grok OSS L1 is privileged to check whether other L1s resumed gracefully and to help them along.
+
+L1, L2, and L3 can tell the harness what failed. That includes an early exit, a repeating sentence, or a missing report.
+
 ### MCP inheritance
 
 Subagents inherit the parent session’s **already-connected** MCP servers by default. That includes local stdio/HTTP servers and plugin-sourced agents (for example `my-plugin:reviewer`). The child discovers and calls those tools with `search_tool` / `use_tool` the same way the parent does.
@@ -385,7 +395,17 @@ The main (L1) session uses the catalog 500k sampling window. AUTO compact on L1 
 
 L1 and L2 may still spawn subagents, update the session board, wait on specialists, and read the short on-disk report they asked for. That is coordination, not work. L2 exists so its context can be thrown away after the report. An L2 coordinator for implement work must spawn L3 for greps, reads, and product edits. L2 does not fill 200k implementing. Ordinary L2 still AUTO compact at 95% of nested 200k. L3 never compact.
 
-See [Configuration → Token Economy](05-configuration.md#token-economy) for economic mode, implement-effort Settings, and ASCII scrub. `/spend` and `/limits` are the live views. Isolated Agents are not free. They help when the parent stays small.
+See [Configuration → Token Economy](05-configuration.md#token-economy) for economic mode, implement-effort Settings, and ASCII scrub. `/spend` and `/limits` are the live views. Isolated Agents are not free. They help when the main thread stays small.
+
+## Live job actual tokens
+
+Actual tokens on a live job row come from the host session-usage figure for that row. That figure is not included SuperGrok period limits, not SuperGrok dollar credits, and not console team prepaid / console API credits. SuperGrok is a paid product.
+
+If the host has not returned a figure yet, the Actual tokens cell says not fetched. The wall-clock estimate and the token estimate stay labeled as estimates. Do not copy the estimate into Actual tokens. A standing estimate such as 19.4 minutes and 167.0k is still an estimate until the host returns a figure. Do not invent a count.
+
+When the host has returned a figure, the row shows that figure. Showing the row does not add that figure again into the L1 total or into the grok-oss sqlite session record. Nested spend stays on the nested row.
+
+The tasks pane paints each running job row by calling `display_live_job_row` and showing that row's labeled estimates and actual-tokens text. `/tasks` uses the same formatter. Neither path adds the row figure to the L1 total or to the grok-oss sqlite session record.
 
 ---
 

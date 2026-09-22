@@ -711,6 +711,14 @@ impl AgentView {
             true
         });
         self.retain_still_running_nested_occupancy();
+        // Last-session open still has `loading_replay` set. Occupancy spares
+        // `continue_prior_work` so pause resume can re-drive a painted Human
+        // turn. That spare is not last-session open. With no
+        // `canceled_turn_resume.json`, drop Operator prompts history already
+        // recorded, including that flag.
+        if self.session.loading_replay {
+            self.drop_recorded_prompts_when_no_canceled_turn_marker();
+        }
     }
 
     /// Occupancy drop may collapse stale queue rows. Still-running nested
@@ -926,10 +934,17 @@ impl AgentView {
         );
     }
 
-    /// Reload the durable pager queue after bind/rebuild when memory is empty.
-    /// Tests skip this wrapper so they do not read the operator's grok home.
+    /// Reload the durable pager queue after bind or last-session open.
+    ///
+    /// Live and tests share the recorded-prompt drop. Tests without
+    /// `GROK_HOME` do not read the operator grok home, and they still run
+    /// that drop. Tests that set `GROK_HOME` load `pending_prompts.json`
+    /// the same way live does.
     pub(crate) fn restore_pending_prompts(&mut self) {
-        if cfg!(test) {
+        if cfg!(test) && std::env::var_os("GROK_HOME").is_none() {
+            self.drop_stale_queue_occupancy_with_chat_history();
+            self.drop_recorded_prompts_when_no_canceled_turn_marker();
+            self.sync_queue_pane();
             return;
         }
         self.restore_pending_prompts_from_disk();
@@ -988,7 +1003,36 @@ impl AgentView {
             }
         }
         self.drop_stale_queue_occupancy_with_chat_history();
+        // Occupancy drop keeps `continue_prior_work` so pause resume can
+        // re-drive a painted Human turn. Last-session open with no
+        // `canceled_turn_resume.json` is not that resume. Drop recorded
+        // Operator prompts, including that flag, so they are not re-queued.
+        self.drop_recorded_prompts_when_no_canceled_turn_marker();
         self.sync_queue_pane();
+    }
+
+    /// Last-session restore without a canceled-turn marker must not keep a
+    /// queue row whose text is already a Human turn. `continue_prior_work`
+    /// is not spared here. A present marker stays on the canceled-turn path.
+    fn drop_recorded_prompts_when_no_canceled_turn_marker(&mut self) {
+        let Some(session_id) = self.session.session_id.as_ref() else {
+            return;
+        };
+        let cwd = self.session.cwd.to_string_lossy().into_owned();
+        let sid = session_id.0.to_string();
+        if matches!(
+            xai_grok_shell::session::canceled_turn_resume::load_canceled_turn_resume(&cwd, &sid),
+            Ok(Some(_))
+        ) {
+            return;
+        }
+        let committed = self.committed_human_turn_texts(true, false);
+        self.session.pending_prompts.retain(|prompt| {
+            prompt.kind == QueueEntryKind::Command
+                || !Self::queue_text_matches_committed_human_turn(&prompt.text, &committed)
+        });
+        self.shared_queue
+            .retain(|wire| !Self::queue_text_matches_committed_human_turn(&wire.text, &committed));
     }
 
     /// Tests skip disk so they do not read the operator grok home.
@@ -1385,6 +1429,7 @@ impl AgentView {
             plan_feedback_in_flight: None,
             isolated_preview_rewrite_wait_prompt: None,
             isolated_preview_shows_secondary_plan: false,
+            last_isolated_preview_plan_feedback: None,
             deferred_session_mode: None,
             pending_extensions_fetch: false,
             in_dashboard_overlay: false,
@@ -1469,6 +1514,7 @@ impl AgentView {
             follow_up_pending: HashMap::new(),
             follow_up_pending_order: VecDeque::new(),
             pending_adoption_updates: Vec::new(),
+            composer_copy_button: None,
         };
         let mode = if crate::appearance::cache::load_simple_mode() {
             InputMode::Simple

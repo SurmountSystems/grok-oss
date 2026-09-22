@@ -76,6 +76,7 @@ let
       ++ lib.optionals pkgs.stdenv.hostPlatform.isLinux [
         pkgs.mold
         pkgs.dbus
+        pkgs.duckdb.lib
       ];
     pathsToLink = [
       "/bin"
@@ -108,6 +109,7 @@ let
     ++ lib.optionals pkgs.stdenv.hostPlatform.isLinux [
       pkgs.dbus
       pkgs.mold
+      pkgs.duckdb.lib
     ];
 
     # Share host-cargo env with .#ci so jemalloc configure works here too

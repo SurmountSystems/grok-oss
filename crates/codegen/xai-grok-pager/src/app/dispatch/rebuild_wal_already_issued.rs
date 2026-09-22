@@ -92,6 +92,151 @@ mod tests {
         }
     }
 
+    /// Operator: "Stale prompts at start are still a problem sadly... And yes, what is running is the latest binary."
+    ///
+    /// Class B. WAL send `/goal do the thing` is not its own `chat_history.jsonl`
+    /// line. A later user turn begins with a system-reminder
+    /// `A goal has been set: do the thing`, then a different `<user_query>`.
+    /// `canceled_turn_resume.json` is absent. Restore must not re-queue that
+    /// slash. A send that is truly absent still restores. Do not weaken the
+    /// committed-goal skip above.
+    #[test]
+    #[serial_test::serial(GROK_HOME)]
+    fn stale_prompts_at_start_wal_goal_send_is_not_its_own_history_line() {
+        use crate::app::agent::AgentId;
+        use crate::scrollback::block::RenderBlock;
+
+        let grok_home = tempfile::tempdir().unwrap();
+        let _home = xai_grok_test_support::EnvGuard::set("GROK_HOME", grok_home.path());
+        let proj = tempfile::tempdir().unwrap();
+        let cwd = proj.path().to_path_buf();
+        let cwd_str = cwd.to_string_lossy().into_owned();
+        let sid = "wal-stale-goal-not-own-line";
+        let goal_wal = "/goal do the thing";
+        let missing_wal = "operator send that never reached chat history";
+        append_wal_send(&cwd_str, sid, goal_wal);
+        append_wal_send(&cwd_str, sid, missing_wal);
+        write_session_chat_history(
+            &cwd_str,
+            sid,
+            concat!(
+                r#"{"type":"user","content":[{"type":"text","text":"<system-reminder>\nA goal has been set: do the thing\n\nYou are the L1 parent.\n</system-reminder>\n<user_query>\nlater operator turn\n</user_query>"}]}"#,
+                "\n",
+            ),
+        );
+        let marker =
+            xai_grok_shell::session::canceled_turn_resume::load_canceled_turn_resume(&cwd_str, sid)
+                .expect("load canceled-turn marker");
+        assert!(
+            marker.is_none(),
+            "fixture must not use canceled_turn_resume.json; this miss is the WAL send"
+        );
+
+        let mut app = crate::app::app_view::tests::test_app_with_agent();
+        let agent_id = AgentId(0);
+        {
+            let agent = app.agents.get_mut(&agent_id).unwrap();
+            agent.session.session_id = Some(sid.into());
+            agent.session.cwd = cwd;
+            agent.session.prompt_history.clear();
+            agent.session.pending_prompts.clear();
+            agent.restore_prompt_wal_from_disk();
+            let queued: Vec<&str> = agent
+                .session
+                .pending_prompts
+                .iter()
+                .map(|p| p.text.as_str())
+                .collect();
+            assert!(
+                !queued
+                    .iter()
+                    .any(|t| *t == goal_wal || t.contains("do the thing")),
+                "Operator: \"Stale prompts at start are still a problem sadly... And yes, what is running is the latest binary.\" restore must not re-queue a WAL /goal send already recorded as A goal has been set; queue={queued:?}"
+            );
+            assert!(
+                queued.contains(&missing_wal),
+                "a WAL send whose body is truly absent from parsed user text must still restore; queue={queued:?}"
+            );
+            for i in 0..agent.scrollback.len() {
+                let Some(entry) = agent.scrollback.entry(i) else {
+                    continue;
+                };
+                if let RenderBlock::UserPrompt(block) = &entry.block {
+                    assert!(
+                        !block.text.contains(goal_wal) && !block.text.contains("do the thing"),
+                        "Operator: \"Stale prompts at start are still a problem sadly... And yes, what is running is the latest binary.\" restore must not paint the WAL /goal slash; painted={}",
+                        block.text
+                    );
+                }
+            }
+        }
+    }
+
+    /// Operator: "Stale prompts at start are still a problem sadly... And yes, what is running is the latest binary."
+    ///
+    /// WAL send `/goal do the thing`. The user turn is a system-reminder,
+    /// then `<user_query>A goal has been set: do the thing</user_query>`.
+    /// `canceled_turn_resume.json` is absent. Restore must not re-queue
+    /// that slash. A send that is truly absent still restores.
+    #[test]
+    #[serial_test::serial(GROK_HOME)]
+    fn stale_prompts_at_start_reminder_before_user_query_does_not_requeue_goal() {
+        use crate::app::agent::AgentId;
+
+        let grok_home = tempfile::tempdir().unwrap();
+        let _home = xai_grok_test_support::EnvGuard::set("GROK_HOME", grok_home.path());
+        let proj = tempfile::tempdir().unwrap();
+        let cwd = proj.path().to_path_buf();
+        let cwd_str = cwd.to_string_lossy().into_owned();
+        let sid = "wal-stale-goal-reminder-before-user-query";
+        let goal_wal = "/goal do the thing";
+        let missing_wal = "operator send that never reached chat history";
+        append_wal_send(&cwd_str, sid, goal_wal);
+        append_wal_send(&cwd_str, sid, missing_wal);
+        write_session_chat_history(
+            &cwd_str,
+            sid,
+            concat!(
+                r#"{"type":"user","content":[{"type":"text","text":"<system-reminder>\nThe session is continuing.\n</system-reminder>\n<user_query>A goal has been set: do the thing</user_query>"}]}"#,
+                "\n",
+            ),
+        );
+        let marker =
+            xai_grok_shell::session::canceled_turn_resume::load_canceled_turn_resume(&cwd_str, sid)
+                .expect("load canceled-turn marker");
+        assert!(
+            marker.is_none(),
+            "fixture must not use canceled_turn_resume.json; this miss is the WAL send"
+        );
+
+        let mut app = crate::app::app_view::tests::test_app_with_agent();
+        let agent_id = AgentId(0);
+        {
+            let agent = app.agents.get_mut(&agent_id).unwrap();
+            agent.session.session_id = Some(sid.into());
+            agent.session.cwd = cwd;
+            agent.session.prompt_history.clear();
+            agent.session.pending_prompts.clear();
+            agent.restore_prompt_wal_from_disk();
+            let queued: Vec<&str> = agent
+                .session
+                .pending_prompts
+                .iter()
+                .map(|p| p.text.as_str())
+                .collect();
+            assert!(
+                !queued
+                    .iter()
+                    .any(|t| *t == goal_wal || t.contains("do the thing")),
+                "Operator: \"Stale prompts at start are still a problem sadly... And yes, what is running is the latest binary.\" restore must not re-queue a WAL /goal send already recorded as A goal has been set; queue={queued:?}"
+            );
+            assert!(
+                queued.contains(&missing_wal),
+                "a WAL send whose body is truly absent from parsed user text must still restore; queue={queued:?}"
+            );
+        }
+    }
+
     fn append_wal_kind(
         cwd: &str,
         sid: &str,

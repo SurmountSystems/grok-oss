@@ -149,6 +149,44 @@ impl AgentView {
         }
         self.insert_prompt_plain_text(clipboard_text.as_deref()).0
     }
+    /// The app drains effects from the parent agent, and probe completion
+    /// looks that agent up by id. Nested overlay paste enqueues on the L2
+    /// composer, so move those effects up and stamp the parent id. Completion
+    /// then uses the same chip insert on the L2 composer.
+    pub(super) fn hoist_nested_overlay_composer_effects(&mut self, child_sid: &str) {
+        let parent_id = self.session.id;
+        let mut effects = {
+            let Some(child) = self.subagent_views.get_mut(child_sid) else {
+                return;
+            };
+            std::mem::take(&mut child.pending_effects)
+        };
+        for effect in &mut effects {
+            if let crate::app::actions::Effect::ProbeClipboardAttachment { ctx, .. } = effect
+                && let crate::app::actions::ClipboardPasteTarget::AgentPrompt { agent_id, .. } =
+                    &mut ctx.target
+            {
+                *agent_id = parent_id;
+            }
+        }
+        self.pending_effects.append(&mut effects);
+    }
+    /// L2 overlay image paste is in flight on the nested composer, not the
+    /// parent prompt. L3 overlays stay observational and do not take this path.
+    fn l2_overlay_composer_awaits_image_paste(&self) -> bool {
+        let Some(child_sid) = self.visible_nested_overlay_sid() else {
+            return false;
+        };
+        if !crate::app::subagent::overlay_child_is_l2_coordinator(
+            &self.subagent_sessions,
+            child_sid,
+        ) {
+            return false;
+        }
+        self.subagent_views
+            .get(child_sid)
+            .is_some_and(|child| child.paste_probe_in_flight > 0)
+    }
     /// Attach the result of a deferred clipboard attachment probe
     /// ([`Effect::ProbeClipboardAttachment`]). The heavy read/decode/persist
     /// already ran off-thread; this only mutates prompt state on the event loop.
@@ -158,6 +196,21 @@ impl AgentView {
         image: crate::app::actions::ProbedAttachment,
         file_urls: Option<String>,
     ) -> crate::app::actions::ClipboardPasteCompletion {
+        if self.l2_overlay_composer_awaits_image_paste() {
+            let child_sid = self
+                .visible_nested_overlay_sid()
+                .expect("L2 overlay composer")
+                .to_owned();
+            let completion = self
+                .subagent_views
+                .get_mut(&child_sid)
+                .expect("L2 overlay composer")
+                .complete_clipboard_attachment_paste(ctx, image, file_urls);
+            if let Some(child) = self.subagent_views.get_mut(&child_sid) {
+                self.pending_effects.append(&mut child.pending_effects);
+            }
+            return completion;
+        }
         use crate::app::actions::{
             ClipboardPasteCompletion, ClipboardPasteFailure, ProbedAttachment,
         };
@@ -1703,6 +1756,417 @@ pub(super) mod paste_key_tests {
         );
         assert_eq!(agent.prompt.images.len(), 1);
         assert!(agent.prompt.text().contains("[Image #1]"));
+    }
+
+    /// Operator: image paste on an L2 prompt must take the same chip path
+    /// as the main composer. It must not be dropped, and it must not land
+    /// in line-viewer search.
+    #[test]
+    fn l2_overlay_composer_image_paste_uses_the_same_chip_path() {
+        const OPERATOR: &str = "still can't paste images into L2 prompt inputs, which means we haven't sufficiently unified and made consistent the behavior of all prompt inputs.";
+        let child_sid = "l2-coord";
+        let mut parent = make_agent();
+        parent.session.id = AgentId(7);
+        parent.session.session_id = Some(agent_client_protocol::SessionId::new("l1-sess"));
+        parent.set_active_pane(ActivePane::Prompt, true);
+        let mut child = make_agent();
+        child.session.id = AgentId(99);
+        child.session.session_id = Some(agent_client_protocol::SessionId::new(child_sid));
+        child.set_active_pane(ActivePane::Prompt, true);
+        child.prompt.textarea.insert_str("ask the coordinator");
+        let now = std::time::Instant::now();
+        parent.subagent_sessions.insert(
+            child_sid.to_string(),
+            crate::app::subagent::SubagentInfo {
+                subagent_id: child_sid.into(),
+                child_session_id: child_sid.into(),
+                description: "coordinate the slice".into(),
+                subagent_type: "general-purpose".into(),
+                persona: None,
+                role: None,
+                model: None,
+                context_source: None,
+                resumed_from: None,
+                capability_mode: None,
+                workflow_run_id: None,
+                context_normalized: false,
+                parent_prompt_id: None,
+                parent_session_id: Some("l1-sess".into()),
+                depth: Some(1),
+                started_at: now,
+                last_progress_at: now,
+                finished: false,
+                status: None,
+                error: None,
+                duration_ms: None,
+                tool_calls: None,
+                turns: None,
+                turn_count: None,
+                tool_call_count: None,
+                tokens_used: None,
+                tokens_past: 0,
+                context_window_tokens: None,
+                context_usage_pct: None,
+                tools_used: Vec::new(),
+                error_count: None,
+                activity_label: None,
+                is_background: false,
+                pending_kill: false,
+                kill_requested_at: None,
+                scrollback_entry_id: None,
+                prompt: None,
+                child_cwd: None,
+                worktree_path: None,
+                child_updates_replayed: true,
+            },
+        );
+        parent
+            .subagent_views
+            .insert(child_sid.to_string(), Box::new(child));
+        parent.open_subagent_fullscreen(child_sid.to_string());
+        parent.line_viewer =
+            crate::views::file_search::line_viewer::LineViewerState::open_markdown_content(
+                "notes.md",
+                "regular file preview\n".to_string(),
+                None,
+            );
+        {
+            let viewer = parent.line_viewer.as_mut().unwrap();
+            viewer.list_state.open_search(&viewer.lines);
+            viewer.list_state.handle_key_event(
+                &KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE),
+                &viewer.lines,
+            );
+        }
+        crate::clipboard::set_clipboard_probe_hook(
+            crate::clipboard::ClipboardProbeHook::with_raster(None),
+        );
+        let outcome = parent.handle_input(
+            &Event::Paste("All Markup Copy".to_string()),
+            &ActionRegistry::defaults(),
+        );
+        let ctx = deferred_probe_ctx(&parent);
+        crate::clipboard::clear_clipboard_probe_hook();
+        assert!(
+            matches!(outcome, InputOutcome::Changed),
+            "{OPERATOR}: image paste must not be dropped, got {outcome:?}"
+        );
+        let search = parent
+            .line_viewer
+            .as_ref()
+            .unwrap()
+            .list_state
+            .input_textarea()
+            .text()
+            .to_string();
+        assert_eq!(
+            search, "k",
+            "{OPERATOR}: image paste must not be dumped into line-viewer search, got {search:?}"
+        );
+        assert!(
+            !search.contains("All Markup") && !search.contains("[Image"),
+            "{OPERATOR}: image paste must not be dumped into line-viewer search, got {search:?}"
+        );
+        let ctx = ctx.expect(OPERATOR);
+        assert!(
+            matches!(
+                ctx.target,
+                crate::app::actions::ClipboardPasteTarget::AgentPrompt {
+                    agent_id: AgentId(7),
+                    ..
+                }
+            ),
+            "{OPERATOR}: the probe must use the parent agent id so the chip path can run"
+        );
+        let pasted = crate::prompt_images::from_clipboard_data(&test_image_data());
+        parent.complete_clipboard_attachment_paste(
+            ctx,
+            crate::app::actions::ProbedAttachment::Image(pasted),
+            None,
+        );
+        let child = parent.subagent_views.get(child_sid).expect("l2 composer");
+        assert_eq!(
+            child.prompt.images.len(),
+            1,
+            "{OPERATOR}: L2 prompt paste must become an image chip"
+        );
+        assert!(
+            child.prompt.text().contains("[Image #1]"),
+            "{OPERATOR}: L2 prompt paste must become an image chip, got {:?}",
+            child.prompt.text()
+        );
+        assert!(
+            child.prompt.text().contains("ask the coordinator"),
+            "{OPERATOR}: the L2 draft must stay, got {:?}",
+            child.prompt.text()
+        );
+        assert!(
+            !child.prompt.text().contains("All Markup"),
+            "{OPERATOR}: the chip must not keep the dialog title, got {:?}",
+            child.prompt.text()
+        );
+        assert!(
+            parent.prompt.images.is_empty(),
+            "{OPERATOR}: the chip belongs on the L2 composer, not the hidden parent prompt"
+        );
+        assert!(
+            !parent.prompt.text().contains("[Image"),
+            "{OPERATOR}: the chip belongs on the L2 composer, got {:?}",
+            parent.prompt.text()
+        );
+        let search_after = parent
+            .line_viewer
+            .as_ref()
+            .unwrap()
+            .list_state
+            .input_textarea()
+            .text()
+            .to_string();
+        assert_eq!(
+            search_after, "k",
+            "{OPERATOR}: completing the chip must not fill line-viewer search, got {search_after:?}"
+        );
+
+        let mut main = make_agent();
+        main.set_active_pane(ActivePane::Prompt, true);
+        main.prompt.textarea.insert_str("main draft");
+        crate::clipboard::set_clipboard_probe_hook(
+            crate::clipboard::ClipboardProbeHook::with_raster(None),
+        );
+        let _ = main.handle_input(
+            &Event::Paste("All Markup Copy".to_string()),
+            &ActionRegistry::defaults(),
+        );
+        let main_ctx = deferred_probe_ctx(&main);
+        crate::clipboard::clear_clipboard_probe_hook();
+        let main_ctx = main_ctx.expect(
+            "still can't paste images into L2 prompt inputs, which means we haven't sufficiently unified and made consistent the behavior of all prompt inputs.",
+        );
+        let pasted = crate::prompt_images::from_clipboard_data(&test_image_data());
+        main.complete_clipboard_attachment_paste(
+            main_ctx,
+            crate::app::actions::ProbedAttachment::Image(pasted),
+            None,
+        );
+        assert_eq!(main.prompt.images.len(), 1);
+        assert!(
+            main.prompt.text().contains("[Image #1]"),
+            "{OPERATOR}: the main composer paste must still become an image chip, got {:?}",
+            main.prompt.text()
+        );
+        assert!(
+            main.prompt.text().contains("main draft"),
+            "{OPERATOR}: the main composer draft must stay, got {:?}",
+            main.prompt.text()
+        );
+        assert!(
+            !main.prompt.text().contains("All Markup"),
+            "{OPERATOR}: the main composer chip must not keep the dialog title, got {:?}",
+            main.prompt.text()
+        );
+    }
+
+    const OPERATOR_PROMPT_INPUTS: &str = "still can't paste images into L2 prompt inputs, which means we haven't sufficiently unified and made consistent the behavior of all prompt inputs.";
+    const PROMPT_INPUTS_NOT_ONE_BEHAVIOR: &str = "prompt inputs are not yet one behavior until Isolated Preview, exclusive `/plan`, and goal take the same chip path as the main composer and the L2 overlay.";
+
+    fn open_line_viewer_search(agent: &mut AgentView, query: &str) {
+        let viewer = agent.line_viewer.as_mut().expect("line viewer");
+        viewer.list_state.open_search(&viewer.lines);
+        for ch in query.chars() {
+            viewer.list_state.handle_key_event(
+                &KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE),
+                &viewer.lines,
+            );
+        }
+    }
+
+    /// Image paste on one named prompt input becomes an image chip through
+    /// `complete_clipboard_attachment_paste`. It is not dropped, and it is
+    /// not dumped into line-viewer search.
+    fn assert_named_prompt_input_image_paste_is_same_chip(
+        agent: &mut AgentView,
+        input_name: &str,
+        draft: &str,
+        search_before: &str,
+    ) {
+        agent.prompt.textarea.insert_str(draft);
+        crate::clipboard::set_clipboard_probe_hook(
+            crate::clipboard::ClipboardProbeHook::with_raster(None),
+        );
+        let outcome = agent.handle_input(
+            &Event::Paste("All Markup Copy".to_string()),
+            &ActionRegistry::defaults(),
+        );
+        let ctx = deferred_probe_ctx(agent);
+        crate::clipboard::clear_clipboard_probe_hook();
+        let why =
+            format!("{input_name}: {OPERATOR_PROMPT_INPUTS} {PROMPT_INPUTS_NOT_ONE_BEHAVIOR}");
+        assert!(
+            matches!(outcome, InputOutcome::Changed),
+            "{why}: image paste must not be dropped, got {outcome:?}"
+        );
+        let search = agent
+            .line_viewer
+            .as_ref()
+            .expect("line viewer")
+            .list_state
+            .input_textarea()
+            .text()
+            .to_string();
+        assert_eq!(
+            search, search_before,
+            "{why}: image paste must not be dumped into line-viewer search, got {search:?}"
+        );
+        assert!(
+            !search.contains("All Markup") && !search.contains("[Image"),
+            "{why}: image paste must not be dumped into line-viewer search, got {search:?}"
+        );
+        assert!(
+            !agent.prompt.text().contains("All Markup"),
+            "{why}: the dialog title must not land as text, got {:?}",
+            agent.prompt.text()
+        );
+        let ctx = ctx.expect(&why);
+        assert!(
+            matches!(
+                ctx.target,
+                crate::app::actions::ClipboardPasteTarget::AgentPrompt { .. }
+            ),
+            "{why}: the probe must target the Operator box so the chip path can run"
+        );
+        let pasted = crate::prompt_images::from_clipboard_data(&test_image_data());
+        agent.complete_clipboard_attachment_paste(
+            ctx,
+            crate::app::actions::ProbedAttachment::Image(pasted),
+            None,
+        );
+        assert_eq!(
+            agent.prompt.images.len(),
+            1,
+            "{why}: {input_name} image paste must become an image chip"
+        );
+        assert!(
+            agent.prompt.text().contains("[Image #1]"),
+            "{why}: {input_name} image paste must become an image chip, got {:?}",
+            agent.prompt.text()
+        );
+        assert!(
+            agent.prompt.text().contains(draft),
+            "{why}: the draft must stay, got {:?}",
+            agent.prompt.text()
+        );
+        assert!(
+            !agent.prompt.text().contains("All Markup"),
+            "{why}: the chip must not keep the dialog title, got {:?}",
+            agent.prompt.text()
+        );
+        let search_after = agent
+            .line_viewer
+            .as_ref()
+            .expect("line viewer")
+            .list_state
+            .input_textarea()
+            .text()
+            .to_string();
+        assert_eq!(
+            search_after, search_before,
+            "{why}: completing the chip must not fill line-viewer search, got {search_after:?}"
+        );
+    }
+
+    /// Isolated Preview already probes through the same chip completion as
+    /// the main composer. This assert names that input.
+    #[test]
+    fn isolated_preview_image_paste_uses_the_same_chip_path() {
+        let mut agent = make_agent();
+        agent.set_active_pane(ActivePane::Prompt, true);
+        park_isolated_preview_without_approval(&mut agent, false);
+        open_line_viewer_search(&mut agent, "prev");
+        assert_named_prompt_input_image_paste_is_same_chip(
+            &mut agent,
+            "Isolated Preview",
+            "preview notes",
+            "prev",
+        );
+        assert!(
+            agent.is_plan_viewer() && !agent.plan_mode_active,
+            "{} {}",
+            OPERATOR_PROMPT_INPUTS,
+            PROMPT_INPUTS_NOT_ONE_BEHAVIOR
+        );
+    }
+
+    /// Exclusive `/plan` (plan mode, fullscreen plan pane) already probes
+    /// through the same chip completion as the main composer.
+    #[test]
+    fn exclusive_plan_image_paste_uses_the_same_chip_path() {
+        let mut agent = make_agent();
+        agent.set_active_pane(ActivePane::Prompt, true);
+        agent.plan_mode_active = true;
+        park_isolated_preview_without_approval(&mut agent, true);
+        let mut view = make_plan_approval_view_state();
+        view.focus = crate::views::plan_approval_view::PlanApprovalFocus::Preview;
+        agent.plan_approval_view = Some(view);
+        assert!(
+            agent.plan_mode_active
+                && agent.plan_approval_view.is_some()
+                && agent.line_viewer.as_ref().is_some_and(|v| {
+                    v.fullscreen
+                        && v.kind
+                            == crate::views::file_search::line_viewer::LineViewerKind::PlanPreview
+                }),
+            "exclusive `/plan` is plan mode with a covering plan pane"
+        );
+        open_line_viewer_search(&mut agent, "plan");
+        assert_named_prompt_input_image_paste_is_same_chip(
+            &mut agent,
+            "exclusive `/plan`",
+            "exclusive plan notes",
+            "plan",
+        );
+        assert!(
+            agent.plan_mode_active && agent.is_plan_viewer(),
+            "{} {}",
+            OPERATOR_PROMPT_INPUTS,
+            PROMPT_INPUTS_NOT_ONE_BEHAVIOR
+        );
+    }
+
+    /// Goal detail used to swallow `Event::Paste`. It now takes the same
+    /// chip completion as the main composer. The paste is not dropped, and
+    /// it is not dumped into line-viewer search.
+    #[test]
+    fn goal_image_paste_uses_the_same_chip_path() {
+        let mut agent = make_agent();
+        agent.set_active_pane(ActivePane::Prompt, true);
+        agent.goal_state = Some(crate::app::agent::GoalDisplayState::test_stub());
+        agent.show_goal_detail = true;
+        agent.line_viewer =
+            crate::views::file_search::line_viewer::LineViewerState::open_markdown_content(
+                "notes.md",
+                "regular file preview\n".to_string(),
+                None,
+            );
+        assert!(
+            agent.show_goal_detail && agent.goal_state.is_some(),
+            "goal detail is the goal prompt input"
+        );
+        assert!(
+            !agent.is_plan_viewer(),
+            "goal paste must not be confused with Isolated Preview"
+        );
+        open_line_viewer_search(&mut agent, "goal");
+        assert_named_prompt_input_image_paste_is_same_chip(
+            &mut agent,
+            "goal",
+            "/goal keep going",
+            "goal",
+        );
+        assert!(
+            agent.show_goal_detail,
+            "{} {} goal detail must stay open after the chip",
+            OPERATOR_PROMPT_INPUTS, PROMPT_INPUTS_NOT_ONE_BEHAVIOR
+        );
     }
 
     /// Regular file line-viewer paste stays on list search. Empty

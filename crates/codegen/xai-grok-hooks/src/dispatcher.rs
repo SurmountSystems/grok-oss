@@ -39,6 +39,9 @@ fn eligible_or_record_skip(
 pub struct PreToolUseResult {
     pub decision: HookDecision,
     pub results: Vec<HookRunResult>,
+    /// Last allow that rewrote the tool input. `None` when the chain denied,
+    /// or when every allow left the input unchanged.
+    pub updated_input: Option<serde_json::Value>,
 }
 
 /// Dispatch a `pre_tool_use` event against all matching hooks.
@@ -67,6 +70,7 @@ pub async fn dispatch_pre_tool_use(
         return PreToolUseResult {
             decision: HookDecision::Allow,
             results: Vec::new(),
+            updated_input: None,
         };
     }
 
@@ -75,6 +79,7 @@ pub async fn dispatch_pre_tool_use(
 
     let match_value = envelope.payload.match_value().map(str::to_string);
     let mut run_results = Vec::new();
+    let mut updated_input = None;
 
     for spec in hooks {
         if !eligible_or_record_skip(spec, match_value.as_deref(), &mut run_results) {
@@ -112,6 +117,7 @@ pub async fn dispatch_pre_tool_use(
                         hook_name: spec.name.clone(),
                     },
                     results: run_results,
+                    updated_input: None,
                 };
             }
             HookRunnerResult::Decision(HookDecision::Allow) => {
@@ -120,6 +126,19 @@ pub async fn dispatch_pre_tool_use(
                     elapsed_ms = elapsed.as_millis() as u64,
                     "hook allowed"
                 );
+                run_results.push(HookRunResult::Success {
+                    hook_name: spec.name.clone(),
+                    elapsed,
+                    http_info,
+                });
+            }
+            HookRunnerResult::AllowRewrite(value) => {
+                tracing::info!(
+                    hook_name = %spec.name,
+                    elapsed_ms = elapsed.as_millis() as u64,
+                    "hook allowed"
+                );
+                updated_input = Some(value);
                 run_results.push(HookRunResult::Success {
                     hook_name: spec.name.clone(),
                     elapsed,
@@ -163,6 +182,7 @@ pub async fn dispatch_pre_tool_use(
     PreToolUseResult {
         decision: HookDecision::Allow,
         results: run_results,
+        updated_input,
     }
 }
 
@@ -345,7 +365,9 @@ pub async fn dispatch_stop(
                     http_info,
                 });
             }
-            HookRunnerResult::Success | HookRunnerResult::Decision(_) => {
+            HookRunnerResult::Success
+            | HookRunnerResult::Decision(_)
+            | HookRunnerResult::AllowRewrite(_) => {
                 out.results.push(HookRunResult::Success {
                     hook_name: spec.name.clone(),
                     elapsed,
@@ -425,7 +447,9 @@ pub async fn dispatch_non_blocking(
                     http_info,
                 });
             }
-            HookRunnerResult::Decision(_) | HookRunnerResult::Stop(_) => {
+            HookRunnerResult::Decision(_)
+            | HookRunnerResult::Stop(_)
+            | HookRunnerResult::AllowRewrite(_) => {
                 tracing::info!(
                     hook_name = %spec.name,
                     elapsed_ms = elapsed.as_millis() as u64,
@@ -1117,6 +1141,7 @@ mod tests {
             (HookEventName::SessionEnd, "hook.session_end"),
             (HookEventName::Stop, "hook.stop"),
             (HookEventName::StopFailure, "hook.stop_failure"),
+            (HookEventName::StopCancelled, "hook.stop_cancelled"),
             (HookEventName::PostToolUse, "hook.post_tool_use"),
             (
                 HookEventName::PostToolUseFailure,
@@ -1140,6 +1165,7 @@ mod tests {
                 | HookEventName::SessionEnd
                 | HookEventName::Stop
                 | HookEventName::StopFailure
+                | HookEventName::StopCancelled
                 | HookEventName::PreToolUse
                 | HookEventName::PostToolUse
                 | HookEventName::PostToolUseFailure
@@ -1150,7 +1176,7 @@ mod tests {
                 | HookEventName::SubagentStop
                 | HookEventName::SubagentEnd
                 | HookEventName::PreCompact
-                | HookEventName::PostCompact => 15,
+                | HookEventName::PostCompact => 16,
             }
         };
         assert_eq!(

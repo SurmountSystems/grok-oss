@@ -165,11 +165,15 @@ impl AgentView {
     /// as session `plan.md`. A later `exit_plan_mode` present re-reads
     /// current disk and arms idle CTAs. Isolated Preview stays until Esc,
     /// Exit, or Approve. Do not close Isolated Preview here.
-    pub(crate) fn enter_isolated_preview_rewrite_wait(&mut self, operator_prompt: &str) {
+    pub(crate) fn enter_isolated_preview_rewrite_wait_quoted(
+        &mut self,
+        kind: PlanFeedbackInFlight,
+        operator_prompt: &str,
+    ) {
         if !self.is_plan_viewer() {
             return;
         }
-        self.plan_feedback_in_flight = Some(PlanFeedbackInFlight::Updating);
+        self.plan_feedback_in_flight = Some(kind);
         self.isolated_preview_rewrite_wait_prompt = Some(operator_prompt.trim().to_string());
         let body = crate::views::plan_approval_view::isolated_preview_rewrite_wait_markdown(
             operator_prompt,
@@ -178,8 +182,11 @@ impl AgentView {
             return;
         };
         viewer.kind = crate::views::file_search::line_viewer::LineViewerKind::PlanPreview;
-        viewer.title_override =
-            Some(crate::views::plan_approval_view::PLAN_REWRITE_WAIT_HEADING.to_string());
+        viewer.title_override = Some(if self.isolated_preview_shows_secondary_plan {
+            xai_grok_shell::grok_oss::SECONDARY_PLAN_IDENTITY.to_string()
+        } else {
+            crate::views::plan_approval_view::PLAN_REWRITE_WAIT_HEADING.to_string()
+        });
         viewer.fullscreen = crate::appearance::cache::load_plan_approval_force_modal();
         {
             let plan = viewer.plan_mut();
@@ -189,6 +196,10 @@ impl AgentView {
         }
         self.line_viewer = Some(viewer);
         self.persist_session_plan_dock_open(true);
+    }
+
+    pub(crate) fn enter_isolated_preview_rewrite_wait(&mut self, kind: PlanFeedbackInFlight) {
+        self.enter_isolated_preview_rewrite_wait_quoted(kind, "");
     }
 
     /// Mill rewrote session plan.md. Isolated Preview must paint that file,
@@ -789,6 +800,13 @@ impl AgentView {
     /// preview so the user always sees a decision surface (a/s/q) instead of
     /// a dead "Waiting on plan approval" line with a no-op Tab:plan.
     pub fn show_plan_preview(&mut self) {
+        if matches!(
+            self.plan_feedback_in_flight,
+            Some(PlanFeedbackInFlight::Revising)
+        ) && self.exclusive_plan_revise_should_hide_pane()
+        {
+            return;
+        }
         // File-backed Isolated Preview re-reads session plan.md on open so a
         // Revise rewrite is not stuck behind the first-draft snapshot.
         self.refresh_file_backed_plan_from_live_file();
@@ -1266,10 +1284,58 @@ impl AgentView {
         }
         log_plan_submit(action);
     }
+
+    /// Exclusive `/plan` primary `plan.md` hides on revision submit.
+    /// Isolated Preview `secondary-plan.md` does not.
+    fn exclusive_plan_revise_should_hide_pane(&self) -> bool {
+        if self.isolated_preview_shows_secondary_plan {
+            return false;
+        }
+        if self.line_viewer.as_ref().is_some_and(|viewer| {
+            viewer.title_override.as_deref() == Some("secondary-plan.md")
+                || viewer.path.file_name().and_then(|name| name.to_str())
+                    == Some("secondary-plan.md")
+        }) {
+            return false;
+        }
+        true
+    }
+
+    /// Interject sentence for a plan revision. Isolated Preview secondary
+    /// names `secondary-plan.md`. Exclusive parked `/plan` names `plan.md`.
+    fn plan_revision_interject_text(&self, feedback: Option<&str>) -> String {
+        let update_target = if self.isolated_preview_shows_secondary_plan {
+            "secondary-plan.md"
+        } else {
+            "plan.md"
+        };
+        let feedback_block = feedback
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| format!("\n\nOperator feedback:\n{s}"))
+            .unwrap_or_default();
+        format!(
+            "The user requested plan revisions. Update {update_target} from the conversation\
+             {feedback_block}\n\nWhen the plan is ready, call exit_plan_mode again to \
+             present it for approval."
+        )
+    }
+
     /// Live Revise submit (Enter after notes, or a test that needs the same
     /// path). Footer Revise only arms the box via `focus_plan_prompt`.
     pub(crate) fn send_plan_feedback(&mut self, feedback: Option<String>) -> InputOutcome {
         let Some(mut pav) = self.plan_approval_view.take() else {
+            if self.isolated_preview_shows_secondary_plan {
+                let text = self.plan_revision_interject_text(feedback.as_deref());
+                self.last_isolated_preview_plan_feedback = Some(text.clone());
+                self.plan_feedback_in_flight = Some(PlanFeedbackInFlight::Revising);
+                self.show_toast("Plan revision sent.");
+                log_plan_submit("revise");
+                return InputOutcome::Action(Action::Interject {
+                    text,
+                    images: Vec::new(),
+                });
+            }
             return InputOutcome::Changed;
         };
         self.record_explicit_plan_choice(
@@ -1306,12 +1372,16 @@ impl AgentView {
         let images = self.prompt.drain_images();
         self.prompt.set_text("");
         self.persist_unsent_composer_draft_now();
-        // Isolated Preview stays until Esc, Exit, or Approve. Clickable
-        // Revise rewrites and re-presents; do not drop exclusive covering
-        // so the Operator is stuck with no pane and no CTAs. Idle Approve
-        // / Comment / Revise / Exit do not arm on leftover body until the
-        // next `exit_plan_mode` present.
-        if let Some(viewer) = self.line_viewer.as_mut() {
+        // Exclusive /plan primary plan.md closes on revision submit.
+        // After the Operator submits revisions, the plan view goes away
+        // while the revise turn runs. Do not leave plan.md docked.
+        // Isolated Preview (secondary-plan.md) stays until Esc, Exit, or
+        // Approve. Do not call close_plan_review: that resolves the decision.
+        // The next exit_plan_mode present docks plan.md again.
+        if self.exclusive_plan_revise_should_hide_pane() {
+            self.line_viewer = None;
+            self.persist_session_plan_dock_open(false);
+        } else if let Some(viewer) = self.line_viewer.as_mut() {
             let plan = viewer.plan_mut();
             plan.show_action_buttons = false;
             plan.feedback_active = false;
@@ -1334,17 +1404,8 @@ impl AgentView {
         // exclusive covering with a live waiter answers ACP cancelled with
         // notes, then a later `exit_plan_mode` re-presents.
         if pav.is_local_idle_decision || !sent_acp || !images.is_empty() {
-            let feedback_block = to_send
-                .as_deref()
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(|s| format!("\n\nOperator feedback:\n{s}"))
-                .unwrap_or_default();
-            let text = format!(
-                "The user requested plan revisions. Update plan.md from the conversation\
-                 {feedback_block}\n\nWhen the plan is ready, call exit_plan_mode again to \
-                 present it for approval."
-            );
+            let text = self.plan_revision_interject_text(to_send.as_deref());
+            self.last_isolated_preview_plan_feedback = Some(text.clone());
             return InputOutcome::Action(Action::Interject { text, images });
         }
         InputOutcome::Changed
@@ -2319,6 +2380,115 @@ mod plan_approval_enter_tests {
         assert_eq!(
             agent.toast.as_ref().map(|(msg, _)| msg.as_str()),
             Some("Plan revision sent.")
+        );
+    }
+    /// Operator: "After the Operator submits revisions on an exclusive /plan
+    /// present, the plan view goes away (or is not left up as the idle plan
+    /// pane) while the revise turn runs. Do not leave plan.md docked after
+    /// revision submit."
+    ///
+    /// Empty Enter on the Revise prompt is
+    /// `empty_enter_on_revise_prompt_does_not_approve`: it does not Approve
+    /// and it leaves the present up. This test does not weaken that.
+    #[test]
+    fn exclusive_plan_revise_submit_hides_plan_md_until_represent() {
+        let mut agent = agent_with_revise_prompt();
+        agent.plan_mode_active = true;
+        agent.plan_mode_pending = None;
+        agent.isolated_preview_shows_secondary_plan = false;
+        agent.show_plan_preview();
+        assert!(
+            agent.is_plan_viewer(),
+            "fixture: exclusive /plan docks primary plan.md before Revise submit"
+        );
+        assert!(
+            agent.line_viewer.as_ref().is_some_and(|viewer| {
+                viewer.path.file_name().and_then(|name| name.to_str()) == Some("plan.md")
+                    && viewer.title_override.as_deref() != Some("secondary-plan.md")
+            }),
+            "fixture: dock is primary plan.md, not secondary-plan.md"
+        );
+        assert!(
+            !agent.plan_decision_resolved,
+            "fixture: exclusive /plan present is not already decided"
+        );
+        agent
+            .prompt
+            .set_text("please hide plan.md while the revise turn runs");
+        let outcome = agent.handle_plan_feedback_key(&enter_key());
+        assert!(
+            matches!(outcome, InputOutcome::Changed | InputOutcome::Action(_)),
+            "Enter on the Revise prompt must submit the revision, not Approve; got {outcome:?}"
+        );
+        assert!(
+            agent.plan_approval_view.is_none(),
+            "revision submit must leave the first present"
+        );
+        assert!(
+            agent.line_viewer.is_none(),
+            "After the Operator submits revisions on an exclusive /plan present, the plan view goes away (or is not left up as the idle plan pane) while the revise turn runs. Do not leave plan.md docked after revision submit."
+        );
+        assert!(
+            !agent.is_plan_viewer(),
+            "exclusive /plan revise submit must not leave a plan viewer, so the casual copy plan footer cannot paint"
+        );
+        assert_eq!(
+            agent.plan_feedback_in_flight,
+            Some(crate::views::plan_approval_view::PlanFeedbackInFlight::Revising),
+            "revise turn stays in flight until the next present"
+        );
+        assert!(
+            !agent.plan_decision_resolved,
+            "Revise must not call close_plan_review; the decision stays unresolved"
+        );
+        agent.show_plan_preview();
+        assert!(
+            agent.line_viewer.is_none() && !agent.is_plan_viewer(),
+            "a later tick must not re-dock exclusive plan.md while the revise turn is still Revising"
+        );
+        assert_eq!(
+            agent.plan_feedback_in_flight,
+            Some(crate::views::plan_approval_view::PlanFeedbackInFlight::Revising)
+        );
+        assert!(!agent.plan_decision_resolved);
+        // Same order as `re_present_after_revise_clears_in_flight_and_arms_ctas`:
+        // clear Revising, then dock. `handle_exit_plan_mode` clears in-flight
+        // before `show_plan_preview_if_available`.
+        agent.clear_plan_loop_flags_for_new_present();
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        let request = crate::views::plan_approval_view::ExitPlanModeExtRequest {
+            session_id: "test-session".into(),
+            tool_call_id: "call-represent".into(),
+            plan_content: Some("# Plan\n\n## Step 1\nRevised present\n".into()),
+        };
+        agent.plan_approval_view = Some(
+            crate::views::plan_approval_view::PlanApprovalViewState::new(
+                request,
+                agent.prompt.stash(),
+                tx,
+            ),
+        );
+        agent.plan_mode_active = true;
+        agent.plan_mode_pending = None;
+        agent.isolated_preview_shows_secondary_plan = false;
+        agent.show_plan_preview_if_available();
+        assert!(
+            agent.plan_feedback_in_flight.is_none(),
+            "the later exit_plan_mode present must clear Revising"
+        );
+        assert!(
+            agent.plan_approval_view.is_some() && !agent.plan_decision_resolved,
+            "the later present arms review; it does not Approve"
+        );
+        assert!(
+            agent.is_plan_viewer()
+                && agent.line_viewer.as_ref().is_some_and(|viewer| {
+                    viewer.path.file_name().and_then(|name| name.to_str()) == Some("plan.md")
+                        && viewer
+                            .plan_ref()
+                            .is_some_and(|plan| plan.feedback_active && plan.show_action_buttons)
+                }),
+            "the later exit_plan_mode present must dock primary plan.md and arm review CTAs"
         );
     }
     #[test]
@@ -3809,8 +3979,9 @@ mod plan_pane_letter_a_contract_tests {
         match &outcome {
             InputOutcome::Action(Action::Interject { text, .. }) => {
                 assert!(
-                    text.contains("approved the plan with the following review comments")
-                        && text.contains("All this is sensible"),
+                    text.contains(
+                        crate::views::plan_approval_view::PLAN_APPROVED_REVIEW_COMMENTS_LEAD,
+                    ) && text.contains("All this is sensible"),
                     "Approve must wrap the comment once; got {text:?}"
                 );
                 let raw_only = text.trim() == notes.trim();
@@ -3837,8 +4008,167 @@ mod plan_pane_letter_a_contract_tests {
             "exactly one human/scrollback entry must contain the comment; got {hits:?}"
         );
         assert!(
-            hits[0].contains("approved the plan with the following review comments"),
+            hits[0].contains(crate::views::plan_approval_view::PLAN_APPROVED_REVIEW_COMMENTS_LEAD),
             "the one entry must be the wrapped review, got {:?}",
+            hits[0]
+        );
+        assert!(
+            matches!(
+                agent.send_composer_as_normal_prompt(),
+                InputOutcome::Changed
+            ),
+            "leftover composer must not be sendable after Approve"
+        );
+    }
+
+    /// Surmount / grok-oss fork: named tests are contracts, not optional chrome.
+    /// Composer text while the plan panel is open, `Love it! Execute now.`,
+    /// is kept. Approve exits plan mode. The approval record quotes
+    /// `The user approved the plan with the following review comments:` and
+    /// then that sentence. That Interject is work starting. Empty Enter
+    /// never Approves. The composer is consumed. Exactly one scrollback hit
+    /// contains the full record.
+    #[test]
+    fn approve_keeps_love_it_execute_now_exits_plan_and_starts_work() {
+        const SENTENCE: &str = "Love it! Execute now.";
+        const REVIEW_LEAD: &str = "The user approved the plan with the following review comments:";
+        let record = format!("{REVIEW_LEAD}\n\n{SENTENCE}");
+
+        let mut agent = make_agent();
+        install_parked_plan(&mut agent, "# Plan\n\nApprove once");
+        agent.plan_mode_active = true;
+        agent.plan_mode_pending = None;
+        agent.show_plan_preview();
+        if let Some(ref mut pav) = agent.plan_approval_view {
+            pav.focus = PlanApprovalFocus::Preview;
+        }
+        agent.prompt.set_text("");
+        assert!(
+            agent.line_viewer.is_some(),
+            "fixture: the plan panel is open"
+        );
+
+        let empty_enter = type_key(
+            &mut agent,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        );
+        assert!(
+            !matches!(
+                &empty_enter,
+                InputOutcome::Action(
+                    Action::SendPrompt(_) | Action::SendPromptNow { .. } | Action::Interject { .. }
+                ) | InputOutcome::ActionThenForward(
+                    Action::SendPrompt(_) | Action::SendPromptNow { .. } | Action::Interject { .. }
+                )
+            ),
+            "empty Enter never Approves; got {empty_enter:?}"
+        );
+        assert!(
+            agent.plan_approval_view.is_some() && !agent.plan_decision_resolved,
+            "empty Enter never Approves"
+        );
+        assert!(
+            agent.line_viewer.is_some(),
+            "empty Enter never Approves and must leave the plan panel open"
+        );
+        assert_ne!(
+            agent.plan_mode_pending,
+            Some(false),
+            "empty Enter never Approves and must not exit plan mode"
+        );
+
+        type_chars(&mut agent, SENTENCE);
+        let notes = agent.prompt.text().to_string();
+        assert!(
+            notes.contains("Love it! Execute now."),
+            "fixture must type the review comment, got {notes:?}"
+        );
+        assert_eq!(
+            notes, SENTENCE,
+            "composer text while the plan panel is open must keep `Love it! Execute now.`, got {notes:?}"
+        );
+
+        let outcome = click_plan_approve(&mut agent);
+        assert!(
+            agent.plan_approval_view.is_none(),
+            "Approve must close the review"
+        );
+        assert_eq!(
+            agent.plan_mode_pending,
+            Some(false),
+            "plan mode exits after Approve with `Love it! Execute now.`"
+        );
+        assert!(
+            agent.line_viewer.is_none(),
+            "plan mode exit closes the plan panel"
+        );
+        assert!(
+            agent.plan_decision_resolved,
+            "Approve with `Love it! Execute now.` resolves the plan so work can start"
+        );
+        match &outcome {
+            InputOutcome::Action(Action::Interject { text, .. }) => {
+                assert!(
+                    text.contains(
+                        crate::views::plan_approval_view::PLAN_APPROVED_REVIEW_COMMENTS_LEAD,
+                    ) && text.contains("Love it! Execute now."),
+                    "Approve must wrap the comment once; got {text:?}"
+                );
+                assert!(
+                    text.contains(REVIEW_LEAD),
+                    "approval record must quote `The user approved the plan with the following review comments:`; got {text:?}"
+                );
+                assert!(
+                    text.contains(SENTENCE),
+                    "approval record must keep `Love it! Execute now.`; got {text:?}"
+                );
+                assert!(
+                    text.contains(&record),
+                    "plan exit record must quote `The user approved the plan with the following review comments:` and then `Love it! Execute now.`; got {text:?}"
+                );
+                let lead_at = text.find(REVIEW_LEAD).expect("review comments prefix");
+                let sentence_at = text.find(SENTENCE).expect("`Love it! Execute now.`");
+                assert!(
+                    lead_at < sentence_at,
+                    "the review comments prefix must come before `Love it! Execute now.`; got {text:?}"
+                );
+                assert!(
+                    !text.trim().is_empty()
+                        && !text.contains("do not implement yet")
+                        && !text.contains("NOT operator approval"),
+                    "the Interject must start work, not hold a present-only plan; got {text:?}"
+                );
+                let raw_only = text.trim() == notes.trim();
+                assert!(
+                    !raw_only,
+                    "the wrapped review line is the intended human copy, not a raw second prompt"
+                );
+            }
+            other => panic!("Approve with comments must Interject once; got {other:?}"),
+        }
+        apply_approve_outcome_to_scrollback(&mut agent, outcome);
+        assert!(
+            agent.prompt.text().trim().is_empty(),
+            "Approve must consume the comment so persist/send cannot post it again, got {:?}",
+            agent.prompt.text()
+        );
+        let hits: Vec<String> = user_prompt_texts(&agent)
+            .into_iter()
+            .filter(|t| t.contains("Love it! Execute now."))
+            .collect();
+        assert_eq!(
+            hits.len(),
+            1,
+            "exactly one human/scrollback entry must contain the comment; got {hits:?}"
+        );
+        assert!(
+            hits[0].contains(crate::views::plan_approval_view::PLAN_APPROVED_REVIEW_COMMENTS_LEAD),
+            "the one entry must be the wrapped review, got {:?}",
+            hits[0]
+        );
+        assert!(
+            hits[0].contains(&record),
+            "the one scrollback entry must quote `The user approved the plan with the following review comments:` and then `Love it! Execute now.`; got {:?}",
             hits[0]
         );
         assert!(
@@ -3911,8 +4241,9 @@ mod plan_pane_letter_a_contract_tests {
         match &outcome {
             InputOutcome::Action(Action::Interject { text, .. }) => {
                 assert!(
-                    text.contains("approved the plan with the following review comments")
-                        && text.contains(notes_needle),
+                    text.contains(
+                        crate::views::plan_approval_view::PLAN_APPROVED_REVIEW_COMMENTS_LEAD,
+                    ) && text.contains(notes_needle),
                     "Approve must wrap the comment once; got {text:?}"
                 );
             }
@@ -3934,7 +4265,7 @@ mod plan_pane_letter_a_contract_tests {
             "exactly one human/scrollback entry must contain the comment; got {hits:?}"
         );
         assert!(
-            hits[0].contains("approved the plan with the following review comments"),
+            hits[0].contains(crate::views::plan_approval_view::PLAN_APPROVED_REVIEW_COMMENTS_LEAD),
             "the one entry must be the wrapped review, got {:?}",
             hits[0]
         );

@@ -19,6 +19,7 @@ pub mod backend;
 pub mod coordinator;
 mod coordinator_state;
 pub use coordinator_state::{cap_completion_output, completion_summary};
+pub mod l1_session_harness;
 pub mod types;
 
 use self::backend::SubagentBackendResource;
@@ -357,6 +358,142 @@ fn map_follow_up_outcome(
     }
 }
 
+/// True when every non-empty line is the same sentence and there are at least two.
+fn stop_text_is_repeating_sentence(text: &str) -> bool {
+    let lines: Vec<&str> = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect();
+    lines.len() >= 2 && lines.iter().all(|line| *line == lines[0])
+}
+
+fn harness_layer_for_depth(depth: u32) -> l1_session_harness::AgentLayer {
+    // Depth 0 is an L1 task call, so the agent that exited is an L2.
+    // A deeper task call's exit is an L3. There is no other layer.
+    if depth == 0 {
+        l1_session_harness::AgentLayer::L2
+    } else {
+        l1_session_harness::AgentLayer::L3
+    }
+}
+
+fn harness_failures_for_exit(
+    early: bool,
+    has_land_report: bool,
+    repeating: bool,
+) -> Vec<l1_session_harness::HarnessFailure> {
+    let mut failures = Vec::new();
+    if early {
+        failures.push(l1_session_harness::HarnessFailure::EarlyExit);
+    }
+    if repeating {
+        failures.push(l1_session_harness::HarnessFailure::RepeatingSentence);
+    }
+    if !has_land_report {
+        failures.push(l1_session_harness::HarnessFailure::MissingReport);
+    }
+    failures
+}
+
+/// Soft help is not a lock and not a kill. This does not write a file and
+/// does not take a lock.
+fn soft_help_is_not_a_lock_or_a_kill(from_session: &str, to_session: &str) -> bool {
+    let help = l1_session_harness::SoftMessage::help(
+        from_session,
+        to_session,
+        "This L1 is resuming the same L2.",
+        l1_session_harness::LIVE_CHECK_REMOTE_RESOURCE,
+    );
+    !help.is_lock() && !help.is_kill()
+}
+
+async fn record_exit_feedback(
+    resources: &SharedResources,
+    depth: u32,
+    failures: &[l1_session_harness::HarnessFailure],
+) {
+    let layer = harness_layer_for_depth(depth);
+    let session_dir = {
+        let guard = resources.lock().await;
+        guard.get::<SessionFolder>().map(|folder| folder.0.clone())
+    };
+    for failure in failures {
+        let feedback = l1_session_harness::record_harness_feedback(layer, *failure);
+        if let Some(dir) = session_dir.as_deref() {
+            let _ = l1_session_harness::append_harness_feedback(dir, &feedback);
+        }
+    }
+}
+
+/// On a blocking exit, call [`l1_session_harness::l2_exit_action`].
+///
+/// A land report is true only when the exit output is non-empty, tool calls
+/// are at least 5, and the stop text is not a repeating sentence. Otherwise
+/// `has_land_report` stays false, and the action is
+/// [`l1_session_harness::L2ExitAction::ResumeSame`] for that same L2 id.
+/// Resume uses the existing `resume_from` path and does not allocate a new
+/// id. [`l1_session_harness::L2ExitAction::SpawnDuplicate`] does not spawn.
+/// One resume per task call. When the action is Done, this does not resume.
+async fn resume_same_l2_after_exit(
+    backend: &SubagentBackendResource,
+    resources: &SharedResources,
+    mut request: SubagentRequest,
+    result: SubagentResult,
+    depth: u32,
+) -> Result<SubagentResult, xai_tool_runtime::ToolError> {
+    let elapsed_secs = result.duration_ms / 1000;
+    let tool_calls = u64::from(result.tool_calls);
+    let stop_text: &str = if !result.output.is_empty() {
+        result.output.as_ref()
+    } else {
+        result.error.as_deref().unwrap_or("")
+    };
+    let stopped_on_repeating_sentence = stop_text_is_repeating_sentence(stop_text);
+    let has_land_report = !result.output.is_empty()
+        && tool_calls >= l1_session_harness::EARLY_L2_FEW_TOOL_CALLS
+        && !stopped_on_repeating_sentence;
+    let early = l1_session_harness::early_l2_exit(
+        elapsed_secs,
+        tool_calls,
+        has_land_report,
+        stopped_on_repeating_sentence,
+    );
+    let l2_id = if result.subagent_id.is_empty() {
+        request.id.clone()
+    } else {
+        result.subagent_id.clone()
+    };
+    let action = l1_session_harness::l2_exit_action(
+        &l2_id,
+        elapsed_secs,
+        tool_calls,
+        has_land_report,
+        stopped_on_repeating_sentence,
+    );
+    let failures = harness_failures_for_exit(early, has_land_report, stopped_on_repeating_sentence);
+    record_exit_feedback(resources, depth, &failures).await;
+
+    let l1_session_harness::L2ExitAction::ResumeSame { l2_id } = action else {
+        return Ok(result);
+    };
+    if !soft_help_is_not_a_lock_or_a_kill(&request.parent_session_id, &l2_id) {
+        return Ok(result);
+    }
+    // This task call is L1 when depth is 0. Deeper calls are not an L2 exit.
+    if depth != 0 || result.cancelled || result.backgrounded {
+        return Ok(result);
+    }
+    if request.resume_from.as_deref() == Some(l2_id.as_str()) || !is_valid_resume_id(&l2_id) {
+        return Ok(result);
+    }
+    request.id = l2_id.clone();
+    request.resume_from = Some(l2_id.clone());
+    #[cfg(test)]
+    tests::stash_resume_echo(&l2_id, &result);
+    backend.backend().spawn(request).await
+}
+
 impl xai_tool_runtime::Tool for TaskTool {
     type Args = TaskToolInput;
     type Output = ToolOutput;
@@ -484,6 +621,12 @@ impl xai_tool_runtime::Tool for TaskTool {
                  Cannot spawn further nested subagents."
             )));
         }
+
+        // L1 (depth 0) leaves spawn depth unset so the spawned session is an
+        // L2 coordinator. An L2 (depth > 0, still under max) may spawn only
+        // an L3 specialist. Stamp the ceiling so that session cannot spawn,
+        // including when the request named a coordinator type. Default max
+        // stays 2. Follow-up above this reject is unchanged.
 
         // Treat blank/empty/"null" resume_from as absent (models sometimes emit these).
         let resume_from = input.resume_from.and_then(|s| {
@@ -664,7 +807,7 @@ impl xai_tool_runtime::Tool for TaskTool {
                 // is set only by the harness-internal role spawners).
                 harness_agent_type: None,
                 completion_output_cap: None,
-                spawn_depth: None,
+                spawn_depth: (depth > 0).then_some(max_depth),
                 immediate_parent_session_id: None,
                 output_token_budget: None,
                 output_schema: None,
@@ -716,6 +859,7 @@ impl xai_tool_runtime::Tool for TaskTool {
 
         // 5. Blocking mode (default): spawn via backend and await result
         let _foreground_wait = foreground_wait.map(|wait| wait.enter());
+        let resume_request = request.clone();
         let result = backend.backend().spawn(request).await;
         if let Some(forwarder) = cancellation_forwarder {
             forwarder.abort();
@@ -758,6 +902,10 @@ impl xai_tool_runtime::Tool for TaskTool {
             return Ok(ToolOutput::Text(text.into()));
         }
 
+        // 5c. Early L2 exit: resume that same id. Do not mark the early exit done.
+        let result =
+            resume_same_l2_after_exit(&backend, &resources, resume_request, result, depth).await?;
+
         // 6. Return result
         if result.success {
             let resume_from_hint = result.subagent_id.clone();
@@ -795,10 +943,32 @@ mod tests {
     };
     use crate::types::resources::Resources;
     use crate::types::tool_metadata::test_ctx;
-    use std::sync::Arc;
+    use std::collections::HashMap;
     use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, LazyLock, Mutex};
     use tokio::sync::mpsc;
     use xai_tool_types::SubagentCapabilityMode;
+
+    fn resume_echo_map() -> &'static Mutex<HashMap<String, SubagentResult>> {
+        static MAP: LazyLock<Mutex<HashMap<String, SubagentResult>>> =
+            LazyLock::new(|| Mutex::new(HashMap::new()));
+        &MAP
+    }
+
+    /// Test double only. The live coordinator does not read this map.
+    pub(super) fn stash_resume_echo(l2_id: &str, result: &SubagentResult) {
+        let mut map = resume_echo_map()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        map.insert(l2_id.to_string(), result.clone());
+    }
+
+    fn take_resume_echo(l2_id: &str) -> Option<SubagentResult> {
+        let mut map = resume_echo_map()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        map.remove(l2_id)
+    }
 
     /// Backend whose `ValidateType` events are auto-acked with `Ok`.
     fn make_backend() -> (
@@ -837,6 +1007,19 @@ mod tests {
                     SubagentEvent::ValidateType(req) => {
                         let outcome = outcome_fn(&req.subagent_type, &req.parent_session_id);
                         let _ = req.respond_to.send(outcome);
+                    }
+                    SubagentEvent::Spawn(spawn) => {
+                        let same_id_resume =
+                            spawn.resume_from.as_deref() == Some(spawn.id.as_str());
+                        if same_id_resume {
+                            if let Some(echo) = take_resume_echo(&spawn.id) {
+                                let _ = spawn.respond_with(move |_| echo);
+                                continue;
+                            }
+                        }
+                        if proxy_tx.send(SubagentEvent::Spawn(spawn)).is_err() {
+                            break;
+                        }
                     }
                     other => {
                         if proxy_tx.send(other).is_err() {

@@ -219,10 +219,76 @@ pub fn apply_definition_runtime_defaults(
         runtime.isolation = SubagentIsolationMode::Worktree;
     }
 }
-/// First-level nested coordinators (depth 1 with default max 2) may spawn
-/// specialists. Depth at or above max must not get `spawn_subagent`.
-pub fn nested_spawn_allowed(child_depth: u32, max_depth: u32) -> bool {
-    child_depth < max_depth
+/// Numeric depth check only. An agent at `agent_depth` may hold
+/// `spawn_subagent` when `agent_depth < max_depth`.
+///
+/// Depth 1 with the default max of 2 is the L2 that L1 spawned, so
+/// `nested_spawn_allowed(1, 2)` stays true and that L2 keeps
+/// `spawn_subagent`. This check alone is not the spawn gate: it is true for
+/// any depth under max, which let an L2 spawn another coordinator. Only L1
+/// spawns L2s. Use [`spawned_agent_may_spawn`].
+pub fn nested_spawn_allowed(agent_depth: u32, max_depth: u32) -> bool {
+    agent_depth < max_depth
+}
+
+/// Layer created by one spawn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpawnedLayer {
+    /// L2 coordinator. Only L1 may create this layer. It may spawn an L3.
+    L2Coordinator,
+    /// L3 specialist. Cannot spawn.
+    L3Specialist,
+}
+
+/// Whether a spawn is admitted, and whether the spawned session may spawn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpawnAdmission {
+    Allow {
+        layer: SpawnedLayer,
+        /// Whether the spawned session gets `spawn_subagent`.
+        may_spawn: bool,
+    },
+    /// Spawner depth is at or above max. `TaskTool::run` rejects with
+    /// "Subagent depth limit exceeded". An L3 cannot spawn an L3 or an L4.
+    RejectDepthLimit,
+}
+
+/// Only L1 (depth 0) may spawn an L2 coordinator, and only when that L2's
+/// depth is still under max.
+///
+/// An L2 (depth 1, still under max) may spawn only an L3 specialist. A
+/// coordinator request at that depth (grok-build / general-purpose) is this
+/// specialist: `may_spawn` is false, so the toolset keeps implement tools
+/// and loses Task. Depth at or above max cannot spawn. Default max stays 2.
+/// No new config key.
+pub fn admit_spawn(spawner_depth: u32, max_depth: u32) -> SpawnAdmission {
+    if spawner_depth >= max_depth {
+        return SpawnAdmission::RejectDepthLimit;
+    }
+    if spawner_depth == 0 && nested_spawn_allowed(spawner_depth.saturating_add(1), max_depth) {
+        SpawnAdmission::Allow {
+            layer: SpawnedLayer::L2Coordinator,
+            may_spawn: true,
+        }
+    } else {
+        SpawnAdmission::Allow {
+            layer: SpawnedLayer::L3Specialist,
+            may_spawn: false,
+        }
+    }
+}
+
+/// Full gate for whether the spawned session gets `spawn_subagent`.
+///
+/// Only an L1 admission with room under max may spawn. An L2 admission is
+/// always an L3 specialist, even when `agent_depth < max_depth`.
+pub fn spawned_agent_may_spawn(spawner_depth: u32, agent_depth: u32, max_depth: u32) -> bool {
+    match admit_spawn(spawner_depth, max_depth) {
+        SpawnAdmission::Allow {
+            may_spawn: true, ..
+        } => nested_spawn_allowed(agent_depth, max_depth),
+        _ => false,
+    }
 }
 
 /// Apply capability filtering and recursion depth to the exact production
@@ -358,6 +424,93 @@ mod tests {
         assert!(
             !nested_spawn_allowed(1, 1),
             "explicit max 1 is L1-only spawn"
+        );
+    }
+
+    /// Operator: "L2s should not be able to spawn other L2s."
+    /// "They can only spawn L3s."
+    /// Only L1 spawns L2s.
+    #[test]
+    fn only_l1_spawns_l2_l2_spawn_is_l3_specialist_that_cannot_spawn() {
+        assert!(
+            matches!(
+                admit_spawn(0, 2),
+                SpawnAdmission::Allow {
+                    layer: SpawnedLayer::L2Coordinator,
+                    may_spawn: true,
+                }
+            ),
+            "Only L1 spawns L2s."
+        );
+        assert!(spawned_agent_may_spawn(0, 1, 2), "Only L1 spawns L2s.");
+        let mut l2 = AgentDefinition::default_grok_build();
+        apply_child_tool_policy(&mut l2, None, spawned_agent_may_spawn(0, 1, 2));
+        assert!(
+            l2.tool_config
+                .tools
+                .iter()
+                .any(|tool| tool.kind == Some(ToolKind::Task)),
+            "Only L1 spawns L2s. The L2 coordinator must keep spawn_subagent."
+        );
+
+        // Coordinator request (grok-build / general-purpose) from an L2.
+        // Numeric depth 1 is still under max 2. That must not create an L2.
+        assert!(
+            matches!(
+                admit_spawn(1, 2),
+                SpawnAdmission::Allow {
+                    layer: SpawnedLayer::L3Specialist,
+                    may_spawn: false,
+                }
+            ),
+            "L2s should not be able to spawn other L2s. They can only spawn L3s."
+        );
+        assert!(
+            !spawned_agent_may_spawn(1, 1, 2),
+            "L2s should not be able to spawn other L2s. They can only spawn L3s."
+        );
+        let mut forced = AgentDefinition::default_grok_build();
+        apply_child_tool_policy(&mut forced, None, spawned_agent_may_spawn(1, 1, 2));
+        assert!(
+            !forced
+                .tool_config
+                .tools
+                .iter()
+                .any(|tool| tool.kind == Some(ToolKind::Task)),
+            "A coordinator request from an L2 is forced to a specialist that cannot spawn."
+        );
+        assert!(
+            forced
+                .tool_config
+                .tools
+                .iter()
+                .any(|tool| tool.kind == Some(ToolKind::Edit)),
+            "They can only spawn L3s. The specialist keeps implement tools."
+        );
+    }
+
+    /// Operator: "L3s cannot spawn L4s or other L3s."
+    #[test]
+    fn l3_cannot_spawn_l4_or_another_l3() {
+        assert!(
+            matches!(admit_spawn(2, 2), SpawnAdmission::RejectDepthLimit),
+            "L3s cannot spawn L4s or other L3s."
+        );
+        assert!(
+            matches!(admit_spawn(3, 2), SpawnAdmission::RejectDepthLimit),
+            "L3s cannot spawn L4s or other L3s."
+        );
+        assert!(
+            !spawned_agent_may_spawn(2, 2, 2),
+            "L3s cannot spawn L4s or other L3s."
+        );
+        assert!(
+            !spawned_agent_may_spawn(2, 3, 2),
+            "L3s cannot spawn L4s or other L3s."
+        );
+        assert!(
+            !nested_spawn_allowed(2, 2),
+            "L3s cannot spawn L4s or other L3s."
         );
     }
 

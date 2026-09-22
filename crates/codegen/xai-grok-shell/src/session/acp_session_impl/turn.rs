@@ -1075,6 +1075,27 @@ impl SessionActor {
                     *category,
                     context.clone(),
                 );
+                let stop_cancelled_reason = if matches!(
+                    category,
+                    Some(crate::session::events::CancellationCategory::PermissionRejected)
+                ) {
+                    "permission_reject"
+                } else {
+                    "interrupt"
+                };
+                self.dispatch_hook(
+                    xai_grok_hooks::event::HookEventName::StopCancelled,
+                    xai_grok_hooks::event::HookPayload::StopCancelled {
+                        reason: stop_cancelled_reason.to_string(),
+                        stop_hook_active: false,
+                        last_assistant_message: None,
+                        background_tasks: None,
+                        session_crons: None,
+                    },
+                    Some(prompt_id),
+                    None,
+                )
+                .await;
                 if let Some(cause) = category {
                     self.events.set_prior_interrupt_category(*cause);
                 }
@@ -1110,6 +1131,19 @@ impl SessionActor {
                         "limit": limit,
                     })),
                 );
+                self.dispatch_hook(
+                    xai_grok_hooks::event::HookEventName::StopCancelled,
+                    xai_grok_hooks::event::HookPayload::StopCancelled {
+                        reason: "max_turns".to_string(),
+                        stop_hook_active: false,
+                        last_assistant_message: None,
+                        background_tasks: None,
+                        session_crons: None,
+                    },
+                    Some(prompt_id),
+                    None,
+                )
+                .await;
                 self.send_after_turn_event(xai_tool_protocol::turn_hook::AfterTurnPayload {
                     turn_number: current_prompt_index as u64,
                     outcome: xai_tool_protocol::turn_hook::TurnHookOutcome::Cancelled,

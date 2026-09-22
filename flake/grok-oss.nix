@@ -46,7 +46,11 @@ let
   buildInputs =
     with pkgs;
     [ openssl ]
-    ++ lib.optionals stdenv.hostPlatform.isLinux [ dbus ]
+    ++ lib.optionals stdenv.hostPlatform.isLinux [
+      dbus
+      # Installed libduckdb.so for uptime. Runtime load, not a cargo C++ build.
+      duckdb.lib
+    ]
     ++ lib.optionals stdenv.hostPlatform.isDarwin [
       darwin.apple_sdk.frameworks.Security
       darwin.apple_sdk.frameworks.SystemConfiguration

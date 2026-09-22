@@ -23,6 +23,7 @@ use crate::notifications::{NotificationEvent, NotificationEventKind};
 use crate::scrollback::block::RenderBlock;
 use crate::scrollback::blocks::SessionEvent;
 use crate::slash::command::DoctorRequest;
+use crate::views::plan_approval_view::PlanFeedbackInFlight;
 use agent_client_protocol as acp;
 use xai_grok_telemetry::session_ctx::log_event;
 
@@ -214,7 +215,8 @@ fn enqueue_if_interject_dropped(
         // work rewrote that file.
         agent.leave_or_reread_isolated_preview_after_mill_continues();
     } else if crate::slash::queue_schedule::plan_slash_is_update_turn(&text) {
-        agent.enter_isolated_preview_rewrite_wait(&send_text);
+        agent
+            .enter_isolated_preview_rewrite_wait_quoted(PlanFeedbackInFlight::Updating, &send_text);
     }
     let sent = effects
         .iter()
@@ -847,7 +849,7 @@ pub(super) fn dispatch_send_prompt_inner(
         && crate::slash::queue_schedule::plan_slash_is_update_turn(text.trim())
         && let Some(desc) = crate::slash::queue_schedule::plan_description_from_command(text.trim())
     {
-        agent.enter_isolated_preview_rewrite_wait(&desc);
+        agent.enter_isolated_preview_rewrite_wait_quoted(PlanFeedbackInFlight::Updating, &desc);
         let in_plan = agent.plan_mode_pending.unwrap_or(agent.plan_mode_active);
         let enter_new_plan =
             !in_plan && agent.session.state.is_idle() && agent.session.session_id.is_some();
@@ -2023,6 +2025,15 @@ pub(super) fn handle_prompt_response(
             .current_prompt_id
             .clone()
             .or_else(|| response_pid.clone());
+
+        crate::app::turn_completion::record_driver_prompt_outcome(
+            agent,
+            &result,
+            http_status,
+            usage_meta,
+            elapsed,
+            was_cancelling,
+        );
 
         agent.session.finish_turn(&mut agent.scrollback);
 

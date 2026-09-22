@@ -816,6 +816,13 @@ pub(crate) fn reconcile_overdue_turn_ends(app: &mut AppView) -> Option<Vec<Effec
             })),
         );
 
+        crate::app::turn_completion::record_terminal_stop_reason(
+            agent,
+            pending.stop_reason.as_deref(),
+            pending.agent_result.as_deref(),
+            agent.turn_elapsed(),
+            was_cancelling,
+        );
         agent.complete_live_prompt_task(Some(pending.prompt_id.as_str()), None);
         agent.session.finish_turn(&mut agent.scrollback);
         let event = if was_cancelling {
@@ -910,6 +917,13 @@ pub(crate) fn reconcile_overdue_turn_ends(app: &mut AppView) -> Option<Vec<Effec
                 None => expected_send_now.is_some(),
             };
         let elapsed = child.turn_elapsed().unwrap_or_default();
+        crate::app::turn_completion::record_terminal_stop_reason(
+            child,
+            pending.stop_reason.as_deref(),
+            pending.agent_result.as_deref(),
+            child.turn_elapsed(),
+            was_cancelling,
+        );
         child.complete_live_prompt_task(Some(pending.prompt_id.as_str()), None);
         child.session.finish_turn(&mut child.scrollback);
         let event = if was_cancelling {

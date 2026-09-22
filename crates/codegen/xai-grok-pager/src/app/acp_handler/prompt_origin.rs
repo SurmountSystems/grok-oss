@@ -176,6 +176,13 @@ pub(super) fn finish_wake_turn(
         _ if !had_output => None,
         _ => Some(SessionEvent::TurnCompleted { elapsed }),
     };
+    crate::app::turn_completion::record_wake_outcome(
+        agent,
+        stop_reason,
+        agent_result,
+        had_output,
+        elapsed,
+    );
     if event.is_some() {
         crate::app::turn_completion::push_turn_terminal_marker(agent, event, Some(prompt_id));
     }

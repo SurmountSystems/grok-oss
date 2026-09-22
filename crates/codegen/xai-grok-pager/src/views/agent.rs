@@ -414,13 +414,10 @@ impl AgentViewLayout {
         }
     }
 
-    /// Shrink the transcript so a right-docked soft plan pane does not
-    /// cover wrapped scrollback. Call after [`Self::compute`].
+    /// The soft plan pane paints over the right side of the full-width
+    /// transcript, so this method must not narrow scrollback.
     pub fn reserve_soft_plan_pane(&mut self, pane_width: u16) {
-        let leave_left = 16.min(self.scrollback.width.saturating_sub(1));
-        let pane_width = pane_width.min(self.scrollback.width.saturating_sub(leave_left));
-        self.scrollback.width = self.scrollback.width.saturating_sub(pane_width);
-        self.scrollback_content.width = self.scrollback_content.width.saturating_sub(pane_width);
+        let _ = pane_width;
     }
     /// Inner area width (for prompt height computation before full layout).
     ///
@@ -2488,6 +2485,48 @@ mod tests {
         assert_eq!(
             forced_off.scrollback_content.width, forced_off.scrollback.width,
             "no carve-out without the scrollbar gutter"
+        );
+    }
+    /// The plan side panel paints over the transcript behind it. Full
+    /// scrollback width stays, and that width still reaches into the pane,
+    /// so the text is behind the overlay. A layout that only narrows the
+    /// transcript column, leaving that text visible beside the pane, is
+    /// not this contract.
+    #[test]
+    fn soft_plan_pane_paints_over_full_width_transcript() {
+        let mut layout = layout_with_rows(Rect::new(0, 0, 80, 40), 0, 0, 0);
+        layout.scrollback.width = 80;
+        layout.scrollback_content.width = 80;
+        let pane_w = 40u16;
+        layout.reserve_soft_plan_pane(pane_w);
+        assert_eq!(
+            layout.scrollback.width, 80,
+            "overlay covers the transcript; do not narrow the transcript column so text stays visible beside the plan"
+        );
+        assert_eq!(
+            layout.scrollback_content.width, 80,
+            "transcript text stays laid out at full width behind the plan pane"
+        );
+        let transcript_right = layout.scrollback.x.saturating_add(layout.scrollback.width);
+        let pane_x = transcript_right.saturating_sub(pane_w);
+        assert!(
+            layout.scrollback.x <= pane_x && pane_x < transcript_right,
+            "the plan pane must overlap the full-width transcript, not sit in a column carved out beside it; scrollback={:?} pane_x={pane_x}",
+            layout.scrollback
+        );
+        assert!(
+            layout
+                .scrollback_content
+                .x
+                .saturating_add(layout.scrollback_content.width)
+                > pane_x,
+            "transcript text is still laid out behind the pane so the overlay can cover it; content={:?} pane_x={pane_x}",
+            layout.scrollback_content
+        );
+        let overlap = transcript_right.saturating_sub(pane_x);
+        assert_eq!(
+            overlap, pane_w,
+            "Plan side panel still paints over the transcript behind it."
         );
     }
     #[test]

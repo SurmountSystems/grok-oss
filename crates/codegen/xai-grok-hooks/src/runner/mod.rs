@@ -24,6 +24,8 @@ pub struct RunContext<'a> {
 #[derive(Debug)]
 pub enum HookRunnerResult {
     Decision(HookDecision),
+    /// `PreToolUse` allow that also rewrote the tool input. Deny never uses this.
+    AllowRewrite(serde_json::Value),
     Stop(StopHookOutcome),
     Success,
     /// Failed: the caller fails open.
@@ -32,11 +34,35 @@ pub enum HookRunnerResult {
 
 /// JSON from `PreToolUse` gate hooks:
 /// `{"decision": "allow" | "deny", "reason": "…"}`.
+/// `updatedInput` (top-level or under `hookSpecificOutput`) rewrites the tool
+/// input on allow. A deny ignores it.
 #[derive(Debug, Deserialize)]
 pub(crate) struct GateHookJson {
     pub decision: String,
     #[serde(default)]
     pub reason: Option<String>,
+    #[serde(default, rename = "updatedInput")]
+    pub updated_input: Option<serde_json::Value>,
+    #[serde(default, rename = "hookSpecificOutput")]
+    pub hook_specific_output: Option<GateHookSpecificOutput>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub(crate) struct GateHookSpecificOutput {
+    #[serde(default, rename = "updatedInput")]
+    pub updated_input: Option<serde_json::Value>,
+}
+
+/// Rewritten tool input from a gate hook, if the JSON carried one.
+pub(crate) fn gate_updated_input(json: &GateHookJson) -> Option<serde_json::Value> {
+    json.updated_input
+        .clone()
+        .or_else(|| {
+            json.hook_specific_output
+                .as_ref()
+                .and_then(|output| output.updated_input.clone())
+        })
+        .filter(|value| !value.is_null())
 }
 
 /// Interpret a [`GateHookJson`] as a [`HookDecision`]. An unknown decision value

@@ -133,8 +133,9 @@ hook_events! {
         aliases: ["PermissionDenied", "permission_denied", "permissionDenied"],
         traits: (Observe, Tested, true),
     },
-    /// Fires on a genuine turn-end with stop decision control (a hook can block);
-    /// not on user interrupts (API-error turns fire `StopFailure`); observe-only at session end.
+    /// Fires on a genuine turn-end (`end_turn`) with stop decision control.
+    /// Interrupted, permission-rejected, and max-turns turns fire `StopCancelled`
+    /// instead. API-error turns fire `StopFailure`. Also observe-only at session end.
     Stop {
         display: "stop",
         aliases: ["Stop", "stop"],
@@ -145,6 +146,13 @@ hook_events! {
         display: "stop_failure",
         aliases: ["StopFailure", "stop_failure", "stopFailure"],
         traits: (Observe, Tested, true),
+    },
+    /// Observe-only turn end for interrupt, permission reject, and max turns.
+    /// Same payload shape as `Stop`. It does not replace `Stop` or `StopFailure`.
+    StopCancelled {
+        display: "stop_cancelled",
+        aliases: ["StopCancelled", "stop_cancelled", "stopCancelled"],
+        traits: (Observe, Ignored, true),
     },
     Notification {
         display: "notification",
@@ -385,7 +393,22 @@ pub enum HookPayload {
         )]
         last_assistant_message: Option<String>,
     },
-
+    /// Observe-only turn end for interrupt, permission reject, and max turns.
+    /// Same field renames as `Stop`. It does not replace `Stop` or `StopFailure`.
+    StopCancelled {
+        reason: String,
+        #[serde(rename = "stopHookActive")]
+        stop_hook_active: bool,
+        #[serde(
+            rename = "lastAssistantMessage",
+            skip_serializing_if = "Option::is_none"
+        )]
+        last_assistant_message: Option<String>,
+        #[serde(rename = "backgroundTasks", skip_serializing_if = "Option::is_none")]
+        background_tasks: Option<Vec<StopBackgroundTask>>,
+        #[serde(rename = "sessionCrons", skip_serializing_if = "Option::is_none")]
+        session_crons: Option<Vec<StopSessionCron>>,
+    },
     PreToolUse {
         /// The tool the model invoked. For the meta-dispatch tools (`use_tool`
         /// and the external MCP-call tool) this is the resolved underlying tool
@@ -521,7 +544,9 @@ impl HookPayload {
             // Always a non-empty name, unlike the free-text arms above.
             Self::StopFailure { error, .. } => return Some(error.as_str()),
             // Ignored events listed explicitly so a new Tested event can't silently return None.
-            Self::Stop { .. } | Self::UserPromptSubmit { .. } => return None,
+            Self::Stop { .. } | Self::StopCancelled { .. } | Self::UserPromptSubmit { .. } => {
+                return None;
+            }
         };
         Some(value.as_str()).filter(|v| !v.is_empty())
     }
@@ -565,6 +590,11 @@ mod tests {
             ("SessionEnd", "session_end", HookEventName::SessionEnd),
             ("Stop", "stop", HookEventName::Stop),
             ("StopFailure", "stop_failure", HookEventName::StopFailure),
+            (
+                "StopCancelled",
+                "stop_cancelled",
+                HookEventName::StopCancelled,
+            ),
             ("Notification", "notification", HookEventName::Notification),
             (
                 "UserPromptSubmit",
@@ -610,6 +640,7 @@ mod tests {
             (HookEventName::SessionEnd, "session_end"),
             (HookEventName::Stop, "stop"),
             (HookEventName::StopFailure, "stop_failure"),
+            (HookEventName::StopCancelled, "stop_cancelled"),
             (HookEventName::Notification, "notification"),
             (HookEventName::UserPromptSubmit, "user_prompt_submit"),
             (HookEventName::PermissionDenied, "permission_denied"),
@@ -643,6 +674,7 @@ mod tests {
             ("subagentEnd", HookEventName::SubagentEnd),
             ("preCompact", HookEventName::PreCompact),
             ("stopFailure", HookEventName::StopFailure),
+            ("stopCancelled", HookEventName::StopCancelled),
         ];
         for (spelling, expected) in cases {
             let parsed: HookEventName = serde_json::from_str(&format!("\"{spelling}\"")).unwrap();

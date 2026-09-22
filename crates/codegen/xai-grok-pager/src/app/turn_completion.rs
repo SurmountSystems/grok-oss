@@ -279,6 +279,16 @@ pub(super) fn finalize_turn_from_terminal(
         .clone()
         .or_else(|| prompt_id.map(str::to_string));
 
+    // Viewer never receives PromptResponse. Record the outcome this signal
+    // already named. Tokens were not on this signal.
+    record_terminal_stop_reason(
+        agent,
+        stop_reason,
+        agent_result,
+        agent.turn_elapsed(),
+        matches!(stop_reason, Some("cancelled")),
+    );
+
     // Viewer never receives PromptResponse; write metrics if the row is still open.
     agent.complete_live_prompt_task(ending_prompt_id.as_deref(), None);
     agent.session.finish_turn(&mut agent.scrollback);
@@ -351,6 +361,251 @@ pub(super) fn apply_terminal_outcome(
             }
             is_active
         }
+    }
+}
+
+/// Driver `PromptResponse` already knows success, HTTP status, and the
+/// formatted error text. Tokens are recorded only when `usage` already
+/// carried `inputTokens` or `outputTokens`. This does not touch the
+/// session ledger or `live_tokens_used`.
+pub(in crate::app) fn record_driver_prompt_outcome(
+    agent: &AgentView,
+    result: &Result<agent_client_protocol::PromptResponse, String>,
+    http_status: Option<u16>,
+    usage_meta: Option<&serde_json::Map<String, serde_json::Value>>,
+    elapsed: Option<std::time::Duration>,
+    was_cancelling: bool,
+) {
+    if agent.bash_turn || was_cancelling {
+        return;
+    }
+    let outcome = match result {
+        Ok(_) => Some(crate::uptime::Outcome::ModelRequestSucceeded),
+        Err(err) => outcome_from_failure(http_status, err),
+    };
+    if let Some(outcome) = outcome {
+        persist_completed(agent, outcome, elapsed, fetched_token_count(usage_meta));
+    }
+}
+
+/// Wake turn that skips `PromptResponse`. A silent wake with no output is
+/// not a completed model request.
+pub(in crate::app) fn record_wake_outcome(
+    agent: &AgentView,
+    stop_reason: &str,
+    agent_result: Option<&str>,
+    had_output: bool,
+    elapsed: Option<std::time::Duration>,
+) {
+    if agent.bash_turn {
+        return;
+    }
+    let outcome = match stop_reason {
+        "cancelled" | "rate_limit" => None,
+        "error" => outcome_from_failure(None, agent_result.unwrap_or("")),
+        _ if had_output => Some(crate::uptime::Outcome::ModelRequestSucceeded),
+        _ => None,
+    };
+    if let Some(outcome) = outcome {
+        persist_completed(agent, outcome, elapsed, None);
+    }
+}
+
+/// Viewer finalize and lost-response reconcile. `token_count` stays
+/// not-fetched: those signals do not carry usage.
+pub(in crate::app) fn record_terminal_stop_reason(
+    agent: &AgentView,
+    stop_reason: Option<&str>,
+    error_text: Option<&str>,
+    elapsed: Option<std::time::Duration>,
+    was_cancelling: bool,
+) {
+    if agent.bash_turn || was_cancelling {
+        return;
+    }
+    let outcome = match stop_reason {
+        Some("cancelled") | Some("rate_limit") => None,
+        Some("error") => outcome_from_failure(None, error_text.unwrap_or("")),
+        _ => Some(crate::uptime::Outcome::ModelRequestSucceeded),
+    };
+    if let Some(outcome) = outcome {
+        persist_completed(agent, outcome, elapsed, None);
+    }
+}
+
+/// First time this process paints a recognized outage banner. Later frames
+/// of the same text do not append another piece.
+pub(in crate::app) fn note_painted_announcement(
+    session_id: &str,
+    title: Option<&str>,
+    message: Option<&str>,
+) {
+    let text = match (title.unwrap_or("").trim(), message.unwrap_or("").trim()) {
+        ("", "") => return,
+        (title, "") => title.to_string(),
+        ("", message) => message.to_string(),
+        (title, message) => format!("{title}\n{message}"),
+    };
+    use std::sync::Mutex;
+    static LAST_PAINTED: Mutex<String> = Mutex::new(String::new());
+    let mut last = match LAST_PAINTED.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    if *last == text {
+        return;
+    }
+    *last = text.clone();
+    drop(last);
+    #[cfg(not(test))]
+    {
+        let dir = crate::uptime::uptime_dir(&xai_grok_config::grok_home());
+        let now = chrono::Utc::now().timestamp_millis();
+        let _ = crate::uptime::record_announcement_if_recognized(&dir, session_id, &text, now);
+    }
+    #[cfg(test)]
+    {
+        let _ = session_id;
+    }
+}
+
+/// `/announcements hide` keeps the stored row. This does not delete pieces.
+pub(in crate::app) fn note_announcement_hide() {
+    #[cfg(not(test))]
+    {
+        let dir = crate::uptime::uptime_dir(&xai_grok_config::grok_home());
+        if let Ok(store) = crate::uptime::UptimeStore::open(&dir) {
+            let _ = crate::uptime::hide_announcement_keeps_row(&store);
+        }
+    }
+}
+
+/// Text that sits beside the token chip. Reads pieces when the directory
+/// already exists. Does not write a piece.
+pub(in crate::app) fn uptime_text_beside_token_chrome() -> String {
+    use std::sync::Mutex;
+    use std::time::{Duration, Instant};
+    struct Cached {
+        at: Instant,
+        text: String,
+    }
+    static CACHE: Mutex<Option<Cached>> = Mutex::new(None);
+    let now = Instant::now();
+    if let Ok(guard) = CACHE.lock() {
+        if let Some(cached) = guard.as_ref() {
+            if cached.at.elapsed() < Duration::from_secs(1) {
+                return cached.text.clone();
+            }
+        }
+    }
+    let text = fresh_uptime_text();
+    if let Ok(mut guard) = CACHE.lock() {
+        *guard = Some(Cached {
+            at: now,
+            text: text.clone(),
+        });
+    }
+    text
+}
+
+fn fresh_uptime_text() -> String {
+    let home = xai_grok_config::grok_home();
+    let dir = crate::uptime::uptime_dir(&home);
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    // Missing libduckdb.so returns the tracking-off sentence. It does not panic
+    // and it does not open an error dialog.
+    crate::uptime::text_beside_status(&dir, now_ms).replace('\n', "  ")
+}
+
+fn outcome_from_failure(http_status: Option<u16>, text: &str) -> Option<crate::uptime::Outcome> {
+    if text.contains("Stopped: repeating sentence") || text.contains("repetitive_generation") {
+        return Some(crate::uptime::Outcome::RepeatingSentenceStop);
+    }
+    if http_status == Some(500)
+        || text.contains("Server error (500)")
+        || text.contains("status 500")
+    {
+        return Some(crate::uptime::Outcome::Http500);
+    }
+    if matches!(http_status, Some(408) | Some(504))
+        || text.contains("Request timed out")
+        || text.contains("timed out")
+        || text.contains("No response from the model")
+        || text.contains("idle_timeout")
+    {
+        return Some(crate::uptime::Outcome::Timeout);
+    }
+    None
+}
+
+fn fetched_token_count(
+    usage_meta: Option<&serde_json::Map<String, serde_json::Value>>,
+) -> Option<i64> {
+    let usage = usage_meta?.get("usage")?.as_object()?;
+    let input = usage.get("inputTokens");
+    let output = usage.get("outputTokens");
+    if input.is_none() && output.is_none() {
+        return None;
+    }
+    let number = |value: Option<&serde_json::Value>| -> i64 {
+        value
+            .and_then(|v| {
+                v.as_i64()
+                    .or_else(|| v.as_u64().and_then(|n| i64::try_from(n).ok()))
+            })
+            .unwrap_or(0)
+    };
+    Some(number(input).saturating_add(number(output)))
+}
+
+fn session_id_of(agent: &AgentView) -> String {
+    agent
+        .session
+        .session_id
+        .as_ref()
+        .map(|sid| sid.0.to_string())
+        .unwrap_or_default()
+}
+
+fn model_id_of(agent: &AgentView) -> String {
+    agent
+        .session
+        .models
+        .current_model_id_str()
+        .unwrap_or("")
+        .to_string()
+}
+
+fn latency_ms(elapsed: Option<std::time::Duration>) -> Option<i64> {
+    elapsed.and_then(|d| i64::try_from(d.as_millis()).ok())
+}
+
+/// Unit-test builds skip the piece write so pager tests do not append into
+/// the operator uptime directory. The grok-oss binary calls
+/// `record_completed_observation`.
+fn persist_completed(
+    agent: &AgentView,
+    outcome: crate::uptime::Outcome,
+    elapsed: Option<std::time::Duration>,
+    token_count: Option<i64>,
+) {
+    #[cfg(not(test))]
+    {
+        let dir = crate::uptime::uptime_dir(&xai_grok_config::grok_home());
+        let now = chrono::Utc::now().timestamp_millis();
+        let _ = crate::uptime::record_completed_observation(
+            &dir,
+            &session_id_of(agent),
+            &model_id_of(agent),
+            outcome,
+            latency_ms(elapsed),
+            token_count,
+            now,
+        );
+    }
+    #[cfg(test)]
+    {
+        let _ = (agent, outcome, elapsed, token_count);
     }
 }
 

@@ -166,6 +166,7 @@ use ratatui::widgets::Widget;
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::Instant;
+mod composer_copy;
 mod cta;
 mod input;
 pub(crate) use input::ExternalPromptEditorAccess;
@@ -173,6 +174,7 @@ mod interactions;
 mod jump;
 mod key_owner;
 pub(crate) use key_owner::{BlockingCard, EscStep, KeyOwner};
+mod isolated_preview_revise;
 mod links;
 mod media;
 mod modals;
@@ -186,6 +188,8 @@ mod render;
 pub use render::AppRenderParams;
 pub(crate) mod l2_token_tracking;
 mod live_prompt_task;
+#[cfg(test)]
+mod plan_approval_action_spacing_tests;
 mod rewind;
 mod selection;
 mod session;
@@ -1463,6 +1467,10 @@ pub struct AgentView {
     /// Isolated Preview is showing the secondary plan from `/plan --soft`.
     /// Soft planning must not reset the primary session `plan.md`.
     pub(crate) isolated_preview_shows_secondary_plan: bool,
+    /// Last plan-revision Interject text. Isolated Preview secondary revise
+    /// stores `Update secondary-plan.md` here. Exclusive parked `/plan`
+    /// stores `Update plan.md`.
+    pub(crate) last_isolated_preview_plan_feedback: Option<String>,
     /// Session mode to apply once this agent's ACP session exists. Set when
     /// the agent is spawned from the dashboard with `/plan` active (the
     /// session does not exist yet, so the mode can't be sent immediately).
@@ -1824,6 +1832,9 @@ pub struct AgentView {
         agent_client_protocol::SessionUpdate,
         crate::acp::meta::NotificationMeta,
     )>,
+    /// Composer `[Copy]` hit rectangle. Rebuilt each frame next to the
+    /// inline prompt. `None` when the button is not painted.
+    pub(crate) composer_copy_button: Option<Rect>,
 }
 /// Cap on [`AgentView::self_originated_prompt_ids`]. Only recent ids matter (a
 /// stale post-rewind chunk arrives right after its turn ends), so a small

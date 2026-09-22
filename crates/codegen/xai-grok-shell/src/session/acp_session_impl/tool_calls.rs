@@ -1054,7 +1054,7 @@ impl SessionActor {
         );
         let parse_result = serde_json::from_str::<serde_json::Value>(args_str);
         let mut concatenated_json_count: usize = 0;
-        let raw_input = match &parse_result {
+        let mut raw_input = match &parse_result {
             Ok(value) => value.clone(),
             Err(e) => {
                 if let Some(objects) = crate::session::helpers::tool_input_parsing::try_extract_concatenated_json_objects(
@@ -1102,7 +1102,7 @@ impl SessionActor {
                 }
             }
         };
-        let tool_input = match self
+        let mut tool_input = match self
             .agent
             .borrow()
             .tool_bridge()
@@ -1123,7 +1123,7 @@ impl SessionActor {
                 return Ok(Err(ToolLoop::ToolParsingError));
             }
         };
-        let access_kind = AccessKind::from(&tool_input);
+        let mut access_kind = AccessKind::from(&tool_input);
         if should_refuse_tool_in_context_only(
             self.context_only.load(std::sync::atomic::Ordering::Relaxed),
         ) {
@@ -1192,8 +1192,8 @@ impl SessionActor {
         } else {
             None
         };
-        let dispatch_target_name = tool_input.dispatch_target_name();
-        let resolved_tool_name = dispatch_target_name
+        let mut dispatch_target_name = tool_input.dispatch_target_name();
+        let mut resolved_tool_name = dispatch_target_name
             .clone()
             .unwrap_or_else(|| call.function.name.clone());
         if self.hook_event_active(xai_grok_hooks::event::HookEventName::PreToolUse) {
@@ -1241,6 +1241,41 @@ impl SessionActor {
                             reason,
                         )
                         .await?));
+                }
+                if let Some(rewritten) = pre_result.updated_input {
+                    raw_input = rewritten.clone();
+                    let parsed = self
+                        .agent
+                        .borrow()
+                        .tool_bridge()
+                        .try_parse(&call.function.name, rewritten)
+                        .await;
+                    match parsed {
+                        Ok(parsed) => {
+                            access_kind = AccessKind::from(&parsed);
+                            dispatch_target_name = parsed.dispatch_target_name();
+                            resolved_tool_name = dispatch_target_name
+                                .clone()
+                                .unwrap_or_else(|| call.function.name.clone());
+                            tool_input = parsed;
+                        }
+                        Err(err) => {
+                            // A rewrite that does not parse must not keep the
+                            // previous tool input. Same failure path as the
+                            // original parse.
+                            let rewritten_arguments = raw_input.to_string();
+                            self.handle_tool_parse_error(
+                                &tool_call_id,
+                                &call.id,
+                                &call.function.name,
+                                err,
+                                &rewritten_arguments,
+                                &model_id_str,
+                            )
+                            .await?;
+                            return Ok(Err(ToolLoop::ToolParsingError));
+                        }
+                    }
                 }
             }
             if let Some(denied) = self

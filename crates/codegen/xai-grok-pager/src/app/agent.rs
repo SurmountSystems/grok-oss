@@ -686,15 +686,15 @@ impl GoalDisplayState {
             elapsed_floor_ms: 0,
         }
     }
+    /// L1 sampling window only. Nested L2 and L3 stay on the nested row.
     pub fn live_tokens_used(&self, context_used: Option<u64>, active_subagent_tokens: u64) -> i64 {
+        let _active_nested_stays_on_the_nested_row = active_subagent_tokens;
         if self.status == GoalDisplayStatus::Active {
             let parent_delta = context_used
                 .map(|u| (u as i64).saturating_sub(self.token_baseline).max(0))
                 .unwrap_or(self.tokens_used);
-            let candidate = parent_delta
-                .saturating_add(self.finished_subagent_tokens)
-                .saturating_add(active_subagent_tokens as i64);
-            candidate.max(self.tokens_used)
+            let _finished_nested_stays_on_the_nested_row = self.finished_subagent_tokens;
+            parent_delta.max(self.tokens_used)
         } else {
             self.tokens_used
         }

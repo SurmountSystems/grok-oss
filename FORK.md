@@ -898,6 +898,9 @@ identifier that has no matching `fn`.
   report). Do not put Hierarchical fast path into `CHILD_TASK_DESCRIPTION`.
   A restack can keep AGENTS via `FORK_PATHS` and still drop
   `CHILD_TASK_DESCRIPTION`. Product cargo is the seam.
+
+Upstream may allow a peer coordinator spawn. Surmount rejects that so an L2 cannot bypass L1. Only L1 spawns L2s. An L2 spawn is an L3. An L3 cannot spawn.
+
 - [x] **`/goal` parent coordinates; L2 MUST spawn L3 (Surmount / grok-oss
   fork of the injected prompt):** Upstream `goal_instruction` tells the
   parent to "Deliver everything the user asked for yourself," which
@@ -3221,7 +3224,11 @@ cargo test -p xai-grok-pager --lib -- \
   format_subagent_label_shows_measured_tokens_suffix \
   tech_md_write_records_measured_tokens_on_spawn_usage_tick_and_l2_exit \
   subagents_list_layout_does_not_read_chat_history_jsonl \
-  concurrent_nested_l2_usage_ticks_keep_atomic_u64_high_water
+  concurrent_nested_l2_usage_ticks_keep_atomic_u64_high_water \
+  subagents_list_and_compact_chrome_live_update_from_current_atomic_counters_not_a_frozen_snapshot \
+  footer_down_arrow_270k_is_l1_window_and_does_not_sum_l2_plus_l3_twice
+cargo test -p xai-grok-shell --lib -- \
+  grok_oss_sqlite_ulid_rows_record_nested_l2_and_l3_spend_once
 
 # Extra: /start + leftover cancel-resume marker drop
 cargo test -p xai-grok-pager --lib -- \

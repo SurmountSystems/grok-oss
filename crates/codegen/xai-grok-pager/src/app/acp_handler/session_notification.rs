@@ -313,6 +313,13 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
                     let errored = matches!(stop_reason.as_str(), "error" | "rate_limit");
                     if errored && agent.failed_wake_marker_for.as_deref() != Some(&*prompt_id) {
                         agent.failed_wake_marker_for = Some(prompt_id.clone());
+                        crate::app::turn_completion::record_wake_outcome(
+                            agent,
+                            &stop_reason,
+                            agent_result.as_deref(),
+                            true,
+                            None,
+                        );
                         if crate::app::dispatch::scrollback_has_recent_error_banner(
                             &agent.scrollback,
                         ) {

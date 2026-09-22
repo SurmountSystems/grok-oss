@@ -1253,7 +1253,12 @@ Parent `239K / 500K` is the L1 window and must not add nested windows.
 `sum_live_nested_session_windows` adds each live nested session once and
 does not double-count an L3 that already has its own window. List paint
 uses the live `SubagentProgress` sample, not the tracker high-water, so
-compact cannot leave a stale leftover. The nested
+compact cannot leave a stale leftover. The next paint live-updates from
+the current atomic token counters and is not a snapshot frozen until spawn
+or exit. The L1 footer stays the L1 window (`270K` / `↓270k`) and must not
+sum L2 plus L3 twice. grok-oss sqlite ULID session rows record nested
+spend once (an L3 already inside the L2 total is not a second row, and
+there is no third summed row). The nested
 accumulator is still an `AtomicU64` high-water (`fetch_max`) for TECH.md so
 concurrent ACP usage ticks do not race. Grok OSS: this map is not upstream
 xAI. Layout must not read the session transcript jsonl. TECH.md records
@@ -1279,6 +1284,9 @@ credits, and not console team prepaid / console API credits.
 | `xai-grok-pager` `tech_md_write_records_measured_tokens_on_spawn_usage_tick_and_l2_exit` | Temp TECH.md has the measured number, L1 to L2 to L3 tree, aspect table columns, and the not-billing-meters sentence |
 | `xai-grok-pager` `subagents_list_layout_does_not_read_chat_history_jsonl` | Paint takes in-memory counts only and does not open the session transcript file |
 | `xai-grok-pager` `concurrent_nested_l2_usage_ticks_keep_atomic_u64_high_water` | Concurrent 10232 and 8000 usage ticks keep high-water 10232 on AtomicU64; Subagents row contains `10.2k`, does not contain `tokens` or `measured`, and does not contain `10232` |
+| `xai-grok-pager` `subagents_list_and_compact_chrome_live_update_from_current_atomic_counters_not_a_frozen_snapshot` | After 90000, the next paint of a 40100 live sample is `40.1k`, not a frozen `90.0k`. live-update from the current atomic token counters. Not a snapshot |
+| `xai-grok-pager` `footer_down_arrow_270k_is_l1_window_and_does_not_sum_l2_plus_l3_twice` | L1 chip and footer stay `270K` / `270k` when nested L2 is 442200 and L3 is 85600. must not sum L2 plus L3 twice |
+| `xai-grok-shell` `grok_oss_sqlite_ulid_rows_record_nested_l2_and_l3_spend_once` | ULID session rows. Nested spend is recorded once. No third summed row |
 
 ```bash
 cargo test -p xai-grok-pager --lib -- \
@@ -1295,8 +1303,12 @@ cargo test -p xai-grok-pager --lib -- \
   format_subagent_label_shows_measured_tokens_suffix \
   tech_md_write_records_measured_tokens_on_spawn_usage_tick_and_l2_exit \
   subagents_list_layout_does_not_read_chat_history_jsonl \
-  concurrent_nested_l2_usage_ticks_keep_atomic_u64_high_water
+  concurrent_nested_l2_usage_ticks_keep_atomic_u64_high_water \
+  subagents_list_and_compact_chrome_live_update_from_current_atomic_counters_not_a_frozen_snapshot \
+  footer_down_arrow_270k_is_l1_window_and_does_not_sum_l2_plus_l3_twice
 ```
+
+The sqlite test is `just test-remote -p xai-grok-shell --lib grok_oss_sqlite_ulid_rows_record_nested_l2_and_l3_spend_once` because that contract lives in `xai-grok-shell` and the filter above is pager-only.
 
 #### Nested overlay hang, duplicate prompt, L3 click (Surmount / grok-oss fork)
 

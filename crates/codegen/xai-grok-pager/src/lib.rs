@@ -35,6 +35,7 @@ pub mod memory_trace;
 //   - `minimal_api`  — minimal → pager read surface (facade over `pub(crate)`s).
 // Module names are kept flat (via `#[path]`) so existing references and
 // every `crate::minimal_{api,hook}` call site stay valid.
+pub mod l1_session_harness;
 #[path = "minimal/api.rs"]
 pub mod minimal_api;
 #[path = "minimal/hook.rs"]
@@ -73,6 +74,7 @@ pub use xai_grok_pager_render::{
 pub mod trace_cmd;
 pub mod tracing;
 pub mod unified_log;
+mod uptime;
 pub mod views;
 pub mod voice;
 pub mod worktree_cmd;

@@ -1,11 +1,12 @@
 //! Context usage bar — shows token usage in the status bar.
 //!
-//! Default builds a `Line<'static>` of styled spans: `8.5K / 1.0M` (actual tokens,
-//! colored by usage percentage). On hover, replaces the tokens with a progress
-//! bar + percentage, e.g. `█████ 42.0%`. The bar width is derived from the
-//! default string length so the hover line is the same total width — no layout
-//! shift on hover. The default is right-padded to a minimum of 6 columns so the
-//! width invariant holds even for degenerate inputs like `0 / 9`.
+//! Default builds a `Line<'static>` of styled spans: `↓8.5k 8.5K / 1.0M`
+//! (L1 down arrow beside actual tokens, colored by usage percentage). On hover,
+//! the chip becomes a progress bar + percentage and the L1 down arrow stays,
+//! e.g. `↓8.5k █████ 42.0%`. The bar width is derived from the chip string
+//! length so the hover line is the same total width, with no layout shift.
+//! The chip is right-padded to a minimum of 6 columns so the width invariant
+//! holds even for degenerate inputs like `0 / 9`.
 
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
@@ -166,9 +167,10 @@ const BAR_PCT_GAP: u16 = 1;
 
 /// Build the context usage bar as a `Line<'static>`.
 ///
-/// Normal: `8.5K / 1.0M` — actual token usage, colored by the same percentage
+/// Normal: `↓8.5k 8.5K / 1.0M`. The L1 down arrow uses the same used count as
+/// the chip and must not add nested L2 or L3. Colored by the same percentage
 /// gradient the hover bar uses so the urgency signal stays visible at a glance.
-/// Hovered: `█████ 42.0%` — progress bar + colored percentage, sized to match.
+/// Hovered: the chip becomes `█████ 42.0%` and the L1 down arrow stays.
 ///
 /// The bar width is derived from the default token string length so the
 /// hovered line has the same total width as the default (no layout shift on
@@ -251,6 +253,15 @@ pub fn footer_sampling_window(
         .map(|catalog| xai_grok_shell::util::config::session_sampling_window(catalog, is_nested))
 }
 
+/// L1 footer `↓270k` beside the session chip. Nested L2 and L3 are not added.
+///
+/// `l1_live_tokens` is the L1 delta from
+/// [`crate::app::agent::GoalDisplayState::live_tokens_used`].
+pub fn footer_l1_down_arrow_compact(l1_live_tokens: i64) -> String {
+    let compact = crate::views::agent_status::format_tokens_compact(l1_live_tokens);
+    format!("↓{compact}")
+}
+
 /// Window AUTO compact actually gates on when both sizes are known.
 ///
 /// Percent and urgency follow this window, not the larger catalog total.
@@ -302,14 +313,20 @@ pub fn context_bar_line_with_windows(
     // high-usage warnings without requiring the user to hover.
     let breakpoints = default_breakpoints(theme);
     let color = crate::theme::quantize(blend_color(pct, &breakpoints));
+    let mark = Style::default().fg(color).bg(theme.bg_base);
+    // Same L1 count as the chip. Callers do not pass nested L2 or L3 here.
+    let l1_down = footer_l1_down_arrow_compact(i64::try_from(used).unwrap_or(i64::MAX));
 
     if hovered {
         // Bar fills the space the default tokens would occupy, minus the gap
         // and the percentage. `total_width >= min_width` by construction, so
-        // this subtraction is safe.
+        // this subtraction is safe. The L1 down arrow stays on both branches
+        // so hover width still matches.
         let bar_width = total_width - min_width;
         let mut spans =
             progress_bar_spans(bar_width, pct as f32 / 100.0, color, theme.bg_highlight);
+        spans.insert(0, Span::styled(" ", mark));
+        spans.insert(0, Span::styled(l1_down, mark));
         spans.push(Span::styled(" ", Style::default().bg(theme.bg_base)));
         spans.push(Span::styled(
             fmt_pct5(pct),
@@ -317,10 +334,11 @@ pub fn context_bar_line_with_windows(
         ));
         Some(Line::from(spans))
     } else {
-        Some(Line::from(Span::styled(
-            token_str,
-            Style::default().fg(color).bg(theme.bg_base),
-        )))
+        Some(Line::from(vec![
+            Span::styled(l1_down, mark),
+            Span::styled(" ", mark),
+            Span::styled(token_str, mark),
+        ]))
     }
 }
 
@@ -414,12 +432,12 @@ mod tests {
 
     #[test]
     fn test_context_bar_default_shows_compact_token_usage() {
-        // Default (non-hovered) state shows `used / total` with no padding.
+        // L1 down arrow beside `used / total`. The chip itself has no padding.
         let theme = Theme::default();
         let line = context_bar_line(Some(8_500), Some(1_000_000), false, &theme)
             .expect("token data provided");
         let text = line_text(&line);
-        assert_eq!(text, "8.5K / 1.0M");
+        assert_eq!(text, "↓8.5k 8.5K / 1.0M");
     }
 
     #[test]
@@ -585,7 +603,7 @@ mod tests {
             false,
         )
         .expect("token data");
-        assert_eq!(line_text(&line), "207K / 500K");
+        assert_eq!(line_text(&line), "↓207k 207K / 500K");
     }
 
     /// Parent context `239K / 500K` is the L1 window. Nested L2/L3 windows
@@ -610,6 +628,80 @@ mod tests {
         assert_ne!(
             text, doubled,
             "adding nested windows to the L1 used count must not be how the parent chip is painted"
+        );
+    }
+
+    /// Operator: footer ↓270k is the L1 window. It must not sum L2 plus L3 twice.
+    #[test]
+    fn footer_down_arrow_270k_is_l1_window_and_does_not_sum_l2_plus_l3_twice() {
+        let l1_used = 270_000u64;
+        let nested_l2 = 442_200u64;
+        let nested_l3 = 85_600u64;
+        let summed = l1_used.saturating_add(nested_l2).saturating_add(nested_l3);
+        let text = context_chip_token_text(l1_used, Some(500_000), Some(500_000))
+            .expect("L1 context chip");
+        assert_eq!(text, "270K / 500K");
+        let doubled = context_chip_token_text(summed, Some(500_000), Some(500_000))
+            .expect("wrong nested sum");
+        assert_ne!(text, doubled, "must not sum L2 plus L3 twice");
+        assert!(
+            !text.contains("797") && !text.contains("798"),
+            "must not sum L2 plus L3 twice, got {text}"
+        );
+
+        let mut goal = crate::app::agent::GoalDisplayState::test_stub();
+        goal.token_baseline = 0;
+        goal.tokens_used = 0;
+        goal.finished_subagent_tokens = nested_l2 as i64;
+        let l1_live = goal.live_tokens_used(Some(l1_used), nested_l3);
+        assert_eq!(l1_live, l1_used as i64, "must not sum L2 plus L3 twice");
+        let footer = footer_l1_down_arrow_compact(l1_live);
+        assert_eq!(footer, "↓270k");
+        assert!(
+            !footer.contains("797") && !footer.contains("442"),
+            "must not sum L2 plus L3 twice, got {footer}"
+        );
+
+        let theme = Theme::default();
+        let line = context_bar_line_with_windows(
+            Some(l1_used),
+            Some(500_000),
+            Some(500_000),
+            false,
+            &theme,
+            false,
+        )
+        .expect("footer chip");
+        let painted = line_text(&line);
+        assert!(
+            painted.contains("↓270k"),
+            "must not sum L2 plus L3 twice, got {painted}"
+        );
+        assert!(
+            painted.contains("270K / 500K"),
+            "session chip stays beside the L1 down arrow, got {painted}"
+        );
+        assert!(
+            !painted.contains("797") && !painted.contains("442"),
+            "must not sum L2 plus L3 twice, got {painted}"
+        );
+
+        let goal_line = crate::views::agent_status::goal_status_line(
+            &goal,
+            &theme,
+            false,
+            0,
+            Some(l1_used),
+            nested_l3,
+        );
+        let goal_painted = line_text(&goal_line);
+        assert!(
+            goal_painted.contains("270k"),
+            "must not sum L2 plus L3 twice, got {goal_painted}"
+        );
+        assert!(
+            !goal_painted.contains("797") && !goal_painted.contains("442.2k"),
+            "must not sum L2 plus L3 twice, got {goal_painted}"
         );
     }
 
@@ -659,8 +751,8 @@ mod tests {
         .expect("token data");
         let text = line_text(&line);
         assert_eq!(
-            text, "201K / 500K",
-            "L1 sampling 500k matches catalog, so the chip is unlabeled used/total: {text}"
+            text, "↓201k 201K / 500K",
+            "L1 sampling 500k matches catalog, so the chip is unlabeled used/total beside the L1 down arrow: {text}"
         );
         assert!(
             !text.contains("200K"),

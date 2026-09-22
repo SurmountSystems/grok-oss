@@ -6,8 +6,13 @@
 
 use crate::app::agent::BgTaskStatus;
 use crate::app::agent_view::AgentView;
+use crate::app::agent_view::l2_token_tracking::{
+    LiveJobRowInput, STANDING_WRAP_ESTIMATE_TOKENS, STANDING_WRAP_ESTIMATE_WALL,
+    display_live_job_row,
+};
 use crate::app::subagent::{
     format_live_l3_count, format_subagent_label_among, is_l2_list_row, live_l3_count,
+    subagent_list_row_usage,
 };
 use crate::util::{format_duration, group_thousands};
 
@@ -125,10 +130,31 @@ pub(crate) fn tasks_block_text(agent: &AgentView) -> String {
         } else {
             format!("{type_label} · {desc}{l3}")
         };
-        rows.push(format!(
-            "  {status:<9}{label}  ({})",
-            format_duration(info.display_elapsed())
-        ));
+        let elapsed_text = format_duration(info.display_elapsed());
+        // Running rows are live job rows. Same formatter as the tasks pane.
+        // A missing host figure stays the formatter's actual-tokens text.
+        // Do not add that figure to the L1 total or grok-oss sqlite.
+        let (elapsed, live_actual) = if info.is_running() {
+            let shown = display_live_job_row(LiveJobRowInput {
+                job: &label,
+                estimate_wall: STANDING_WRAP_ESTIMATE_WALL,
+                estimate_tokens: STANDING_WRAP_ESTIMATE_TOKENS,
+                elapsed: &elapsed_text,
+                host_tokens: subagent_list_row_usage(info, &all),
+            });
+            debug_assert_eq!(shown.l1_tokens_added, 0);
+            debug_assert!(!shown.wrote_grok_oss_sqlite);
+            (
+                shown.elapsed,
+                format!(
+                    " · {} · {} · {}",
+                    shown.estimate_wall, shown.estimate_tokens, shown.actual_tokens
+                ),
+            )
+        } else {
+            (elapsed_text, String::new())
+        };
+        rows.push(format!("  {status:<9}{label}  ({elapsed}){live_actual}"));
     }
 
     // ── Background tasks / monitors ──
