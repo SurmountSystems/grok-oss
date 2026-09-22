@@ -9,7 +9,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 /// Default TECH.md filename at the workspace root.
@@ -33,7 +33,12 @@ pub struct NestedL2Tokens {
     pub description: String,
     /// High-water nested L2 session usage. Not included SuperGrok period
     /// limits, SuperGrok dollar credits, or console team prepaid.
+    /// TECH.md only. List paint reads `current_tokens` so compact can go down.
     measured_tokens: AtomicU64,
+    /// Latest live sample. `store`, not `fetch_max`, so a later compact
+    /// replaces a stale larger window on the next paint.
+    current_tokens: AtomicU64,
+    current_set: AtomicBool,
     /// Optional estimate (not billing truth).
     pub estimate_tokens: Option<u64>,
     /// Owner of the contract/aspect row in TECH.md.
@@ -68,6 +73,8 @@ impl NestedL2Tokens {
             nested_session_id: nested_session_id.into(),
             description: description.into(),
             measured_tokens: AtomicU64::new(0),
+            current_tokens: AtomicU64::new(0),
+            current_set: AtomicBool::new(false),
             estimate_tokens: None,
             owner: "L2".to_string(),
             contract_aspect: "nested L2 session usage".to_string(),
@@ -79,6 +86,22 @@ impl NestedL2Tokens {
     pub fn measured_tokens(&self) -> u64 {
         self.measured_tokens.load(Ordering::Relaxed)
     }
+
+    /// Current live sample, if a usage tick has stored one. Can be below
+    /// [`Self::measured_tokens`] after compact.
+    pub fn current_tokens(&self) -> Option<u64> {
+        if self.current_set.load(Ordering::Relaxed) {
+            Some(self.current_tokens.load(Ordering::Relaxed))
+        } else {
+            None
+        }
+    }
+
+    fn store_current(&self, measured_tokens: u64) {
+        self.current_tokens
+            .store(measured_tokens, Ordering::Relaxed);
+        self.current_set.store(true, Ordering::Relaxed);
+    }
 }
 
 impl Clone for NestedL2Tokens {
@@ -87,6 +110,8 @@ impl Clone for NestedL2Tokens {
             nested_session_id: self.nested_session_id.clone(),
             description: self.description.clone(),
             measured_tokens: AtomicU64::new(self.measured_tokens()),
+            current_tokens: AtomicU64::new(self.current_tokens().unwrap_or(0)),
+            current_set: AtomicBool::new(self.current_tokens().is_some()),
             estimate_tokens: self.estimate_tokens,
             owner: self.owner.clone(),
             contract_aspect: self.contract_aspect.clone(),
@@ -100,6 +125,7 @@ impl PartialEq for NestedL2Tokens {
         self.nested_session_id == other.nested_session_id
             && self.description == other.description
             && self.measured_tokens() == other.measured_tokens()
+            && self.current_tokens() == other.current_tokens()
             && self.estimate_tokens == other.estimate_tokens
             && self.owner == other.owner
             && self.contract_aspect == other.contract_aspect
@@ -175,8 +201,17 @@ pub fn on_nested_l2_spawn(nested_session_id: &str, description: &str) {
 }
 
 /// Production usage-tick hook (session usage tokens, not billing meters).
+///
+/// Always stores the live sample with `store_current`, including when the new
+/// count is below the TECH.md high-water. `record_usage` still `fetch_max`s
+/// `measured_tokens` and does not lower that high-water.
 pub fn on_nested_l2_usage(nested_session_id: &str, measured_tokens: u64) {
-    with_process_tracker(|t| t.record_usage(nested_session_id, measured_tokens));
+    with_process_tracker(|t| {
+        t.record_usage(nested_session_id, measured_tokens);
+        if let Some(row) = t.get(nested_session_id) {
+            row.store_current(measured_tokens);
+        }
+    });
 }
 
 /// Production L2-exit hook. Keeps the last measured count for TECH.md.
@@ -220,15 +255,16 @@ impl L2TokenTracker {
     ///
     /// ACP `SubagentProgress` `tokens_used` is that nested session's live
     /// sampling window (`context_tokens_used`). `fetch_max` keeps a TECH.md
-    /// high-water so concurrent ticks cannot lose a later count. Subagents
-    /// list paint uses the live sample passed into
-    /// [`format_live_subagents_list_suffix`], not this high-water, so a later
-    /// compact cannot leave a stale 90k leftover.
+    /// high-water so concurrent ticks cannot lose a later count. The current
+    /// sample is stored separately and can go down after compact. Subagents
+    /// list paint reads that current sample, not the high-water.
     pub fn record_usage(&mut self, nested_session_id: &str, measured_tokens: u64) {
         if let Some(row) = self.by_id.get_mut(nested_session_id) {
             let _previous = row
                 .measured_tokens
                 .fetch_max(measured_tokens, Ordering::Relaxed);
+            // Not fetch_max. A later 40100 still replaces a stale 90000 live sample.
+            row.store_current(measured_tokens);
             if row.status == NestedL2Status::Spawned {
                 row.status = NestedL2Status::Running;
             }
@@ -289,19 +325,113 @@ pub fn format_subagents_list_row_from_memory(
     }
 }
 
+/// Current live sample for this nested id, if a tick has stored one.
+///
+/// List paint calls this (via [`format_live_subagents_list_suffix`] with no
+/// override) so a later sample replaces a stale row without another event.
+/// Absent means the list may fall back to the TECH.md high-water.
+pub fn current_live_sample(nested_session_id: &str) -> Option<u64> {
+    peek_process_tracker(|t| {
+        t.get(nested_session_id)
+            .and_then(|row| row.current_tokens())
+    })
+}
+
 /// Compact suffix for a nested session window.
 ///
-/// Live `SubagentProgress` (`tokens_used`) wins over the tracker high-water
-/// so compact cannot leave a stale leftover. Falls back to the tracker when
-/// this nested id has no live sample yet. Does not open the session
-/// transcript file. Never the word `tokens`.
+/// An explicit live sample still wins over the tracker high-water, and is
+/// stored as the current sample. With no override, paint reads
+/// [`current_live_sample`], then the high-water only when no sample has
+/// been stored.
+/// Does not open the session transcript file. Never the word `tokens`.
 pub fn format_live_subagents_list_suffix(
     nested_session_id: &str,
     tokens_used: Option<u64>,
 ) -> Option<String> {
-    match tokens_used {
-        Some(live) => Some(format_measured_tokens_suffix(live)),
-        None => peek_process_tracker(|t| t.format_subagents_list_token_suffix(nested_session_id)),
+    if let Some(live) = tokens_used {
+        with_process_tracker(|t| {
+            if let Some(row) = t.by_id.get(nested_session_id) {
+                row.store_current(live);
+            }
+        });
+        return Some(format_measured_tokens_suffix(live));
+    }
+    if let Some(current) = current_live_sample(nested_session_id) {
+        return Some(format_measured_tokens_suffix(current));
+    }
+    peek_process_tracker(|t| t.format_subagents_list_token_suffix(nested_session_id))
+}
+
+/// Grok 4.6-era wrap average. It stays an estimate until the host returns a figure.
+/// Not an actual token count. Not billing truth.
+pub const STANDING_WRAP_ESTIMATE_WALL: &str = "19.4 minutes";
+/// Grok 4.6-era nested-token estimate. Not an actual token count.
+pub const STANDING_WRAP_ESTIMATE_TOKENS: &str = "167.0k";
+
+/// Actual tokens cell when the host has not returned a figure.
+/// Words, not the wire token `not_fetched`.
+pub const ACTUAL_TOKENS_NOT_FETCHED_LABEL: &str = "not fetched";
+
+/// Display text for one live job row. Pure. No L1 total and no grok-oss sqlite.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LiveJobRowDisplay {
+    pub job: String,
+    /// Wall estimate, labeled as an estimate.
+    pub estimate_wall: String,
+    /// Token estimate, labeled as an estimate.
+    pub estimate_tokens: String,
+    pub elapsed: String,
+    /// Host figure, or [`ACTUAL_TOKENS_NOT_FETCHED_LABEL`].
+    pub actual_tokens: String,
+    /// Always 0. Display must not add this row into the L1 sampling window.
+    pub l1_tokens_added: u64,
+    /// Always false. Display must not write grok-oss sqlite.
+    pub wrote_grok_oss_sqlite: bool,
+}
+
+/// Inputs for [`display_live_job_row`].
+///
+/// `host_tokens` is the host session-usage figure for this row. `None` means
+/// the host has not returned a figure yet. Do not pass the standing estimate
+/// in place of a missing figure.
+pub struct LiveJobRowInput<'a> {
+    pub job: &'a str,
+    pub estimate_wall: &'a str,
+    pub estimate_tokens: &'a str,
+    pub elapsed: &'a str,
+    pub host_tokens: Option<u64>,
+}
+
+fn label_as_estimate(text: &str) -> String {
+    let trimmed = text.trim();
+    if trimmed.to_ascii_lowercase().contains("estimate") {
+        trimmed.to_string()
+    } else {
+        format!("{trimmed} (estimate)")
+    }
+}
+
+/// Paint one live job row.
+///
+/// No host figure paints [`ACTUAL_TOKENS_NOT_FETCHED_LABEL`] and labels the
+/// estimate as an estimate. A host figure is shown with the same compact
+/// count as Subagents list chrome. This function does not copy
+/// [`STANDING_WRAP_ESTIMATE_WALL`] or [`STANDING_WRAP_ESTIMATE_TOKENS`] into
+/// Actual tokens, does not add the figure into the L1 total, and does not
+/// write grok-oss sqlite.
+pub fn display_live_job_row(input: LiveJobRowInput<'_>) -> LiveJobRowDisplay {
+    let actual_tokens = match input.host_tokens {
+        Some(figure) => format_measured_tokens_suffix(figure),
+        None => ACTUAL_TOKENS_NOT_FETCHED_LABEL.to_string(),
+    };
+    LiveJobRowDisplay {
+        job: input.job.to_string(),
+        estimate_wall: label_as_estimate(input.estimate_wall),
+        estimate_tokens: label_as_estimate(input.estimate_tokens),
+        elapsed: input.elapsed.to_string(),
+        actual_tokens,
+        l1_tokens_added: 0,
+        wrote_grok_oss_sqlite: false,
     }
 }
 
@@ -493,6 +623,54 @@ mod tests {
         assert!(
             !live.contains("tokens"),
             "Subagents list omits the word tokens; got {live:?}"
+        );
+    }
+
+    /// Operator: live-update from the current atomic token counters. Not a snapshot.
+    #[test]
+    fn subagents_list_and_compact_chrome_live_update_from_current_atomic_counters_not_a_frozen_snapshot()
+     {
+        let id = "nested-l2-live-atomic-paint";
+        on_nested_l2_spawn(id, "Residual");
+        let before = format_subagents_list_row_from_memory(
+            "Residual",
+            format_live_subagents_list_suffix(id, None).as_deref(),
+        );
+        on_nested_l2_usage(id, 90_000);
+        let high_water = format_subagents_list_row_from_memory(
+            "Residual",
+            format_live_subagents_list_suffix(id, None).as_deref(),
+        );
+        assert!(
+            high_water.contains("90k") && !before.contains("40.1k"),
+            "Operator: live-update from the current atomic token counters. Not a snapshot. got {high_water:?}"
+        );
+        on_nested_l2_usage(id, 40_100);
+        assert_eq!(
+            current_live_sample(id),
+            Some(40_100),
+            "Operator: live-update from the current atomic token counters. Not a snapshot."
+        );
+        let compact = format_live_subagents_list_suffix(id, None);
+        assert_eq!(
+            compact.as_deref(),
+            Some("40.1k"),
+            "Operator: live-update from the current atomic token counters. Not a snapshot. got {compact:?}"
+        );
+        let live = format_subagents_list_row_from_memory("Residual", compact.as_deref());
+        assert_eq!(
+            live, "Residual (40.1k)",
+            "Operator: live-update from the current atomic token counters. Not a snapshot. got {live:?}"
+        );
+        assert!(
+            !live.contains("90.0k") && !live.contains("90k"),
+            "Not a snapshot. compact suffix must paint 40.1k, not 90.0k, got {live:?}"
+        );
+        let high_water_tokens =
+            peek_process_tracker(|t| t.get(id).map(|row| row.measured_tokens()).unwrap_or(0));
+        assert_eq!(
+            high_water_tokens, 90_000,
+            "fetch_max high-water stays TECH.md only after compact"
         );
     }
 
@@ -719,5 +897,241 @@ mod tests {
             "must not paint a stale concurrent tick, got {row:?}"
         );
         assert_eq!(format_measured_tokens_suffix(HIGH_WATER), "10.2k");
+    }
+
+    /// Operator: Live rows show Actual tokens = not_fetched, so 19.4 minutes
+    /// and 167.0k stay an estimate. KernelLinearTheorems fetched 357.0k. Do
+    /// not invent a count. If there is no figure yet, say not fetched and
+    /// label the estimate as an estimate.
+    #[test]
+    fn live_job_row_says_not_fetched_and_labels_the_estimate_without_copying_it_into_actual_tokens()
+    {
+        const CONTRACT: &str = "Live rows show Actual tokens = not_fetched, so 19.4 minutes and 167.0k stay an estimate. KernelLinearTheorems fetched 357.0k. Do not invent a count. If there is no figure yet, say not fetched and label the estimate as an estimate.";
+
+        let sqlite_path = std::env::temp_dir().join(format!(
+            "grok-oss-live-job-row-{}-{}.sqlite",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        let _ = fs::remove_file(&sqlite_path);
+
+        let id = "live-job-row-display-does-not-record";
+        on_nested_l2_spawn(id, "Import-graph driver");
+        let measured_before =
+            peek_process_tracker(|t| t.get(id).map(|row| row.measured_tokens()).unwrap_or(0));
+
+        let missing = display_live_job_row(LiveJobRowInput {
+            job: "Import-graph driver",
+            estimate_wall: STANDING_WRAP_ESTIMATE_WALL,
+            estimate_tokens: STANDING_WRAP_ESTIMATE_TOKENS,
+            elapsed: "19.4 minutes",
+            host_tokens: None,
+        });
+        assert_eq!(
+            missing.actual_tokens, ACTUAL_TOKENS_NOT_FETCHED_LABEL,
+            "{CONTRACT} got {:?}",
+            missing.actual_tokens
+        );
+        assert!(
+            !missing.actual_tokens.contains("not_fetched"),
+            "{CONTRACT} words are not fetched, not the wire token, got {:?}",
+            missing.actual_tokens
+        );
+        assert!(
+            missing.estimate_wall.contains("estimate")
+                && missing.estimate_wall.contains(STANDING_WRAP_ESTIMATE_WALL),
+            "{CONTRACT} label the estimate, got {:?}",
+            missing.estimate_wall
+        );
+        assert!(
+            missing.estimate_tokens.contains("estimate")
+                && missing
+                    .estimate_tokens
+                    .contains(STANDING_WRAP_ESTIMATE_TOKENS),
+            "{CONTRACT} label the estimate, got {:?}",
+            missing.estimate_tokens
+        );
+        assert!(
+            !missing.actual_tokens.contains("19.4")
+                && !missing.actual_tokens.contains("167.0")
+                && missing.actual_tokens != STANDING_WRAP_ESTIMATE_WALL
+                && missing.actual_tokens != STANDING_WRAP_ESTIMATE_TOKENS,
+            "{CONTRACT} never copy 19.4 minutes or 167.0k into Actual tokens, got {:?}",
+            missing.actual_tokens
+        );
+        assert_eq!(missing.l1_tokens_added, 0, "{CONTRACT}");
+        assert!(!missing.wrote_grok_oss_sqlite, "{CONTRACT}");
+
+        // 357_000 is evidence a fetch can work (KernelLinearTheorems, 357.0k).
+        // It is not the only success value. Another host figure must show too.
+        let evidence = 357_000_u64;
+        let also_fetched = 112_400_u64;
+        let evidence_row = display_live_job_row(LiveJobRowInput {
+            job: "KernelLinearTheorems",
+            estimate_wall: STANDING_WRAP_ESTIMATE_WALL,
+            estimate_tokens: STANDING_WRAP_ESTIMATE_TOKENS,
+            elapsed: "finished",
+            host_tokens: Some(evidence),
+        });
+        let other_row = display_live_job_row(LiveJobRowInput {
+            job: "another fetched row",
+            estimate_wall: STANDING_WRAP_ESTIMATE_WALL,
+            estimate_tokens: STANDING_WRAP_ESTIMATE_TOKENS,
+            elapsed: "finished",
+            host_tokens: Some(also_fetched),
+        });
+        assert_eq!(
+            evidence_row.actual_tokens,
+            format_measured_tokens_suffix(evidence),
+            "{CONTRACT} show the fetched host figure, got {:?}",
+            evidence_row.actual_tokens
+        );
+        assert_eq!(
+            other_row.actual_tokens,
+            format_measured_tokens_suffix(also_fetched),
+            "{CONTRACT} 357.0k is not the only success value, got {:?}",
+            other_row.actual_tokens
+        );
+        assert_ne!(
+            evidence_row.actual_tokens, other_row.actual_tokens,
+            "{CONTRACT} do not hardcode one success string"
+        );
+        assert_ne!(evidence_row.actual_tokens, ACTUAL_TOKENS_NOT_FETCHED_LABEL);
+        assert_ne!(other_row.actual_tokens, ACTUAL_TOKENS_NOT_FETCHED_LABEL);
+        assert!(
+            !evidence_row.actual_tokens.contains("19.4")
+                && evidence_row.actual_tokens != STANDING_WRAP_ESTIMATE_TOKENS,
+            "{CONTRACT} do not copy the estimate into Actual tokens, got {:?}",
+            evidence_row.actual_tokens
+        );
+        assert!(
+            evidence_row.estimate_tokens.contains("estimate")
+                && other_row.estimate_wall.contains("estimate"),
+            "{CONTRACT} a fetched row still labels the estimate as an estimate"
+        );
+
+        let mut goal = crate::app::agent::GoalDisplayState::test_stub();
+        goal.status = crate::app::agent::GoalDisplayStatus::Active;
+        goal.tokens_used = 1_000;
+        goal.token_baseline = 100;
+        goal.finished_subagent_tokens = 50;
+        let context = Some(270_000_u64);
+        let l1_before = goal.live_tokens_used(context, 0);
+        let l1_after_display = goal.live_tokens_used(context, evidence_row.l1_tokens_added);
+        let l1_if_caller_passed_the_row_figure = goal.live_tokens_used(context, evidence);
+        assert_eq!(
+            l1_before, l1_after_display,
+            "{CONTRACT} displaying the row does not add that figure again into the L1 total"
+        );
+        assert_eq!(
+            l1_before, l1_if_caller_passed_the_row_figure,
+            "{CONTRACT} the row figure stays off the L1 total"
+        );
+        assert_eq!(goal.tokens_used, 1_000, "{CONTRACT}");
+        assert_eq!(goal.token_baseline, 100, "{CONTRACT}");
+        assert_eq!(goal.finished_subagent_tokens, 50, "{CONTRACT}");
+
+        let measured_after =
+            peek_process_tracker(|t| t.get(id).map(|row| row.measured_tokens()).unwrap_or(0));
+        assert_eq!(
+            measured_before, measured_after,
+            "{CONTRACT} displaying the row does not record the figure again"
+        );
+        assert!(
+            !sqlite_path.exists(),
+            "{CONTRACT} displaying the row does not write grok-oss sqlite at {sqlite_path:?}"
+        );
+
+        let src = include_str!("l2_token_tracking.rs");
+        let product = src.split("mod tests").next().expect("product before tests");
+        let start = product
+            .find("pub fn display_live_job_row")
+            .expect("display fn");
+        let rest = &product[start..];
+        let end = rest
+            .find("\nfn render_tech_md")
+            .expect("render follows display");
+        let fn_src = &rest[..end];
+        assert!(
+            !fn_src.contains("rusqlite")
+                && !fn_src.contains("Connection::open")
+                && !fn_src.contains("fs::write")
+                && !fn_src.contains(".execute("),
+            "{CONTRACT} display must not write grok-oss sqlite"
+        );
+        assert!(
+            !fn_src.contains("on_nested_l2_usage")
+                && !fn_src.contains("finished_subagent_tokens")
+                && !fn_src.contains("token_baseline"),
+            "{CONTRACT} display must not add the row figure into the L1 total"
+        );
+    }
+
+    /// Operator: Live rows show Actual tokens = not_fetched, so 19.4 minutes
+    /// and 167.0k stay an estimate. KernelLinearTheorems fetched 357.0k. Do
+    /// not invent a count. If there is no figure yet, say not fetched and
+    /// label the estimate as an estimate.
+    ///
+    /// The tasks pane row that `TasksPane::render` paints, and the `/tasks`
+    /// block, must call [`display_live_job_row`] and use the returned text.
+    #[test]
+    fn live_job_row_paint_path_calls_display_live_job_row() {
+        const CONTRACT: &str = "Live rows show Actual tokens = not_fetched, so 19.4 minutes and 167.0k stay an estimate. KernelLinearTheorems fetched 357.0k. Do not invent a count. If there is no figure yet, say not fetched and label the estimate as an estimate.";
+
+        let tasks_src = include_str!("../../views/tasks_pane.rs");
+        let tasks_fn = fn_body(
+            tasks_src,
+            "fn from_subagent_with_l3_count",
+            "\n    fn from_workflow_run",
+        );
+        assert_paint_calls_formatter("tasks pane", tasks_fn, CONTRACT);
+
+        let tasks_block = include_str!("../status_blocks.rs");
+        let block_fn = fn_body(
+            tasks_block,
+            "pub(crate) fn tasks_block_text",
+            "\npub(crate) fn session_usage_block_text",
+        );
+        assert_paint_calls_formatter("/tasks block", block_fn, CONTRACT);
+    }
+
+    fn fn_body<'a>(src: &'a str, start_needle: &str, end_needle: &str) -> &'a str {
+        let start = src.find(start_needle).expect("paint function");
+        let rest = &src[start..];
+        let end = rest.find(end_needle).expect("following function");
+        &rest[..end]
+    }
+
+    fn assert_paint_calls_formatter(surface: &str, paint_fn: &str, contract: &str) {
+        assert!(
+            paint_fn.contains("display_live_job_row"),
+            "{contract} {surface} must call display_live_job_row"
+        );
+        assert!(
+            paint_fn.contains("shown.actual_tokens")
+                && paint_fn.contains("shown.estimate_wall")
+                && paint_fn.contains("shown.estimate_tokens"),
+            "{contract} {surface} must use the returned actual tokens and the labeled estimate"
+        );
+        assert!(
+            paint_fn.contains("subagent_list_row_usage"),
+            "{contract} {surface} must take the host figure, not invent one"
+        );
+        assert!(
+            !paint_fn.contains("357.0k")
+                && !paint_fn.contains("357_000")
+                && !paint_fn.contains("357000"),
+            "{contract} {surface} must not hardcode 357.0k"
+        );
+        assert!(
+            !paint_fn.contains("live_tokens_used")
+                && !paint_fn.contains("on_nested_l2_usage")
+                && !paint_fn.contains("rusqlite")
+                && !paint_fn.contains("finished_subagent_tokens"),
+            "{contract} {surface} must not add the row figure to the L1 total or grok-oss sqlite"
+        );
     }
 }

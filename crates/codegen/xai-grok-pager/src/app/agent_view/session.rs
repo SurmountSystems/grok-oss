@@ -97,6 +97,23 @@ impl AgentView {
         self.persist_isolated_preview_open_marker();
     }
 
+    /// Write the unsent draft now. Keystroke callers use the debounced path.
+    pub(crate) fn persist_unsent_composer_draft_now(&self) {
+        self.persist_unsent_prompt_draft();
+    }
+
+    /// Record whether Isolated Preview was docked so `/rebuild` can reopen it.
+    fn persist_isolated_preview_open_marker(&self) {
+        let Some(session_id) = self.session.session_id.as_ref() else {
+            return;
+        };
+        crate::slash::commands::plan::persist_isolated_preview_open(
+            &self.session.cwd.to_string_lossy(),
+            session_id.0.as_ref(),
+            self.is_plan_viewer(),
+        );
+    }
+
     /// Write live nested implementor occupancy so `/rebuild` session load
     /// can resume the same way a TUI disconnect adopts nested work.
     fn persist_nested_occupancy_to_disk(&self) {
@@ -222,6 +239,30 @@ impl AgentView {
             self.prompt.set_text(&text);
             self.prompt.set_cursor(text.len());
         }
+    }
+
+    /// Last-session restore without a canceled-turn marker must not keep a
+    /// queue row whose text is already a Human turn. `continue_prior_work`
+    /// is not spared here. A present marker stays on the canceled-turn path.
+    fn drop_recorded_prompts_when_no_canceled_turn_marker(&mut self) {
+        let Some(session_id) = self.session.session_id.as_ref() else {
+            return;
+        };
+        let cwd = self.session.cwd.to_string_lossy().into_owned();
+        let sid = session_id.0.to_string();
+        if matches!(
+            xai_grok_shell::session::canceled_turn_resume::load_canceled_turn_resume(&cwd, &sid),
+            Ok(Some(_))
+        ) {
+            return;
+        }
+        let committed = self.committed_human_turn_texts(true, false);
+        self.session.pending_prompts.retain(|prompt| {
+            prompt.kind == QueueEntryKind::Command
+                || !Self::queue_text_matches_committed_human_turn(&prompt.text, &committed)
+        });
+        self.shared_queue
+            .retain(|wire| !Self::queue_text_matches_committed_human_turn(&wire.text, &committed));
     }
 
     /// Tests skip disk so they do not read the operator grok home.
@@ -664,6 +705,11 @@ impl AgentView {
             available_modes: Vec::new(),
             session_mode: xai_grok_tools::types::SessionMode::Default,
             session_mode_pending: None,
+            plan_decision_resolved: false,
+            plan_feedback_in_flight: None,
+            isolated_preview_rewrite_wait_prompt: None,
+            isolated_preview_shows_secondary_plan: false,
+            last_isolated_preview_plan_feedback: None,
             deferred_session_mode: None,
             deferred_permission_mode: None,
             pending_extensions_fetch: false,
@@ -756,6 +802,7 @@ impl AgentView {
             follow_up_pending: HashMap::new(),
             follow_up_pending_order: VecDeque::new(),
             pending_adoption_updates: Vec::new(),
+            composer_copy_button: None,
         };
         let mode = if crate::appearance::cache::load_simple_mode() {
             InputMode::Simple

@@ -518,7 +518,15 @@ impl AgentView {
                     return InputOutcome::Changed;
                 }
             }
-            if matches!(ev, Event::Mouse(_) | Event::Paste(_)) {
+            // Goal detail sits on the Operator box. An image paste is a chip
+            // on the same probe path as the main composer, not a drop.
+            if let Event::Paste(text) = ev {
+                if let Some((outcome, _)) = self.try_handle_dropped_paths_paste(text) {
+                    return outcome;
+                }
+                return self.insert_or_defer_bracketed_prompt_paste(text);
+            }
+            if matches!(ev, Event::Mouse(_)) {
                 return InputOutcome::Changed;
             }
         }

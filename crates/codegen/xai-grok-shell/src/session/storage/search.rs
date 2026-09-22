@@ -236,4 +236,50 @@ mod tests {
         assert_eq!(session.cwd, "/workspace");
         assert_eq!(session.updated_at_unix, summary.updated_at.timestamp());
     }
+
+    fn enabled(env_value: Option<&str>, config_off: bool) -> bool {
+        !env_disables_session_search(env_value) && !config_off
+    }
+
+    #[test]
+    fn session_search_stays_on_when_env_and_config_are_absent() {
+        assert!(enabled(None, false));
+    }
+
+    #[test]
+    fn session_search_env_zero_or_false_turns_the_index_off() {
+        for value in ["0", "false", "FALSE", "False", "  false  "] {
+            assert!(!enabled(Some(value), false), "{value}");
+        }
+    }
+
+    #[test]
+    fn session_search_other_env_values_stay_on() {
+        for value in ["1", "true", "TRUE", "yes", ""] {
+            assert!(enabled(Some(value), false), "{value}");
+        }
+    }
+
+    #[test]
+    fn session_search_config_false_wins_even_when_env_is_on() {
+        assert!(!enabled(None, true));
+        assert!(!enabled(Some("true"), true));
+        assert!(!enabled(Some("0"), false));
+    }
+
+    #[test]
+    fn session_search_config_false_is_the_bool_only() {
+        let off: toml::Value = toml::from_str("[features]\nsession_search = false\n").unwrap();
+        assert!(config_value_disables_session_search(&off));
+        let on: toml::Value = toml::from_str("[features]\nsession_search = true\n").unwrap();
+        assert!(!config_value_disables_session_search(&on));
+        assert!(!config_value_disables_session_search(&toml::Value::Table(
+            Default::default()
+        )));
+        let empty = empty_session_search_response();
+        assert!(empty.results.is_empty());
+        assert_eq!(empty.total_estimate, Some(0));
+        assert!(!empty.bootstrapping);
+        assert!(empty.next_offset.is_none());
+    }
 }

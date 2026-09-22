@@ -35,6 +35,7 @@ pub mod mcp_cmd;
 pub mod memory_cmd;
 pub mod memory_release;
 pub mod memory_trace;
+pub mod l1_session_harness;
 #[path = "minimal/api.rs"]
 pub mod minimal_api;
 #[path = "minimal/hook.rs"]
@@ -74,6 +75,7 @@ pub mod test_util;
 pub mod trace_cmd;
 pub mod tracing;
 pub mod unified_log;
+mod uptime;
 pub mod views;
 pub mod voice;
 pub mod worktree_cmd;

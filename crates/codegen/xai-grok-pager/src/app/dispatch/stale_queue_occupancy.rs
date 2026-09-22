@@ -631,4 +631,143 @@ mod tests {
         );
         xai_grok_shell::session::canceled_turn_resume::clear_process_shutdown_cancel_resume();
     }
+
+    /// Operator: "Stale prompts at start are still a problem sadly... And yes, what is running is the latest binary."
+    ///
+    /// Last-session open. No `canceled_turn_resume.json`. Chat history already
+    /// has the Operator prompt, including `/goal do the thing` recorded as
+    /// `A goal has been set: do the thing`. Disk pending has those bodies
+    /// plus a truly unsent follow-up. Occupancy already marked the goal
+    /// `continue_prior_work`, which the ordinary drop spares. Restore through
+    /// session bind must not re-queue the recorded prompts.
+    #[test]
+    #[serial_test::serial(GROK_HOME)]
+    fn last_session_restore_without_canceled_turn_file_does_not_requeue_recorded_operator_prompt() {
+        use crate::app::actions::{Action, Effect, TaskResult};
+        use crate::app::dispatch::dispatch;
+        use agent_client_protocol as acp;
+
+        let grok_home = tempfile::tempdir().unwrap();
+        let _home = xai_grok_test_support::EnvGuard::set("GROK_HOME", grok_home.path());
+        let proj = tempfile::tempdir().unwrap();
+        let cwd = proj.path().to_path_buf();
+        let cwd_str = cwd.to_string_lossy().into_owned();
+        let sid = "last-session-no-canceled-marker";
+        let goal = "/goal do the thing";
+        let recorded = "already recorded operator prompt";
+        let _ = xai_grok_shell::session::canceled_turn_resume::clear_canceled_turn_resume(
+            &cwd_str, sid,
+        );
+        xai_grok_shell::session::canceled_turn_resume::clear_process_shutdown_cancel_resume();
+        let marker =
+            xai_grok_shell::session::canceled_turn_resume::load_canceled_turn_resume(&cwd_str, sid)
+                .expect("load canceled-turn marker");
+        assert!(
+            marker.is_none(),
+            "fixture is last-session open with no canceled_turn_resume.json"
+        );
+        xai_grok_shell::session::pending_prompts::write_pending_prompts(
+            &cwd_str,
+            sid,
+            &[
+                PersistedQueuedPrompt {
+                    id: 1,
+                    text: goal.to_string(),
+                    kind: "prompt".into(),
+                },
+                PersistedQueuedPrompt {
+                    id: 2,
+                    text: recorded.to_string(),
+                    kind: "prompt".into(),
+                },
+                PersistedQueuedPrompt {
+                    id: 3,
+                    text: STILL_UNSENT.to_string(),
+                    kind: "prompt".into(),
+                },
+            ],
+        )
+        .expect("write pending_prompts.json");
+        write_session_chat_history(
+            &cwd_str,
+            sid,
+            &format!(
+                "{}\n{}\n",
+                serde_json::json!({
+                    "type": "user",
+                    "content": [{"type": "text", "text": recorded}],
+                }),
+                serde_json::json!({
+                    "type": "user",
+                    "content": [{
+                        "type": "text",
+                        "text": "<user_query>\nA goal has been set: do the thing\n</user_query>",
+                    }],
+                }),
+            ),
+        );
+
+        let mut app = crate::app::app_view::tests::test_app_with_agent();
+        let agent_id = AgentId(0);
+        {
+            let agent = app.agents.get_mut(&agent_id).unwrap();
+            agent.session.session_id = Some(sid.into());
+            agent.session.cwd = cwd;
+            agent.session.state = AgentState::Idle;
+            agent.session.loading_replay = true;
+            agent.session.pending_prompts.clear();
+            agent.session.prompt_history.clear();
+            agent
+                .session
+                .enqueue_continue_prior_work_front(goal.to_string());
+            assert_eq!(
+                agent.scrollback.len(),
+                0,
+                "last-session open starts with empty scrollback"
+            );
+        }
+        let load_effects = dispatch(
+            Action::TaskComplete(TaskResult::SessionLoaded {
+                agent_id,
+                session_id: acp::SessionId::new(sid),
+                models: None,
+                code_restored: false,
+                restore_summary: None,
+                restore_degree: None,
+                running_prompt_id: None,
+                scheduler_background_loops: None,
+            }),
+            &mut app,
+        );
+        let agent = app.agents.get(&agent_id).unwrap();
+        let queued = queued_texts(agent);
+        let stale = |text: &str| {
+            text.contains(goal) || text.contains("do the thing") || text.trim() == recorded
+        };
+        assert!(
+            !queued.iter().any(|t| stale(t)),
+            "Operator: \"Stale prompts at start are still a problem sadly... And yes, what is running is the latest binary.\" last-session restore must not re-queue an Operator prompt already in history, including /goal mapped to A goal has been set; queue={queued:?}"
+        );
+        assert!(
+            !load_effects
+                .iter()
+                .any(|e| { matches!(e, Effect::SendPrompt { text, .. } if stale(text)) }),
+            "Operator: \"Stale prompts at start are still a problem sadly... And yes, what is running is the latest binary.\" last-session restore must not send that recorded prompt; effects={load_effects:?}"
+        );
+        let kept_unsent = queued.iter().any(|t| t == STILL_UNSENT)
+            || load_effects
+                .iter()
+                .any(|e| matches!(e, Effect::SendPrompt { text, .. } if text == STILL_UNSENT));
+        assert!(
+            kept_unsent,
+            "a pending row that is not yet a Human turn must still restore; queue={queued:?} effects={load_effects:?}"
+        );
+        let still_absent =
+            xai_grok_shell::session::canceled_turn_resume::load_canceled_turn_resume(&cwd_str, sid)
+                .expect("load marker after restore");
+        assert!(
+            still_absent.is_none(),
+            "this restore must not invent canceled_turn_resume.json"
+        );
+    }
 }

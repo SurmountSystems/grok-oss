@@ -1637,6 +1637,19 @@ impl SessionActor {
                         "limit": limit,
                     })),
                 );
+                self.dispatch_hook(
+                    xai_grok_hooks::event::HookEventName::StopCancelled,
+                    xai_grok_hooks::event::HookPayload::StopCancelled {
+                        reason: "max_turns".to_string(),
+                        stop_hook_active: false,
+                        last_assistant_message: None,
+                        background_tasks: None,
+                        session_crons: None,
+                    },
+                    Some(prompt_id),
+                    None,
+                )
+                .await;
                 self.send_after_turn_event(xai_tool_protocol::turn_hook::AfterTurnPayload {
                     turn_number: current_prompt_index as u64,
                     outcome: xai_tool_protocol::turn_hook::TurnHookOutcome::Cancelled,

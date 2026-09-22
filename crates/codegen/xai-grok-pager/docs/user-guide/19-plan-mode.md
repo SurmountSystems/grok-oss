@@ -11,7 +11,7 @@ When plan mode is active, the agent:
 1. Reads and searches the codebase to understand existing patterns and architecture
 2. Designs an implementation approach and writes it to the plan file
 3. May ask questions in the plan file or in chat. This fork prefers **freeform** questions. The questionnaire modal (`ask_user_question`) is `--legacy` only.
-4. Calls `exit_plan_mode` to **present** the plan for your review. Present is not Approve. Always-approve permission mode does **not** click Approve for you. Soft present docks a real right-side pane. It is not a centered overlay that dims the transcript.
+4. Calls `exit_plan_mode` to **present** the plan for your review. Present is not Approve. Always-approve permission mode does **not** click Approve for you. Soft present docks a real right-side pane. The pane paints over the conversation text behind it. The left of the transcript stays visible and is not dimmed. It is not a centered overlay that dims the transcript.
 
 Plan mode is read-only except for the plan file: plan-file edits (`plan.md` in the session directory) are auto-approved, and edits to any other file are rejected outright — the tool call fails with a short message naming the plan file as the only editable path. This holds in every permission mode, including always-approve. Separating planning from implementation lets you review and correct the approach before any code is written.
 
@@ -88,13 +88,15 @@ The plan file contains:
 
 ## Plan Approval
 
-When the agent finishes planning, it calls the `exit_plan_mode` tool. The tool reads the plan file from disk. Soft present (`plan_approval_park = "soft"`, the default) docks a scrollable plan pane on the **right** of the transcript. The transcript stays visible and is not dimmed. Status says **Plan ready. Side panel open** only when that plan viewer is actually open. Force a covering overlay with `plan_approval_park = "modal"` (or enlarge). The four footer CTAs stay on the pane.
+When the agent finishes planning, it calls the `exit_plan_mode` tool. The tool reads the plan file from disk. Soft present (`plan_approval_park = "soft"`, the default) docks a scrollable plan pane on the **right** of the transcript. The pane paints over the conversation text behind it. The left of the transcript stays visible and is not dimmed. It is not a centered overlay that dims the transcript. Status says **Plan ready. Side panel open** only when that plan viewer is actually open. Force a covering overlay with `plan_approval_park = "modal"` (or enlarge). The four footer CTAs stay on the pane.
 
 ### Present is not Approve
 
 A successful `exit_plan_mode` (or a **Plan ready** status) means the plan is **presented for review**. It is not operator approval. Always-approve skips tool-permission prompts only. It does not auto-click Approve. When Isolated Preview is docked on L1, nested implementers keep running. Exclusive `/plan` exclusive-blocks nested implementers. If a waiter is required for Approve, that waiter must not send cancel to those nested implementers.
 
 The four idle actions are mouse buttons: **Approve**, **Comment**, **Revise**, **Exit**. Click a button to mark it and run it (the selected one is marked). Enter submits the marked CTA except Approve. Empty Enter never Approves. Clickable Approve only ([GitHub #122](https://github.com/SurmountSystems/grok-oss/issues/122)). A first click on **Approve** still Approves. A first click on **Comment** focuses the comment composer. A first click on idle **Revise** focuses the box and waits; after a comment is typed, Revise rewrites. A first click on **Exit** abandons. After **Comment**, **Clarify** sends questions (not a rewrite). A second click on an already-selected CTA still submits that action. Letter keys type into the prompt and into the plan pane box, so you can type `also` or `Also` while review is open. Capital A is not a notes action. Empty `Enter` never Approves. When the Operator box is composing a line comment or revise draft, Enter still saves or sends that draft (`Enter:save comment` on the line-comment overlay, including while session Multiline is on).
+
+Approving while the plan panel is open keeps the composer comment. The session quotes `The user approved the plan with the following review comments:` and then the comment, leaves plan review, and can start the work. A confirmed comment is `Love it! Execute now.` Pressing Enter with an empty composer does not approve the plan.
 
 If the agent exits without writing a plan (empty or missing `plan.md`), the same approval surface still opens with a clear empty-state message so you can approve and start implementing, comment (then Approve, Clarify, or Revise), revise, or exit. In minimal mode the empty notice is committed into scrollback and the controls strip header reads **No plan written yet**.
 

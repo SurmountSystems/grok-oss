@@ -91,8 +91,177 @@ impl AgentView {
             v.kind == crate::views::file_search::line_viewer::LineViewerKind::PlanPreview
         })
     }
-    /// Whether the user is composing a comment via the prompt input inside the *casual* plan preview (the modal opened with no `plan_approval_view`).
-    /// Mirrors the `pav.focus == Commenting` check used by the plan-approval path so the prompt/footer behaves identically across both modes.
+    /// Leave parked Isolated Preview. After Plan Exit, Esc:close, `/start`,
+    /// and `/unstick` (hung parent prompt) must actually leave the pane so
+    /// the Operator can continue interrupted work.
+    pub(crate) fn leave_parked_isolated_preview(&mut self) {
+        if !self.is_plan_viewer() {
+            return;
+        }
+        self.cancel_line_viewer();
+    }
+
+    /// Isolated Preview stays after present so Comment then Approve can run.
+    /// Isolated Preview stays until Esc, Exit, or Approve. There is no Plan
+    /// Exit wall-clock timer. Nested occupancy ticks and specialist finish
+    /// must not call this close. Secondary `/plan --soft` already
+    /// early-returns; keep that. Operator `/implement` / auto-run
+    /// `/implement` with a live waiter must not vanish the pane. Human
+    /// mill-continue still re-reads current disk `plan.md` when nested
+    /// work rewrote that file. `/plan` extra text is a plan-update turn
+    /// and must not take this close. Empty Enter never Approves. Does not
+    /// Approve the parked plan.
+    pub(crate) fn leave_or_reread_isolated_preview_after_mill_continues(&mut self) {
+        if self.plan_feedback_in_flight.is_some() {
+            return;
+        }
+        if self.isolated_preview_shows_secondary_plan {
+            return;
+        }
+        if !self.is_plan_viewer() {
+            return;
+        }
+        let leftover = self
+            .line_viewer
+            .as_ref()
+            .and_then(|v| v.markdown_content_for_feedback());
+        let disk = self
+            .plan_file_path()
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .filter(|s| !s.trim().is_empty());
+        if let Some(disk) = disk {
+            let mill_rewrote = leftover.as_deref() != Some(disk.as_str())
+                && !disk.contains("TECH.md")
+                && !disk.contains("why the agent stopped");
+            if mill_rewrote {
+                self.paint_isolated_preview_from_mill_plan_md(disk);
+                return;
+            }
+        }
+        if self.plan_approval_view.is_some() && !self.plan_decision_resolved {
+            return;
+        }
+        self.leave_parked_isolated_preview();
+    }
+
+    /// Exclusive `/plan` and `/view-plan` re-read current disk plan.md, not
+    /// leftover "why the agent stopped" / TECH.md persist overwrite. Soft
+    /// planning (`/plan --soft`) must not call this: it makes a secondary
+    /// plan and must not immediately pull up leftover current `plan.md`.
+    /// Does not Approve. Empty Enter never Approves.
+    pub(crate) fn reread_isolated_preview_from_current_disk_plan_md(&mut self) {
+        if matches!(
+            self.plan_feedback_in_flight,
+            Some(PlanFeedbackInFlight::Updating)
+        ) {
+            return;
+        }
+        let leftover = self
+            .line_viewer
+            .as_ref()
+            .and_then(|v| v.markdown_content_for_feedback());
+        let Some(disk) = self
+            .plan_file_path()
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .filter(|s| !s.trim().is_empty())
+        else {
+            return;
+        };
+        if disk.contains("TECH.md") || disk.contains("why the agent stopped") {
+            return;
+        }
+        let leftover_stale = leftover
+            .as_ref()
+            .is_some_and(|body| body.contains("why the agent stopped") || body.contains("TECH.md"));
+        let mill_rewrote = leftover.as_deref() != Some(disk.as_str());
+        if mill_rewrote || leftover_stale {
+            self.paint_isolated_preview_from_mill_plan_md(disk);
+        }
+    }
+
+    /// Plan-update send: Isolated Preview stays docked as rewriting-wait.
+    /// Quotes the Operator's second prompt. Does not paint leftover
+    /// `plan.md` as a live present. Idle Approve / Comment / Revise / Exit
+    /// do not arm. Empty Enter never Approves. Does not persist this chrome
+    /// as session `plan.md`. A later `exit_plan_mode` present re-reads
+    /// current disk and arms idle CTAs. Isolated Preview stays until Esc,
+    /// Exit, or Approve. Do not close Isolated Preview here.
+    pub(crate) fn enter_isolated_preview_rewrite_wait_quoted(
+        &mut self,
+        kind: PlanFeedbackInFlight,
+        operator_prompt: &str,
+    ) {
+        if !self.is_plan_viewer() {
+            return;
+        }
+        self.plan_feedback_in_flight = Some(kind);
+        self.isolated_preview_rewrite_wait_prompt = Some(operator_prompt.trim().to_string());
+        let body = crate::views::plan_approval_view::isolated_preview_rewrite_wait_markdown(
+            operator_prompt,
+        );
+        let Some(mut viewer) = LineViewerState::open_markdown_content("plan.md", body, None) else {
+            return;
+        };
+        viewer.kind = crate::views::file_search::line_viewer::LineViewerKind::PlanPreview;
+        viewer.title_override = Some(if self.isolated_preview_shows_secondary_plan {
+            xai_grok_shell::grok_oss::SECONDARY_PLAN_IDENTITY.to_string()
+        } else {
+            crate::views::plan_approval_view::PLAN_REWRITE_WAIT_HEADING.to_string()
+        });
+        viewer.fullscreen = crate::appearance::cache::load_plan_approval_force_modal();
+        {
+            let plan = viewer.plan_mut();
+            plan.show_action_buttons = false;
+            plan.feedback_active = false;
+            plan.selected_cta = None;
+        }
+        self.line_viewer = Some(viewer);
+        self.persist_session_plan_dock_open(true);
+    }
+
+    pub(crate) fn enter_isolated_preview_rewrite_wait(&mut self, kind: PlanFeedbackInFlight) {
+        self.enter_isolated_preview_rewrite_wait_quoted(kind, "");
+    }
+
+    /// Mill rewrote session plan.md. Isolated Preview must paint that file,
+    /// not leftover present / TECH.md persist overwrite. Does not Approve.
+    fn paint_isolated_preview_from_mill_plan_md(&mut self, disk: String) {
+        self.isolated_preview_shows_secondary_plan = false;
+        if let Some(pav) = self.plan_approval_view.as_mut() {
+            pav.plan_content = Some(disk.clone());
+            pav.has_plan = true;
+        }
+        self.latest_inline_plan_content = Some(disk.clone());
+        self.persist_session_plan_body(&disk);
+        let Some(mut viewer) = LineViewerState::open_markdown_content("plan.md", disk, None) else {
+            self.show_plan_preview();
+            return;
+        };
+        viewer.kind = crate::views::file_search::line_viewer::LineViewerKind::PlanPreview;
+        viewer.title_override = Some("plan.md".to_string());
+        viewer.fullscreen = crate::appearance::cache::load_plan_approval_force_modal();
+        {
+            let recorded = self.recorded_plan_choice_for_paint();
+            let plan = viewer.plan_mut();
+            plan.show_action_buttons = true;
+            plan.recorded_choice = recorded;
+            plan.feedback_active = self.plan_approval_view.is_some();
+        }
+        if let Some(ref pav) = self.plan_approval_view
+            && !pav.comments.is_empty()
+        {
+            viewer.rebuild_with_comments(&pav.comments);
+        } else if !self.plan_comments.is_empty() {
+            viewer.rebuild_with_comments(&self.plan_comments);
+        }
+        self.line_viewer = Some(viewer);
+        self.persist_session_plan_dock_open(true);
+    }
+    /// Whether the user is currently composing a comment via the prompt
+    /// input inside the *casual* plan preview (the modal opened with no
+    /// `plan_approval_view`). Mirrors the `pav.focus == Commenting`
+    /// check used by the plan-approval path so the prompt/footer
+    /// behaves identically across both modes.
     pub(super) fn is_casual_commenting(&self) -> bool {
         self.plan_approval_view.is_none()
             && self.is_plan_viewer()
@@ -304,6 +473,56 @@ impl AgentView {
         xai_grok_shell::grok_oss::try_open_from_token_economy_config(&cfg)
     }
 
+    pub(crate) fn persist_session_plan_dock_open(&self, open: bool) {
+        let Some(sid) = self.session.session_id.as_ref().map(|s| s.0.to_string()) else {
+            return;
+        };
+        let Some(store) = self.grok_oss_store_for_plan_choice() else {
+            return;
+        };
+        let identity = if self.isolated_preview_shows_secondary_plan {
+            xai_grok_shell::grok_oss::SECONDARY_PLAN_IDENTITY
+        } else {
+            xai_grok_shell::grok_oss::SESSION_PLAN_IDENTITY
+        };
+        if let Err(e) = store.set_session_plan_dock_open(&sid, identity, open) {
+            tracing::debug!(error = %e, "session_plans dock_open write failed (fail-open)");
+        }
+    }
+
+    pub(crate) fn persist_session_plan_body(&self, body: &str) {
+        if body.trim().is_empty() {
+            return;
+        }
+        let Some(sid) = self.session.session_id.as_ref().map(|s| s.0.to_string()) else {
+            return;
+        };
+        let Some(store) = self.grok_oss_store_for_plan_choice() else {
+            return;
+        };
+        if let Err(e) = store.upsert_session_plan_body_for(
+            &sid,
+            xai_grok_shell::grok_oss::SESSION_PLAN_IDENTITY,
+            body,
+        ) {
+            tracing::debug!(error = %e, "session_plans body write failed (fail-open)");
+        }
+    }
+
+    pub(crate) fn clear_sent_human_from_plan_feedback_draft(&mut self, sent: &str) {
+        let sent = sent.trim();
+        if sent.is_empty() {
+            return;
+        }
+        if let Some(pav) = self.plan_approval_view.as_mut() {
+            let leftover = pav.feedback_draft.as_deref().map(str::trim).unwrap_or("");
+            if leftover == sent {
+                pav.feedback_draft = None;
+            }
+        }
+        self.persist_unsent_composer_draft_now();
+    }
+
     fn record_explicit_plan_choice(
         &self,
         choice: crate::views::file_search::line_viewer::RecordedPlanChoice,
@@ -512,6 +731,13 @@ impl AgentView {
     /// When plan approval is parked without a body, opens a placeholder preview.
     /// The user then always sees a decision surface (a/s/q) instead of a dead "Waiting on plan approval" line with a no-op Tab:plan.
     pub fn show_plan_preview(&mut self) {
+        if matches!(
+            self.plan_feedback_in_flight,
+            Some(PlanFeedbackInFlight::Revising)
+        ) && self.exclusive_plan_revise_should_hide_pane()
+        {
+            return;
+        }
         // File-backed Isolated Preview re-reads session plan.md on open so a
         // Revise rewrite is not stuck behind the first-draft snapshot.
         self.refresh_file_backed_plan_from_live_file();
@@ -887,11 +1113,60 @@ impl AgentView {
             }
         }
     }
-    fn send_plan_feedback(&mut self, feedback: Option<String>) -> InputOutcome {
-        let Some(pav) = self.plan_approval_view.as_ref() else {
+    /// Exclusive `/plan` primary `plan.md` hides on revision submit.
+    /// Isolated Preview `secondary-plan.md` does not.
+    fn exclusive_plan_revise_should_hide_pane(&self) -> bool {
+        if self.isolated_preview_shows_secondary_plan {
+            return false;
+        }
+        if self.line_viewer.as_ref().is_some_and(|viewer| {
+            viewer.title_override.as_deref() == Some("secondary-plan.md")
+                || viewer.path.file_name().and_then(|name| name.to_str())
+                    == Some("secondary-plan.md")
+        }) {
+            return false;
+        }
+        true
+    }
+
+    /// Interject sentence for a plan revision. Isolated Preview secondary
+    /// names `secondary-plan.md`. Exclusive parked `/plan` names `plan.md`.
+    fn plan_revision_interject_text(&self, feedback: Option<&str>) -> String {
+        let update_target = if self.isolated_preview_shows_secondary_plan {
+            "secondary-plan.md"
+        } else {
+            "plan.md"
+        };
+        let feedback_block = feedback
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| format!("\n\nOperator feedback:\n{s}"))
+            .unwrap_or_default();
+        format!(
+            "The user requested plan revisions. Update {update_target} from the conversation\
+             {feedback_block}\n\nWhen the plan is ready, call exit_plan_mode again to \
+             present it for approval."
+        )
+    }
+
+    /// Live Revise submit (Enter after notes, or a test that needs the same
+    /// path). Footer Revise only arms the box via `focus_plan_prompt`.
+    pub(crate) fn send_plan_feedback(&mut self, feedback: Option<String>) -> InputOutcome {
+        let Some(mut pav) = self.plan_approval_view.take() else {
+            if self.isolated_preview_shows_secondary_plan {
+                let text = self.plan_revision_interject_text(feedback.as_deref());
+                self.last_isolated_preview_plan_feedback = Some(text.clone());
+                self.plan_feedback_in_flight = Some(PlanFeedbackInFlight::Revising);
+                self.show_toast("Plan revision sent.");
+                log_plan_submit("revise");
+                return InputOutcome::Action(Action::Interject {
+                    text,
+                    images: Vec::new(),
+                });
+            }
             return InputOutcome::Changed;
         };
-        let formatted = pav.format_feedback_with_selection(feedback.as_deref(), selection.as_ref());
+        let formatted = pav.format_feedback(feedback.as_deref());
         let to_send = if formatted.trim().is_empty() {
             feedback
         } else {
@@ -906,34 +1181,52 @@ impl AgentView {
                 .push_block(crate::scrollback::RenderBlock::user_prompt(msg.to_string()));
         }
         if post_turn && to_send.as_deref().is_none_or(|text| text.trim().is_empty()) {
+            self.plan_approval_view = Some(pav);
             self.show_toast("Type revision notes, or press a to approve.");
             return InputOutcome::Changed;
         }
         if self.is_post_turn_build_starting() {
+            self.plan_approval_view = Some(pav);
             self.show_toast(BUILD_IN_FLIGHT_REVISE_NOTICE);
             return InputOutcome::Changed;
         }
         if post_turn && self.plan_mode_pending == Some(false) {
+            self.plan_approval_view = Some(pav);
             self.show_toast(LEAVE_PLAN_REVISE_NOTICE);
             return InputOutcome::Changed;
         }
         if post_turn {
+            self.plan_approval_view = Some(pav);
             let text = to_send.unwrap_or_default();
             return InputOutcome::Action(Action::RevisePlan(text));
         }
-        if let Some(pav) = self.plan_approval_view.as_mut() {
-            Self::merge_live_images_into_stash(&mut self.prompt, &mut pav.stashed_prompt);
-        }
-        let Some(mut pav) = self.unmount_plan_review() else {
-            return InputOutcome::Changed;
-        };
-        pav.send_cancelled(to_send.clone());
+        let sent_acp = pav.send_cancelled(to_send.clone());
         if pav.source == PlanReviewSource::Inline {
             self.kept_plan.clear_body();
         }
+        self.plan_next_comment_id = pav.next_comment_id;
+        let _ = pav.stashed_prompt;
+        let images = self.prompt.drain_images();
+        self.prompt.set_text("");
+        self.persist_unsent_composer_draft_now();
+        if self.exclusive_plan_revise_should_hide_pane() {
+            self.line_viewer = None;
+            self.persist_session_plan_dock_open(false);
+        } else if let Some(viewer) = self.line_viewer.as_mut() {
+            let plan = viewer.plan_mut();
+            plan.show_action_buttons = false;
+            plan.feedback_active = false;
+            plan.selected_cta = None;
+        }
         self.prompt.textarea.cancel_undo_group();
+        self.plan_feedback_in_flight = Some(PlanFeedbackInFlight::Revising);
         self.show_toast("Plan revision sent.");
         log_plan_submit("revise");
+        if pav.is_local_idle_decision || !sent_acp || !images.is_empty() {
+            let text = self.plan_revision_interject_text(to_send.as_deref());
+            self.last_isolated_preview_plan_feedback = Some(text.clone());
+            return InputOutcome::Action(Action::Interject { text, images });
+        }
         InputOutcome::Changed
     }
 
@@ -1830,6 +2123,115 @@ mod plan_approval_enter_tests {
         assert_eq!(
             agent.toast.as_ref().map(|(msg, _)| msg.as_str()),
             Some("Plan revision sent.")
+        );
+    }
+    /// Operator: "After the Operator submits revisions on an exclusive /plan
+    /// present, the plan view goes away (or is not left up as the idle plan
+    /// pane) while the revise turn runs. Do not leave plan.md docked after
+    /// revision submit."
+    ///
+    /// Empty Enter on the Revise prompt is
+    /// `empty_enter_on_revise_prompt_does_not_approve`: it does not Approve
+    /// and it leaves the present up. This test does not weaken that.
+    #[test]
+    fn exclusive_plan_revise_submit_hides_plan_md_until_represent() {
+        let mut agent = agent_with_revise_prompt();
+        agent.plan_mode_active = true;
+        agent.plan_mode_pending = None;
+        agent.isolated_preview_shows_secondary_plan = false;
+        agent.show_plan_preview();
+        assert!(
+            agent.is_plan_viewer(),
+            "fixture: exclusive /plan docks primary plan.md before Revise submit"
+        );
+        assert!(
+            agent.line_viewer.as_ref().is_some_and(|viewer| {
+                viewer.path.file_name().and_then(|name| name.to_str()) == Some("plan.md")
+                    && viewer.title_override.as_deref() != Some("secondary-plan.md")
+            }),
+            "fixture: dock is primary plan.md, not secondary-plan.md"
+        );
+        assert!(
+            !agent.plan_decision_resolved,
+            "fixture: exclusive /plan present is not already decided"
+        );
+        agent
+            .prompt
+            .set_text("please hide plan.md while the revise turn runs");
+        let outcome = agent.handle_plan_feedback_key(&enter_key());
+        assert!(
+            matches!(outcome, InputOutcome::Changed | InputOutcome::Action(_)),
+            "Enter on the Revise prompt must submit the revision, not Approve; got {outcome:?}"
+        );
+        assert!(
+            agent.plan_approval_view.is_none(),
+            "revision submit must leave the first present"
+        );
+        assert!(
+            agent.line_viewer.is_none(),
+            "After the Operator submits revisions on an exclusive /plan present, the plan view goes away (or is not left up as the idle plan pane) while the revise turn runs. Do not leave plan.md docked after revision submit."
+        );
+        assert!(
+            !agent.is_plan_viewer(),
+            "exclusive /plan revise submit must not leave a plan viewer, so the casual copy plan footer cannot paint"
+        );
+        assert_eq!(
+            agent.plan_feedback_in_flight,
+            Some(crate::views::plan_approval_view::PlanFeedbackInFlight::Revising),
+            "revise turn stays in flight until the next present"
+        );
+        assert!(
+            !agent.plan_decision_resolved,
+            "Revise must not call close_plan_review; the decision stays unresolved"
+        );
+        agent.show_plan_preview();
+        assert!(
+            agent.line_viewer.is_none() && !agent.is_plan_viewer(),
+            "a later tick must not re-dock exclusive plan.md while the revise turn is still Revising"
+        );
+        assert_eq!(
+            agent.plan_feedback_in_flight,
+            Some(crate::views::plan_approval_view::PlanFeedbackInFlight::Revising)
+        );
+        assert!(!agent.plan_decision_resolved);
+        // Same order as `re_present_after_revise_clears_in_flight_and_arms_ctas`:
+        // clear Revising, then dock. `handle_exit_plan_mode` clears in-flight
+        // before `show_plan_preview_if_available`.
+        agent.clear_plan_loop_flags_for_new_present();
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        let request = crate::views::plan_approval_view::ExitPlanModeExtRequest {
+            session_id: "test-session".into(),
+            tool_call_id: "call-represent".into(),
+            plan_content: Some("# Plan\n\n## Step 1\nRevised present\n".into()),
+        };
+        agent.plan_approval_view = Some(
+            crate::views::plan_approval_view::PlanApprovalViewState::new(
+                request,
+                agent.prompt.stash(),
+                tx,
+            ),
+        );
+        agent.plan_mode_active = true;
+        agent.plan_mode_pending = None;
+        agent.isolated_preview_shows_secondary_plan = false;
+        agent.show_plan_preview_if_available();
+        assert!(
+            agent.plan_feedback_in_flight.is_none(),
+            "the later exit_plan_mode present must clear Revising"
+        );
+        assert!(
+            agent.plan_approval_view.is_some() && !agent.plan_decision_resolved,
+            "the later present arms review; it does not Approve"
+        );
+        assert!(
+            agent.is_plan_viewer()
+                && agent.line_viewer.as_ref().is_some_and(|viewer| {
+                    viewer.path.file_name().and_then(|name| name.to_str()) == Some("plan.md")
+                        && viewer
+                            .plan_ref()
+                            .is_some_and(|plan| plan.feedback_active && plan.show_action_buttons)
+                }),
+            "the later exit_plan_mode present must dock primary plan.md and arm review CTAs"
         );
     }
     #[test]

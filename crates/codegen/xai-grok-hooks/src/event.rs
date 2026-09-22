@@ -493,7 +493,22 @@ pub enum HookPayload {
         #[serde(rename = "subagentType", skip_serializing_if = "Option::is_none")]
         subagent_type: Option<String>,
     },
-
+    /// Observe-only turn end for interrupt, permission reject, and max turns.
+    /// Same field renames as `Stop`. It does not replace `Stop` or `StopFailure`.
+    StopCancelled {
+        reason: String,
+        #[serde(rename = "stopHookActive")]
+        stop_hook_active: bool,
+        #[serde(
+            rename = "lastAssistantMessage",
+            skip_serializing_if = "Option::is_none"
+        )]
+        last_assistant_message: Option<String>,
+        #[serde(rename = "backgroundTasks", skip_serializing_if = "Option::is_none")]
+        background_tasks: Option<Vec<StopBackgroundTask>>,
+        #[serde(rename = "sessionCrons", skip_serializing_if = "Option::is_none")]
+        session_crons: Option<Vec<StopSessionCron>>,
+    },
     PreToolUse {
         /// For meta-dispatch tools (`use_tool`, the external MCP-call tool) this is the underlying tool (`server__tool`), not the dispatcher.
         /// Matchers key on the real target.

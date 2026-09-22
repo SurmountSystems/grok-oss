@@ -24,6 +24,7 @@ use crate::notifications::{NotificationEvent, NotificationEventKind};
 use crate::scrollback::block::RenderBlock;
 use crate::scrollback::blocks::{MemoryCommandKind, SessionEvent};
 use crate::slash::command::DoctorRequest;
+use crate::views::plan_approval_view::PlanFeedbackInFlight;
 use agent_client_protocol as acp;
 use xai_grok_telemetry::session_ctx::log_event;
 

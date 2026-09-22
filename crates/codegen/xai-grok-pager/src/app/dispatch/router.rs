@@ -1031,6 +1031,7 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
             }]
         }
         Action::AnnouncementsHide => {
+            crate::app::turn_completion::note_announcement_hide();
             let shown_key = crate::views::announcements::first_session_announcement(
                 &app.active_announcements,
                 &app.hidden_announcement_ids,

@@ -1539,6 +1539,8 @@ mod tests {
         let blank = || GateHookJson {
             decision: "deny".to_string(),
             reason: Some("  ".to_string()),
+            updated_input: None,
+            hook_specific_output: None,
         };
         let with_fallback =
             gate_json_to_decision(blank(), "h", Some("quota exceeded")).expect("valid decision");

@@ -352,6 +352,93 @@ mod tests {
         );
     }
 
+    /// Operator: "L2s should not be able to spawn other L2s."
+    /// "They can only spawn L3s."
+    /// Only L1 spawns L2s.
+    #[test]
+    fn only_l1_spawns_l2_l2_spawn_is_l3_specialist_that_cannot_spawn() {
+        assert!(
+            matches!(
+                admit_spawn(0, 2),
+                SpawnAdmission::Allow {
+                    layer: SpawnedLayer::L2Coordinator,
+                    may_spawn: true,
+                }
+            ),
+            "Only L1 spawns L2s."
+        );
+        assert!(spawned_agent_may_spawn(0, 1, 2), "Only L1 spawns L2s.");
+        let mut l2 = AgentDefinition::default_grok_build();
+        apply_child_tool_policy(&mut l2, None, spawned_agent_may_spawn(0, 1, 2));
+        assert!(
+            l2.tool_config
+                .tools
+                .iter()
+                .any(|tool| tool.kind == Some(ToolKind::Task)),
+            "Only L1 spawns L2s. The L2 coordinator must keep spawn_subagent."
+        );
+
+        // Coordinator request (grok-build / general-purpose) from an L2.
+        // Numeric depth 1 is still under max 2. That must not create an L2.
+        assert!(
+            matches!(
+                admit_spawn(1, 2),
+                SpawnAdmission::Allow {
+                    layer: SpawnedLayer::L3Specialist,
+                    may_spawn: false,
+                }
+            ),
+            "L2s should not be able to spawn other L2s. They can only spawn L3s."
+        );
+        assert!(
+            !spawned_agent_may_spawn(1, 1, 2),
+            "L2s should not be able to spawn other L2s. They can only spawn L3s."
+        );
+        let mut forced = AgentDefinition::default_grok_build();
+        apply_child_tool_policy(&mut forced, None, spawned_agent_may_spawn(1, 1, 2));
+        assert!(
+            !forced
+                .tool_config
+                .tools
+                .iter()
+                .any(|tool| tool.kind == Some(ToolKind::Task)),
+            "A coordinator request from an L2 is forced to a specialist that cannot spawn."
+        );
+        assert!(
+            forced
+                .tool_config
+                .tools
+                .iter()
+                .any(|tool| tool.kind == Some(ToolKind::Edit)),
+            "They can only spawn L3s. The specialist keeps implement tools."
+        );
+    }
+
+    /// Operator: "L3s cannot spawn L4s or other L3s."
+    #[test]
+    fn l3_cannot_spawn_l4_or_another_l3() {
+        assert!(
+            matches!(admit_spawn(2, 2), SpawnAdmission::RejectDepthLimit),
+            "L3s cannot spawn L4s or other L3s."
+        );
+        assert!(
+            matches!(admit_spawn(3, 2), SpawnAdmission::RejectDepthLimit),
+            "L3s cannot spawn L4s or other L3s."
+        );
+        assert!(
+            !spawned_agent_may_spawn(2, 2, 2),
+            "L3s cannot spawn L4s or other L3s."
+        );
+        assert!(
+            !spawned_agent_may_spawn(2, 3, 2),
+            "L3s cannot spawn L4s or other L3s."
+        );
+        assert!(
+            !nested_spawn_allowed(2, 2),
+            "L3s cannot spawn L4s or other L3s."
+        );
+    }
+
     /// Named contract: an L2 grok-build coordinator keeps spawn_subagent.
     #[test]
     fn l2_grok_build_child_tool_policy_keeps_spawn_subagent() {

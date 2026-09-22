@@ -2054,8 +2054,9 @@ fn empty_enter_never_approves_exclusive_covering_present_github_122() {
 /// Exclusive covering clickable Revise rewrites session `plan.md` and
 /// re-presents (`exit_plan_mode` present again). Idle CTAs are Approve /
 /// Comment / Revise / Exit. Letter keys type; they do not steal Approve.
-/// Empty Enter never Approves. Isolated Preview stays until Esc, Exit, or
-/// Approve, so Revise must not drop exclusive covering into a stuck wait.
+/// Empty Enter never Approves. Exclusive `/plan` revision submit hides the
+/// pane. Isolated Preview `secondary-plan.md` still stays until Esc, Exit,
+/// or Approve.
 #[test]
 fn exclusive_covering_revise_cta_rewrites_and_represents_cannot_revise_plans() {
     let mut app = make_app_with_agent("sess-exclusive-revise-stuck");
@@ -2096,14 +2097,8 @@ fn exclusive_covering_revise_cta_rewrites_and_represents_cannot_revise_plans() {
             "cannot revise plans: Revise is not Approve and not Exit"
         );
         assert!(
-            agent.line_viewer.as_ref().is_some_and(|v| v.fullscreen),
-            "cannot revise plans: Isolated Preview stays until Esc, Exit, or Approve; Revise must not drop exclusive covering"
-        );
-        assert!(
-            agent.line_viewer.as_ref().is_some_and(|v| v
-                .plan_ref()
-                .is_some_and(|p| !p.show_action_buttons && !p.feedback_active)),
-            "cannot revise plans: rewrite-wait must not arm idle Approve on leftover body"
+            agent.line_viewer.is_none(),
+            "After the Operator submits revisions on an exclusive /plan present, the plan view goes away (or is not left up as the idle plan pane) while the revise turn runs. Do not leave plan.md docked after revision submit."
         );
         let acp_revise = match rx.try_recv() {
             Ok(Ok(raw)) => serde_json::from_str::<serde_json::Value>(raw.0.get()).ok(),

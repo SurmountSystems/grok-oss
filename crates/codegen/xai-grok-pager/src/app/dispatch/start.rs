@@ -52,9 +52,15 @@ fn try_continue_canceled_turn(app: &mut AppView) -> Option<Vec<Effect>> {
     if text.trim().is_empty() {
         return None;
     }
-    if agent.operator_prompt_already_issued_as_human_turn(&text) {
+    // Scrollback is empty at process start. Read chat_history.jsonl here
+    // as well as through operator_prompt_already_issued_as_human_turn.
+    // `/goal <rest>` matches `A goal has been set: <rest>` through
+    // `operator_text_matches_recorded`, not a second mapper.
+    if agent.operator_prompt_already_issued_as_human_turn(&text)
+        || disk_chat_history_already_has_prompt(&cwd, &sid, &text)
+    {
         // `/start` must not requeue a finished Human turn as continue_prior_work.
-        // Occupancy drop spares that flag, so chat-history skip lives here.
+        // Occupancy drop spares that flag, so the chat-history skip lives here.
         let _ = clear_canceled_turn_resume(&cwd, &sid);
         return None;
     }
@@ -62,6 +68,22 @@ fn try_continue_canceled_turn(app: &mut AppView) -> Option<Vec<Effect>> {
     agent.session.enqueue_continue_prior_work_front(text);
     let _ = clear_canceled_turn_resume(&cwd, &sid);
     Some(maybe_drain_queue_and_note_peek(app, id))
+}
+
+/// True when `chat_history.jsonl` already has this Operator prompt as a
+/// Human turn. Scrollback is not consulted. `/goal` uses
+/// `operator_text_matches_recorded`.
+fn disk_chat_history_already_has_prompt(cwd: &str, sid: &str, text: &str) -> bool {
+    let Some(blob) = xai_grok_shell::session::prompt_wal::chat_history_path(cwd, sid)
+        .and_then(|path| std::fs::read_to_string(path).ok())
+    else {
+        return false;
+    };
+    xai_grok_shell::session::prompt_wal::user_texts_from_chat_history_jsonl(&blob)
+        .iter()
+        .any(|recorded| {
+            xai_grok_shell::session::prompt_wal::operator_text_matches_recorded(text, recorded)
+        })
 }
 
 fn release_soft_stop_hold(app: &mut AppView) -> Vec<Effect> {

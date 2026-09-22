@@ -608,6 +608,7 @@ impl AgentView {
             overlay_stop_label,
         } = app_params;
         self.scrollback.begin_frame();
+        self.composer_copy_button = None;
         self.in_dashboard_overlay = in_dashboard_overlay;
         self.overlay_can_cycle = overlay_header.can_cycle();
         self.workspace_dashboard_enabled = workspace_dashboard_enabled;
@@ -1354,6 +1355,11 @@ impl AgentView {
             &theme,
             self.chat_kind,
         ) {
+            let beside = crate::app::turn_completion::uptime_text_beside_token_chrome();
+            let dim = Style::default().fg(theme.gray_dim).bg(theme.bg_base);
+            ctx_line
+                .spans
+                .push(Span::styled(format!("  {beside}"), dim));
             status.push("context", ctx_line);
         }
         let hover_or = |hovered: bool, resting: Style| {
@@ -2285,6 +2291,24 @@ impl AgentView {
                 self.hit_announcement_cta.hovered,
                 self.permission_queue.is_empty(),
             );
+            if announcement_banner_owns_slot {
+                if let Some(shown) = crate::views::announcements::first_session_announcement(
+                    banner_announcements,
+                    hidden_announcement_ids,
+                ) {
+                    let session_id = self
+                        .session
+                        .session_id
+                        .as_ref()
+                        .map(|sid| sid.0.to_string())
+                        .unwrap_or_default();
+                    crate::app::turn_completion::note_painted_announcement(
+                        &session_id,
+                        shown.title.as_deref(),
+                        shown.message.as_deref(),
+                    );
+                }
+            }
             self.hit_announcement_hide
                 .set_unless_dropdown(banner_hits.hide, dropdown_open);
             self.hit_announcement_cta
@@ -2604,10 +2628,13 @@ impl AgentView {
                 let box_h = inline_prompt_h
                     .min(below_card.saturating_sub(question_footer_h))
                     .max(below_card.min(1));
+                let copy_label = super::composer_copy::COMPOSER_COPY_LABEL;
+                let copy_w = copy_label.len() as u16;
+                let copy_reserve = copy_w.saturating_add(1);
                 let input_area = Rect {
                     x: layout.prompt.x + 3,
                     y: box_y,
-                    width: feedback_input::width(layout.prompt.width),
+                    width: feedback_input::width(layout.prompt.width).saturating_sub(copy_reserve),
                     height: box_h,
                 };
                 buf.set_style(
@@ -2635,6 +2662,22 @@ impl AgentView {
                 );
                 prompt_cursor_pos = result.cursor_pos;
                 self.inline_prompt_area = Some(input_area);
+                let copy_button = Rect {
+                    x: input_area
+                        .x
+                        .saturating_add(input_area.width)
+                        .saturating_add(1),
+                    y: input_area.y,
+                    width: copy_w,
+                    height: 1,
+                };
+                buf.set_string_safe(
+                    copy_button.x,
+                    copy_button.y,
+                    copy_label,
+                    Style::default().fg(theme.gray).bg(theme.bg_light),
+                );
+                self.set_composer_copy_button(Some(copy_button));
                 painted_prompt_h = box_h;
             } else if is_input_mode && inline_prompt_h > 0 {
                 let row_y = question_area.y + question_area.height;
@@ -2944,14 +2987,47 @@ impl AgentView {
             } else {
                 None
             };
+            let copy_label = super::composer_copy::COMPOSER_COPY_LABEL;
+            let copy_w = copy_label.len() as u16;
+            let copy_reserve = copy_w.saturating_add(1);
+            let (prompt_area, copy_button) = if layout.prompt.width > copy_reserve.saturating_add(8)
+            {
+                let prompt_area = Rect {
+                    x: layout.prompt.x,
+                    y: layout.prompt.y,
+                    width: layout.prompt.width.saturating_sub(copy_reserve),
+                    height: layout.prompt.height,
+                };
+                let button = Rect {
+                    x: prompt_area
+                        .x
+                        .saturating_add(prompt_area.width)
+                        .saturating_add(1),
+                    y: prompt_area.y,
+                    width: copy_w,
+                    height: 1,
+                };
+                (prompt_area, Some(button))
+            } else {
+                (layout.prompt, None)
+            };
             let prompt_result_inner = self.prompt.draw(
                 buf,
-                layout.prompt,
+                prompt_area,
                 Some(layout.scrollback),
                 &prompt_style,
                 Some(&info),
                 voice_overlay,
             );
+            if let Some(button) = copy_button {
+                buf.set_string_safe(
+                    button.x,
+                    button.y,
+                    copy_label,
+                    Style::default().fg(theme.gray).bg(theme.bg_base),
+                );
+            }
+            self.set_composer_copy_button(copy_button);
             if let Some((s, ovr)) = saved_scroll {
                 self.prompt.textarea.set_scroll_override(ovr);
                 self.prompt.set_scroll(s);
