@@ -74,6 +74,7 @@ pub mod toggle_mouse_reporting;
 pub mod transcript;
 pub mod tutorial;
 pub mod unstick;
+pub mod uptime;
 pub mod usage;
 pub mod view_plan;
 pub mod vim_mode;
@@ -113,6 +114,7 @@ pub fn builtin_commands() -> Vec<Arc<dyn SlashCommand>> {
         Arc::new(copy::CopyCommand),
         Arc::new(find::FindCommand),
         Arc::new(usage::UsageCommand),
+        Arc::new(uptime::UptimeCommand),
         Arc::new(tasks::TasksCommand),
         // Extending the agent.
         Arc::new(plugin::SkillsCommand),

@@ -73,6 +73,12 @@ pub fn format_uptime_beside_status(windows: &WindowPair) -> String {
     )
 }
 
+/// Reading `/uptime` prints. Same text as the beside-status block.
+/// Local windows only. This does not open a socket and it does not call xAI.
+pub fn uptime_slash_output(windows: &WindowPair) -> String {
+    format_uptime_beside_status(windows)
+}
+
 /// Status-line cap. Keeps SuperGrok period limits on the one-line bar.
 pub fn cap_uptime_status_segment(text: &str) -> String {
     const TRACKING_OFF: &str = "uptime tracking is off because DuckDB is not installed";

@@ -1478,10 +1478,8 @@ User-guide [`06-theming`](crates/codegen/xai-grok-pager/docs/user-guide/06-themi
   total. Internal field names such as `measured_tokens` and the
   TECH.md table column "measured tokens" stay. `format_subagent_label`
   calls `format_subagent_label_parts` so `format_measured_tokens_suffix`
-  is used in the shipped lib. TECH.md at the workspace root (tests inject
-  a temp path) has a description-label L1 to L2 to L3 tree and a table
-  with columns id, contract/aspect, owner, measured tokens, estimate,
-  status. Layout must not parse the session transcript jsonl. Those
+  is used in the shipped lib. The product does not write TECH.md.
+  Layout must not parse the session transcript jsonl. Those
   counts are not included SuperGrok period limits, not SuperGrok dollar
   credits, and not console team prepaid / console API credits. Tests:
   `subagents_list_omits_the_word_tokens`,

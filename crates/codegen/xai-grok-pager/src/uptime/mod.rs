@@ -23,9 +23,10 @@ pub use store::{
 };
 #[cfg(not(test))]
 pub use store::{record_announcement_if_recognized, record_completed_observation};
+pub use window::cap_uptime_status_segment;
 #[cfg(test)]
 pub use window::format_uptime_beside_status;
-pub use window::{WindowPair, cap_uptime_status_segment};
+pub use window::{WindowPair, uptime_slash_output};
 
 use std::sync::atomic::{AtomicU64, Ordering};
 

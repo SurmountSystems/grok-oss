@@ -173,3 +173,80 @@ fn plan_approval_actions_are_a_little_bigger_and_spaced_out_better() {
         "magnifying glass glyph is unchanged"
     );
 }
+
+/// Search, next, and previous stay on the search row. Approve, comment,
+/// revise, and exit stay on the action row. Those rows are not one line.
+#[test]
+fn painted_search_row_and_painted_action_row_are_separate() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    let mut viewer = LineViewerState::open_markdown_content(
+        "plan.md",
+        "# Plan\n\nDo the thing\n".to_owned(),
+        None,
+    )
+    .expect("open plan");
+    viewer.kind = LineViewerKind::PlanPreview;
+    viewer.fullscreen = true;
+    viewer.plan_mut().feedback_active = true;
+    viewer.plan_mut().show_action_buttons = false;
+    viewer.list_state.open_search(&viewer.lines);
+    for ch in ['d', 'u', 'c', 'k'] {
+        viewer.list_state.handle_key_event(
+            &KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE),
+            &viewer.lines,
+        );
+    }
+
+    let full = Rect::new(0, 0, 80, 24);
+    let mut buf = Buffer::empty(full);
+    let theme = crate::theme::Theme::current();
+    render_line_viewer(&mut buf, full, &mut viewer, Path::new("/tmp"), &theme, 0);
+
+    let rows: Vec<(u16, String)> = (0..full.height)
+        .map(|y| (y, span_text(&buf, y, 0, full.width)))
+        .filter(|(_, row)| !row.trim().is_empty())
+        .collect();
+    let frame = rows
+        .iter()
+        .map(|(y, row)| format!("{y}: {row}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let search_row = rows.iter().find(|(_, row)| {
+        let lower = row.to_ascii_lowercase();
+        lower.contains("search") && lower.contains("duck")
+    });
+    let action_row = rows.iter().find(|(_, row)| {
+        let lower = row.to_ascii_lowercase();
+        lower.contains("approve")
+            && lower.contains("comment")
+            && lower.contains("revise")
+            && lower.contains("exit")
+    });
+    let (search_y, search_text) =
+        search_row.expect(&format!("search row must paint search: duck\n{frame}"));
+    let (action_y, action_text) =
+        action_row.expect(&format!("action row must paint the four actions\n{frame}"));
+    assert_ne!(
+        search_y, action_y,
+        "search: duck must not share a line with approve | comment | revise | exit\nsearch: {search_text:?}\naction: {action_text:?}"
+    );
+
+    let search_lower = search_text.to_ascii_lowercase();
+    assert!(
+        search_lower.contains("next") && search_lower.contains("previous"),
+        "next and previous stay on the search row, not a second control line: {search_text:?}"
+    );
+    let action_lower = action_text.to_ascii_lowercase();
+    assert!(
+        !action_lower.contains("search")
+            && !action_lower.contains("next")
+            && !action_lower.contains("previous"),
+        "search, next, and previous must not sit in the action row: {action_text:?}"
+    );
+    assert!(
+        action_text.contains(SPACED_IDLE_ROW.trim()),
+        "opening search must not shrink or reflow the spaced action row: {action_text:?}"
+    );
+}

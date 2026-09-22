@@ -1,7 +1,8 @@
-//! In-memory nested L2 token counts and TECH.md render.
+//! In-memory nested L2 token counts and one grok-oss sqlite row.
 //!
 //! Subagents list layout reads only this in-memory map. This module never
-//! opens session transcript files on paint. Measured nested L2 tokens are
+//! opens session transcript files on paint and does not write TECH.md.
+//! Measured nested L2 tokens are
 //! session usage counts, not included SuperGrok period limits, not SuperGrok
 //! dollar credits, and not console team prepaid / console API credits.
 //! Operator-visible Subagents list chrome omits the word `tokens`. The unit
@@ -29,11 +30,16 @@ pub const NOT_BILLING_METERS_SENTENCE: &str = "Measured nested L2 tokens are ses
 pub struct NestedL2Tokens {
     /// Nested session id (internal key; not dumped in Subagents list text).
     pub nested_session_id: String,
-    /// Operator-facing description label for the Subagents list and TECH.md tree.
+    /// Operator-facing description label for the Subagents list.
     pub description: String,
+    /// grok-oss event ULID for this nested row. Not a Grok Build UUID.
+    event_ulid: String,
+    /// grok-oss work ULID shared by spawn, usage, and exit. One row.
+    work_ulid: String,
     /// High-water nested L2 session usage. Not included SuperGrok period
     /// limits, SuperGrok dollar credits, or console team prepaid.
-    /// TECH.md only. List paint reads `current_tokens` so compact can go down.
+    /// The grok-oss row stores this high-water. List paint reads
+    /// `current_tokens` so compact can go down.
     measured_tokens: AtomicU64,
     /// Latest live sample. `store`, not `fetch_max`, so a later compact
     /// replaces a stale larger window on the next paint.
@@ -72,6 +78,8 @@ impl NestedL2Tokens {
         Self {
             nested_session_id: nested_session_id.into(),
             description: description.into(),
+            event_ulid: xai_grok_tools::util::ulid::mint(),
+            work_ulid: xai_grok_tools::util::ulid::mint(),
             measured_tokens: AtomicU64::new(0),
             current_tokens: AtomicU64::new(0),
             current_set: AtomicBool::new(false),
@@ -109,6 +117,8 @@ impl Clone for NestedL2Tokens {
         Self {
             nested_session_id: self.nested_session_id.clone(),
             description: self.description.clone(),
+            event_ulid: self.event_ulid.clone(),
+            work_ulid: self.work_ulid.clone(),
             measured_tokens: AtomicU64::new(self.measured_tokens()),
             current_tokens: AtomicU64::new(self.current_tokens().unwrap_or(0)),
             current_set: AtomicBool::new(self.current_tokens().is_some()),
@@ -124,6 +134,8 @@ impl PartialEq for NestedL2Tokens {
     fn eq(&self, other: &Self) -> bool {
         self.nested_session_id == other.nested_session_id
             && self.description == other.description
+            && self.event_ulid == other.event_ulid
+            && self.work_ulid == other.work_ulid
             && self.measured_tokens() == other.measured_tokens()
             && self.current_tokens() == other.current_tokens()
             && self.estimate_tokens == other.estimate_tokens
@@ -181,11 +193,6 @@ fn with_process_tracker(f: impl FnOnce(&mut L2TokenTracker)) {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     f(&mut tracker);
-    // cargo test must not write repo-root TECH.md. Production persist is the binary.
-    #[cfg(not(test))]
-    {
-        let _ = tracker.persist_tech_md();
-    }
 }
 
 fn peek_process_tracker<R>(f: impl FnOnce(&L2TokenTracker) -> R) -> R {
@@ -196,8 +203,12 @@ fn peek_process_tracker<R>(f: impl FnOnce(&L2TokenTracker) -> R) -> R {
 }
 
 /// Production spawn hook. Subagents list paint still uses in-memory counts only.
+/// Also calls `insert_local_usage_event`. A zero total is not stored.
 pub fn on_nested_l2_spawn(nested_session_id: &str, description: &str) {
     with_process_tracker(|t| t.record_spawn(nested_session_id, description));
+    if let Some((store, event)) = nested_l2_sqlite_pair(nested_session_id) {
+        let _ = xai_grok_shell::token_economy::insert_local_usage_event(&store, &event);
+    }
 }
 
 /// Production usage-tick hook (session usage tokens, not billing meters).
@@ -212,11 +223,59 @@ pub fn on_nested_l2_usage(nested_session_id: &str, measured_tokens: u64) {
             row.store_current(measured_tokens);
         }
     });
+    if let Some((store, event)) = nested_l2_sqlite_pair(nested_session_id) {
+        let _ = xai_grok_shell::token_economy::insert_local_usage_event(&store, &event);
+    }
 }
 
-/// Production L2-exit hook. Keeps the last measured count for TECH.md.
+/// Production L2-exit hook. Keeps the last measured count and writes
+/// the same ULID row into grok-oss sqlite.
 pub fn on_nested_l2_exit(nested_session_id: &str) {
     with_process_tracker(|t| t.record_exit(nested_session_id));
+    if let Some((store, event)) = nested_l2_sqlite_pair(nested_session_id) {
+        let _ = xai_grok_shell::token_economy::insert_local_usage_event(&store, &event);
+    }
+}
+
+/// One grok-oss `local_usage_event` for this nested L2. Not the session sqlite.
+///
+/// Paint does not call this. Tests skip unless `grok_oss_database_path` is
+/// set, so crate tests do not write the operator store. A zero total still
+/// reaches the ledger write, which does not store it.
+fn nested_l2_sqlite_pair(
+    nested_session_id: &str,
+) -> Option<(
+    xai_grok_shell::grok_oss::GrokOssStore,
+    xai_grok_shell::token_economy::LocalUsageEvent,
+)> {
+    let event = peek_process_tracker(|t| {
+        let row = t.get(nested_session_id)?;
+        let total = i64::try_from(row.measured_tokens()).ok()?;
+        Some(xai_grok_shell::token_economy::LocalUsageEvent {
+            event_ulid: row.event_ulid.clone(),
+            session_id: row.nested_session_id.clone(),
+            work_ulid: Some(row.work_ulid.clone()),
+            timestamp_utc: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            turn_type: "nested".to_string(),
+            agent_kind: "l2".to_string(),
+            model_id: None,
+            input_tokens: None,
+            output_tokens: None,
+            cached_tokens: None,
+            reasoning_tokens: None,
+            total_tokens: Some(total),
+            cost_usd_ticks: None,
+            cost_missing: true,
+            incomplete: false,
+            sampling_identity: None,
+        })
+    })?;
+    let cfg = xai_grok_shell::token_economy::token_economy_from_disk();
+    if cfg!(test) && cfg.grok_oss_database_path.is_none() {
+        return None;
+    }
+    let store = xai_grok_shell::grok_oss::try_open_from_token_economy_config(&cfg)?;
+    Some((store, event))
 }
 
 impl L2TokenTracker {
@@ -292,14 +351,10 @@ impl L2TokenTracker {
         Some(format_measured_tokens_suffix(measured))
     }
 
-    /// Render TECH.md and write it to the injected path.
+    /// Does not create TECH.md. Nested spend is one grok-oss sqlite row.
     pub fn persist_tech_md(&self) -> std::io::Result<()> {
-        let body = render_tech_md(&self.by_id);
-        let path = self.tech_md_path();
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        std::fs::write(path, body)
+        let _body = render_tech_md(&self.by_id);
+        Ok(())
     }
 }
 
@@ -682,13 +737,10 @@ mod tests {
         );
     }
 
-    /// Operator contract: TECH.md write records measured tokens on spawn,
-    /// usage tick, and L2 exit. File contains the measured number, a
-    /// dependency tree, a table with columns id | contract/aspect | owner |
-    /// measured tokens | estimate | status, and the sentence that this is
-    /// not included SuperGrok period limits / SuperGrok dollar credits /
-    /// console credits.
+    /// Operator contract: spawn, usage, and exit record one grok-oss sqlite
+    /// row and do not create TECH.md. Measured tokens stay on that one row.
     #[test]
+    #[serial_test::serial(TOKEN_ECONOMY_LIVE)]
     fn tech_md_write_records_measured_tokens_on_spawn_usage_tick_and_l2_exit() {
         let dir = std::env::temp_dir().join(format!(
             "grok-l2-token-tracking-{}-{}",
@@ -700,37 +752,132 @@ mod tests {
         ));
         fs::create_dir_all(&dir).expect("temp dir");
         let tech_path = dir.join("TECH.md");
+        let db_path = dir.join("grok_oss.db");
+        let process_tech = peek_process_tracker(|t| t.tech_md_path().to_path_buf());
+        let process_before = fs::read(&process_tech).ok();
+
+        let cfg = xai_grok_shell::token_economy::TokenEconomyConfig {
+            grok_oss_database_path: Some(db_path.clone()),
+            ..xai_grok_shell::token_economy::TokenEconomyConfig::default()
+        };
+        xai_grok_shell::token_economy::set_token_economy_live(cfg);
+        struct ResetLiveTokenEconomy;
+        impl Drop for ResetLiveTokenEconomy {
+            fn drop(&mut self) {
+                xai_grok_shell::token_economy::reset_token_economy_live_to_defaults();
+            }
+        }
+        let _reset_live_token_economy = ResetLiveTokenEconomy;
+
+        let id = format!(
+            "nested-l2-sqlite-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        );
+        on_nested_l2_spawn(&id, "occupancy extras writer");
+        on_nested_l2_usage(&id, 12400);
+        on_nested_l2_exit(&id);
+
         let mut tracker = L2TokenTracker::with_tech_md_path(&tech_path);
         tracker.record_spawn("l2-a", "occupancy extras writer");
-        tracker.persist_tech_md().expect("write after spawn");
         tracker.record_usage("l2-a", 12400);
-        tracker.persist_tech_md().expect("write after usage tick");
         tracker.record_exit("l2-a");
-        tracker.persist_tech_md().expect("write after L2 exit");
+        tracker
+            .persist_tech_md()
+            .expect("persist must not create TECH.md");
+        assert!(
+            !tech_path.exists(),
+            "the product must not create TECH.md at {tech_path:?}"
+        );
+        assert_eq!(
+            fs::read(&process_tech).ok(),
+            process_before,
+            "the product must not write TECH.md"
+        );
 
-        let body = fs::read_to_string(&tech_path).expect("read TECH.md");
+        let (event_ulid, work_ulid, measured, status) = peek_process_tracker(|t| {
+            let row = t.get(&id).expect("spawned nested L2 row");
+            (
+                row.event_ulid.clone(),
+                row.work_ulid.clone(),
+                row.measured_tokens(),
+                row.status,
+            )
+        });
+        assert_eq!(
+            measured, 12400,
+            "in-memory atomic high-water stays 12400"
+        );
+        assert_eq!(status, NestedL2Status::Exited);
         assert!(
-            body.contains("12400"),
-            "TECH.md must contain the measured token number, got {body}"
+            event_ulid.len() == 26 && work_ulid.len() == 26,
+            "ULID session rows"
         );
         assert!(
-            body.contains("L1") && body.contains("L2") && body.contains("L3"),
-            "TECH.md must contain the L1 -> L2 -> L3 dependency tree, got {body}"
+            !event_ulid.contains('-') && !work_ulid.contains('-'),
+            "ULID session rows are grok-oss ULIDs, not Grok Build UUIDs"
         );
         assert!(
-            body.contains("| id | contract/aspect | owner | measured tokens | estimate | status |"),
-            "TECH.md must have the aspect table columns, got {body}"
+            xai_grok_tools::util::ulid::is_valid(&event_ulid)
+                && xai_grok_tools::util::ulid::is_valid(&work_ulid),
+            "event and work ids must be ULIDs"
+        );
+
+        let store = xai_grok_shell::grok_oss::open_at(&db_path).expect("grok_oss.db");
+        let rows = xai_grok_shell::token_economy::ledger::local_usage_events_for_session(
+            &store, &id,
+        )
+        .expect("read local_usage_event");
+        assert_eq!(rows.len(), 1, "one nested row");
+        let row = &rows[0];
+        assert_eq!(row.event_ulid, event_ulid);
+        assert_eq!(row.work_ulid.as_deref(), Some(work_ulid.as_str()));
+        assert_eq!(row.agent_kind, "l2");
+        assert_ne!(row.agent_kind.to_ascii_lowercase(), "l3");
+        assert_eq!(
+            row.total_tokens,
+            Some(12400),
+            "one sqlite row records the measured tokens"
+        );
+
+        let src = include_str!("l2_token_tracking.rs");
+        let product = src.split("mod tests").next().expect("product before tests");
+        let tracker_fn = fn_body(product, "fn with_process_tracker", "fn peek_process_tracker");
+        assert!(
+            !tracker_fn.contains("persist_tech_md"),
+            "live path must not write TECH.md"
         );
         assert!(
-            body.contains("not included SuperGrok period limits")
-                && body.contains("not SuperGrok dollar credits")
-                && body.contains("console team prepaid / console API credits"),
-            "TECH.md must say measured tokens are not billing meters, got {body}"
+            !tracker_fn.contains("insert_local_usage_event"),
+            "paint shares with_process_tracker and must not insert"
+        );
+        let hooks = fn_body(
+            product,
+            "pub fn on_nested_l2_spawn",
+            "fn nested_l2_sqlite_pair",
+        );
+        assert_eq!(
+            hooks.matches("insert_local_usage_event").count(),
+            3,
+            "spawn, usage, and exit each call insert_local_usage_event"
+        );
+        let paint = fn_body(
+            product,
+            "pub fn format_live_subagents_list_suffix",
+            "pub const STANDING_WRAP_ESTIMATE_WALL",
         );
         assert!(
-            body.contains("exited"),
-            "TECH.md after L2 exit must record exited status, got {body}"
+            !paint.contains("insert_local_usage_event"),
+            "do not insert during paint"
         );
+        assert!(
+            product.contains("AtomicU64") && product.contains("fetch_max"),
+            "keep the in-memory atomic counter"
+        );
+
         let _ = fs::remove_dir_all(&dir);
     }
 

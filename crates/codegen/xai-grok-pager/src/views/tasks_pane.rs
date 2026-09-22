@@ -8,6 +8,10 @@ use super::list_pane::{
 };
 use super::overlay::OverlayState;
 use crate::app::agent::{BgTaskState, BgTaskStatus, ScheduledTaskInfo};
+use crate::app::agent_view::l2_token_tracking::{
+    display_live_job_row, LiveJobRowInput, STANDING_WRAP_ESTIMATE_TOKENS,
+    STANDING_WRAP_ESTIMATE_WALL,
+};
 use crate::app::subagent::{SubagentInfo, format_context_badge, format_subagent_label};
 use crate::appearance::LayoutConfig;
 use crate::scrollback::layout::HorizontalLayout;
@@ -2806,6 +2810,50 @@ mod tests {
             !l3_joined.contains("140k"),
             "specialist row must not paint the L2 atomic total, got {l3_joined:?}"
         );
+    }
+
+    /// Description tail `(106.8k)` and atomic figure `106.8k` paint once.
+    /// The standing estimate is not on the line. Unrelated parentheses stay.
+    #[test]
+    fn l2_row_paints_atomic_figure_once_and_strips_duplicate_token_tail() {
+        let mut info = make_info();
+        info.description = Arc::from("Wrap the parser (106.8k)");
+        info.tokens_used = Some(106_800);
+        let joined = styled_agent_line(&entry_from_subagent(&info));
+        assert_eq!(
+            joined.matches("106.8k").count(),
+            1,
+            "atomic figure paints once, got {joined:?}"
+        );
+        assert!(
+            !joined.contains("167.0k") && !joined.contains("19.4 minutes"),
+            "row must not paint the standing estimate, got {joined:?}"
+        );
+
+        info.description = Arc::from("Wrap the parser (review notes) (106.8k)");
+        let joined = styled_agent_line(&entry_from_subagent(&info));
+        assert!(
+            joined.contains("(review notes)"),
+            "unrelated parentheses stay, got {joined:?}"
+        );
+        assert_eq!(
+            joined.matches("106.8k").count(),
+            1,
+            "atomic figure still paints once, got {joined:?}"
+        );
+        assert!(
+            !joined.contains("167.0k") && !joined.contains("19.4 minutes"),
+            "row must not paint the standing estimate, got {joined:?}"
+        );
+    }
+
+    fn styled_agent_line(entry: &TaskEntry) -> String {
+        match entry {
+            TaskEntry::Agent { styled, .. } => {
+                styled.spans.iter().map(|s| s.content.as_ref()).collect()
+            }
+            _ => panic!("expected Agent variant"),
+        }
     }
 
     #[test]

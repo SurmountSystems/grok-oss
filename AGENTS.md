@@ -967,6 +967,10 @@ stop*, § *Report finished nested work the same turn*, and the line that
 says do not kill a healthy in-flight L2. Dual-pin: this file and host
 `~/.grok/AGENTS.md` same heading.
 
+### Close a misaligned L2 (pinned 2026-09-22)
+
+Close a misaligned L2. A nudge is only when that L2 is already on the right job and is missing one fact. If the job changed, close it and start a new one.
+
 ## Subagents — parent is HITL UX only (hard)
 
 The **main/parent thread is HITL UX only**: status to the operator, spawn L2,

@@ -21,6 +21,8 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
     - L3 specialists (when spawned)
   - L2 Add session search kill switch
     - L3 specialists (when spawned)
+  - L2 Add slash uptime command
+    - L3 specialists (when spawned)
   - L2 Add turbo and reminder settings rows
     - L3 specialists (when spawned)
   - L2 Append testing-phase index HAVE row
@@ -30,6 +32,8 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
   - L2 Apply exclusive plan dismiss
     - L3 specialists (when spawned)
   - L2 Apply the three edits now
+    - L3 specialists (when spawned)
+  - L2 Apply two rustfmt wraps
     - L3 specialists (when spawned)
   - L2 Apply uptime header edits
     - L3 specialists (when spawned)
@@ -211,6 +215,8 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
     - L3 specialists (when spawned)
   - L2 Excerpt wal_sends_missing_from_history
     - L3 specialists (when spawned)
+  - L2 Execute guest mkdir before copy
+    - L3 specialists (when spawned)
   - L2 Explore /rebuild exec path
     - L3 specialists (when spawned)
   - L2 Explore Isolated Preview Revise
@@ -297,13 +303,21 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
     - L3 specialists (when spawned)
   - L2 Finish plan action spacing
     - L3 specialists (when spawned)
+  - L2 Finish plan image paste
+    - L3 specialists (when spawned)
   - L2 Finish preview paste slash
+    - L3 specialists (when spawned)
+  - L2 Finish remote enqueue mkdir
+    - L3 specialists (when spawned)
+  - L2 Finish separate search rows
     - L3 specialists (when spawned)
   - L2 Finish settings inventory
     - L3 specialists (when spawned)
   - L2 Finish soft reminder spawn inject
     - L3 specialists (when spawned)
   - L2 Finish spawn hierarchy land
+    - L3 specialists (when spawned)
+  - L2 Finish sqlite hooks, drop TECH.md
     - L3 specialists (when spawned)
   - L2 Finish stale prompt fix
     - L3 specialists (when spawned)
@@ -398,6 +412,8 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
   - L2 Fix hook compile errors
     - L3 specialists (when spawned)
   - L2 Fix image describe request fail
+    - L3 specialists (when spawned)
+  - L2 Fix install compile errors
     - L3 specialists (when spawned)
   - L2 Fix interject elapsed bound
     - L3 specialists (when spawned)
@@ -515,6 +531,8 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
     - L3 specialists (when spawned)
   - L2 Fresh mill chip Ctrl+C
     - L3 specialists (when spawned)
+  - L2 GUI remote enqueue command
+    - L3 specialists (when spawned)
   - L2 GitHub Isolated Preview issue
     - L3 specialists (when spawned)
   - L2 Goal card clickable clear
@@ -550,6 +568,8 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
   - L2 Harden the plan pane test
     - L3 specialists (when spawned)
   - L2 Hide plan pane after revise
+    - L3 specialists (when spawned)
+  - L2 Hook sqlite, one token figure
     - L3 specialists (when spawned)
   - L2 Identify Grok Build 1.0.4 delta
     - L3 specialists (when spawned)
@@ -662,6 +682,8 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
   - L2 Land nextest leftovers from report
     - L3 specialists (when spawned)
   - L2 Land parent L2 follow-up
+    - L3 specialists (when spawned)
+  - L2 Land plan image paste
     - L3 specialists (when spawned)
   - L2 Land plan pane covers transcript
     - L3 specialists (when spawned)
@@ -781,6 +803,14 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
     - L3 specialists (when spawned)
   - L2 Pad plan approval actions
     - L3 specialists (when spawned)
+  - L2 Paint one token figure
+    - L3 specialists (when spawned)
+  - L2 Paint one token figure
+    - L3 specialists (when spawned)
+  - L2 Paint one token figure per row
+    - L3 specialists (when spawned)
+  - L2 Paint search row controls
+    - L3 specialists (when spawned)
   - L2 Paren SetBool dispatch match
     - L3 specialists (when spawned)
   - L2 Parent follow-up to live L2
@@ -824,6 +854,8 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
   - L2 Pin then fix lock install
     - L3 specialists (when spawned)
   - L2 Plan Revise Exit unstick
+    - L3 specialists (when spawned)
+  - L2 Plan approval image paste
     - L3 specialists (when spawned)
   - L2 Plan stale-prompt TDD
     - L3 specialists (when spawned)
@@ -905,11 +937,19 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
     - L3 specialists (when spawned)
   - L2 Record live HTTP 500s
     - L3 specialists (when spawned)
+  - L2 Record nested spend in sqlite
+    - L3 specialists (when spawned)
+  - L2 Record nested spend in sqlite
+    - L3 specialists (when spawned)
   - L2 Record uptime observations in Parquet
     - L3 specialists (when spawned)
   - L2 Red tests then fix soft plan
     - L3 specialists (when spawned)
   - L2 Reliability unit integration tests
+    - L3 specialists (when spawned)
+  - L2 Remote enqueue drop copy
+    - L3 specialists (when spawned)
+  - L2 Remote enqueue to surmount-1
     - L3 specialists (when spawned)
   - L2 Remove bundled DuckDB feature
     - L3 specialists (when spawned)
@@ -922,6 +962,8 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
   - L2 Remove python3 from grok-oss
     - L3 specialists (when spawned)
   - L2 Remove unused SubagentBackend import
+    - L3 specialists (when spawned)
+  - L2 Remove workspace TECH.md writer
     - L3 specialists (when spawned)
   - L2 Repetition stream stop
     - L3 specialists (when spawned)
@@ -1059,9 +1101,17 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
     - L3 specialists (when spawned)
   - L2 Run just install
     - L3 specialists (when spawned)
+  - L2 Run one remote gate then install
+    - L3 specialists (when spawned)
+  - L2 Run one remote gate then install
+    - L3 specialists (when spawned)
   - L2 Run one remote quality gate
     - L3 specialists (when spawned)
   - L2 Run one remote quality gate
+    - L3 specialists (when spawned)
+  - L2 Run the two sqlite tests
+    - L3 specialists (when spawned)
+  - L2 Run two named sqlite tests
     - L3 specialists (when spawned)
   - L2 Runner one check-remote then install
     - L3 specialists (when spawned)
@@ -1079,9 +1129,13 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
     - L3 specialists (when spawned)
   - L2 Search GitHub follow-up issue
     - L3 specialists (when spawned)
+  - L2 Search row, paste, uptime
+    - L3 specialists (when spawned)
   - L2 Second just check-remote
     - L3 specialists (when spawned)
   - L2 Send Interject from shell child follow_up
+    - L3 specialists (when spawned)
+  - L2 Separate plan search row
     - L3 specialists (when spawned)
   - L2 SetBool from_typed_setter
     - L3 specialists (when spawned)
@@ -1107,6 +1161,8 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
     - L3 specialists (when spawned)
   - L2 Spot-check landed plan contracts
     - L3 specialists (when spawned)
+  - L2 Sqlite hook and one token row
+    - L3 specialists (when spawned)
   - L2 Stale prompts at start L2
     - L3 specialists (when spawned)
   - L2 Stamp F plan xhigh
@@ -1121,7 +1177,11 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
     - L3 specialists (when spawned)
   - L2 Stop product python3 execution
     - L3 specialists (when spawned)
+  - L2 Stop writing TECH.md
+    - L3 specialists (when spawned)
   - L2 Store current sample on usage
+    - L3 specialists (when spawned)
+  - L2 Store nested counts in sqlite
     - L3 specialists (when spawned)
   - L2 Stricter approve-comment asserts
     - L3 specialists (when spawned)
@@ -1177,6 +1237,8 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
     - L3 specialists (when spawned)
   - L2 Verify leftover follow-up land closed
     - L3 specialists (when spawned)
+  - L2 Verify mkdir command then report
+    - L3 specialists (when spawned)
   - L2 Verify parent follow-up product land
     - L3 specialists (when spawned)
   - L2 Verify reports on disk
@@ -1210,6 +1272,8 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
   - L2 Wire composer copy once
     - L3 specialists (when spawned)
   - L2 Wire goal-clear no-interject
+    - L3 specialists (when spawned)
+  - L2 Wire gui enqueue command
     - L3 specialists (when spawned)
   - L2 Wire harness into task spawn
     - L3 specialists (when spawned)
@@ -1380,7 +1444,7 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
 
 | id | contract/aspect | owner | measured tokens | estimate | status |
 | --- | --- | --- | --- | --- | --- |
-| Actual tokens not_fetched | nested L2 session usage | L2 | 59349 | estimate | exited |
+| Actual tokens not_fetched | nested L2 session usage | L2 | 0 | estimate | exited |
 | Add FollowUp event and backend | nested L2 session usage | L2 | 108631 | estimate | exited |
 | Add TaskTool run follow_up named test | nested L2 session usage | L2 | 128771 | estimate | exited |
 | Add composer copy button | nested L2 session usage | L2 | 196896 | estimate | exited |
@@ -1388,11 +1452,13 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
 | Add follow_up schema field | nested L2 session usage | L2 | 118884 | estimate | exited |
 | Add paste insert helper | nested L2 session usage | L2 | 199034 | estimate | exited |
 | Add session search kill switch | nested L2 session usage | L2 | 196496 | estimate | exited |
+| Add slash uptime command | nested L2 session usage | L2 | 199108 | estimate | exited |
 | Add turbo and reminder settings rows | nested L2 session usage | L2 | 166737 | estimate | exited |
 | Append testing-phase index HAVE row | nested L2 session usage | L2 | 98169 | estimate | exited |
 | Apply Isolated Preview revise patch | nested L2 session usage | L2 | 216058 | estimate | exited |
 | Apply exclusive plan dismiss | nested L2 session usage | L2 | 132547 | estimate | exited |
 | Apply the three edits now | nested L2 session usage | L2 | 202387 | estimate | exited |
+| Apply two rustfmt wraps | nested L2 session usage | L2 | 80685 | estimate | exited |
 | Apply uptime header edits | nested L2 session usage | L2 | 199129 | estimate | exited |
 | Approve paste-chip TDD fresh | nested L2 session usage | L2 | 78767 | estimate | exited |
 | Approve paste-chip comment | nested L2 session usage | L2 | 121302 | estimate | exited |
@@ -1400,7 +1466,7 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
 | Bound first-token retry | nested L2 session usage | L2 | 199588 | estimate | exited |
 | Bump rustls past advisory | nested L2 session usage | L2 | 82648 | estimate | exited |
 | Call harness from task exit | nested L2 session usage | L2 | 195390 | estimate | exited |
-| Careful Grok Build 1.0.4 merge | nested L2 session usage | L2 | 97094 | estimate | exited |
+| Careful Grok Build 1.0.4 merge | nested L2 session usage | L2 | 96950 | estimate | exited |
 | Check canceled_turn_resume.json exists | nested L2 session usage | L2 | 82920 | estimate | exited |
 | Check diagnose reports on disk | nested L2 session usage | L2 | 78507 | estimate | exited |
 | Check if new tests exist | nested L2 session usage | L2 | 76887 | estimate | exited |
@@ -1409,7 +1475,7 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
 | Check whether fix edits landed | nested L2 session usage | L2 | 116505 | estimate | exited |
 | Check-remote and Isolated Preview paths | nested L2 session usage | L2 | 149501 | estimate | exited |
 | Clear composer after send | nested L2 session usage | L2 | 156108 | estimate | exited |
-| Clear composer do not queue | nested L2 session usage | L2 | 196856 | estimate | exited |
+| Clear composer do not queue | nested L2 session usage | L2 | 106848 | estimate | exited |
 | Clear persist after Isolated send | nested L2 session usage | L2 | 132983 | estimate | exited |
 | Close Isolated Preview after mill | nested L2 session usage | L2 | 197806 | estimate | exited |
 | Collect quality-fix playbook | nested L2 session usage | L2 | 96860 | estimate | exited |
@@ -1419,7 +1485,7 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
 | Compact must shrink loop garbage | nested L2 session usage | L2 | 128834 | estimate | exited |
 | Compacting open click hit | nested L2 session usage | L2 | 185117 | estimate | exited |
 | Compile follow-up tests and request_is_l3 | nested L2 session usage | L2 | 193515 | estimate | exited |
-| Composer copy character toast | nested L2 session usage | L2 | 196850 | estimate | exited |
+| Composer copy character toast | nested L2 session usage | L2 | 68603 | estimate | exited |
 | Confirm arrow click on issue 140 | nested L2 session usage | L2 | 85758 | estimate | exited |
 | Confirm early L2 resume pin | nested L2 session usage | L2 | 85450 | estimate | exited |
 | Confirm exclusive plan pane dismiss | nested L2 session usage | L2 | 104696 | estimate | exited |
@@ -1449,7 +1515,7 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
 | Drop C++ DuckDB use Rust parquet | nested L2 session usage | L2 | 117559 | estimate | exited |
 | Drop duckdb Connection link | nested L2 session usage | L2 | 198721 | estimate | exited |
 | Drop looping compact garbage | nested L2 session usage | L2 | 190595 | estimate | exited |
-| Drop not-fetched chrome | nested L2 session usage | L2 | 88552 | estimate | exited |
+| Drop not-fetched chrome | nested L2 session usage | L2 | 84953 | estimate | exited |
 | Drop unused revise import | nested L2 session usage | L2 | 92722 | estimate | exited |
 | DuckDB shared library not bundled | nested L2 session usage | L2 | 206091 | estimate | exited |
 | E+G implement now | nested L2 session usage | L2 | 221380 | estimate | exited |
@@ -1483,6 +1549,7 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
 | Excerpt restore_pending function | nested L2 session usage | L2 | 83263 | estimate | exited |
 | Excerpt start.rs continue_prior_work | nested L2 session usage | L2 | 87567 | estimate | exited |
 | Excerpt wal_sends_missing_from_history | nested L2 session usage | L2 | 94408 | estimate | exited |
+| Execute guest mkdir before copy | nested L2 session usage | L2 | 148823 | estimate | exited |
 | Explore /rebuild exec path | nested L2 session usage | L2 | 143364 | estimate | exited |
 | Explore Isolated Preview Revise | nested L2 session usage | L2 | 179985 | estimate | exited |
 | Extract FORK nested token pins | nested L2 session usage | L2 | 123322 | estimate | exited |
@@ -1526,11 +1593,15 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
 | Finish live session report | nested L2 session usage | L2 | 210777 | estimate | exited |
 | Finish paste helper edit | nested L2 session usage | L2 | 209028 | estimate | exited |
 | Finish plan action spacing | nested L2 session usage | L2 | 154015 | estimate | exited |
+| Finish plan image paste | nested L2 session usage | L2 | 205709 | estimate | exited |
 | Finish preview paste slash | nested L2 session usage | L2 | 213092 | estimate | exited |
+| Finish remote enqueue mkdir | nested L2 session usage | L2 | 134694 | estimate | exited |
+| Finish separate search rows | nested L2 session usage | L2 | 199547 | estimate | exited |
 | Finish settings inventory | nested L2 session usage | L2 | 208984 | estimate | exited |
 | Finish soft reminder spawn inject | nested L2 session usage | L2 | 181506 | estimate | exited |
 | Finish spawn hierarchy land | nested L2 session usage | L2 | 205422 | estimate | exited |
-| Finish stale prompt fix | nested L2 session usage | L2 | 190975 | estimate | exited |
+| Finish sqlite hooks, drop TECH.md | nested L2 session usage | L2 | 211008 | estimate | exited |
+| Finish stale prompt fix | nested L2 session usage | L2 | 133660 | estimate | exited |
 | Finish stale-prompt diagnosis | nested L2 session usage | L2 | 206036 | estimate | exited |
 | Finish the image paste land | nested L2 session usage | L2 | 214200 | estimate | exited |
 | Finish the uptime window store | nested L2 session usage | L2 | 203603 | estimate | exited |
@@ -1577,6 +1648,7 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
 | Fix handle_mouse_event E0599 | nested L2 session usage | L2 | 81897 | estimate | exited |
 | Fix hook compile errors | nested L2 session usage | L2 | 91962 | estimate | exited |
 | Fix image describe request fail | nested L2 session usage | L2 | 198548 | estimate | exited |
+| Fix install compile errors | nested L2 session usage | L2 | 94526 | estimate | exited |
 | Fix interject elapsed bound | nested L2 session usage | L2 | 131141 | estimate | exited |
 | Fix just install ripgrep | nested L2 session usage | L2 | 125135 | estimate | exited |
 | Fix last 2 nextest fails | nested L2 session usage | L2 | 175479 | estimate | exited |
@@ -1600,7 +1672,7 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
 | Fix rebuild prompt restore | nested L2 session usage | L2 | 92558 | estimate | exited |
 | Fix rebuild resume like disconnect | nested L2 session usage | L2 | 105264 | estimate | exited |
 | Fix remaining 6 nextest fails | nested L2 session usage | L2 | 187580 | estimate | exited |
-| Fix remote compile errors | nested L2 session usage | L2 | 94014 | estimate | exited |
+| Fix remote compile errors | nested L2 session usage | L2 | 90104 | estimate | exited |
 | Fix replay.rs format string | nested L2 session usage | L2 | 86714 | estimate | exited |
 | Fix resume 403 chrome | nested L2 session usage | L2 | 199325 | estimate | exited |
 | Fix review contract misses | nested L2 session usage | L2 | 205397 | estimate | exited |
@@ -1614,7 +1686,7 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
 | Fix stale prompt hang | nested L2 session usage | L2 | 166405 | estimate | exited |
 | Fix stale prompt replay | nested L2 session usage | L2 | 195599 | estimate | exited |
 | Fix stale prompts at start | nested L2 session usage | L2 | 192891 | estimate | exited |
-| Fix stale prompts still live | nested L2 session usage | L2 | 86682 | estimate | exited |
+| Fix stale prompts still live | nested L2 session usage | L2 | 82311 | estimate | exited |
 | Fix static HashMap compile error | nested L2 session usage | L2 | 82857 | estimate | exited |
 | Fix stdenv.hostPlatform isLinux | nested L2 session usage | L2 | 101821 | estimate | exited |
 | Fix stuck first-token retry | nested L2 session usage | L2 | 110959 | estimate | exited |
@@ -1625,16 +1697,17 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
 | Fix truncated output-limit chrome | nested L2 session usage | L2 | 102197 | estimate | exited |
 | Fix turn completion privacy | nested L2 session usage | L2 | 98260 | estimate | exited |
 | Fix uptime compile errors | nested L2 session usage | L2 | 106055 | estimate | exited |
-| Fix uptime compile errors | nested L2 session usage | L2 | 93668 | estimate | exited |
-| Fix uptime header smash | nested L2 session usage | L2 | 196529 | estimate | exited |
+| Fix uptime compile errors | nested L2 session usage | L2 | 93598 | estimate | exited |
+| Fix uptime header smash | nested L2 session usage | L2 | 96363 | estimate | exited |
 | Fix wait signature and report | nested L2 session usage | L2 | 192417 | estimate | exited |
 | Fix write preview not a git diff | nested L2 session usage | L2 | 178268 | estimate | exited |
 | Format mutations.rs rustfmt | nested L2 session usage | L2 | 79334 | estimate | exited |
 | Format one remaining Rust file | nested L2 session usage | L2 | 77025 | estimate | exited |
 | Format remote gate leftovers | nested L2 session usage | L2 | 115883 | estimate | exited |
 | Format the new rustfmt files | nested L2 session usage | L2 | 81614 | estimate | exited |
-| Format two load.rs wraps | nested L2 session usage | L2 | 80392 | estimate | exited |
+| Format two load.rs wraps | nested L2 session usage | L2 | 80183 | estimate | exited |
 | Fresh mill chip Ctrl+C | nested L2 session usage | L2 | 171886 | estimate | exited |
+| GUI remote enqueue command | nested L2 session usage | L2 | 195771 | estimate | exited |
 | GitHub Isolated Preview issue | nested L2 session usage | L2 | 107573 | estimate | exited |
 | Goal card clickable clear | nested L2 session usage | L2 | 199757 | estimate | exited |
 | Goal check-remote closeout | nested L2 session usage | L2 | 85842 | estimate | exited |
@@ -1642,17 +1715,18 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
 | Green Isolated Preview present tests | nested L2 session usage | L2 | 156883 | estimate | exited |
 | Green mill leftover Isolated Preview | nested L2 session usage | L2 | 152759 | estimate | exited |
 | Grep restore_pending_prompts sites | nested L2 session usage | L2 | 118807 | estimate | exited |
-| Grok OSS L1 harness AX | nested L2 session usage | L2 | 145305 | estimate | exited |
+| Grok OSS L1 harness AX | nested L2 session usage | L2 | 143087 | estimate | exited |
 | HAVE facts and GitHub | nested L2 session usage | L2 | 163538 | estimate | exited |
-| Hard plan view after revise | nested L2 session usage | L2 | 195193 | estimate | exited |
+| Hard plan view after revise | nested L2 session usage | L2 | 116806 | estimate | exited |
 | Harden 500 token-generation harness | nested L2 session usage | L2 | 200384 | estimate | exited |
 | Harden API 500 token generation | nested L2 session usage | L2 | 141584 | estimate | exited |
 | Harden approve and overlay tests | nested L2 session usage | L2 | 123706 | estimate | exited |
 | Harden approve-with-comment tests | nested L2 session usage | L2 | 202040 | estimate | exited |
-| Harden plan approve and overlay | nested L2 session usage | L2 | 199011 | estimate | exited |
+| Harden plan approve and overlay | nested L2 session usage | L2 | 99019 | estimate | exited |
 | Harden plan pane overlay contract | nested L2 session usage | L2 | 199414 | estimate | exited |
 | Harden the plan pane test | nested L2 session usage | L2 | 84536 | estimate | exited |
 | Hide plan pane after revise | nested L2 session usage | L2 | 197865 | estimate | exited |
+| Hook sqlite, one token figure | nested L2 session usage | L2 | 98801 | estimate | exited |
 | Identify Grok Build 1.0.4 delta | nested L2 session usage | L2 | 197437 | estimate | exited |
 | Idle mill plan vanish | nested L2 session usage | L2 | 107469 | estimate | exited |
 | If-let settings_e2e single-match | nested L2 session usage | L2 | 78827 | estimate | exited |
@@ -1709,6 +1783,7 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
 | Land live token counts | nested L2 session usage | L2 | 198451 | estimate | exited |
 | Land nextest leftovers from report | nested L2 session usage | L2 | 145897 | estimate | exited |
 | Land parent L2 follow-up | nested L2 session usage | L2 | 199866 | estimate | exited |
+| Land plan image paste | nested L2 session usage | L2 | 192509 | estimate | exited |
 | Land plan pane covers transcript | nested L2 session usage | L2 | 129110 | estimate | exited |
 | Land plan pane overlay contract | nested L2 session usage | L2 | 211641 | estimate | exited |
 | Land rebuild resume tests | nested L2 session usage | L2 | 202916 | estimate | exited |
@@ -1720,13 +1795,13 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
 | Land three 1.0.4 hook takes | nested L2 session usage | L2 | 169019 | estimate | exited |
 | Land three 1.0.4 takes | nested L2 session usage | L2 | 165402 | estimate | exited |
 | Land three missing 1.0.4 takes | nested L2 session usage | L2 | 196782 | estimate | exited |
-| Land three upstream takes | nested L2 session usage | L2 | 196119 | estimate | exited |
+| Land three upstream takes | nested L2 session usage | L2 | 96764 | estimate | exited |
 | Land totals and report | nested L2 session usage | L2 | 162630 | estimate | exited |
 | Land truncation tests and fix | nested L2 session usage | L2 | 201497 | estimate | exited |
 | Land two hook behaviors | nested L2 session usage | L2 | 197920 | estimate | exited |
 | Land two restore leftovers | nested L2 session usage | L2 | 198045 | estimate | exited |
 | List rustfmt Diff in files | nested L2 session usage | L2 | 111463 | estimate | exited |
-| Live token counts no double-count | nested L2 session usage | L2 | 197043 | estimate | exited |
+| Live token counts no double-count | nested L2 session usage | L2 | 130522 | estimate | exited |
 | Locate goal card files | nested L2 session usage | L2 | 146163 | estimate | exited |
 | Locate plan approval spacing | nested L2 session usage | L2 | 171650 | estimate | exited |
 | Locate token helper paths | nested L2 session usage | L2 | 84556 | estimate | exited |
@@ -1765,9 +1840,13 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
 | One check-remote after wrap | nested L2 session usage | L2 | 75928 | estimate | exited |
 | One check-remote then install | nested L2 session usage | L2 | 87251 | estimate | exited |
 | One check-remote wrap is done | nested L2 session usage | L2 | 92720 | estimate | exited |
-| One remote check then install | nested L2 session usage | L2 | 197745 | estimate | exited |
+| One remote check then install | nested L2 session usage | L2 | 103338 | estimate | exited |
 | Open or reuse the uptime issue | nested L2 session usage | L2 | 91435 | estimate | exited |
 | Pad plan approval actions | nested L2 session usage | L2 | 116712 | estimate | exited |
+| Paint one token figure | nested L2 session usage | L2 | 133999 | estimate | exited |
+| Paint one token figure | nested L2 session usage | L2 | 163603 | estimate | exited |
+| Paint one token figure per row | nested L2 session usage | L2 | 148226 | estimate | exited |
+| Paint search row controls | nested L2 session usage | L2 | 131477 | estimate | exited |
 | Paren SetBool dispatch match | nested L2 session usage | L2 | 81664 | estimate | exited |
 | Parent follow-up to live L2 | nested L2 session usage | L2 | 195541 | estimate | exited |
 | Parse subagents parent_follow_up config | nested L2 session usage | L2 | 187168 | estimate | exited |
@@ -1786,10 +1865,11 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
 | Pin grok-oss vs Grok Build versions | nested L2 session usage | L2 | 132114 | estimate | exited |
 | Pin jobs queue orchestration | nested L2 session usage | L2 | 86438 | estimate | exited |
 | Pin never ignore Operator | nested L2 session usage | L2 | 82013 | estimate | exited |
-| Pin no siblings say L3s | nested L2 session usage | L2 | 88654 | estimate | exited |
+| Pin no siblings say L3s | nested L2 session usage | L2 | 84931 | estimate | exited |
 | Pin one-version upstream merge | nested L2 session usage | L2 | 78719 | estimate | exited |
 | Pin then fix lock install | nested L2 session usage | L2 | 131658 | estimate | exited |
 | Plan Revise Exit unstick | nested L2 session usage | L2 | 199533 | estimate | exited |
+| Plan approval image paste | nested L2 session usage | L2 | 197230 | estimate | exited |
 | Plan stale-prompt TDD | nested L2 session usage | L2 | 158750 | estimate | exited |
 | Post-compact summary size cap | nested L2 session usage | L2 | 166690 | estimate | exited |
 | Preview paste leftover slash | nested L2 session usage | L2 | 199087 | estimate | exited |
@@ -1829,16 +1909,21 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
 | Rebuild resume nested work | nested L2 session usage | L2 | 77407 | estimate | exited |
 | Recheck review after footer sqlite | nested L2 session usage | L2 | 133058 | estimate | exited |
 | Reconcile settings e2e collision | nested L2 session usage | L2 | 114205 | estimate | exited |
-| Record live HTTP 500s | nested L2 session usage | L2 | 85982 | estimate | exited |
+| Record live HTTP 500s | nested L2 session usage | L2 | 82042 | estimate | exited |
+| Record nested spend in sqlite | nested L2 session usage | L2 | 195522 | estimate | exited |
+| Record nested spend in sqlite | nested L2 session usage | L2 | 194077 | estimate | exited |
 | Record uptime observations in Parquet | nested L2 session usage | L2 | 201078 | estimate | exited |
 | Red tests then fix soft plan | nested L2 session usage | L2 | 75657 | estimate | exited |
 | Reliability unit integration tests | nested L2 session usage | L2 | 264256 | estimate | exited |
+| Remote enqueue drop copy | nested L2 session usage | L2 | 199878 | estimate | exited |
+| Remote enqueue to surmount-1 | nested L2 session usage | L2 | 97592 | estimate | exited |
 | Remove bundled DuckDB feature | nested L2 session usage | L2 | 196675 | estimate | exited |
 | Remove in-tree bug dump | nested L2 session usage | L2 | 69726 | estimate | exited |
-| Remove needless probe return | nested L2 session usage | L2 | 199913 | estimate | exited |
+| Remove needless probe return | nested L2 session usage | L2 | 89869 | estimate | exited |
 | Remove not-fetched header chrome | nested L2 session usage | L2 | 191542 | estimate | exited |
-| Remove python3 from grok-oss | nested L2 session usage | L2 | 85454 | estimate | exited |
+| Remove python3 from grok-oss | nested L2 session usage | L2 | 85103 | estimate | exited |
 | Remove unused SubagentBackend import | nested L2 session usage | L2 | 95997 | estimate | exited |
+| Remove workspace TECH.md writer | nested L2 session usage | L2 | 129536 | estimate | exited |
 | Repetition stream stop | nested L2 session usage | L2 | 201861 | estimate | exited |
 | Replace DuckDB with Rust Parquet | nested L2 session usage | L2 | 107998 | estimate | exited |
 | Replace grok-oss python3 spawn | nested L2 session usage | L2 | 198162 | estimate | exited |
@@ -1852,37 +1937,37 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
 | Resume Approve paste-chip TDD | nested L2 session usage | L2 | 107402 | estimate | exited |
 | Resume D+H implement now | nested L2 session usage | L2 | 206082 | estimate | exited |
 | Resume DuckDB line 48 | nested L2 session usage | L2 | 188826 | estimate | exited |
-| Resume DuckDB shared library | nested L2 session usage | L2 | 127851 | estimate | exited |
+| Resume DuckDB shared library | nested L2 session usage | L2 | 126954 | estimate | exited |
 | Resume E+G implement now | nested L2 session usage | L2 | 216791 | estimate | exited |
-| Resume Isolated Preview L2 | nested L2 session usage | L2 | 197121 | estimate | exited |
+| Resume Isolated Preview L2 | nested L2 session usage | L2 | 163558 | estimate | exited |
 | Resume Isolated Preview Revise | nested L2 session usage | L2 | 115172 | estimate | exited |
-| Resume Isolated Preview no report | nested L2 session usage | L2 | 119534 | estimate | exited |
+| Resume Isolated Preview no report | nested L2 session usage | L2 | 118347 | estimate | exited |
 | Resume Isolated Preview report | nested L2 session usage | L2 | 184157 | estimate | exited |
 | Resume L1 harness AX | nested L2 session usage | L2 | 183902 | estimate | exited |
 | Resume L2 coordinator product land | nested L2 session usage | L2 | 216053 | estimate | exited |
-| Resume L2 image paste | nested L2 session usage | L2 | 139822 | estimate | exited |
-| Resume L2 spawn-only L3 | nested L2 session usage | L2 | 150465 | estimate | exited |
-| Resume L2 spawns only L3 | nested L2 session usage | L2 | 184371 | estimate | exited |
+| Resume L2 image paste | nested L2 session usage | L2 | 137009 | estimate | exited |
+| Resume L2 spawn-only L3 | nested L2 session usage | L2 | 148124 | estimate | exited |
+| Resume L2 spawns only L3 | nested L2 session usage | L2 | 181472 | estimate | exited |
 | Resume Revise product patch | nested L2 session usage | L2 | 200180 | estimate | exited |
-| Resume actual tokens fetch | nested L2 session usage | L2 | 130749 | estimate | exited |
-| Resume actual tokens same L2 | nested L2 session usage | L2 | 115915 | estimate | exited |
-| Resume composer copy same L2 | nested L2 session usage | L2 | 167715 | estimate | exited |
+| Resume actual tokens fetch | nested L2 session usage | L2 | 128313 | estimate | exited |
+| Resume actual tokens same L2 | nested L2 session usage | L2 | 113534 | estimate | exited |
+| Resume composer copy same L2 | nested L2 session usage | L2 | 167404 | estimate | exited |
 | Resume fix write edits | nested L2 session usage | L2 | 224356 | estimate | exited |
 | Resume inject soft reminders | nested L2 session usage | L2 | 217938 | estimate | exited |
 | Resume land token counts | nested L2 session usage | L2 | 206072 | estimate | exited |
-| Resume live token chrome | nested L2 session usage | L2 | 145668 | estimate | exited |
-| Resume no python3 same L2 | nested L2 session usage | L2 | 113048 | estimate | exited |
+| Resume live token chrome | nested L2 session usage | L2 | 145653 | estimate | exited |
+| Resume no python3 same L2 | nested L2 session usage | L2 | 112108 | estimate | exited |
 | Resume other prompt image paste | nested L2 session usage | L2 | 146820 | estimate | exited |
 | Resume parent L2 follow-up | nested L2 session usage | L2 | 212581 | estimate | exited |
-| Resume plan button spacing | nested L2 session usage | L2 | 138750 | estimate | exited |
-| Resume plan spacing stage 1 | nested L2 session usage | L2 | 146799 | estimate | exited |
+| Resume plan button spacing | nested L2 session usage | L2 | 136379 | estimate | exited |
+| Resume plan spacing stage 1 | nested L2 session usage | L2 | 145812 | estimate | exited |
 | Resume quality after other nix | nested L2 session usage | L2 | 146952 | estimate | exited |
 | Resume stale prompt leftovers | nested L2 session usage | L2 | 149254 | estimate | exited |
 | Resume stale prompts stage 1 | nested L2 session usage | L2 | 160799 | estimate | exited |
 | Resume stamp plan xhigh | nested L2 session usage | L2 | 212942 | estimate | exited |
 | Resume turbo wire after 500 | nested L2 session usage | L2 | 194980 | estimate | exited |
 | Resume wire turbo and reminders | nested L2 session usage | L2 | 165467 | estimate | exited |
-| Retry actual tokens fetch | nested L2 session usage | L2 | 90494 | estimate | exited |
+| Retry actual tokens fetch | nested L2 session usage | L2 | 88337 | estimate | exited |
 | Retry check-remote then install | nested L2 session usage | L2 | 107832 | estimate | exited |
 | Retry quality after const assert | nested L2 session usage | L2 | 140629 | estimate | exited |
 | Retry quality after pager compile | nested L2 session usage | L2 | 135915 | estimate | exited |
@@ -1907,8 +1992,12 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
 | Run just check-remote 1f | nested L2 session usage | L2 | 110377 | estimate | exited |
 | Run just check-remote 2 | nested L2 session usage | L2 | 116284 | estimate | exited |
 | Run just install | nested L2 session usage | L2 | 77310 | estimate | exited |
-| Run one remote quality gate | nested L2 session usage | L2 | 117196 | estimate | exited |
+| Run one remote gate then install | nested L2 session usage | L2 | 86400 | estimate | exited |
+| Run one remote gate then install | nested L2 session usage | L2 | 89679 | estimate | exited |
+| Run one remote quality gate | nested L2 session usage | L2 | 116511 | estimate | exited |
 | Run one remote quality gate | nested L2 session usage | L2 | 116717 | estimate | exited |
+| Run the two sqlite tests | nested L2 session usage | L2 | 214320 | estimate | exited |
+| Run two named sqlite tests | nested L2 session usage | L2 | 98647 | estimate | exited |
 | Runner one check-remote then install | nested L2 session usage | L2 | 76872 | estimate | exited |
 | Runner surmount-1 quality install | nested L2 session usage | L2 | 92031 | estimate | exited |
 | Rustfmt chat_completions Nix form | nested L2 session usage | L2 | 82457 | estimate | exited |
@@ -1917,8 +2006,10 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
 | Rustfmt pager nav.rs Nix form | nested L2 session usage | L2 | 83221 | estimate | exited |
 | Screenshot paste composer | nested L2 session usage | L2 | 166450 | estimate | exited |
 | Search GitHub follow-up issue | nested L2 session usage | L2 | 124068 | estimate | exited |
+| Search row, paste, uptime | nested L2 session usage | L2 | 182827 | estimate | exited |
 | Second just check-remote | nested L2 session usage | L2 | 83414 | estimate | exited |
 | Send Interject from shell child follow_up | nested L2 session usage | L2 | 172892 | estimate | exited |
+| Separate plan search row | nested L2 session usage | L2 | 196322 | estimate | exited |
 | SetBool from_typed_setter | nested L2 session usage | L2 | 174496 | estimate | exited |
 | Settings inventory turbo reminders | nested L2 session usage | L2 | 197461 | estimate | exited |
 | Ship not-fetched token rows | nested L2 session usage | L2 | 176439 | estimate | exited |
@@ -1929,16 +2020,19 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
 | Slices D E G Isolated Preview | nested L2 session usage | L2 | 81377 | estimate | exited |
 | Soft plan tests then product | nested L2 session usage | L2 | 86959 | estimate | exited |
 | Space plan approval actions | nested L2 session usage | L2 | 195745 | estimate | exited |
-| Space plan approval buttons | nested L2 session usage | L2 | 89967 | estimate | exited |
+| Space plan approval buttons | nested L2 session usage | L2 | 89902 | estimate | exited |
 | Spot-check landed plan contracts | nested L2 session usage | L2 | 139218 | estimate | exited |
-| Stale prompts at start L2 | nested L2 session usage | L2 | 199103 | estimate | exited |
+| Sqlite hook and one token row | nested L2 session usage | L2 | 137684 | estimate | exited |
+| Stale prompts at start L2 | nested L2 session usage | L2 | 146960 | estimate | exited |
 | Stamp F plan xhigh | nested L2 session usage | L2 | 198124 | estimate | exited |
 | Stamp xhigh on plan send | nested L2 session usage | L2 | 216571 | estimate | exited |
 | Stay until handle_mouse then gate | nested L2 session usage | L2 | 92504 | estimate | exited |
 | Stay until wrap then one gate | nested L2 session usage | L2 | 97692 | estimate | exited |
 | Stop linking libduckdb-sys | nested L2 session usage | L2 | 223745 | estimate | exited |
 | Stop product python3 execution | nested L2 session usage | L2 | 196916 | estimate | exited |
+| Stop writing TECH.md | nested L2 session usage | L2 | 96257 | estimate | exited |
 | Store current sample on usage | nested L2 session usage | L2 | 129017 | estimate | exited |
+| Store nested counts in sqlite | nested L2 session usage | L2 | 176112 | estimate | exited |
 | Stricter approve-comment asserts | nested L2 session usage | L2 | 195222 | estimate | exited |
 | Subagents L2 token totals | nested L2 session usage | L2 | 199285 | estimate | exited |
 | Synthesize task expiry notice | nested L2 session usage | L2 | 163108 | estimate | exited |
@@ -1952,12 +2046,12 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
 | Typed bool turbo setter | nested L2 session usage | L2 | 198656 | estimate | exited |
 | Unify image paste on prompt inputs | nested L2 session usage | L2 | 156506 | estimate | exited |
 | Unify prompt image paste | nested L2 session usage | L2 | 197754 | estimate | exited |
-| Unify prompt paste and arrows | nested L2 session usage | L2 | 106827 | estimate | exited |
+| Unify prompt paste and arrows | nested L2 session usage | L2 | 105988 | estimate | exited |
 | Unstick Isolated Preview resume | nested L2 session usage | L2 | 196993 | estimate | exited |
 | Unstick plan Revise and Exit | nested L2 session usage | L2 | 138765 | estimate | exited |
 | Unwedge parked Isolated Preview | nested L2 session usage | L2 | 112874 | estimate | exited |
 | Update harness wire report | nested L2 session usage | L2 | 204577 | estimate | exited |
-| Uptime window local only | nested L2 session usage | L2 | 181185 | estimate | exited |
+| Uptime window local only | nested L2 session usage | L2 | 178436 | estimate | exited |
 | Use dest encoder skip const | nested L2 session usage | L2 | 83695 | estimate | exited |
 | User-guide exclusive plan stay | nested L2 session usage | L2 | 129812 | estimate | exited |
 | User-guide grok-oss CLI | nested L2 session usage | L2 | 136389 | estimate | exited |
@@ -1966,6 +2060,7 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
 | Verify GitHub issue comment | nested L2 session usage | L2 | 84592 | estimate | exited |
 | Verify branch and read grep | nested L2 session usage | L2 | 85583 | estimate | exited |
 | Verify leftover follow-up land closed | nested L2 session usage | L2 | 157048 | estimate | exited |
+| Verify mkdir command then report | nested L2 session usage | L2 | 96911 | estimate | exited |
 | Verify parent follow-up product land | nested L2 session usage | L2 | 174934 | estimate | exited |
 | Verify reports on disk | nested L2 session usage | L2 | 180894 | estimate | exited |
 | Verify start restore land | nested L2 session usage | L2 | 131797 | estimate | exited |
@@ -1981,11 +2076,12 @@ Measured nested L2 tokens are session usage counts, not included SuperGrok perio
 | Wire TaskTool follow_up run | nested L2 session usage | L2 | 177147 | estimate | exited |
 | Wire composer copy button | nested L2 session usage | L2 | 83244 | estimate | exited |
 | Wire composer copy character count | nested L2 session usage | L2 | 195336 | estimate | exited |
-| Wire composer copy once | nested L2 session usage | L2 | 89289 | estimate | exited |
+| Wire composer copy once | nested L2 session usage | L2 | 87418 | estimate | exited |
 | Wire goal-clear no-interject | nested L2 session usage | L2 | 196106 | estimate | exited |
+| Wire gui enqueue command | nested L2 session usage | L2 | 92258 | estimate | exited |
 | Wire harness into task spawn | nested L2 session usage | L2 | 194502 | estimate | exited |
 | Wire live job row paint | nested L2 session usage | L2 | 191802 | estimate | exited |
-| Wire live job token paint | nested L2 session usage | L2 | 129911 | estimate | exited |
+| Wire live job token paint | nested L2 session usage | L2 | 129412 | estimate | exited |
 | Wire or drop unused commenting fn | nested L2 session usage | L2 | 106056 | estimate | exited |
 | Wire paste Event paths | nested L2 session usage | L2 | 178804 | estimate | exited |
 | Wire remaining prompt image paste | nested L2 session usage | L2 | 183776 | estimate | exited |
