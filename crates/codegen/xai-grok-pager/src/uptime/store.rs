@@ -11,6 +11,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use parquet::basic::{Compression, Encoding};
 use parquet::data_type::{BoolType, ByteArray, ByteArrayType, DataType, Int64Type};
 use parquet::file::properties::{WriterProperties, WriterVersion};
+#[cfg(test)]
 use parquet::file::reader::{FileReader, SerializedFileReader};
 use parquet::file::writer::{
     SerializedColumnWriter, SerializedFileWriter, SerializedRowGroupWriter,
@@ -128,24 +129,31 @@ pub fn uptime_dir(grok_home: &Path) -> PathBuf {
 /// Status-line text for this uptime directory. A missing shared library,
 /// or a failed open or aggregate, shows tracking off and invents no rows.
 pub fn text_beside_status(dir: &Path, now_unix_ms: i64) -> String {
-    if super::shared_library::installed_api().is_err() {
-        return super::window::format_tracking_off();
-    }
-    match UptimeStore::open(dir).and_then(|store| store.aggregate(now_unix_ms)) {
-        Ok(windows) => super::window::format_uptime_beside_status(&windows),
-        Err(_) => super::window::format_tracking_off(),
-    }
+    let text = if super::shared_library::installed_api().is_err() {
+        super::window::format_tracking_off()
+    } else {
+        match UptimeStore::open(dir).and_then(|store| store.aggregate(now_unix_ms)) {
+            Ok(windows) => super::window::format_uptime_beside_status(&windows),
+            Err(_) => super::window::format_tracking_off(),
+        }
+    };
+    append_extra_request_count(text)
 }
 
-/// Same status-line text when the caller already knows whether the API is present.
-pub fn text_beside_status_using(dir: &Path, now_unix_ms: i64, api_present: bool) -> String {
-    if !api_present {
-        return super::window::format_tracking_off();
+/// The status line reads the extra-request counter. Zero leaves the sentence
+/// unchanged. This does not send a request.
+fn append_extra_request_count(text: String) -> String {
+    let extra = super::extra_api_requests();
+    if extra == 0 {
+        text
+    } else {
+        format!("{text}; extra API requests {extra}")
     }
-    text_beside_status(dir, now_unix_ms)
 }
 
 /// Recognized announcement copy, if this text is one of the two banners.
+/// Unit-test builds do not record banners, so this helper is not compiled there.
+#[cfg(not(test))]
 pub fn outcome_from_banner_text(text: &str) -> Option<Outcome> {
     if text.contains(BANNER_MODEL_SERVING_ISSUES) || text.contains(BANNER_DATACENTER_INCIDENT) {
         Some(Outcome::AnnouncementBanner)
@@ -189,6 +197,7 @@ impl UptimeStore {
     /// When the installed DuckDB shared library is missing, returns this
     /// directory and does not create a piece.
     pub fn record(&self, observation: Observation) -> Result<PathBuf, StoreError> {
+        super::send_synthetic_probe();
         if super::shared_library::installed_api().is_err() {
             return Ok(self.dir.clone());
         }
@@ -215,6 +224,9 @@ impl UptimeStore {
     /// Read pieces and count the two windows. Does not write.
     pub fn aggregate(&self, now_unix_ms: i64) -> Result<WindowPair, StoreError> {
         let rows = self.read_rows()?;
+        if rows.is_empty() {
+            return Ok(WindowPair::empty());
+        }
         Ok(WindowPair {
             last_15_minutes: summarize(SHORT_WINDOW_WORDS, SHORT_WINDOW_MS, now_unix_ms, &rows),
             last_24_hours: summarize(LONG_WINDOW_WORDS, LONG_WINDOW_MS, now_unix_ms, &rows),
@@ -231,6 +243,8 @@ pub fn hide_announcement_keeps_row(store: &UptimeStore) -> bool {
 /// Record a finished model request, HTTP 500, timeout, or repeating-sentence stop.
 /// `token_count` is `None` when tokens were not fetched. This does not invent a number.
 /// When the installed DuckDB shared library is missing, returns Ok and writes no piece.
+/// The pager calls this from the grok-oss binary. Unit tests do not.
+#[cfg(not(test))]
 pub fn record_completed_observation(
     dir: &Path,
     local_session_id: &str,
@@ -260,6 +274,8 @@ pub fn record_completed_observation(
 /// Store a banner the product already showed, when the text is one of the two
 /// known sentences. Returns false and writes nothing for other text.
 /// When the installed DuckDB shared library is missing, returns false and writes no piece.
+/// The pager calls this from the grok-oss binary. Unit tests do not.
+#[cfg(not(test))]
 pub fn record_announcement_if_recognized(
     dir: &Path,
     local_session_id: &str,
@@ -287,13 +303,17 @@ pub fn record_announcement_if_recognized(
 }
 
 pub fn read_rows_through_duckdb(dir: &Path) -> Result<Vec<StoredRow>, StoreError> {
-    let paths = list_piece_paths(dir)?;
+    let paths = UptimeStore {
+        dir: dir.to_path_buf(),
+    }
+    .piece_paths()?;
     if paths.is_empty() {
         return Ok(Vec::new());
     }
     let api = match super::shared_library::installed_api() {
         Ok(api) => api,
-        Err(()) => return Ok(Vec::new()),
+        Err(super::shared_library::QueryFail::LibraryMissing) => return Ok(Vec::new()),
+        Err(super::shared_library::QueryFail::Unreadable(message)) => return Err(err(message)),
     };
     let list = parquet_list_sql(&paths);
     let sql = format!(
@@ -323,6 +343,8 @@ fn stored_from_raw(row: super::shared_library::RawRow) -> StoredRow {
 }
 
 /// Encodings recorded in one piece's column-chunk metadata.
+/// Only the uptime unit tests read this metadata.
+#[cfg(test)]
 pub fn column_encodings(path: &Path) -> Result<Vec<(String, Vec<Encoding>)>, StoreError> {
     let file = File::open(path).map_err(|e| err(format!("open piece: {e}")))?;
     let reader = SerializedFileReader::new(file).map_err(|e| err(format!("read piece: {e}")))?;
@@ -334,6 +356,23 @@ pub fn column_encodings(path: &Path) -> Result<Vec<(String, Vec<Encoding>)>, Sto
         }
     }
     Ok(found)
+}
+
+fn stored_outcome_is_success(outcome: &str) -> bool {
+    let parsed = if outcome == Outcome::ModelRequestSucceeded.as_str() {
+        Some(Outcome::ModelRequestSucceeded)
+    } else if outcome == Outcome::Http500.as_str() {
+        Some(Outcome::Http500)
+    } else if outcome == Outcome::Timeout.as_str() {
+        Some(Outcome::Timeout)
+    } else if outcome == Outcome::RepeatingSentenceStop.as_str() {
+        Some(Outcome::RepeatingSentenceStop)
+    } else if outcome == Outcome::AnnouncementBanner.as_str() {
+        Some(Outcome::AnnouncementBanner)
+    } else {
+        None
+    };
+    parsed.is_some_and(Outcome::is_success)
 }
 
 fn summarize(
@@ -349,7 +388,7 @@ fn summarize(
             continue;
         }
         stats.observation_count += 1;
-        if row.outcome == Outcome::ModelRequestSucceeded.as_str() {
+        if stored_outcome_is_success(&row.outcome) {
             stats.succeeded_count += 1;
         }
         if row.outcome == Outcome::Http500.as_str() {
@@ -432,9 +471,11 @@ fn list_piece_paths(dir: &Path) -> Result<Vec<PathBuf>, StoreError> {
     Ok(paths)
 }
 
-fn next_column(
-    row_group: &mut SerializedRowGroupWriter<File>,
-) -> Result<SerializedColumnWriter<'_>, StoreError> {
+// `SerializedColumnWriter` borrows this `&mut`. That borrow is shorter than
+// the row group's buffer lifetime, so the two lifetimes stay distinct.
+fn next_column<'a, 'b>(
+    row_group: &'a mut SerializedRowGroupWriter<'b, File>,
+) -> Result<SerializedColumnWriter<'a>, StoreError> {
     row_group
         .next_column()
         .map_err(|e| err(format!("parquet column: {e}")))?

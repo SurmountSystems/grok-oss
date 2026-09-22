@@ -29,7 +29,7 @@ pub(in crate::uptime) struct RawRow {
     pub banner_text: Option<String>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(in crate::uptime) enum QueryFail {
     LibraryMissing,
     Unreadable(String),
@@ -83,12 +83,13 @@ pub(in crate::uptime) fn default_library_names() -> &'static [&'static str] {
     &[]
 }
 
-pub(in crate::uptime) fn installed_api() -> Result<DuckApi, ()> {
-    static CELL: OnceLock<Result<DuckApi, ()>> = OnceLock::new();
-    *CELL.get_or_init(|| load_uncached(default_library_names()))
+pub(in crate::uptime) fn installed_api() -> Result<DuckApi, QueryFail> {
+    static CELL: OnceLock<Result<DuckApi, QueryFail>> = OnceLock::new();
+    CELL.get_or_init(|| load_uncached(default_library_names()))
+        .clone()
 }
 
-pub(in crate::uptime) fn load_uncached(names: &[&str]) -> Result<DuckApi, ()> {
+pub(in crate::uptime) fn load_uncached(names: &[&str]) -> Result<DuckApi, QueryFail> {
     #[cfg(target_pointer_width = "64")]
     {
         load_uncached_wide(names)
@@ -96,7 +97,7 @@ pub(in crate::uptime) fn load_uncached(names: &[&str]) -> Result<DuckApi, ()> {
     #[cfg(not(target_pointer_width = "64"))]
     {
         let _ = names;
-        Err(())
+        Err(QueryFail::LibraryMissing)
     }
 }
 
@@ -191,7 +192,7 @@ type ResultError = unsafe extern "C" fn(*mut DuckResult) -> *const c_char;
 type LibraryVersion = unsafe extern "C" fn() -> *const c_char;
 
 #[cfg(target_pointer_width = "64")]
-fn load_uncached_wide(names: &[&str]) -> Result<DuckApi, ()> {
+fn load_uncached_wide(names: &[&str]) -> Result<DuckApi, QueryFail> {
     for name in names {
         let Some(handle) = open_library(name) else {
             continue;
@@ -201,7 +202,9 @@ fn load_uncached_wide(names: &[&str]) -> Result<DuckApi, ()> {
             Ok(_) | Err(()) => close_library(handle),
         }
     }
-    Err(())
+    // No installed library opened, including libduckdb.so. Tracking stays off.
+    // grok-oss still starts.
+    Err(QueryFail::LibraryMissing)
 }
 
 #[cfg(target_pointer_width = "64")]
