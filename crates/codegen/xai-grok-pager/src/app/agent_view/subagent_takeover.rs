@@ -30,6 +30,10 @@ pub(super) struct InheritedOverlay<'a> {
     pub(super) stop_label: &'static str,
 }
 impl AgentView {
+    /// The open takeover, if any. `active_subagent` is the only signal.
+    pub(crate) fn visible_nested_overlay_sid(&self) -> Option<&str> {
+        self.active_subagent.as_deref()
+    }
     /// Open the fullscreen subagent view for `child_sid`, replaying child `updates.jsonl` when the child scrollback is still empty (or the child finished).
     pub(crate) fn open_subagent_fullscreen(&mut self, child_sid: String) {
         let Some(child) = self.subagent_views.get(&child_sid) else {
@@ -318,6 +322,8 @@ impl AgentView {
             && inner.height > 3
             && let Some(child_view) = self.subagent_views.get_mut(child_sid)
         {
+            // Local clocks on this nested window. The child keeps its role.
+            child_view.activity_row_clocks = true;
             let (cursor, post_flush) = child_view.draw(
                 inner,
                 buf,

@@ -1685,6 +1685,77 @@ mod background_and_tasks_shortcut_tests {
         }
     }
     #[test]
+    fn l2_coordinator_overlay_thought_row_shows_local_clock() {
+        use chrono::TimeZone;
+        use ratatui::buffer::Buffer;
+        use ratatui::layout::Rect;
+
+        crate::appearance::cache::set_show_thinking_blocks(true);
+        crate::appearance::cache::set_timestamps(true);
+        let mut parent = make_agent();
+        parent.session.session_id = Some("l1-sess".into());
+        let mut child = make_agent();
+        child.session.session_id = Some("l2-coord".into());
+        child
+            .scrollback
+            .push_block(crate::scrollback::block::RenderBlock::thinking_with_time(
+                "deep thoughts",
+                15_400,
+            ));
+        let created_at = chrono::Local
+            .with_ymd_and_hms(2026, 9, 24, 11, 12, 36)
+            .single()
+            .expect("2026-09-24 11:12:36 is a real local time");
+        {
+            let entry = child.scrollback.last_mut().expect("thought");
+            entry.created_at = Some(created_at);
+            entry.display_mode = crate::scrollback::types::DisplayMode::Collapsed;
+        }
+        parent.insert_test_child("l2-coord".into(), Box::new(child));
+        parent.active_subagent = Some("l2-coord".into());
+        let area = Rect::new(0, 0, 120, 40);
+        let mut buf = Buffer::empty(area);
+        let mut scratch = ScratchBuffer::new();
+        let _ = parent.draw(
+            area,
+            &mut buf,
+            &ActionRegistry::defaults(),
+            &mut scratch,
+            None,
+            false,
+            crate::app::agent_view::BannerSlotParams::none(),
+            false,
+            false,
+            &mut Vec::new(),
+            crate::app::agent_view::AppRenderParams::default(),
+        );
+        let mut text = String::new();
+        for y in 0..area.height {
+            for x in 0..area.width {
+                text.push_str(buf[(x, y)].symbol());
+            }
+            text.push('\n');
+        }
+        assert!(
+            text.contains("Thought for"),
+            "L2 overlay thought row must paint Thought for, got {text:?}"
+        );
+        assert!(
+            text.contains("11:12 AM"),
+            "nested L2 overlay must paint the local clock, got {text:?}"
+        );
+        let child = parent.subagent_views.get("l2-coord").expect("l2");
+        assert!(
+            matches!(child.role, super::super::AgentRole::Child(_)),
+            "the overlay keeps the tip child role"
+        );
+        assert!(
+            child.activity_row_clocks,
+            "nested overlay draw sets local clocks"
+        );
+    }
+
+    #[test]
     fn ctrl_g_toggles_tasks_and_never_demotes() {
         let registry = ActionRegistry::defaults();
         let mut agent = make_agent();

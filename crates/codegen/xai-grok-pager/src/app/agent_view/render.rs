@@ -1586,6 +1586,7 @@ impl AgentView {
                 .with_hovered_entry(self.hovered_entry)
                 .with_search_highlight(search_highlight)
                 .with_media_paths(self.media_link_paths.clone())
+                .with_activity_row_clocks(self.activity_row_clocks)
                 .render_with_scratch_and_selection_boundaries(
                     layout.scrollback_content,
                     buf,

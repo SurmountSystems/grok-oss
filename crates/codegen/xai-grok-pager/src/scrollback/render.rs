@@ -50,15 +50,23 @@ pub fn media_open_button_col(content_width: u16, is_video: bool) -> u16 {
 
 /// Width reserved for timestamp plus copy trailing inset on message blocks.
 ///
-/// Matches `EntryRenderer::timestamp_reserved()`.
-fn timestamp_reserved_for_block(block: &RenderBlock, appearance: &AppearanceConfig) -> u16 {
-    super::wrappers::message_right_chrome_reserve(
-        appearance,
-        matches!(
+/// Matches `EntryRenderer::timestamp_reserved()`. When `activity_row_clocks`
+/// is set, thinking, tool-call, and specialist rows reserve the same gutter
+/// so the clock does not cover the row text.
+fn timestamp_reserved_for_block(
+    block: &RenderBlock,
+    appearance: &AppearanceConfig,
+    activity_row_clocks: bool,
+) -> u16 {
+    let show_clock = matches!(
+        block,
+        RenderBlock::UserPrompt(_) | RenderBlock::AgentMessage(_) | RenderBlock::Btw(_)
+    ) || (activity_row_clocks
+        && matches!(
             block,
-            RenderBlock::UserPrompt(_) | RenderBlock::AgentMessage(_) | RenderBlock::Btw(_)
-        ),
-    )
+            RenderBlock::Thinking(_) | RenderBlock::ToolCall(_) | RenderBlock::Subagent(_)
+        ));
+    super::wrappers::message_right_chrome_reserve(appearance, show_clock)
 }
 
 /// Reusable scratch `Buffer` so clipped-entry rendering is greppable and not reallocated every frame.
@@ -216,6 +224,7 @@ pub fn render_scrolled_entries_with_scratch(
         media_paths,
         group_spans,
         cwd,
+        false,
     )
     .result
 }
@@ -239,6 +248,9 @@ pub(crate) fn render_scrolled_entries_with_selection_boundaries(
     media_paths: &[std::path::PathBuf],
     group_spans: Option<(&[GroupSpan], usize)>,
     cwd: Option<&std::path::Path>,
+    // Local clocks on thinking, tool-call, and specialist rows. The L2
+    // window passes true. Other callers pass false.
+    activity_row_clocks: bool,
 ) -> ScrollRenderResultWithBoundaries {
     if entries.is_empty() || viewport.width == 0 || viewport.height == 0 {
         return ScrollRenderResultWithBoundaries::default();
@@ -386,7 +398,8 @@ pub(crate) fn render_scrolled_entries_with_selection_boundaries(
             .with_group_header_count(entry_layout_info.group_header_count)
             .with_group_collapse_header(entry_layout_info.group_collapse_header)
             .with_group_header_label(header_label.as_ref())
-            .with_cwd(cwd);
+            .with_cwd(cwd)
+            .with_activity_row_clocks(activity_row_clocks);
         renderer.render(entry_content_area, buf);
 
         if dim_from_entry.is_some_and(|d| logical_idx >= d) {
@@ -411,8 +424,9 @@ pub(crate) fn render_scrolled_entries_with_selection_boundaries(
         }
 
         // Use cached output for selection model building. Must use the same effective width as the renderer (reduced by
-        // timestamp reservation for message blocks) to avoid cache thrashing.
-        let ts_reserved = timestamp_reserved_for_block(&entry.block, appearance);
+        // timestamp reservation for message blocks, and for thought, tool, and specialist rows when local clocks are on).
+        let ts_reserved =
+            timestamp_reserved_for_block(&entry.block, appearance, activity_row_clocks);
         let content_width = entry_row_layout.content_width().saturating_sub(ts_reserved);
         entry.ensure_cached(content_width, appearance, is_selected, cwd);
         let cached_rendered = entry.cached_rendered_output_ref();

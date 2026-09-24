@@ -9,10 +9,10 @@ use std::io::Read;
 use std::path::PathBuf;
 
 use crate::remote_console_key::{
-    set_remote_host_console_api_key, RemoteHostConsoleKeyError, SshDeployInstall, SshInstallSpec,
-    SshRequest, DEFAULT_GUEST_GROK_HOME,
+    DEFAULT_GUEST_GROK_HOME, RemoteHostConsoleKeyError, SshDeployInstall, SshInstallSpec,
+    SshRequest, set_remote_host_console_api_key,
 };
-use crate::{safe_json_from_running, SessionHost};
+use crate::{SessionHost, safe_json_from_running};
 
 const SET_KEY_CMD: &str = "set-remote-host-console-api-key";
 

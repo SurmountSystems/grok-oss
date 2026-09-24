@@ -1,5 +1,6 @@
-//! Text block that sits beside the status line. It only formats numbers
-//! the caller already read. It does not write Parquet and it does not call xAI.
+//! Text beside the status line, and the fuller `/uptime` reading.
+//! Both only format numbers the caller already read.
+//! Neither writes Parquet and neither calls xAI.
 
 /// Short window, in words, for the status-line block.
 pub const SHORT_WINDOW_WORDS: &str = "15 minutes";
@@ -63,20 +64,27 @@ pub fn format_tracking_off() -> String {
     "uptime tracking is off because DuckDB is not installed".to_string()
 }
 
-/// Small text block meant to sit beside the status line.
-/// Not a second dashboard and not a replacement for token chrome.
+/// One short segment for the status line.
+/// Empty windows are `15m none · 24h none`.
+/// Observations are `15m 0/6 ok · 24h 0/6 ok` (succeeded over observations).
+/// Not a sentence, and not a replacement for token chrome.
 pub fn format_uptime_beside_status(windows: &WindowPair) -> String {
     format!(
         "{} · {}",
-        format_one(&windows.last_15_minutes),
-        format_one(&windows.last_24_hours)
+        format_status_one(&windows.last_15_minutes),
+        format_status_one(&windows.last_24_hours)
     )
 }
 
-/// Reading `/uptime` prints. Same text as the beside-status block.
-/// Local windows only. This does not open a socket and it does not call xAI.
+/// Reading `/uptime` prints. Empty windows match the status line.
+/// When observations exist, this keeps the HTTP 500 count, measured latency,
+/// and a stored token sum. It does not open a socket and it does not call xAI.
 pub fn uptime_slash_output(windows: &WindowPair) -> String {
-    format_uptime_beside_status(windows)
+    format!(
+        "{} · {}",
+        format_slash_one(&windows.last_15_minutes),
+        format_slash_one(&windows.last_24_hours)
+    )
 }
 
 /// Status-line cap. Keeps SuperGrok period limits on the one-line bar.
@@ -114,11 +122,23 @@ fn short_window_label(duration_words: &str) -> &str {
     }
 }
 
-fn format_one(stats: &WindowStats) -> String {
-    let duration = stats.duration_words;
+fn format_status_one(stats: &WindowStats) -> String {
+    let label = short_window_label(stats.duration_words);
     if stats.observation_count == 0 {
-        return format!("{} none", short_window_label(duration));
+        format!("{label} none")
+    } else {
+        format!(
+            "{label} {}/{} ok",
+            stats.succeeded_count, stats.observation_count
+        )
     }
+}
+
+fn format_slash_one(stats: &WindowStats) -> String {
+    if stats.observation_count == 0 {
+        return format_status_one(stats);
+    }
+    let duration = stats.duration_words;
     let share = share_text(stats.succeeded_count, stats.observation_count);
     let latency = latency_text(stats);
     let mut line = format!(

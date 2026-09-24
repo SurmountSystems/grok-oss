@@ -1,9 +1,10 @@
 //! Context usage bar: shows token usage in the status bar.
 //!
-//! Default builds a `Line<'static>` of styled spans: `8.5K / 1.0M` (actual tokens, colored by usage percentage).
+//! Default builds a `Line<'static>` of styled spans: `8.5K / 1.0M` (one token count, colored by usage percentage).
 //! On hover, replaces the tokens with a progress bar and percentage, e.g. `█████ 42.0%`.
 //! The bar width is derived from the default string length so the hover line is the same total width; no layout shift on hover.
 //! The default is right-padded to a minimum of 6 columns so the width invariant holds even for degenerate inputs like `0 / 9`.
+//! Do not prefix a second down-arrow count.
 
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
@@ -135,9 +136,26 @@ const PCT_WIDTH: u16 = 5;
 /// Width of the gap between the progress bar and the percentage on hover.
 const BAR_PCT_GAP: u16 = 1;
 
-/// The default is right-padded to a minimum of 6 columns (`BAR_PCT_GAP + PCT_WIDTH`) so the
-/// invariant holds for every input. Without the pad, degenerate cases like `0 / 9` (5 chars) would
-/// mismatch the hovered line, which rounds up to 6 (zero-width bar, gap, percentage).
+/// Build the context usage bar as a `Line<'static>`.
+///
+/// Normal: `8.5K / 1.0M`. One count. Do not prefix a second `↓8.5k`.
+/// Colored by the same percentage gradient the hover bar uses so the
+/// urgency signal stays visible at a glance.
+/// Hovered: the chip becomes `█████ 42.0%`.
+///
+/// The bar width is derived from the default token string length so the
+/// hovered line has the same total width as the default (no layout shift on
+/// hover). The default is right-padded to a minimum of 6 columns
+/// (`BAR_PCT_GAP + PCT_WIDTH`) so the invariant holds for every input. Without
+/// the pad, degenerate cases like `0 / 9` (5 chars) would mismatch the hovered
+/// line, which always rounds up to 6 (zero-width bar, gap, and percentage).
+///
+/// Returns `None` if token data is unavailable.
+///
+/// Gateway light-frontend (`kind: "chat"`) sessions must not display Build
+/// or local sampler context usage. Call with `gateway_chat = true` to suppress
+/// the bar entirely (remote owns context; no mapped totals yet). Remote settings
+/// opt-in for chat entry can reuse the same gate later.
 pub fn context_bar_line(
     used_tokens: Option<u64>,
     total_tokens: Option<u64>,
@@ -206,7 +224,8 @@ pub fn footer_sampling_window(
         .map(|catalog| xai_grok_shell::util::config::session_sampling_window(catalog, is_nested))
 }
 
-/// L1 footer `↓270k` beside the session chip. Nested L2 and L3 are not added.
+/// Compact L1 count as `↓270k`. Nested L2 and L3 are not added.
+/// The context bar does not paint this prefix.
 ///
 /// `l1_live_tokens` is the L1 delta from
 /// [`crate::app::agent::GoalDisplayState::live_tokens_used`].
@@ -265,17 +284,14 @@ pub fn context_bar_line_with_windows(
     let breakpoints = default_breakpoints(theme);
     let color = crate::theme::quantize(blend_color(pct, &breakpoints));
     let mark = Style::default().fg(color).bg(theme.bg_base);
-    // Same L1 count as the chip. Callers do not pass nested L2 or L3 here.
-    let l1_down = footer_l1_down_arrow_compact(i64::try_from(used).unwrap_or(i64::MAX));
 
     if hovered {
-        // Bar fills the space the default tokens would occupy, minus the gap and the percentage
-        // `total_width >= min_width` by construction, so this subtraction is safe
+        // Bar fills the space the default tokens would occupy, minus the gap and the percentage.
+        // `total_width >= min_width` by construction, so this subtraction is safe.
+        // Hover width matches the one-count chip. No second down-arrow prefix.
         let bar_width = total_width - min_width;
         let mut spans =
             progress_bar_spans(bar_width, pct as f32 / 100.0, color, theme.bg_highlight);
-        spans.insert(0, Span::styled(" ", mark));
-        spans.insert(0, Span::styled(l1_down, mark));
         spans.push(Span::styled(" ", Style::default().bg(theme.bg_base)));
         spans.push(Span::styled(
             fmt_pct5(pct),
@@ -283,11 +299,7 @@ pub fn context_bar_line_with_windows(
         ));
         Some(Line::from(spans))
     } else {
-        Some(Line::from(vec![
-            Span::styled(l1_down, mark),
-            Span::styled(" ", mark),
-            Span::styled(token_str, mark),
-        ]))
+        Some(Line::from(Span::styled(token_str, mark)))
     }
 }
 
@@ -402,12 +414,12 @@ mod tests {
 
     #[test]
     fn test_context_bar_default_shows_compact_token_usage() {
-        // L1 down arrow beside `used / total`. The chip itself has no padding.
+        // One token count. The chip itself has no padding.
         let theme = Theme::default();
         let line = context_bar_line(Some(8_500), Some(1_000_000), false, &theme)
             .expect("token data provided");
         let text = line_text(&line);
-        assert_eq!(text, "↓8.5k 8.5K / 1.0M");
+        assert_eq!(text, "8.5K / 1.0M");
     }
 
     #[test]
@@ -569,7 +581,7 @@ mod tests {
             false,
         )
         .expect("token data");
-        assert_eq!(line_text(&line), "↓207k 207K / 500K");
+        assert_eq!(line_text(&line), "207K / 500K");
     }
 
     /// Parent context `239K / 500K` is the L1 window. Nested L2/L3 windows
@@ -640,12 +652,12 @@ mod tests {
         .expect("footer chip");
         let painted = line_text(&line);
         assert!(
-            painted.contains("↓270k"),
-            "must not sum L2 plus L3 twice, got {painted}"
+            !painted.contains('↓'),
+            "header shows the token count once, got {painted}"
         );
         assert!(
             painted.contains("270K / 500K"),
-            "session chip stays beside the L1 down arrow, got {painted}"
+            "session chip keeps the L1 used/total count, got {painted}"
         );
         assert!(
             !painted.contains("797") && !painted.contains("442"),
@@ -717,8 +729,8 @@ mod tests {
         .expect("token data");
         let text = line_text(&line);
         assert_eq!(
-            text, "↓201k 201K / 500K",
-            "L1 sampling 500k matches catalog, so the chip is unlabeled used/total beside the L1 down arrow: {text}"
+            text, "201K / 500K",
+            "L1 sampling 500k matches catalog, so the chip is unlabeled used/total: {text}"
         );
         assert!(
             !text.contains("200K"),

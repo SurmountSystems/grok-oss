@@ -1532,6 +1532,10 @@ pub struct AgentView {
     pub active_subagent: Option<String>,
     /// Root of its session, or a child mirrored under a parent's takeover; every child-specific gate derives from it.
     role: AgentRole,
+    /// Paint local clocks on thought, tool, and specialist rows.
+    /// Nested overlay draw sets this without replacing [`AgentRole`],
+    /// so an L2 coordinator keeps the tip child model.
+    pub(crate) activity_row_clocks: bool,
     /// Hit area for the [✗] close button in the subagent frame title bar.
     pub hit_subagent_frame_close: HitArea,
     /// Overlay title wait chrome that names a live L3. Click opens that

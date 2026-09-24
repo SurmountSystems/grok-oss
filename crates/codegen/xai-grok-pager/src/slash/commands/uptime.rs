@@ -20,7 +20,7 @@ fn live_uptime_slash_text() -> String {
     let home = xai_grok_config::grok_home();
     let dir = crate::uptime::uptime_dir(&home);
     let now_ms = chrono::Utc::now().timestamp_millis();
-    crate::uptime::text_beside_status(&dir, now_ms)
+    crate::uptime::uptime_slash_text(&dir, now_ms)
 }
 
 impl SlashCommand for UptimeCommand {

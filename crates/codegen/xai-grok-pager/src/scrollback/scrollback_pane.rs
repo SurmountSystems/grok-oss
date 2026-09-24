@@ -42,6 +42,9 @@ pub struct ScrollbackPane {
     /// Used to resolve the short relative paths the model prints (`images/1.jpg`) into clickable `file://` links.
     /// Empty disables relative-path resolution.
     pub media_paths: Vec<std::path::PathBuf>,
+    /// When true, thinking, tool-call, and specialist rows paint a local
+    /// clock. The open L2 window sets this. The main transcript does not.
+    pub activity_row_clocks: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -85,6 +88,7 @@ impl ScrollbackPane {
             hovered_entry: None,
             search_highlight: None,
             media_paths: Vec::new(),
+            activity_row_clocks: false,
         }
     }
 
@@ -118,6 +122,13 @@ impl ScrollbackPane {
     /// Set the transcript's generated-media paths used to resolve relative file-path link targets (`images/1.jpg`) into clickable `file://` links.
     pub fn with_media_paths(mut self, media_paths: Vec<std::path::PathBuf>) -> Self {
         self.media_paths = media_paths;
+        self
+    }
+
+    /// Local clocks on thinking, tool-call, and specialist rows.
+    /// Default is off so the main transcript stays unchanged.
+    pub fn with_activity_row_clocks(mut self, on: bool) -> Self {
+        self.activity_row_clocks = on;
         self
     }
 }
@@ -949,6 +960,7 @@ impl ScrollbackPane {
             &self.media_paths,
             Some((state.group_spans(), paint_range.start)),
             state.cwd(),
+            self.activity_row_clocks,
         );
         let result = rendered.result;
         let selection_boundaries = rendered.selection_boundaries;
