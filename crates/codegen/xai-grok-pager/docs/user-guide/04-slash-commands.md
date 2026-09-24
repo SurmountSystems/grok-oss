@@ -733,7 +733,7 @@ This setting doesn't touch `[features] telemetry`, `trace_upload`, or your exter
 
 The small window sits beside the status line. It is not a second dashboard, and it does not replace the token chrome.
 
-Over a short window and a longer window, it shows the share of observations that succeeded, the count of HTTP 500s, and latency that was actually measured. Estimates are labeled as estimates.
+Beside the status line, the 15 minute window and the 24 hour window share one short segment. With no observations that segment is `15m none · 24h none`. With observations it stays short, on the order of `15m 0/6 ok · 24h 0/6 ok` (succeeded observations over observations in that window). It does not grow into a sentence, so SuperGrok period limits stay on the bar.
 
 The window reads local observations through the installed DuckDB shared library. It does not call xAI to paint.
 
@@ -741,7 +741,7 @@ grok-oss loads that shared library when it reads the pieces. It does not link th
 
 Recorded observations are ones the product already made: a real model request, a real 500, a timeout, a repeating-sentence stop, a latency, a fetched token count, and an announcement banner the product already showed ("We're currently experiencing issues serving our models" or "A datacenter incident is affecting all Grok models").
 
-When every model observation in the window stored a token count, the window shows that sum. When a count is missing, the window omits the token clause. The product does not invent a token count.
+When every model observation in the window stored a token count, `/uptime` shows that sum. When a count is missing, `/uptime` omits the token clause. The product does not invent a token count. The status line does not carry that clause.
 
 Each row is the time, the outcome, the latency, the token count when one was stored, the model id, and which local session saw it.
 
@@ -759,7 +759,7 @@ The plan side panel still paints over the transcript behind it.
 
 ### `/uptime`
 
-Show the short local 15 minute and 24 hour reading. When those windows have no observations, the reading is `15m none · 24h none`. That is the same short reading that sits beside the status line.
+Show the local 15 minute and 24 hour reading. When those windows have no observations, the reading is `15m none · 24h none`. That is the same short reading that sits beside the status line. When observations exist, `/uptime` prints the full reading: the share that succeeded, the HTTP 500 count, latency that was actually measured, and a stored token sum when every model observation has one. The status line stays the short segment.
 
 `/uptime` does not open a network connection. It does not send a request to xAI. It reads observations already stored on this machine. If the installed DuckDB shared library is missing, tracking stays off, grok-oss still starts, and `/uptime` says uptime tracking is off because DuckDB is not installed.
 

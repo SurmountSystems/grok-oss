@@ -150,6 +150,7 @@ fn render_with_selection_boundaries(
         &[],
         None,
         None,
+        false,
     )
 }
 

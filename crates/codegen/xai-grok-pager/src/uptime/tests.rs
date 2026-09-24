@@ -99,13 +99,28 @@ fn operator_http_500_is_stored_and_counted_in_both_the_15_minute_and_24_hour_win
         "Operator: a 500 observation shows up in the 500 count for the last 24 hours"
     );
     let text = format_uptime_beside_status(&windows);
-    assert!(
-        text.contains("15 minutes") && text.contains("24 hours"),
-        "Operator: the window says 15 minutes and 24 hours: {text}"
+    assert_eq!(
+        text, "15m 0/1 ok · 24h 0/1 ok",
+        "Operator: observations beside the status line are a short segment, not a sentence: {text}"
     );
     assert!(
-        text.contains("HTTP 500 count 1"),
-        "Operator: the 500 count is in the window text: {text}"
+        !text.contains("last 15 minutes"),
+        "Operator: the status line does not start with last 15 minutes: {text}"
+    );
+    let before_requests = extra_api_requests();
+    let slash = crate::slash::commands::uptime::render_uptime_slash(Some(&windows));
+    assert!(
+        slash.contains("HTTP 500 count 1"),
+        "Operator: /uptime still carries the HTTP 500 count: {slash}"
+    );
+    assert_eq!(
+        extra_api_requests(),
+        before_requests,
+        "Operator: /uptime does not open a socket to xAI"
+    );
+    assert!(
+        !synthetic_probe_enabled(),
+        "Operator: /uptime does not send a request to xAI"
     );
     let rows = store.read_rows().expect("rows");
     assert!(
@@ -151,6 +166,15 @@ fn operator_not_fetched_token_count_is_stored_as_not_fetched_and_not_167k() {
     assert!(
         !text.contains("167.0k") && !text.contains("167000") && !text.contains("167"),
         "Operator: the window does not invent a token total: {text}"
+    );
+    let slash = crate::uptime::uptime_slash_output(&windows);
+    assert!(
+        !slash.contains("not fetched") && !slash.contains("tokens"),
+        "Operator: /uptime omits a missing token count: {slash}"
+    );
+    assert!(
+        !slash.contains("167.0k") && !slash.contains("167000") && !slash.contains("167"),
+        "Operator: /uptime does not invent a token total: {slash}"
     );
 }
 
@@ -322,9 +346,13 @@ fn operator_paint_format_does_not_write_a_new_piece() {
         before, after_format,
         "Operator: paint/format does not write a new piece: {text}"
     );
+    assert_eq!(
+        text, "15m 1/1 ok · 24h 1/1 ok",
+        "Operator: the formatted block stays a short segment: {text}"
+    );
     assert!(
-        text.contains("15 minutes") && text.contains("24 hours"),
-        "Operator: the formatted block still says 15 minutes and 24 hours: {text}"
+        !text.contains("last 15 minutes"),
+        "Operator: paint text does not use the long sentence: {text}"
     );
 }
 
@@ -338,21 +366,48 @@ fn operator_uptime_shows_a_real_token_sum_and_omits_the_clause_when_a_count_is_m
     missing.fetched_token_sum = None;
     let mut missing_day = missing.clone();
     missing_day.duration_words = super::window::LONG_WINDOW_WORDS;
-    let absent = format_uptime_beside_status(&super::window::WindowPair {
+    let absent_pair = super::window::WindowPair {
         last_15_minutes: missing,
         last_24_hours: missing_day,
-    });
+    };
+    let absent = format_uptime_beside_status(&absent_pair);
+    assert_eq!(
+        absent, "15m 0/6 ok · 24h 0/6 ok",
+        "Operator: observations beside the status line are short, like 15m 0/6 ok, not a sentence: {absent}"
+    );
+    assert!(
+        !absent.contains("last 15 minutes") && !absent.contains("no observations"),
+        "Operator: the status line does not use the long sentence: {absent}"
+    );
     assert!(
         !absent.contains("not fetched") && !absent.contains("tokens"),
         "Operator: no count omits the token clause: {absent}"
     );
     assert!(
-        absent.contains("15 minutes") && absent.contains("24 hours"),
-        "Operator: a window with observations still names 15 minutes and 24 hours: {absent}"
-    );
-    assert!(
         !absent.contains("167"),
         "Operator: do not invent 167.0k: {absent}"
+    );
+    let absent_slash = crate::uptime::uptime_slash_output(&absent_pair);
+    assert!(
+        absent_slash.contains("HTTP 500 count 0"),
+        "Operator: /uptime still carries the HTTP 500 count: {absent_slash}"
+    );
+    assert!(
+        !absent_slash.contains("not fetched") && !absent_slash.contains("tokens"),
+        "Operator: /uptime omits the token clause when a count is missing: {absent_slash}"
+    );
+    assert!(
+        !absent_slash.contains("167"),
+        "Operator: /uptime does not invent 167.0k: {absent_slash}"
+    );
+    assert_eq!(
+        extra_api_requests(),
+        0,
+        "Operator: /uptime does not open a socket to xAI"
+    );
+    assert!(
+        !synthetic_probe_enabled(),
+        "Operator: /uptime does not send a request to xAI"
     );
 
     let mut fetched = super::window::WindowStats::empty(super::window::SHORT_WINDOW_WORDS);
@@ -362,21 +417,27 @@ fn operator_uptime_shows_a_real_token_sum_and_omits_the_clause_when_a_count_is_m
     let mut fetched_day = fetched.clone();
     fetched_day.duration_words = super::window::LONG_WINDOW_WORDS;
     fetched_day.fetched_token_sum = Some(12);
-    let shown = format_uptime_beside_status(&super::window::WindowPair {
+    let shown_pair = super::window::WindowPair {
         last_15_minutes: fetched,
         last_24_hours: fetched_day,
-    });
+    };
+    let shown = format_uptime_beside_status(&shown_pair);
+    assert_eq!(
+        shown, "15m 1/1 ok · 24h 1/1 ok",
+        "Operator: a window with observations stays a short status segment: {shown}"
+    );
+    let shown_slash = crate::uptime::uptime_slash_output(&shown_pair);
     assert!(
-        shown.contains(", tokens 9") && shown.contains(", tokens 12"),
-        "Operator: a real token count is shown: {shown}"
+        shown_slash.contains(", tokens 9") && shown_slash.contains(", tokens 12"),
+        "Operator: a real token count is shown on /uptime: {shown_slash}"
     );
     assert!(
-        !shown.contains("not fetched") && !shown.contains("167.0k"),
-        "Operator: a real count is not a placeholder and not 167.0k: {shown}"
+        !shown_slash.contains("not fetched") && !shown_slash.contains("167.0k"),
+        "Operator: a real count is not a placeholder and not 167.0k: {shown_slash}"
     );
     assert!(
-        !shown.contains("estimate"),
-        "Operator: a stored token count is not relabeled as an estimate: {shown}"
+        !shown.contains("estimate") && !shown_slash.contains("estimate"),
+        "Operator: a stored token count is not relabeled as an estimate: {shown_slash}"
     );
 }
 
@@ -395,13 +456,22 @@ fn operator_fetched_token_count_is_shown_and_a_partial_window_omits_the_clause()
     store.record(also).expect("record also fetched");
     let windows = store.aggregate(NOW_UNIX_MS).expect("aggregate");
     let text = format_uptime_beside_status(&windows);
-    assert!(
-        text.contains(", tokens 12"),
-        "Operator: the window shows the sum of stored token counts: {text}"
+    assert_eq!(
+        text, "15m 2/2 ok · 24h 2/2 ok",
+        "Operator: observations beside the status line stay short: {text}"
     );
     assert!(
-        !text.contains("not fetched"),
-        "Operator: a real sum does not say not fetched: {text}"
+        !text.contains("last 15 minutes") && !text.contains("tokens"),
+        "Operator: the status line does not carry the token sentence: {text}"
+    );
+    let slash = crate::uptime::uptime_slash_output(&windows);
+    assert!(
+        slash.contains(", tokens 12"),
+        "Operator: /uptime shows the sum of stored token counts: {slash}"
+    );
+    assert!(
+        !slash.contains("not fetched"),
+        "Operator: a real sum does not say not fetched: {slash}"
     );
     assert_eq!(
         windows.last_15_minutes.fetched_token_sum,
@@ -415,14 +485,19 @@ fn operator_fetched_token_count_is_shown_and_a_partial_window_omits_the_clause()
     store.record(banner).expect("record banner");
     let with_banner = store.aggregate(NOW_UNIX_MS).expect("aggregate banner");
     let banner_text = format_uptime_beside_status(&with_banner);
+    let banner_slash = crate::uptime::uptime_slash_output(&with_banner);
     assert_eq!(
         with_banner.last_15_minutes.fetched_token_sum,
         Some(12),
         "Operator: an announcement banner does not erase a stored token sum"
     );
+    assert_eq!(
+        banner_text, "15m 2/3 ok · 24h 2/3 ok",
+        "Operator: a banner keeps the status segment short: {banner_text}"
+    );
     assert!(
-        banner_text.contains(", tokens 12") && !banner_text.contains("not fetched"),
-        "Operator: an announcement banner does not hide a stored token sum: {banner_text}"
+        banner_slash.contains(", tokens 12") && !banner_slash.contains("not fetched"),
+        "Operator: an announcement banner does not hide a stored token sum on /uptime: {banner_slash}"
     );
 
     let mut missing = observation(Outcome::Timeout, NOW_UNIX_MS);
@@ -431,20 +506,30 @@ fn operator_fetched_token_count_is_shown_and_a_partial_window_omits_the_clause()
     store.record(missing).expect("record missing");
     let mixed = store.aggregate(NOW_UNIX_MS).expect("aggregate mixed");
     let mixed_text = format_uptime_beside_status(&mixed);
+    let mixed_slash = crate::uptime::uptime_slash_output(&mixed);
     assert!(
         mixed.last_15_minutes.fetched_token_sum.is_none(),
         "Operator: one missing count means the window has no complete sum"
     );
+    assert_eq!(
+        mixed_text, "15m 2/4 ok · 24h 2/4 ok",
+        "Operator: a partial window stays a short status segment: {mixed_text}"
+    );
     assert!(
         !mixed_text.contains("not fetched") && !mixed_text.contains("tokens"),
-        "Operator: a partial window omits the token clause: {mixed_text}"
+        "Operator: a partial window omits the token clause on the status line: {mixed_text}"
+    );
+    assert!(
+        !mixed_slash.contains("not fetched") && !mixed_slash.contains("tokens"),
+        "Operator: a partial window omits the token clause on /uptime: {mixed_slash}"
     );
     assert!(
         !mixed_text.contains("167")
-            && !mixed_text.contains("tokens 12")
-            && !mixed_text.contains("tokens 9")
-            && !mixed_text.contains("tokens 3"),
-        "Operator: a partial window does not invent or show a partial sum: {mixed_text}"
+            && !mixed_slash.contains("167")
+            && !mixed_slash.contains("tokens 12")
+            && !mixed_slash.contains("tokens 9")
+            && !mixed_slash.contains("tokens 3"),
+        "Operator: a partial window does not invent or show a partial sum: {mixed_slash}"
     );
 }
 

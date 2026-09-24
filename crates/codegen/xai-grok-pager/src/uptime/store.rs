@@ -129,19 +129,33 @@ pub fn uptime_dir(grok_home: &Path) -> PathBuf {
 /// Status-line text for this uptime directory. A missing shared library,
 /// or a failed open or aggregate, shows tracking off and invents no rows.
 pub fn text_beside_status(dir: &Path, now_unix_ms: i64) -> String {
+    format_loaded_windows(dir, now_unix_ms, super::window::format_uptime_beside_status)
+}
+
+/// Full `/uptime` reading for this directory. Same local store as the status
+/// line. A missing shared library shows tracking off. This does not call xAI.
+pub fn uptime_slash_text(dir: &Path, now_unix_ms: i64) -> String {
+    format_loaded_windows(dir, now_unix_ms, super::window::uptime_slash_output)
+}
+
+fn format_loaded_windows(
+    dir: &Path,
+    now_unix_ms: i64,
+    format_windows: fn(&WindowPair) -> String,
+) -> String {
     let text = if super::shared_library::installed_api().is_err() {
         super::window::format_tracking_off()
     } else {
         match UptimeStore::open(dir).and_then(|store| store.aggregate(now_unix_ms)) {
-            Ok(windows) => super::window::uptime_slash_output(&windows),
+            Ok(windows) => format_windows(&windows),
             Err(_) => super::window::format_tracking_off(),
         }
     };
     append_extra_request_count(text)
 }
 
-/// The status line reads the extra-request counter. Zero leaves the sentence
-/// unchanged. This does not send a request.
+/// The status line and `/uptime` read the extra-request counter. Zero leaves
+/// the text unchanged. This does not send a request.
 fn append_extra_request_count(text: String) -> String {
     let extra = super::extra_api_requests();
     if extra == 0 {

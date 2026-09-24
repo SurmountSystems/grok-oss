@@ -121,6 +121,10 @@ pub struct EntryRenderer<'a> {
     dim_accent: bool,
     /// Session/worktree cwd (`AgentSession.cwd`) for Expanded tool paths.
     cwd: Option<&'a Path>,
+    /// When true, thinking, tool-call, and specialist rows use the same
+    /// short local clock as user and agent messages. The open L2 window
+    /// turns this on. The main transcript leaves it off.
+    activity_row_clocks: bool,
 }
 
 impl<'a> EntryRenderer<'a> {
@@ -141,11 +145,19 @@ impl<'a> EntryRenderer<'a> {
             hide_accent: false,
             dim_accent: false,
             cwd: None,
+            activity_row_clocks: false,
         }
     }
 
     pub fn with_cwd(mut self, cwd: Option<&'a Path>) -> Self {
         self.cwd = cwd;
+        self
+    }
+
+    /// Paint local clocks on thinking, tool-call, and specialist rows.
+    /// Default is off, which keeps the main transcript clock-free there.
+    pub fn with_activity_row_clocks(mut self, on: bool) -> Self {
+        self.activity_row_clocks = on;
         self
     }
 
@@ -433,13 +445,19 @@ impl<'a> EntryRenderer<'a> {
     /// Whether this entry should display a timestamp on the first content line.
     ///
     /// Timestamps are shown for user and agent messages (including /btw responses
-    /// and mid-turn interjections) but NOT for thinking traces, tool calls, or
-    /// system messages.
+    /// and mid-turn interjections). Thinking traces, tool calls, and specialist
+    /// rows get the same clock only when [`Self::activity_row_clocks`] is set
+    /// (the open L2 window). System messages stay clock-free. A missing
+    /// `created_at` still paints no clock.
     fn should_show_timestamp(&self) -> bool {
         matches!(
             self.entry.block,
             RenderBlock::UserPrompt(_) | RenderBlock::AgentMessage(_) | RenderBlock::Btw(_)
-        )
+        ) || (self.activity_row_clocks
+            && matches!(
+                self.entry.block,
+                RenderBlock::Thinking(_) | RenderBlock::ToolCall(_) | RenderBlock::Subagent(_)
+            ))
     }
 
     /// Width reserved on the right of content lines for timestamp plus
@@ -1723,6 +1741,90 @@ mod tests {
             }
             assert!(!found, "{name} should NOT show timestamp");
         }
+    }
+
+    /// L2 window rows keep their duration and also show the local clock
+    /// from `created_at`. The main transcript (flag off) does not.
+    #[test]
+    fn l2_window_thought_row_shows_local_clock_not_only_duration() {
+        use std::time::Duration;
+
+        use chrono::TimeZone;
+
+        use crate::scrollback::blocks::SubagentBlock;
+
+        crate::appearance::cache::set_show_thinking_blocks(true);
+        let theme = Theme::current();
+        let created_at = chrono::Local
+            .with_ymd_and_hms(2026, 9, 24, 11, 12, 36)
+            .single()
+            .expect("2026-09-24 11:12:36 is a real local time");
+        let clock = created_at.format("%-I:%M %p").to_string();
+        assert_eq!(clock, "11:12 AM");
+
+        let paint = |block: RenderBlock, clocks: bool| -> String {
+            let mut entry = ScrollbackEntry::new(block);
+            entry.created_at = Some(created_at);
+            if matches!(entry.block, RenderBlock::Thinking(_)) {
+                entry.display_mode = DisplayMode::Collapsed;
+            }
+            let renderer = EntryRenderer::new(&entry, &theme).with_activity_row_clocks(clocks);
+            let width: u16 = 80;
+            let height = renderer.desired_height(width);
+            assert!(height > 0, "row must paint");
+            let area = Rect::new(0, 0, width, height);
+            let mut buf = Buffer::empty(area);
+            renderer.render(area, &mut buf);
+            (0..height)
+                .map(|y| collect_row_symbols(&buf, y, 0, width))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
+        let thought = paint(
+            RenderBlock::thinking_with_time("deep thoughts", 15_400),
+            true,
+        );
+        assert!(
+            thought.contains("Thought for") || thought.contains("15.4s"),
+            "thought row must keep its duration, got {thought:?}"
+        );
+        assert!(
+            thought.contains("11:12 AM"),
+            "L2 thought row must show the local clock, not only the duration, got {thought:?}"
+        );
+
+        let tool = paint(RenderBlock::tool_call("Read", "src/main.rs", true), true);
+        assert!(
+            tool.contains("11:12 AM"),
+            "L2 tool row must show the local clock, got {tool:?}"
+        );
+
+        let specialist = paint(
+            RenderBlock::Subagent(SubagentBlock::completed(
+                "review",
+                "child-session",
+                Duration::from_secs(26 * 60 + 9),
+            )),
+            true,
+        );
+        assert!(
+            specialist.contains("26m9s"),
+            "specialist row must keep its duration, got {specialist:?}"
+        );
+        assert!(
+            specialist.contains("11:12 AM"),
+            "L2 specialist row must show the local clock, got {specialist:?}"
+        );
+
+        let thought_off = paint(
+            RenderBlock::thinking_with_time("deep thoughts", 15_400),
+            false,
+        );
+        assert!(
+            !thought_off.contains("AM") && !thought_off.contains("PM"),
+            "flag off must not stamp a clock on a thought row, got {thought_off:?}"
+        );
     }
 
     #[test]

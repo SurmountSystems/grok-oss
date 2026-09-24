@@ -2131,6 +2131,65 @@ mod background_and_tasks_shortcut_tests {
     }
 
     #[test]
+    fn l2_coordinator_overlay_thought_row_shows_local_clock() {
+        use chrono::TimeZone;
+
+        crate::appearance::cache::set_show_thinking_blocks(true);
+        crate::appearance::cache::set_timestamps(true);
+        let (mut parent, child_sid) = parent_with_overlay_child("l2-coord", 1);
+        let created_at = chrono::Local
+            .with_ymd_and_hms(2026, 9, 24, 11, 12, 36)
+            .single()
+            .expect("2026-09-24 11:12:36 is a real local time");
+        {
+            let child = parent.subagent_views.get_mut(&child_sid).expect("l2");
+            child
+                .scrollback
+                .push_block(crate::scrollback::block::RenderBlock::thinking_with_time(
+                    "deep thoughts",
+                    15_400,
+                ));
+            let entry = child.scrollback.last_mut().expect("thought");
+            entry.created_at = Some(created_at);
+            entry.display_mode = crate::scrollback::types::DisplayMode::Collapsed;
+        }
+        let area = Rect::new(0, 0, 120, 40);
+        let mut buf = Buffer::empty(area);
+        let mut scratch = ScratchBuffer::new();
+        let _ = parent.draw(
+            area,
+            &mut buf,
+            &ActionRegistry::defaults(),
+            &mut scratch,
+            None,
+            false,
+            crate::app::agent_view::BannerSlotParams::none(),
+            &BundleState::default(),
+            false,
+            false,
+            &mut Vec::new(),
+            crate::app::agent_view::AppRenderParams::default(),
+        );
+        let mut text = String::new();
+        for y in 0..area.height {
+            for x in 0..area.width {
+                text.push_str(buf[(x, y)].symbol());
+            }
+            text.push('\n');
+        }
+        assert!(
+            text.contains("Thought for"),
+            "L2 overlay thought row must paint Thought for, got {text:?}"
+        );
+        assert!(
+            text.contains("11:12 AM"),
+            "nested L2 overlay must paint the local clock even when is_subagent_view is false, got {text:?}"
+        );
+        let child = parent.subagent_views.get(&child_sid).expect("l2");
+        assert!(!child.is_subagent_view);
+    }
+
+    #[test]
     fn l2_overlay_key_forward_does_not_mark_observational() {
         let registry = ActionRegistry::defaults();
         let (mut parent, child_sid) = parent_with_overlay_child("l2-coord", 1);

@@ -868,6 +868,7 @@ impl AgentView {
             ) {
                 child_view.mark_as_subagent_view();
             }
+            child_view.activity_row_clocks = true;
             let (_, post_flush) = child_view.draw(
                 inner,
                 buf,
@@ -1947,6 +1948,7 @@ impl AgentView {
                 .with_hovered_entry(self.hovered_entry)
                 .with_search_highlight(search_highlight)
                 .with_media_paths(self.media_link_paths.clone())
+                .with_activity_row_clocks(self.is_subagent_view || self.activity_row_clocks)
                 .render_with_scratch_and_selection_boundaries(
                     layout.scrollback_content,
                     buf,

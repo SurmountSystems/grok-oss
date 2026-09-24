@@ -20,6 +20,7 @@ pub use store::{
 };
 pub use store::{
     Outcome, UptimeStore, hide_announcement_keeps_row, text_beside_status, uptime_dir,
+    uptime_slash_text,
 };
 #[cfg(not(test))]
 pub use store::{record_announcement_if_recognized, record_completed_observation};

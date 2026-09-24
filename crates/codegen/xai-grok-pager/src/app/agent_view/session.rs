@@ -1470,6 +1470,7 @@ impl AgentView {
             subagent_views: HashMap::new(),
             active_subagent: None,
             is_subagent_view: false,
+            activity_row_clocks: false,
             hit_subagent_frame_close: Default::default(),
             hit_overlay_nested_status: Default::default(),
             overlay_nested_status_child_sid: None,

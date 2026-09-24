@@ -1600,6 +1600,10 @@ pub struct AgentView {
     /// L2 coordinator overlays clear this so the operator can ask that L2.
     /// L3 specialist overlays keep it set so specialists stay unbothered.
     pub is_subagent_view: bool,
+    /// Paint local clocks on thought, tool, and specialist rows.
+    /// Nested overlay draw sets this even when `is_subagent_view` stays
+    /// false, so an L2 coordinator keeps its composer.
+    pub activity_row_clocks: bool,
     /// Hit area for the [✗] close button in the subagent frame title bar.
     pub hit_subagent_frame_close: HitArea,
     /// Overlay title wait chrome that names a live L3. Click opens that
