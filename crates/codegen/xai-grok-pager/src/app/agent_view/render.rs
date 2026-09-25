@@ -154,7 +154,6 @@ impl AgentView {
             PlanApprovalFocus::Commenting => {
                 vec![
                     HintItem::new(key!(Enter), "save comment"),
-                    HintItem::new(key!('y'), "copy"),
                     HintItem::new(key!(Esc), "cancel"),
                 ]
             }
@@ -363,7 +362,6 @@ impl AgentView {
         if self.is_casual_commenting() {
             return ShortcutsBarContent::Surface(vec![
                 HintItem::new(key!(Enter), "save comment"),
-                HintItem::new(key!('y'), "copy"),
                 HintItem::new(key!(Esc), "cancel"),
             ]);
         }

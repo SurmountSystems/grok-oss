@@ -1573,6 +1573,17 @@ impl AgentView {
             self.discard_in_progress_comment();
             return InputOutcome::Changed;
         }
+        // Empty Preview `y` copies the plan. A focused plan comment composer
+        // inserts `y`. A live Preview or Prompt draft inserts `y`.
+        let empty_prompt =
+            self.prompt.text().trim().is_empty() && !self.prompt.file_search_visible();
+        let preview_focused = self
+            .plan_approval_view
+            .as_ref()
+            .is_some_and(|pav| pav.focus == PlanApprovalFocus::Preview);
+        if crate::key!('y').matches(key) && !is_commenting && empty_prompt && preview_focused {
+            return self.copy_plan_full();
+        }
         if !is_commenting
             && key.code == KeyCode::Char('a')
             && key.modifiers.is_empty()

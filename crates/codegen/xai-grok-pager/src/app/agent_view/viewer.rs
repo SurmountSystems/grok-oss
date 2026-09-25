@@ -567,6 +567,19 @@ impl AgentView {
         }
         if key!('y').matches(key) {
             if self.is_plan_viewer() {
+                let commenting = self
+                    .plan_approval_view
+                    .as_ref()
+                    .is_some_and(|pav| pav.focus == PlanApprovalFocus::Commenting)
+                    || self.is_casual_commenting();
+                let empty =
+                    self.prompt.text().trim().is_empty() && !self.prompt.file_search_visible();
+                // Empty Preview `y` copies. A focused plan comment composer
+                // inserts `y`, including an empty draft. A live Prompt or
+                // Preview draft still types `y`.
+                if commenting || !empty {
+                    return self.handle_plan_feedback_key(key);
+                }
                 return self.copy_plan_full();
             }
             if let Some(ref viewer) = self.line_viewer {
