@@ -73,10 +73,9 @@ pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
         .await
     {
         SubagentFollowUpOutcome::Queued { .. } => queued_status(),
-        SubagentFollowUpOutcome::NotFound => Err(acp::Error::invalid_params().data(format!(
-            "session is gone: {}",
-            req.session_id
-        ))),
+        SubagentFollowUpOutcome::NotFound => {
+            Err(acp::Error::invalid_params().data(format!("session is gone: {}", req.session_id)))
+        }
         SubagentFollowUpOutcome::Disabled => {
             Err(interjection_not_sent("follow-up is off", &req.session_id))
         }

@@ -1953,7 +1953,8 @@ impl SessionActor {
             ResumeAction::LeaveAndImplement(text) => {
                 tracing::info!("[exit_plan_mode] resume: user approved plan");
                 self.leave_plan_mode_to_default();
-                self.start_resume_turn(text, PromptMode::Agent, completion_tx).await;
+                self.start_resume_turn(text, PromptMode::Agent, completion_tx)
+                    .await;
             }
         }
     }

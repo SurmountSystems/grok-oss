@@ -6308,10 +6308,7 @@ fn comment_intent_held_critique_rides_approve_with_review_lead() {
         "Approve after held Comment critique must not Interject; got {outcome:?}"
     );
     assert!(
-        matches!(
-            &outcome,
-            crate::app::app_view::InputOutcome::Changed
-        ),
+        matches!(&outcome, crate::app::app_view::InputOutcome::Changed),
         "Approve after held Comment critique keeps the comment and is not an interject; got {outcome:?}"
     );
     let agent = app.agents.get(&id).unwrap();
@@ -6335,9 +6332,7 @@ fn comment_intent_held_critique_rides_approve_with_review_lead() {
     let lead_at = hits[0]
         .find(crate::views::plan_approval_view::PLAN_APPROVED_REVIEW_COMMENTS_LEAD)
         .expect("review comments prefix");
-    let note_at = hits[0]
-        .find(PLAN_COMMENT_CRITIQUE)
-        .expect("held critique");
+    let note_at = hits[0].find(PLAN_COMMENT_CRITIQUE).expect("held critique");
     assert!(
         lead_at < note_at,
         "the review lead comes before the held critique; got {:?}",

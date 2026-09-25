@@ -4388,7 +4388,8 @@ mod plan_pane_letter_a_contract_tests {
             "for a live waiter the scrollback already has the wrapped comment; got {already:?}"
         );
         assert!(
-            already[0].contains(crate::views::plan_approval_view::PLAN_APPROVED_REVIEW_COMMENTS_LEAD),
+            already[0]
+                .contains(crate::views::plan_approval_view::PLAN_APPROVED_REVIEW_COMMENTS_LEAD),
             "the scrollback comment must include the review lead; got {:?}",
             already[0]
         );
