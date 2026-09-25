@@ -1156,6 +1156,69 @@ mod tests {
         );
     }
 
+    /// One interjection addressed to a live L2 is delivered to that L2 once.
+    /// It must not also enqueue a second copy on the L1 prompt queue, including
+    /// when the send later reports failure.
+    #[test]
+    fn interjection_to_a_live_l2_is_delivered_once_and_the_l1_queue_does_not_gain_a_copy() {
+        let body = "steer the live coordinator once";
+        let mut app = app_with_overlay("l2-coord", 1);
+        let id = AgentId(0);
+        let l1 = app.agents[&id]
+            .session
+            .session_id
+            .clone()
+            .expect("l1 session");
+        let effects = dispatch(Action::SendPrompt(body.into()), &mut app);
+        match effects.as_slice() {
+            [
+                Effect::SendInterject {
+                    session_id, text, ..
+                },
+            ] => {
+                assert_eq!(
+                    session_id.0.as_ref(),
+                    "l2-coord",
+                    "an interjection to a live L2 is delivered once to that L2, and the L1 queue does not gain a copy"
+                );
+                assert_ne!(
+                    session_id, &l1,
+                    "an interjection to a live L2 is delivered once to that L2, and the L1 queue does not gain a copy"
+                );
+                assert_eq!(text, body);
+            }
+            other => panic!(
+                "an interjection to a live L2 is delivered once to that L2, and the L1 queue does not gain a copy; got {other:?}"
+            ),
+        }
+        assert!(
+            !app.agents[&id]
+                .session
+                .pending_prompts
+                .iter()
+                .any(|prompt| prompt.text == body),
+            "an interjection to a live L2 is delivered once to that L2, and the L1 queue does not gain a copy"
+        );
+        let _ = dispatch(
+            Action::TaskComplete(crate::app::actions::TaskResult::InterjectFailed {
+                agent_id: id,
+                session_id: acp::SessionId::new("l2-coord"),
+                error: "couldn't send interjection: transport closed".into(),
+                text: body.into(),
+                blocks: None,
+            }),
+            &mut app,
+        );
+        assert!(
+            !app.agents[&id]
+                .session
+                .pending_prompts
+                .iter()
+                .any(|prompt| prompt.text == body),
+            "an interjection to a live L2 is delivered once to that L2, and the L1 queue does not gain a copy"
+        );
+    }
+
     /// Operator: "Also for some reason enter just duplicated my prompt just
     /// now lol". After Enter that interjects (or sends) the composer text, the
     /// composer must not still hold that same body. Soft interject is additive

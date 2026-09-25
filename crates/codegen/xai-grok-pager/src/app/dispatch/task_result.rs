@@ -1285,25 +1285,45 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
         }
         TaskResult::InterjectFailed {
             agent_id,
+            session_id,
             error,
             text,
             blocks,
         } => {
             if let Some(agent) = app.agents.get_mut(&agent_id) {
-                let id = agent.session.next_queue_id;
-                agent.session.next_queue_id += 1;
-                agent
+                let session_gone = error.to_ascii_lowercase().contains("session is gone");
+                let targets_own_session = agent
                     .session
-                    .pending_prompts
-                    .push_front(crate::app::agent::QueuedPrompt {
-                        wire_blocks: blocks,
-                        ..crate::app::agent::QueuedPrompt::plain(
-                            id,
-                            text,
-                            crate::app::agent::QueueEntryKind::Prompt,
+                    .session_id
+                    .as_ref()
+                    .is_some_and(|own| own == &session_id);
+                // Overlay open on that same L2 is the live address. A failure
+                // whose session is this agent's own session still requeues.
+                let overlay_is_that_l2 = agent.active_subagent.as_deref().is_some_and(|child| {
+                    child == session_id.0.as_ref()
+                        && crate::app::subagent::overlay_child_is_l2_coordinator(
+                            &agent.subagent_sessions,
+                            child,
                         )
-                    });
-                agent.show_toast(&format!("Interjection failed — requeued: {error}"));
+                });
+                if session_gone || !targets_own_session || overlay_is_that_l2 {
+                    agent.show_toast(&format!("Interjection failed: {error}"));
+                } else {
+                    let id = agent.session.next_queue_id;
+                    agent.session.next_queue_id += 1;
+                    agent
+                        .session
+                        .pending_prompts
+                        .push_front(crate::app::agent::QueuedPrompt {
+                            wire_blocks: blocks,
+                            ..crate::app::agent::QueuedPrompt::plain(
+                                id,
+                                text,
+                                crate::app::agent::QueueEntryKind::Prompt,
+                            )
+                        });
+                    agent.show_toast(&format!("Interjection failed — requeued: {error}"));
+                }
             }
             vec![]
         }

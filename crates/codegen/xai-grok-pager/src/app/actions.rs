@@ -2993,12 +2993,14 @@ pub enum TaskResult {
     InterjectQueued {
         agent_id: AgentId,
     },
-    /// Interjection send failed. Carries the payload so the dispatcher can
-    /// requeue it (mirrors the batch path's `failed_local` requeue) — the
-    /// queue row was already removed optimistically, so dropping the text
-    /// here would silently lose the user's message.
+    /// Interjection send failed. Requeue only when `session_id` is this
+    /// agent's own session, so a plain L1 interject is not dropped. An
+    /// interjection addressed to another session (a live L2) must not be
+    /// copied onto this agent's prompt queue. If `error` says the session
+    /// is gone, do not queue the text.
     InterjectFailed {
         agent_id: AgentId,
+        session_id: acp::SessionId,
         error: String,
         text: String,
         blocks: Option<Vec<agent_client_protocol::ContentBlock>>,

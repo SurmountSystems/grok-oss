@@ -3783,6 +3783,7 @@ pub(crate) fn execute(
                         Err(e) => {
                             TaskResult::InterjectFailed {
                                 agent_id,
+                                session_id,
                                 error: sanitize_user_error(
                                     &format!("couldn't send interjection: {e}"),
                                 ),
