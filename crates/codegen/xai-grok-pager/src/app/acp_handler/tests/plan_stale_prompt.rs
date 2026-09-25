@@ -2407,6 +2407,110 @@ fn plan_soft_identity_collision_does_not_reset_primary() {
     }
 }
 
+/// `/plan --soft` writes `{slug}-{crockford-ulid}.md` under the session cwd
+/// `docs/features/`. A second soft plan adds another file and leaves the
+/// first bytes alone. The pane title is that filename, not
+/// `secondary-plan.md`.
+#[test]
+#[serial_test::serial(GROK_HOME)]
+fn soft_plan_writes_a_new_feature_file_and_does_not_erase_the_older_one() {
+    let grok_home = tempfile::tempdir().expect("home");
+    let _home = xai_grok_test_support::EnvGuard::set("GROK_HOME", grok_home.path());
+    let proj = tempfile::tempdir().expect("cwd");
+    let cwd = proj.path().to_path_buf();
+    let sid = "plan-soft-feature-files";
+    let mut app = make_app_with_agent(sid);
+    bind_session_home(&mut app, cwd.clone(), sid);
+    let _ = crate::app::dispatch::dispatch(
+        Action::SendPrompt("/plan --soft add feature one".into()),
+        &mut app,
+    );
+    let features = cwd.join("docs").join("features");
+    let first = feature_markdown_names(&features);
+    assert_eq!(
+        first.len(),
+        1,
+        "first `/plan --soft` must write one feature file; got {first:?}"
+    );
+    let first_name = first[0].clone();
+    assert!(
+        feature_filename_ends_with_crockford_ulid(&first_name),
+        "feature filename must end with `-` plus 26 Crockford chars plus `.md`; got {first_name}"
+    );
+    let first_bytes = std::fs::read(features.join(&first_name)).expect("first feature bytes");
+    let _ = crate::app::dispatch::dispatch(
+        Action::SendPrompt("/plan --soft add feature two".into()),
+        &mut app,
+    );
+    let names = feature_markdown_names(&features);
+    assert_eq!(
+        names.len(),
+        2,
+        "second `/plan --soft` must add a file and leave the first; got {names:?}"
+    );
+    assert!(
+        names
+            .iter()
+            .all(|name| feature_filename_ends_with_crockford_ulid(name)),
+        "each feature filename must end with `-` plus 26 Crockford chars plus `.md`; got {names:?}"
+    );
+    assert!(
+        !names.iter().any(|name| name == "secondary-plan.md"),
+        "docs/features must not contain secondary-plan.md; got {names:?}"
+    );
+    let after = std::fs::read(features.join(&first_name)).expect("first feature still readable");
+    assert_eq!(
+        after, first_bytes,
+        "second `/plan --soft` must leave the first feature file bytes unchanged"
+    );
+    let newer: Vec<_> = names
+        .into_iter()
+        .filter(|name| name != &first_name)
+        .collect();
+    assert_eq!(newer.len(), 1, "exactly one new feature file; got {newer:?}");
+    let second_name = &newer[0];
+    let agent = app.agents.get(&AgentId(0)).unwrap();
+    assert_eq!(
+        agent
+            .line_viewer
+            .as_ref()
+            .and_then(|viewer| viewer.title_override.as_deref()),
+        Some(second_name.as_str()),
+        "title_override must be the second feature filename, not secondary-plan.md"
+    );
+    let painted = leftover_isolated_preview_body(&app)
+        .expect("second `/plan --soft` must paint Isolated Preview");
+    assert!(
+        painted.contains("add feature two"),
+        "painted body must contain the second feature text; got {painted:?}"
+    );
+}
+
+fn feature_markdown_names(dir: &std::path::Path) -> Vec<String> {
+    let mut names = std::fs::read_dir(dir)
+        .map(|entries| {
+            entries
+                .filter_map(|entry| entry.ok())
+                .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                .filter(|name| name.ends_with(".md"))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    names.sort();
+    names
+}
+
+fn feature_filename_ends_with_crockford_ulid(name: &str) -> bool {
+    const CROCKFORD: &[u8] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+    let Some(stem) = name.strip_suffix(".md") else {
+        return false;
+    };
+    let Some((slug, ulid)) = stem.rsplit_once('-') else {
+        return false;
+    };
+    !slug.is_empty() && ulid.len() == 26 && ulid.bytes().all(|byte| CROCKFORD.contains(&byte))
+}
+
 /// `exit_plan_mode` writing the primary must present that file. `/plan --soft`
 /// leftover placeholder must not stay as if it were leftover Isolated Preview
 /// leftover body paint. Operator: two tests were not enough.

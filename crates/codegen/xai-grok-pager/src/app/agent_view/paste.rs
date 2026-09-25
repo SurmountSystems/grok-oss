@@ -2441,15 +2441,23 @@ pub(super) mod paste_key_tests {
             .insert_image(pasted)
             .expect("plan composer must accept the chip");
         let outcome = agent.approve_plan();
+        assert!(
+            !matches!(
+                &outcome,
+                InputOutcome::Action(Action::Interject { .. })
+                    | InputOutcome::ActionThenForward(Action::Interject { .. })
+            ),
+            "Approve with a chip must not Interject; got {outcome:?}"
+        );
         match outcome {
-            InputOutcome::Action(Action::Interject { images, .. }) => {
+            InputOutcome::Action(Action::SendPromptNow { images, .. }) => {
                 assert_eq!(
                     images.len(),
                     1,
-                    "Approve must drain the plan composer chip, not images: vec![]"
+                    "Approve must drain the plan composer chip onto SendPromptNow, not images: vec![]"
                 );
             }
-            other => panic!("Approve with a chip must Interject the image; got {other:?}"),
+            other => panic!("idle Approve with a chip must SendPromptNow one image; got {other:?}"),
         }
     }
 

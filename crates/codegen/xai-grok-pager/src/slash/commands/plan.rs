@@ -235,7 +235,26 @@ impl AgentView {
         }
         self.view_plan_requested = true;
         self.snapshot_or_clear_plan_feedback_draft();
-        self.paint_secondary_isolated_preview(body);
+        let title = if let Some(text) = feature.as_deref() {
+            let mut slug = String::new();
+            for ch in text.chars() {
+                if ch.is_ascii_alphanumeric() {
+                    slug.push(ch.to_ascii_lowercase());
+                } else {
+                    slug.push('-');
+                }
+            }
+            let slug = slug.trim_matches('-');
+            let slug = if slug.is_empty() { "feature" } else { slug };
+            let filename = format!("{slug}-{}.md", xai_grok_tools::util::ulid::mint());
+            let dir = self.session.cwd.join("docs").join("features");
+            let _ = std::fs::create_dir_all(&dir);
+            let _ = std::fs::write(dir.join(&filename), text);
+            filename
+        } else {
+            xai_grok_shell::grok_oss::SECONDARY_PLAN_IDENTITY.to_string()
+        };
+        self.paint_secondary_isolated_preview(body, &title);
         if let Some(text) = feature {
             self.persist_session_plan_body_for(
                 xai_grok_shell::grok_oss::SECONDARY_PLAN_IDENTITY,

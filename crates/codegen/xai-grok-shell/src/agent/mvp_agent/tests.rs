@@ -1998,6 +1998,7 @@ async fn ensure_plugin_registry_lazily_populates_snapshot() {
         "repeat call must keep the populated snapshot"
     );
 }
+mod interject_live_session_tests;
 mod list_running_heal_tests;
 #[cfg(unix)]
 mod process_scope_reclaim;
@@ -2188,10 +2189,6 @@ async fn push_roster_activity_delta_broadcasts_overridden_activity() {
     assert_eq!(changed.upserted[0].activity, RosterActivity::Idle);
 }
 /// Extract the inner payload from an ExtResponse.
-#[expect(
-    dead_code,
-    reason = "unused in production; remove expect when wired or delete the item"
-)]
 fn parse_ext_body(resp: &acp::ExtResponse) -> serde_json::Value {
     let outer: serde_json::Value =
         serde_json::from_str(resp.0.get()).expect("ExtResponse must be valid JSON");

@@ -890,7 +890,7 @@ pub struct MvpAgent {
     >,
     /// Unified sender for all subagent coordinator events.
     /// LEADER-SAFE(shared): channel is multi-producer, coordinator drains.
-    subagent_event_tx: tokio::sync::mpsc::UnboundedSender<
+    pub(crate) subagent_event_tx: tokio::sync::mpsc::UnboundedSender<
         xai_grok_tools::implementations::grok_build::task::types::SubagentEvent,
     >,
     /// Receiver for subagent events. Taken once by `start_subagent_coordinator()`.

@@ -225,9 +225,9 @@ fn painted_search_row_and_painted_action_row_are_separate() {
             && lower.contains("exit")
     });
     let (search_y, search_text) =
-        search_row.expect(&format!("search row must paint search: duck\n{frame}"));
+        search_row.unwrap_or_else(|| panic!("search row must paint search: duck\n{frame}"));
     let (action_y, action_text) =
-        action_row.expect(&format!("action row must paint the four actions\n{frame}"));
+        action_row.unwrap_or_else(|| panic!("action row must paint the four actions\n{frame}"));
     assert_ne!(
         search_y, action_y,
         "search: duck must not share a line with approve | comment | revise | exit\nsearch: {search_text:?}\naction: {action_text:?}"

@@ -308,6 +308,14 @@ const PLAN_APPROVED_IMPLEMENT_MESSAGE: &str =
 ///
 /// Completes the parked `exit_plan_mode` call. Does not run the
 /// present-only `ExitPlanModeTool` body.
+fn approved_implement_text(feedback: Option<&str>) -> String {
+    let implement = PLAN_APPROVED_IMPLEMENT_MESSAGE;
+    match feedback.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(notes) => format!("{implement}\n\n{notes}"),
+        None => implement.to_string(),
+    }
+}
+
 fn mid_turn_approved_tool_result() -> &'static str {
     PLAN_APPROVED_IMPLEMENT_MESSAGE
 }
@@ -354,7 +362,7 @@ fn mid_turn_decision(
             completes_parked_tool: true,
         },
         PlanApprovalOutcome::Approved => MidTurnDecision {
-            message: mid_turn_approved_tool_result().to_string(),
+            message: approved_implement_text(feedback),
             leave_plan_mode: true,
             completes_parked_tool: true,
         },
@@ -394,7 +402,7 @@ fn questions_plan_message(feedback: &str) -> String {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum ResumeAction {
     /// Approved: leave plan mode and start an implement turn (Agent mode).
-    LeaveAndImplement,
+    LeaveAndImplement(String),
     /// Request changes: stay in plan mode and start a revise turn (Plan mode).
     StayAndRevise(String),
     /// Questions: stay in plan mode and start an answer-only turn (Plan mode).
@@ -404,7 +412,9 @@ pub(super) enum ResumeAction {
 }
 fn resume_action_for(outcome: PlanApprovalOutcome, feedback: Option<String>) -> ResumeAction {
     match outcome {
-        PlanApprovalOutcome::Approved => ResumeAction::LeaveAndImplement,
+        PlanApprovalOutcome::Approved => {
+            ResumeAction::LeaveAndImplement(approved_implement_text(feedback.as_deref()))
+        }
         PlanApprovalOutcome::Cancelled => {
             ResumeAction::StayAndRevise(revise_plan_message(feedback.as_deref().unwrap_or("")))
         }
@@ -1940,15 +1950,10 @@ impl SessionActor {
                 self.start_resume_turn(text, PromptMode::Plan, completion_tx)
                     .await;
             }
-            ResumeAction::LeaveAndImplement => {
+            ResumeAction::LeaveAndImplement(text) => {
                 tracing::info!("[exit_plan_mode] resume: user approved plan");
                 self.leave_plan_mode_to_default();
-                self.start_resume_turn(
-                    PLAN_APPROVED_IMPLEMENT_MESSAGE.to_string(),
-                    PromptMode::Agent,
-                    completion_tx,
-                )
-                .await;
+                self.start_resume_turn(text, PromptMode::Agent, completion_tx).await;
             }
         }
     }
@@ -3626,8 +3631,25 @@ mod plan_approval_helper_tests {
     fn resume_action_maps_each_outcome() {
         assert_eq!(
             resume_action_for(PlanApprovalOutcome::Approved, None),
-            ResumeAction::LeaveAndImplement
+            ResumeAction::LeaveAndImplement(super::PLAN_APPROVED_IMPLEMENT_MESSAGE.to_string())
         );
+        let notes = "Love it! Execute now.";
+        match resume_action_for(PlanApprovalOutcome::Approved, Some(notes.to_string())) {
+            ResumeAction::LeaveAndImplement(text) => {
+                let implement = super::PLAN_APPROVED_IMPLEMENT_MESSAGE;
+                assert_eq!(
+                    text,
+                    format!("{implement}\n\n{notes}"),
+                    "non-empty feedback must be appended after the implement sentence and not dropped"
+                );
+                assert!(
+                    text.starts_with(implement),
+                    "None feedback stays the implement sentence only; notes follow it"
+                );
+                assert!(text.contains(notes), "feedback must not be dropped: {text}");
+            }
+            other => panic!("expected LeaveAndImplement, got {other:?}"),
+        }
         assert_eq!(
             resume_action_for(PlanApprovalOutcome::Abandoned, Some("ignored".into())),
             ResumeAction::LeaveOnly

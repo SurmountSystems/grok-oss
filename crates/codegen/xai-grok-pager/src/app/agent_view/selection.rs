@@ -2678,6 +2678,22 @@ mod tests {
         assert_eq!(agent.scrollback.selected(), None, "no entry selected");
     }
 
+    /// A click in the gap above the prompt title must not clear the title.
+    /// There is no dismiss control on that border title.
+    #[test]
+    fn click_above_the_title_leaves_the_title_painted() {
+        let mut agent = agent_with_above_prompt_strip();
+        agent.display_name = Some("my session".into());
+        let reg = ActionRegistry::defaults();
+
+        let _ = agent.handle_input(&Event::Mouse(mouse_down(10, 17)), &reg);
+        let _ = agent.handle_input(&Event::Mouse(mouse_up(10, 17)), &reg);
+        assert_eq!(agent.display_name.as_deref(), Some("my session"));
+
+        agent.active_pane = AgentPane::Scrollback;
+        assert_eq!(agent.display_name.as_deref(), Some("my session"));
+    }
+
     /// A strip drag that never enters text selects nothing and leaves no
     /// state behind on release.
     #[test]

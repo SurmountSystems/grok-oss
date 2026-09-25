@@ -353,8 +353,10 @@ fn send_ext_response(
 }
 
 impl PlanApprovalViewState {
-    pub fn send_approved(&mut self) -> bool {
-        send_ext_response(&mut self.response_tx, "approved", None)
+    /// `feedback` is the review comment attached to this approval.
+    /// Approve with a typed comment passes that text. Empty Approve passes None.
+    pub fn send_approved(&mut self, feedback: Option<String>) -> bool {
+        send_ext_response(&mut self.response_tx, "approved", feedback)
     }
 
     pub fn send_abandoned(&mut self) -> bool {
@@ -464,7 +466,7 @@ mod tests {
     #[test]
     fn test_send_approved() {
         let (mut state, mut rx) = make_test_state();
-        assert!(state.send_approved());
+        assert!(state.send_approved(None));
         let resp = rx.try_recv().expect("should receive response");
         let raw = resp.expect("should be Ok");
         let parsed: serde_json::Value =
@@ -536,8 +538,8 @@ mod tests {
     #[test]
     fn test_double_send_returns_false() {
         let (mut state, _rx) = make_test_state();
-        assert!(state.send_approved());
-        assert!(!state.send_approved());
+        assert!(state.send_approved(None));
+        assert!(!state.send_approved(None));
         assert!(!state.send_cancelled(None));
     }
 

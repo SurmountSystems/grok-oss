@@ -685,21 +685,17 @@ impl AgentView {
     /// Isolated Preview for `/plan --soft`. Paints the secondary plan. Does
     /// not copy leftover primary `plan.md` and does not persist mill leftover
     /// as the primary body.
-    pub(crate) fn paint_secondary_isolated_preview(&mut self, body: String) {
+    pub(crate) fn paint_secondary_isolated_preview(&mut self, body: String, title: &str) {
         if let Some(pav) = self.plan_approval_view.as_mut() {
             pav.plan_content = Some(body.clone());
             pav.has_plan = true;
         }
         self.latest_inline_plan_content = Some(body.clone());
-        let Some(mut viewer) = LineViewerState::open_markdown_content(
-            xai_grok_shell::grok_oss::SECONDARY_PLAN_IDENTITY,
-            body,
-            None,
-        ) else {
+        let Some(mut viewer) = LineViewerState::open_markdown_content(title, body, None) else {
             return;
         };
         viewer.kind = crate::views::file_search::line_viewer::LineViewerKind::PlanPreview;
-        viewer.title_override = Some(xai_grok_shell::grok_oss::SECONDARY_PLAN_IDENTITY.to_string());
+        viewer.title_override = Some(title.to_string());
         viewer.fullscreen = crate::appearance::cache::load_plan_approval_force_modal();
         {
             let plan = viewer.plan_mut();
@@ -1158,12 +1154,10 @@ impl AgentView {
         } else {
             None
         };
-        let sent_acp = pav.send_approved();
+        let sent_acp = pav.send_approved(review_comments.clone());
         if consumed_composer {
-            // Notes were the live composer (including idle notes already in
-            // the Operator box at present). Drop that stash so close cannot
-            // restore it into a second prompt after Interject paints the
-            // wrapped review line.
+            // Notes were the live composer. Drop that stash so close cannot
+            // restore it into a second prompt.
             let _ = std::mem::take(&mut pav.stashed_prompt);
         }
         self.close_plan_review(pav, "build");
@@ -1171,20 +1165,29 @@ impl AgentView {
             self.prompt.set_text("");
             self.persist_unsent_composer_draft_now();
         }
-        // Idle (no waiter) must start implement. Images-only must not
-        // Interject empty text. Live-waiter Approve continues via the
-        // shell tool result; notes/images still Interject when present.
+        // Approve with comment is not `x.ai/interject` and not a queued prompt.
+        // A live waiter continues on the approval tool result. Idle has no
+        // waiter, so start the implement turn directly.
         let implement = crate::views::plan_approval_view::PLAN_APPROVED_IMPLEMENT_MESSAGE;
-        let text = match (review_comments, sent_acp) {
-            (Some(notes), false) => format!("{implement}\n\n{notes}"),
-            (Some(notes), true) => notes,
-            (None, false) => implement.to_string(),
-            (None, true) => String::new(),
+        let start_text = match review_comments.as_deref() {
+            Some(notes) => format!("{implement}\n\n{notes}"),
+            None => implement.to_string(),
         };
-        if !text.is_empty() || !images.is_empty() {
-            return InputOutcome::Action(Action::Interject { text, images });
+        if sent_acp {
+            if let Some(notes) = review_comments {
+                self.scrollback
+                    .push_block(crate::scrollback::RenderBlock::user_prompt(notes));
+            }
+            return InputOutcome::Changed;
         }
-        InputOutcome::Changed
+        self.finish_turn_idle_after_plan_park();
+        if images.is_empty() {
+            return InputOutcome::Action(Action::SendPrompt(start_text));
+        }
+        InputOutcome::Action(Action::SendPromptNow {
+            text: start_text,
+            images,
+        })
     }
     pub(crate) fn abandon_plan(&mut self) -> InputOutcome {
         let Some(mut pav) = self.plan_approval_view.take() else {
@@ -2889,8 +2892,8 @@ mod plan_approval_optimistic_mode_tests {
         let parsed: serde_json::Value = serde_json::from_str(raw.0.get()).unwrap();
         assert_eq!(parsed["outcome"], "approved");
     }
-    /// Approve with review comments takes the early `Action::Interject`
-    /// return — the optimistic clear must happen before that branch.
+    /// Approve with review comments is not an interject. The optimistic
+    /// clear still happens, and the comment stays on that approval.
     #[test]
     fn approve_plan_with_comments_still_clears_plan_mode() {
         let (mut agent, _rx) = agent_in_plan_mode_with_approval();
@@ -2903,10 +2906,18 @@ mod plan_approval_optimistic_mode_tests {
                 });
         }
         let outcome = agent.approve_plan();
-        assert!(matches!(
-            outcome,
-            InputOutcome::Action(Action::Interject { .. })
-        ));
+        assert!(
+            !matches!(
+                &outcome,
+                InputOutcome::Action(Action::Interject { .. })
+                    | InputOutcome::ActionThenForward(Action::Interject { .. })
+            ),
+            "Approve with comments must not Interject; got {outcome:?}"
+        );
+        assert!(
+            matches!(&outcome, InputOutcome::Changed),
+            "a live waiter continues on the approval; got {outcome:?}"
+        );
         assert_eq!(agent.plan_mode_pending, Some(false));
         assert!(!effective_plan_mode(&agent));
     }
@@ -3768,17 +3779,18 @@ mod plan_pane_letter_a_contract_tests {
             "bare Approve must close the review"
         );
         assert!(agent.plan_decision_resolved);
-        match outcome {
-            InputOutcome::Changed => {}
-            InputOutcome::Action(Action::Interject { ref text, .. }) => {
-                assert!(
-                    !text.contains("do not implement yet")
-                        && !text.contains("NOT operator approval"),
-                    "live-waiter Approve must not Interject present-only text: {text:?}"
-                );
-            }
-            other => panic!("bare live-waiter Approve must send approved; got {other:?}"),
-        }
+        assert!(
+            !matches!(
+                &outcome,
+                InputOutcome::Action(Action::Interject { .. })
+                    | InputOutcome::ActionThenForward(Action::Interject { .. })
+            ),
+            "bare live-waiter Approve must not Interject; got {outcome:?}"
+        );
+        assert!(
+            matches!(outcome, InputOutcome::Changed),
+            "bare live-waiter Approve must be Changed; ACP outcome stays approved; got {outcome:?}"
+        );
         let raw = rx
             .try_recv()
             .expect("bare Approve must send ACP approved")
@@ -3789,7 +3801,7 @@ mod plan_pane_letter_a_contract_tests {
 
     /// Local idle Approve (no live waiter) must start an implement turn.
     #[test]
-    fn bare_idle_approve_interjects_implement_message() {
+    fn bare_idle_approve_sends_implement_message() {
         let mut agent = make_agent();
         agent.plan_approval_view = Some(PlanApprovalViewState::for_idle_decision(Some(
             "# Plan\n\nIdle Approve".into(),
@@ -3800,8 +3812,16 @@ mod plan_pane_letter_a_contract_tests {
             "idle Approve must close the review"
         );
         assert!(agent.plan_decision_resolved);
+        assert!(
+            !matches!(
+                &outcome,
+                InputOutcome::Action(Action::Interject { .. })
+                    | InputOutcome::ActionThenForward(Action::Interject { .. })
+            ),
+            "idle Approve must not Interject; got {outcome:?}"
+        );
         match outcome {
-            InputOutcome::Action(Action::Interject { text, .. }) => {
+            InputOutcome::Action(Action::SendPrompt(text)) => {
                 assert!(
                     text.contains("The user approved the plan. Implement"),
                     "idle Approve must start implement: {text:?}"
@@ -3812,14 +3832,14 @@ mod plan_pane_letter_a_contract_tests {
                     "idle Approve must not use present-only text: {text:?}"
                 );
             }
-            other => panic!("idle Approve must Interject implement; got {other:?}"),
+            other => panic!("idle Approve must SendPrompt implement; got {other:?}"),
         }
     }
 
-    /// Idle Approve with images only is still a real Approve. Interject
+    /// Idle Approve with images only is still a real Approve. SendPromptNow
     /// must carry the implement sentence plus the chips, not empty text.
     #[test]
-    fn idle_approve_with_images_interjects_implement_message() {
+    fn idle_approve_with_images_sends_implement_message() {
         let mut agent = make_agent();
         agent.plan_approval_view = Some(PlanApprovalViewState::for_idle_decision(Some(
             "# Plan\n\nIdle Approve with image".into(),
@@ -3834,11 +3854,19 @@ mod plan_pane_letter_a_contract_tests {
             "idle Approve must close the review"
         );
         assert!(agent.plan_decision_resolved);
+        assert!(
+            !matches!(
+                &outcome,
+                InputOutcome::Action(Action::Interject { .. })
+                    | InputOutcome::ActionThenForward(Action::Interject { .. })
+            ),
+            "idle Approve with images must not Interject; got {outcome:?}"
+        );
         match outcome {
-            InputOutcome::Action(Action::Interject { text, images }) => {
+            InputOutcome::Action(Action::SendPromptNow { text, images }) => {
                 assert!(
                     text.contains("The user approved the plan. Implement"),
-                    "idle Approve with images must start implement, not empty Interject: {text:?}"
+                    "idle Approve with images must start implement: {text:?}"
                 );
                 assert!(
                     !text.contains("do not implement yet")
@@ -3852,7 +3880,9 @@ mod plan_pane_letter_a_contract_tests {
                 );
             }
             other => {
-                panic!("idle Approve with images must Interject implement + images; got {other:?}")
+                panic!(
+                    "idle Approve with images must SendPromptNow implement + one image; got {other:?}"
+                )
             }
         }
     }
@@ -3886,15 +3916,32 @@ mod plan_pane_letter_a_contract_tests {
             "comment plus Approve must decide the plan"
         );
         assert!(agent.plan_decision_resolved);
-        match outcome {
-            InputOutcome::Action(Action::Interject { text, .. }) => {
-                assert!(
-                    text.contains("approved the plan") && text.contains("use the existing helper"),
-                    "Approve with comment must send the notes; got {text:?}"
-                );
-            }
-            other => panic!("comment plus Approve must Interject notes; got {other:?}"),
-        }
+        assert!(
+            !matches!(
+                &outcome,
+                InputOutcome::Action(Action::Interject { .. })
+                    | InputOutcome::ActionThenForward(Action::Interject { .. })
+            ),
+            "comment plus Approve must not Interject; got {outcome:?}"
+        );
+        assert!(
+            matches!(&outcome, InputOutcome::Changed),
+            "comment plus Approve with a live waiter is Changed; got {outcome:?}"
+        );
+        let hits: Vec<String> = user_prompt_texts(&agent)
+            .into_iter()
+            .filter(|t| t.contains("use the existing helper"))
+            .collect();
+        assert_eq!(
+            hits.len(),
+            1,
+            "the scrollback user prompt must keep the typed notes; got {hits:?}"
+        );
+        assert!(
+            hits[0].contains(crate::views::plan_approval_view::PLAN_APPROVED_REVIEW_COMMENTS_LEAD),
+            "the scrollback user prompt must include the review lead; got {:?}",
+            hits[0]
+        );
     }
 
     fn click_plan_approve(agent: &mut AgentView) -> InputOutcome {
@@ -3976,22 +4023,49 @@ mod plan_pane_letter_a_contract_tests {
             agent.plan_approval_view.is_none(),
             "Approve must close the review"
         );
-        match &outcome {
-            InputOutcome::Action(Action::Interject { text, .. }) => {
-                assert!(
-                    text.contains(
-                        crate::views::plan_approval_view::PLAN_APPROVED_REVIEW_COMMENTS_LEAD,
-                    ) && text.contains("All this is sensible"),
-                    "Approve must wrap the comment once; got {text:?}"
-                );
-                let raw_only = text.trim() == notes.trim();
-                assert!(
-                    !raw_only,
-                    "the wrapped review line is the intended human copy, not a raw second prompt"
-                );
-            }
-            other => panic!("Approve with comments must Interject once; got {other:?}"),
-        }
+        assert!(
+            !matches!(
+                &outcome,
+                InputOutcome::Action(Action::Interject { .. })
+                    | InputOutcome::ActionThenForward(Action::Interject { .. })
+            ),
+            "Approve with comments must not Interject; got {outcome:?}"
+        );
+        assert!(
+            matches!(&outcome, InputOutcome::Changed),
+            "Approve with a live waiter is Changed, not an interject; got {outcome:?}"
+        );
+        let painted: Vec<String> = user_prompt_texts(&agent)
+            .into_iter()
+            .filter(|t| t.contains("All this is sensible"))
+            .collect();
+        assert_eq!(
+            painted.len(),
+            1,
+            "approve_plan must paint the wrapped comment; got {painted:?}"
+        );
+        assert!(
+            painted[0]
+                .contains(crate::views::plan_approval_view::PLAN_APPROVED_REVIEW_COMMENTS_LEAD),
+            "the one entry must be the wrapped review, got {:?}",
+            painted[0]
+        );
+        let lead_at = painted[0]
+            .find(crate::views::plan_approval_view::PLAN_APPROVED_REVIEW_COMMENTS_LEAD)
+            .expect("review comments prefix");
+        let sentence_at = painted[0]
+            .find("All this is sensible")
+            .expect("typed comment");
+        assert!(
+            lead_at < sentence_at,
+            "the review comments prefix must come before the typed comment; got {:?}",
+            painted[0]
+        );
+        assert_ne!(
+            painted[0].trim(),
+            notes.trim(),
+            "the wrapped review line is the intended human copy, not a raw second prompt"
+        );
         apply_approve_outcome_to_scrollback(&mut agent, outcome);
         assert!(
             agent.prompt.text().trim().is_empty(),
@@ -4025,9 +4099,9 @@ mod plan_pane_letter_a_contract_tests {
     /// Composer text while the plan panel is open, `Love it! Execute now.`,
     /// is kept. Approve exits plan mode. The approval record quotes
     /// `The user approved the plan with the following review comments:` and
-    /// then that sentence. That Interject is work starting. Empty Enter
-    /// never Approves. The composer is consumed. Exactly one scrollback hit
-    /// contains the full record.
+    /// then that sentence. That approval starts the work. It is not an
+    /// interject. Empty Enter never Approves. The composer is consumed.
+    /// Exactly one scrollback hit contains the full record.
     #[test]
     fn approve_keeps_love_it_execute_now_exits_plan_and_starts_work() {
         const SENTENCE: &str = "Love it! Execute now.";
@@ -4106,46 +4180,62 @@ mod plan_pane_letter_a_contract_tests {
             agent.plan_decision_resolved,
             "Approve with `Love it! Execute now.` resolves the plan so work can start"
         );
-        match &outcome {
-            InputOutcome::Action(Action::Interject { text, .. }) => {
-                assert!(
-                    text.contains(
-                        crate::views::plan_approval_view::PLAN_APPROVED_REVIEW_COMMENTS_LEAD,
-                    ) && text.contains("Love it! Execute now."),
-                    "Approve must wrap the comment once; got {text:?}"
-                );
-                assert!(
-                    text.contains(REVIEW_LEAD),
-                    "approval record must quote `The user approved the plan with the following review comments:`; got {text:?}"
-                );
-                assert!(
-                    text.contains(SENTENCE),
-                    "approval record must keep `Love it! Execute now.`; got {text:?}"
-                );
-                assert!(
-                    text.contains(&record),
-                    "plan exit record must quote `The user approved the plan with the following review comments:` and then `Love it! Execute now.`; got {text:?}"
-                );
-                let lead_at = text.find(REVIEW_LEAD).expect("review comments prefix");
-                let sentence_at = text.find(SENTENCE).expect("`Love it! Execute now.`");
-                assert!(
-                    lead_at < sentence_at,
-                    "the review comments prefix must come before `Love it! Execute now.`; got {text:?}"
-                );
-                assert!(
-                    !text.trim().is_empty()
-                        && !text.contains("do not implement yet")
-                        && !text.contains("NOT operator approval"),
-                    "the Interject must start work, not hold a present-only plan; got {text:?}"
-                );
-                let raw_only = text.trim() == notes.trim();
-                assert!(
-                    !raw_only,
-                    "the wrapped review line is the intended human copy, not a raw second prompt"
-                );
-            }
-            other => panic!("Approve with comments must Interject once; got {other:?}"),
-        }
+        assert!(
+            !matches!(
+                &outcome,
+                InputOutcome::Action(Action::Interject { .. })
+                    | InputOutcome::ActionThenForward(Action::Interject { .. })
+            ),
+            "Approve with `Love it! Execute now.` must not Interject; got {outcome:?}"
+        );
+        assert!(
+            matches!(&outcome, InputOutcome::Changed),
+            "Approve with a live waiter is Changed so work can start; got {outcome:?}"
+        );
+        let painted: Vec<String> = user_prompt_texts(&agent)
+            .into_iter()
+            .filter(|t| t.contains(SENTENCE))
+            .collect();
+        assert_eq!(
+            painted.len(),
+            1,
+            "approve_plan must paint one wrapped comment before any later scrollback helper; got {painted:?}"
+        );
+        let text = &painted[0];
+        assert!(
+            text.contains(crate::views::plan_approval_view::PLAN_APPROVED_REVIEW_COMMENTS_LEAD)
+                && text.contains("Love it! Execute now."),
+            "Approve must wrap the comment once; got {text:?}"
+        );
+        assert!(
+            text.contains(REVIEW_LEAD),
+            "approval record must quote `The user approved the plan with the following review comments:`; got {text:?}"
+        );
+        assert!(
+            text.contains(SENTENCE),
+            "approval record must keep `Love it! Execute now.`; got {text:?}"
+        );
+        assert!(
+            text.contains(&record),
+            "plan exit record must quote `The user approved the plan with the following review comments:` and then `Love it! Execute now.`; got {text:?}"
+        );
+        let lead_at = text.find(REVIEW_LEAD).expect("review comments prefix");
+        let sentence_at = text.find(SENTENCE).expect("`Love it! Execute now.`");
+        assert!(
+            lead_at < sentence_at,
+            "the review comments prefix must come before `Love it! Execute now.`; got {text:?}"
+        );
+        assert!(
+            !text.trim().is_empty()
+                && !text.contains("do not implement yet")
+                && !text.contains("NOT operator approval"),
+            "the approval must start work, not hold a present-only plan; got {text:?}"
+        );
+        assert_ne!(
+            text.trim(),
+            notes.trim(),
+            "the wrapped review line is the intended human copy, not a raw second prompt"
+        );
         apply_approve_outcome_to_scrollback(&mut agent, outcome);
         assert!(
             agent.prompt.text().trim().is_empty(),
@@ -4177,6 +4267,44 @@ mod plan_pane_letter_a_contract_tests {
                 InputOutcome::Changed
             ),
             "leftover composer must not be sendable after Approve"
+        );
+    }
+
+    /// Typing the review sentence while a plan is presented does not approve.
+    /// Enter on that presented plan is not an interject.
+    #[test]
+    fn typing_love_it_execute_now_without_approve_leaves_the_plan_presented() {
+        const SENTENCE: &str = "Love it! Execute now.";
+        let mut agent = make_agent();
+        install_parked_plan(&mut agent, "# Plan\n\nPresented");
+        agent.plan_mode_active = true;
+        agent.plan_mode_pending = None;
+        agent.show_plan_preview();
+        if let Some(ref mut pav) = agent.plan_approval_view {
+            pav.focus = PlanApprovalFocus::Preview;
+        }
+        agent.prompt.set_text("");
+        type_chars(&mut agent, SENTENCE);
+        assert_eq!(agent.prompt.text(), SENTENCE);
+        assert!(
+            agent.plan_approval_view.is_some() && agent.line_viewer.is_some(),
+            "typing the comment without clicking Approve must leave the plan presented"
+        );
+        assert!(
+            !agent.plan_decision_resolved,
+            "typing the comment without clicking Approve does not approve"
+        );
+        let enter = type_key(
+            &mut agent,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        );
+        assert!(
+            !matches!(
+                &enter,
+                InputOutcome::Action(Action::Interject { .. })
+                    | InputOutcome::ActionThenForward(Action::Interject { .. })
+            ),
+            "Enter on that presented plan must not be Action::Interject; got {enter:?}"
         );
     }
 
@@ -4238,17 +4366,41 @@ mod plan_pane_letter_a_contract_tests {
         outcome: InputOutcome,
         notes_needle: &str,
     ) {
-        match &outcome {
-            InputOutcome::Action(Action::Interject { text, .. }) => {
-                assert!(
-                    text.contains(
-                        crate::views::plan_approval_view::PLAN_APPROVED_REVIEW_COMMENTS_LEAD,
-                    ) && text.contains(notes_needle),
-                    "Approve must wrap the comment once; got {text:?}"
-                );
-            }
-            other => panic!("Approve with comments must Interject once; got {other:?}"),
-        }
+        assert!(
+            !matches!(
+                &outcome,
+                InputOutcome::Action(Action::Interject { .. })
+                    | InputOutcome::ActionThenForward(Action::Interject { .. })
+            ),
+            "Approve with comments must not Interject; got {outcome:?}"
+        );
+        assert!(
+            matches!(&outcome, InputOutcome::Changed),
+            "a live waiter already painted the wrapped comment; got {outcome:?}"
+        );
+        let already: Vec<String> = user_prompt_texts(agent)
+            .into_iter()
+            .filter(|t| t.contains(notes_needle))
+            .collect();
+        assert_eq!(
+            already.len(),
+            1,
+            "for a live waiter the scrollback already has the wrapped comment; got {already:?}"
+        );
+        assert!(
+            already[0].contains(crate::views::plan_approval_view::PLAN_APPROVED_REVIEW_COMMENTS_LEAD),
+            "the scrollback comment must include the review lead; got {:?}",
+            already[0]
+        );
+        let lead_at = already[0]
+            .find(crate::views::plan_approval_view::PLAN_APPROVED_REVIEW_COMMENTS_LEAD)
+            .expect("review comments prefix");
+        let notes_at = already[0].find(notes_needle).expect("typed notes");
+        assert!(
+            lead_at < notes_at,
+            "the review lead comes before the typed notes; got {:?}",
+            already[0]
+        );
         apply_approve_outcome_to_scrollback(agent, outcome);
         assert!(
             agent.prompt.text().trim().is_empty(),

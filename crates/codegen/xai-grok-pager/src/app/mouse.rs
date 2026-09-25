@@ -656,8 +656,7 @@ impl AgentView {
                         InputOutcome::Changed
                     }
                     Some(AgentPane::Prompt) => {
-                        let was_collapsed = self.active_pane != AgentPane::Prompt
-                            && self.scrollback.appearance().prompt.collapse_unfocused;
+                        let was_collapsed = false;
                         self.set_active_pane(AgentPane::Prompt, false);
                         self.btw_focused = false;
                         if !was_collapsed {

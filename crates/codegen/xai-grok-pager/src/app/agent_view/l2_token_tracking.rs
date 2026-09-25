@@ -116,17 +116,9 @@ impl PartialEq for NestedL2Tokens {
 impl Eq for NestedL2Tokens {}
 
 /// In-memory nested L2 token counts keyed by nested session id.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct L2TokenTracker {
     by_id: HashMap<String, NestedL2Tokens>,
-}
-
-impl Default for L2TokenTracker {
-    fn default() -> Self {
-        Self {
-            by_id: HashMap::new(),
-        }
-    }
 }
 
 fn process_tracker() -> &'static Mutex<L2TokenTracker> {

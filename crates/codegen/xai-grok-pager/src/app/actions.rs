@@ -158,8 +158,10 @@ pub enum Action {
     /// same effect outputs — but skips the `prompt.set_text("")` calls.
     SendSlashCommandPreservingDraft(String),
     /// Send a mid-turn interjection without canceling the running turn.
-    /// Reserved for text that answers the running turn (plan-review comments,
-    /// permission follow-ups); user send-now takes [`Self::SendPromptNow`].
+    /// Approve with a typed comment is not an interject. Mid-turn Enter that
+    /// is not on a presented plan still is. Revise and Clarify may still use
+    /// Interject. Permission follow-ups stay on Interject. User send-now
+    /// takes [`Self::SendPromptNow`].
     Interject {
         text: String,
         /// Pasted images riding along with the interjection. Empty for

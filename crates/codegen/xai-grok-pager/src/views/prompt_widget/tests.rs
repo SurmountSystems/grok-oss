@@ -4543,6 +4543,29 @@
         }
     }
 
+    /// A one-line prompt in a tall box fits. No scrollbar thumb.
+    #[test]
+    fn short_prompt_has_no_scrollbar() {
+        let _pin = crate::theme::cache::pin_theme();
+        let mut pw = PromptWidget::new();
+        pw.textarea.insert_str("hello");
+        let style = title_test_style(Some("my session"));
+        let area = Rect::new(0, 0, 40, 24);
+        let mut buf = Buffer::empty(area);
+        pw.draw(&mut buf, area, None, &style, None, None);
+
+        let ta = pw.textarea_area();
+        assert!(ta.height > 1, "tall buffer must leave room under one line");
+        let sb_x = ta.right().saturating_sub(1);
+        for y in ta.y..ta.bottom() {
+            let sym = buf.cell((sb_x, y)).expect("cell").symbol();
+            assert!(
+                sym == " ",
+                "short prompt must not paint a scrollbar thumb at ({sb_x}, {y}), got {sym:?}"
+            );
+        }
+    }
+
     /// Titled DOGE composer: the box stays `prompt_border_active` (white).
     /// Session title is context chrome (`theme.gray` / yellow). Prefix is
     /// Human green. The live screenshot's all-yellow frame is the hole.

@@ -5,6 +5,8 @@
 //! point in `process_conversation_turn`.
 
 use agent_client_protocol as acp;
+use xai_grok_tools::implementations::grok_build::task::backend::{ChannelBackend, SubagentBackend};
+use xai_grok_tools::implementations::grok_build::task::types::SubagentFollowUpOutcome;
 
 use super::{ExtResult, parse_params};
 use crate::agent::MvpAgent;
@@ -37,29 +39,60 @@ fn split_content(content: Vec<acp::ContentBlock>) -> (Option<String>, Vec<acp::I
     (text_override, crate::session::image_blocks(content))
 }
 
+fn queued_status() -> ExtResult {
+    super::to_ext_response(Ok(serde_json::json!({
+        "status": "queued",
+    })))
+}
+
+fn interjection_not_sent(detail: &str, session_id: &str) -> acp::Error {
+    acp::Error::invalid_params().data(format!("interjection not sent ({detail}): {session_id}"))
+}
+
 /// Handle `x.ai/interject` — queue a mid-turn user interjection.
 pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     let req: InterjectRequest = parse_params(args)?;
     let sid: acp::SessionId = req.session_id.clone().into();
+    let (text_override, images) = split_content(req.content);
+    let text = text_override.unwrap_or(req.text);
     // Load-race-tolerant: an interjection racing a reconnect-replayed
     // `session/load` (leader restart) waits for the load instead of failing.
-    let session_handle = agent.session_handle_waiting_for_load(&sid).await;
-    let Some(session) = session_handle else {
-        return Err(
-            acp::Error::invalid_params().data(format!("session not found: {}", req.session_id))
-        );
-    };
+    if let Some(session) = agent.session_handle_waiting_for_load(&sid).await {
+        let _ = session.cmd_tx.send(SessionCommand::Interject {
+            text,
+            id: req.interjection_id,
+            images,
+        });
+        return queued_status();
+    }
 
-    let (text_override, images) = split_content(req.content);
-    let _ = session.cmd_tx.send(SessionCommand::Interject {
-        text: text_override.unwrap_or(req.text),
-        id: req.interjection_id,
-        images,
-    });
-
-    super::to_ext_response(Ok(serde_json::json!({
-        "status": "queued",
-    })))
+    // A running nested session uses this same id and is not a resident handle.
+    // Follow-up already enqueues one Interject. Do not send a second one.
+    match ChannelBackend::new(agent.subagent_event_tx.clone())
+        .follow_up(&req.session_id, &text)
+        .await
+    {
+        SubagentFollowUpOutcome::Queued { .. } => queued_status(),
+        SubagentFollowUpOutcome::NotFound => Err(acp::Error::invalid_params().data(format!(
+            "session is gone: {}",
+            req.session_id
+        ))),
+        SubagentFollowUpOutcome::Disabled => {
+            Err(interjection_not_sent("follow-up is off", &req.session_id))
+        }
+        SubagentFollowUpOutcome::NotRunning => Err(interjection_not_sent(
+            "session is not running",
+            &req.session_id,
+        )),
+        SubagentFollowUpOutcome::LiveL3Unbothered => Err(interjection_not_sent(
+            "live specialist was not targeted",
+            &req.session_id,
+        )),
+        SubagentFollowUpOutcome::NotThisParentsL2 => Err(interjection_not_sent(
+            "not this nested session",
+            &req.session_id,
+        )),
+    }
 }
 
 #[cfg(test)]

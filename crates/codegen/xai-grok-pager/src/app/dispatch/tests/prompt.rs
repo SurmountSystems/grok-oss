@@ -6299,19 +6299,50 @@ fn comment_intent_held_critique_rides_approve_with_review_lead() {
     );
 
     let outcome = app.agents.get_mut(&id).unwrap().approve_plan();
-    match outcome {
-        crate::app::app_view::InputOutcome::Action(Action::Interject { text, .. }) => {
-            assert!(
-                text.contains(crate::views::plan_approval_view::PLAN_APPROVED_REVIEW_COMMENTS_LEAD),
-                "Approve must wrap with PLAN_APPROVED_REVIEW_COMMENTS_LEAD, got {text:?}"
-            );
-            assert!(
-                text.contains(PLAN_COMMENT_CRITIQUE),
-                "Approve must carry the held critique, got {text:?}"
-            );
-        }
-        other => panic!("Approve after held Comment critique must Interject; got {other:?}"),
-    }
+    assert!(
+        !matches!(
+            &outcome,
+            crate::app::app_view::InputOutcome::Action(Action::Interject { .. })
+                | crate::app::app_view::InputOutcome::ActionThenForward(Action::Interject { .. })
+        ),
+        "Approve after held Comment critique must not Interject; got {outcome:?}"
+    );
+    assert!(
+        matches!(
+            &outcome,
+            crate::app::app_view::InputOutcome::Changed
+        ),
+        "Approve after held Comment critique keeps the comment and is not an interject; got {outcome:?}"
+    );
+    let agent = app.agents.get(&id).unwrap();
+    let hits: Vec<String> = (0..agent.scrollback.len())
+        .filter_map(|i| match agent.scrollback.get(i).map(|e| &e.block) {
+            Some(crate::scrollback::RenderBlock::UserPrompt(block)) => Some(block.text.clone()),
+            _ => None,
+        })
+        .filter(|text| text.contains(PLAN_COMMENT_CRITIQUE))
+        .collect();
+    assert_eq!(
+        hits.len(),
+        1,
+        "the comment stays on the approval; got {hits:?}"
+    );
+    assert!(
+        hits[0].contains(crate::views::plan_approval_view::PLAN_APPROVED_REVIEW_COMMENTS_LEAD),
+        "Approve must wrap with PLAN_APPROVED_REVIEW_COMMENTS_LEAD, got {:?}",
+        hits[0]
+    );
+    let lead_at = hits[0]
+        .find(crate::views::plan_approval_view::PLAN_APPROVED_REVIEW_COMMENTS_LEAD)
+        .expect("review comments prefix");
+    let note_at = hits[0]
+        .find(PLAN_COMMENT_CRITIQUE)
+        .expect("held critique");
+    assert!(
+        lead_at < note_at,
+        "the review lead comes before the held critique; got {:?}",
+        hits[0]
+    );
     assert!(
         app.agents.get(&id).unwrap().plan_approval_view.is_none(),
         "Approve must decide the parked plan"
