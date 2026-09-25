@@ -50,6 +50,34 @@ pub const PLAN_FEEDBACK_QUEUE_TOAST: &str =
 /// Human scrollback line when decisive Revise unparks with no freeform notes.
 pub const PLAN_REVISE_HUMAN_LINE: &str = "Revise the plan";
 
+/// Short status that used to paint while a plan was parked and the side
+/// panel was shut. Do not return this while the composer is Enter:send.
+pub const PLAN_READY_STATUS: &str = "Plan ready";
+
+/// Synthetic tool_call_id for local idle decision park (no shell reverse-request).
+pub const IDLE_PLAN_DECISION_TOOL_CALL_ID: &str = "local-idle-plan-decision";
+
+/// Model-facing text after a real plan-panel Approve with no live waiter.
+/// Mid-turn Approve uses the same sentence in the shell tool result.
+pub const PLAN_APPROVED_IMPLEMENT_MESSAGE: &str =
+    "The user approved the plan. Implement the plan in plan.md.";
+
+/// Lead-in when Approve sends typed review comments with the implement turn.
+pub const PLAN_APPROVED_REVIEW_COMMENTS_LEAD: &str =
+    "The user approved the plan with the following review comments:";
+
+/// Isolated Preview body for `/plan --soft` before `exit_plan_mode` writes
+/// the secondary plan. Must be non-empty after trim. Must not copy leftover
+/// primary `plan.md`.
+pub const SECONDARY_PLAN_PLACEHOLDER: &str = "\
+# Secondary plan
+
+Soft planning. This Isolated Preview is a secondary plan. It does not reset the primary session plan.md.
+
+- Empty Enter never Approves
+- Comment then Approve works after exit_plan_mode writes this secondary plan
+";
+
 /// Isolated Preview body while a plan-update turn is rewriting `plan.md`.
 pub fn isolated_preview_rewrite_wait_markdown(operator_prompt: &str) -> String {
     let quoted = operator_prompt
@@ -220,11 +248,16 @@ impl PlanApprovalViewState {
             stashed_prompt,
             origin: ReviewOrigin::InTurn(Some(response_tx)),
             focus: PlanApprovalFocus::Preview,
+            prompt_intent: PlanPromptIntent::Revise,
             comments: Vec::new(),
             next_comment_id: 0,
             editing_comment_id: None,
             commenting_range: None,
             stashed_feedback_prompt: None,
+            feedback_draft: None,
+            comment_held_from_enter: false,
+            keep_draft_is_next_operator_turn: false,
+            is_local_idle_decision: false,
         }
     }
 
@@ -270,7 +303,7 @@ impl PlanApprovalViewState {
             plan_content,
             source: PlanReviewSource::FileBacked,
             stashed_prompt: StashedPrompt::default(),
-            response_tx: None,
+            origin: ReviewOrigin::AfterTurn,
             focus: PlanApprovalFocus::Preview,
             prompt_intent: PlanPromptIntent::Revise,
             comments: Vec::new(),
@@ -358,6 +391,11 @@ impl PlanApprovalViewState {
         matches!(self.origin, ReviewOrigin::InTurn(_))
     }
 
+    /// Live `exit_plan_mode` waiter. Taken responses and after-turn reviews are not live.
+    pub fn has_live_ext_waiter(&self) -> bool {
+        matches!(self.origin, ReviewOrigin::InTurn(Some(_)))
+    }
+
     fn take_response_tx(
         &mut self,
     ) -> Option<tokio::sync::oneshot::Sender<AcpResult<acp::ExtResponse>>> {
@@ -367,8 +405,10 @@ impl PlanApprovalViewState {
         }
     }
 
-    pub fn send_approved(&mut self) -> bool {
-        send_ext_response(self.take_response_tx(), "approved", None)
+    /// `feedback` is the review comment attached to this approval.
+    /// Approve with a typed comment passes that text. Empty Approve passes None.
+    pub fn send_approved(&mut self, feedback: Option<String>) -> bool {
+        send_ext_response(self.take_response_tx(), "approved", feedback)
     }
 
     pub fn send_abandoned(&mut self) -> bool {
@@ -381,7 +421,7 @@ impl PlanApprovalViewState {
 
     /// Clarifying questions — plan mode stays Active; shell injects answer-only turn.
     pub fn send_questions(&mut self, feedback: Option<String>) -> bool {
-        send_ext_response(&mut self.response_tx, "questions", feedback)
+        send_ext_response(self.take_response_tx(), "questions", feedback)
     }
 
     pub fn send_stale_cancel(&mut self) -> bool {
@@ -484,7 +524,7 @@ mod tests {
     #[test]
     fn test_send_approved() {
         let (mut state, mut rx) = make_test_state();
-        assert!(state.send_approved());
+        assert!(state.send_approved(None));
         let resp = rx.try_recv().expect("should receive response");
         let raw = resp.expect("should be Ok");
         let parsed: serde_json::Value =
@@ -574,8 +614,8 @@ mod tests {
     #[test]
     fn test_double_send_returns_false() {
         let (mut state, _rx) = make_test_state();
-        assert!(state.send_approved());
-        assert!(!state.send_approved());
+        assert!(state.send_approved(None));
+        assert!(!state.send_approved(None));
         assert!(!state.send_cancelled(None));
     }
 
@@ -595,7 +635,7 @@ mod tests {
         );
         assert!(state.is_after_turn());
         assert!(state.has_plan);
-        assert!(!state.send_approved());
+        assert!(!state.send_approved(None));
         assert!(!state.send_abandoned());
     }
 

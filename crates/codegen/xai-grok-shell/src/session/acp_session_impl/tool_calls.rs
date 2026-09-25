@@ -275,6 +275,71 @@ fn external_tool_bodies(
 /// Model-facing turn injected after a resumed plan is approved.
 const PLAN_APPROVED_IMPLEMENT_MESSAGE: &str =
     "The user approved the plan. Implement the plan in plan.md.";
+/// Model-facing tool result after a live mid-turn Approve CTA.
+///
+/// Completes the parked `exit_plan_mode` call. Does not run the
+/// present-only `ExitPlanModeTool` body. Non-empty feedback is appended
+/// after the implement sentence. Empty Approve stays that sentence alone.
+fn approved_implement_text(feedback: Option<&str>) -> String {
+    let implement = PLAN_APPROVED_IMPLEMENT_MESSAGE;
+    match feedback.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(notes) => format!("{implement}\n\n{notes}"),
+        None => implement.to_string(),
+    }
+}
+
+fn mid_turn_approved_tool_result() -> &'static str {
+    PLAN_APPROVED_IMPLEMENT_MESSAGE
+}
+
+/// What the mid-turn `exit_plan_mode` intercept does with a panel decision.
+///
+/// Every outcome completes the parked tool. Approve must not fall through
+/// to present-only [`ExitPlanModeTool`]. Approve leaves plan mode.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MidTurnDecision {
+    message: String,
+    leave_plan_mode: bool,
+    completes_parked_tool: bool,
+}
+
+fn mid_turn_decision(
+    outcome: PlanApprovalOutcome,
+    feedback: Option<&str>,
+    has_plan: bool,
+    tool_name: &str,
+) -> MidTurnDecision {
+    match outcome {
+        PlanApprovalOutcome::Abandoned => MidTurnDecision {
+            message: format!(
+                "The user chose to abandon the plan entirely (via the Abandon option in the plan approval dialog). Plan mode has been disabled. Do not call {tool_name} again unless the user explicitly asks to re-enter plan mode."
+            ),
+            leave_plan_mode: true,
+            completes_parked_tool: true,
+        },
+        PlanApprovalOutcome::Cancelled => MidTurnDecision {
+            message: if has_plan {
+                revise_plan_message(feedback.unwrap_or(""))
+            } else {
+                "The user does not want to exit plan mode. \
+                 Continue planning and ask the user what they would like to do."
+                    .to_string()
+            },
+            leave_plan_mode: false,
+            completes_parked_tool: true,
+        },
+        PlanApprovalOutcome::Questions => MidTurnDecision {
+            message: questions_plan_message(feedback.unwrap_or("")),
+            leave_plan_mode: false,
+            completes_parked_tool: true,
+        },
+        PlanApprovalOutcome::Approved => MidTurnDecision {
+            message: approved_implement_text(feedback),
+            leave_plan_mode: true,
+            completes_parked_tool: true,
+        },
+    }
+}
 /// Shared "revise the plan" message for the request-changes outcome, used by both the mid-turn intercept and the resume re-park.
 fn revise_plan_message(feedback: &str) -> String {
     let feedback = feedback.trim();
@@ -286,12 +351,28 @@ fn revise_plan_message(feedback: &str) -> String {
         format!("The user wants to revise the plan. The user said:\n{feedback}")
     }
 }
+/// Shared clarifying-question message for the Questions outcome (not a rewrite).
+/// Plan mode stays Active; the agent must answer read-only and call
+/// `exit_plan_mode` again to re-present approval.
+fn questions_plan_message(feedback: &str) -> String {
+    let feedback = feedback.trim();
+    let preamble = "The user has a clarifying question about the plan \
+         (not requesting a rewrite). Answer read-only from the plan and \
+         existing research. Do not rewrite plan.md unless the user explicitly \
+         asks to change it. End by calling exit_plan_mode again to re-present \
+         the plan for approval.";
+    if feedback.is_empty() {
+        format!("{preamble} Ask the user what they want to know about the plan.")
+    } else {
+        format!("{preamble}\n\nThe user asked:\n{feedback}")
+    }
+}
 /// What the resume re-park does with the user's decision.
 /// Extracted from `resume_plan_approval` so the branch logic is unit-testable without driving a real turn.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum ResumeAction {
     /// Approved: leave plan mode and start an implement turn (Agent mode).
-    LeaveAndImplement,
+    LeaveAndImplement(String),
     /// Request changes: stay in plan mode and start a revise turn (Plan mode).
     StayAndRevise(String),
     /// Questions: stay in plan mode and start an answer-only turn (Plan mode).
@@ -301,7 +382,9 @@ pub(super) enum ResumeAction {
 }
 fn resume_action_for(outcome: PlanApprovalOutcome, feedback: Option<String>) -> ResumeAction {
     match outcome {
-        PlanApprovalOutcome::Approved => ResumeAction::LeaveAndImplement,
+        PlanApprovalOutcome::Approved => {
+            ResumeAction::LeaveAndImplement(approved_implement_text(feedback.as_deref()))
+        }
         PlanApprovalOutcome::Cancelled => {
             ResumeAction::StayAndRevise(revise_plan_message(feedback.as_deref().unwrap_or("")))
         }
@@ -2363,15 +2446,10 @@ impl SessionActor {
                 self.start_resume_turn(text, PromptMode::Plan, completion_tx)
                     .await;
             }
-            ResumeAction::LeaveAndImplement => {
+            ResumeAction::LeaveAndImplement(text) => {
                 tracing::info!("[exit_plan_mode] resume: user approved plan");
                 self.leave_plan_mode_to_default();
-                self.start_resume_turn(
-                    PLAN_APPROVED_IMPLEMENT_MESSAGE.to_string(),
-                    PromptMode::Agent,
-                    completion_tx,
-                )
-                .await;
+                self.start_resume_turn(text, PromptMode::Agent, completion_tx).await;
             }
         }
     }
@@ -3918,8 +3996,25 @@ mod plan_approval_helper_tests {
     fn resume_action_maps_each_outcome() {
         assert_eq!(
             resume_action_for(PlanApprovalOutcome::Approved, None),
-            ResumeAction::LeaveAndImplement
+            ResumeAction::LeaveAndImplement(super::PLAN_APPROVED_IMPLEMENT_MESSAGE.to_string())
         );
+        let notes = "Love it! Execute now.";
+        match resume_action_for(PlanApprovalOutcome::Approved, Some(notes.to_string())) {
+            ResumeAction::LeaveAndImplement(text) => {
+                let implement = super::PLAN_APPROVED_IMPLEMENT_MESSAGE;
+                assert_eq!(
+                    text,
+                    format!("{implement}\n\n{notes}"),
+                    "non-empty feedback must be appended after the implement sentence and not dropped"
+                );
+                assert!(
+                    text.starts_with(implement),
+                    "None feedback stays the implement sentence only; notes follow it"
+                );
+                assert!(text.contains(notes), "feedback must not be dropped: {text}");
+            }
+            other => panic!("expected LeaveAndImplement, got {other:?}"),
+        }
         assert_eq!(
             resume_action_for(PlanApprovalOutcome::Abandoned, Some("ignored".into())),
             ResumeAction::LeaveOnly

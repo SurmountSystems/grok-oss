@@ -32,6 +32,18 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Widget;
 use std::collections::HashSet;
 use std::time::Instant;
+/// Prompt box height. Focus does not change it. The box grows with the
+/// prompt and stops at the window height.
+pub(crate) fn laid_out_prompt_height(
+    focused: bool,
+    content_height: u16,
+    window_height: u16,
+) -> u16 {
+    let _focus_does_not_change_height = focused;
+    let window = window_height.max(1);
+    content_height.min(window).max(1)
+}
+
 /// AppView-owned per-frame inputs to [`AgentView::draw`]: state the agent view cannot see itself (voice pipeline, Esc ownership, status row).
 /// Grouped (mirroring `WelcomeRenderParams`) so the next app-level render fact extends this struct instead of every `draw` call site.
 /// Tests take `Default` and override only what they exercise.
@@ -828,19 +840,15 @@ impl AgentView {
         let tip_row_visible =
             self.ephemeral_tip_renderable(area.height) && self.ephemeral_tip.is_active();
         let banner_height = banner_height.max(u16::from(tip_row_visible));
-        let max_prompt_height = area.height / 2;
         // Grok OSS: While recording, the prompt box grows with the transcript
         // and must not clip spoken text. Overlay Some is the live recording path.
         self.prompt
             .set_voice_recording_grow(voice_listening, voice_interim);
-        let base_prompt_height = if !prompt_focused && appearance.prompt.collapse_unfocused {
+        let content_height =
             self.prompt
-                .desired_height(inner_width, &prompt_style, true, max_prompt_height)
-                .min(prompt_style.vpad_top + 1 + prompt_style.info_block(true))
-        } else {
-            self.prompt
-                .desired_height(inner_width, &prompt_style, true, max_prompt_height)
-        };
+                .desired_height(inner_width, &prompt_style, true, area.height.max(1));
+        let base_prompt_height =
+            laid_out_prompt_height(prompt_focused, content_height, area.height);
         let overlay_content_w = inner_width.saturating_sub(QUESTION_VIEW_HPAD) as usize;
         let slot_card = self.blocking_card();
         let permission_view_h = if slot_card == Some(BlockingCard::Permission) {
@@ -2973,7 +2981,7 @@ impl AgentView {
                 buttons.clear();
             }
         } else {
-            let collapsed = !prompt_focused && appearance.prompt.collapse_unfocused;
+            let collapsed = false;
             let saved_scroll = if collapsed {
                 let s = self.prompt.scroll();
                 let ovr = self.prompt.textarea.scroll_override();
@@ -5551,5 +5559,26 @@ mod status_line_draw_tests {
             agent.last_status_line_size, painted,
             "a frame with no row must not export a width the script would read as the 80-column fallback"
         );
+    }
+}
+
+#[cfg(test)]
+mod prompt_box_height_tests {
+    use super::laid_out_prompt_height;
+
+    #[test]
+    fn focus_does_not_change_the_prompt_box_height() {
+        let focused = laid_out_prompt_height(true, 8, 24);
+        let blurred = laid_out_prompt_height(false, 8, 24);
+        assert_eq!(focused, blurred);
+        assert_eq!(focused, 8);
+        assert_ne!(focused, 3);
+        assert_ne!(focused, 1);
+    }
+
+    #[test]
+    fn prompt_taller_than_the_window_scrolls_and_does_not_grow_past_the_window() {
+        assert_eq!(laid_out_prompt_height(true, 40, 20), 20);
+        assert_eq!(laid_out_prompt_height(false, 40, 20), 20);
     }
 }

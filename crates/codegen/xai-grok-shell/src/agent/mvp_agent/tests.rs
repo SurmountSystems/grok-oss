@@ -3343,6 +3343,7 @@ async fn lazy_registry_build_resolves_real_remote_trust_before_reading_disk_conf
         .and_then(|s| s.get("regr-lazy-killswitch").map(|p| p.trusted));
     assert_eq!(trusted, Some(true), "kill-switched folder counts trusted");
 }
+mod interject_live_session_tests;
 mod list_running_heal_tests;
 #[cfg(unix)]
 mod process_scope_reclaim;
@@ -3548,10 +3549,7 @@ async fn push_roster_activity_delta_broadcasts_overridden_activity() {
     };
     assert_eq!(idle.activity, RosterActivity::Idle);
 }
-#[expect(
-    dead_code,
-    reason = "unused in production; remove expect when wired or delete the item"
-)]
+/// Extract the inner payload from an ExtResponse.
 fn parse_ext_body(resp: &acp::ExtResponse) -> serde_json::Value {
     let outer: serde_json::Value =
         serde_json::from_str(resp.0.get()).expect("ExtResponse must be valid JSON");

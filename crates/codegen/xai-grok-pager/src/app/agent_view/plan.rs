@@ -509,6 +509,135 @@ impl AgentView {
         }
     }
 
+    /// Persist a named plan identity. Soft planning writes the secondary
+    /// plan and must not reset the primary session `plan.md`.
+    pub(crate) fn persist_session_plan_body_for(&self, plan_identity: &str, body: &str) {
+        if body.trim().is_empty() {
+            return;
+        }
+        let Some(sid) = self.session.session_id.as_ref().map(|s| s.0.to_string()) else {
+            return;
+        };
+        let Some(store) = self.grok_oss_store_for_plan_choice() else {
+            return;
+        };
+        if let Err(e) = store.upsert_session_plan_body_for(&sid, plan_identity, body) {
+            tracing::debug!(error = %e, "session_plans body write failed (fail-open)");
+        }
+    }
+
+    /// Isolated Preview for `/plan --soft`. Paints the secondary plan. Does
+    /// not copy leftover primary `plan.md` and does not persist mill leftover
+    /// as the primary body.
+    pub(crate) fn paint_secondary_isolated_preview(&mut self, body: String, title: &str) {
+        if let Some(pav) = self.plan_approval_view.as_mut() {
+            pav.plan_content = Some(body.clone());
+            pav.has_plan = true;
+        }
+        self.latest_inline_plan_content = Some(body.clone());
+        let Some(mut viewer) = LineViewerState::open_markdown_content(title, body, None) else {
+            return;
+        };
+        viewer.kind = crate::views::file_search::line_viewer::LineViewerKind::PlanPreview;
+        viewer.title_override = Some(title.to_string());
+        viewer.fullscreen = crate::appearance::cache::load_plan_approval_force_modal();
+        {
+            let plan = viewer.plan_mut();
+            plan.show_action_buttons = true;
+            plan.feedback_active = self.plan_approval_view.is_some();
+        }
+        if let Some(ref pav) = self.plan_approval_view
+            && !pav.comments.is_empty()
+        {
+            viewer.rebuild_with_comments(&pav.comments);
+        } else if !self.plan_comments.is_empty() {
+            viewer.rebuild_with_comments(&self.plan_comments);
+        }
+        self.line_viewer = Some(viewer);
+        self.persist_session_plan_dock_open(true);
+    }
+
+    /// `/view-plan` and the plan status / chip click.
+    ///
+    /// Reopens a parked review, including a live `exit_plan_mode` waiter.
+    /// With no park, falls through to the saved preview.
+    pub(crate) fn open_plan_from_view_plan_or_status(&mut self) {
+        self.clear_leftover_view_plan_slash_palette();
+        self.view_plan_requested = true;
+        self.snapshot_or_clear_plan_feedback_draft();
+        if self.plan_approval_view.is_some() {
+            self.reopen_plan_approval();
+            return;
+        }
+        self.show_plan_preview();
+        self.restore_plan_feedback_draft_if_composer_lost();
+        self.clear_view_plan_request_if_waiter_bound();
+    }
+
+    /// Composer holds a complete `/view-plan` (or alias) slash, Enter not yet
+    /// applied. Restore treats that as a view-plan request, not a draft.
+    pub(crate) fn composer_holds_view_plan_slash(&self) -> bool {
+        matches!(
+            self.prompt.text().trim(),
+            "/view-plan" | "/show-plan" | "/plan-view"
+        )
+    }
+
+    /// Resume `/view-plan` can land as a leftover slash-palette `/` that
+    /// covers Approve. Dismiss that leftover. Keep Revise / Comment notes.
+    pub(crate) fn clear_leftover_view_plan_slash_palette(&mut self) {
+        let trimmed = self.prompt.text().trim();
+        if matches!(trimmed, "/" | "/view-plan" | "/show-plan" | "/plan-view") {
+            self.prompt.slash_close();
+            self.prompt.set_text("");
+        }
+    }
+
+    pub(crate) fn clear_view_plan_request_if_waiter_bound(&mut self) {
+        if self.is_plan_viewer()
+            && self
+                .plan_approval_view
+                .as_ref()
+                .is_some_and(|p| p.has_live_ext_waiter())
+        {
+            self.view_plan_requested = false;
+        }
+    }
+
+    /// Remember Revise / Comment box text. Slash commands are not a draft.
+    /// Empty composer after a real edit drops the snapshot.
+    pub(crate) fn snapshot_or_clear_plan_feedback_draft(&mut self) {
+        let Some(ref mut pav) = self.plan_approval_view else {
+            return;
+        };
+        let text = self.prompt.text();
+        if text.trim().starts_with('/') {
+            return;
+        }
+        if text.trim().is_empty() {
+            pav.feedback_draft = None;
+            return;
+        }
+        pav.feedback_draft = Some(text.to_string());
+    }
+
+    /// Put the Revise / Comment snapshot back when `/view-plan` or pane
+    /// close wiped the composer (or left only the slash).
+    pub(crate) fn restore_plan_feedback_draft_if_composer_lost(&mut self) {
+        let Some(draft) = self
+            .plan_approval_view
+            .as_ref()
+            .and_then(|pav| pav.feedback_draft.clone())
+            .filter(|d| !d.trim().is_empty())
+        else {
+            return;
+        };
+        if self.prompt.text().trim().is_empty() || self.composer_holds_view_plan_slash() {
+            self.prompt.set_text(&draft);
+            self.prompt.set_cursor(draft.len());
+        }
+    }
+
     pub(crate) fn clear_sent_human_from_plan_feedback_draft(&mut self, sent: &str) {
         let sent = sent.trim();
         if sent.is_empty() {
@@ -924,20 +1053,20 @@ impl AgentView {
         let Some(mut pav) = self.unmount_plan_review() else {
             return InputOutcome::Changed;
         };
-        pav.send_approved();
+        // Approve with a typed comment stays on the approval. It is not an
+        // interject and not a queued prompt. A live waiter continues on the
+        // approval tool result. Idle has no waiter, so start the implement turn.
+        let sent = pav.send_approved(review_comments.clone());
         self.close_plan_review_and_forget(PlanReviewOutcome::Approved);
-        if let Some(text) = review_comments {
-            return InputOutcome::Action(Action::Interject { text, images });
+        if sent {
+            return InputOutcome::Changed;
         }
-        // Screenshots without text notes still ride with approve so the agent
-        // sees visual context on the implement turn.
-        if !images.is_empty() {
-            return InputOutcome::Action(Action::Interject {
-                text: review_comments.unwrap_or_default(),
-                images,
-            });
-        }
-        InputOutcome::Changed
+        let implement = crate::views::plan_approval_view::PLAN_APPROVED_IMPLEMENT_MESSAGE;
+        let start_text = match review_comments.as_deref() {
+            Some(notes) => format!("{implement}\n\n{notes}"),
+            None => implement.to_string(),
+        };
+        InputOutcome::Action(Action::SendPrompt(start_text))
     }
     /// Fold freeform-only images into the session draft.
     /// Prefill clones share `display_number` *and* payload with the session image and are dropped.
@@ -1096,7 +1225,7 @@ impl AgentView {
         self.pending_post_turn_commit = None;
         match commit {
             PostTurnPlanCommit::Approved => {
-                pav.send_approved();
+                pav.send_approved(None);
                 self.finish_plan_review_ui(PlanReviewOutcome::Approved);
                 self.leave_plan_after_approved_build();
             }
@@ -2876,7 +3005,8 @@ mod plan_approval_optimistic_mode_tests {
             Some(&serde_json::json!("approved"))
         );
     }
-    /// Approve with review comments takes the early `Action::Interject` return; the optimistic clear must happen before that branch.
+    /// Approve with review comments is not an interject. The optimistic
+    /// clear still happens, and the comment stays on that approval.
     #[test]
     fn approve_plan_with_comments_still_clears_plan_mode() {
         let (mut agent, _rx) = agent_in_plan_mode_with_approval();
@@ -2889,10 +3019,18 @@ mod plan_approval_optimistic_mode_tests {
                 });
         }
         let outcome = agent.approve_plan();
-        assert!(matches!(
-            outcome,
-            InputOutcome::Action(Action::Interject { .. })
-        ));
+        assert!(
+            !matches!(
+                &outcome,
+                InputOutcome::Action(Action::Interject { .. })
+                    | InputOutcome::ActionThenForward(Action::Interject { .. })
+            ),
+            "Approve with comments must not Interject; got {outcome:?}"
+        );
+        assert!(
+            matches!(&outcome, InputOutcome::Changed),
+            "a live waiter continues on the approval; got {outcome:?}"
+        );
         assert_eq!(agent.plan_mode_pending, Some(false));
         assert!(!effective_plan_mode(&agent));
     }

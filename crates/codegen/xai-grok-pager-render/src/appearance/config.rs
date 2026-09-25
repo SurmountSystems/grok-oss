@@ -79,7 +79,7 @@ pub struct PromptViewConfig {
 impl Default for PromptViewConfig {
     fn default() -> Self {
         Self {
-            collapse_unfocused: true,
+            collapse_unfocused: false,
             mouse_hover: true,
             show_prefix: true,
             compact: false,
@@ -712,7 +712,7 @@ pub struct RawPromptViewConfig {
 impl Default for RawPromptViewConfig {
     fn default() -> Self {
         Self {
-            collapse_unfocused: true,
+            collapse_unfocused: false,
             mouse_hover: true,
             show_prefix: true,
         }

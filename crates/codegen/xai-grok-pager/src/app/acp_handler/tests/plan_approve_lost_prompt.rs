@@ -129,16 +129,25 @@ fn dispatch_outcome(app: &mut AppView, outcome: InputOutcome) -> Vec<Effect> {
 fn click_approve_via_app(app: &mut AppView) -> AfterClickApprove {
     arm_approve_hit_rect(app);
     let outcome = app.handle_input(&mouse_down(12, 20));
-    let interject_text = match &outcome {
-        InputOutcome::Action(Action::Interject { text, .. })
-        | InputOutcome::ActionThenForward(Action::Interject { text, .. }) => Some(text.clone()),
-        InputOutcome::ActionPair(Action::Interject { text, .. }, _)
-        | InputOutcome::ActionPair(_, Action::Interject { text, .. }) => Some(text.clone()),
-        _ => None,
-    };
+    assert!(
+        !matches!(
+            &outcome,
+            InputOutcome::Action(Action::Interject { .. })
+                | InputOutcome::ActionThenForward(Action::Interject { .. })
+                | InputOutcome::ActionPair(Action::Interject { .. }, _)
+                | InputOutcome::ActionPair(_, Action::Interject { .. })
+        ),
+        "click Approve must not Interject; got {outcome:?}"
+    );
     let effects = dispatch_outcome(app, outcome);
+    assert!(
+        !effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::SendInterject { .. })),
+        "click Approve must not Interject; effects={effects:?}"
+    );
     AfterClickApprove {
-        interject_text,
+        interject_text: None,
         effects,
     }
 }
@@ -241,12 +250,22 @@ fn assert_human_box_prompt_not_lost(app: &AppView, after: &AfterClickApprove, ne
 fn assert_prompt_sent_on_implement_turn(app: &AppView, after: &AfterClickApprove, needle: &str) {
     assert_human_box_prompt_not_lost(app, after, needle);
     assert!(
-        after.effects.iter().any(|effect| matches!(
-            effect,
-            Effect::SendInterject { text, .. } if text.contains(needle)
-        )),
-        "dispatch must emit SendInterject carrying the typed prompt; effects={:?}",
+        !after
+            .effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::SendInterject { .. })),
+        "Approve must not Interject; effects={:?}",
         after.effects
+    );
+    assert!(
+        !notes_queued_as_prompt(app, after, needle),
+        "Approve must not queue a Prompt row; effects={:?} pending={:?}",
+        after.effects,
+        app.agents
+            .get(&AgentId(0))
+            .unwrap()
+            .session
+            .pending_prompts
     );
     assert!(
         prompt_in_scrollback_or_interject(app, after.interject_text.as_deref(), needle),
@@ -275,10 +294,13 @@ fn assert_acp_approved_notes_not_in_feedback(
         parsed["outcome"], "approved",
         "ACP waiter must be approved; got {parsed:?}"
     );
-    let feedback = parsed.get("feedback");
+    let feedback = parsed
+        .get("feedback")
+        .and_then(|value| value.as_str())
+        .unwrap_or("");
     assert!(
-        feedback.is_none() || feedback == Some(&serde_json::Value::Null),
-        "review notes ride Interject, not the ACP feedback field; got {parsed:?}"
+        feedback.contains(PLAN_APPROVED_REVIEW_COMMENTS_LEAD),
+        "the comment stays on the approval; got {parsed:?}"
     );
 }
 
@@ -443,32 +465,34 @@ fn isolated_present_click_approve_dispatches_interject_with_prompt_text() {
 
     arm_approve_hit_rect(&mut app);
     let outcome = app.handle_input(&mouse_down(12, 20));
-    let interject_text = match &outcome {
-        InputOutcome::Action(Action::Interject { text, .. }) => {
-            assert!(
-                text.contains(HUMAN_BOX_PROMPT),
-                "Interject action must carry the Human-box prompt, got {text:?}"
-            );
-            assert!(
-                text.contains(PLAN_APPROVED_REVIEW_COMMENTS_LEAD),
-                "Interject action must wrap review comments, got {text:?}"
-            );
-            text.clone()
-        }
-        other => panic!(
-            "click Approve with a Human-box prompt must return Action::Interject; got {other:?}"
+    assert!(
+        !matches!(
+            &outcome,
+            InputOutcome::Action(Action::Interject { .. })
+                | InputOutcome::ActionThenForward(Action::Interject { .. })
         ),
-    };
+        "click Approve with a Human-box prompt must not Interject; got {outcome:?}"
+    );
+    assert!(
+        matches!(&outcome, InputOutcome::Changed),
+        "click Approve with a live waiter is not an interject and not a queued Prompt; got {outcome:?}"
+    );
     let effects = dispatch_outcome(&mut app, outcome);
     assert!(
-        effects.iter().any(|effect| matches!(
+        !effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::SendInterject { .. })),
+        "dispatch must not emit SendInterject; got {effects:?}"
+    );
+    assert!(
+        !effects.iter().any(|effect| matches!(
             effect,
-            Effect::SendInterject { text, .. } if text.contains(HUMAN_BOX_PROMPT)
+            Effect::SendPrompt { .. } | Effect::SendPromptNow { .. }
         )),
-        "dispatch must emit SendInterject carrying the typed prompt; got {effects:?}"
+        "click Approve must not queue or send a Prompt row; got {effects:?}"
     );
     let after = AfterClickApprove {
-        interject_text: Some(interject_text),
+        interject_text: None,
         effects,
     };
     assert_prompt_sent_on_implement_turn(&app, &after, HUMAN_BOX_PROMPT);
@@ -568,13 +592,19 @@ fn isolated_preview_idle_non_empty_operator_paste_enter_approves_with_notes_not_
         );
     }
     assert!(
-        enter_effects.iter().any(|effect| matches!(
-            effect,
-            Effect::SendInterject { text, .. }
-                if text.contains("line 1 of the pasted review")
-                    && text.contains("line 15 of the pasted review")
-        )),
-        "Enter must Interject the pasted notes with Approve, not Plan-Exit; effects={enter_effects:?}"
+        !enter_effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::SendInterject { .. })),
+        "Enter Approve must not Interject; effects={enter_effects:?}"
+    );
+    assert!(
+        user_prompt_texts(&app).iter().any(|text| {
+            text.contains("line 1 of the pasted review")
+                && text.contains("line 15 of the pasted review")
+                && text.contains(PLAN_APPROVED_REVIEW_COMMENTS_LEAD)
+        }),
+        "the pasted comment stays on the approval; scrollback={:?}",
+        user_prompt_texts(&app)
     );
     assert!(
         !enter_effects.iter().any(|effect| match effect {
@@ -655,7 +685,7 @@ fn isolated_preview_idle_leftover_slash_plus_notes_click_approve_is_approve_with
     }
     assert!(
         !notes_queued_as_prompt(&app, &after, HUMAN_BOX_PROMPT),
-        "click Approve with notes must Interject, not SendPrompt; effects={:?} pending={:?}",
+        "click Approve with notes must not Interject and must not queue a Prompt; the comment stays on the approval; effects={:?} pending={:?}",
         after.effects,
         app.agents.get(&AgentId(0)).unwrap().session.pending_prompts
     );
@@ -740,20 +770,28 @@ fn isolated_preview_vanished_pane_notes_enter_approves_with_comment() {
         KeyCode::Enter,
         KeyModifiers::NONE,
     )));
-    let interject_text = match &enter {
-        InputOutcome::Action(Action::Interject { text, .. })
-        | InputOutcome::ActionThenForward(Action::Interject { text, .. }) => text.clone(),
-        other => panic!(
-            "vanished Isolated Preview plus Operator notes plus Enter must Approve with those notes; got {other:?}"
-        ),
-    };
     assert!(
-        interject_text.contains(HUMAN_BOX_PROMPT),
-        "Enter must Approve with the Operator notes, got {interject_text:?}"
+        !matches!(
+            &enter,
+            InputOutcome::Action(Action::Interject { .. })
+                | InputOutcome::ActionThenForward(Action::Interject { .. })
+        ),
+        "vanished Isolated Preview plus Operator notes plus Enter must not Interject; got {enter:?}"
+    );
+    assert!(
+        matches!(&enter, InputOutcome::Changed),
+        "vanished Isolated Preview plus Operator notes plus Enter approves without an interject or a queued Prompt; got {enter:?}"
     );
     let enter_effects = dispatch_outcome(&mut app, enter);
+    assert!(
+        user_prompt_texts(&app)
+            .iter()
+            .any(|text| text.contains(HUMAN_BOX_PROMPT) && text.contains(PLAN_APPROVED_REVIEW_COMMENTS_LEAD)),
+        "the comment stays on the approval; scrollback={:?}",
+        user_prompt_texts(&app)
+    );
     let after = AfterClickApprove {
-        interject_text: Some(interject_text),
+        interject_text: None,
         effects: enter_effects,
     };
     {
@@ -829,20 +867,28 @@ fn isolated_present_preview_enter_is_human_turn_then_click_approve() {
         KeyCode::Enter,
         KeyModifiers::NONE,
     )));
-    let interject_text = match &enter {
-        InputOutcome::Action(Action::Interject { text, .. })
-        | InputOutcome::ActionThenForward(Action::Interject { text, .. }) => text.clone(),
-        other => panic!(
-            "Isolated Preview idle plus a non-empty Operator box plus Enter must Approve with those notes; got {other:?}"
-        ),
-    };
     assert!(
-        interject_text.contains(HUMAN_BOX_PROMPT),
-        "Enter must Approve with the Operator notes, got {interject_text:?}"
+        !matches!(
+            &enter,
+            InputOutcome::Action(Action::Interject { .. })
+                | InputOutcome::ActionThenForward(Action::Interject { .. })
+        ),
+        "Isolated Preview idle plus a non-empty Operator box plus Enter must not Interject; got {enter:?}"
+    );
+    assert!(
+        matches!(&enter, InputOutcome::Changed),
+        "Isolated Preview idle plus a non-empty Operator box plus Enter approves without an interject or a queued Prompt; got {enter:?}"
     );
     let enter_effects = dispatch_outcome(&mut app, enter);
+    assert!(
+        user_prompt_texts(&app)
+            .iter()
+            .any(|text| text.contains(HUMAN_BOX_PROMPT) && text.contains(PLAN_APPROVED_REVIEW_COMMENTS_LEAD)),
+        "the comment stays on the approval; scrollback={:?}",
+        user_prompt_texts(&app)
+    );
     let after = AfterClickApprove {
-        interject_text: Some(interject_text),
+        interject_text: None,
         effects: enter_effects,
     };
     assert!(
@@ -951,7 +997,7 @@ fn isolated_preview_approve_with_plan_composer_notes_submits_with_approve_not_as
     }
     assert!(
         !notes_queued_as_prompt(&app, &after, HUMAN_BOX_PROMPT),
-        "Approve with notes must Interject, not SendPrompt or queue a Prompt; effects={:?} pending={:?}",
+        "Approve with notes must not Interject and must not queue a Prompt; the comment stays on the approval; effects={:?} pending={:?}",
         after.effects,
         app.agents.get(&AgentId(0)).unwrap().session.pending_prompts
     );
@@ -1090,7 +1136,7 @@ fn isolated_preview_comment_cta_then_notes_then_approve_submits_with_approve_not
     }
     assert!(
         !notes_queued_as_prompt(&app, &after, HUMAN_BOX_PROMPT),
-        "Comment then Approve must Interject, not SendPrompt; effects={:?} pending={:?}",
+        "Comment then Approve must not Interject and must not queue a Prompt; the comment stays on the approval; effects={:?} pending={:?}",
         after.effects,
         app.agents.get(&AgentId(0)).unwrap().session.pending_prompts
     );

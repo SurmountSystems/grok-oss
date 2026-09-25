@@ -1469,6 +1469,10 @@ pub struct AgentView {
     /// Active plan approval view (from `exit_plan_mode` ext_method). When `Some`,
     /// the prompt area shows the plan approval overlay and input is modal.
     pub(crate) plan_approval_view: Option<PlanApprovalViewState>,
+    /// `/view-plan` or a status click asked to open the plan pane. Resume
+    /// restore docks only when this is set or the pane is already open.
+    /// Idle `--continue` must not auto-dock.
+    pub(crate) view_plan_requested: bool,
     /// Waiting CreatePlan keep. Set by `PlanKept` (or grok-shell inline preview).
     pub(crate) kept_plan: KeptPlan,
     /// Post-turn approve/build. Only backends that implement `ExecutePlan` turn this on.

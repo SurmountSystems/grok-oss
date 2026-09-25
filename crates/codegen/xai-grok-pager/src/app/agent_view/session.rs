@@ -732,6 +732,7 @@ impl AgentView {
             permission_stashed_pane: None,
             permission_pattern_edit: None,
             plan_approval_view: None,
+            view_plan_requested: false,
             kept_plan: crate::app::agent_view::KeptPlan::default(),
             post_turn_plan_review: post_turn_plan_review_default(),
             execute_plan: None,
