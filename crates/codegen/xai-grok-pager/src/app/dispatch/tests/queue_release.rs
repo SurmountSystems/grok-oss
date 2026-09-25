@@ -458,6 +458,7 @@ fn failed_flush_drops_trailing_echoes_before_requeue() {
     let _ = dispatch_task_result(
         TaskResult::InterjectFailed {
             agent_id: AgentId(0),
+            session_id: acp::SessionId::new("test-session"),
             error: "channel closed".into(),
             remaining,
         },
@@ -514,6 +515,7 @@ fn failed_flush_drops_only_the_failed_identical_follow_up() {
     let _ = dispatch_task_result(
         TaskResult::InterjectFailed {
             agent_id: AgentId(0),
+            session_id: acp::SessionId::new("test-session"),
             error: "channel closed".into(),
             remaining: vec![(first_text, first_id, None)],
         },

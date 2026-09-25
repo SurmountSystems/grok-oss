@@ -2119,10 +2119,20 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
         }
         TaskResult::InterjectFailed {
             agent_id,
+            session_id,
             error,
             remaining,
         } => {
             if let Some(agent) = app.agents.get_mut(&agent_id) {
+                let session_gone = error.to_ascii_lowercase().contains("session is gone");
+                let targets_own_session = agent
+                    .session
+                    .session_id
+                    .as_ref()
+                    .is_some_and(|own| own == &session_id);
+                // Requeue only an own-session failure. A live L2 address, or
+                // "session is gone", must not copy the text onto this queue.
+                let requeue = targets_own_session && !session_gone;
                 for (text, interjection_id, _blocks) in remaining.into_iter().rev() {
                     agent.self_interjection_ids.remove(&interjection_id);
                     if let Some(entry_id) =
@@ -2134,6 +2144,9 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                         .interjection_retry_images
                         .remove(&interjection_id)
                         .unwrap_or_default();
+                    if !requeue {
+                        continue;
+                    }
                     let id = agent.session.next_queue_id;
                     agent.session.next_queue_id += 1;
                     agent
@@ -2151,7 +2164,11 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                             combined_texts: Vec::new(),
                         });
                 }
-                agent.show_toast(&format!("Interjection failed. Requeued: {error}"));
+                if requeue {
+                    agent.show_toast(&format!("Interjection failed. Requeued: {error}"));
+                } else {
+                    agent.show_toast(&format!("Interjection failed: {error}"));
+                }
             }
             vec![]
         }

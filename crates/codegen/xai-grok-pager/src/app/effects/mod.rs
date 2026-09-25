@@ -4627,6 +4627,7 @@ pub(crate) fn execute(
                 session_id,
                 vec![(text, interjection_id, blocks)],
             );
+
         }
         Effect::FetchBundleStatus => {
             let tx = acp_tx.clone();
@@ -5806,6 +5807,7 @@ pub(crate) fn spawn_ordered_interjects(
                         .unwrap_or_else(|| e.to_string());
                     return TaskResult::InterjectFailed {
                         agent_id,
+                        session_id,
                         error: sanitize_user_error(
                             &format!("couldn't send interjection: {detail}"),
                         ),
