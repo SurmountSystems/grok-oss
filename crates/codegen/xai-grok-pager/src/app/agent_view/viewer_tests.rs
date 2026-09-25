@@ -1475,7 +1475,54 @@ fn tab_leave_commenting_restores_stashed_composer() {
     );
 }
 
-/// Operator: `y` copies the plan while the comment overlay is open.
+/// Operator: a focused plan comment composer inserts y. Copy must not
+/// steal that letter. The Operator typed `for you too` and saw `for ou too`
+/// because the footer advertised `y:copy` during text entry.
+#[test]
+fn focused_plan_comment_box_inserts_y_instead_of_copy() {
+    let mut agent = agent_with_scrollable_plan();
+    let _ = agent.enter_plan_commenting();
+    assert_eq!(
+        agent.plan_approval_view.as_ref().unwrap().focus,
+        PlanApprovalFocus::Commenting,
+        "the plan comment composer must be focused before y"
+    );
+    type_plan_chars(&mut agent, "for you too");
+    assert_eq!(
+        agent.prompt.text(),
+        "for you too",
+        "focused plan comment composer must insert y; got {:?} (copy stole y when this is `for ou too`)",
+        agent.prompt.text()
+    );
+    assert!(
+        agent.toast.is_none(),
+        "bare y must not copy the plan while the plan comment composer is focused"
+    );
+    assert!(
+        agent.plan_approval_view.is_some() && !agent.plan_decision_resolved,
+        "inserting y must not Approve or Exit"
+    );
+    let labels: Vec<String> = agent
+        .current_shortcut_hints(&ActionRegistry::defaults(), false)
+        .iter()
+        .map(|hint| hint.label.to_string())
+        .collect();
+    assert!(
+        labels.iter().any(|label| label == "save comment"),
+        "Enter still saves; footer must keep save comment, got {labels:?}"
+    );
+    assert!(
+        labels.iter().any(|label| label == "cancel"),
+        "Esc still cancels; footer must keep cancel, got {labels:?}"
+    );
+    assert!(
+        !labels.iter().any(|label| label == "copy"),
+        "do not advertise y:copy while the plan comment composer is focused, got {labels:?}"
+    );
+}
+
+/// Catalog filter name stays enrolled. The Operator contract replaced
+/// copy-on-y: a focused plan comment composer inserts y and does not copy.
 #[test]
 fn y_copies_the_plan_while_the_comment_overlay_is_open() {
     let mut agent = agent_with_scrollable_plan();
@@ -1489,17 +1536,17 @@ fn y_copies_the_plan_while_the_comment_overlay_is_open() {
     press_plan_key(&mut agent, KeyCode::Char('y'), KeyModifiers::NONE);
     assert_eq!(
         agent.prompt.text(),
-        "line note",
-        "y while commenting copies the plan; it must not type y into the line comment, got {:?}",
+        "line notey",
+        "y while the plan comment composer is focused must insert y, got {:?}",
         agent.prompt.text()
     );
     assert!(
-        agent.toast.is_some(),
-        "y while commenting must copy the plan (clipboard toast)"
+        agent.toast.is_none(),
+        "bare y must not copy the plan while the plan comment composer is focused"
     );
     assert!(
         agent.plan_approval_view.is_some() && !agent.plan_decision_resolved,
-        "y while commenting must not Approve or Exit"
+        "inserting y must not Approve or Exit"
     );
 }
 

@@ -2171,7 +2171,7 @@ Do not call SuperGrok free.
 | `hit_credits_click_dispatches_show_limits` | Click on the compact meter dispatches `Action::ShowLimits` | **Keep** |
 | `titled_doge_composer_frame_is_prompt_border_not_context_yellow` | Titled composer frame is white (`prompt_border_active`); title only is yellow | **Keep** |
 | `plan_approval_footer_paints_five_cta_vocabulary` | Idle plan panel footer paints Approve / Comment / Revise / Exit. Clarify is only after Comment, not an idle top-level CTA | **Keep** (old `soft_park_draw_paints_panel_*` names are gone; do not revive them) |
-| `y_copies_the_plan_while_the_comment_overlay_is_open` | Comment overlay `y` copies the plan | **Keep** |
+| `y_copies_the_plan_while_the_comment_overlay_is_open` | Focused plan comment composer inserts y. Bare y does not copy. | **Keep** |
 | `plan_approval_pane_has_a_clickable_copy_control` | Copy is a clickable title-bar glyph left of `[↗]`, not a fifth idle CTA | **Keep** |
 | `plan_approval_cta_row_does_not_paint_copy` | Approve / Comment / Revise / Exit row must not paint copy | **Keep** |
 | `plan_approval_copy_button_click_copies_the_plan` | Clicking the copy control copies the plan | **Keep** |

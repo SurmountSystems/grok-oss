@@ -1074,8 +1074,13 @@ mod tests {
             "19-plan-mode.md must say the selected CTA is marked and Enter submits it"
         );
         assert!(
-            content.contains("line-comment overlay") || content.contains("comment overlay"),
-            "19-plan-mode.md must say y copies while the line-comment overlay is open"
+            content.contains("While the plan comment composer is focused, y inserts"),
+            "19-plan-mode.md must say y inserts while the plan comment composer is focused"
+        );
+        assert!(
+            !content.contains("including while a line-comment overlay is open")
+                && !content.contains("y also copies while the line-comment overlay is open"),
+            "19-plan-mode.md must not say bare y copies while the plan comment composer is focused"
         );
         assert!(
             content.contains("Ctrl+Z") || content.contains("ctrl+z"),

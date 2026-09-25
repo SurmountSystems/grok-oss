@@ -473,10 +473,10 @@ impl AgentView {
                 .as_ref()
                 .is_some_and(|pav| pav.focus == PlanApprovalFocus::Commenting);
             let empty = self.prompt.text().trim().is_empty() && !self.prompt.file_search_visible();
-            // Empty Preview `y` copies (footer `y:copy`). Comment overlay
-            // `y` copies even with a line-comment draft. A live Prompt or
-            // Preview draft still types `y`.
-            if commenting || empty {
+            // Empty Preview `y` copies (footer `y:copy`). A focused plan
+            // comment composer inserts `y`, including an empty draft.
+            // A live Prompt or Preview draft still types `y`.
+            if !commenting && empty {
                 return self.copy_plan_full();
             }
         }

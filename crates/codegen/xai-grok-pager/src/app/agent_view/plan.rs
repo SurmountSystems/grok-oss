@@ -1632,15 +1632,15 @@ impl AgentView {
         // Letter CTA keys (`a` Approve, `A` Notes, `s` Revise, `q` Exit) must
         // type. Approve is the clickable button. Empty Preview `?` arms
         // Clarify. Prompt focus or a live draft inserts `?`. Empty Preview
-        // `y` copies the plan. Comment overlay `y` copies too. A live
-        // Preview or Prompt draft inserts `y`.
+        // `y` copies the plan. A focused plan comment composer inserts `y`.
+        // A live Preview or Prompt draft inserts `y`.
         let empty_prompt =
             self.prompt.text().trim().is_empty() && !self.prompt.file_search_visible();
         let preview_focused = self
             .plan_approval_view
             .as_ref()
             .is_some_and(|pav| pav.focus == PlanApprovalFocus::Preview);
-        if crate::key!('y').matches(key) && (is_commenting || (empty_prompt && preview_focused)) {
+        if crate::key!('y').matches(key) && !is_commenting && empty_prompt && preview_focused {
             return self.copy_plan_full();
         }
         if !is_commenting && matches_shifted_char(key, '?') {
