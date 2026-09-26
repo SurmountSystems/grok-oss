@@ -32,6 +32,9 @@ const SMEAR_BLOCK_CHARS: usize = 64;
 /// True when `text` is an obvious looping sentence, a two-sentence cycle,
 /// or a long block that still repeats after a smear.
 pub fn is_repetitive_generation(text: &str) -> bool {
+    if identical_character_run_hit_256(text) {
+        return true;
+    }
     let tail = tail_window(text);
     if tail.len() < MIN_PHRASE_CHARS * MIN_LONG_REPEATS {
         return false;
@@ -295,7 +298,48 @@ fn is_loop_phrase(unit: &str) -> bool {
     unit.len() >= MIN_PHRASE_CHARS && unit.contains(char::is_whitespace)
 }
 
-/// Copied from the live-stream breaker. Not a second detector.
+fn identical_character_run_hit_256(text: &str) -> bool {
+    // The counter is a u8. The 256th identical character stops, and it never wraps.
+    let mut run: u8 = 0;
+    let mut prev: Option<char> = None;
+    for ch in text.chars() {
+        if prev == Some(ch) {
+            if run == 255 {
+                return true;
+            }
+            run += 1;
+        } else {
+            prev = Some(ch);
+            run = 1;
+        }
+    }
+    false
+}
+
+fn smear_block_is_mostly_spaces(block: &str) -> bool {
+    // A short run of padding spaces is a fixed-width table, not a smear.
+    // A block that is more than half spaces is not a smear either.
+    let mut spaces = 0usize;
+    let mut total = 0usize;
+    let mut run: u8 = 0;
+    let mut longest: u8 = 0;
+    for ch in block.chars() {
+        total += 1;
+        if ch == ' ' {
+            spaces += 1;
+            if run < 255 {
+                run += 1;
+            }
+            if run > longest {
+                longest = run;
+            }
+        } else {
+            run = 0;
+        }
+    }
+    total > 0 && (spaces * 2 > total || longest >= 3)
+}
+
 fn repeated_block_survives_smear(tail: &str) -> bool {
     if tail.len() < SMEAR_BLOCK_CHARS * MIN_LONG_REPEATS {
         return false;
@@ -306,7 +350,7 @@ fn repeated_block_survives_smear(tail: &str) -> bool {
     while i + SMEAR_BLOCK_CHARS <= n {
         if tail.is_char_boundary(i) && tail.is_char_boundary(i + SMEAR_BLOCK_CHARS) {
             let window = &tail[i..i + SMEAR_BLOCK_CHARS];
-            if window.contains(char::is_whitespace) {
+            if window.contains(char::is_whitespace) && !smear_block_is_mostly_spaces(window) {
                 starts.entry(window).or_default().push(i);
             }
         }

@@ -171,8 +171,10 @@ impl StreamRepetitionGuard {
     }
 
     pub(crate) fn error(&self, channel: SamplingChannel, chunk_index: u64) -> SamplingError {
+        let channel_name = channel.as_str();
+        append_repetition_stop_log(channel_name, chunk_index);
         SamplingError::RepetitiveGeneration {
-            channel: channel.as_str().to_string(),
+            channel: channel_name.to_string(),
             aborted_at_chunk: Some(chunk_index),
         }
     }
@@ -195,6 +197,9 @@ impl StreamRepetitionGuard {
 /// True when `text` ends in an obvious looping sentence, a two-sentence
 /// cycle, or a long block that still repeats after a smear.
 pub(crate) fn is_repetitive(text: &str) -> bool {
+    if identical_character_run_hit_256(text) {
+        return true;
+    }
     let tail = tail_window(text);
     if tail.len() < MIN_PHRASE_CHARS * MIN_LONG_REPEATS {
         return false;
@@ -428,10 +433,62 @@ fn is_loop_phrase(unit: &str) -> bool {
     unit.len() >= MIN_PHRASE_CHARS && unit.contains(char::is_whitespace)
 }
 
-/// Same breaker as [`trailing_units_loop`]. List-marker periods (`1. `)
-/// split one checklist into rotating units, and a smear is not
-/// byte-identical to the sentence it came from, so the equal-unit streak
-/// resets. Count a long block that still occurs inside that smear.
+fn identical_character_run_hit_256(text: &str) -> bool {
+    // The counter is a u8. The 256th identical character stops, and it never wraps.
+    let mut run: u8 = 0;
+    let mut prev: Option<char> = None;
+    for ch in text.chars() {
+        if prev == Some(ch) {
+            if run == 255 {
+                return true;
+            }
+            run += 1;
+        } else {
+            prev = Some(ch);
+            run = 1;
+        }
+    }
+    false
+}
+
+fn append_repetition_stop_log(channel: &str, chunk_index: u64) {
+    let dir = "/home/hunter/.agents/logs";
+    let path = "/home/hunter/.agents/logs/repetition-stops.log";
+    let _ = std::fs::create_dir_all(dir);
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let line = format!("repetition stop channel={channel} chunk={chunk_index}\n");
+        let _ = std::io::Write::write_all(&mut file, line.as_bytes());
+    }
+}
+
+fn smear_block_is_mostly_spaces(block: &str) -> bool {
+    // A short run of padding spaces is a fixed-width table, not a smear.
+    // A block that is more than half spaces is not a smear either.
+    let mut spaces = 0usize;
+    let mut total = 0usize;
+    let mut run: u8 = 0;
+    let mut longest: u8 = 0;
+    for ch in block.chars() {
+        total += 1;
+        if ch == ' ' {
+            spaces += 1;
+            if run < 255 {
+                run += 1;
+            }
+            if run > longest {
+                longest = run;
+            }
+        } else {
+            run = 0;
+        }
+    }
+    total > 0 && (spaces * 2 > total || longest >= 3)
+}
+
 fn repeated_block_survives_smear(tail: &str) -> bool {
     if tail.len() < SMEAR_BLOCK_CHARS * MIN_LONG_REPEATS {
         return false;
@@ -442,7 +499,7 @@ fn repeated_block_survives_smear(tail: &str) -> bool {
     while i + SMEAR_BLOCK_CHARS <= n {
         if tail.is_char_boundary(i) && tail.is_char_boundary(i + SMEAR_BLOCK_CHARS) {
             let window = &tail[i..i + SMEAR_BLOCK_CHARS];
-            if window.contains(char::is_whitespace) {
+            if window.contains(char::is_whitespace) && !smear_block_is_mostly_spaces(window) {
                 starts.entry(window).or_default().push(i);
             }
         }
@@ -741,5 +798,95 @@ mod dest_encoder_skip_repetition_tests {
             }
             other => panic!("expected RepetitiveGeneration, got {other:?}"),
         }
+    }
+
+    /// Markdown job table: header, dash row, and data rows. Each data row
+    /// has a different name, then 24.0 minutes, 1.64m, just started, and
+    /// still open. Space padding is real and well under 256 characters.
+    /// Different padded rows are different sentences and must not stop.
+    #[test]
+    fn padded_job_table_with_different_names_does_not_stop_the_turn() {
+        let table = "\
+| job         | wall             | tokens   | state          | status       |
+| ----------- | ---------------- | -------- | -------------- | ------------ |
+| Adastria    | 24.0 minutes     | 1.64m    | just started   | still open   |
+| Bellerophon | 24.0 minutes     | 1.64m    | just started   | still open   |
+| Callisto    | 24.0 minutes     | 1.64m    | just started   | still open   |
+";
+        for name in ["Adastria", "Bellerophon", "Callisto"] {
+            assert!(table.contains(name), "data row must name {name}");
+        }
+        assert!(
+            table.contains("24.0 minutes")
+                && table.contains("1.64m")
+                && table.contains("just started")
+                && table.contains("still open"),
+            "data rows must carry the shared job cells"
+        );
+        assert!(
+            table.lines().any(|line| line.contains("---")),
+            "table must include a dash row"
+        );
+        let mut best = 0usize;
+        let mut run = 0usize;
+        let mut prev: Option<char> = None;
+        for ch in table.chars() {
+            if prev == Some(ch) {
+                run += 1;
+            } else {
+                prev = Some(ch);
+                run = 1;
+            }
+            if run > best {
+                best = run;
+            }
+        }
+        assert!(
+            best < 64,
+            "space padding must stay well under 256, longest identical run was {best}"
+        );
+        let tail = tail_window(table);
+        assert!(
+            !is_repetitive(table),
+            "padded job table must not stop the turn; smear={} sentence_units={} line_units={} longest_run={best}",
+            repeated_block_survives_smear(tail),
+            trailing_units_loop(split_sentences(tail)),
+            trailing_units_loop(split_nonempty_lines(tail)),
+        );
+    }
+
+    /// This exact sentence three times must stop the turn.
+    #[test]
+    fn bellerophon_waiting_sentence_three_times_stops_the_turn() {
+        const SENTENCE: &str = "I am Bellerophon. I am waiting for the L3s to complete their work.";
+        assert!(!is_repetitive(SENTENCE), "one copy must not stop");
+        let twice = format!("{SENTENCE}\n{SENTENCE}");
+        assert!(!is_repetitive(&twice), "two copies must not stop");
+        let thrice = format!("{SENTENCE}\n{SENTENCE}\n{SENTENCE}");
+        assert!(
+            is_repetitive(&thrice),
+            "three copies of the Bellerophon waiting sentence must stop the turn"
+        );
+    }
+
+    /// 255 spaces must not stop. The 256th identical character must stop.
+    /// 200 spaces, one other character, then 200 spaces must not stop.
+    #[test]
+    fn character_run_stops_at_the_256th_identical_character() {
+        assert!(
+            !is_repetitive(&" ".repeat(255)),
+            "255 spaces in a row must not stop"
+        );
+        assert!(
+            is_repetitive(&" ".repeat(256)),
+            "the 256th identical character must stop"
+        );
+        let mut broken = " ".repeat(200);
+        broken.push('x');
+        broken.push_str(&" ".repeat(200));
+        assert!(
+            !is_repetitive(&broken),
+            "200 spaces, one other character, then 200 spaces must not stop"
+        );
     }
 }
