@@ -331,10 +331,16 @@ impl AgentView {
                     // over the first letter of `keep` (`/quiteep`).
                     // Unique `/model` still switches: that typed slash
                     // is not idle notes.
+                    if let Some(outcome) = self.send_marked_comment_cta_enter() {
+                        return outcome;
+                    }
                     if self.isolated_preview_idle_enter_approves_with_notes() {
                         self.snapshot_or_clear_plan_feedback_draft();
                         self.prompt.slash_close();
-                        return self.approve_plan();
+                        return self.approve_plan_from_enter();
+                    }
+                    if self.isolated_preview_typed_open_enter_is_human_turn() {
+                        return self.record_open_preview_typed_enter_human_turn();
                     }
                     if let Some(outcome) = self.try_apply_unique_model_slash_row() {
                         return outcome;
@@ -702,10 +708,16 @@ impl AgentView {
                     // Vanished Isolated Preview (pane shut, live waiter)
                     // still Approves. Must not only expand a paste chip.
                     // Empty Enter never Approves.
+                    if let Some(outcome) = self.send_marked_comment_cta_enter() {
+                        return outcome;
+                    }
                     if self.isolated_preview_idle_enter_approves_with_notes() {
                         self.snapshot_or_clear_plan_feedback_draft();
                         self.prompt.slash_close();
-                        return self.approve_plan();
+                        return self.approve_plan_from_enter();
+                    }
+                    if self.isolated_preview_typed_open_enter_is_human_turn() {
+                        return self.record_open_preview_typed_enter_human_turn();
                     }
                     // Apple Terminal: Shift+Enter arrives as bare Enter (no
                     // Kitty protocol). Poll CoreGraphics for real modifier

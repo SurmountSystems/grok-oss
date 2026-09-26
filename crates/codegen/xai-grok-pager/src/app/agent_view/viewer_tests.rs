@@ -2302,12 +2302,15 @@ fn isolated_preview_idle_leftover_slash_plus_notes_enter_approves_with_comment()
     );
 }
 
-/// Isolated Preview idle plus typed Operator notes plus Enter Approves
-/// with those notes. Empty Enter never Approves.
+/// Isolated Preview open plus a typed Operator sentence: Enter is the
+/// human turn. It does not Approve. It is not an interjection. The
+/// sentence stays in the composer for a later Approve click, and it is
+/// not only plan comment 1. Empty Enter never Approves.
 #[test]
 fn isolated_preview_human_text_enter_is_human_turn_not_only_plan_comment() {
     use crate::app::actions::Action;
     use crate::app::app_view::InputOutcome;
+    use crate::scrollback::block::RenderBlock;
 
     const HUMAN: &str = "keep the join order from the archive index";
     let mut agent = agent_with_scrollable_plan();
@@ -2321,21 +2324,47 @@ fn isolated_preview_human_text_enter_is_human_turn_not_only_plan_comment() {
         &Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
         &ActionRegistry::defaults(),
     );
-    match send {
-        InputOutcome::Action(Action::Interject { text, .. })
-        | InputOutcome::ActionThenForward(Action::Interject { text, .. }) => {
-            assert!(
-                text.contains(HUMAN),
-                "Isolated Preview idle plus notes plus Enter must Approve with those notes, got {text:?}"
-            );
-        }
-        other => panic!(
-            "Isolated Preview idle plus a non-empty Operator box plus Enter must Approve with those notes; got {other:?}"
-        ),
-    }
     assert!(
-        agent.plan_approval_view.is_none() || agent.plan_decision_resolved,
-        "Isolated Preview idle Enter with notes must Approve"
+        !matches!(
+            &send,
+            InputOutcome::Action(Action::Interject { .. })
+                | InputOutcome::ActionThenForward(Action::Interject { .. })
+        ),
+        "Isolated Preview open plus a typed sentence plus Enter must not Interject; got {send:?}"
+    );
+    assert!(
+        matches!(&send, InputOutcome::Changed),
+        "Isolated Preview open plus a typed sentence plus Enter is a human turn, not Approve and not SendPrompt; got {send:?}"
+    );
+    assert!(
+        agent.plan_approval_view.is_some() && !agent.plan_decision_resolved,
+        "Enter must leave the plan waiting"
+    );
+    assert!(
+        agent.prompt.text().contains(HUMAN),
+        "Enter must leave the sentence in the composer so click Approve can send it as notes, got {:?}",
+        agent.prompt.text()
+    );
+    let comments = agent
+        .plan_approval_view
+        .as_ref()
+        .map(|pav| {
+            pav.comments
+                .iter()
+                .map(|c| c.text.clone())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let in_comments = comments.iter().any(|c| c.contains(HUMAN));
+    let in_scrollback = (0..agent.scrollback.len()).any(|i| {
+        matches!(
+            agent.scrollback.get(i).map(|e| &e.block),
+            Some(RenderBlock::UserPrompt(b)) if b.text.contains(HUMAN)
+        )
+    });
+    assert!(
+        !in_comments || in_scrollback,
+        "Human sentence must not remain only as plan comment 1; comments={comments:?}"
     );
 
     let mut empty = agent_with_scrollable_plan();

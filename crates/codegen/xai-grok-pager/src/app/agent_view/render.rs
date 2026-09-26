@@ -1657,7 +1657,7 @@ impl AgentView {
             catalog_window,
             self.is_subagent_view,
         );
-        if let Some(mut ctx_line) = context_bar::context_bar_line_with_windows(
+        if let Some(ctx_line) = context_bar::context_bar_line_with_windows(
             ctx_used,
             sampling_window,
             catalog_window,
@@ -1665,42 +1665,10 @@ impl AgentView {
             &theme,
             self.chat_kind,
         ) {
-            let beside = crate::uptime::cap_uptime_status_segment(
-                &crate::app::turn_completion::uptime_text_beside_token_chrome(),
-            );
-            let dim = Style::default().fg(theme.gray_dim).bg(theme.bg_base);
-            ctx_line
-                .spans
-                .push(Span::styled(format!("  {beside}"), dim));
+            // Context figure only. The 15-minute and 24-hour windows stay on `/uptime`.
             status.push("context", ctx_line);
         }
-        let compact_identity = crate::views::credit_bar::compact_meter_identity(
-            self.sampling_identity,
-            self.credit_balance.as_ref(),
-        );
-        let (console_prepaid_cents, console_prepaid_gap) =
-            crate::views::credit_bar::compact_footer_console_prepaid(
-                self.console_team_prepaid_cents,
-                xai_grok_shell::auth::cached_console_team_prepaid_cents_default(),
-                self.console_prepaid_billing_settled,
-                xai_grok_shell::auth::resolve_management_api_key_default().is_some(),
-                xai_grok_shell::auth::resolve_management_team_id_default().is_some(),
-            );
-        if let Some(credits_line) =
-            crate::views::credit_bar::credit_status_line_for_live_session_emphasizing_meter_source(
-                self.credit_balance.as_ref(),
-                compact_identity,
-                console_prepaid_cents,
-                console_prepaid_gap,
-                self.hit_credits.hovered,
-                &theme,
-                self.chat_kind,
-                crate::views::credit_bar::compact_live_principal_role_from_process(),
-                xai_grok_shell::auth::limits_pins::load_limits_pins().meter_source,
-            )
-        {
-            status.push("credits", credits_line);
-        }
+        // No SuperGrok period chip on this header. `/limits` still names that meter.
         let running = self.session.current_prompt_id.as_deref();
         let queue_len = self.session.queue_len()
             + self
@@ -6750,28 +6718,28 @@ mod status_credits_meter_tests {
         }
     }
 
-    /// Named contract: the top status bar always pushes `"credits"` and paints
-    /// the compact included SuperGrok period limits string.
+    /// Named contract: the header does not paint the compact SuperGrok period
+    /// chip, even when included usage is known. `/limits` still names that meter.
     #[test]
     fn status_bar_pushes_credits_compact_included_supergrok_period_limits() {
         let mut agent = make_agent();
         agent.credit_balance = Some(included_balance(24.0));
         let text = draw(&mut agent);
         assert!(
-            agent.hit_credits.rect.is_some(),
-            "status bar must push \"credits\" so hit_credits.rect is a real rect"
+            agent.hit_credits.rect.is_none(),
+            "header must not push a credits chip:\n{text}"
         );
         assert!(
-            text.contains("SuperGrok period"),
-            "status bar must paint the compact SuperGrok period meter:\n{text}"
+            !text.contains("SuperGrok period"),
+            "header must not paint SuperGrok period:\n{text}"
         );
         assert!(
             !text.contains("included SuperGrok period limits"),
             "user-facing TUI chrome must not paint included SuperGrok period limits:\n{text}"
         );
         assert!(
-            text.contains("24%"),
-            "compact meter must show included SuperGrok period limits used percent:\n{text}"
+            !text.contains("24%"),
+            "header must not paint the included SuperGrok period percent:\n{text}"
         );
         assert!(
             !text.contains("free SuperGrok period"),
@@ -6909,6 +6877,251 @@ mod status_credits_meter_tests {
         assert!(
             text.contains("send a message to interrupt"),
             "parked row must still carry send a message to interrupt:\n{text}"
+        );
+    }
+}
+
+/// Header paint omits the 15-minute window, the 24-hour window, SuperGrok
+/// period, and behind linear burn. Branch, context figure, and task count
+/// stay when they are separate from that chip.
+#[cfg(test)]
+mod header_omits_uptime_and_supergrok_period_chip {
+    use std::collections::BTreeMap;
+
+    use super::super::test_fixtures::make_agent;
+    use crate::actions::ActionRegistry;
+    use crate::app::bundle::BundleState;
+    use crate::scrollback::render::ScratchBuffer;
+    use crate::uptime::{
+        Observation, Outcome, UptimeStore, format_uptime_beside_status, uptime_dir,
+    };
+    use crate::views::credit_bar::{
+        ConsoleTeamPrepaidGap, CreditBalance, SamplingIdentityKind,
+        compact_live_principal_role_from_process,
+        credit_status_line_for_live_session_emphasizing_meter_source,
+    };
+    use ratatui::buffer::Buffer;
+    use ratatui::layout::Rect;
+    use xai_grok_shell::session::ContextInfo;
+    use xai_grok_shell::tools::{TodoItem, TodoStatus};
+
+    struct GrokHomeGuard {
+        prev: Option<std::ffi::OsString>,
+    }
+
+    impl GrokHomeGuard {
+        fn set(path: &std::path::Path) -> Self {
+            let prev = std::env::var_os("GROK_HOME");
+            // Safety: this test is the only thread, and Drop restores the previous value.
+            unsafe { std::env::set_var("GROK_HOME", path) };
+            Self { prev }
+        }
+    }
+
+    impl Drop for GrokHomeGuard {
+        fn drop(&mut self) {
+            // Safety: paired with `set`. Restores the process environment this test changed.
+            unsafe {
+                match self.prev.take() {
+                    Some(prev) => std::env::set_var("GROK_HOME", prev),
+                    None => std::env::remove_var("GROK_HOME"),
+                }
+            }
+        }
+    }
+
+    fn draw(agent: &mut super::AgentView) -> String {
+        crate::appearance::cache::set_hide_header(false);
+        let area = Rect::new(0, 0, 220, 40);
+        let mut buf = Buffer::empty(area);
+        let mut scratch = ScratchBuffer::new();
+        agent.draw(
+            area,
+            &mut buf,
+            &ActionRegistry::defaults(),
+            &mut scratch,
+            None,
+            false,
+            crate::app::agent_view::BannerSlotParams::none(),
+            &BundleState::default(),
+            false,
+            false,
+            &mut Vec::new(),
+            super::AppRenderParams::default(),
+        );
+        (0..area.height)
+            .map(|y| {
+                (0..area.width)
+                    .filter_map(|x| buf.cell((x, y)).map(|c| c.symbol().to_string()))
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn line_text(line: &ratatui::text::Line<'_>) -> String {
+        line.spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect()
+    }
+
+    fn succeeded(time_unix_ms: i64) -> Observation {
+        Observation {
+            time_unix_ms,
+            outcome: Outcome::ModelRequestSucceeded,
+            latency_ms: Some(40),
+            token_count: None,
+            tokens_not_fetched: true,
+            model_id: "grok-4.6".to_string(),
+            local_session_id: "header-contract".to_string(),
+            banner_text: None,
+        }
+    }
+
+    /// Header paint omits the 15-minute window, the 24-hour window, SuperGrok
+    /// period, and behind linear burn.
+    #[test]
+    fn header_paint_omits_the_15_minute_window_the_24_hour_window_supergrok_period_and_behind_linear_burn()
+     {
+        let home = tempfile::tempdir().expect("temp grok home");
+        let _home_guard = GrokHomeGuard::set(home.path());
+        xai_grok_shell::token_economy::set_token_economy_live_bool("show_period_pacing", true);
+
+        let mut auth = xai_grok_shell::auth::GrokAuth::default();
+        auth.key = "header-contract-not-a-secret".into();
+        auth.user_id = "header-contract-user".into();
+        auth.principal_type = Some("Team".into());
+        auth.team_id = Some("header-contract-team".into());
+        auth.auth_mode = xai_grok_shell::auth::AuthMode::Oidc;
+        let mut sessions = BTreeMap::new();
+        sessions.insert("https://auth.x.ai::header-contract".to_string(), auth);
+        std::fs::write(
+            home.path().join("auth.json"),
+            serde_json::to_string(&sessions).expect("auth json"),
+        )
+        .expect("write auth.json");
+
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let store = UptimeStore::open(uptime_dir(home.path())).expect("uptime dir");
+        for ago_ms in [60_000_i64, 120_000, 180_000] {
+            store
+                .record(succeeded(now_ms - ago_ms))
+                .expect("record 15-minute success");
+        }
+        store
+            .record(succeeded(now_ms - 2 * 60 * 60 * 1000))
+            .expect("record 24-hour success");
+        let windows = store.aggregate(now_ms).expect("aggregate windows");
+        let uptime = format_uptime_beside_status(&windows);
+        assert_eq!(
+            uptime, "15m 3/3 ok · 24h 4/4 ok",
+            "fixture windows the header would otherwise read: {uptime}"
+        );
+        let capped = crate::uptime::cap_uptime_status_segment(&uptime);
+        assert!(
+            capped.contains("15m") && capped.contains("24h"),
+            "capped status segment still carries both windows: {capped}"
+        );
+
+        let now = chrono::Utc::now();
+        let balance = CreditBalance {
+            usage_pct: 28.0,
+            effective_usage_pct: 28.0,
+            period_end_at: Some(now + chrono::Duration::hours(6)),
+            period_type: Some("USAGE_PERIOD_TYPE_WEEKLY".into()),
+            included_usage_known: true,
+            ..CreditBalance::default()
+        };
+        assert_eq!(
+            compact_live_principal_role_from_process(),
+            Some("business"),
+            "fixture workspace the header chip would otherwise read"
+        );
+        let chip = credit_status_line_for_live_session_emphasizing_meter_source(
+            Some(&balance),
+            SamplingIdentityKind::SuperGrokSession,
+            None,
+            ConsoleTeamPrepaidGap::MissingManagementKey,
+            false,
+            &crate::theme::Theme::default(),
+            false,
+            compact_live_principal_role_from_process(),
+            None,
+        )
+        .expect("populated SuperGrok period chip");
+        let chip_text = line_text(&chip);
+        assert!(
+            chip_text.contains("SuperGrok period")
+                && chip_text.contains("business")
+                && chip_text.contains("28%")
+                && chip_text.contains("behind linear burn"),
+            "fixture chip the header would otherwise read: {chip_text}"
+        );
+
+        let mut agent = make_agent();
+        agent.current_branch = Some("header-contract-branch".into());
+        agent.context_state = Some(ContextInfo {
+            used: 400_000,
+            total: 500_000,
+            ..ContextInfo::default()
+        });
+        agent.session_sampling_window = Some(500_000);
+        agent.credit_balance = Some(balance);
+        agent.sampling_identity = SamplingIdentityKind::SuperGrokSession;
+        let mut todos = Vec::with_capacity(200);
+        for index in 0..190 {
+            todos.push(TodoItem {
+                content: format!("done {index}"),
+                priority: Default::default(),
+                status: TodoStatus::Completed,
+                meta: None,
+                size: None,
+            });
+        }
+        for index in 0..10 {
+            todos.push(TodoItem {
+                content: format!("open {index}"),
+                priority: Default::default(),
+                status: TodoStatus::Pending,
+                meta: None,
+                size: None,
+            });
+        }
+        agent.todo.update_todos(todos);
+
+        let text = draw(&mut agent);
+        let header = text
+            .lines()
+            .find(|line| line.contains("header-contract-branch"))
+            .unwrap_or(text.as_str());
+        let forbidden = [
+            "15m",
+            "24h",
+            "SuperGrok period",
+            "behind linear burn",
+            "business",
+            "28%",
+        ];
+        let found: Vec<&str> = forbidden
+            .into_iter()
+            .filter(|token| header.contains(token))
+            .collect();
+        assert!(
+            found.is_empty(),
+            "header paint omits the 15-minute window, the 24-hour window, SuperGrok period, and behind linear burn, but found {found:?} in:\n{header}"
+        );
+        assert!(
+            header.contains("header-contract-branch"),
+            "branch stays on the header:\n{header}"
+        );
+        assert!(
+            header.contains("400K / 500K"),
+            "context window figure stays when it is separate from the uptime suffix:\n{header}"
+        );
+        assert!(
+            header.contains("tasks 190/200"),
+            "task count stays when it is a separate widget:\n{header}"
         );
     }
 }

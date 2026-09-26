@@ -378,6 +378,19 @@ pub(super) fn handle_exit_plan_mode(
     agent.restore_plan_feedback_draft_if_composer_lost();
     agent.persist_unsent_composer_draft();
 
+    // Soft plan present: a body that is only the Operator prompt, or only
+    // a Job/State/Operator status recap, is not the feature document.
+    if !is_restore && agent.isolated_preview_shows_secondary_plan {
+        let presented = agent
+            .plan_approval_view
+            .as_ref()
+            .and_then(|pav| pav.plan_content.clone())
+            .unwrap_or_default();
+        if crate::slash::commands::plan::soft_present_should_keep_feature_plan(&presented) {
+            agent.restore_soft_feature_plan_over_prompt_or_status();
+        }
+    }
+
     tracing::info!(
         target_active = is_active,
         "Opened plan approval view from ext_method"

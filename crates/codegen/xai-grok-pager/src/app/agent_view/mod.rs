@@ -1454,6 +1454,9 @@ pub struct AgentView {
     /// active and turn-end re-arms Approve for a plan the operator already
     /// decided.
     pub(crate) plan_decision_resolved: bool,
+    /// Paste-chip Approve returns `Action::Interject` and must not emit
+    /// `SendInterject`. Dispatch clears this. Typed notes leave it false.
+    pub(crate) paste_chip_approval_not_wire_interject: bool,
     /// After decisive Revise / Clarify unparks, suppress idle "Plan written.
     /// Click or /view-plan" status and local idle decision re-park until a new
     /// `exit_plan_mode` present re-arms CTAs. Status paints "Revising plan..."

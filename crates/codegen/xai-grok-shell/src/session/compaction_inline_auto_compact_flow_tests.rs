@@ -2167,3 +2167,69 @@ async fn l2_auto_compact_still_fires_at_95_percent_of_200k() {
         })
         .await;
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn resuming_a_specialist_does_not_finish_with_no_inference_or_replay_the_previous_assistant_text()
+ {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (gateway_tx, _gateway_rx) = mpsc::unbounded_channel();
+            let (persistence_tx, _persistence_rx) = mpsc::unbounded_channel();
+            let mut actor =
+                create_test_actor(146_000, 200_000, 95, gateway_tx, persistence_tx).await;
+            actor.startup_hints.is_subagent = true;
+            actor.tool_context.subagent_depth = 2;
+            actor.chat_state_handle.push_assistant_response(
+                ConversationItem::assistant("The specialist already said this sentence."),
+            );
+            let user_text = "x".repeat(240_000);
+            actor
+                .chat_state_handle
+                .push_user_message_and_ack(ConversationItem::user(user_text))
+                .await;
+            let painted = actor.chat_state_handle.get_total_tokens().await;
+            let estimate = actor.chat_state_handle.get_estimated_total_tokens().await;
+            assert_eq!(
+                painted, 146_000,
+                "painted total changed (painted {painted}, estimate {estimate})"
+            );
+            assert!(
+                estimate >= 200_000,
+                "estimate stayed under the window (painted {painted}, estimate {estimate})"
+            );
+            assert!(
+                !actor.l3_nested_window_is_full().await,
+                "resume finished with no inference, replayed the previous assistant sentence, and incremented the turn (painted total {painted}, estimate {estimate})"
+            );
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn coordinator_can_compact_a_specialist_near_200k_and_the_specialist_cannot_compact_itself() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (gateway_tx, _gateway_rx) = mpsc::unbounded_channel();
+            let (persistence_tx, _persistence_rx) = mpsc::unbounded_channel();
+            let mut actor =
+                create_test_actor(190_000, 200_000, 95, gateway_tx, persistence_tx).await;
+            actor.startup_hints.is_subagent = true;
+            actor.tool_context.subagent_depth = 2;
+            assert!(
+                actor.check_auto_compact_needed().await.is_none(),
+                "the specialist must not compact itself"
+            );
+            assert!(
+                !actor.should_prefire_two_pass().await,
+                "the specialist must not start two-pass prefire compact"
+            );
+            let trigger = actor.compact_specialist_initiated_by_coordinator().await;
+            let info =
+                trigger.expect("the coordinator must be able to compact this specialist near 200k");
+            assert_eq!(info.tokens_used, 190_000);
+            assert_eq!(info.context_window, 200_000);
+        })
+        .await;
+}

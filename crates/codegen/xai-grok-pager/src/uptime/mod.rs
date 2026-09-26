@@ -1,4 +1,4 @@
-//! Local uptime observations beside the status line.
+//! Local uptime observations. `/uptime` prints the windows. The header does not.
 //!
 //! Each observation is one new Parquet piece. The installed DuckDB shared
 //! library reads those pieces. This module does not call xAI, does not run a
@@ -18,12 +18,10 @@ pub use store::{
     BANNER_DATACENTER_INCIDENT, BANNER_MODEL_SERVING_ISSUES, Observation, StoreError,
     column_encodings, writer_properties,
 };
-pub use store::{
-    Outcome, UptimeStore, hide_announcement_keeps_row, text_beside_status, uptime_dir,
-    uptime_slash_text,
-};
+pub use store::{Outcome, UptimeStore, hide_announcement_keeps_row, uptime_dir, uptime_slash_text};
 #[cfg(not(test))]
 pub use store::{record_announcement_if_recognized, record_completed_observation};
+#[cfg(test)]
 pub use window::cap_uptime_status_segment;
 #[cfg(test)]
 pub use window::format_uptime_beside_status;

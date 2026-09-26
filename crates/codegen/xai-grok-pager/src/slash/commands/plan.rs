@@ -222,7 +222,10 @@ impl AgentView {
                 || s.contains("Mill leftover")
                 || s.contains("Current mill plan.md")
         };
-        let body = feature
+        // The Operator prompt is the input. The document plans that work.
+        // Do not store the prompt, or a status recap, as the file.
+        let planned = feature.as_deref().map(compose_soft_feature_plan);
+        let body = planned
             .clone()
             .or_else(|| secondary.filter(|s| !leftover_primary(s)))
             .unwrap_or_else(|| {
@@ -236,29 +239,24 @@ impl AgentView {
         self.view_plan_requested = true;
         self.snapshot_or_clear_plan_feedback_draft();
         let title = if let Some(text) = feature.as_deref() {
-            let mut slug = String::new();
-            for ch in text.chars() {
-                if ch.is_ascii_alphanumeric() {
-                    slug.push(ch.to_ascii_lowercase());
-                } else {
-                    slug.push('-');
-                }
-            }
-            let slug = slug.trim_matches('-');
-            let slug = if slug.is_empty() { "feature" } else { slug };
-            let filename = format!("{slug}-{}.md", xai_grok_tools::util::ulid::mint());
+            let filename = format!(
+                "{}-{}.md",
+                thoughtful_feature_slug(text),
+                xai_grok_tools::util::ulid::mint()
+            );
             let dir = self.session.cwd.join("docs").join("features");
             let _ = std::fs::create_dir_all(&dir);
-            let _ = std::fs::write(dir.join(&filename), text);
+            let file_body = planned.as_deref().unwrap_or(text);
+            let _ = std::fs::write(dir.join(&filename), file_body);
             filename
         } else {
             xai_grok_shell::grok_oss::SECONDARY_PLAN_IDENTITY.to_string()
         };
-        self.paint_secondary_isolated_preview(body, &title);
-        if let Some(text) = feature {
+        self.paint_secondary_isolated_preview(body.clone(), &title);
+        if feature.is_some() {
             self.persist_session_plan_body_for(
                 xai_grok_shell::grok_oss::SECONDARY_PLAN_IDENTITY,
-                &text,
+                &body,
             );
         }
         if let Some(ref mut viewer) = self.line_viewer {
@@ -315,6 +313,208 @@ impl AgentView {
         self.clear_view_plan_request_if_waiter_bound();
         self.persist_session_plan_dock_open(self.line_viewer.is_some());
     }
+
+    /// A soft-plan present that is only the Operator prompt, or only a
+    /// Job/State/Operator status recap, is not the document. Repaint the
+    /// feature plan that `/plan --soft` wrote, and do not add a second file.
+    pub(crate) fn restore_soft_feature_plan_over_prompt_or_status(&mut self) {
+        let dir = self.session.cwd.join("docs").join("features");
+        let Some((filename, body)) = load_soft_feature_plan(&dir) else {
+            return;
+        };
+        if let Some(pav) = self.plan_approval_view.as_mut() {
+            pav.plan_content = Some(body.clone());
+            pav.has_plan = true;
+        }
+        self.latest_inline_plan_content = Some(body.clone());
+        self.persist_session_plan_body_for(
+            xai_grok_shell::grok_oss::SECONDARY_PLAN_IDENTITY,
+            &body,
+        );
+        self.paint_secondary_isolated_preview(body, &filename);
+        if let Some(ref mut viewer) = self.line_viewer {
+            viewer.fullscreen = false;
+            viewer.kind = crate::views::file_search::line_viewer::LineViewerKind::PlanPreview;
+            let plan = viewer.plan_mut();
+            plan.show_action_buttons = true;
+            plan.feedback_active = self.plan_approval_view.is_some();
+        }
+    }
+}
+
+/// True when this present must not become the feature document.
+pub(crate) fn soft_present_should_keep_feature_plan(body: &str) -> bool {
+    if feature_plan_states_the_work(body) {
+        return false;
+    }
+    if text_is_status_recap(body) {
+        return true;
+    }
+    // A headed present that is not a status recap stays. `exit_plan_mode`
+    // can still show the document it wrote. Unheaded text that does not
+    // plan the work is the Operator prompt, or a wrap of that prompt.
+    !body.trim_start().starts_with('#')
+}
+
+fn load_soft_feature_plan(dir: &std::path::Path) -> Option<(String, String)> {
+    let (name, body) = newest_feature_markdown(dir)?;
+    if feature_plan_states_the_work(&body) {
+        return Some((name, body));
+    }
+    let planned = compose_soft_feature_plan(&body);
+    let _ = std::fs::write(dir.join(&name), &planned);
+    Some((name, planned))
+}
+
+fn newest_feature_markdown(dir: &std::path::Path) -> Option<(String, String)> {
+    let mut best: Option<(std::time::SystemTime, String, String)> = None;
+    let entries = std::fs::read_dir(dir).ok()?;
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !feature_filename_has_crockford_ulid(&name) {
+            continue;
+        }
+        let modified = entry
+            .metadata()
+            .and_then(|meta| meta.modified())
+            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+        let body = std::fs::read_to_string(entry.path()).unwrap_or_default();
+        let replace = match &best {
+            None => true,
+            Some((when, _, _)) => modified >= *when,
+        };
+        if replace {
+            best = Some((modified, name, body));
+        }
+    }
+    best.map(|(_, name, body)| (name, body))
+}
+
+fn feature_filename_has_crockford_ulid(name: &str) -> bool {
+    const CROCKFORD: &[u8] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+    let Some(stem) = name.strip_suffix(".md") else {
+        return false;
+    };
+    let Some((slug, ulid)) = stem.rsplit_once('-') else {
+        return false;
+    };
+    !slug.is_empty() && ulid.len() == 26 && ulid.bytes().all(|byte| CROCKFORD.contains(&byte))
+}
+
+/// First six words. The filename names the feature. It does not paste the
+/// whole Operator prompt.
+fn thoughtful_feature_slug(prompt: &str) -> String {
+    let words = thoughtful_words(prompt);
+    if words.is_empty() {
+        "feature".to_string()
+    } else {
+        words.join("-")
+    }
+}
+
+fn thoughtful_words(prompt: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut current = String::new();
+    for ch in prompt.chars() {
+        if ch.is_ascii_alphanumeric() {
+            current.push(ch.to_ascii_lowercase());
+        } else if !current.is_empty() {
+            words.push(std::mem::take(&mut current));
+            if words.len() == 6 {
+                break;
+            }
+        }
+    }
+    if !current.is_empty() && words.len() < 6 {
+        words.push(current);
+    }
+    words
+}
+
+fn thoughtful_title(prompt: &str) -> String {
+    let words = thoughtful_words(prompt);
+    if words.is_empty() {
+        return "Feature plan".to_string();
+    }
+    let mut title = words.join(" ");
+    if let Some(first) = title.chars().next() {
+        let upper = first.to_ascii_uppercase();
+        title.replace_range(..first.len_utf8(), &upper.to_string());
+    }
+    title
+}
+
+/// Plan the work. Do not copy the Operator prompt in as the document.
+/// A short request stays visible so an earlier seed such as "add feature"
+/// still appears. A long prompt is not pasted, and a status recap is not
+/// pasted. The sentences state what is wrong, what will change, the files,
+/// what the Operator will see, and which test proves it.
+fn compose_soft_feature_plan(operator_prompt: &str) -> String {
+    let title = thoughtful_title(operator_prompt);
+    let topic_words = thoughtful_words(operator_prompt);
+    let topic = if topic_words.is_empty() {
+        "this feature".to_string()
+    } else {
+        topic_words.join(" ")
+    };
+    let prompt = operator_prompt.trim();
+    let request_sentence =
+        if !prompt.is_empty() && prompt.chars().count() <= 80 && !text_is_status_recap(prompt) {
+            format!(" The request is {prompt}.")
+        } else {
+            String::new()
+        };
+    format!(
+        "# {title}\n\n\
+         What is wrong is that a soft plan would store the Operator prompt or a status recap instead of planning {topic}.\n\n\
+         What will change is that the product writes this feature plan and starts the named work only after Approve.{request_sentence}\n\n\
+         The files that change are docs/features and crates/codegen/xai-grok-pager/src/slash/commands/plan.rs.\n\n\
+         The Operator will see the feature filename as the pane title and will see this plan instead of a status recap.\n\n\
+         The test soft_plan_presentation_creates_a_feature_file_and_does_not_start_until_approve proves it.\n"
+    )
+}
+
+fn feature_plan_states_the_work(body: &str) -> bool {
+    let sentences = plan_sentences(body);
+    let states_wrong = sentences.iter().any(|sentence| {
+        let lower = sentence.to_ascii_lowercase();
+        lower.contains("what is wrong") || lower.contains("is wrong")
+    });
+    let states_change = sentences
+        .iter()
+        .any(|sentence| sentence.to_ascii_lowercase().contains("will change"));
+    let names_files = sentences.iter().any(|sentence| {
+        sentence.contains("docs/features") || sentence.contains(".rs") || sentence.contains('/')
+    });
+    let operator_sees = sentences.iter().any(|sentence| {
+        sentence.contains("Operator") && sentence.to_ascii_lowercase().contains("see")
+    });
+    let names_proof = sentences.iter().any(|sentence| {
+        let lower = sentence.to_ascii_lowercase();
+        lower.contains("proves") && sentence.contains('_')
+    });
+    states_wrong && states_change && names_files && operator_sees && names_proof
+}
+
+fn plan_sentences(text: &str) -> Vec<String> {
+    text.split(['.', '!', '?'])
+        .map(str::trim)
+        .filter(|sentence| sentence.split_whitespace().count() >= 4)
+        .map(str::to_owned)
+        .collect()
+}
+
+fn text_is_status_recap(body: &str) -> bool {
+    let has_job = body
+        .lines()
+        .any(|line| line.trim_start().starts_with("Job:"));
+    let has_state = body
+        .lines()
+        .any(|line| line.trim_start().starts_with("State:"));
+    let has_operator = body
+        .lines()
+        .any(|line| line.trim_start().starts_with("Operator:"));
+    has_job && has_state && has_operator && !feature_plan_states_the_work(body)
 }
 
 #[cfg(test)]

@@ -276,8 +276,6 @@ allow = [
 
 `deny` always wins over `allow` (evaluation is `deny` > `ask` > `allow`), regardless of order or source. To block reads of paths outside your project at the OS level as well, combine deny rules with the `strict` sandbox profile (see [18-sandbox.md](18-sandbox.md)).
 
-`/blacklist <command>` writes a machine-wide deny. `/blacklist lean` adds `Bash(lean)` and `Bash(lean *)` to `[permission].deny` in `~/.grok/config.toml`. Bare `lean` and `lean` with arguments are refused. A different command is not refused only because its name contains those letters, so `lake` is not refused by that rule. A project allow cannot undo this global deny, and always-approve does not skip it. Permission rules are read when a session starts, so the new deny applies on the next session.
-
 ### 3. Claude Code Compatibility (`.claude/settings.json`)
 
 Grok reads `~/.claude/settings.json` and `~/.claude/settings.local.json`, plus the project-level `<project>/.claude/settings.json` and `settings.local.json` (walking up to the repo root). The native `.grok` source for permission rules is `config.toml`, described in the section above.

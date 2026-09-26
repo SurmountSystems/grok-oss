@@ -191,13 +191,23 @@ impl SessionActor {
         self.is_l3_session() || self.is_once_run_nested()
     }
 
-    /// True when an L3 or once-run nested child has filled its nested
-    /// sampling window. Callers must end the child run, not `run_compact_only`.
+    /// True when an L3 or once-run nested role has a painted model total
+    /// (`get_total_tokens`) at or over its sampling window. The byte
+    /// estimate is not this gate. A painted total under the window must
+    /// fall through to the sampler. Callers must end the run, not
+    /// `run_compact_only`. The specialist still must not compact itself.
     pub(crate) async fn l3_nested_window_is_full(&self) -> bool {
         if !self.never_auto_compact() {
             return false;
         }
-        self.sampling_window_is_full().await
+        let Some(cfg) = self.chat_state_handle.get_sampling_config().await else {
+            return false;
+        };
+        let cw = cfg.context_window.get();
+        if cw == 0 {
+            return false;
+        }
+        self.chat_state_handle.get_total_tokens().await >= cw
     }
 
     /// True when used tokens are at or over this session's sampling window.
@@ -2021,6 +2031,35 @@ impl SessionActor {
         .await;
         Err(acp::Error::internal_error().data(message))
     }
+    /// An L2 coordinator may compact a specialist it spawned when the
+    /// painted total is at least 95 percent of the sampling window. The
+    /// specialist turn loop must not call this. `check_auto_compact_needed`
+    /// stays `None` for that specialist.
+    pub(crate) async fn compact_specialist_initiated_by_coordinator(
+        &self,
+    ) -> Option<AutoCompactTriggerInfo> {
+        if !self.is_l3_session() {
+            return None;
+        }
+        let cw = self
+            .chat_state_handle
+            .get_sampling_config()
+            .await
+            .map(|cfg| cfg.context_window.get())
+            .filter(|cw| *cw > 0)?;
+        let tokens_used = self.chat_state_handle.get_total_tokens().await;
+        let ratio = tokens_used.saturating_mul(100) / cw;
+        if ratio < 95 {
+            return None;
+        }
+        let percentage = u8::try_from(ratio).unwrap_or(u8::MAX);
+        Some(AutoCompactTriggerInfo {
+            tokens_used,
+            context_window: cw,
+            percentage,
+        })
+    }
+
     /// Pre-sampling compaction check. Uses `get_estimated_total_tokens()`
     /// (exact prior count + byte-estimate of items since last response) so
     /// tool results are accounted for. Returns `None` when `is_flushing`.

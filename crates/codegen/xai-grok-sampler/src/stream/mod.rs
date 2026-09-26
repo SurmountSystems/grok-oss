@@ -18,6 +18,7 @@ pub use collect::collect_response;
 pub use messages::stream_messages;
 pub use responses::stream_responses;
 
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use crate::events::SamplingChannel;
@@ -123,6 +124,10 @@ mod first_token_wait_tests {
 // never reports those triggers. When the same short sentence (or a
 // two-sentence cycle) repeats in the stream, this abort is Fatal: stop
 // the turn instead of resampling and then accepting the loop as-is.
+// A numbered list's periods split one checklist into many units, and a
+// later smear is not byte-identical, so that unit streak resets. A long
+// block that still sits inside the smear is the same streak, not a
+// second breaker.
 
 /// Tail inspected on each push. Long enough for three copies of a short
 /// two-sentence cycle (the dest-encoder-skip loop is about 70 characters).
@@ -135,6 +140,10 @@ const MIN_SHORT_REPEATS: usize = 4;
 const MIN_LONG_REPEATS: usize = 3;
 /// Phrases this long use [`MIN_LONG_REPEATS`].
 const LONG_PHRASE_CHARS: usize = 48;
+/// Block that still counts when a smear drops words or pastes the list
+/// onto itself. Distinct numbered steps share a shorter tail (the unique
+/// step list's repeated clause is 43 characters) and must not stop.
+const SMEAR_BLOCK_CHARS: usize = 64;
 
 /// Per-stream accumulator. Text and thought are scored separately so a
 /// repeated heading in the answer cannot be blamed on a thought dump.
@@ -183,13 +192,16 @@ impl StreamRepetitionGuard {
     }
 }
 
-/// True when `text` ends in an obvious looping sentence or two-sentence cycle.
+/// True when `text` ends in an obvious looping sentence, a two-sentence
+/// cycle, or a long block that still repeats after a smear.
 pub(crate) fn is_repetitive(text: &str) -> bool {
     let tail = tail_window(text);
     if tail.len() < MIN_PHRASE_CHARS * MIN_LONG_REPEATS {
         return false;
     }
-    trailing_units_loop(split_sentences(tail)) || trailing_units_loop(split_nonempty_lines(tail))
+    trailing_units_loop(split_sentences(tail))
+        || trailing_units_loop(split_nonempty_lines(tail))
+        || repeated_block_survives_smear(tail)
 }
 
 fn tail_window(s: &str) -> &str {
@@ -291,11 +303,169 @@ fn trailing_units_loop(units: Vec<&str>) -> bool {
             break;
         }
     }
-    cycles >= MIN_LONG_REPEATS
+    if cycles >= MIN_LONG_REPEATS {
+        return true;
+    }
+    // A 3- or 4-line cycle smears inside one line. Compare trimmed text
+    // with collapsed whitespace, drop a leading "L3." or "N." marker, and
+    // split on " N. ". The same step matches on its first 24 characters.
+    // A shorter smear matches when it is still a prefix of that step.
+    let step_pieces = |unit: &str| -> Vec<String> {
+        let mut collapsed = String::new();
+        let mut prev_space = false;
+        for ch in unit.trim().chars() {
+            if ch.is_whitespace() {
+                if !prev_space {
+                    collapsed.push(' ');
+                    prev_space = true;
+                }
+            } else {
+                collapsed.push(ch);
+                prev_space = false;
+            }
+        }
+        let mut body = collapsed.as_str();
+        if let Some(after) = body.strip_prefix("L3.") {
+            body = after.trim_start();
+        } else {
+            let raw = body.as_bytes();
+            let mut k = 0;
+            while k < raw.len() && raw[k].is_ascii_digit() {
+                k += 1;
+            }
+            if k > 0 && k < raw.len() && raw[k] == b'.' {
+                body = body[k + 1..].trim_start();
+            }
+        }
+        let normalized = body.to_string();
+        let bytes = normalized.as_bytes();
+        let mut pieces = Vec::new();
+        let mut start = 0usize;
+        let mut at = 0usize;
+        while at < bytes.len() {
+            if bytes[at] == b' ' {
+                let mut end_num = at + 1;
+                while end_num < bytes.len() && bytes[end_num].is_ascii_digit() {
+                    end_num += 1;
+                }
+                if end_num > at + 1
+                    && end_num + 1 < bytes.len()
+                    && bytes[end_num] == b'.'
+                    && bytes[end_num + 1] == b' '
+                {
+                    let piece = normalized[start..at].trim();
+                    if !piece.is_empty() {
+                        pieces.push(piece.to_string());
+                    }
+                    start = end_num + 2;
+                    at = start;
+                    continue;
+                }
+            }
+            at += 1;
+        }
+        let tail = normalized[start..].trim();
+        if !tail.is_empty() {
+            pieces.push(tail.to_string());
+        }
+        pieces
+    };
+    let same_step = |left: &str, right: &str| -> bool {
+        let left_n = left.chars().count();
+        let right_n = right.chars().count();
+        if left_n >= 24 && right_n >= 24 {
+            let left_head: String = left.chars().take(24).collect();
+            let right_head: String = right.chars().take(24).collect();
+            return left_head == right_head;
+        }
+        if left_n < 24 && right_n < 24 {
+            return left == right;
+        }
+        let (short, long) = if left_n < right_n {
+            (left, right)
+        } else {
+            (right, left)
+        };
+        short.chars().count() >= 20 && long.starts_with(short)
+    };
+    let same_unit = |left: &str, right: &str| -> bool {
+        let left_pieces = step_pieces(left);
+        let right_pieces = step_pieces(right);
+        !left_pieces.is_empty()
+            && left_pieces.len() == right_pieces.len()
+            && left_pieces
+                .iter()
+                .zip(right_pieces.iter())
+                .all(|(left_piece, right_piece)| same_step(left_piece, right_piece))
+    };
+    for period in [3usize, 4] {
+        let need = period * MIN_LONG_REPEATS;
+        if units.len() < need {
+            continue;
+        }
+        let start = units.len() - need;
+        let mut matched = true;
+        for offset in 0..period {
+            let base = units[start + offset];
+            for rep in 1..MIN_LONG_REPEATS {
+                if !same_unit(base, units[start + rep * period + offset]) {
+                    matched = false;
+                    break;
+                }
+            }
+            if !matched {
+                break;
+            }
+        }
+        if matched {
+            return true;
+        }
+    }
+    false
 }
 
 fn is_loop_phrase(unit: &str) -> bool {
     unit.len() >= MIN_PHRASE_CHARS && unit.contains(char::is_whitespace)
+}
+
+/// Same breaker as [`trailing_units_loop`]. List-marker periods (`1. `)
+/// split one checklist into rotating units, and a smear is not
+/// byte-identical to the sentence it came from, so the equal-unit streak
+/// resets. Count a long block that still occurs inside that smear.
+fn repeated_block_survives_smear(tail: &str) -> bool {
+    if tail.len() < SMEAR_BLOCK_CHARS * MIN_LONG_REPEATS {
+        return false;
+    }
+    let mut starts: HashMap<&str, Vec<usize>> = HashMap::new();
+    let n = tail.len();
+    let mut i = 0;
+    while i + SMEAR_BLOCK_CHARS <= n {
+        if tail.is_char_boundary(i) && tail.is_char_boundary(i + SMEAR_BLOCK_CHARS) {
+            let window = &tail[i..i + SMEAR_BLOCK_CHARS];
+            if window.contains(char::is_whitespace) {
+                starts.entry(window).or_default().push(i);
+            }
+        }
+        i += 1;
+    }
+    starts.values().any(|at| {
+        let mut count = 0usize;
+        let mut last: Option<usize> = None;
+        for &pos in at {
+            let far = match last {
+                Some(prev) => pos >= prev + SMEAR_BLOCK_CHARS,
+                None => true,
+            };
+            if far {
+                count += 1;
+                last = Some(pos);
+                if count >= MIN_LONG_REPEATS {
+                    return true;
+                }
+            }
+        }
+        false
+    })
 }
 
 /// Operator screenshot 2026-09-20 Isolated Preview: the stream looped this
@@ -308,7 +478,9 @@ pub(crate) const DEST_ENCODER_SKIP_LOOP: &str =
 #[cfg(test)]
 mod dest_encoder_skip_repetition_tests {
     use super::*;
+    use crate::events::SamplingChannel;
     use xai_grok_sampling_types::REPETITIVE_GENERATION_USER_MESSAGE;
+    use xai_grok_sampling_types::SamplingError;
 
     /// Surmount fork of SpaceXAI stream handling. Upstream server
     /// `x-grok-doom-loop-check` resamples confident *thinking* loops on
@@ -368,5 +540,206 @@ mod dest_encoder_skip_repetition_tests {
     fn thought_line_loop_is_repetitive() {
         let line = format!("{DEST_ENCODER_SKIP_LOOP}\n");
         assert!(is_repetitive(&line.repeat(3)));
+    }
+
+    /// Operator screenshot Fri Sep 25, 2026, 12:58 PM. Thinking stayed on
+    /// this sentence for 12 minutes 36 seconds, then the copies smeared.
+    /// Words dropped, and the same list was concatenated onto itself.
+    /// The scored tail is that smear, not three byte-identical copies, so
+    /// a streak that resets on the smear does not stop the turn. Same
+    /// `StreamRepetitionGuard` and `RepetitiveGeneration` stop.
+    #[test]
+    fn repeated_needle_update_sentence_and_smear_stops_the_turn() {
+        const SENTENCE: &str = "Let me start with the needle updates: 1. Update the needles and shape checks 2. Update the header comment 3. Update the imports section 4. Update the fuel comment";
+        const SMEAR: &str = "Let me start with the needle 1. Update the needles and shape checks 2. Update the header comment 3. Update the imports section 4. Update the fuel comment";
+        const CONCAT: &str = "Let me start with the needle 1. Update the needles and shape checks 2. Update the header comment 3. Update the imports section 4. Update the 1. Update the needles and shape checks 2. Update the header comment 3. Update the imports section 4. Update the fuel comment";
+        assert_eq!(
+            SENTENCE,
+            "Let me start with the needle updates: 1. Update the needles and shape checks 2. Update the header comment 3. Update the imports section 4. Update the fuel comment"
+        );
+        assert!(
+            SMEAR.starts_with("Let me start with the needle 1. Update the needles"),
+            "smear must drop words from the needle-update sentence"
+        );
+        assert!(
+            CONCAT.contains(
+                "4. Update the 1. Update the needles and shape checks 2. Update the header comment 3. Update the imports section 4. Update the fuel comment"
+            ),
+            "concatenation must paste the list onto itself"
+        );
+
+        let mut restatement = StreamRepetitionGuard::default();
+        restatement.append(SamplingChannel::Reasoning, SENTENCE);
+        restatement.append(SamplingChannel::Reasoning, " ");
+        restatement.append(SamplingChannel::Reasoning, SENTENCE);
+        assert!(
+            !restatement.is_looping(SamplingChannel::Reasoning),
+            "two copies of the needle-update sentence must not stop an ordinary restatement"
+        );
+
+        let mut stream = String::new();
+        for _ in 0..4 {
+            stream.push_str(SENTENCE);
+            stream.push(' ');
+        }
+        for _ in 0..6 {
+            stream.push_str(SMEAR);
+            stream.push(' ');
+            stream.push_str(CONCAT);
+            stream.push(' ');
+        }
+        assert!(
+            stream.len() > WINDOW_CHARS,
+            "fixture must be longer than the breaker window"
+        );
+        let tail_at = stream.len() - WINDOW_CHARS;
+        assert!(
+            stream.is_char_boundary(tail_at),
+            "window cut must be a char boundary"
+        );
+        let tail = &stream[tail_at..];
+        assert!(
+            !tail.contains("needle updates:"),
+            "scored tail must be the smear, so a byte-identical sentence streak has reset"
+        );
+        assert!(
+            tail.contains("Let me start with the needle 1. Update the needles"),
+            "scored tail must still be this needle-update loop"
+        );
+
+        let mut guard = StreamRepetitionGuard::default();
+        for chunk in stream.split_inclusive(' ') {
+            guard.append(SamplingChannel::Reasoning, chunk);
+        }
+        assert!(
+            guard.is_looping(SamplingChannel::Reasoning),
+            "needle-update sentence plus smears must stop the turn"
+        );
+        match guard.error(SamplingChannel::Reasoning, 1) {
+            SamplingError::RepetitiveGeneration {
+                channel,
+                aborted_at_chunk,
+            } => {
+                assert_eq!(channel, SamplingChannel::Reasoning.as_str());
+                assert_eq!(aborted_at_chunk, Some(1));
+                assert!(
+                    REPETITIVE_GENERATION_USER_MESSAGE.contains("repeating the same sentence"),
+                    "user-facing stop must name repeating sentence, got {REPETITIVE_GENERATION_USER_MESSAGE}"
+                );
+            }
+            other => panic!("expected RepetitiveGeneration, got {other:?}"),
+        }
+    }
+
+    /// Operator screenshot Sat Sep 26, 2026, 6:13 AM. Thinking stayed on
+    /// this four-line list for 35 minutes 42 seconds, then the copies
+    /// smeared. Each line is shorter than the 64-character smear block.
+    /// The second line glues "hardening in AG" onto "3. Implement skill".
+    /// Same `StreamRepetitionGuard` and `RepetitiveGeneration` stop. One
+    /// pass of these different lines must not stop.
+    #[test]
+    fn repeated_four_line_hardening_list_and_smear_stops_the_turn() {
+        const L1: &str = "L3. L1 interactions hardening in AGENTS.md";
+        const L2: &str = "L3. Plan approval hardening in AGENTS.md";
+        const L3LINE: &str = "L3. Implement skill hardening in AGENTS.md";
+        const L4: &str = "L3. Compact pin hardening in host AGENTS.md";
+        const CYCLE0: &str = "L3. Plan approval hardening in AGENTS.md 3. Implement skill hardening in AGENTS.md 4. Compact pin hardening in host AGENTS.md";
+        const CYCLE1: &str = "L3. Plan approval hardening in AG 3. Implement skill hardening in AGENTS.md 4. Compact pin hardening in host AGENTS.md";
+        // Cycle 2 smears the glue prefix and the copied tail. A single
+        // prefix edit leaves "3. Implement..." and the following two lines
+        // as a third 64-character copy. Extra spaces collapse back to the
+        // same steps. L1, the implement line, and the compact line stay.
+        const CYCLE2: &str = "L3.  Plan  approval  hardenin  3.  Implement  skill  hardening  in  AGENTS.md  4.  Compact  pin  hardening  in  host  AGENTS.md";
+
+        let block = format!("{L1}\n{L2}\n{L3LINE}\n{L4}");
+        let mut once = StreamRepetitionGuard::default();
+        once.append(SamplingChannel::Reasoning, &block);
+        assert!(
+            !once.is_looping(SamplingChannel::Reasoning),
+            "one joined block must not stop"
+        );
+
+        let mut twice = StreamRepetitionGuard::default();
+        twice.append(SamplingChannel::Reasoning, &block);
+        twice.append(SamplingChannel::Reasoning, "\n");
+        twice.append(SamplingChannel::Reasoning, &block);
+        assert!(
+            !twice.is_looping(SamplingChannel::Reasoning),
+            "two copies must not stop"
+        );
+
+        let mut guard = StreamRepetitionGuard::default();
+        let mut stream = String::new();
+        for (cycle_i, second) in [CYCLE0, CYCLE1, CYCLE2].into_iter().enumerate() {
+            let lines = [L1, second, L3LINE, L4];
+            for (line_i, line) in lines.into_iter().enumerate() {
+                guard.append(SamplingChannel::Reasoning, line);
+                stream.push_str(line);
+                // Cycle 2's junctions must not rebuild the 64-character
+                // pair of the implement line and the compact line.
+                let sep = if cycle_i == 2 && (line_i == 1 || line_i == 2) {
+                    " \n"
+                } else {
+                    "\n"
+                };
+                guard.append(SamplingChannel::Reasoning, sep);
+                stream.push_str(sep);
+            }
+        }
+
+        let width = 64usize;
+        let mut starts: std::collections::HashMap<&str, Vec<usize>> =
+            std::collections::HashMap::new();
+        let n = stream.len();
+        let mut i = 0usize;
+        while i + width <= n {
+            if stream.is_char_boundary(i) && stream.is_char_boundary(i + width) {
+                let window = &stream[i..i + width];
+                if window.contains(char::is_whitespace) {
+                    starts.entry(window).or_default().push(i);
+                }
+            }
+            i += 1;
+        }
+        let triple = starts.values().any(|at| {
+            let mut count = 0usize;
+            let mut last: Option<usize> = None;
+            for &pos in at {
+                let far = match last {
+                    Some(prev) => pos >= prev + width,
+                    None => true,
+                };
+                if far {
+                    count += 1;
+                    last = Some(pos);
+                    if count >= 3 {
+                        return true;
+                    }
+                }
+            }
+            false
+        });
+        assert!(
+            !triple,
+            "fewer than three identical 64-character windows at least 64 apart"
+        );
+        assert!(
+            guard.is_looping(SamplingChannel::Reasoning),
+            "four-line hardening list plus smear must stop the turn, got continue"
+        );
+        match guard.error(SamplingChannel::Reasoning, 1) {
+            SamplingError::RepetitiveGeneration {
+                channel,
+                aborted_at_chunk,
+            } => {
+                assert_eq!(channel, SamplingChannel::Reasoning.as_str());
+                assert_eq!(aborted_at_chunk, Some(1));
+                assert!(
+                    REPETITIVE_GENERATION_USER_MESSAGE.contains("repeating the same sentence"),
+                    "user-facing stop must name repeating sentence, got {REPETITIVE_GENERATION_USER_MESSAGE}"
+                );
+            }
+            other => panic!("expected RepetitiveGeneration, got {other:?}"),
+        }
     }
 }

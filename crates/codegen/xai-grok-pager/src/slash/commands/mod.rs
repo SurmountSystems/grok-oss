@@ -6,6 +6,7 @@
 pub mod always_approve;
 pub mod announcements;
 pub mod auto;
+pub mod blacklist;
 pub mod btw;
 pub mod cd;
 pub mod clear_completed_todos;
@@ -117,6 +118,7 @@ pub fn builtin_commands() -> Vec<Arc<dyn SlashCommand>> {
         Arc::new(model::ModelCommand),
         Arc::new(effort::EffortCommand),
         Arc::new(always_approve::AlwaysApproveCommand),
+        Arc::new(blacklist::BlacklistCommand),
         Arc::new(auto::AutoCommand),
         Arc::new(context_only::ContextOnlyCommand),
         Arc::new(multiline::MultilineCommand),

@@ -1037,6 +1037,16 @@ impl AgentView {
         self.casual_commenting_range = Some(0..1);
     }
     pub(crate) fn approve_plan(&mut self) -> InputOutcome {
+        self.finish_approve_plan(false)
+    }
+
+    /// Enter Approve with notes. A paste chip and leftover notes return
+    /// Interject. A typed Preview sentence never reaches this.
+    pub(crate) fn approve_plan_from_enter(&mut self) -> InputOutcome {
+        self.finish_approve_plan(true)
+    }
+
+    fn finish_approve_plan(&mut self, from_enter: bool) -> InputOutcome {
         // Image chips insert `[Image #N]` into the buffer. Those tokens are
         // not review notes. Strip them before deciding implement text.
         let live_notes = self.prompt.text_without_image_chips();
@@ -1160,34 +1170,66 @@ impl AgentView {
             // restore it into a second prompt.
             let _ = std::mem::take(&mut pav.stashed_prompt);
         }
+        // Soft plan must start work on Approve. close_plan_review clears
+        // the secondary flag and the pane, so read both first. Vanished
+        // Isolated Preview Enter is decided from the pane that was open
+        // before that close.
+        let soft_plan = self.isolated_preview_shows_secondary_plan;
+        let plan_pane_was_open = self.is_plan_viewer();
         self.close_plan_review(pav, "build");
+        // Read the chip before the composer clear. A paste-chip Approve
+        // returns Interject. Dispatch must not emit SendInterject for that
+        // chip. A non-paste click leaves the flag false.
+        let approval_from_paste_chip = self
+            .prompt
+            .textarea
+            .elements()
+            .iter()
+            .any(|e| e.kind == crate::views::prompt_widget::KIND_PASTE);
         if consumed_composer {
             self.prompt.set_text("");
             self.persist_unsent_composer_draft_now();
         }
-        // Approve with comment is not `x.ai/interject` and not a queued prompt.
-        // A live waiter continues on the approval tool result. Idle has no
-        // waiter, so start the implement turn directly.
         let implement = crate::views::plan_approval_view::PLAN_APPROVED_IMPLEMENT_MESSAGE;
         let start_text = match review_comments.as_deref() {
             Some(notes) => format!("{implement}\n\n{notes}"),
             None => implement.to_string(),
         };
-        if sent_acp {
-            if let Some(notes) = review_comments {
+        let paste_with_notes = approval_from_paste_chip && review_comments.is_some();
+        self.paste_chip_approval_not_wire_interject = paste_with_notes;
+        // Paste Enter and paste click Approve with notes return Interject.
+        // Enter with notes while the plan pane is still open also returns
+        // Interject. Vanished Isolated Preview (pane already shut) Enter
+        // with typed notes is Changed, same as click Approve on a live
+        // waiter. It must not Interject. Soft-plan Approve starts work
+        // instead. A non-paste click on a live waiter is Changed.
+        let enter_with_notes =
+            from_enter && review_comments.is_some() && !soft_plan && plan_pane_was_open;
+        if paste_with_notes || enter_with_notes {
+            if let Some(notes) = review_comments.clone() {
                 self.scrollback
                     .push_block(crate::scrollback::RenderBlock::user_prompt(notes));
             }
-            return InputOutcome::Changed;
+            return InputOutcome::Action(Action::Interject {
+                text: start_text,
+                images,
+            });
         }
-        self.finish_turn_idle_after_plan_park();
-        if images.is_empty() {
-            return InputOutcome::Action(Action::SendPrompt(start_text));
+        if soft_plan || !sent_acp {
+            self.finish_turn_idle_after_plan_park();
+            if images.is_empty() {
+                return InputOutcome::Action(Action::SendPrompt(start_text));
+            }
+            return InputOutcome::Action(Action::SendPromptNow {
+                text: start_text,
+                images,
+            });
         }
-        InputOutcome::Action(Action::SendPromptNow {
-            text: start_text,
-            images,
-        })
+        if let Some(notes) = review_comments {
+            self.scrollback
+                .push_block(crate::scrollback::RenderBlock::user_prompt(notes));
+        }
+        InputOutcome::Changed
     }
     pub(crate) fn abandon_plan(&mut self) -> InputOutcome {
         let Some(mut pav) = self.plan_approval_view.take() else {
@@ -1540,9 +1582,45 @@ impl AgentView {
             self.prompt.set_text_preserving("");
         }
     }
+    /// Comment CTA was clicked. Enter sends the sentence. It does not
+    /// Approve and it is not an interjection. Flush the prompt write-ahead
+    /// log before the send. Empty Enter does not send. A paste chip still
+    /// Approves.
+    pub(crate) fn send_marked_comment_cta_enter(&mut self) -> Option<InputOutcome> {
+        if self.selected_plan_cta()
+            != Some(crate::views::file_search::line_viewer::SelectedPlanCta::Comment)
+        {
+            return None;
+        }
+        if self.prompt.text().trim().is_empty() {
+            return None;
+        }
+        if self
+            .prompt
+            .textarea
+            .elements()
+            .iter()
+            .any(|element| element.kind == crate::views::prompt_widget::KIND_PASTE)
+        {
+            return None;
+        }
+        let text = self.prompt.text().to_string();
+        let images = self.prompt.images.clone();
+        self.append_prompt_wal(
+            xai_grok_shell::session::prompt_wal::PromptWalKind::Send,
+            &text,
+            &images,
+        );
+        Some(self.send_composer_as_normal_prompt())
+    }
+
     /// Submit the live composer as a normal agent prompt. Does not Approve
-    /// or Revise a parked plan.
+    /// or Revise a parked plan. A typed sentence in an open Isolated
+    /// Preview is not this send: flush the prompt write-ahead log and
+    /// leave the composer for click Approve.
     pub(super) fn send_composer_as_normal_prompt(&mut self) -> InputOutcome {
+        // Bare Enter already recorded a typed Preview sentence. Shift+Enter
+        // reaches here and must send, including when composer multiline is off.
         if let Some(text) = self.prompt.try_send() {
             let action = self.prompt_input_mode.send_action(text);
             self.prompt_input_mode = super::PromptInputMode::Normal;
@@ -1660,6 +1738,11 @@ impl AgentView {
         // Approves with those notes. That submit wins over Session Multiline
         // newline. Empty Enter never Approves. Line-comment overlay still
         // saves. Shift+Enter still inserts a newline.
+        if key.code == KeyCode::Enter && key.modifiers.is_empty() && !is_commenting {
+            if let Some(outcome) = self.send_marked_comment_cta_enter() {
+                return outcome;
+            }
+        }
         if key.code == KeyCode::Enter
             && key.modifiers.is_empty()
             && !is_commenting
@@ -1667,7 +1750,14 @@ impl AgentView {
         {
             self.snapshot_or_clear_plan_feedback_draft();
             self.prompt.slash_close();
-            return self.approve_plan();
+            return self.approve_plan_from_enter();
+        }
+        if key.code == KeyCode::Enter
+            && key.modifiers.is_empty()
+            && !is_commenting
+            && self.isolated_preview_typed_open_enter_is_human_turn()
+        {
+            return self.record_open_preview_typed_enter_human_turn();
         }
         // Session Multiline: Enter inserts a newline. Preview must match
         // the main Human box. `[ui] composer_multiline = false` never
@@ -1738,13 +1828,30 @@ impl AgentView {
                         self.show_toast(toast);
                         return InputOutcome::Changed;
                     }
-                    if intent != PlanPromptIntent::Comment && !panel_open && !text.trim().is_empty()
+                    // A shut panel with text in the composer sends the prompt.
+                    // Revise Enter needs the open decision surface. It must
+                    // not send a plan revision or drop the text. Questions
+                    // still reach send_plan_questions when the pane is shut.
+                    // Comment Enter still sends or holds. Empty Enter never
+                    // Approves.
+                    if !panel_open
+                        && !text.trim().is_empty()
+                        && !matches!(
+                            intent,
+                            PlanPromptIntent::Comment | PlanPromptIntent::Questions
+                        )
                     {
                         return self.send_composer_as_normal_prompt();
                     }
+                    if self.isolated_preview_typed_open_enter_is_human_turn() {
+                        return self.record_open_preview_typed_enter_human_turn();
+                    }
+                    if let Some(outcome) = self.send_marked_comment_cta_enter() {
+                        return outcome;
+                    }
                     if self.isolated_preview_idle_enter_approves_with_notes() {
                         self.snapshot_or_clear_plan_feedback_draft();
-                        return self.approve_plan();
+                        return self.approve_plan_from_enter();
                     }
                     let freeform = if text.trim().is_empty() {
                         None
@@ -1753,7 +1860,7 @@ impl AgentView {
                     };
                     return match intent {
                         PlanPromptIntent::Questions => self.send_plan_questions(freeform),
-                        PlanPromptIntent::ApproveNotes => self.approve_plan(),
+                        PlanPromptIntent::ApproveNotes => self.approve_plan_from_enter(),
                         PlanPromptIntent::Revise => self.send_plan_feedback(freeform),
                         PlanPromptIntent::Comment => {
                             if self.hold_parked_plan_review_comments_from_enter() {

@@ -326,6 +326,10 @@ Running one while another is active switches modes. For example, `/auto` while a
 
 Always-approve remains the preferred daily autonomy mode. Context-only is an explicit diagnostic mode, not the default.
 
+### `/blacklist <command>`
+
+Blacklist one command on this machine. `/blacklist lean` adds `Bash(lean)` and `Bash(lean *)` to `[permission].deny` in `~/.grok/config.toml`. Bare `lean` and `lean` with arguments are refused on the next session. `lake` is not refused by that rule. Deny wins over allow and over always-approve, and a project allow cannot undo this global deny.
+
 ### `/multiline`
 
 Toggle multiline input. When it is on, `Enter` in the middle of a draft inserts a newline, and `Enter` at the end of the last line still sends (or interjects if a turn is running). `Shift+Enter` (or `Alt+Enter`) still sends. `Ctrl+Enter` interjects when a running turn can take it, and otherwise inserts a newline. Mid-turn, a bare `Enter` on an empty composer still force-sends the top queued follow-up. Alias: `/ml`. This is a per-session toggle. `[ui] composer_multiline = false` disables Enter / Shift+Enter newlines; `/multiline` cannot restore those while that persist flag is off. `[ui] allow_session_multiline = false` (Settings → Editor) refuses enabling session Multiline from this command, from `Ctrl+M`, and from the Multiline settings row.

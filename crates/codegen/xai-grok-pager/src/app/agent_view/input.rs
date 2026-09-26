@@ -678,13 +678,19 @@ impl AgentView {
             if let Event::Key(key) = ev
                 && key.kind != KeyEventKind::Release
             {
-                match key.code {
-                    KeyCode::Esc | KeyCode::Char('g') | KeyCode::Char('q') => {
-                        self.show_goal_detail = false;
-                        return InputOutcome::Changed;
-                    }
-                    _ => {
-                        return InputOutcome::Changed;
+                // Ctrl-C is not a goal-detail key. Fall through so an empty
+                // composer can set pending quit. Esc, bare g, and bare q still close.
+                let ctrl_c = key.modifiers.contains(KeyModifiers::CONTROL)
+                    && matches!(key.code, KeyCode::Char('c') | KeyCode::Char('C'));
+                if !ctrl_c {
+                    match key.code {
+                        KeyCode::Esc | KeyCode::Char('g') | KeyCode::Char('q') => {
+                            self.show_goal_detail = false;
+                            return InputOutcome::Changed;
+                        }
+                        _ => {
+                            return InputOutcome::Changed;
+                        }
                     }
                 }
             }

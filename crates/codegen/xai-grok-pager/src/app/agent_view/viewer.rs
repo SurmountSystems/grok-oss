@@ -150,7 +150,7 @@ impl AgentView {
         }
     }
 
-    fn selected_plan_cta(&self) -> Option<SelectedPlanCta> {
+    pub(crate) fn selected_plan_cta(&self) -> Option<SelectedPlanCta> {
         self.line_viewer
             .as_ref()
             .and_then(|v| v.plan_ref())
@@ -210,17 +210,16 @@ impl AgentView {
         reg.get_for_dispatch(invocation.token).is_some() || reg.is_builtin(invocation.token)
     }
 
-    /// Isolated Preview idle after present: a non-empty Operator box
-    /// (typed notes or a paste chip) plus Enter Approves with those notes.
-    /// A `[Pasted: 13 lines]` chip whose body starts with `/implement`
-    /// is still Approve-with-comment, not Plan Exit. Empty Enter never
-    /// Approves. Keep-draft from before present still SendPrompt. Typed
-    /// slash commands without a paste chip still send. Line-comment
-    /// overlay still saves. Prompt-focused Revise / Questions keep those
-    /// intents. Vanished Isolated Preview (pane shut, live waiter,
-    /// Preview focus) still Approves with those notes. Leftover
-    /// slash-palette `/` is not notes. Leftover `/` plus notes is still
-    /// those notes: Enter must not accept leftover slash as `/quit`.
+    /// Isolated Preview idle after present: a paste chip plus Enter
+    /// Approves with those notes. A typed sentence while the plan viewer
+    /// is open is not Approve. A `[Pasted: 13 lines]` chip whose body
+    /// starts with `/implement` is still Approve-with-comment, not Plan
+    /// Exit. Empty Enter never Approves. Keep-draft from before present
+    /// still SendPrompt. Typed slash commands without a paste chip still
+    /// send. Line-comment overlay still saves. Vanished Isolated Preview
+    /// (pane shut, live waiter, Preview focus) still Approves with those
+    /// notes. A typed human sentence in an open Isolated Preview is not
+    /// that setup. Leftover slash-palette `/` is not notes.
     pub(crate) fn isolated_preview_idle_enter_approves_with_notes(&self) -> bool {
         if self.plan_decision_resolved {
             return false;
@@ -249,6 +248,28 @@ impl AgentView {
         if self.composer_is_recognized_slash_command() {
             return false;
         }
+        // A typed sentence whose keystroke snapshot matches the composer is
+        // a human turn, not Approve. A paste chip still Approves. Leftover
+        // slash plus notes has no snapshot, so Enter still Approves. A
+        // marked Comment CTA Enter sends and must not be re-approved.
+        let paste_chip = self
+            .prompt
+            .textarea
+            .elements()
+            .iter()
+            .any(|e| e.kind == crate::views::prompt_widget::KIND_PASTE);
+        if self.selected_plan_cta() == Some(SelectedPlanCta::Comment) && !paste_chip {
+            return false;
+        }
+        if self.isolated_preview_typed_open_enter_is_human_turn() {
+            let typed_snapshot = pav
+                .feedback_draft
+                .as_deref()
+                .is_some_and(|draft| draft.trim() == self.prompt.text().trim());
+            if typed_snapshot {
+                return false;
+            }
+        }
         if pav.focus == PlanApprovalFocus::Prompt {
             return matches!(
                 pav.prompt_intent,
@@ -256,6 +277,66 @@ impl AgentView {
             );
         }
         true
+    }
+
+    /// Typed sentence in an open Isolated Preview. Not a paste chip, not a
+    /// vanished pane, not keep-draft, not a typed slash, not a line comment.
+    /// Session Multiline Enter still inserts a newline.
+    pub(crate) fn isolated_preview_typed_open_enter_is_human_turn(&self) -> bool {
+        if !self.is_plan_viewer() {
+            return false;
+        }
+        if self.plan_decision_resolved || self.plan_feedback_in_flight.is_some() {
+            return false;
+        }
+        let Some(pav) = self.plan_approval_view.as_ref() else {
+            return false;
+        };
+        if pav.focus == PlanApprovalFocus::Commenting {
+            return false;
+        }
+        // Prompt focus is plan feedback (Revise / Comment), not a Preview
+        // human turn. Prompt+Revise must reach send_plan_feedback.
+        if pav.focus == PlanApprovalFocus::Prompt {
+            return false;
+        }
+        if self
+            .prompt
+            .textarea
+            .elements()
+            .iter()
+            .any(|e| e.kind == crate::views::prompt_widget::KIND_PASTE)
+        {
+            return false;
+        }
+        if self.prompt.text().trim().is_empty() {
+            return false;
+        }
+        if self.composer_is_leftover_slash_palette_only()
+            || self.composer_is_keep_draft_from_before_present()
+            || self.composer_is_recognized_slash_command()
+        {
+            return false;
+        }
+        if self.multiline_mode && crate::appearance::cache::load_composer_multiline() {
+            return false;
+        }
+        true
+    }
+
+    /// Flush the sentence to the prompt write-ahead log before any send.
+    /// Leave the composer and the parked plan so click Approve still has
+    /// the sentence as notes. Do not Approve. Do not Interject. Do not
+    /// SendPrompt. Do not set `plan_decision_resolved`.
+    pub(crate) fn record_open_preview_typed_enter_human_turn(&mut self) -> InputOutcome {
+        let text = self.prompt.text().to_string();
+        let images = self.prompt.images.clone();
+        self.append_prompt_wal(
+            xai_grok_shell::session::prompt_wal::PromptWalKind::Send,
+            &text,
+            &images,
+        );
+        InputOutcome::Changed
     }
 
     /// Click marks the CTA and runs it. Enter also submits the marked CTA.
@@ -485,10 +566,16 @@ impl AgentView {
             if focus == Some(PlanApprovalFocus::Commenting) {
                 return self.handle_plan_feedback_key(key);
             }
+            if let Some(outcome) = self.send_marked_comment_cta_enter() {
+                return outcome;
+            }
             if self.isolated_preview_idle_enter_approves_with_notes() {
                 self.snapshot_or_clear_plan_feedback_draft();
                 self.prompt.slash_close();
-                return self.approve_plan();
+                return self.approve_plan_from_enter();
+            }
+            if self.isolated_preview_typed_open_enter_is_human_turn() {
+                return self.record_open_preview_typed_enter_human_turn();
             }
             if self.hold_parked_plan_review_comments_from_enter() {
                 return InputOutcome::Changed;

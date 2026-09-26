@@ -480,43 +480,6 @@ pub(in crate::app) fn note_announcement_hide() {
     }
 }
 
-/// Text that sits beside the token chip. Reads pieces when the directory
-/// already exists. Does not write a piece.
-pub(in crate::app) fn uptime_text_beside_token_chrome() -> String {
-    use std::sync::Mutex;
-    use std::time::{Duration, Instant};
-    struct Cached {
-        at: Instant,
-        text: String,
-    }
-    static CACHE: Mutex<Option<Cached>> = Mutex::new(None);
-    let now = Instant::now();
-    if let Ok(guard) = CACHE.lock() {
-        if let Some(cached) = guard.as_ref() {
-            if cached.at.elapsed() < Duration::from_secs(1) {
-                return cached.text.clone();
-            }
-        }
-    }
-    let text = fresh_uptime_text();
-    if let Ok(mut guard) = CACHE.lock() {
-        *guard = Some(Cached {
-            at: now,
-            text: text.clone(),
-        });
-    }
-    text
-}
-
-fn fresh_uptime_text() -> String {
-    let home = xai_grok_config::grok_home();
-    let dir = crate::uptime::uptime_dir(&home);
-    let now_ms = chrono::Utc::now().timestamp_millis();
-    // Missing libduckdb.so returns the tracking-off sentence. It does not panic
-    // and it does not open an error dialog.
-    crate::uptime::text_beside_status(&dir, now_ms).replace('\n', "  ")
-}
-
 fn outcome_from_failure(http_status: Option<u16>, text: &str) -> Option<crate::uptime::Outcome> {
     if text.contains("Stopped: repeating sentence") || text.contains("repetitive_generation") {
         return Some(crate::uptime::Outcome::RepeatingSentenceStop);

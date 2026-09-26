@@ -808,7 +808,7 @@ pub(super) fn dispatch_send_prompt_inner(
         }
         agent.snapshot_or_clear_plan_feedback_draft();
         agent.prompt.slash_close();
-        let outcome = agent.approve_plan();
+        let outcome = agent.approve_plan_from_enter();
         return match outcome {
             crate::app::app_view::InputOutcome::Action(action)
             | crate::app::app_view::InputOutcome::ActionThenForward(action) => {

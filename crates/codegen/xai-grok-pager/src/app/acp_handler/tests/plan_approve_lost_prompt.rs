@@ -810,10 +810,10 @@ fn isolated_preview_vanished_pane_notes_enter_approves_with_comment() {
     assert_acp_approved_notes_not_in_feedback(rx);
 }
 
-/// Isolated Preview idle plus typed Operator notes plus Enter Approves
-/// with those notes. Empty Enter never Approves. This diverges from
-/// upstream xAI because FORK.md lost-prompt extra and the catalog
-/// Clickable Approve table.
+/// Isolated Preview idle plus a typed Operator sentence: Enter is the
+/// human turn and leaves the plan waiting. Click Approve is the approve.
+/// The notes ride along on that click, and that click is not an
+/// interjection. Empty Enter never Approves.
 #[test]
 fn isolated_present_preview_enter_is_human_turn_then_click_approve() {
     let mut app = make_app_with_agent("sess-1");
@@ -881,23 +881,48 @@ fn isolated_present_preview_enter_is_human_turn_then_click_approve() {
     );
     let enter_effects = dispatch_outcome(&mut app, enter);
     assert!(
-        user_prompt_texts(&app)
-            .iter()
-            .any(|text| text.contains(HUMAN_BOX_PROMPT) && text.contains(PLAN_APPROVED_REVIEW_COMMENTS_LEAD)),
-        "the comment stays on the approval; scrollback={:?}",
-        user_prompt_texts(&app)
+        !enter_effects.iter().any(|effect| matches!(
+            effect,
+            Effect::SendPrompt { .. } | Effect::SendInterject { .. } | Effect::SendPromptNow { .. }
+        )),
+        "Enter is the human turn and must not send or interject; effects={enter_effects:?}"
     );
-    let after = AfterClickApprove {
-        interject_text: None,
-        effects: enter_effects,
-    };
+    {
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(
+            agent.plan_approval_view.is_some() && !agent.plan_decision_resolved,
+            "Enter must leave the plan waiting"
+        );
+        assert!(
+            agent.prompt.text().contains(HUMAN_BOX_PROMPT),
+            "Enter must leave the sentence in the composer so click Approve can send it as notes, got {:?}",
+            agent.prompt.text()
+        );
+    }
+    let after = click_approve_via_app(&mut app);
     assert!(
         app.agents
             .get(&AgentId(0))
             .unwrap()
             .plan_approval_view
             .is_none(),
-        "non-empty Enter must Approve the parked plan"
+        "click Approve must decide the parked plan"
+    );
+    assert!(
+        user_prompt_texts(&app).iter().any(|text| {
+            text.contains(HUMAN_BOX_PROMPT) && text.contains(PLAN_APPROVED_REVIEW_COMMENTS_LEAD)
+        }),
+        "the comment stays on the approval; scrollback={:?}",
+        user_prompt_texts(&app)
+    );
+    assert!(
+        after.interject_text.is_none()
+            && !after.effects.iter().any(|effect| matches!(
+                effect,
+                Effect::SendInterject { .. }
+            )),
+        "click Approve is not an interjection; effects={:?}",
+        after.effects
     );
     assert_prompt_sent_on_implement_turn(&app, &after, HUMAN_BOX_PROMPT);
     assert_acp_approved_notes_not_in_feedback(rx);

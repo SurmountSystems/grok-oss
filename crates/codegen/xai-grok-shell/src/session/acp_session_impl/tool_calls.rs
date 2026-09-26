@@ -232,10 +232,12 @@ pub(super) enum PlanEditGate {
 /// - **Compat-toolset `Delete`** is **not** on the markdown carve-out: it maps to
 ///   `AccessKind::Edit` and is plan-file-only (same as grok edits). Deleting
 ///   an arbitrary `.md` in plan mode must not pass.
-/// - **Every other edit tool** (`AccessKind::Edit`) is restricted to the plan
-///   file itself, via the same predicate that auto-approves plan-file edits
+/// - **Every other edit tool** (`AccessKind::Edit`) uses the same predicate
+///   that auto-approves those edits
 ///   ([`PlanModeTracker::should_auto_approve_edit`]) so the gate and the
-///   permission bypass can never disagree.
+///   permission bypass can never disagree. plan.md stays the main plan file,
+///   and a living document the plan names under `.agents/reports/` is allowed
+///   beside it.
 ///
 /// `apply_patch` maps to a placeholder `AccessKind::Edit("apply_patch")` and
 /// therefore never matches the plan file: it is always rejected in plan mode
@@ -3518,6 +3520,64 @@ mod plan_mode_edit_gate_tests {
         assert_eq!(
             gate(&t, &write("/tmp/gate-session/plan.md")),
             PlanEditGate::Allow
+        );
+    }
+    /// Contract: plan mode can write the inventory path the plan points at,
+    /// and still refuses a Rust source edit. plan.md stays the main plan
+    /// file. A path the plan does not name stays refused. A named path that
+    /// is not a living document under `.agents/reports/` stays refused.
+    #[test]
+    fn plan_mode_can_write_the_inventory_path_the_plan_points_at_and_still_refuses_a_rust_source_edit()
+     {
+        let root = tempfile::tempdir().expect("tempdir");
+        let session_dir = root.path().join("session");
+        std::fs::create_dir_all(&session_dir).expect("session dir");
+        let reports = root.path().join(".agents").join("reports");
+        std::fs::create_dir_all(&reports).expect("reports dir");
+        let inventory = reports.join("remaining-unwrapped-inventory.md");
+        let unnamed = reports.join("not-named-by-the-plan.md");
+        let rust_src = root.path().join("src").join("lib.rs");
+        std::fs::create_dir_all(rust_src.parent().expect("src parent")).expect("src dir");
+        let named_outside = root.path().join("notes.md");
+        let inventory_s = inventory.to_string_lossy().into_owned();
+        let unnamed_s = unnamed.to_string_lossy().into_owned();
+        let rust_s = rust_src.to_string_lossy().into_owned();
+        let outside_s = named_outside.to_string_lossy().into_owned();
+        let plan_path = session_dir.join("plan.md");
+        let plan_s = plan_path.to_string_lossy().into_owned();
+        let plan_body = format!(
+            "# Plan\n\nWhat remains is tracked in the living inventory at {inventory_s}. \
+             This file is the living list.\n\n\
+             The plan also mentions {rust_s} and {outside_s}. Those are not living inventory files.\n"
+        );
+        std::fs::write(&plan_path, plan_body).expect("write plan.md");
+        let mut tracker = PlanModeTracker::new(session_dir);
+        assert!(tracker.enter_pending());
+        assert!(tracker.activate());
+        assert_eq!(
+            gate(&tracker, &write(&inventory_s)),
+            PlanEditGate::Allow,
+            "plan mode blocked the inventory write the plan points at"
+        );
+        assert_eq!(
+            gate(&tracker, &search_replace(&rust_s)),
+            PlanEditGate::RejectNonPlanFile,
+            "plan mode must still refuse a Rust source edit"
+        );
+        assert_eq!(
+            gate(&tracker, &write(&unnamed_s)),
+            PlanEditGate::RejectNonPlanFile,
+            "a path the plan does not name stays refused"
+        );
+        assert_eq!(
+            gate(&tracker, &write(&outside_s)),
+            PlanEditGate::RejectNonPlanFile,
+            "a named path outside .agents/reports stays refused"
+        );
+        assert_eq!(
+            gate(&tracker, &write(&plan_s)),
+            PlanEditGate::Allow,
+            "plan.md stays the main plan file"
         );
     }
     /// `apply_patch` carries a placeholder access path, never the plan file:

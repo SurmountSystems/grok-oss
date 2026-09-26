@@ -2828,6 +2828,38 @@ fn ctrl_c_idle_empty_prompt_sets_pending_quit() {
     assert_pending_quit(&app);
 }
 #[test]
+fn ctrl_c_idle_empty_prompt_with_running_loop_sets_pending_quit() {
+    crate::appearance::cache::set_simple_mode(true);
+    let mut app = test_app_with_agent();
+    let id = super::super::agent::AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.scheduled_tasks.insert(
+            "task-1".into(),
+            crate::app::agent::ScheduledTaskInfo {
+                task_id: "task-1".into(),
+                prompt: "loop".into(),
+                human_schedule: "every 30 minutes".into(),
+                created_at: std::time::Instant::now(),
+                next_fire_at: Some("in about 1 minute".into()),
+                tag: "loop".into(),
+                last_subagent_id: None,
+            },
+        );
+        let mut goal = crate::app::agent::GoalDisplayState::test_stub();
+        goal.status = crate::app::agent::GoalDisplayStatus::UserPaused;
+        agent.goal_state = Some(goal);
+        agent.show_goal_detail = true;
+        agent.session.set_yolo_mode_for_test(true);
+    }
+    let outcome = app.handle_input(&ctrl_c());
+    assert!(
+        matches!(outcome, InputOutcome::Changed),
+        "empty composer plus a running loop: Ctrl-C must not be ignored, got {outcome:?}"
+    );
+    assert_pending_quit(&app);
+}
+#[test]
 fn ctrl_c_idle_empty_prompt_focused_sets_pending_quit() {
     crate::appearance::cache::set_simple_mode(true);
     let mut app = test_app_with_agent();
