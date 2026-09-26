@@ -180,6 +180,7 @@ fn trailing_units_loop(units: Vec<&str>) -> bool {
     // with collapsed whitespace, drop a leading "L3." or "N." marker, and
     // split on " N. ". The same step matches on its first 24 characters.
     // A shorter smear matches when it is still a prefix of that step.
+    // The same words with a different index are unique steps, not a smear.
     let step_pieces = |unit: &str| -> Vec<String> {
         let mut collapsed = String::new();
         let mut prev_space = false;
@@ -246,7 +247,10 @@ fn trailing_units_loop(units: Vec<&str>) -> bool {
         if left_n >= 24 && right_n >= 24 {
             let left_head: String = left.chars().take(24).collect();
             let right_head: String = right.chars().take(24).collect();
-            return left_head == right_head;
+            if left_head != right_head {
+                return false;
+            }
+            return !distinct_numbered_template(left, right);
         }
         if left_n < 24 && right_n < 24 {
             return left == right;
@@ -298,6 +302,30 @@ fn is_loop_phrase(unit: &str) -> bool {
     unit.len() >= MIN_PHRASE_CHARS && unit.contains(char::is_whitespace)
 }
 
+/// Exact copies stay a loop. A shared sentence whose ASCII digit runs differ does not.
+fn distinct_numbered_template(left: &str, right: &str) -> bool {
+    if left == right {
+        return false;
+    }
+    let template = |text: &str| -> String {
+        let mut out = String::with_capacity(text.len());
+        let mut in_digits = false;
+        for ch in text.chars() {
+            if ch.is_ascii_digit() {
+                if !in_digits {
+                    out.push('#');
+                    in_digits = true;
+                }
+            } else {
+                in_digits = false;
+                out.push(ch);
+            }
+        }
+        out
+    };
+    template(left) == template(right)
+}
+
 fn identical_character_run_hit_256(text: &str) -> bool {
     // The counter is a u8. The 256th identical character stops, and it never wraps.
     let mut run: u8 = 0;
@@ -327,9 +355,7 @@ fn smear_block_is_mostly_spaces(block: &str) -> bool {
         total += 1;
         if ch == ' ' {
             spaces += 1;
-            if run < 255 {
-                run += 1;
-            }
+            run = run.saturating_add(1);
             if run > longest {
                 longest = run;
             }

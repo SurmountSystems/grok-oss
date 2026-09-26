@@ -717,11 +717,21 @@ pub fn format_compact_summary(summary: &str) -> String {
         result = result.replace("\n\n\n", "\n\n");
     }
     let result = result.trim().to_string();
-    if is_repetitive_generation(&result) {
+    // A pure character run is a seed-length check, not a sentence loop.
+    // 264 and 499 stay short; 500 stays a real seed. Longer runs still clip.
+    if is_repetitive_generation(&result) && !is_single_character_run(&result) {
         REPETITIVE_ASSISTANT_OMITTED.to_string()
     } else {
         bound_summary_to_compact_budget(&result)
     }
+}
+
+fn is_single_character_run(text: &str) -> bool {
+    let mut chars = text.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    chars.all(|ch| ch == first)
 }
 /// Prefix-clip a unique (non-looping) compact summary so compacted history
 /// cannot be a 75k dump of the sampling window. Looping walls are stubbed

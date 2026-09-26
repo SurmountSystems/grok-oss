@@ -476,9 +476,7 @@ fn smear_block_is_mostly_spaces(block: &str) -> bool {
         total += 1;
         if ch == ' ' {
             spaces += 1;
-            if run < 255 {
-                run += 1;
-            }
+            run = run.saturating_add(1);
             if run > longest {
                 longest = run;
             }
