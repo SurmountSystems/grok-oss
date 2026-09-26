@@ -458,6 +458,7 @@ pub const PAGER_COMMAND_KEYS: &[&str] = &[
     "always-approve",
     "announcements",
     "auto",
+    "blacklist",
     "btw",
     "cd",
     "changelog",

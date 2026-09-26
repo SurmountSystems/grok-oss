@@ -23,9 +23,6 @@ xai-grok-pager-diff = { path = "../xai-grok-pager-diff" }
 # The /gboom easter-egg game (extracted)
 xai-grok-gboom = { path = "../xai-grok-gboom" }
 
-# Diff hunk construction (extracted)
-xai-grok-pager-diff = { path = "../xai-grok-pager-diff" }
-
 # Rendering
 ratatui = { workspace = true, features = ["crossterm", "unstable-widget-ref"] }
 xai-grok-announcements = { workspace = true }
@@ -243,12 +240,6 @@ harness = false
 [[test]]
 name = "settings_e2e"
 path = "tests/settings_e2e.rs"
-
-# Opt into [workspace.lints.clippy] (too_many_arguments etc.). Without this,
-# `cargo clippy --workspace -- -D warnings` on this package is stricter than
-# the workspace-default clippy allows used in CI.
-[lints]
-workspace = true
 
 # Opt into [workspace.lints.clippy] (too_many_arguments etc.). Without this,
 # `cargo clippy --workspace -- -D warnings` on this package is stricter than
