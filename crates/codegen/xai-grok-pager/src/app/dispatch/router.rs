@@ -139,6 +139,21 @@ pub(super) fn dispatch_copy_auth_url(
         generation: app.auth_clipboard_feedback_generation,
     }]
 }
+/// Paste-chip Approve returns `Action::Interject` and must not emit
+/// `SendInterject`. Typed notes leave the flag false and still send.
+/// One-shot: this clears the flag even when the text is not an approval.
+fn paste_chip_approval_skips_wire_interject(app: &mut AppView, text: &str) -> bool {
+    let ActiveView::Agent(id) = app.active_view else {
+        return false;
+    };
+    let Some(agent) = app.agents.get_mut(&id) else {
+        return false;
+    };
+    let from_paste_chip = std::mem::take(&mut agent.paste_chip_approval_not_wire_interject);
+    from_paste_chip
+        && text.contains(crate::views::plan_approval_view::PLAN_APPROVED_REVIEW_COMMENTS_LEAD)
+}
+
 /// Dispatch an action: mutate state, return effects to execute.
 /// The returned `Vec<Effect>` may be empty (pure state mutation) or contain async work that the event loop should spawn.
 /// Do not extract a returning arm into a handler: as a delegation its `return`s become plain arm values and start flowing through the tail.
@@ -419,9 +434,13 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::SendSlashCommandPreservingDraft(text) => {
             dispatch_send_prompt_inner(app, text, false, false, false)
         }
-        Action::Interject { text, images } => {
-            super::queue::with_held_queue_flush(app, |app| dispatch_interject(app, text, images))
-        }
+        Action::Interject { text, images } => super::queue::with_held_queue_flush(app, |app| {
+            if paste_chip_approval_skips_wire_interject(app, &text) {
+                vec![]
+            } else {
+                dispatch_interject(app, text, images)
+            }
+        }),
         Action::ExecutePlan {
             plan_file_content,
             plan_file_uri,

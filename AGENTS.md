@@ -46,6 +46,10 @@ project `.agents/reports/`, `.agents/plans/`, or project-root `.grok/`
 for reports. This pin does not weaken § *Project agent home*. Host
 dual-pin: `~/.grok/AGENTS.md` same heading.
 
+### Bug reports and issue writeups stay out of the product tree (pinned 2026-09-26)
+
+Bug reports and issue writeups stay out of the product tree. They do not go in `docs/issues/`, `docs/features/`, `docs/dev/bugs/`, or any other docs path. GitHub holds the GitHub issue. Local notes go in `~/.agents/reports/` and are not part of the git tree.
+
 ## Product priority (value order)
 
 **Code + tests > docs > git.** Docs matter more than git ceremony; docs matter
@@ -263,10 +267,10 @@ less than product code and tests. Do not invent long essays or git nags.
    2026-08-20; compact split 2026-08-21).** The main (L1) session uses
    the catalog 500k sampling window. AUTO compact on L1 uses that
    window, not the old 200k knee. Nested L2 sampling stays 200k. L2
-   may compact. L3 never compact. An L3 is disposable. If it stalls
+   may compact. A specialist must not compact itself. An L3 is disposable. If it stalls
    or spirals, kill it. Think-only stall: see § *Kill a think-only L3
    after about 15 minutes*. When an L3 is near 200k, it summarizes,
-   reports to L2, and stops. Do not compact-and-continue on L3.
+   reports to L2, and stops. The specialist must not compact itself and continue.
    Keep L1 near about 40% of that 500k window, and keep nested
    sessions near 40% of their 200k window. Compaction is expensive
    and slow. Avoid filling L1: board pointers, spawn, wait, read the
@@ -976,8 +980,9 @@ Close a misaligned L2. A nudge is only when that L2 is already on the right job 
 The **main/parent thread is HITL UX only**: status to the operator, spawn L2,
 wait, read **short on-disk reports**, board upsert, plus the **Hierarchical
 fast path**. **Research, implementation, multi-file greps, edits, tests, and
-skill-body rewrites never run on L1 or L2**, not even “just a quick look.”
-L2 parallelizes and spawns L3s; L3 does the actual tools and work. Full
+skill-body rewrites never run on L1**, not even “just a quick look.”
+The L2 does that work. The L2 spawns an L3 only when the slice is hard.
+Easy work can stay on that L2. Full
 rule: this file § *Agent depth L1 / L2 / L3*; host `~/.grok/AGENTS.md` §
 *Regressions…* + § *Hard stop — parent is coordinator only*. Git handoff
 only when the operator asked for complex git help (see hard constraint
@@ -999,7 +1004,12 @@ joins under project `.agents/joins/`.
 
 - **L1 sampling** is the catalog 500k window. AUTO compact on L1 uses that window, not 200k. No 40% throttle on the L1 window size. Cancelled compact must not re-arm.
 - **L2 nested** stays 200k. L2 may compact.
-- **L3 never compact.** An L3 is disposable. If it stalls or spirals, kill it. When an L3 is near 200k, it summarizes, reports to L2, and stops. Do not compact-and-continue on L3. Compact on L3 is an error. Think-only stall: see § *Kill a think-only L3 after about 15 minutes*.
+- **A specialist must not compact itself.** An L3 is disposable. If it stalls or spirals, kill it. When an L3 is near 200k, it summarizes, reports to L2, and stops. The specialist must not compact itself and continue. The specialist compacting itself is an error. Think-only stall: see § *Kill a think-only L3 after about 15 minutes*.
+
+### An L2 may compact a specialist near the nested window (pinned 2026-09-25)
+
+An L2 may compact a specialist it spawned when that specialist is near the 200k nested sampling window. The L2 initiates that compact. The specialist must not compact itself and continue.
+
 - **Finished nested agents must stop (pinned 2026-08-22).** When the host says a nested agent has exited, L1 must not leave it painted as live. If the Subagents list still shows Responding and a running timer, kill that id the same turn. A finished L2 must not keep its context open. Compaction of a finished L2 is waste. Host dual-pin: `~/.grok/AGENTS.md` § Agent depth. Same turn, **report** that finished work to the operator (§ *Report finished nested work the same turn*). Killing the painted-live row is not the report. An early L2 exit is not a finished L2. See § *L1 resumes an early L2 exit*.
 - **L1** never does product work and never shows raw edits. Status, spawn L2, wait, short reports, board, Hierarchical fast path. L1 must not edit product code (see § *I hate seeing you edit code at L1*). L1 must not rewrite process-law files (see § *L1 must not rewrite process law*).
 - **L2** is the coordinator and reports back to the operator at L1. L2 decides whether to spawn L3s. Spawn L3 **only if the problem is actually hard**. Easy work can stay on L2. Easy documentation dual-pins stay on L2.
@@ -1014,10 +1024,10 @@ goes up. Do not go deeper than L3.
 | Depth | Does | Does not |
 |-------|------|----------|
 | **L1 main** | Status to the operator. Spawn L2. Wait. Read short reports. Board upsert. Hierarchical fast path. Modal-free operator chat: typing and chat must stay unobstructed; must not get stuck in plan soft-park or exclusive key capture. | Diagnose, implement, multi-file reads, CI logs, rewriting `AGENTS.md` / `FORK.md` / `RESIDUAL.md` / user-guide / remaining-work reports |
-| **L2 subagent** | Parallelize. Decide whether to spawn L3 (only if the problem is actually hard). Stay token-efficient. Throw context away after a report goes up. Operator-facing nested view: operator questions and clarifications in that L2 overlay go to that L2. | Show raw edits to the operator as if they were L1. Do not inject operator text into a live L3. Spawn L4. |
-| **L3 specialist** | All actual tools and work, in parallel. Same agency as L2 except it cannot spawn. | Spawn L4 (**forbidden**). Do not add extra L3 hobbles (no "L3 may only grep", no weaker model unless product already requires it). |
+| **L2 subagent** | Does the work. Parallelize. Decide whether to spawn L3 (only if the problem is actually hard). Stay token-efficient. Throw context away after a report goes up. Operator-facing nested view: operator questions and clarifications in that L2 overlay go to that L2. | Show raw edits to the operator as if they were L1. Do not inject operator text into a live L3. Spawn L4. |
+| **L3 specialist** | The hard slice, in parallel, when the L2 spawned it. Same agency as L2 except it cannot spawn. | Spawn L4 (**forbidden**). Do not add extra L3 hobbles (no "L3 may only grep", no weaker model unless product already requires it). |
 
-L3 is not a weaker agent. The hard cap is no L4. L2's unique extra versus L3 is spawning L3 plus being the nested view the operator talks to. L3's unique extra versus L2 is doing the tools when spawned. Easy work can stay on L2.
+L3 is not a weaker agent. The hard cap is no L4. L2's unique extra versus L3 is spawning L3 plus being the nested view the operator talks to. An L3 does the hard slice when the L2 spawned it. Easy work can stay on L2.
 
 Spawn an L2 when the job needs isolation from L1: implement, multi-file diagnosis, CI, regressions, skill-maintenance, or any tool work that would fill the parent. The Hierarchical fast path does not spawn L2. Additive "also" / "btw" spawns another L2 (or queues same-file). Do not kill a healthy in-flight L2. See § *L1 resumes an early L2 exit*. Builder jobs on surmount-1 go through one runner L2 (see § *Jobs queue*). Do not spawn a swarm of identical Isolated Preview writers on the same files.
 
@@ -1033,11 +1043,16 @@ these things without spawning L2:
 
 That is the **Hierarchical fast path**. It is not a license to diagnose,
 implement, or walk many files in the main thread. L2 still decides whether
-to spawn L3 when the problem is actually hard. L2 may compact. **Do not
-compact-and-continue** on L3.
+to spawn L3 when the problem is actually hard. L2 may compact a specialist
+it spawned when that specialist is near the 200k nested window. A specialist
+must not compact itself and continue.
 
-L1 and L2 may still use `spawn_subagent`, `todo_write`,
-`get_command_or_subagent_output` / wait, and read the short on-disk report they
+### L1 interactions are spawn and report (pinned 2026-09-26)
+
+An Operator message that asks for a fix, a diagnosis, a multi-file change, or a plan follow-through is an L2 job. L1 spawns that L2 and reports. L1 does not grep, edit, or run the suite to do the job. The Hierarchical fast path stays narrow: one already-named command, one already-named file read, the asked-for short report, one already-named one-line edit. "Just a quick look" is not that path. Easy work stays on that L2. It does not stay on L1. The L2 spawns an L3 only when the slice is hard.
+
+L1 may still use `spawn_subagent`, `todo_write`,
+`get_command_or_subagent_output` / wait, and read the short on-disk report it
 asked for. That is coordination, not work. **Do not go deeper than L3.**
 
 This section is project **D1** law and must survive recon. Host dual-pin:
@@ -1149,15 +1164,15 @@ Host: § *Hard stop* default loop.
   parent or child*.
 - **CI fail, regression, multi-file diagnosis, non-trivial fix, skills-location
   claims:** L1’s first tool turn is `spawn_subagent`, not L1 `grep` / `gh`
-  log pull / unnamed test-file reads / “I’ll check the docs.” L2 then
-  spawns L3 specialists. L2 does not grep, walk the hot path, or implement.
+  log pull / unnamed test-file reads / “I’ll check the docs.” The L2 does
+  that work. The L2 spawns an L3 only when the slice is hard.
   Hierarchical fast path stays on L1.
-- L1 and L2 may: spawn, wait, board upsert, read the **short on-disk report**
-  they asked for; L1 also gives brief user status. Git handoff only when asked
+- L1 may: spawn, wait, board upsert, read the **short on-disk report**
+  it asked for, and give brief user status. The L2 does the work. Git handoff only when asked
   for complex git/recon work.
-- L1 and L2 must **not**: pull CI logs, open failing tests, re-run nextest,
+- L1 must **not**: pull CI logs, open failing tests, re-run nextest,
   edit product code, grep “to be sure,” rewrite skill bodies, or
-  research/implement. L3 does that work.
+  research/implement. The L2 does that work. The L2 spawns an L3 only when the slice is hard.
 - **Additive asks / “also” / “btw”:** phrases like **also**, **btw**, **by the
   way**, **this too**, **and also**, **this work too** mean a second slice, not
   a pivot. Board-upsert; **spawn** another subagent (or queue if same-file race);
@@ -1212,6 +1227,8 @@ approve cycle. Track the work, write a size estimate, implement the groups
 in parallel, then reconcile the estimate against what landed. After Approve,
 work starts.
 
+After the Operator clicks Approve, the implement work is an L2. L1 spawns that L2 and reports. L1 does not implement the plan in the main thread. The L2 spawns an L3 only when the slice is hard. Easy work can stay on that L2. It does not stay on L1.
+
 This does not weaken present-is-not-Approve. `exit_plan_mode` tool success
 and soft-park remain present for review, not operator Approve. Empty
 freeform Enter never Approves. Always-approve is tool permissions only,
@@ -1231,7 +1248,7 @@ intent, or recon survival from prose alone.
   **spawn_subagent** (explore or general-purpose as fits). That is L1 spawning
   L2. L2 spawns L3 only if the problem is actually hard. Easy work can stay on L2.
 - Verify against **code and load paths** (and live trees) before asserting
-  (L3 does that work; L1/L2 read the short report).
+  (the L2 does that work; L1 reads the short report; the L2 spawns an L3 only when the slice is hard).
 - Read short on-disk reports; do not re-prove the subagent in the parent.
 - **Auth / credentials store / keyring:** diagnose with **red/green TDD**
   (`cargo test` contracts), not host shell D-Bus/keyring probes. Do **not** fan
@@ -1285,9 +1302,8 @@ already happened. Do not treat this pin as an owed next run.
 
 Chat is **not** enough. Import restores only `FORK_PATHS`; put-history
 cherry-picks product; join (`-s ours`) keeps the onto tip tree. Pins on branch:
-this file (including § *Agent depth L1 / L2 / L3*: three layers for
-implement, multi-file diagnosis, CI, and regressions, plus the
-**Hierarchical fast path**; not the old weaker “spawn L3 when many greps /
+this file (including § *Agent depth L1 / L2 / L3*: L1 spawns and reports, the L2 does the work, and an L3 only when the slice is hard, plus the
+**Hierarchical fast path**; not “L2 MUST always spawn L3 / always three layers,” and not the older weaker “spawn L3 when many greps /
 half the window” rule),
 [`FORK.md`](FORK.md), [`RESIDUAL.md`](RESIDUAL.md),
 [`docs/upstream-history.md`](docs/upstream-history.md) + sibling logs, upstream
@@ -1387,7 +1403,7 @@ history). Detail: [`docs/upstream-history.md`](docs/upstream-history.md).
 
 No `MODE=overlay` / commit-tree. No `cherry-pick --abort` or `FORCE=1` rebuild
 while a healthy stack is mid-pick. Multi-file conflicts → L2 coordinators on
-disjoint paths spawn L3 specialists (L2 does not resolve files itself); L2
+disjoint paths resolve those files and spawn an L3 only when the slice is hard; L2
 writes short reports on disk. Every continue/join merge = human `git commit -S`.
 
 ## Residual

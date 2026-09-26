@@ -15,9 +15,14 @@ pub enum PlanModeState {
     /// The model does not know about plan mode yet.
     /// Transitions: -> Active (first user prompt triggers injection) -> Inactive (client toggles off before any prompt).
     Pending,
-    /// The model has received plan mode instructions (either via system-reminder injection or via EnterPlanMode tool result).
-    /// Write tools are blocked except for the plan file.
-    /// Transitions: -> Inactive (ExitPlanMode approved, or user toggles off when idle) -> ExitPending (user toggles off while a turn is in-flight).
+    /// Plan mode is active. The model has received plan mode instructions
+    /// (either via system-reminder injection or via EnterPlanMode tool result).
+    /// Write tools are blocked except for plan.md and a living document the
+    /// plan names under `.agents/reports/`. Rust source stays refused.
+    ///
+    /// Transitions:
+    ///   -> Inactive    (ExitPlanMode approved, or user toggles off when idle)
+    ///   -> ExitPending (user toggles off while a turn is in-flight)
     Active,
     /// Client toggled plan mode OFF while Active and a model turn is in-flight.
     /// We need to wait for the current turn to finish (or cancel it), then cleanly exit.
@@ -148,9 +153,19 @@ impl PlanModeTracker {
     pub fn plan_file_path(&self) -> &Path {
         &self.plan_file_path
     }
-    /// Used to bypass the permission prompt for plan file edits during plan mode.
+    /// Returns `true` when plan mode is active and this edit may proceed
+    /// without a permission prompt. plan.md stays the main plan file. A
+    /// living document the plan names under `.agents/reports/` is allowed
+    /// beside it. Other paths stay refused, and a Rust source edit stays
+    /// refused.
     pub(crate) fn should_auto_approve_edit(&self, edit_path: &Path) -> bool {
-        self.is_active() && is_plan_file_write(edit_path, &self.plan_file_path)
+        if !self.is_active() {
+            return false;
+        }
+        if is_plan_file_write(edit_path, &self.plan_file_path) {
+            return true;
+        }
+        living_report_the_plan_names(edit_path, &self.plan_file_path)
     }
     /// Whether the next reminder should be the full variant.
     pub(crate) fn should_use_full_reminder(&self) -> bool {
@@ -316,7 +331,7 @@ using the ${{ tools.by_kind.edit }} tool.
 ${%- endif %}
 
 You should build your plan by writing to or editing this file. \
-Note that this is the only file you are allowed to edit.
+plan.md stays the main plan file. You may also write or update a living document this plan names when that path is under .agents/reports/. Do not edit any other path. Do not edit Rust source.
 
 Put open questions as plain bullets in the plan file or freeform chat. \
 Do not use ${{ tools.by_kind.ask_user }} multi-choice questionnaires for plan \
@@ -326,7 +341,7 @@ to present it for approval."
 /// Static string for alternating turns (when `reminder_count` is odd) to save tokens.
 /// No MiniJinja placeholders: plan path and tool names are only in the full reminder.
 pub(crate) fn plan_mode_reminder_sparse_template() -> &'static str {
-    "Plan mode is still active. Do not make any edits or writes to the system except for the plan file."
+    "Plan mode is still active. Do not make any edits or writes except the plan file, or a living document the plan names under .agents/reports/. Other paths stay refused."
 }
 /// Returns a MiniJinja template string injected when entering plan mode for the second or later time in the same session.
 /// Render via `TemplateRenderer::render_with_extra()` with `{ "plan_path": "..." }`.
@@ -342,11 +357,14 @@ Do not use ${{ tools.by_kind.ask_user }} multi-choice questionnaires for plan \
 clarifications. When the plan is ready, end your turn with ${{ tools.by_kind.exit_plan }} \
 to present it for approval."
 }
-/// Rejection message for an edit outside the plan file while plan mode is active.
-/// Returned as the tool result so the model knows the only editable path.
-/// Render via `TemplateRenderer::render_with_extra()` with `{ "plan_path": "..." }`.
+/// Rejection message for an edit plan mode refuses. plan.md stays the main
+/// plan file. A living document the plan names under `.agents/reports/` may
+/// also be written. Other paths, including Rust source, stay refused.
+///
+/// Render via `TemplateRenderer::render_with_extra()` with
+/// `{ "plan_path": "..." }`.
 pub(crate) fn plan_mode_edit_rejected_template() -> &'static str {
-    "Rejected: file edits are not allowed in plan mode - the only editable file is the plan file (${{ plan_path }})."
+    "Rejected: file edits are not allowed in plan mode. The main plan file is ${{ plan_path }}. A living document the plan names under .agents/reports/ may also be written. Other paths, including Rust source, stay refused."
 }
 /// Returns a MiniJinja template string injected once after exiting plan mode (user-initiated exit via toggle).
 /// Contains no placeholders.
@@ -358,6 +376,97 @@ You have exited plan mode. You can now make edits, run tools, and take actions."
 /// `plan_file` is the absolute path from [`PlanModeTracker::plan_file_path`].
 pub(crate) fn is_plan_file_write(target_path: &Path, plan_file: &Path) -> bool {
     target_path == plan_file
+}
+
+/// A living document beside plan.md: the plan names this exact path, the
+/// path is under `.agents/reports/`, and it is not Rust source.
+///
+/// Directory and extension are checked before `plan.md` is read, so a Rust
+/// source path never becomes allowed because the plan mentions it.
+fn living_report_the_plan_names(edit_path: &Path, plan_file: &Path) -> bool {
+    if !has_agents_reports_components(edit_path) || extension_is_rs(edit_path) {
+        return false;
+    }
+    let Some(path_token) = edit_path.to_str() else {
+        return false;
+    };
+    let Ok(plan_text) = std::fs::read_to_string(plan_file) else {
+        return false;
+    };
+    plan_text_names_bounded_path(&plan_text, path_token)
+}
+
+fn has_agents_reports_components(path: &Path) -> bool {
+    let mut components = path.components();
+    while let Some(component) = components.next() {
+        if component_is(component, ".agents")
+            && components
+                .next()
+                .is_some_and(|next| component_is(next, "reports"))
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn component_is(component: std::path::Component<'_>, name: &str) -> bool {
+    matches!(component, std::path::Component::Normal(text) if text == name)
+}
+
+fn extension_is_rs(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("rs"))
+}
+
+/// Characters that keep a path token going. A sentence period is not this:
+/// `.` then whitespace or end of text ends the token.
+fn is_path_char(c: char) -> bool {
+    c.is_alphanumeric() || matches!(c, '/' | '\\' | '.' | '_' | '-' | '~' | '+' | '@' | '%')
+}
+
+fn plan_text_names_bounded_path(plan_text: &str, path: &str) -> bool {
+    if path.is_empty() {
+        return false;
+    }
+    let mut search_from = 0;
+    while let Some(rel) = plan_text[search_from..].find(path) {
+        let at = search_from + rel;
+        let before_ok = match plan_text[..at].chars().next_back() {
+            None => true,
+            Some(c) => !is_path_char(c),
+        };
+        let end = at + path.len();
+        if before_ok && path_token_does_not_continue(plan_text, end) {
+            return true;
+        }
+        let step = plan_text[at..]
+            .chars()
+            .next()
+            .map(|c| c.len_utf8())
+            .unwrap_or(1);
+        search_from = at + step;
+    }
+    false
+}
+
+/// The path does not continue after `end`. A sentence period (`.` then
+/// whitespace or end of text) is allowed. `.` then a path character, such
+/// as `.bak`, means the plan named a longer path.
+fn path_token_does_not_continue(text: &str, end: usize) -> bool {
+    let mut chars = text[end..].chars();
+    match chars.next() {
+        None => true,
+        Some('.') => match chars.next() {
+            None => true,
+            Some(c) if c.is_whitespace() => true,
+            Some(c) if is_path_char(c) => false,
+            Some(_) => true,
+        },
+        Some(c) if is_path_char(c) => false,
+        Some(_) => true,
+    }
 }
 
 /// Session `plan_mode.json` path under `$GROK_HOME/sessions/<cwd>/<id>/`.
@@ -698,6 +807,9 @@ mod tests {
             "/tmp/session/plan.md",
             true,
         );
+        assert!(with_plan.contains(
+            "plan.md stays the main plan file. You may also write or update a living document this plan names when that path is under .agents/reports/. Do not edit any other path. Do not edit Rust source."
+        ));
         let without_plan = render(
             &r,
             plan_mode_reminder_full_template(),
@@ -745,6 +857,10 @@ mod tests {
             plan_mode_reminder_sparse_template(),
             "/tmp/plan.md",
             false,
+        );
+        assert_eq!(
+            text,
+            "Plan mode is still active. Do not make any edits or writes except the plan file, or a living document the plan names under .agents/reports/. Other paths stay refused."
         );
         assert!(!text.contains("/tmp/plan.md"));
         assert!(!text.contains("exit_plan_mode"));
@@ -812,6 +928,10 @@ mod tests {
             plan_mode_edit_rejected_template(),
             "/tmp/session/plan.md",
             false,
+        );
+        assert_eq!(
+            text,
+            "Rejected: file edits are not allowed in plan mode. The main plan file is /tmp/session/plan.md. A living document the plan names under .agents/reports/ may also be written. Other paths, including Rust source, stay refused."
         );
         assert!(text.contains("/tmp/session/plan.md"));
         assert!(!text.contains("${{"));

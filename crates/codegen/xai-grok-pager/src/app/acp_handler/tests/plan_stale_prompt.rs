@@ -18,8 +18,8 @@ use crate::app::agent::{QueueEntryKind, QueuedPrompt};
 use crate::app::app_view::InputOutcome;
 use crate::scrollback::block::RenderBlock;
 use crate::views::plan_approval_view::{
-    PlanApprovalFocus, PlanFeedbackInFlight, PlanPromptIntent, PLAN_APPROVED_REVIEW_COMMENTS_LEAD,
-    PLAN_REWRITE_WAIT_HEADING,
+    PLAN_APPROVED_IMPLEMENT_MESSAGE, PLAN_APPROVED_REVIEW_COMMENTS_LEAD, PLAN_REWRITE_WAIT_HEADING,
+    PlanApprovalFocus, PlanFeedbackInFlight, PlanPromptIntent,
 };
 use crossterm::event::{
     Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
@@ -36,6 +36,7 @@ const OPERATOR_STALE_PROMPT: &str = concat!(
 );
 
 const HUMAN_TURN: &str = "planning still has stale prompt problems";
+const HUMAN_TURN_WAL_BEFORE_SEND: &str = "The sentence is appended and flushed to the prompt write-ahead log before any send is attempted, and a reload after an interrupted send still contains the sentence. Enter does not approve. Enter is not an interjection.";
 const PRODUCT_REPORT: &str = "Job: Isolated Preview must send this as a Human turn.";
 const COMMENT_STASH: &str = "this comment may ride Approve";
 
@@ -342,31 +343,37 @@ fn isolated_preview_human_sentence_is_human_turn_and_wal_not_only_plan_comment_1
 
     type_into_human_box(&mut app, HUMAN_TURN);
     let outcome = app.handle_input(&enter_key());
-    assert_enter_approves_with_notes(&outcome, HUMAN_TURN);
-    let effects = dispatch_outcome(&mut app, outcome);
     assert!(
-        effects_approve_with_notes(&effects, HUMAN_TURN),
-        "Isolated Preview idle plus notes plus Enter must Approve with those notes; effects={effects:?}"
+        !matches!(
+            &outcome,
+            InputOutcome::Action(Action::Interject { .. })
+                | InputOutcome::ActionThenForward(Action::Interject { .. })
+        ),
+        "{HUMAN_TURN_WAL_BEFORE_SEND} got {outcome:?}"
     );
+    {
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(
+            agent.plan_approval_view.is_some() && !agent.plan_decision_resolved,
+            "{HUMAN_TURN_WAL_BEFORE_SEND}"
+        );
+    }
+    let rows_before_send = load_wal(&cwd_str, sid);
     assert!(
-        wal_has_human_send(&cwd_str, sid, HUMAN_TURN),
-        "Approve with notes must be on WAL, got {:?}",
-        load_wal(&cwd_str, sid)
+        rows_before_send
+            .iter()
+            .any(|row| { row.kind == PromptWalKind::Send && row.text.contains(HUMAN_TURN) }),
+        "{HUMAN_TURN_WAL_BEFORE_SEND} got {rows_before_send:?}"
     );
     assert_not_only_plan_comment_1(&app, HUMAN_TURN);
-    let agent = app.agents.get(&AgentId(0)).unwrap();
+    drop(app);
+    let reloaded =
+        xai_grok_shell::session::prompt_wal::load_prompt_wal(&cwd_str, sid).unwrap_or_default();
     assert!(
-        agent.plan_approval_view.is_none() || agent.plan_decision_resolved,
-        "Isolated Preview idle Enter with notes must Approve"
-    );
-    assert!(
-        !agent
-            .plan_approval_view
-            .as_ref()
-            .and_then(|p| p.feedback_draft.as_deref())
-            .is_some_and(|d| d.contains(HUMAN_TURN))
-            || wal_has_human_send(&cwd_str, sid, HUMAN_TURN),
-        "feedback_draft must not be the only home for a Human turn"
+        reloaded
+            .iter()
+            .any(|row| row.kind == PromptWalKind::Send && row.text.contains(HUMAN_TURN)),
+        "{HUMAN_TURN_WAL_BEFORE_SEND} got {reloaded:?}"
     );
 }
 
@@ -395,21 +402,36 @@ fn after_comment_cta_later_product_report_sends_as_human_not_ride_approve_only()
     click_comment_cta(&mut app);
     type_into_human_box(&mut app, COMMENT_STASH);
     let outcome = app.handle_input(&enter_key());
-    assert_enter_approves_with_notes(&outcome, COMMENT_STASH);
-    let effects = dispatch_outcome(&mut app, outcome);
     assert!(
-        effects_approve_with_notes(&effects, COMMENT_STASH),
-        "Comment CTA then notes then Enter must Approve with those notes; effects={effects:?}"
+        !matches!(
+            &outcome,
+            InputOutcome::Action(Action::Interject { .. })
+                | InputOutcome::ActionThenForward(Action::Interject { .. })
+        ),
+        "a later human send is not an interjection and is not ride-approve; got {outcome:?}"
     );
+    {
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(
+            agent.plan_approval_view.is_some() && !agent.plan_decision_resolved,
+            "a later human send must not Approve"
+        );
+    }
+    let rows_before_send = load_wal(&cwd_str, sid);
     assert!(
-        wal_has_human_send(&cwd_str, sid, COMMENT_STASH),
-        "Approve with Comment notes must be on WAL, got {:?}",
-        load_wal(&cwd_str, sid)
+        rows_before_send
+            .iter()
+            .any(|row| { row.kind == PromptWalKind::Send && row.text.contains(COMMENT_STASH) }),
+        "The sentence is appended and flushed to the prompt write-ahead log before any send is attempted, and a reload after an interrupted send still contains the sentence. Enter does not approve. Enter is not an interjection. got {rows_before_send:?}"
     );
-    let agent = app.agents.get(&AgentId(0)).unwrap();
+    drop(app);
+    let reloaded =
+        xai_grok_shell::session::prompt_wal::load_prompt_wal(&cwd_str, sid).unwrap_or_default();
     assert!(
-        agent.plan_approval_view.is_none() || agent.plan_decision_resolved,
-        "Comment notes plus Enter must Approve"
+        reloaded
+            .iter()
+            .any(|row| row.kind == PromptWalKind::Send && row.text.contains(COMMENT_STASH)),
+        "The sentence is appended and flushed to the prompt write-ahead log before any send is attempted, and a reload after an interrupted send still contains the sentence. Enter does not approve. Enter is not an interjection. got {reloaded:?}"
     );
 }
 
@@ -473,11 +495,64 @@ fn isolated_preview_human_send_clears_composer_no_stale_draft() {
     );
     type_into_human_box(&mut app, HUMAN_TURN);
     let outcome = app.handle_input(&enter_key());
-    assert_enter_approves_with_notes(&outcome, HUMAN_TURN);
+    assert!(
+        !matches!(
+            &outcome,
+            InputOutcome::Action(Action::Interject { .. })
+                | InputOutcome::ActionThenForward(Action::Interject { .. })
+        ),
+        "a typed sentence plus Enter is a human turn, not an interjection; got {outcome:?}"
+    );
+    assert!(
+        matches!(&outcome, InputOutcome::Changed),
+        "a typed sentence plus Enter must record the human turn before any send; got {outcome:?}"
+    );
     let effects = dispatch_outcome(&mut app, outcome);
     assert!(
-        effects_approve_with_notes(&effects, HUMAN_TURN),
-        "Isolated Preview idle plus notes plus Enter must Approve with those notes; effects={effects:?}"
+        !effects.iter().any(|effect| matches!(
+            effect,
+            Effect::SendPrompt { .. }
+                | Effect::SendInterject { .. }
+                | Effect::SendPromptNow { .. }
+                | Effect::SetModeThenPrompt { .. }
+        )),
+        "typed Enter must not Approve and must not send; effects={effects:?}"
+    );
+    {
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(
+            agent.plan_approval_view.is_some() && !agent.plan_decision_resolved,
+            "typed Enter must not Approve"
+        );
+        assert!(
+            agent.prompt.text().contains(HUMAN_TURN),
+            "Enter must leave the sentence in the composer until Approve lands, leftover={:?}",
+            agent.prompt.text()
+        );
+    }
+    assert!(
+        load_wal(&cwd_str, sid)
+            .iter()
+            .any(|row| row.kind == PromptWalKind::Send && row.text.contains(HUMAN_TURN)),
+        "the sentence is flushed to the prompt write-ahead log before any send; got {:?}",
+        load_wal(&cwd_str, sid)
+    );
+    arm_comment_and_approve_hit_rects(&mut app);
+    let click = app.handle_input(&mouse_down(APPROVE_HIT.x + 1, APPROVE_HIT.y));
+    assert!(
+        !matches!(
+            &click,
+            InputOutcome::Action(Action::Interject { .. })
+                | InputOutcome::ActionThenForward(Action::Interject { .. })
+        ),
+        "a non-paste click Approve must not return Interject; got {click:?}"
+    );
+    let click_effects = dispatch_outcome(&mut app, click);
+    assert!(
+        !click_effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::SendInterject { .. })),
+        "a non-paste click Approve must not emit SendInterject; effects={click_effects:?}"
     );
     let agent = app.agents.get(&AgentId(0)).unwrap();
     assert!(
@@ -596,20 +671,39 @@ fn ride_approve_chrome_visible_non_empty_composer_enter_still_sends() {
     click_comment_cta(&mut app);
     type_into_human_box(&mut app, COMMENT_STASH);
     let first = app.handle_input(&enter_key());
-    assert_enter_approves_with_notes(&first, COMMENT_STASH);
+    match &first {
+        InputOutcome::Action(Action::Interject { .. })
+        | InputOutcome::ActionThenForward(Action::Interject { .. }) => {
+            panic!(
+                "Comment CTA plus a typed sentence plus Enter must send, not Interject; got {first:?}"
+            );
+        }
+        InputOutcome::Action(Action::SendPrompt(text))
+        | InputOutcome::ActionThenForward(Action::SendPrompt(text))
+        | InputOutcome::Action(Action::SendPromptNow { text, .. })
+        | InputOutcome::ActionThenForward(Action::SendPromptNow { text, .. }) => {
+            assert!(
+                text.contains(COMMENT_STASH) && !text.contains(PLAN_APPROVED_REVIEW_COMMENTS_LEAD),
+                "Comment CTA plus Enter must send the sentence, not Approve; got {text:?}"
+            );
+        }
+        other => panic!(
+            "Comment CTA plus a typed sentence plus Enter must send, not only Changed; got {other:?}"
+        ),
+    }
     let effects = dispatch_outcome(&mut app, first);
     assert!(
-        effects_approve_with_notes(&effects, COMMENT_STASH),
-        "Comment notes plus Enter must Approve with those notes; effects={effects:?}"
+        effects_send_human(&effects, COMMENT_STASH),
+        "Comment CTA plus Enter must send the sentence; effects={effects:?}"
     );
     let agent = app.agents.get(&AgentId(0)).unwrap();
     assert!(
-        agent.plan_approval_view.is_none() || agent.plan_decision_resolved,
-        "Comment notes plus Enter must Approve, not Plan-Exit"
+        agent.plan_approval_view.is_some() && !agent.plan_decision_resolved,
+        "Comment CTA plus Enter must send and must not Approve"
     );
     assert!(
         agent.prompt.text().trim().is_empty(),
-        "composer clears only after Approve lands, got {:?}",
+        "composer clears after the human send, got {:?}",
         agent.prompt.text()
     );
 }
@@ -634,12 +728,30 @@ fn revise_re_present_does_not_resurrect_prompt_already_in_chat_history() {
     );
     type_into_human_box(&mut app, HUMAN_TURN);
     let outcome = app.handle_input(&enter_key());
-    assert_enter_approves_with_notes(&outcome, HUMAN_TURN);
+    assert!(
+        !matches!(
+            &outcome,
+            InputOutcome::Action(Action::Interject { .. })
+                | InputOutcome::ActionThenForward(Action::Interject { .. })
+        ),
+        "a typed sentence plus Enter is a human turn, not an interjection; got {outcome:?}"
+    );
+    assert!(
+        matches!(&outcome, InputOutcome::Changed),
+        "a typed sentence plus Enter must record the human turn, not Approve; got {outcome:?}"
+    );
     let effects = dispatch_outcome(&mut app, outcome);
     assert!(
-        effects_approve_with_notes(&effects, HUMAN_TURN),
-        "first Isolated Preview idle Enter must Approve with those notes; effects={effects:?}"
+        !effects_approve_with_notes(&effects, HUMAN_TURN),
+        "first Isolated Preview idle Enter must not Approve; effects={effects:?}"
     );
+    {
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(
+            agent.plan_approval_view.is_some() && !agent.plan_decision_resolved,
+            "typed Enter must leave the plan waiting"
+        );
+    }
     let already_painted = user_prompt_texts(&app)
         .iter()
         .any(|t| t.contains(HUMAN_TURN));
@@ -751,17 +863,19 @@ fn operator_stale_prompt_quote_is_a_human_turn_not_plan_comment_1() {
     );
     type_into_human_box(&mut app, OPERATOR_STALE_PROMPT);
     let outcome = app.handle_input(&enter_key());
-    assert_enter_approves_with_notes(&outcome, OPERATOR_STALE_PROMPT);
-    let effects = dispatch_outcome(&mut app, outcome);
     assert!(
-        effects_approve_with_notes(&effects, OPERATOR_STALE_PROMPT),
-        "Operator quote plus Enter must Approve with those notes; effects={effects:?}"
+        !matches!(
+            &outcome,
+            InputOutcome::Action(Action::Interject { .. })
+                | InputOutcome::ActionThenForward(Action::Interject { .. })
+        ),
+        "Operator quote Enter is a human turn, not an interjection; got {outcome:?}"
     );
     assert_not_only_plan_comment_1(&app, OPERATOR_STALE_PROMPT);
     let agent = app.agents.get(&AgentId(0)).unwrap();
     assert!(
-        agent.plan_approval_view.is_none() || agent.plan_decision_resolved,
-        "Operator quote plus Enter must Approve"
+        agent.plan_approval_view.is_some() && !agent.plan_decision_resolved,
+        "Operator quote Enter is a human turn and must not Approve"
     );
 }
 
@@ -846,21 +960,30 @@ fn isolated_preview_human_send_closes_leftover_present_after_mill_continues() {
     }
     type_into_human_box(&mut app, MILL_CONTINUE_HUMAN);
     let outcome = app.handle_input(&enter_key());
-    assert_enter_approves_with_notes(&outcome, MILL_CONTINUE_HUMAN);
-    let effects = dispatch_outcome(&mut app, outcome);
     assert!(
-        effects_approve_with_notes(&effects, MILL_CONTINUE_HUMAN),
-        "Isolated Preview idle plus notes plus Enter must Approve with those notes; effects={effects:?}"
+        !matches!(
+            &outcome,
+            InputOutcome::Action(Action::Interject { .. })
+                | InputOutcome::ActionThenForward(Action::Interject { .. })
+        ),
+        "human send is not an interjection; got {outcome:?}"
     );
     let agent = app.agents.get(&AgentId(0)).unwrap();
     assert!(
-        agent.plan_approval_view.is_none() || agent.plan_decision_resolved,
-        "Isolated Preview idle Enter with notes must Approve, not Plan-Exit and leave the paste"
+        agent.plan_approval_view.is_some() && !agent.plan_decision_resolved,
+        "human send must not Approve"
     );
     assert!(
-        agent.prompt.text().trim().is_empty(),
-        "composer clears only after Approve lands, got {:?}",
-        agent.prompt.text()
+        matches!(
+            &outcome,
+            InputOutcome::Action(Action::SendPrompt(text))
+                | InputOutcome::ActionThenForward(Action::SendPrompt(text))
+                if text.contains(MILL_CONTINUE_HUMAN)
+        ) || agent.prompt.text().contains(MILL_CONTINUE_HUMAN)
+            || user_prompt_texts(&app)
+                .iter()
+                .any(|text| text.contains(MILL_CONTINUE_HUMAN)),
+        "human send must keep the sentence as a human turn; got {outcome:?}"
     );
 }
 
@@ -1730,14 +1853,37 @@ fn isolated_preview_second_plan_prompt_must_not_paint_stale_plan_as_live_present
         let agent = app.agents.get_mut(&AgentId(0)).unwrap();
         agent.prompt.set_text("");
     }
-    type_into_human_box(&mut app, APPROVE_NOTES);
+    let paste = format!("{APPROVE_NOTES}\nline 2 of the paste\nline 3 of the paste\nline 4 of the paste");
+    let _pasted = app.handle_input(&Event::Paste(paste));
+    {
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(
+            agent
+                .prompt
+                .textarea
+                .elements()
+                .iter()
+                .any(|element| element.kind == crate::views::prompt_widget::KIND_PASTE),
+            "paste-then-Enter must start from a paste chip, got {:?}",
+            agent.prompt.text()
+        );
+    }
     let approve_outcome = app.handle_input(&enter_key());
     assert_enter_approves_with_notes(&approve_outcome, APPROVE_NOTES);
     let approve_effects = dispatch_outcome(&mut app, approve_outcome);
     assert!(
-        effects_approve_with_notes(&approve_effects, APPROVE_NOTES),
-        "paste-then-Enter Approve must work after the new present; effects={approve_effects:?}"
+        !approve_effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::SendInterject { .. })),
+        "paste-chip Approve must not emit SendInterject; effects={approve_effects:?}"
     );
+    {
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(
+            agent.plan_approval_view.is_none() || agent.plan_decision_resolved,
+            "paste-then-Enter Approve must work after the new present"
+        );
+    }
 }
 
 /// Operator: bare `/plan` exclusive-blocks nested implementers the way
@@ -2467,7 +2613,11 @@ fn soft_plan_writes_a_new_feature_file_and_does_not_erase_the_older_one() {
         .into_iter()
         .filter(|name| name != &first_name)
         .collect();
-    assert_eq!(newer.len(), 1, "exactly one new feature file; got {newer:?}");
+    assert_eq!(
+        newer.len(),
+        1,
+        "exactly one new feature file; got {newer:?}"
+    );
     let second_name = &newer[0];
     let agent = app.agents.get(&AgentId(0)).unwrap();
     assert_eq!(
@@ -2483,6 +2633,152 @@ fn soft_plan_writes_a_new_feature_file_and_does_not_erase_the_older_one() {
     assert!(
         painted.contains("add feature two"),
         "painted body must contain the second feature text; got {painted:?}"
+    );
+}
+
+/// A soft plan presentation creates a new `docs/features` file whose name
+/// is not `secondary-plan.md`. The soft-plan input is only an Operator
+/// prompt. The written body plans the work in complete sentences. It is
+/// not that prompt, and it is not a Job/State/Operator status recap. A
+/// template that only wraps the prompt still fails. It does not overwrite
+/// primary `plan.md`. It does not start implementation before Approve.
+/// After Approve, work starts. Always-approve does not click Approve.
+/// Empty Enter never Approves.
+#[test]
+#[serial_test::serial(GROK_HOME)]
+fn soft_plan_presentation_creates_a_feature_file_and_does_not_start_until_approve() {
+    let grok_home = tempfile::tempdir().expect("home");
+    let _home = xai_grok_test_support::EnvGuard::set("GROK_HOME", grok_home.path());
+    let proj = tempfile::tempdir().expect("cwd");
+    let cwd = proj.path().to_path_buf();
+    let sid = "plan-soft-present-feature";
+    let primary = "# Primary plan stays\n\nDo not overwrite this primary plan.\n";
+    // Soft-plan input is only this Operator prompt. It is not a plan.
+    let operator_prompt = concat!(
+        "The soft plan pane still titles secondary-plan.md and pastes the Operator prompt ",
+        "or a Job State Operator status about Approve versus Interject instead of ",
+        "planning the work before Approve starts it."
+    );
+    // The 7:11 PM pane pasted this status recap. That recap is not a plan.
+    let status_recap = concat!(
+        "Job: Approve versus Interject.\n",
+        "State: The pane title is secondary-plan.md and the body is the previous status.\n",
+        "Operator: The Operator does not need to click anything for this recap.\n",
+        "Next: Leave the recap in the pane.\n",
+    );
+    let mut app = make_app_with_agent(sid);
+    bind_session_home(&mut app, cwd.clone(), sid);
+    write_mill_session_plan_md(&cwd, sid, primary);
+    {
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        agent.session.yolo_mode = true;
+    }
+    let _ = crate::app::dispatch::dispatch(
+        Action::SendPrompt(format!("/plan --soft {operator_prompt}")),
+        &mut app,
+    );
+    // Presentation that only repeats a status recap must not become the document.
+    let _rx = isolated_present(&mut app, "create-plan-call", status_recap);
+    let features = cwd.join("docs").join("features");
+    let names = feature_markdown_names(&features);
+    assert!(
+        !names.iter().any(|name| name == "secondary-plan.md"),
+        "soft plan presentation must not write secondary-plan.md; got {names:?}"
+    );
+    assert_eq!(
+        names.len(),
+        1,
+        "soft plan presentation must create one docs/features file that is not secondary-plan.md; got {names:?}"
+    );
+    let name = names[0].clone();
+    assert!(
+        feature_filename_ends_with_crockford_ulid(&name),
+        "feature filename must be a thoughtful name plus a ULID; got {name}"
+    );
+    assert!(
+        feature_slug_is_a_thoughtful_name(&name),
+        "feature filename must be a short thoughtful name plus a ULID, not the whole prompt and not secondary-plan.md; got {name}"
+    );
+    let bytes = std::fs::read_to_string(features.join(&name)).expect("feature file");
+    assert_feature_plan_body(&bytes, operator_prompt, status_recap);
+    let agent = app.agents.get(&AgentId(0)).unwrap();
+    assert_eq!(
+        agent
+            .line_viewer
+            .as_ref()
+            .and_then(|viewer| viewer.title_override.as_deref()),
+        Some(name.as_str()),
+        "pane title must be the feature filename, not secondary-plan.md"
+    );
+    let disk = {
+        let cwd_str = cwd.to_string_lossy();
+        let encoded = urlencoding::encode(&cwd_str);
+        std::fs::read_to_string(
+            xai_grok_shell::util::grok_home::grok_home()
+                .join("sessions")
+                .join(encoded.as_ref())
+                .join(sid)
+                .join("plan.md"),
+        )
+        .expect("primary plan.md")
+    };
+    assert_eq!(
+        disk, primary,
+        "soft plan presentation must not overwrite primary plan.md"
+    );
+    assert!(
+        agent.plan_approval_view.is_some() && !agent.plan_decision_resolved,
+        "always-approve must not click Approve; present is not Approve"
+    );
+    {
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        agent.prompt.set_text("");
+    }
+    let empty = app.handle_input(&enter_key());
+    let empty_effects = dispatch_outcome(&mut app, empty);
+    {
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(
+            agent.plan_approval_view.is_some() && !agent.plan_decision_resolved,
+            "empty Enter never Approves a soft plan, and work must not start before Approve"
+        );
+    }
+    assert!(
+        !empty_effects.iter().any(|effect| matches!(
+            effect,
+            Effect::SendPrompt { .. } | Effect::SendInterject { .. } | Effect::SendPromptNow { .. }
+        )),
+        "empty Enter must not start implementation; effects={empty_effects:?}"
+    );
+    arm_comment_and_approve_hit_rects(&mut app);
+    let outcome = app.handle_input(&mouse_down(12, 20));
+    let started = match &outcome {
+        InputOutcome::Action(Action::Interject { text, .. })
+        | InputOutcome::ActionThenForward(Action::Interject { text, .. })
+        | InputOutcome::Action(Action::SendPrompt(text))
+        | InputOutcome::ActionThenForward(Action::SendPrompt(text)) => {
+            text.contains(PLAN_APPROVED_IMPLEMENT_MESSAGE)
+        }
+        InputOutcome::Action(Action::SendPromptNow { text, .. })
+        | InputOutcome::ActionThenForward(Action::SendPromptNow { text, .. }) => {
+            text.contains(PLAN_APPROVED_IMPLEMENT_MESSAGE)
+        }
+        _ => false,
+    };
+    let effects = dispatch_outcome(&mut app, outcome);
+    let effects_start = effects.iter().any(|effect| match effect {
+        Effect::SendPrompt { text, .. } | Effect::SendInterject { text, .. } => {
+            text.contains(PLAN_APPROVED_IMPLEMENT_MESSAGE)
+        }
+        Effect::SendPromptNow { blocks, .. } => blocks.iter().any(|block| match block {
+            acp::ContentBlock::Text(text) => text.text.contains(PLAN_APPROVED_IMPLEMENT_MESSAGE),
+            _ => false,
+        }),
+        _ => false,
+    });
+    assert!(
+        started || effects_start,
+        "after Approve, work starts; effects={effects:?}"
     );
 }
 
@@ -2509,6 +2805,144 @@ fn feature_filename_ends_with_crockford_ulid(name: &str) -> bool {
         return false;
     };
     !slug.is_empty() && ulid.len() == 26 && ulid.bytes().all(|byte| CROCKFORD.contains(&byte))
+}
+
+/// A thoughtful feature name is a few words, not `secondary-plan` and not
+/// the entire Operator prompt pasted into the filename.
+fn feature_slug_is_a_thoughtful_name(name: &str) -> bool {
+    let Some(stem) = name.strip_suffix(".md") else {
+        return false;
+    };
+    let Some((slug, _)) = stem.rsplit_once('-') else {
+        return false;
+    };
+    if slug == "secondary-plan" || slug.is_empty() {
+        return false;
+    }
+    let words = slug.split('-').filter(|word| !word.is_empty()).count();
+    (2..=6).contains(&words)
+}
+
+fn plan_sentences(text: &str) -> Vec<String> {
+    text.split(['.', '!', '?'])
+        .map(str::trim)
+        .filter(|sentence| sentence.split_whitespace().count() >= 4)
+        .map(str::to_owned)
+        .collect()
+}
+
+fn body_is_only_status_recap(body: &str) -> bool {
+    let lines: Vec<&str> = body
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect();
+    let has_job = lines.iter().any(|line| line.starts_with("Job:"));
+    let has_state = lines.iter().any(|line| line.starts_with("State:"));
+    let has_operator = lines.iter().any(|line| line.starts_with("Operator:"));
+    if !(has_job && has_state && has_operator) {
+        return false;
+    }
+    let sentences = plan_sentences(body);
+    let states_change = sentences.iter().any(|sentence| {
+        let lower = sentence.to_ascii_lowercase();
+        lower.contains("will change") || lower.contains("what will change")
+    });
+    let names_files = sentences
+        .iter()
+        .any(|sentence| sentence.contains("docs/features") || sentence.contains(".rs"));
+    let names_proof = sentences.iter().any(|sentence| {
+        let lower = sentence.to_ascii_lowercase();
+        lower.contains("proves") && sentence.contains('_')
+    });
+    !(states_change && names_files && names_proof)
+}
+
+fn body_only_wraps_prompt(body: &str, prompt: &str) -> bool {
+    let prompt = prompt.trim();
+    if prompt.is_empty() {
+        return false;
+    }
+    if body.contains(prompt) {
+        return true;
+    }
+    let prompt_sentences = plan_sentences(prompt);
+    if prompt_sentences.is_empty() {
+        return false;
+    }
+    let body_sentences = plan_sentences(body);
+    prompt_sentences.iter().all(|prompt_sentence| {
+        body_sentences
+            .iter()
+            .any(|body_sentence| body_sentence.contains(prompt_sentence.as_str()))
+    })
+}
+
+/// The written body must plan the work. The Operator prompt alone fails.
+/// A Job/State/Operator status recap fails. A template that only wraps
+/// the prompt fails.
+fn assert_feature_plan_body(body: &str, operator_prompt: &str, status_recap: &str) {
+    let trimmed = body.trim();
+    assert_ne!(
+        trimmed,
+        operator_prompt.trim(),
+        "feature file must not be only the Operator prompt; got {body:?}"
+    );
+    assert!(
+        !body_only_wraps_prompt(trimmed, operator_prompt),
+        "a template that only wraps the Operator prompt still fails; got {body:?}"
+    );
+    assert!(
+        !body_is_only_status_recap(trimmed),
+        "feature file must not be only a Job/State/Operator status recap; got {body:?}"
+    );
+    assert!(
+        !trimmed.contains(status_recap.trim()),
+        "feature file must not copy the status recap; got {body:?}"
+    );
+    assert!(
+        !trimmed.contains("Job: Approve versus Interject."),
+        "feature file must not paste the Approve versus Interject status; got {body:?}"
+    );
+    let sentences = plan_sentences(trimmed);
+    assert!(
+        sentences.len() >= 4,
+        "feature plan must use complete sentences; got {body:?}"
+    );
+    assert!(
+        sentences.iter().any(|sentence| {
+            let lower = sentence.to_ascii_lowercase();
+            lower.contains("what is wrong") || lower.contains("is wrong")
+        }),
+        "feature plan must state what is wrong in a complete sentence; got {body:?}"
+    );
+    assert!(
+        sentences.iter().any(|sentence| {
+            let lower = sentence.to_ascii_lowercase();
+            lower.contains("will change")
+        }),
+        "feature plan must state what will change in a complete sentence; got {body:?}"
+    );
+    assert!(
+        sentences.iter().any(|sentence| {
+            sentence.contains("docs/features") || sentence.contains(".rs") || sentence.contains('/')
+        }),
+        "feature plan must name the files in a complete sentence; got {body:?}"
+    );
+    assert!(
+        sentences
+            .iter()
+            .any(|sentence| sentence.contains("Operator")
+                && sentence.to_ascii_lowercase().contains("see")),
+        "feature plan must state what the Operator will see in a complete sentence; got {body:?}"
+    );
+    assert!(
+        sentences.iter().any(|sentence| {
+            let lower = sentence.to_ascii_lowercase();
+            lower.contains("proves") && sentence.contains('_')
+        }),
+        "feature plan must name the test that proves it in a complete sentence; got {body:?}"
+    );
 }
 
 /// `exit_plan_mode` writing the primary must present that file. `/plan --soft`

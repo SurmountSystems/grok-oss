@@ -706,6 +706,7 @@ impl AgentView {
             session_mode: xai_grok_tools::types::SessionMode::Default,
             session_mode_pending: None,
             plan_decision_resolved: false,
+            paste_chip_approval_not_wire_interject: false,
             plan_feedback_in_flight: None,
             isolated_preview_rewrite_wait_prompt: None,
             isolated_preview_shows_secondary_plan: false,

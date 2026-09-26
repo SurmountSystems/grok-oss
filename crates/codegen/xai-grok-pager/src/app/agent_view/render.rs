@@ -1361,15 +1361,10 @@ impl AgentView {
             &theme,
             self.chat_kind,
         ) {
-            let beside = crate::uptime::cap_uptime_status_segment(
-                &crate::app::turn_completion::uptime_text_beside_token_chrome(),
-            );
-            let dim = Style::default().fg(theme.gray_dim).bg(theme.bg_base);
-            ctx_line
-                .spans
-                .push(Span::styled(format!("  {beside}"), dim));
+            // Context figure only. The 15-minute and 24-hour windows stay on `/uptime`.
             status.push("context", ctx_line);
         }
+        // No SuperGrok period chip on this header. `/limits` still names that meter.
         let hover_or = |hovered: bool, resting: Style| {
             if hovered {
                 bg.fg(theme.text_primary)

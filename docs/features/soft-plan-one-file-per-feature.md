@@ -12,7 +12,7 @@ The product today writes one `secondary-plan.md` and replaces it. That is the ov
 
 These four files are the documents:
 
-- `docs/features/l2-shown-token-is-its-own-context-plus-its-l3s.md`
+- `~/.agents/reports/l2-shown-token-is-its-own-context-plus-its-l3s.md` (bug note, not a feature plan in this tree)
 - `docs/features/soft-plan-implements-after-approve.md`
 - `docs/features/soft-plan-one-file-per-feature.md`
 - `docs/features/soft-plan-waits-for-the-button.md`

@@ -2,6 +2,7 @@
 pub mod always_approve;
 pub mod announcements;
 pub mod auto;
+pub mod blacklist;
 pub mod btw;
 pub mod cd;
 pub mod clear_completed_todos;
@@ -138,6 +139,7 @@ pub fn builtin_commands() -> Vec<Arc<dyn SlashCommand>> {
         Arc::new(screen_mode_switch::ScreenModeSwitchCommand::fullscreen()),
         // Reached for occasionally.
         Arc::new(timeline::TimelineCommand),
+        Arc::new(blacklist::BlacklistCommand),
         Arc::new(cd::CdCommand),
         Arc::new(imagine::ImagineCommand),
         Arc::new(imagine_video::ImagineVideoCommand),

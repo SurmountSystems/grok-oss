@@ -285,6 +285,10 @@ These are real toggles for the permission mode: they stay in the menu, and runni
 
 Running one while the other is active switches modes — for example, `/auto` while always-approve is on switches to Auto-review. `/auto` only appears when the Auto-review permission-mode feature is enabled. You can also change mode with `Shift+Tab` (cycles Normal / Plan / Auto-review (when enabled) / Always-approve), `Ctrl+O`, or `/settings`.
 
+### `/blacklist <command>`
+
+Blacklist one command on this machine. `/blacklist lean` adds `Bash(lean)` and `Bash(lean *)` to `[permission].deny` in `~/.grok/config.toml`. Bare `lean` and `lean` with arguments are refused on the next session. `lake` is not refused by that rule. Deny wins over allow and over always-approve, and a project allow cannot undo this global deny.
+
 ### `/multiline`
 
 Toggle multiline input. When it's on, `Enter` inserts a newline and `Shift+Enter` (or `Alt+Enter`) sends the message. Mid-turn, a bare `Enter` on an empty composer still force-sends the top queued follow-up. Alias: `/ml`. With multiline off, the composer footer shows the newline chord once the draft is non-empty.

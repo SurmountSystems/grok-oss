@@ -1,4 +1,4 @@
-//! Text beside the status line, and the fuller `/uptime` reading.
+//! Short window text, and the fuller `/uptime` reading. The header does not paint this.
 //! Both only format numbers the caller already read.
 //! Neither writes Parquet and neither calls xAI.
 
@@ -64,10 +64,11 @@ pub fn format_tracking_off() -> String {
     "uptime tracking is off because DuckDB is not installed".to_string()
 }
 
-/// One short segment for the status line.
+/// Short 15-minute and 24-hour window text. The header does not paint this.
 /// Empty windows are `15m none · 24h none`.
 /// Observations are `15m 0/6 ok · 24h 0/6 ok` (succeeded over observations).
 /// Not a sentence, and not a replacement for token chrome.
+#[cfg(test)]
 pub fn format_uptime_beside_status(windows: &WindowPair) -> String {
     format!(
         "{} · {}",
@@ -76,7 +77,7 @@ pub fn format_uptime_beside_status(windows: &WindowPair) -> String {
     )
 }
 
-/// Reading `/uptime` prints. Empty windows match the status line.
+/// Reading `/uptime` prints. Empty windows use the same short window text.
 /// When observations exist, this keeps the HTTP 500 count, measured latency,
 /// and a stored token sum. It does not open a socket and it does not call xAI.
 pub fn uptime_slash_output(windows: &WindowPair) -> String {
@@ -88,6 +89,7 @@ pub fn uptime_slash_output(windows: &WindowPair) -> String {
 }
 
 /// Status-line cap. Keeps SuperGrok period limits on the one-line bar.
+#[cfg(test)]
 pub fn cap_uptime_status_segment(text: &str) -> String {
     const TRACKING_OFF: &str = "uptime tracking is off because DuckDB is not installed";
     const MAX_COLS: usize = 24;
