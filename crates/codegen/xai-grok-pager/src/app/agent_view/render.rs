@@ -44,6 +44,28 @@ pub(crate) fn laid_out_prompt_height(
     content_height.min(window).max(1)
 }
 
+/// Days, hours, and minutes until reset when both real refusals are on disk.
+/// A missing period end does not invent a clock. The chip shows `2d 4h 12m`,
+/// not a sentence, and not "used up".
+fn both_refused_status_chip_label(
+    balance: &crate::views::credit_bar::CreditBalance,
+) -> Option<String> {
+    if !xai_grok_shell::auth::limits_pins::included_period_and_console_api_credits_both_refused() {
+        return None;
+    }
+    let Some(end) = balance.period_end_at else {
+        return Some("the reset time is not available".to_owned());
+    };
+    let total_secs = end
+        .signed_duration_since(chrono::Utc::now())
+        .num_seconds()
+        .max(0) as u64;
+    let days = total_secs / 86_400;
+    let hours = (total_secs % 86_400) / 3_600;
+    let mins = (total_secs % 3_600) / 60;
+    Some(format!("{days}d {hours}h {mins}m"))
+}
+
 /// AppView-owned per-frame inputs to [`AgentView::draw`]: state the agent view cannot see itself (voice pipeline, Esc ownership, status row).
 /// Grouped (mirroring `WelcomeRenderParams`) so the next app-level render fact extends this struct instead of every `draw` call site.
 /// Tests take `Default` and override only what they exercise.
@@ -1365,6 +1387,7 @@ impl AgentView {
             status.push("context", ctx_line);
         }
         // No SuperGrok period chip on this header. `/limits` still names that meter.
+        // The short `limits N%` chip below is not that verbose period helper.
         let hover_or = |hovered: bool, resting: Style| {
             if hovered {
                 bg.fg(theme.text_primary)
@@ -1415,6 +1438,40 @@ impl AgentView {
                 let link_style = Style::default().fg(theme.link_fg).bg(theme.bg_base);
                 status.push_front("link_url", Line::from(Span::styled(display, link_style)));
             }
+        }
+        // Short status chip only. Do not use the verbose SuperGrok period helper.
+        if let Some(balance) = self.credit_balance.as_ref()
+            && let Some(label) = both_refused_status_chip_label(balance)
+        {
+            let mut chip_style = Style::default().fg(theme.accent_error).bg(theme.bg_base);
+            if self.hit_credits.hovered {
+                chip_style = chip_style.add_modifier(ratatui::style::Modifier::BOLD);
+            }
+            status.push("credits", Line::from(Span::styled(label, chip_style)));
+        } else if self.sampling_identity
+            == crate::views::credit_bar::SamplingIdentityKind::SuperGrokSession
+            && let Some(balance) = self.credit_balance.as_ref()
+            && balance.included_usage_known
+            && balance.usage_pct.is_finite()
+        {
+            let used = balance.usage_pct.round().clamp(0.0, 100.0) as u8;
+            let label = if self.hit_credits.hovered {
+                format!("{}% left", 100u8.saturating_sub(used))
+            } else {
+                format!("limits {used}%")
+            };
+            let color = if used >= 100 {
+                theme.accent_error
+            } else if used >= 80 {
+                theme.warning
+            } else {
+                theme.accent_success
+            };
+            let mut chip_style = Style::default().fg(color).bg(theme.bg_base);
+            if self.hit_credits.hovered {
+                chip_style = chip_style.add_modifier(ratatui::style::Modifier::BOLD);
+            }
+            status.push("credits", Line::from(Span::styled(label, chip_style)));
         }
         let areas = status.render(buf, layout.status_bar);
         self.hit_bg_status.rect = areas.get("bg_tasks").copied();
@@ -1498,8 +1555,61 @@ impl AgentView {
             },
         );
         location.push(Span::styled(short, path_style));
-        let mut parts: Vec<Span> = Vec::new();
-        let mut path_offset: u16 = prefix_width;
+        self.hit_header_dashboard.clear();
+        self.hit_header_prev.clear();
+        self.hit_header_next.clear();
+        let show_fork_header = !self.in_dashboard_overlay
+            && (self.session.forked_from.is_some()
+                || self.fork_family_position.is_some_and(|(_, n)| n > 1));
+        let mut header_prev_x: Option<(u16, u16)> = None;
+        let mut header_next_x: Option<(u16, u16)> = None;
+        let mut header_dash_x: Option<(u16, u16)> = None;
+        let mut fork_prefix: Vec<Span> = Vec::new();
+        let mut fork_width: u16 = 0;
+        if show_fork_header {
+            let chip = |hovered: bool| {
+                Style::default()
+                    .fg(if hovered {
+                        theme.text_primary
+                    } else {
+                        theme.gray
+                    })
+                    .bg(theme.bg_base)
+                    .add_modifier(ratatui::style::Modifier::BOLD)
+            };
+            let gap = Style::default().bg(theme.bg_base);
+            if self.fork_family_position.is_some_and(|(_, n)| n > 1) {
+                if let Some((cur, total)) = self.fork_family_position {
+                    let pos_text = format!("{cur}/{total} ");
+                    fork_width += pos_text.width() as u16;
+                    fork_prefix.push(Span::styled(
+                        pos_text,
+                        Style::default().fg(theme.gray_dim).bg(theme.bg_base),
+                    ));
+                }
+                let prev_label = format!("[{}]", crate::glyphs::chevron_left());
+                let next_label = format!("[{}]", crate::glyphs::chevron());
+                let prev_w = prev_label.width() as u16;
+                let next_w = next_label.width() as u16;
+                header_prev_x = Some((fork_width, prev_w));
+                fork_prefix.push(Span::styled(prev_label, chip(self.hit_header_prev.hovered)));
+                fork_width += prev_w;
+                header_next_x = Some((fork_width, next_w));
+                fork_prefix.push(Span::styled(next_label, chip(self.hit_header_next.hovered)));
+                fork_width += next_w;
+                fork_prefix.push(Span::styled(" ", gap));
+                fork_width += 1;
+            }
+            let dash = "[Dashboard]";
+            let dash_w = dash.width() as u16;
+            header_dash_x = Some((fork_width, dash_w));
+            fork_prefix.push(Span::styled(dash, chip(self.hit_header_dashboard.hovered)));
+            fork_width += dash_w;
+            fork_prefix.push(Span::styled("  ", gap));
+            fork_width += 2;
+        }
+        let mut parts: Vec<Span> = fork_prefix;
+        let mut path_offset: u16 = fork_width + prefix_width;
         if let Some(title) = title {
             let sep = crate::views::agent_status::separator(&theme);
             path_offset += (title.width() + sep.width()) as u16;
@@ -1596,7 +1706,7 @@ impl AgentView {
                 );
             let sb_output = sb_rendered.output;
             sticky_gap_row = sb_output.sticky_gap_row;
-            if !global_paused && !in_dashboard_overlay {
+            if !self.global_work_paused && !in_dashboard_overlay {
                 let activity = self.resolve_turn_activity();
                 if let Some(label) = turn_status::leftover_viewport_wait_label(&activity) {
                     let pad = HorizontalLayout::ACCENT.saturating_add(2);
@@ -4736,6 +4846,2641 @@ mod selection_state_tests {
         agent.clear_scrollback_selection_state();
         assert!(agent.last_scrollback_selection_model.ranges.is_empty());
         assert!(agent.last_scrollback_selection_boundaries.is_empty());
+    }
+}
+#[cfg(test)]
+mod plan_approval_draw_contract_tests {
+    use super::super::test_fixtures::make_agent;
+    use super::super::test_fixtures::make_plan_approval_view_state;
+    use super::AgentView;
+    use crate::actions::ActionRegistry;
+    use crate::app::bundle::BundleState;
+    use crate::scrollback::render::ScratchBuffer;
+    use ratatui::buffer::Buffer;
+    use ratatui::layout::Rect;
+    /// Agent with the plan-approval view (and its line-viewer overlay) open.
+    fn plan_approval_agent() -> AgentView {
+        let mut agent = make_agent();
+        agent.plan_approval_view = Some(make_plan_approval_view_state());
+        agent.reopen_plan_approval();
+        assert!(agent.line_viewer.is_some(), "approval must open the viewer");
+        agent
+    }
+    /// Render `agent` with the given voice state and return the buffer text.
+    fn render_text(agent: &mut AgentView, listening: bool) -> String {
+        let reg = ActionRegistry::defaults();
+        let area = Rect::new(0, 0, 100, 40);
+        let mut buf = Buffer::empty(area);
+        let mut scratch = ScratchBuffer::new();
+        agent.draw(
+            area,
+            &mut buf,
+            &reg,
+            &mut scratch,
+            None,
+            false,
+            crate::app::agent_view::BannerSlotParams::none(),
+            &BundleState::default(),
+            false,
+            false,
+            &mut Vec::new(),
+            super::AppRenderParams {
+                voice_available: listening,
+                voice_listening: listening,
+                ..Default::default()
+            },
+        );
+        (0..area.height)
+            .map(|y| {
+                (0..area.width)
+                    .filter_map(|x| buf.cell((x, y)).map(|c| c.symbol().to_string()))
+                    .collect::<String>()
+                    + "\n"
+            })
+            .collect()
+    }
+    /// The plan approval's line-viewer overlay used to paint over the
+    /// `voice_recording` row, leaving a live mic (Ctrl+Space / F8 still work
+    /// there) with no visible "Recording" indicator. The overlay must stop
+    /// above the record indicator row.
+    #[test]
+    fn recording_row_visible_while_plan_approval_open() {
+        let mut agent = plan_approval_agent();
+        let text = render_text(&mut agent, true);
+        assert!(
+            text.contains("Recording"),
+            "record indicator must stay visible under the plan approval viewer:\n{text}"
+        );
+    }
+    /// Named contract: one decision vocabulary on both the plan panel
+    /// footer and the composer shortcut row. The 1.0.3 restack painted
+    /// `request changes` / `c comment` on one bar and a different set on
+    /// the other.
+    #[test]
+    fn plan_approval_draw_uses_one_five_cta_vocabulary() {
+        let mut agent = plan_approval_agent();
+        let text = render_text(&mut agent, false);
+        let lower = text.to_ascii_lowercase();
+        assert!(
+            !lower.contains("request changes"),
+            "plan approval must not advertise the 1.0.3 request-changes placeholder:\n{text}"
+        );
+        for needle in ["approve", "comment", "revise", "exit"] {
+            assert!(
+                lower.contains(needle),
+                "plan approval chrome must name {needle} on the decision surface:\n{text}"
+            );
+        }
+        assert!(
+            !lower.contains("notes") && !lower.contains("quit"),
+            "plan approval chrome must not name Notes or Quit:\n{text}"
+        );
+    }
+
+    /// Soft park draw: the plan rect is on the right, status names a
+    /// side panel, and the five CTAs stay.
+    #[test]
+    fn plan_soft_park_draw_right_pane_matches_side_panel_status() {
+        let mut agent = plan_approval_agent();
+        assert!(
+            agent.line_viewer.as_ref().is_some_and(|v| !v.fullscreen),
+            "fixture: soft park is not the covering modal"
+        );
+        let text = render_text(&mut agent, false);
+        let modal = agent
+            .line_viewer
+            .as_ref()
+            .and_then(|v| v.last_modal_area)
+            .expect("draw must paint the plan pane");
+        assert!(
+            modal.x >= 50,
+            "plan pane must sit on the right of a 100-col draw; modal={modal:?}"
+        );
+        assert!(
+            text.contains("Plan ready. Side panel open"),
+            "status must match the right-side pane geometry:\n{text}"
+        );
+        let lower = text.to_ascii_lowercase();
+        for needle in ["approve", "comment", "revise", "exit"] {
+            assert!(
+                lower.contains(needle),
+                "right pane must keep the four idle CTAs; missing {needle}:\n{text}"
+            );
+        }
+        assert!(
+            !lower.contains("notes") && !lower.contains("quit"),
+            "right pane must not paint Notes or Quit:\n{text}"
+        );
+    }
+
+    /// Letter keys type into the plan composer while Preview still owns
+    /// Tab/?/y. The Human box caret must paint in that state (screenshot:
+    /// typed comment, no caret). Drive the filled blink half; do not sleep
+    /// on wall clock hoping the solid plate is showing.
+    #[test]
+    fn plan_approval_preview_paints_composer_box_caret() {
+        use crate::theme::cache;
+        use crate::views::plan_approval_view::PlanApprovalFocus;
+
+        let _pin = cache::pin_theme();
+        cache::set(crate::theme::ThemeKind::Doge);
+        let _filled_phase = crate::glyphs::pin_cursor_box_filled_phase(true);
+
+        let mut agent = plan_approval_agent();
+        assert_eq!(
+            agent.plan_approval_view.as_ref().expect("plan view").focus,
+            PlanApprovalFocus::Preview
+        );
+        agent
+            .prompt
+            .set_text("I'll be honest, I don't understand your plan.");
+        agent.prompt.set_cursor(agent.prompt.text().len());
+        let filled = crate::glyphs::cursor_box_filled();
+        let theme = crate::theme::Theme::current();
+        let reg = ActionRegistry::defaults();
+        let area = Rect::new(0, 0, 100, 40);
+        let mut buf = Buffer::empty(area);
+        let mut scratch = ScratchBuffer::new();
+        agent.draw(
+            area,
+            &mut buf,
+            &reg,
+            &mut scratch,
+            None,
+            false,
+            crate::app::agent_view::BannerSlotParams::none(),
+            &BundleState::default(),
+            false,
+            false,
+            &mut Vec::new(),
+            super::AppRenderParams {
+                voice_available: false,
+                voice_listening: false,
+                ..Default::default()
+            },
+        );
+        let mut found_caret = false;
+        for y in area.y..area.y + area.height {
+            for x in area.x..area.x + area.width {
+                if let Some(cell) = buf.cell((x, y))
+                    && cell.symbol() == filled
+                    && cell.bg == theme.accent_user
+                {
+                    found_caret = true;
+                }
+            }
+        }
+        let last_text: String = (0..area.height)
+            .map(|y| {
+                (0..area.width)
+                    .filter_map(|x| buf.cell((x, y)).map(|c| c.symbol().to_string()))
+                    .collect::<String>()
+                    + "\n"
+            })
+            .collect();
+        assert!(
+            last_text.contains("I'll be honest"),
+            "composer must still show the typed comment:\n{last_text}"
+        );
+        assert!(
+            found_caret,
+            "Preview plan park must paint the Human box caret on the typeable composer:\n{last_text}"
+        );
+    }
+
+    /// Isolated Preview with an **empty** Human box (cursor 0). Sibling
+    /// [`plan_approval_preview_paints_composer_box_caret`] types comment
+    /// text first, so it cannot catch a missing insertion cell on empty
+    /// wrap. Filled pin must show the Human-green plate. Hollow pin must
+    /// still be a visible box caret (not canvas-on-canvas vanish).
+    #[test]
+    fn plan_approval_preview_empty_composer_paints_box_caret() {
+        use crate::theme::cache;
+        use crate::views::plan_approval_view::PlanApprovalFocus;
+
+        let _pin = cache::pin_theme();
+        cache::set(crate::theme::ThemeKind::Doge);
+        let filled = crate::glyphs::cursor_box_filled();
+        let theme = crate::theme::Theme::current();
+        let area = Rect::new(0, 0, 100, 40);
+
+        let mut agent = plan_approval_agent();
+        assert_eq!(
+            agent.plan_approval_view.as_ref().expect("plan view").focus,
+            PlanApprovalFocus::Preview
+        );
+        agent.prompt.set_text("");
+        agent.prompt.set_cursor(0);
+        assert!(
+            agent.prompt.text().is_empty(),
+            "fixture: Isolated Preview composer starts empty"
+        );
+
+        let draw = |agent: &mut AgentView| {
+            let reg = ActionRegistry::defaults();
+            let mut buf = Buffer::empty(area);
+            let mut scratch = ScratchBuffer::new();
+            agent.draw(
+                area,
+                &mut buf,
+                &reg,
+                &mut scratch,
+                None,
+                false,
+                crate::app::agent_view::BannerSlotParams::none(),
+                &BundleState::default(),
+                false,
+                false,
+                &mut Vec::new(),
+                super::AppRenderParams {
+                    voice_available: false,
+                    voice_listening: false,
+                    ..Default::default()
+                },
+            );
+            buf
+        };
+        let dump = |buf: &Buffer| -> String {
+            (0..area.height)
+                .map(|y| {
+                    (0..area.width)
+                        .filter_map(|x| buf.cell((x, y)).map(|c| c.symbol().to_string()))
+                        .collect::<String>()
+                        + "\n"
+                })
+                .collect()
+        };
+
+        let human_green = crate::theme::doge::as_doge_human_green(theme.accent_user);
+        let is_human_green = |c: ratatui::style::Color| -> bool {
+            c == human_green
+                || matches!(
+                    c,
+                    ratatui::style::Color::Rgb(0, 255, 0)
+                        | ratatui::style::Color::Green
+                        | ratatui::style::Color::LightGreen
+                        | ratatui::style::Color::Indexed(2 | 10 | 46)
+                )
+        };
+        let find_filled_plate = |buf: &Buffer| -> bool {
+            for y in area.y..area.y + area.height {
+                for x in area.x..area.x + area.width {
+                    if let Some(cell) = buf.cell((x, y))
+                        && cell.symbol() == filled
+                        && is_human_green(cell.bg)
+                    {
+                        return true;
+                    }
+                }
+            }
+            false
+        };
+        let find_visible_caret = |buf: &Buffer| -> bool {
+            // Hollow half keeps the full-block glyph. Color may be green ink
+            // on canvas; the contract is that the cell is not a vanished space.
+            for y in area.y..area.y + area.height {
+                for x in area.x..area.x + area.width {
+                    if let Some(cell) = buf.cell((x, y))
+                        && cell.symbol() == filled
+                    {
+                        return true;
+                    }
+                }
+            }
+            false
+        };
+
+        {
+            let _filled_phase = crate::glyphs::pin_cursor_box_filled_phase(true);
+            let buf = draw(&mut agent);
+            let text = dump(&buf);
+            assert!(
+                agent.prompt.text().is_empty(),
+                "empty Preview must not invent draft text:\n{text}"
+            );
+            assert!(
+                find_filled_plate(&buf),
+                "empty Preview (cursor 0) must paint the filled Human-green box caret:\n{text}"
+            );
+        }
+        {
+            let _hollow_phase = crate::glyphs::pin_cursor_box_filled_phase(false);
+            let buf = draw(&mut agent);
+            let text = dump(&buf);
+            assert!(
+                find_visible_caret(&buf),
+                "empty Preview hollow blink half must stay a visible Human-green box caret, \
+                 not a vanished empty cell:\n{text}"
+            );
+        }
+    }
+
+    /// Isolated file-backed `plan.md` approval (no CreatePlan / inline title).
+    /// Same 1.0.3 leftover the live screenshot still shows until rebuild:
+    /// `request changes` / `c comment` / `copy plan` / `quit plan` plus
+    /// `Waiting on plan approval`. This path must share Surmount five-CTA
+    /// and parked review copy with the inline present.
+    #[test]
+    fn file_backed_plan_md_approval_draw_uses_five_cta_not_103_placeholder() {
+        let mut agent = make_agent();
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        let request = crate::views::plan_approval_view::ExitPlanModeExtRequest {
+            session_id: "test-session".into(),
+            tool_call_id: "call-file-plan".into(),
+            plan_content: Some("# Isolated plan.md\n\nDo the thing\n".into()),
+        };
+        agent.plan_approval_view = Some(
+            crate::views::plan_approval_view::PlanApprovalViewState::with_source(
+                request,
+                crate::views::plan_approval_view::PlanReviewSource::FileBacked,
+                agent.prompt.stash(),
+                tx,
+            ),
+        );
+        agent.plan_mode_active = true;
+        agent.show_plan_preview_if_available();
+
+        assert_eq!(
+            agent.plan_approval_view.as_ref().map(|p| p.source),
+            Some(crate::views::plan_approval_view::PlanReviewSource::FileBacked),
+            "this surface is file-backed plan.md, not inline CreatePlan"
+        );
+        assert!(
+            agent
+                .line_viewer
+                .as_ref()
+                .is_some_and(|v| v.feedback_active()),
+            "file-backed plan.md must arm approval CTAs, not casual view-only"
+        );
+
+        let text = render_text(&mut agent, false);
+        let lower = text.to_ascii_lowercase();
+        assert!(
+            !lower.contains("request changes"),
+            "isolated plan.md must not paint the 1.0.3 request-changes bar:\n{text}"
+        );
+        assert!(
+            !lower.contains("quit plan"),
+            "isolated plan.md must not paint the 1.0.3 quit-plan label:\n{text}"
+        );
+        assert!(
+            !lower.contains("copy plan"),
+            "isolated plan.md approval must not use casual copy-plan as a decision CTA:\n{text}"
+        );
+        assert!(
+            !lower.contains("c comment") && !lower.contains("c:comment"),
+            "isolated plan.md approval must not advertise casual c-comment as a decision CTA:\n{text}"
+        );
+        assert!(
+            !text.contains("Waiting on plan approval"),
+            "parked file-backed present is review, not Waiting on plan approval:\n{text}"
+        );
+        assert!(
+            text.contains("Plan ready. Side panel open"),
+            "file-backed park must say Plan ready. Side panel open:\n{text}"
+        );
+        for needle in ["approve", "comment", "revise", "exit"] {
+            assert!(
+                lower.contains(needle),
+                "file-backed plan.md chrome must name {needle}:\n{text}"
+            );
+        }
+        assert!(
+            !lower.contains("notes"),
+            "file-backed plan.md chrome must not paint Notes:\n{text}"
+        );
+
+        let plan = agent
+            .line_viewer
+            .as_ref()
+            .and_then(|v| v.plan_ref())
+            .expect("file-backed plan.md viewer extras");
+        assert!(
+            plan.approve_button_area.is_some(),
+            "Approve must be a clickable hit target on isolated plan.md"
+        );
+        assert!(
+            plan.approve_notes_button_area.is_none(),
+            "Notes must not be a clickable hit target on isolated plan.md"
+        );
+        assert!(
+            plan.comment_button_area.is_some(),
+            "Comment must be a clickable idle hit target on isolated plan.md"
+        );
+        assert!(
+            plan.questions_button_area.is_none(),
+            "Clarify is comment-flow only on isolated plan.md"
+        );
+        assert!(
+            plan.send_button_area.is_some(),
+            "Revise must be a clickable hit target on isolated plan.md"
+        );
+        assert!(
+            plan.abandon_button_area.is_some(),
+            "Exit must be a clickable hit target on isolated plan.md"
+        );
+    }
+
+    /// `/view-plan` after Approve still paints the four idle CTAs in draw.
+    /// Casual `c:comment | y:copy plan` is not the view-plan chrome.
+    #[test]
+    fn view_plan_after_resolved_draw_paints_four_idle_ctas_not_casual_copy() {
+        let mut agent = make_agent();
+        agent.plan_mode_active = true;
+        agent.plan_decision_resolved = true;
+        agent.latest_inline_plan_content = Some("# Isolated plan.md\n\nAlready approved\n".into());
+        agent.open_plan_from_view_plan_or_status();
+        assert!(
+            agent.plan_approval_view.is_none(),
+            "resolved view-plan must not park a local idle waiter"
+        );
+        assert!(agent.line_viewer.is_some());
+
+        let text = render_text(&mut agent, false);
+        let lower = text.to_ascii_lowercase();
+        for needle in ["approve", "comment", "revise", "exit"] {
+            assert!(
+                lower.contains(needle),
+                "/view-plan after resolved draw must name {needle}:\n{text}"
+            );
+        }
+        assert!(
+            !lower.contains("c comment") && !lower.contains("c:comment"),
+            "/view-plan after resolved must not advertise casual c-comment:\n{text}"
+        );
+        assert!(
+            !text.contains(crate::views::plan_approval_view::PLAN_READY_STATUS)
+                || agent.line_viewer.is_some(),
+            "must not re-arm shut-pane Plan ready after resolved view-plan:\n{text}"
+        );
+        assert!(
+            !text.contains(crate::views::plan_approval_view::PLAN_READY_STATUS)
+                || text.contains("Side panel open"),
+            "if Plan ready paints at all it must be the open-pane label:\n{text}"
+        );
+        let plan = agent
+            .line_viewer
+            .as_ref()
+            .and_then(|v| v.plan_ref())
+            .expect("view-plan extras");
+        assert!(plan.approve_button_area.is_some());
+        assert!(plan.comment_button_area.is_some());
+        assert!(plan.send_button_area.is_some());
+        assert!(plan.abandon_button_area.is_some());
+    }
+
+    /// Local idle park (`/view-plan` and other idle parks) first-paints
+    /// Approve / Comment / Revise / Exit. Clarify is comment-flow only.
+    #[test]
+    fn local_idle_decision_park_paints_comment_not_clarify() {
+        let mut agent = make_agent();
+        agent.plan_mode_active = true;
+        agent.plan_decision_resolved = false;
+        agent.plan_feedback_in_flight = None;
+        agent.plan_approval_view = Some(
+            crate::views::plan_approval_view::PlanApprovalViewState::for_idle_decision(Some(
+                "# Idle park\n\nDo the thing\n".into(),
+            )),
+        );
+        agent.show_plan_preview();
+
+        let text = render_text(&mut agent, false);
+        let modal = agent
+            .line_viewer
+            .as_ref()
+            .and_then(|v| v.last_modal_area)
+            .expect("idle park must paint a plan modal");
+        // Modal footer only. The composer hint row may still say `?:clarify`.
+        let footer = text
+            .lines()
+            .nth((modal.y + modal.height.saturating_sub(1)) as usize)
+            .unwrap_or("")
+            .to_string();
+        let lower = footer.to_ascii_lowercase();
+        for needle in ["approve", "comment", "revise", "exit"] {
+            assert!(
+                lower.contains(needle),
+                "local idle park footer must name {needle}; got {footer:?}"
+            );
+        }
+        assert!(
+            !lower.contains("clarify"),
+            "local idle park must not first-paint comment-flow Clarify; got {footer:?}"
+        );
+
+        let pav = agent
+            .plan_approval_view
+            .as_ref()
+            .expect("local idle park must stay parked");
+        assert_eq!(
+            pav.focus,
+            crate::views::plan_approval_view::PlanApprovalFocus::Preview,
+            "idle park first paint is Preview until Comment or prompt focus"
+        );
+        let plan = agent
+            .line_viewer
+            .as_ref()
+            .and_then(|v| v.plan_ref())
+            .expect("idle park must have plan extras after draw");
+        assert!(
+            plan.comment_button_area.is_some(),
+            "Comment must be a clickable idle hit target"
+        );
+        assert!(
+            plan.questions_button_area.is_none(),
+            "Clarify must not be an idle hit target"
+        );
+        assert!(
+            !plan.comment_flow_active,
+            "comment_flow_active stays false until Comment or Clarify"
+        );
+    }
+
+    /// Screenshot 15-56-25: idle present with the plan box focused (default
+    /// Revise intent, `Enter:revise`) still paints Approve / Comment / Revise /
+    /// Exit. Clarify is not an idle footer button.
+    #[test]
+    fn idle_plan_prompt_focus_footer_stays_comment_not_clarify() {
+        let mut agent = make_agent();
+        agent.plan_mode_active = true;
+        agent.plan_decision_resolved = false;
+        agent.plan_feedback_in_flight = None;
+        agent.plan_approval_view = Some(
+            crate::views::plan_approval_view::PlanApprovalViewState::for_idle_decision(Some(
+                "# Idle park\n\nDo the thing\n".into(),
+            )),
+        );
+        agent.show_plan_preview();
+        if let Some(ref mut pav) = agent.plan_approval_view {
+            pav.focus = crate::views::plan_approval_view::PlanApprovalFocus::Prompt;
+            pav.prompt_intent = crate::views::plan_approval_view::PlanPromptIntent::Revise;
+        }
+
+        let text = render_text(&mut agent, false);
+        let modal = agent
+            .line_viewer
+            .as_ref()
+            .and_then(|v| v.last_modal_area)
+            .expect("idle park must paint a plan modal");
+        let footer = text
+            .lines()
+            .nth((modal.y + modal.height.saturating_sub(1)) as usize)
+            .unwrap_or("")
+            .to_string();
+        let lower = footer.to_ascii_lowercase();
+        for needle in ["approve", "comment", "revise", "exit"] {
+            assert!(
+                lower.contains(needle),
+                "idle Prompt-focus footer must name {needle}; got {footer:?}"
+            );
+        }
+        assert!(
+            !lower.contains("clarify"),
+            "idle Prompt-focus footer must not paint Clarify; got {footer:?}"
+        );
+        let plan = agent
+            .line_viewer
+            .as_ref()
+            .and_then(|v| v.plan_ref())
+            .expect("idle park must have plan extras after draw");
+        assert!(
+            plan.comment_button_area.is_some(),
+            "Comment must stay a clickable idle hit target while Revise prompt is focused"
+        );
+        assert!(
+            plan.questions_button_area.is_none(),
+            "Clarify must not be an idle hit target while Revise prompt is focused"
+        );
+        assert!(
+            !plan.comment_flow_active,
+            "Revise prompt focus is not comment flow"
+        );
+    }
+
+    /// Plan prompt window uses the titled-composer white frame
+    /// (`prompt_border_active`), not a blended plan-accent outline.
+    #[test]
+    fn plan_prompt_window_paints_white_titled_frame() {
+        use crate::theme::{Theme, cache};
+        let _pin = cache::pin_theme();
+        cache::set(crate::theme::ThemeKind::Doge);
+        let theme = Theme::current();
+        assert_eq!(
+            theme.prompt_border_active,
+            ratatui::style::Color::Rgb(255, 255, 255),
+            "DOGE titled frame is white"
+        );
+
+        let mut agent = plan_approval_agent();
+        if let Some(ref mut pav) = agent.plan_approval_view {
+            pav.focus = crate::views::plan_approval_view::PlanApprovalFocus::Prompt;
+        }
+        let _ = render_text(&mut agent, false);
+        let prompt = agent.pane_areas.prompt;
+        assert!(
+            prompt.width > 4 && prompt.height > 2,
+            "plan prompt must have a painted area; got {prompt:?}"
+        );
+
+        let reg = ActionRegistry::defaults();
+        let area = Rect::new(0, 0, 100, 40);
+        let mut buf = Buffer::empty(area);
+        let mut scratch = ScratchBuffer::new();
+        agent.draw(
+            area,
+            &mut buf,
+            &reg,
+            &mut scratch,
+            None,
+            false,
+            crate::app::agent_view::BannerSlotParams::none(),
+            &BundleState::default(),
+            false,
+            false,
+            &mut Vec::new(),
+            super::AppRenderParams::default(),
+        );
+
+        let white = theme.prompt_border_active;
+        let top_left = buf.cell((prompt.x, prompt.y)).expect("top-left frame");
+        assert_eq!(
+            top_left.symbol(),
+            "\u{256d}",
+            "plan prompt top-left must be ╭; got {:?}",
+            top_left.symbol()
+        );
+        assert_eq!(
+            top_left.fg, white,
+            "plan prompt outline must be titled-composer white, not blended plan accent; got {:?}",
+            top_left.fg
+        );
+        let mid_left = buf.cell((prompt.x, prompt.y + 1)).expect("left side frame");
+        assert_eq!(mid_left.symbol(), "\u{2502}");
+        assert_eq!(
+            mid_left.fg, white,
+            "plan prompt side must stay white; got {:?}",
+            mid_left.fg
+        );
+    }
+
+    /// While voice is idle no indicator row exists, so the overlay keeps
+    /// reaching the prompt as before.
+    #[test]
+    fn no_recording_row_when_not_listening_in_plan_approval() {
+        let mut agent = plan_approval_agent();
+        let text = render_text(&mut agent, false);
+        assert!(
+            !text.contains("Recording"),
+            "no record indicator when voice is idle:\n{text}"
+        );
+    }
+}
+/// Nested L2 overlay wait chrome: name the live specialist, compact minutes,
+/// and last known tool. Bare `Waiting on task output` is FAIL.
+#[cfg(test)]
+mod nested_overlay_wait_extra_contracts {
+    use super::super::test_fixtures::{make_agent, running_subagent_info};
+    use crate::acp::meta::NotificationMeta;
+    use crate::actions::ActionRegistry;
+    use crate::app::agent::AgentState;
+    use crate::app::bundle::BundleState;
+    use crate::scrollback::render::ScratchBuffer;
+    use agent_client_protocol as acp;
+    use ratatui::buffer::Buffer;
+    use ratatui::layout::Rect;
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    fn draw_text(agent: &mut super::AgentView) -> String {
+        let area = Rect::new(0, 0, 120, 30);
+        let mut buf = Buffer::empty(area);
+        let mut scratch = ScratchBuffer::new();
+        agent.draw(
+            area,
+            &mut buf,
+            &ActionRegistry::defaults(),
+            &mut scratch,
+            None,
+            false,
+            crate::app::agent_view::BannerSlotParams::none(),
+            &BundleState::default(),
+            true,
+            false,
+            &mut Vec::new(),
+            super::AppRenderParams::default(),
+        );
+        (0..area.height)
+            .map(|y| {
+                (0..area.width)
+                    .filter_map(|x| buf.cell((x, y)).map(|c| c.symbol().to_string()))
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn nested_l2_overlay_wait_names_specialist_elapsed_and_progress() {
+        let mut parent = make_agent();
+        let mut l2 = make_agent();
+        l2.session.state = AgentState::TurnRunning;
+        let mut specialist = running_subagent_info("l3-cert");
+        specialist.description = Arc::from("prove cert DNS-01");
+        specialist.is_background = true;
+        specialist.activity_label = Some("read_file".into());
+        l2.subagent_sessions.insert("l3-cert".into(), specialist);
+        let meta = NotificationMeta::default();
+        l2.session.handle_update(
+            acp::SessionUpdate::ToolCall(
+                acp::ToolCall::new(
+                    acp::ToolCallId::new(Arc::from("wait-l3")),
+                    "get_command_or_subagent_output",
+                )
+                .kind(acp::ToolKind::Other)
+                .status(acp::ToolCallStatus::Pending)
+                .content(vec![])
+                .raw_input(Some(serde_json::json!({ "timeout_ms": 30_000 })))
+                .locations(vec![]),
+            ),
+            &meta,
+            &mut l2.scrollback,
+        );
+        let mut l2_info = running_subagent_info("l2-coord");
+        l2_info.description = Arc::from("General Fix cryptoquick mail cert");
+        l2_info.started_at = Instant::now() - Duration::from_secs(15 * 60 + 9);
+        parent.subagent_sessions.insert("l2-coord".into(), l2_info);
+        parent
+            .subagent_views
+            .insert("l2-coord".into(), Box::new(l2));
+        parent.active_subagent = Some("l2-coord".into());
+        let text = draw_text(&mut parent);
+        assert!(
+            text.contains("prove cert DNS-01"),
+            "nested overlay wait must name the live specialist:\n{text}"
+        );
+        assert!(
+            text.contains("read_file"),
+            "nested overlay wait must show last known tool when the registry has it:\n{text}"
+        );
+        assert!(
+            text.contains("15m9s"),
+            "nested overlay wait of at least a minute must use compact minutes:\n{text}"
+        );
+        assert!(
+            !text.contains("Waiting on task output"),
+            "bare Waiting on task output is FAIL in the nested overlay:\n{text}"
+        );
+        assert!(
+            !text.contains("You MUST spawn L3 for all tool work"),
+            "overlay must not paint MUST spawn L3 for all tool work:\n{text}"
+        );
+    }
+
+    /// Live nested specialists are registered on the parent, not on the L2
+    /// child view. Overlay wait chrome must still name that specialist, last
+    /// tool, and elapsed. Bare `Waiting on task output` is FAIL.
+    #[test]
+    fn nested_overlay_wait_names_parent_registry_specialist() {
+        let mut parent = make_agent();
+        let mut l2 = make_agent();
+        l2.session.state = AgentState::TurnRunning;
+        let meta = NotificationMeta::default();
+        l2.session.handle_update(
+            acp::SessionUpdate::ToolCall(
+                acp::ToolCall::new(
+                    acp::ToolCallId::new(Arc::from("wait-l3")),
+                    "get_command_or_subagent_output",
+                )
+                .kind(acp::ToolKind::Other)
+                .status(acp::ToolCallStatus::Pending)
+                .content(vec![])
+                .raw_input(Some(serde_json::json!({ "timeout_ms": 30_000 })))
+                .locations(vec![]),
+            ),
+            &meta,
+            &mut l2.scrollback,
+        );
+        let mut l2_info = running_subagent_info("l2-coord");
+        l2_info.description = Arc::from("General Fix nested wait overlay");
+        l2_info.started_at = Instant::now() - Duration::from_secs(3 * 60 + 12);
+        parent.subagent_sessions.insert("l2-coord".into(), l2_info);
+        parent
+            .subagent_views
+            .insert("l2-coord".into(), Box::new(l2));
+        let mut specialist = running_subagent_info("l3-gate");
+        specialist.description = Arc::from("Land check-remote full gate");
+        specialist.is_background = true;
+        specialist.depth = Some(2);
+        specialist.parent_session_id = Some(Arc::from("l2-coord"));
+        specialist.tools_used = vec![Arc::from("read_file")];
+        specialist.tool_call_count = Some(4);
+        parent
+            .subagent_sessions
+            .insert("l3-gate".into(), specialist);
+        parent.active_subagent = Some("l2-coord".into());
+        let text = draw_text(&mut parent);
+        assert!(
+            text.contains("Land check-remote full gate"),
+            "nested overlay wait must name the parent-registry specialist:\n{text}"
+        );
+        assert!(
+            text.contains("read_file"),
+            "nested overlay wait must show last tool from specialist progress:\n{text}"
+        );
+        assert!(
+            text.contains("3m12s"),
+            "nested overlay wait of at least a minute must use compact minutes:\n{text}"
+        );
+        assert!(
+            !text.contains("Waiting on task output"),
+            "bare Waiting on task output is FAIL in the nested overlay:\n{text}"
+        );
+    }
+
+    /// Screenshot 2026-08-22: nested L2 overlay whose activity is model-wait
+    /// (not a task-output wait) while a parent-registry specialist is still
+    /// running. Bare `Waiting for the model` is FAIL; title and footer must
+    /// name that specialist and last tool (or tool count).
+    #[test]
+    fn nested_overlay_model_wait_names_parent_registry_specialist() {
+        let mut parent = make_agent();
+        let mut l2 = make_agent();
+        l2.session.state = AgentState::TurnRunning;
+        let mut l2_info = running_subagent_info("l2-coord");
+        l2_info.description = Arc::from("Implementer Grow CheckersLater subset");
+        l2_info.model = Some(Arc::from("grok-4.6"));
+        l2_info.started_at = Instant::now() - Duration::from_secs(37 * 60 + 36);
+        parent.subagent_sessions.insert("l2-coord".into(), l2_info);
+        parent
+            .subagent_views
+            .insert("l2-coord".into(), Box::new(l2));
+        let mut specialist = running_subagent_info("l3-impl");
+        specialist.description = Arc::from("Land CheckersLater subset");
+        specialist.is_background = true;
+        specialist.depth = Some(2);
+        specialist.parent_session_id = Some(Arc::from("l2-coord"));
+        specialist.tools_used = vec![Arc::from("read_file")];
+        specialist.tool_call_count = Some(6);
+        specialist.started_at = Instant::now() - Duration::from_secs(27 * 60 + 18);
+        parent
+            .subagent_sessions
+            .insert("l3-impl".into(), specialist);
+        parent.active_subagent = Some("l2-coord".into());
+        let text = draw_text(&mut parent);
+        assert!(
+            text.contains("Land CheckersLater subset"),
+            "nested overlay model-wait must name the live parent-registry specialist:\n{text}"
+        );
+        assert!(
+            text.contains("read_file") || text.contains("6 tools"),
+            "nested overlay model-wait must show last tool or tool count:\n{text}"
+        );
+        assert!(
+            text.contains("27m18s") || text.contains("37m36s"),
+            "nested overlay model-wait must show elapsed of that wait or specialist:\n{text}"
+        );
+        let lower = text.to_ascii_lowercase();
+        assert!(
+            !lower.contains("waiting for the model"),
+            "bare Waiting for the model is FAIL while a parented specialist is live:\n{text}"
+        );
+    }
+
+    /// Overlay Write of a remaining-work markdown must not keep `Running`
+    /// after `handle_update` completes the tool (file exists).
+    #[test]
+    fn nested_overlay_write_clears_running_after_completed_handle_update() {
+        let mut parent = make_agent();
+        let mut l2 = make_agent();
+        l2.session.state = AgentState::TurnRunning;
+        let title = "Write `remaining-2026-09-02-plan-cancel-hang.md`";
+        let meta = NotificationMeta::default();
+        l2.session.handle_update(
+            acp::SessionUpdate::ToolCall(
+                acp::ToolCall::new(acp::ToolCallId::new(Arc::from("tc-write")), title)
+                    .kind(acp::ToolKind::Edit)
+                    .status(acp::ToolCallStatus::Pending)
+                    .content(vec![])
+                    .locations(vec![]),
+            ),
+            &meta,
+            &mut l2.scrollback,
+        );
+        l2.session.handle_update(
+            acp::SessionUpdate::ToolCall(
+                acp::ToolCall::new(acp::ToolCallId::new(Arc::from("tc-write")), title)
+                    .kind(acp::ToolKind::Edit)
+                    .status(acp::ToolCallStatus::Completed)
+                    .content(vec![])
+                    .locations(vec![]),
+            ),
+            &meta,
+            &mut l2.scrollback,
+        );
+        l2.tasks.overlay.visible = true;
+        let mut l2_info = running_subagent_info("l2-coord");
+        l2_info.description = Arc::from("General Fix plan cancel hang");
+        parent.subagent_sessions.insert("l2-coord".into(), l2_info);
+        parent
+            .subagent_views
+            .insert("l2-coord".into(), Box::new(l2));
+        parent.active_subagent = Some("l2-coord".into());
+        let text = draw_text(&mut parent);
+        assert!(
+            !text.contains("Running: Write"),
+            "completed Write must not keep overlay Running chrome:\n{text}"
+        );
+        let l2 = parent.subagent_views.get("l2-coord").unwrap();
+        assert!(
+            !matches!(
+                l2.resolve_turn_activity(),
+                Some(crate::acp::tracker::TurnActivity::ToolRunning { title, .. })
+                    if title.starts_with("Write")
+            ),
+            "handle_update Completed must finish the Write, got {:?}",
+            l2.resolve_turn_activity()
+        );
+    }
+
+    /// Overlay Preparing search_replace with no nested specialist must still
+    /// name the live tool, not sit on Preparing for minutes.
+    #[test]
+    fn nested_overlay_preparing_names_the_tool_when_no_specialist() {
+        let mut parent = make_agent();
+        let mut l2 = make_agent();
+        l2.session.state = AgentState::TurnRunning;
+        l2.session
+            .tracker
+            .note_tool_call_arguments_delta(Some("search_replace"), 0);
+        l2.tasks.overlay.visible = true;
+        let mut l2_info = running_subagent_info("l2-coord");
+        l2_info.description = Arc::from("Stop five-minute test restart");
+        l2_info.activity_label = Some("Preparing search_replace…".into());
+        l2_info.tools_used = vec![Arc::from("search_replace")];
+        l2_info.started_at = Instant::now() - Duration::from_secs(13 * 60 + 50);
+        parent.subagent_sessions.insert("l2-coord".into(), l2_info);
+        parent
+            .subagent_views
+            .insert("l2-coord".into(), Box::new(l2));
+        parent.active_subagent = Some("l2-coord".into());
+        let text = draw_text(&mut parent);
+        let lower = text.to_ascii_lowercase();
+        assert!(
+            text.contains("search_replace"),
+            "nested overlay must name the live tool, got:\n{text}"
+        );
+        assert!(
+            !lower.contains("preparing"),
+            "stale Preparing search_replace must not own overlay chrome:\n{text}"
+        );
+    }
+
+    /// Frozen Preparing search_replace on the overlay L2 must yield to the
+    /// live nested job and last tool. The Subagents list must name that
+    /// specialist instead of saying there are no running tasks.
+    #[test]
+    fn nested_overlay_preparing_search_replace_yields_to_live_nested_job() {
+        let mut parent = make_agent();
+        let mut l2 = make_agent();
+        l2.session.state = AgentState::TurnRunning;
+        l2.session
+            .tracker
+            .note_tool_call_arguments_delta(Some("search_replace"), 0);
+        l2.tasks.overlay.visible = true;
+        let mut l2_info = running_subagent_info("l2-coord");
+        l2_info.description = Arc::from("Stop five-minute test restart");
+        l2_info.started_at = Instant::now() - Duration::from_secs(13 * 60 + 50);
+        parent.subagent_sessions.insert("l2-coord".into(), l2_info);
+        parent
+            .subagent_views
+            .insert("l2-coord".into(), Box::new(l2));
+        let mut specialist = running_subagent_info("l3-impl");
+        specialist.description = Arc::from("Keep live remote compile");
+        specialist.is_background = true;
+        specialist.depth = Some(2);
+        specialist.parent_session_id = Some(Arc::from("l2-coord"));
+        specialist.activity_label = Some("Preparing search_replace…".into());
+        specialist.tools_used = vec![Arc::from("read_file")];
+        specialist.started_at = Instant::now() - Duration::from_secs(13 * 60 + 50);
+        parent
+            .subagent_sessions
+            .insert("l3-impl".into(), specialist);
+        parent.active_subagent = Some("l2-coord".into());
+        let text = draw_text(&mut parent);
+        let lower = text.to_ascii_lowercase();
+        assert!(
+            text.contains("Keep live remote compile"),
+            "nested overlay must name the live nested job, got:\n{text}"
+        );
+        assert!(
+            text.contains("read_file"),
+            "nested overlay must show the live tool, not a stale Preparing line:\n{text}"
+        );
+        assert!(
+            !lower.contains("preparing"),
+            "stale Preparing search_replace must not own overlay chrome:\n{text}"
+        );
+        assert!(
+            !text.contains("No running tasks"),
+            "nested overlay must list the live specialist, not No running tasks:\n{text}"
+        );
+    }
+
+    /// Overlay sparkler must change glyphs from a live elapsed clock while
+    /// a nested job is running, and use the magenta running accent.
+    #[test]
+    fn nested_overlay_sparkler_advances_while_nested_job_runs() {
+        let _pin = crate::theme::cache::pin_theme();
+        crate::theme::cache::set(crate::theme::ThemeKind::GrokNight);
+        let early_elapsed = Duration::from_millis(0);
+        let later_elapsed = Duration::from_millis(crate::glyphs::SPARKLER_FRAME_MS);
+        let early_glyph = crate::glyphs::sparkler_frame_at_ms(early_elapsed.as_millis() as u64);
+        let later_glyph = crate::glyphs::sparkler_frame_at_ms(later_elapsed.as_millis() as u64);
+        assert_ne!(
+            early_glyph, later_glyph,
+            "sparkler clock must change glyphs after one frame dwell"
+        );
+
+        fn overlay_with_elapsed(elapsed: Duration) -> String {
+            let mut parent = make_agent();
+            let mut l2 = make_agent();
+            l2.session.state = AgentState::Idle;
+            l2.tasks.overlay.visible = true;
+            let mut l2_info = running_subagent_info("l2-coord");
+            l2_info.description = Arc::from("Stop five-minute test restart");
+            l2_info.started_at = Instant::now() - elapsed;
+            parent.subagent_sessions.insert("l2-coord".into(), l2_info);
+            parent
+                .subagent_views
+                .insert("l2-coord".into(), Box::new(l2));
+            let mut specialist = running_subagent_info("l3-impl");
+            specialist.description = Arc::from("Keep live remote compile");
+            specialist.is_background = true;
+            specialist.depth = Some(2);
+            specialist.parent_session_id = Some(Arc::from("l2-coord"));
+            specialist.tools_used = vec![Arc::from("read_file")];
+            specialist.started_at = Instant::now() - elapsed;
+            parent
+                .subagent_sessions
+                .insert("l3-impl".into(), specialist);
+            parent.active_subagent = Some("l2-coord".into());
+            draw_text(&mut parent)
+        }
+
+        fn title_icon(text: &str) -> String {
+            text.lines()
+                .find(|line| line.contains("Stop five-minute test restart"))
+                .and_then(|line| {
+                    line.chars().find_map(|c| {
+                        let glyph = c.to_string();
+                        if crate::glyphs::dot_spinner_frames().contains(&glyph.as_str())
+                            || glyph == crate::glyphs::check_mark()
+                            || glyph == crate::glyphs::ballot_x()
+                        {
+                            Some(glyph)
+                        } else {
+                            None
+                        }
+                    })
+                })
+                .unwrap_or_default()
+        }
+
+        let early_text = overlay_with_elapsed(early_elapsed);
+        let later_text = overlay_with_elapsed(later_elapsed);
+        let early_icon = title_icon(&early_text);
+        let later_icon = title_icon(&later_text);
+        assert_eq!(
+            early_icon, early_glyph,
+            "early overlay sparkler must paint the live-work glyph {early_glyph:?}:\n{early_text}"
+        );
+        assert_eq!(
+            later_icon, later_glyph,
+            "later overlay sparkler must paint the next live-work glyph {later_glyph:?}:\n{later_text}"
+        );
+        let theme = crate::theme::Theme::current();
+        assert_ne!(
+            theme.accent_running,
+            ratatui::style::Color::Green,
+            "running sparkler must not use human green"
+        );
+        assert_ne!(
+            theme.accent_running,
+            ratatui::style::Color::Cyan,
+            "running sparkler must not use cyan"
+        );
+    }
+
+    /// After nested work finishes, overlay chrome must not keep a live
+    /// sparkler or a No running tasks lie for leftover live rows.
+    #[test]
+    fn nested_overlay_sparkler_clears_after_nested_job_finishes() {
+        let mut parent = make_agent();
+        let mut l2 = make_agent();
+        l2.session.state = AgentState::Idle;
+        l2.tasks.overlay.visible = true;
+        let mut l2_info = running_subagent_info("l2-coord");
+        l2_info.description = Arc::from("Stop five-minute test restart");
+        l2_info.finished = true;
+        l2_info.status = Some(Arc::from("completed"));
+        l2_info.duration_ms = Some(1_000);
+        parent.subagent_sessions.insert("l2-coord".into(), l2_info);
+        parent
+            .subagent_views
+            .insert("l2-coord".into(), Box::new(l2));
+        parent.active_subagent = Some("l2-coord".into());
+        let text = draw_text(&mut parent);
+        let title = text
+            .lines()
+            .find(|line| line.contains("Stop five-minute test restart"))
+            .unwrap_or("");
+        let icon: String = title
+            .chars()
+            .find_map(|c| {
+                let glyph = c.to_string();
+                (glyph == crate::glyphs::check_mark()
+                    || crate::glyphs::dot_spinner_frames().contains(&glyph.as_str())
+                    || glyph == crate::glyphs::ballot_x())
+                .then_some(glyph)
+            })
+            .unwrap_or_default();
+        assert_eq!(
+            icon,
+            crate::glyphs::check_mark(),
+            "finished overlay title must use the check mark, not a stuck sparkler:\n{text}"
+        );
+    }
+
+    /// After the waited-on nested agent has completed (exit 0, duration
+    /// stamped), the parent overlay must not stay `Waiting on task output`.
+    /// The wait tool may still be Pending; that is the stall, not a healthy wait.
+    #[test]
+    fn nested_overlay_wait_chrome_ends_after_waited_child_completes() {
+        let mut parent = make_agent();
+        let mut l2 = make_agent();
+        l2.session.state = AgentState::TurnRunning;
+        let mut specialist = running_subagent_info("l3-lake");
+        specialist.description = Arc::from("remote Lake");
+        specialist.is_background = true;
+        specialist.activity_label = Some("read_file".into());
+        l2.subagent_sessions.insert("l3-lake".into(), specialist);
+        let meta = NotificationMeta::default();
+        l2.session.handle_update(
+            acp::SessionUpdate::ToolCall(
+                acp::ToolCall::new(
+                    acp::ToolCallId::new(Arc::from("wait-l3")),
+                    "get_command_or_subagent_output",
+                )
+                .kind(acp::ToolKind::Other)
+                .status(acp::ToolCallStatus::Pending)
+                .content(vec![])
+                .raw_input(Some(serde_json::json!({ "timeout_ms": 600_000 })))
+                .locations(vec![]),
+            ),
+            &meta,
+            &mut l2.scrollback,
+        );
+        {
+            let info = l2.subagent_sessions.get_mut("l3-lake").unwrap();
+            info.finished = true;
+            info.status = Some(Arc::from("completed"));
+            info.duration_ms = Some(4_000);
+            info.activity_label = None;
+        }
+        let mut l2_info = running_subagent_info("l2-coord");
+        l2_info.description = Arc::from("General Fix nested overlay stall");
+        l2_info.started_at = Instant::now() - Duration::from_secs(60 * 60);
+        parent.subagent_sessions.insert("l2-coord".into(), l2_info);
+        parent
+            .subagent_views
+            .insert("l2-coord".into(), Box::new(l2));
+        parent.active_subagent = Some("l2-coord".into());
+        let text = draw_text(&mut parent);
+        assert!(
+            !text.contains("Waiting on task output"),
+            "nested overlay must not stay Waiting on task output after the waited-on child completed:\n{text}"
+        );
+        let l2 = parent.subagent_views.get("l2-coord").unwrap();
+        assert!(
+            !matches!(
+                l2.resolve_turn_activity(),
+                Some(crate::acp::tracker::TurnActivity::Waiting(
+                    crate::acp::tracker::WaitingReason::TaskOutput { .. }
+                ))
+            ),
+            "L2 wait chrome must end after the waited-on nested agent completed, got {:?}",
+            l2.resolve_turn_activity()
+        );
+        assert!(
+            !crate::views::turn_status::is_sendable_wait(&l2.resolve_turn_activity_unenriched()),
+            "footer must not stay parked on task output after the child completed"
+        );
+        let specialist = l2.subagent_sessions.get("l3-lake").unwrap();
+        assert_eq!(
+            specialist.display_elapsed(),
+            Duration::from_millis(4_000),
+            "completed nested-agent timer must stop"
+        );
+        assert!(
+            crate::app::subagent::live_subagent_list(l2.subagent_sessions.values())
+                .iter()
+                .all(|info| info.child_session_id.as_ref() != "l3-lake"),
+            "live list must not show the completed nested agent as running"
+        );
+    }
+}
+
+/// Status-bar compact included SuperGrok period limits meter (paint + click).
+/// Catalog contract: `"credits"` is pushed and click opens `/limits`.
+#[cfg(test)]
+mod status_credits_meter_tests {
+    use super::super::test_fixtures::make_agent;
+    use crate::actions::ActionRegistry;
+    use crate::app::actions::Action;
+    use crate::app::app_view::InputOutcome;
+    use crate::app::bundle::BundleState;
+    use crate::scrollback::render::ScratchBuffer;
+    use crate::views::credit_bar::CreditBalance;
+    use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+    use ratatui::buffer::Buffer;
+    use ratatui::layout::Rect;
+
+    fn draw(agent: &mut super::AgentView) -> String {
+        let area = Rect::new(0, 0, 120, 40);
+        let mut buf = Buffer::empty(area);
+        let mut scratch = ScratchBuffer::new();
+        agent.draw(
+            area,
+            &mut buf,
+            &ActionRegistry::defaults(),
+            &mut scratch,
+            None,
+            false,
+            crate::app::agent_view::BannerSlotParams::none(),
+            &BundleState::default(),
+            false,
+            false,
+            &mut Vec::new(),
+            super::AppRenderParams::default(),
+        );
+        (0..area.height)
+            .map(|y| {
+                (0..area.width)
+                    .filter_map(|x| buf.cell((x, y)).map(|c| c.symbol().to_string()))
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn included_balance(usage_pct: f64) -> CreditBalance {
+        CreditBalance {
+            usage_pct,
+            effective_usage_pct: usage_pct,
+            included_usage_known: true,
+            ..CreditBalance::default()
+        }
+    }
+    /// Named contract: the status row may paint the short limits chip when
+    /// included usage is known. It must not paint SuperGrok period, the long
+    /// included name, or free SuperGrok period.
+    #[test]
+    fn status_bar_pushes_credits_compact_included_supergrok_period_limits() {
+        let mut agent = make_agent();
+        agent.credit_balance = Some(included_balance(24.0));
+        let text = draw(&mut agent);
+        assert!(
+            !text.contains("SuperGrok period"),
+            "header must not paint SuperGrok period:\n{text}"
+        );
+        assert!(
+            !text.contains("included SuperGrok period limits"),
+            "user-facing TUI chrome must not paint included SuperGrok period limits:\n{text}"
+        );
+        assert!(
+            !text.contains("free SuperGrok period"),
+            "must not paint free SuperGrok period; SuperGrok is paid:\n{text}"
+        );
+    }
+
+    /// Named contract: click on the credits chip dispatches `ShowLimits`
+    /// (same as `/limits`).
+    #[test]
+    fn hit_credits_click_dispatches_show_limits() {
+        let mut agent = make_agent();
+        agent.hit_credits.rect = Some(Rect::new(10, 0, 20, 1));
+        let outcome = agent.handle_mouse(&MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 12,
+            row: 0,
+            modifiers: KeyModifiers::empty(),
+        });
+        assert!(
+            matches!(outcome, InputOutcome::Action(Action::ShowLimits)),
+            "clicking the credits chip must open /limits, got {outcome:?}"
+        );
+    }
+
+    /// Named contract: click on the status-row `[pause]` chip dispatches
+    /// `ToggleGlobalPause`, never `CancelTurn`.
+    #[test]
+    fn pause_button_click_dispatches_global_pause_not_cancel() {
+        let mut agent = make_agent();
+        agent.session.state = crate::app::agent::AgentState::TurnRunning;
+        let _ = draw(&mut agent);
+        let pause = agent
+            .hit_pause_button
+            .rect
+            .expect("running turn must arm the pause rect");
+        let stop = agent
+            .hit_cancel_button
+            .rect
+            .expect("running turn must arm the stop rect");
+        assert_ne!(pause, stop, "pause and stop must be distinct hit targets");
+        let outcome = agent.handle_mouse(&MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: pause.x,
+            row: pause.y,
+            modifiers: KeyModifiers::empty(),
+        });
+        assert!(
+            matches!(outcome, InputOutcome::Action(Action::ToggleGlobalPause)),
+            "pause click must dispatch ToggleGlobalPause, got {outcome:?}"
+        );
+        assert!(
+            !matches!(outcome, InputOutcome::Action(Action::CancelTurn)),
+            "pause must never dispatch CancelTurn"
+        );
+        let outcome = agent.handle_mouse(&MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: stop.x,
+            row: stop.y,
+            modifiers: KeyModifiers::empty(),
+        });
+        assert!(
+            matches!(outcome, InputOutcome::Action(Action::CancelTurn)),
+            "stop click must still dispatch CancelTurn, got {outcome:?}"
+        );
+    }
+
+    /// Keyboard-only / Minimal screen still hides chips. Idle already
+    /// hides via height 0. Parked always has height 1, so the live paint
+    /// site must pass `buttons: None` in Minimal mode.
+    #[test]
+    fn minimal_mode_parked_wait_does_not_paint_pause_or_stop() {
+        use crate::acp::meta::NotificationMeta;
+        use crate::acp::tracker::{TurnActivity, WaitingReason};
+        use crate::app::ScreenMode;
+        use crate::app::agent::AgentState;
+        use agent_client_protocol as acp;
+        use std::sync::Arc;
+
+        let mut agent = make_agent();
+        agent.prompt.set_screen_mode(ScreenMode::Minimal);
+        agent.session.state = AgentState::TurnRunning;
+        agent.front_message_committed = true;
+        let meta = NotificationMeta::default();
+        agent.session.handle_update(
+            acp::SessionUpdate::ToolCall(
+                acp::ToolCall::new(acp::ToolCallId::new(Arc::from("sleep-1")), "Sleep 5s")
+                    .kind(acp::ToolKind::Other)
+                    .status(acp::ToolCallStatus::Pending)
+                    .content(vec![])
+                    .locations(vec![]),
+            ),
+            &meta,
+            &mut agent.scrollback,
+        );
+        assert!(
+            matches!(
+                agent.resolve_turn_activity(),
+                Some(TurnActivity::Waiting(WaitingReason::Sleep))
+            ),
+            "fixture must be a Sleep wait, got {:?}",
+            agent.resolve_turn_activity()
+        );
+        assert!(
+            agent.renders_parked(),
+            "fixture must be a parked sendable wait"
+        );
+        assert_eq!(
+            agent.watchers(),
+            crate::views::turn_status::Watchers::default(),
+            "fixture must have no watchers"
+        );
+
+        let text = draw(&mut agent);
+        assert!(
+            !text.contains("[pause]"),
+            "Minimal parked wait must not paint [pause]:\n{text}"
+        );
+        assert!(
+            !text.contains("[stop]"),
+            "Minimal parked wait must not paint [stop]:\n{text}"
+        );
+        assert!(
+            agent.hit_pause_button.rect.is_none(),
+            "Minimal parked wait must not arm a pause hit"
+        );
+        assert!(
+            agent.hit_cancel_button.rect.is_none(),
+            "Minimal parked wait must not arm a stop hit"
+        );
+        assert!(
+            text.contains("Sleeping"),
+            "parked row must still name Sleeping:\n{text}"
+        );
+        assert!(
+            text.contains("send a message to interrupt"),
+            "parked row must still carry send a message to interrupt:\n{text}"
+        );
+    }
+
+    /// Included used percent is 28. The status row paints `limits 28%` and
+    /// arms a hit rectangle. Hover on that rectangle shows `72% left`.
+    /// The row and the hover do not paint the 15-minute window, the 24-hour
+    /// window, business, personal, SuperGrok period, or behind linear burn.
+    #[test]
+    fn status_row_paints_weekly_limits_used_and_hover_shows_percent_remaining() {
+        use crate::views::credit_bar::SamplingIdentityKind;
+
+        crate::appearance::cache::set_hide_header(false);
+        let mut agent = make_agent();
+        agent.sampling_identity = SamplingIdentityKind::SuperGrokSession;
+        agent.credit_balance = Some(CreditBalance {
+            usage_pct: 28.0,
+            effective_usage_pct: 28.0,
+            included_usage_known: true,
+            period_type: Some("USAGE_PERIOD_TYPE_WEEKLY".into()),
+            ..CreditBalance::default()
+        });
+
+        let text = draw(&mut agent);
+        let row = text
+            .lines()
+            .find(|line| line.contains("/tmp"))
+            .unwrap_or("")
+            .to_string();
+        assert!(
+            row.contains("limits 28%"),
+            "status row must paint `limits 28%` when included used percent is 28:\n{row}\nfull:\n{text}"
+        );
+        let hit = agent
+            .hit_credits
+            .rect
+            .expect("status row must arm a hit rectangle for the limits chip");
+        let forbid = |painted: &str, which: &str| {
+            let forbidden = [
+                "behind linear burn",
+                "15m",
+                "24h",
+                "business",
+                "personal",
+                "SuperGrok period",
+            ];
+            let found: Vec<&str> = forbidden
+                .into_iter()
+                .filter(|token| painted.contains(token))
+                .collect();
+            assert!(
+                found.is_empty(),
+                "{which} must not paint {found:?}:\n{painted}"
+            );
+        };
+        forbid(&row, "status row");
+
+        let _ = agent.handle_mouse(&MouseEvent {
+            kind: MouseEventKind::Moved,
+            column: hit.x,
+            row: hit.y,
+            modifiers: KeyModifiers::empty(),
+        });
+        assert!(
+            agent.hit_credits.hovered,
+            "moving onto the limits chip must hover that hit rectangle"
+        );
+        let hovered = draw(&mut agent);
+        let hover_row = hovered
+            .lines()
+            .find(|line| line.contains("/tmp"))
+            .unwrap_or("")
+            .to_string();
+        let hover = if hover_row.contains("72% left") {
+            hover_row.clone()
+        } else {
+            hovered
+                .lines()
+                .find(|line| line.contains("72% left"))
+                .unwrap_or(hover_row.as_str())
+                .to_string()
+        };
+        assert!(
+            hover.contains("72% left"),
+            "hover must show `72% left` when included used percent is 28:\n{hover}\nrow:\n{hover_row}"
+        );
+        forbid(&row, "status row");
+        forbid(&hover, "hover");
+    }
+}
+
+/// Header paint omits the 15-minute window, the 24-hour window, SuperGrok
+/// period, and behind linear burn. Branch, context figure, and task count
+/// stay when they are separate from that chip.
+#[cfg(test)]
+mod header_omits_uptime_and_supergrok_period_chip {
+    use std::collections::BTreeMap;
+
+    use super::super::test_fixtures::make_agent;
+    use crate::actions::ActionRegistry;
+    use crate::app::bundle::BundleState;
+    use crate::scrollback::render::ScratchBuffer;
+    use crate::uptime::{
+        Observation, Outcome, UptimeStore, format_uptime_beside_status, uptime_dir,
+    };
+    use crate::views::credit_bar::{
+        ConsoleTeamPrepaidGap, CreditBalance, SamplingIdentityKind,
+        compact_live_principal_role_from_process,
+        credit_status_line_for_live_session_emphasizing_meter_source,
+    };
+    use ratatui::buffer::Buffer;
+    use ratatui::layout::Rect;
+    use xai_grok_shell::session::ContextInfo;
+    use xai_grok_shell::tools::{TodoItem, TodoStatus};
+
+    struct GrokHomeGuard {
+        prev: Option<std::ffi::OsString>,
+    }
+
+    impl GrokHomeGuard {
+        fn set(path: &std::path::Path) -> Self {
+            let prev = std::env::var_os("GROK_HOME");
+            // Safety: this test is the only thread, and Drop restores the previous value.
+            unsafe { std::env::set_var("GROK_HOME", path) };
+            Self { prev }
+        }
+    }
+
+    impl Drop for GrokHomeGuard {
+        fn drop(&mut self) {
+            // Safety: paired with `set`. Restores the process environment this test changed.
+            unsafe {
+                match self.prev.take() {
+                    Some(prev) => std::env::set_var("GROK_HOME", prev),
+                    None => std::env::remove_var("GROK_HOME"),
+                }
+            }
+        }
+    }
+
+    fn draw(agent: &mut super::AgentView) -> String {
+        crate::appearance::cache::set_hide_header(false);
+        let area = Rect::new(0, 0, 220, 40);
+        let mut buf = Buffer::empty(area);
+        let mut scratch = ScratchBuffer::new();
+        agent.draw(
+            area,
+            &mut buf,
+            &ActionRegistry::defaults(),
+            &mut scratch,
+            None,
+            false,
+            crate::app::agent_view::BannerSlotParams::none(),
+            &BundleState::default(),
+            false,
+            false,
+            &mut Vec::new(),
+            super::AppRenderParams::default(),
+        );
+        (0..area.height)
+            .map(|y| {
+                (0..area.width)
+                    .filter_map(|x| buf.cell((x, y)).map(|c| c.symbol().to_string()))
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn line_text(line: &ratatui::text::Line<'_>) -> String {
+        line.spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect()
+    }
+
+    fn succeeded(time_unix_ms: i64) -> Observation {
+        Observation {
+            time_unix_ms,
+            outcome: Outcome::ModelRequestSucceeded,
+            latency_ms: Some(40),
+            token_count: None,
+            tokens_not_fetched: true,
+            model_id: "grok-4.6".to_string(),
+            local_session_id: "header-contract".to_string(),
+            banner_text: None,
+        }
+    }
+
+    /// Header paint omits the 15-minute window, the 24-hour window, SuperGrok
+    /// period, and behind linear burn.
+    #[test]
+    fn header_paint_omits_the_15_minute_window_the_24_hour_window_supergrok_period_and_behind_linear_burn()
+     {
+        let home = tempfile::tempdir().expect("temp grok home");
+        let _home_guard = GrokHomeGuard::set(home.path());
+        xai_grok_shell::token_economy::set_token_economy_live_bool("show_period_pacing", true);
+
+        let mut auth = xai_grok_shell::auth::GrokAuth::default();
+        auth.key = "header-contract-not-a-secret".into();
+        auth.user_id = "header-contract-user".into();
+        auth.principal_type = Some("Team".into());
+        auth.team_id = Some("header-contract-team".into());
+        auth.auth_mode = xai_grok_shell::auth::AuthMode::Oidc;
+        let mut sessions = BTreeMap::new();
+        sessions.insert("https://auth.x.ai::header-contract".to_string(), auth);
+        std::fs::write(
+            home.path().join("auth.json"),
+            serde_json::to_string(&sessions).expect("auth json"),
+        )
+        .expect("write auth.json");
+
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let store = UptimeStore::open(uptime_dir(home.path())).expect("uptime dir");
+        for ago_ms in [60_000_i64, 120_000, 180_000] {
+            store
+                .record(succeeded(now_ms - ago_ms))
+                .expect("record 15-minute success");
+        }
+        store
+            .record(succeeded(now_ms - 2 * 60 * 60 * 1000))
+            .expect("record 24-hour success");
+        let windows = store.aggregate(now_ms).expect("aggregate windows");
+        let uptime = format_uptime_beside_status(&windows);
+        assert_eq!(
+            uptime, "15m 3/3 ok · 24h 4/4 ok",
+            "fixture windows the header would otherwise read: {uptime}"
+        );
+        let capped = crate::uptime::cap_uptime_status_segment(&uptime);
+        assert!(
+            capped.contains("15m") && capped.contains("24h"),
+            "capped status segment still carries both windows: {capped}"
+        );
+
+        let now = chrono::Utc::now();
+        let balance = CreditBalance {
+            usage_pct: 28.0,
+            effective_usage_pct: 28.0,
+            period_end_at: Some(now + chrono::Duration::hours(6)),
+            period_type: Some("USAGE_PERIOD_TYPE_WEEKLY".into()),
+            included_usage_known: true,
+            ..CreditBalance::default()
+        };
+        assert_eq!(
+            compact_live_principal_role_from_process(),
+            Some("business"),
+            "fixture workspace the header chip would otherwise read"
+        );
+        let chip = credit_status_line_for_live_session_emphasizing_meter_source(
+            Some(&balance),
+            SamplingIdentityKind::SuperGrokSession,
+            None,
+            ConsoleTeamPrepaidGap::MissingManagementKey,
+            false,
+            &crate::theme::Theme::default(),
+            false,
+            compact_live_principal_role_from_process(),
+            None,
+        )
+        .expect("populated SuperGrok period chip");
+        let chip_text = line_text(&chip);
+        assert!(
+            chip_text.contains("SuperGrok period")
+                && chip_text.contains("business")
+                && chip_text.contains("28%")
+                && chip_text.contains("behind linear burn"),
+            "fixture chip the header would otherwise read: {chip_text}"
+        );
+
+        let mut agent = make_agent();
+        agent.current_branch = Some("header-contract-branch".into());
+        agent.context_state = Some(ContextInfo {
+            used: 400_000,
+            total: 500_000,
+            ..ContextInfo::default()
+        });
+        agent.session_sampling_window = Some(500_000);
+        agent.credit_balance = Some(balance);
+        agent.sampling_identity = SamplingIdentityKind::SuperGrokSession;
+        let mut todos = Vec::with_capacity(200);
+        for index in 0..190 {
+            todos.push(TodoItem {
+                content: format!("done {index}"),
+                priority: Default::default(),
+                status: TodoStatus::Completed,
+                meta: None,
+                size: None,
+            });
+        }
+        for index in 0..10 {
+            todos.push(TodoItem {
+                content: format!("open {index}"),
+                priority: Default::default(),
+                status: TodoStatus::Pending,
+                meta: None,
+                size: None,
+            });
+        }
+        agent.todo.update_todos(todos);
+
+        let text = draw(&mut agent);
+        let header = text
+            .lines()
+            .find(|line| line.contains("header-contract-branch"))
+            .unwrap_or(text.as_str());
+        let forbidden = [
+            "15m",
+            "24h",
+            "SuperGrok period",
+            "behind linear burn",
+            "business",
+        ];
+        let found: Vec<&str> = forbidden
+            .into_iter()
+            .filter(|token| header.contains(token))
+            .collect();
+        assert!(
+            found.is_empty(),
+            "header paint omits the 15-minute window, the 24-hour window, SuperGrok period, and behind linear burn, but found {found:?} in:\n{header}"
+        );
+        assert!(
+            header.contains("header-contract-branch"),
+            "branch stays on the header:\n{header}"
+        );
+        assert!(
+            header.contains("400K / 500K"),
+            "context window figure stays when it is separate from the uptime suffix:\n{header}"
+        );
+        assert!(
+            header.contains("tasks 190/200"),
+            "task count stays when it is a separate widget:\n{header}"
+        );
+    }
+}
+
+/// Forked-session upper-left header chrome. The 11:10 screenshot painted
+/// only git branch plus cwd on the status row. That must not pass: a fork
+/// family needs the conversation switcher and the dashboard control on
+/// that same header, without typing `/dashboard`.
+#[cfg(test)]
+mod forked_session_status_header_tests {
+    use super::super::test_fixtures::make_agent;
+    use crate::actions::ActionRegistry;
+    use crate::app::agent::AgentId;
+    use crate::app::bundle::BundleState;
+    use crate::scrollback::render::ScratchBuffer;
+    use ratatui::buffer::Buffer;
+    use ratatui::layout::Rect;
+
+    fn draw(agent: &mut super::AgentView) -> String {
+        crate::appearance::cache::set_hide_header(false);
+        let area = Rect::new(0, 0, 120, 40);
+        let mut buf = Buffer::empty(area);
+        let mut scratch = ScratchBuffer::new();
+        agent.draw(
+            area,
+            &mut buf,
+            &ActionRegistry::defaults(),
+            &mut scratch,
+            None,
+            false,
+            crate::app::agent_view::BannerSlotParams::none(),
+            &BundleState::default(),
+            false,
+            false,
+            &mut Vec::new(),
+            super::AppRenderParams::default(),
+        );
+        (0..area.height)
+            .map(|y| {
+                (0..area.width)
+                    .filter_map(|x| buf.cell((x, y)).map(|c| c.symbol().to_string()))
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Named contract: drawing the header of a forked session (fork family)
+    /// must include the forked-conversation switcher and the dashboard
+    /// control in the upper-left status header. This would have been red on
+    /// the 11:10 screenshot (`main ~/Projects/...` only, no switcher, no
+    /// dashboard).
+    #[test]
+    fn forked_session_status_header_paints_switcher_and_dashboard() {
+        let mut agent = make_agent();
+        agent.session.forked_from = Some(AgentId(1));
+        agent.fork_family_position = Some((2, 2));
+        let text = draw(&mut agent);
+        let header = text
+            .lines()
+            .find(|line| line.chars().any(|c| !c.is_whitespace()))
+            .unwrap_or("");
+        assert!(
+            header.contains("[Dashboard]"),
+            "forked-session status header must paint the dashboard control; \
+             the 11:10 screenshot only had git plus cwd:\n{header}\nfull:\n{text}"
+        );
+        assert!(
+            header.contains("[‹][›]"),
+            "forked-session status header must paint the forked-conversation \
+             switcher as adjacent `[‹][›]`; the 11:10 screenshot had none:\n{header}\nfull:\n{text}"
+        );
+        assert!(
+            agent.hit_header_dashboard.rect.is_some(),
+            "dashboard control must be a real click target on the status header"
+        );
+        assert!(
+            agent.hit_header_prev.rect.is_some() && agent.hit_header_next.rect.is_some(),
+            "fork switcher chips must be real click targets on the status header"
+        );
+    }
+
+    /// Named contract: the header dashboard chip opens the dashboard, and
+    /// the switcher chips cycle the fork family.
+    #[test]
+    fn forked_session_status_header_clicks_open_dashboard_and_cycle() {
+        use crate::app::actions::Action;
+        use crate::app::app_view::InputOutcome;
+        use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+
+        let mut agent = make_agent();
+        agent.session.forked_from = Some(AgentId(1));
+        agent.fork_family_position = Some((2, 2));
+        let _ = draw(&mut agent);
+        let dash = agent
+            .hit_header_dashboard
+            .rect
+            .expect("dashboard chip must arm a hit");
+        let next = agent
+            .hit_header_next
+            .rect
+            .expect("next-fork chip must arm a hit");
+        let prev = agent
+            .hit_header_prev
+            .rect
+            .expect("prev-fork chip must arm a hit");
+        let click = |x, y| MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: x,
+            row: y,
+            modifiers: KeyModifiers::empty(),
+        };
+        assert!(
+            matches!(
+                agent.handle_mouse(&click(dash.x, dash.y)),
+                InputOutcome::Action(Action::OpenDashboard)
+            ),
+            "clicking [Dashboard] must open the dashboard"
+        );
+        assert!(
+            matches!(
+                agent.handle_mouse(&click(next.x, next.y)),
+                InputOutcome::Action(Action::DashboardOverlayNext)
+            ),
+            "clicking [›] must cycle to the next forked conversation"
+        );
+        assert!(
+            matches!(
+                agent.handle_mouse(&click(prev.x, prev.y)),
+                InputOutcome::Action(Action::DashboardOverlayPrev)
+            ),
+            "clicking [‹] must cycle to the previous forked conversation"
+        );
+    }
+
+    /// A lone fork (parent gone, no siblings) still paints `[Dashboard]`
+    /// on the upper-left status header. Cycle chips are only for a family
+    /// of more than one.
+    #[test]
+    fn forked_session_status_header_paints_dashboard_for_lone_fork() {
+        let mut agent = make_agent();
+        agent.session.forked_from = Some(AgentId(1));
+        agent.fork_family_position = Some((1, 1));
+        let text = draw(&mut agent);
+        let header = text
+            .lines()
+            .find(|line| line.chars().any(|c| !c.is_whitespace()))
+            .unwrap_or("");
+        assert!(
+            header.contains("[Dashboard]"),
+            "a lone fork must still paint the dashboard control on the status header:\n{header}\nfull:\n{text}"
+        );
+        assert!(
+            !header.contains("[‹]") && !header.contains("[›]"),
+            "a lone fork must not paint cycle chips:\n{header}"
+        );
+        assert!(
+            agent.hit_header_dashboard.rect.is_some(),
+            "lone-fork dashboard control must be a real click target"
+        );
+        assert!(
+            agent.hit_header_prev.rect.is_none() && agent.hit_header_next.rect.is_none(),
+            "lone fork must not arm cycle-chip hits"
+        );
+    }
+
+    /// `fork_family_position` must count the living parent plus the child
+    /// so the header switcher is not only a test stub on `AgentView`.
+    #[test]
+    fn fork_family_position_counts_parent_and_live_child() {
+        let mut parent = make_agent();
+        parent.session.id = AgentId(0);
+        let mut child = make_agent();
+        child.session.id = AgentId(1);
+        child.session.forked_from = Some(AgentId(0));
+        let mut agents = indexmap::IndexMap::new();
+        agents.insert(AgentId(0), parent);
+        agents.insert(AgentId(1), child);
+        assert_eq!(
+            crate::app::agent_view::fork_family_position(&agents, AgentId(0)),
+            Some((1, 2)),
+            "parent must be 1 of 2 in the live fork family"
+        );
+        assert_eq!(
+            crate::app::agent_view::fork_family_position(&agents, AgentId(1)),
+            Some((2, 2)),
+            "child must be 2 of 2 in the live fork family"
+        );
+    }
+}
+
+/// Clear finished `[−]` todo-header chrome (open board + finished rows).
+/// Restored from origin/main catalog contracts.
+#[cfg(test)]
+mod clear_finished_paint_tests {
+    use super::super::test_fixtures::make_agent;
+    use super::AgentView;
+    use crate::actions::ActionRegistry;
+    use crate::app::actions::Action;
+    use crate::app::app_view::InputOutcome;
+    use crate::app::bundle::BundleState;
+    use crate::scrollback::render::ScratchBuffer;
+    use ratatui::buffer::Buffer;
+    use ratatui::layout::Rect;
+    use xai_grok_shell::tools::{TodoItem, TodoPriority, TodoStatus};
+
+    fn draw_hits(agent: &mut AgentView) -> Buffer {
+        let area = Rect::new(0, 0, 120, 40);
+        let mut buf = Buffer::empty(area);
+        let mut scratch = ScratchBuffer::new();
+        let _ = agent.draw(
+            area,
+            &mut buf,
+            &ActionRegistry::defaults(),
+            &mut scratch,
+            None,
+            false,
+            crate::app::agent_view::BannerSlotParams::none(),
+            &BundleState::default(),
+            false,
+            false,
+            &mut Vec::new(),
+            super::AppRenderParams::default(),
+        );
+        buf
+    }
+
+    /// Named contract: open todo board with finished rows paints compact `[−]`
+    /// and registers hit even when unfocused (operators looking at the board
+    /// while on scrollback/tasks must still find clear).
+    #[test]
+    fn open_todo_with_finished_paints_clear_even_when_unfocused() {
+        let mut agent = make_agent();
+        let chrome = crate::glyphs::clear_finished_button();
+        agent.todo.update_todos(vec![TodoItem {
+            content: "shipped".into(),
+            priority: TodoPriority::Medium,
+            status: TodoStatus::Completed,
+            meta: None,
+            size: None,
+        }]);
+        agent.todo.overlay.visible = true;
+        agent.todo.overlay.focused = false;
+        agent.set_active_pane(super::super::AgentPane::Scrollback, false);
+        let buf = draw_hits(&mut agent);
+        let hit = agent
+            .hit_todo_clear_done
+            .rect
+            .expect("open + finished must register clear-finished hit when unfocused");
+        assert_eq!(hit.width, 3);
+        let mut label = String::new();
+        for x in hit.x..hit.x + hit.width {
+            if let Some(cell) = buf.cell((x, hit.y)) {
+                label.push_str(cell.symbol());
+            }
+        }
+        assert_eq!(label, chrome, "must paint [−] unfocused, got {label:?}");
+        assert!(!label.contains("Clear finished"));
+        assert!(!label.contains('\u{2205}'));
+        assert!(!chrome.contains('\u{2205}'));
+    }
+
+    /// Named contract: clear chrome only when finished rows exist. Open board
+    /// with pending-only has no clear glyph. Hidden board has no clear either.
+    #[test]
+    fn clear_finished_only_when_open_with_finished_rows() {
+        let mut agent = make_agent();
+        let chrome = crate::glyphs::clear_finished_button();
+
+        agent.todo.update_todos(vec![TodoItem {
+            content: "open work".into(),
+            priority: TodoPriority::Medium,
+            status: TodoStatus::Pending,
+            meta: None,
+            size: None,
+        }]);
+        agent.todo.overlay.visible = true;
+        agent.todo.overlay.focused = true;
+        agent.set_active_pane(super::super::AgentPane::Todo, false);
+        let _buf_pending = draw_hits(&mut agent);
+        assert!(
+            agent.hit_todo_clear_done.rect.is_none(),
+            "focused pending-only must not show clear-finished"
+        );
+
+        agent.todo.update_todos(vec![
+            TodoItem {
+                content: "open work".into(),
+                priority: TodoPriority::Medium,
+                status: TodoStatus::Pending,
+                meta: None,
+                size: None,
+            },
+            TodoItem {
+                content: "shipped".into(),
+                priority: TodoPriority::Medium,
+                status: TodoStatus::Completed,
+                meta: None,
+                size: None,
+            },
+        ]);
+        let buf_done = draw_hits(&mut agent);
+        let hit = agent
+            .hit_todo_clear_done
+            .rect
+            .expect("focused + finished must register clear-finished hit");
+        assert_eq!(hit.width, 3);
+        let mut label = String::new();
+        for x in hit.x..hit.x + hit.width {
+            if let Some(cell) = buf_done.cell((x, hit.y)) {
+                label.push_str(cell.symbol());
+            }
+        }
+        assert_eq!(label, chrome, "must paint [−], got {label:?}");
+        assert!(!label.contains("Clear finished"));
+        assert!(!label.contains('\u{2205}'));
+
+        agent.set_active_pane(super::super::AgentPane::Scrollback, false);
+        agent.todo.overlay.focused = false;
+        let buf_blur = draw_hits(&mut agent);
+        let hit_blur = agent
+            .hit_todo_clear_done
+            .rect
+            .expect("open + finished must keep clear hit after blur");
+        assert_eq!(hit_blur.width, 3);
+        let mut label_blur = String::new();
+        for x in hit_blur.x..hit_blur.x + hit_blur.width {
+            if let Some(cell) = buf_blur.cell((x, hit_blur.y)) {
+                label_blur.push_str(cell.symbol());
+            }
+        }
+        assert_eq!(
+            label_blur, chrome,
+            "blur must still paint [−] when open + finished, got {label_blur:?}"
+        );
+
+        agent.todo.overlay.visible = false;
+        let _buf_hidden = draw_hits(&mut agent);
+        assert!(
+            agent.hit_todo_clear_done.rect.is_none(),
+            "hidden todo pane must not register clear-finished hit"
+        );
+    }
+
+    fn rects_overlap(a: Rect, b: Rect) -> bool {
+        let ax2 = a.x.saturating_add(a.width);
+        let ay2 = a.y.saturating_add(a.height);
+        let bx2 = b.x.saturating_add(b.width);
+        let by2 = b.y.saturating_add(b.height);
+        a.x < bx2 && b.x < ax2 && a.y < by2 && b.y < ay2
+    }
+
+    /// Named contract (compact smash case): clear-finished hit must not
+    /// intersect tasks subagent open chrome (model/timer/[↗]) or kill [x].
+    #[test]
+    fn clear_finished_hit_does_not_intersect_tasks_subagent_open_or_kill() {
+        use super::super::test_fixtures::{make_agent, running_subagent_info};
+        use std::sync::Arc;
+
+        let mut agent = make_agent();
+        let mut appearance = agent.scrollback.appearance().clone();
+        appearance.prompt.compact = true;
+        agent.scrollback.set_appearance(appearance);
+
+        agent.todo.update_todos(vec![TodoItem {
+            content: "shipped".into(),
+            priority: TodoPriority::Medium,
+            status: TodoStatus::Completed,
+            meta: None,
+            size: None,
+        }]);
+        agent.todo.overlay.visible = true;
+        agent.tasks.overlay.visible = true;
+
+        let child_sid = "child-open-1";
+        let mut info = running_subagent_info(child_sid);
+        info.model = Some(Arc::from("grok-4.5"));
+        info.is_background = true;
+        agent.subagent_sessions.insert(child_sid.into(), info);
+        agent
+            .subagent_views
+            .insert(child_sid.into(), Box::new(make_agent()));
+
+        let chrome = crate::glyphs::clear_finished_button();
+        for (label_case, focused) in [("focused", true), ("unfocused", false)] {
+            agent.todo.overlay.focused = focused;
+            if focused {
+                agent.set_active_pane(super::super::AgentPane::Todo, false);
+            } else {
+                agent.set_active_pane(super::super::AgentPane::Scrollback, false);
+            }
+
+            let buf = draw_hits(&mut agent);
+            let clear = agent.hit_todo_clear_done.rect.unwrap_or_else(|| {
+                panic!("{label_case} open + finished must register clear-finished hit")
+            });
+
+            assert!(
+                !agent.tasks.view_button_rects.is_empty(),
+                "{label_case}: tasks pane must register open chrome for the running subagent"
+            );
+            for (id, open) in &agent.tasks.view_button_rects {
+                assert!(
+                    !rects_overlap(clear, *open),
+                    "{label_case}: clear-finished {clear:?} must not intersect open chrome {open:?} for {id:?}"
+                );
+            }
+            for (id, kill) in &agent.tasks.kill_button_rects {
+                assert!(
+                    !rects_overlap(clear, *kill),
+                    "{label_case}: clear-finished {clear:?} must not intersect kill {kill:?} for {id:?}"
+                );
+            }
+
+            let mut label = String::new();
+            for x in clear.x..clear.x + clear.width {
+                if let Some(cell) = buf.cell((x, clear.y)) {
+                    label.push_str(cell.symbol());
+                }
+            }
+            assert_eq!(
+                label, chrome,
+                "{label_case}: label must be clear-finished [−], got {label:?}"
+            );
+            assert!(!label.contains("Clear finished"));
+            assert!(!label.contains("Clear done"));
+            assert!(!label.contains('\u{2205}'));
+            assert_eq!(clear.width, 3);
+        }
+    }
+
+    /// Named contract: click on tasks model/timer open chrome opens that subagent.
+    #[test]
+    fn click_tasks_model_timer_chrome_opens_subagent() {
+        use super::super::test_fixtures::{make_agent, running_subagent_info};
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        use std::sync::Arc;
+
+        let mut agent = make_agent();
+        let mut appearance = agent.scrollback.appearance().clone();
+        appearance.prompt.compact = true;
+        agent.scrollback.set_appearance(appearance);
+
+        let child_sid = "child-click-open";
+        let mut info = running_subagent_info(child_sid);
+        info.model = Some(Arc::from("grok-4.5"));
+        info.is_background = true;
+        agent.subagent_sessions.insert(child_sid.into(), info);
+        agent
+            .subagent_views
+            .insert(child_sid.into(), Box::new(make_agent()));
+        agent.tasks.overlay.visible = true;
+
+        let _buf = draw_hits(&mut agent);
+        let (entry_id, open) = agent
+            .tasks
+            .view_button_rects
+            .iter()
+            .find(|(id, _)| matches!(id, crate::views::tasks_pane::TaskEntryId::Agent(_)))
+            .cloned()
+            .expect("agent open chrome must exist");
+        let click_col = open.x;
+        let click_row = open.y;
+        assert!(
+            open.width >= 3,
+            "open chrome must cover at least the view button, got {open:?}"
+        );
+
+        agent.set_active_pane(super::super::AgentPane::Scrollback, false);
+        assert!(agent.active_subagent.is_none());
+        let out = agent.handle_input(
+            &crossterm::event::Event::Mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: click_col,
+                row: click_row,
+                modifiers: crossterm::event::KeyModifiers::NONE,
+            }),
+            &ActionRegistry::defaults(),
+        );
+        assert!(
+            matches!(out, InputOutcome::Changed),
+            "open chrome click must open subagent, got {out:?} for {entry_id:?} at {open:?}"
+        );
+        assert_eq!(
+            agent.active_subagent.as_deref(),
+            Some(child_sid),
+            "must open the correct child via open_subagent_fullscreen"
+        );
+    }
+
+    fn setup_completed_listed_nested_agent(agent: &mut AgentView, child_sid: &str) {
+        use super::super::test_fixtures::{make_agent, running_subagent_info};
+        use std::sync::Arc;
+
+        let mut appearance = agent.scrollback.appearance().clone();
+        appearance.prompt.compact = true;
+        agent.scrollback.set_appearance(appearance);
+
+        let mut info = running_subagent_info(child_sid);
+        info.model = Some(Arc::from("grok-4.5"));
+        info.activity_label = Some("Responding".into());
+        info.is_background = true;
+        agent.subagent_sessions.insert(child_sid.into(), info);
+        let mut child = make_agent();
+        child.session.state = crate::app::agent::AgentState::Idle;
+        agent
+            .subagent_views
+            .insert(child_sid.into(), Box::new(child));
+        agent.tasks.overlay.visible = true;
+    }
+
+    fn click_at(agent: &mut AgentView, col: u16, row: u16) -> InputOutcome {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        agent.handle_input(
+            &crossterm::event::Event::Mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: col,
+                row,
+                modifiers: crossterm::event::KeyModifiers::NONE,
+            }),
+            &ActionRegistry::defaults(),
+        )
+    }
+
+    fn first_agent_kill_rect(agent: &AgentView) -> ratatui::layout::Rect {
+        agent
+            .tasks
+            .kill_button_rects
+            .iter()
+            .find(|(id, _)| matches!(id, crate::views::tasks_pane::TaskEntryId::Agent(_)))
+            .map(|(_, rect)| *rect)
+            .expect("listed nested agent must paint list [x]")
+    }
+
+    /// Named contract: list `[x]` on a nested-agent row the coordinator already
+    /// marked completed (child view idle, row still listed as running) must
+    /// emit a real cancel, not no-op.
+    #[test]
+    fn click_tasks_kill_on_completed_listed_nested_agent_emits_kill() {
+        let mut agent = super::super::test_fixtures::make_agent();
+        let child_sid = "child-stale-kill";
+        setup_completed_listed_nested_agent(&mut agent, child_sid);
+        let _buf = draw_hits(&mut agent);
+        let kill = first_agent_kill_rect(&agent);
+        let out = click_at(&mut agent, kill.x, kill.y);
+        match out {
+            InputOutcome::Action(Action::KillSubagent(id)) => {
+                assert_eq!(id, format!("sa-{child_sid}"));
+            }
+            other => panic!("list [x] must emit KillSubagent, got {other:?}"),
+        }
+    }
+
+    fn insert_listed_running_l2(
+        agent: &mut AgentView,
+        child_sid: &str,
+        description: &str,
+        started_ago_secs: u64,
+    ) {
+        use super::super::test_fixtures::{make_agent, running_subagent_info};
+        use std::sync::Arc;
+        use std::time::{Duration, Instant};
+
+        let mut info = running_subagent_info(child_sid);
+        info.model = Some(Arc::from("grok-4.5"));
+        info.is_background = true;
+        info.description = Arc::from(description);
+        info.depth = Some(1);
+        info.parent_session_id = Some(Arc::from("sess-l1"));
+        info.activity_label = Some("Thinking".into());
+        let now = Instant::now();
+        info.started_at = now
+            .checked_sub(Duration::from_secs(started_ago_secs))
+            .unwrap_or(now);
+        agent.subagent_sessions.insert(child_sid.into(), info);
+        agent
+            .subagent_views
+            .insert(child_sid.into(), Box::new(make_agent()));
+    }
+
+    fn mark_child_auto_compacting(agent: &mut AgentView, child_sid: &str) {
+        use crate::acp::tracker::TurnActivity;
+        let child = agent
+            .subagent_views
+            .get_mut(child_sid)
+            .expect("child view must exist before marking Compacting");
+        child.session.state = crate::app::agent::AgentState::TurnRunning;
+        child
+            .session
+            .set_compaction_activity(Some(TurnActivity::AutoCompacting));
+        if let Some(info) = agent.subagent_sessions.get_mut(child_sid) {
+            info.activity_label = Some("Compacting".into());
+        }
+        assert!(
+            agent.child_is_auto_compacting(child_sid),
+            "precondition: row status is Compacting"
+        );
+    }
+
+    fn listed_agent_id(child_sid: &str) -> String {
+        format!("sa-{child_sid}")
+    }
+
+    fn agent_open_rect(agent: &AgentView, child_sid: &str) -> ratatui::layout::Rect {
+        let listed = listed_agent_id(child_sid);
+        agent
+            .tasks
+            .view_button_rects
+            .iter()
+            .find(|(id, _)| {
+                matches!(
+                    id,
+                    crate::views::tasks_pane::TaskEntryId::Agent(sid) if sid == &listed
+                )
+            })
+            .map(|(_, rect)| *rect)
+            .unwrap_or_else(|| panic!("open chrome [↗] must exist for {child_sid}"))
+    }
+
+    fn agent_kill_rect(agent: &AgentView, child_sid: &str) -> ratatui::layout::Rect {
+        let listed = listed_agent_id(child_sid);
+        agent
+            .tasks
+            .kill_button_rects
+            .iter()
+            .find(|(id, _)| {
+                matches!(
+                    id,
+                    crate::views::tasks_pane::TaskEntryId::Agent(sid) if sid == &listed
+                )
+            })
+            .map(|(_, rect)| *rect)
+            .unwrap_or_else(|| panic!("kill chrome [X] must exist for {child_sid}"))
+    }
+
+    fn setup_three_listed_l2s(agent: &mut AgentView) -> (&'static str, &'static str, &'static str) {
+        let mut appearance = agent.scrollback.appearance().clone();
+        appearance.prompt.compact = true;
+        agent.scrollback.set_appearance(appearance);
+        agent.tasks.overlay.visible = true;
+        let compacting = "child-compacting-open";
+        let middle = "child-thinking-middle";
+        let last = "child-thinking-last";
+        insert_listed_running_l2(
+            agent,
+            compacting,
+            "turbo planning compacting coordinator",
+            30,
+        );
+        insert_listed_running_l2(agent, middle, "thinking middle coordinator", 20);
+        insert_listed_running_l2(agent, last, "thinking last coordinator", 10);
+        (compacting, middle, last)
+    }
+
+    /// Named contract: Operator `[↗]` still opens while the child is
+    /// AutoCompacting. Compact chrome must not skip `active_subagent`.
+    #[test]
+    fn open_subagent_fullscreen_sets_active_while_child_is_auto_compacting() {
+        let mut agent = super::super::test_fixtures::make_agent();
+        let child_sid = "child-compact-direct-open";
+        insert_listed_running_l2(&mut agent, child_sid, "direct open while compacting", 5);
+        mark_child_auto_compacting(&mut agent, child_sid);
+        assert!(agent.active_subagent.is_none());
+        agent.open_subagent_fullscreen(child_sid.to_string());
+        assert_eq!(
+            agent.active_subagent.as_deref(),
+            Some(child_sid),
+            "Operator open must set the overlay while the child is AutoCompacting"
+        );
+        assert_eq!(
+            agent.visible_nested_overlay_sid(),
+            Some(child_sid),
+            "visible overlay must follow Operator [↗], not stay hidden during Compacting"
+        );
+        assert!(agent.child_is_auto_compacting(child_sid));
+    }
+
+    /// Named contract: a row whose status is Compacting still opens on `[↗]`.
+    /// Compact must not swallow the open hit target on any row, including
+    /// the top painted row. Quote: L2 window opens for the other ones, but
+    /// this specific button doesn't work. Quote: Now it's the top one.
+    #[test]
+    fn click_tasks_open_on_compacting_row_opens_subagent() {
+        let mut agent = super::super::test_fixtures::make_agent();
+        let (compacting, _middle, last) = setup_three_listed_l2s(&mut agent);
+        mark_child_auto_compacting(&mut agent, compacting);
+
+        let _buf = draw_hits(&mut agent);
+        let open = agent_open_rect(&agent, compacting);
+        let last_open = agent_open_rect(&agent, last);
+        assert!(
+            open.y < last_open.y,
+            "this fixture paints Compacting above the last row so the miss cannot hide as last-row-only; compacting y={} last y={}",
+            open.y,
+            last_open.y
+        );
+        agent.set_active_pane(super::super::AgentPane::Scrollback, false);
+        assert!(agent.active_subagent.is_none());
+        let out = click_at(&mut agent, open.x, open.y);
+        assert!(
+            matches!(out, InputOutcome::Changed),
+            "Compacting [↗] must open the L2 window, got {out:?} at {open:?}"
+        );
+        assert_eq!(
+            agent.active_subagent.as_deref(),
+            Some(compacting),
+            "must open the Compacting child, not a neighbor"
+        );
+        assert_eq!(agent.visible_nested_overlay_sid(), Some(compacting));
+        assert!(
+            agent.child_is_auto_compacting(compacting),
+            "open must not clear Compacting status"
+        );
+    }
+
+    /// Named contract: last painted row `[↗]` still opens so footer overlap
+    /// cannot hide the hit target. Descriptions are unique so the live list
+    /// keeps three rows.
+    #[test]
+    fn click_tasks_open_on_last_painted_row_opens_subagent() {
+        let mut agent = super::super::test_fixtures::make_agent();
+        let (_compacting, _middle, last) = setup_three_listed_l2s(&mut agent);
+
+        let _buf = draw_hits(&mut agent);
+        let (entry_id, open) = agent
+            .tasks
+            .view_button_rects
+            .iter()
+            .filter(|(id, _)| matches!(id, crate::views::tasks_pane::TaskEntryId::Agent(_)))
+            .max_by_key(|(_, rect)| rect.y)
+            .cloned()
+            .expect("at least one listed [↗] must paint");
+        assert_eq!(
+            entry_id,
+            crate::views::tasks_pane::TaskEntryId::Agent(listed_agent_id(last)),
+            "last painted [↗] must be the latest-started unique row"
+        );
+        agent.set_active_pane(super::super::AgentPane::Scrollback, false);
+        let out = click_at(&mut agent, open.x, open.y);
+        assert!(
+            matches!(out, InputOutcome::Changed),
+            "last painted [↗] must open, got {out:?} at {open:?}"
+        );
+        assert_eq!(agent.active_subagent.as_deref(), Some(last));
+        assert_eq!(agent.visible_nested_overlay_sid(), Some(last));
+    }
+
+    /// Named contract: `[X]` on a Compacting row still kills.
+    #[test]
+    fn click_tasks_kill_on_compacting_row_emits_kill() {
+        let mut agent = super::super::test_fixtures::make_agent();
+        let (compacting, _middle, _last) = setup_three_listed_l2s(&mut agent);
+        mark_child_auto_compacting(&mut agent, compacting);
+        let _buf = draw_hits(&mut agent);
+        let kill = agent_kill_rect(&agent, compacting);
+        let out = click_at(&mut agent, kill.x, kill.y);
+        match out {
+            InputOutcome::Action(Action::KillSubagent(id)) => {
+                assert_eq!(id, listed_agent_id(compacting));
+            }
+            other => panic!("Compacting [X] must emit KillSubagent, got {other:?}"),
+        }
+    }
+
+    /// Named contract: overlay frame `[x]` on a completed nested snapshot that
+    /// is still listed must drop the live row or emit KillSubagent. Closing
+    /// the overlay alone is a chrome no-op. The tasks pane is hidden while
+    /// the overlay is open, so this is the close hit the operator can click.
+    #[test]
+    fn overlay_frame_close_on_completed_listed_nested_agent_drops_or_cancels() {
+        let mut agent = super::super::test_fixtures::make_agent();
+        let child_sid = "child-overlay-close";
+        setup_completed_listed_nested_agent(&mut agent, child_sid);
+        agent.active_subagent = Some(child_sid.into());
+        let _buf = draw_hits(&mut agent);
+        let close = agent
+            .hit_subagent_frame_close
+            .rect
+            .expect("open nested overlay must paint frame [x]");
+        let out = click_at(&mut agent, close.x, close.y);
+        let still_listed =
+            crate::app::subagent::live_subagent_list(agent.subagent_sessions.values())
+                .iter()
+                .any(|info| info.child_session_id.as_ref() == child_sid);
+        let cancelled = matches!(
+            &out,
+            InputOutcome::Action(Action::KillSubagent(id))
+                if id == &format!("sa-{child_sid}")
+        );
+        assert!(
+            cancelled || !still_listed,
+            "overlay [x] on a completed listed nested agent must cancel or drop the row, got {out:?}, still_listed={still_listed}"
+        );
+    }
+
+    /// Named contract: Clear finished click (open board, including unfocused)
+    /// archives finished todos and does not open a subagent.
+    #[test]
+    fn clear_finished_click_does_not_open_subagent() {
+        use super::super::test_fixtures::{make_agent, running_subagent_info};
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        use std::sync::Arc;
+
+        let mut agent = make_agent();
+        let mut appearance = agent.scrollback.appearance().clone();
+        appearance.prompt.compact = true;
+        agent.scrollback.set_appearance(appearance);
+
+        agent.todo.update_todos(vec![TodoItem {
+            content: "shipped".into(),
+            priority: TodoPriority::Medium,
+            status: TodoStatus::Completed,
+            meta: None,
+            size: None,
+        }]);
+        agent.todo.overlay.visible = true;
+        agent.todo.overlay.focused = false;
+        agent.set_active_pane(super::super::AgentPane::Scrollback, false);
+
+        let child_sid = "child-clear-no-open";
+        let mut info = running_subagent_info(child_sid);
+        info.model = Some(Arc::from("grok-4.5"));
+        info.is_background = true;
+        agent.subagent_sessions.insert(child_sid.into(), info);
+        agent
+            .subagent_views
+            .insert(child_sid.into(), Box::new(make_agent()));
+        agent.tasks.overlay.visible = true;
+
+        let _buf = draw_hits(&mut agent);
+        let clear = agent
+            .hit_todo_clear_done
+            .rect
+            .expect("unfocused open + finished Clear finished hit");
+        for (_, open) in &agent.tasks.view_button_rects {
+            assert!(
+                !rects_overlap(clear, *open),
+                "setup requires disjoint Clear vs open"
+            );
+        }
+
+        let out = agent.handle_input(
+            &crossterm::event::Event::Mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: clear.x,
+                row: clear.y,
+                modifiers: crossterm::event::KeyModifiers::NONE,
+            }),
+            &ActionRegistry::defaults(),
+        );
+        assert!(
+            matches!(out, InputOutcome::Action(Action::ClearCompletedTodos)),
+            "Clear finished click must clear, got {out:?}"
+        );
+        assert!(
+            agent.active_subagent.is_none(),
+            "Clear finished must not open a subagent"
+        );
     }
 }
 

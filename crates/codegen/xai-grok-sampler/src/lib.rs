@@ -24,6 +24,7 @@ pub mod exhausted_identity;
 pub mod handle;
 pub mod metrics;
 mod prewarm;
+pub mod prefer_live_primary;
 mod request_compression;
 pub mod retry;
 pub mod sampling_log;
@@ -50,6 +51,14 @@ pub use events::{
 };
 pub use handle::{CollectedSamplingResult, DoomLoopRecoveryAttempt, SamplerHandle};
 pub use metrics::{InferenceLatencyStats, compute_percentiles};
+pub use prefer_live_primary::{
+    both_included_session_and_console_key_refused,
+    ensure_supergrok_recovery_after_console_credit_exhaust,
+    prefer_console_identity_for_use_console_pin, prefer_live_identity_after_credit_exhaust,
+    prefer_supergrok_identity_for_stay_pin, primary_is_memoized_credit_exhausted,
+    prune_exhausted_failover_candidates, rotate_sampling_client_after_credit_exhaust,
+    withhold_model_request_when_both_refused,
+};
 pub use prewarm::{PrewarmOutcome, PrewarmReport, prewarm_transport};
 pub use retry::{
     DEFAULT_MAX_RETRIES, MAX_RETRY_BACKOFF, RATE_LIMIT_RETRY_DISABLED, RATE_LIMIT_RETRY_THRESHOLD,

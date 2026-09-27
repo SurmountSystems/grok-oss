@@ -398,6 +398,89 @@ pub fn read_limits_snapshot_file(grok_home: impl AsRef<Path>) -> Option<LimitsSn
     read_snapshot_at(&snap_path)
 }
 
+struct LiveAskSocket {
+    path: PathBuf,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    doc: std::sync::Arc<std::sync::Mutex<LimitsSnapshotDocument>>,
+}
+
+fn live_ask_socket() -> &'static std::sync::Mutex<Option<LiveAskSocket>> {
+    static SLOT: std::sync::OnceLock<std::sync::Mutex<Option<LiveAskSocket>>> =
+        std::sync::OnceLock::new();
+    SLOT.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+/// Publish the last details on `$GROK_HOME/limits_billing_ask.sock`.
+///
+/// Not `leader.sock`. The listener stays up after this call returns so another
+/// process can ask. Answering does not call the billing API.
+fn publish_limits_billing_ask_socket(home: &Path, doc: &LimitsSnapshotDocument) -> io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::net::{UnixListener, UnixStream};
+    use std::sync::atomic::Ordering;
+
+    let path = home.join("limits_billing_ask.sock");
+    let mut slot = live_ask_socket()
+        .lock()
+        .map_err(|err| io::Error::other(err.to_string()))?;
+    if let Some(live) = slot.as_ref() {
+        if live.path == path {
+            *live
+                .doc
+                .lock()
+                .map_err(|err| io::Error::other(err.to_string()))? = doc.clone();
+            return Ok(());
+        }
+        live.stop.store(true, Ordering::SeqCst);
+        let _ = UnixStream::connect(&live.path);
+    }
+    let listener = match UnixListener::bind(&path) {
+        Ok(listener) => listener,
+        Err(bind_err) => {
+            // A path that does not accept is a leftover file, not a live leader.
+            if UnixStream::connect(&path).is_ok() {
+                return Err(bind_err);
+            }
+            let _ = std::fs::remove_file(&path);
+            UnixListener::bind(&path)?
+        }
+    };
+    listener.set_nonblocking(true)?;
+    let doc_slot = std::sync::Arc::new(std::sync::Mutex::new(doc.clone()));
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let doc_thread = std::sync::Arc::clone(&doc_slot);
+    let stop_thread = std::sync::Arc::clone(&stop);
+    let thread_path = path.clone();
+    std::thread::spawn(move || {
+        loop {
+            if stop_thread.load(Ordering::SeqCst) {
+                break;
+            }
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    let _ = stream.set_nonblocking(false);
+                    if let Ok(current) = doc_thread.lock() {
+                        if let Ok(bytes) = serde_json::to_vec(&*current) {
+                            let _ = stream.write_all(&bytes);
+                        }
+                    }
+                }
+                Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                Err(_) => break,
+            }
+        }
+        let _ = std::fs::remove_file(&thread_path);
+    });
+    *slot = Some(LiveAskSocket {
+        path,
+        stop,
+        doc: doc_slot,
+    });
+    Ok(())
+}
+
 /// Coordinate: only the exclusive-flock holder may invoke `fetch`.
 ///
 /// `fetch` must not include JWTs or API keys in the returned document.
@@ -447,10 +530,21 @@ where
     let should_fetch = match mode {
         LimitsSnapshotMode::HonorTtl => !fresh,
         LimitsSnapshotMode::ForceRefresh => {
+            let inside_minute = existing.as_ref().is_some_and(|doc| {
+                doc.fetched_at_unix_ms > 0
+                    && now_unix_ms.saturating_sub(doc.fetched_at_unix_ms) < 60_000
+            });
+            // A disk snapshot at 100% is not a successful call. Explicit
+            // refresh must still fetch so that field is not applied.
+            let disk_usage_at_100 = existing.as_ref().is_some_and(|doc| {
+                doc.identities
+                    .iter()
+                    .any(|identity| identity.usage_pct == Some(100.0))
+            });
             if waited {
                 !fresh
             } else {
-                true
+                !inside_minute || disk_usage_at_100
             }
         }
     };
@@ -461,6 +555,7 @@ where
             doc.fetched_at_unix_ms = now_unix_ms;
         }
         write_snapshot_atomic(&snap_path, &doc)?;
+        publish_limits_billing_ask_socket(home, &doc)?;
         (LimitsSnapshotRole::LeaderFetched, doc)
     } else {
         let doc = existing.expect("fresh snapshot exists when not fetching");
@@ -679,6 +774,224 @@ mod tests {
         assert_eq!(fields.usage_pct, Some(24.0));
         assert_eq!(fields.prepaid_balance_cents, Some(250));
         assert!(supergrok_billing_poll_outcome("user-personal").is_ok());
+    }
+
+    /// Second session asks the first over a billing socket. It does not call the API.
+    #[tokio::test]
+    async fn second_session_asks_the_first_over_ipc_and_does_not_call_the_api() {
+        if std::env::var("GROK_LIMITS_ASK_CHILD").ok().as_deref() == Some("1") {
+            let home = std::path::PathBuf::from(std::env::var("GROK_HOME").expect("GROK_HOME"));
+            let sock = home.join("limits_billing_ask.sock");
+            assert_ne!(
+                sock.file_name().and_then(|name| name.to_str()),
+                Some("leader.sock"),
+                "ask socket is a new path under GROK_HOME, not leader.sock"
+            );
+            let mut stream = std::os::unix::net::UnixStream::connect(&sock).expect(
+                "second session asks the first over limits_billing_ask.sock; the hub has no ask socket",
+            );
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+                .ok();
+            let mut buf = String::new();
+            std::io::Read::read_to_string(&mut stream, &mut buf)
+                .expect("details from the ask socket");
+            assert!(
+                buf.contains("user-personal"),
+                "second process got details by asking, not by calling fetch_credits_config_with_session: {buf}",
+            );
+            let hits = std::fs::read_to_string(home.join("http_hits")).unwrap_or_default();
+            assert_eq!(hits.trim(), "1", "HTTP counter stays at 1");
+            return;
+        }
+
+        let tmp = tempfile::TempDir::new().expect("temp home");
+        let home = tmp.path();
+        let _env = SharedSnapshotEnvGuard::acquire(home);
+        clear_included_billing_cache();
+        let now = now_unix_ms();
+        let http = Arc::new(AtomicU32::new(0));
+        let hits_path = home.join("http_hits");
+        let http1 = Arc::clone(&http);
+        let hits_for_fetch = hits_path.clone();
+        let (role1, _) =
+            coordinate_limits_snapshot(home, LimitsSnapshotMode::HonorTtl, now, || {
+                let http1 = Arc::clone(&http1);
+                let hits_for_fetch = hits_for_fetch.clone();
+                async move {
+                    let n = http1.fetch_add(1, Ordering::SeqCst) + 1;
+                    std::fs::write(&hits_for_fetch, n.to_string()).expect("http counter");
+                    sample_doc(now, 24.0)
+                }
+            })
+            .await
+            .expect("first process");
+        assert_eq!(role1, LimitsSnapshotRole::LeaderFetched);
+        assert_eq!(http.load(Ordering::SeqCst), 1, "HTTP counter stays at 1");
+
+        let sock = home.join("limits_billing_ask.sock");
+        assert_ne!(
+            sock.file_name().and_then(|name| name.to_str()),
+            Some("leader.sock")
+        );
+        let child = std::process::Command::new(std::env::current_exe().expect("test bin"))
+            .env("GROK_HOME", home)
+            .env("GROK_LIMITS_ASK_CHILD", "1")
+            .env("GROK_SKIP_EDIT_VERIFY", "1")
+            .args([
+                "--exact",
+                "auth::limits_snapshot_hub::tests::second_session_asks_the_first_over_ipc_and_does_not_call_the_api",
+                "--test-threads",
+                "1",
+            ])
+            .output()
+            .expect("second process");
+        assert!(
+            child.status.success(),
+            "second process asks the first over the socket and does not call fetch_credits_config_with_session\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&child.stdout),
+            String::from_utf8_lossy(&child.stderr),
+        );
+        let hits = std::fs::read_to_string(&hits_path).unwrap_or_default();
+        assert_eq!(hits.trim(), "1", "HTTP counter stays at 1");
+    }
+
+    #[tokio::test]
+    async fn forced_refresh_inside_one_minute_does_not_call_the_api_again() {
+        let tmp = tempfile::TempDir::new().expect("temp home");
+        let home = tmp.path();
+        let _env = SharedSnapshotEnvGuard::acquire(home);
+        clear_included_billing_cache();
+        let now = now_unix_ms();
+        let http = Arc::new(AtomicU32::new(0));
+        let http1 = Arc::clone(&http);
+        let (_role1, doc1) =
+            coordinate_limits_snapshot(home, LimitsSnapshotMode::ForceRefresh, now, || {
+                let http1 = Arc::clone(&http1);
+                async move {
+                    http1.fetch_add(1, Ordering::SeqCst);
+                    sample_doc(now, 24.0)
+                }
+            })
+            .await
+            .expect("first force refresh");
+        assert_eq!(http.load(Ordering::SeqCst), 1);
+        assert_eq!(doc1.identities[0].usage_pct, Some(24.0));
+
+        let http2 = Arc::clone(&http);
+        let (_role2, doc2) = coordinate_limits_snapshot(
+            home,
+            LimitsSnapshotMode::ForceRefresh,
+            now.saturating_add(30_000),
+            || {
+                let http2 = Arc::clone(&http2);
+                async move {
+                    http2.fetch_add(1, Ordering::SeqCst);
+                    sample_doc(now.saturating_add(30_000), 99.0)
+                }
+            },
+        )
+        .await
+        .expect("force refresh inside one minute");
+        assert_eq!(
+            http.load(Ordering::SeqCst),
+            1,
+            "ForceRefresh less than a minute after a successful call must not call the API again"
+        );
+        assert_eq!(doc2.identities[0].usage_pct, Some(24.0));
+    }
+
+    #[tokio::test]
+    async fn when_the_first_session_exits_exactly_one_successor_calls_the_api() {
+        if std::env::var("GROK_LIMITS_SUCCESSOR_CHILD").ok().as_deref() == Some("1") {
+            let home = std::path::PathBuf::from(std::env::var("GROK_HOME").expect("GROK_HOME"));
+            let hits_path = home.join("http_hits");
+            let asked_path = home.join("asked.ok");
+            let now = now_unix_ms();
+            let hits_for_fetch = hits_path.clone();
+            let (role, doc) =
+                coordinate_limits_snapshot(&home, LimitsSnapshotMode::ForceRefresh, now, || {
+                    let hits_for_fetch = hits_for_fetch.clone();
+                    async move {
+                        let prev = std::fs::read_to_string(&hits_for_fetch).unwrap_or_default();
+                        let n = prev.trim().parse::<u32>().unwrap_or(0).saturating_add(1);
+                        std::fs::write(&hits_for_fetch, n.to_string()).expect("http counter");
+                        sample_doc(now, 24.0)
+                    }
+                })
+                .await
+                .expect("contender");
+            let after = std::fs::read_to_string(&hits_path).unwrap_or_default();
+            if role == LimitsSnapshotRole::LeaderFetched {
+                for _ in 0..100 {
+                    if asked_path.exists() {
+                        return;
+                    }
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                panic!("third process did not ask the successor socket");
+            }
+            assert_ne!(role, LimitsSnapshotRole::LeaderFetched);
+            assert_eq!(doc.identities[0].usage_pct, Some(24.0));
+            let mut stream =
+                std::os::unix::net::UnixStream::connect(home.join("limits_billing_ask.sock"))
+                    .expect("stale socket file is not a live leader; ask the successor");
+            stream.set_read_timeout(Some(Duration::from_secs(2))).ok();
+            let mut buf = String::new();
+            std::io::Read::read_to_string(&mut stream, &mut buf).expect("ask reply");
+            assert!(
+                buf.contains("user-personal"),
+                "third process got details by asking, not by a second API call: {buf}"
+            );
+            std::fs::write(&asked_path, b"ok").expect("asked");
+            assert_eq!(after.trim(), "2", "HTTP counter increases by at most one");
+            return;
+        }
+
+        let tmp = tempfile::TempDir::new().expect("temp home");
+        let home = tmp.path();
+        let _env = SharedSnapshotEnvGuard::acquire(home);
+        clear_included_billing_cache();
+        let now = now_unix_ms();
+        let stale_at = now.saturating_sub(3_600_000 + 5_000);
+        write_limits_snapshot_file(home, &sample_doc(stale_at, 24.0)).expect("stale snapshot");
+        std::fs::write(home.join("limits_billing_ask.sock"), b"stale").expect("stale socket file");
+        std::fs::write(home.join("http_hits"), b"1").expect("first already called");
+
+        fn spawn_contender(home_owned: &std::path::Path) -> std::process::Output {
+            std::process::Command::new(std::env::current_exe().expect("test bin"))
+                .env("GROK_HOME", home_owned)
+                .env("GROK_LIMITS_SUCCESSOR_CHILD", "1")
+                .env("GROK_SKIP_EDIT_VERIFY", "1")
+                .args([
+                    "--exact",
+                    "auth::limits_snapshot_hub::tests::when_the_first_session_exits_exactly_one_successor_calls_the_api",
+                    "--test-threads",
+                    "1",
+                ])
+                .output()
+                .expect("contender process")
+        }
+        let left_home = home.to_path_buf();
+        let right_home = left_home.clone();
+        let left = std::thread::spawn(move || spawn_contender(&left_home));
+        let right = std::thread::spawn(move || spawn_contender(&right_home));
+        let left = left.join().expect("left");
+        let right = right.join().expect("right");
+        assert!(
+            left.status.success(),
+            "left failed\n{}\n{}",
+            String::from_utf8_lossy(&left.stdout),
+            String::from_utf8_lossy(&left.stderr)
+        );
+        assert!(
+            right.status.success(),
+            "right failed\n{}\n{}",
+            String::from_utf8_lossy(&right.stdout),
+            String::from_utf8_lossy(&right.stderr)
+        );
+        let hits = std::fs::read_to_string(home.join("http_hits")).unwrap_or_default();
+        assert_eq!(hits.trim(), "2", "exactly one successor calls the API");
     }
 
     /// HonorTtl with a snapshot younger than one hour does not HTTP.
