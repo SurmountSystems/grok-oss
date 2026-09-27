@@ -44,6 +44,27 @@ pub(crate) fn laid_out_prompt_height(
     content_height.min(window).max(1)
 }
 
+/// Days, hours, and minutes until reset when both real refusals are on disk.
+/// A missing period end does not invent a clock.
+fn both_refused_status_chip_label(
+    balance: &crate::views::credit_bar::CreditBalance,
+) -> Option<String> {
+    if !xai_grok_shell::auth::limits_pins::included_period_and_console_api_credits_both_refused() {
+        return None;
+    }
+    let Some(end) = balance.period_end_at else {
+        return Some("the reset time is not available".to_owned());
+    };
+    let total_secs = end
+        .signed_duration_since(chrono::Utc::now())
+        .num_seconds()
+        .max(0) as u64;
+    let days = total_secs / 86_400;
+    let hours = (total_secs % 86_400) / 3_600;
+    let mins = (total_secs % 3_600) / 60;
+    Some(format!("resets in {days}d {hours}h {mins}m"))
+}
+
 impl AgentView {
     fn reserve_soft_plan_scrollback(&self, layout: &mut AgentViewLayout) {
         let Some(viewer) = self.line_viewer.as_ref() else {
@@ -1668,7 +1689,6 @@ impl AgentView {
             // Context figure only. The 15-minute and 24-hour windows stay on `/uptime`.
             status.push("context", ctx_line);
         }
-        // No SuperGrok period chip on this header. `/limits` still names that meter.
         let running = self.session.current_prompt_id.as_deref();
         let queue_len = self.session.queue_len()
             + self
@@ -1698,6 +1718,40 @@ impl AgentView {
             &theme,
         ) {
             status.push("badge", Line::from(badge_spans));
+        }
+        // Short status chip only. Do not use the verbose SuperGrok period helper.
+        if let Some(balance) = self.credit_balance.as_ref()
+            && let Some(label) = both_refused_status_chip_label(balance)
+        {
+            let mut chip_style = Style::default().fg(theme.accent_error).bg(theme.bg_base);
+            if self.hit_credits.hovered {
+                chip_style = chip_style.add_modifier(ratatui::style::Modifier::BOLD);
+            }
+            status.push("credits", Line::from(Span::styled(label, chip_style)));
+        } else if self.sampling_identity
+            == crate::views::credit_bar::SamplingIdentityKind::SuperGrokSession
+            && let Some(balance) = self.credit_balance.as_ref()
+            && balance.included_usage_known
+            && balance.usage_pct.is_finite()
+        {
+            let used = balance.usage_pct.round().clamp(0.0, 100.0) as u8;
+            let label = if self.hit_credits.hovered {
+                format!("{}% left", 100u8.saturating_sub(used))
+            } else {
+                format!("limits {used}%")
+            };
+            let color = if used >= 100 {
+                theme.accent_error
+            } else if used >= 80 {
+                theme.warning
+            } else {
+                theme.accent_success
+            };
+            let mut chip_style = Style::default().fg(color).bg(theme.bg_base);
+            if self.hit_credits.hovered {
+                chip_style = chip_style.add_modifier(ratatui::style::Modifier::BOLD);
+            }
+            status.push("credits", Line::from(Span::styled(label, chip_style)));
         }
         let areas = status.render(buf, layout.status_bar);
         self.hit_bg_status.rect = areas.get("bg_tasks").copied();
@@ -6717,18 +6771,14 @@ mod status_credits_meter_tests {
             ..CreditBalance::default()
         }
     }
-
-    /// Named contract: the header does not paint the compact SuperGrok period
-    /// chip, even when included usage is known. `/limits` still names that meter.
+    /// Named contract: the status row may paint the short limits chip when
+    /// included usage is known. It must not paint SuperGrok period, the long
+    /// included name, or free SuperGrok period.
     #[test]
     fn status_bar_pushes_credits_compact_included_supergrok_period_limits() {
         let mut agent = make_agent();
         agent.credit_balance = Some(included_balance(24.0));
         let text = draw(&mut agent);
-        assert!(
-            agent.hit_credits.rect.is_none(),
-            "header must not push a credits chip:\n{text}"
-        );
         assert!(
             !text.contains("SuperGrok period"),
             "header must not paint SuperGrok period:\n{text}"
@@ -6736,10 +6786,6 @@ mod status_credits_meter_tests {
         assert!(
             !text.contains("included SuperGrok period limits"),
             "user-facing TUI chrome must not paint included SuperGrok period limits:\n{text}"
-        );
-        assert!(
-            !text.contains("24%"),
-            "header must not paint the included SuperGrok period percent:\n{text}"
         );
         assert!(
             !text.contains("free SuperGrok period"),
@@ -6878,6 +6924,92 @@ mod status_credits_meter_tests {
             text.contains("send a message to interrupt"),
             "parked row must still carry send a message to interrupt:\n{text}"
         );
+    }
+
+    /// Included used percent is 28. The status row paints `limits 28%` and
+    /// arms a hit rectangle. Hover on that rectangle shows `72% left`.
+    /// The row and the hover do not paint the 15-minute window, the 24-hour
+    /// window, business, personal, SuperGrok period, or behind linear burn.
+    #[test]
+    fn status_row_paints_weekly_limits_used_and_hover_shows_percent_remaining() {
+        use crate::views::credit_bar::SamplingIdentityKind;
+
+        crate::appearance::cache::set_hide_header(false);
+        let mut agent = make_agent();
+        agent.sampling_identity = SamplingIdentityKind::SuperGrokSession;
+        agent.credit_balance = Some(CreditBalance {
+            usage_pct: 28.0,
+            effective_usage_pct: 28.0,
+            included_usage_known: true,
+            period_type: Some("USAGE_PERIOD_TYPE_WEEKLY".into()),
+            ..CreditBalance::default()
+        });
+
+        let text = draw(&mut agent);
+        let row = text
+            .lines()
+            .find(|line| line.contains("/tmp"))
+            .unwrap_or("")
+            .to_string();
+        assert!(
+            row.contains("limits 28%"),
+            "status row must paint `limits 28%` when included used percent is 28:\n{row}\nfull:\n{text}"
+        );
+        let hit = agent
+            .hit_credits
+            .rect
+            .expect("status row must arm a hit rectangle for the limits chip");
+        let forbid = |painted: &str, which: &str| {
+            let forbidden = [
+                "behind linear burn",
+                "15m",
+                "24h",
+                "business",
+                "personal",
+                "SuperGrok period",
+            ];
+            let found: Vec<&str> = forbidden
+                .into_iter()
+                .filter(|token| painted.contains(token))
+                .collect();
+            assert!(
+                found.is_empty(),
+                "{which} must not paint {found:?}:\n{painted}"
+            );
+        };
+        forbid(&row, "status row");
+
+        let _ = agent.handle_mouse(&MouseEvent {
+            kind: MouseEventKind::Moved,
+            column: hit.x,
+            row: hit.y,
+            modifiers: KeyModifiers::empty(),
+        });
+        assert!(
+            agent.hit_credits.hovered,
+            "moving onto the limits chip must hover that hit rectangle"
+        );
+        let hovered = draw(&mut agent);
+        let hover_row = hovered
+            .lines()
+            .find(|line| line.contains("/tmp"))
+            .unwrap_or("")
+            .to_string();
+        let hover = if hover_row.contains("72% left") {
+            hover_row.clone()
+        } else {
+            hovered
+                .lines()
+                .find(|line| line.contains("72% left"))
+                .unwrap_or(hover_row.as_str())
+                .to_string()
+        };
+        assert!(
+            hover.contains("72% left"),
+            "hover must show `72% left` when included used percent is 28:\n{hover}\nrow:\n{hover_row}"
+        );
+        forbid(&row, "status row");
+        forbid(&hover, "hover");
     }
 }
 
@@ -7101,7 +7233,6 @@ mod header_omits_uptime_and_supergrok_period_chip {
             "SuperGrok period",
             "behind linear burn",
             "business",
-            "28%",
         ];
         let found: Vec<&str> = forbidden
             .into_iter()

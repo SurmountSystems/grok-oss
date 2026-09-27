@@ -52,3 +52,4 @@ Automate, script, and integrate Grok OSS with other systems.
 | 22 | [Permissions and Safety](22-permissions-and-safety.md) | Modes (always-approve, auto, ask, context-only), rules, matching, hooks, and examples |
 | 23 | [Agent Dashboard](23-dashboard.md) | Central overview of local sessions and forks |
 | 24 | [Monitoring Usage (External OpenTelemetry)](24-monitoring-usage.md) | Customer OTEL export. Spend meters and included SuperGrok period limits live on `/limits`, not here. |
+| 25 | [Limits](25-limits.md) | Weekly limits chip (`limits 28%`, hover `72% left`), Credits and Limits, and one session calling the billing APIs. |

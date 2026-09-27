@@ -1236,10 +1236,29 @@ User-guide [`06-theming`](crates/codegen/xai-grok-pager/docs/user-guide/06-themi
 - [x] **Titled composer frame is `prompt_border_active` (white); title only
   is yellow**:
   `titled_doge_composer_frame_is_prompt_border_not_context_yellow`.
-- [x] **Compact included SuperGrok period limits meter**: status chip
-  `SuperGrok period · N%`; click opens `/limits`. Tests:
-  `status_bar_pushes_credits_compact_included_supergrok_period_limits`,
-  `hit_credits_click_dispatches_show_limits` (`app/agent_view/render.rs`).
+- [x] **Weekly limits chip**: at 28% of this week's included SuperGrok
+  period limits used, the status chip is `limits 28%` and hover is
+  `72% left`. Click opens Credits and Limits. The Limits tab shows ahead
+  of a linear week, or behind. Credits fields are `Personal credits` and
+  `Console API credits`. Console API credits are the business credits.
+  `Use credits` changes the next request to console API credits while
+  included limits remain, and does not spend personal credits. A real
+  SuperGrok HTTP 402 fails over when console API credits are available.
+  A 100% printout does not. When both are out, the chip shows
+  `2d 4h 12m`. One grok-oss session calls the billing APIs at most once
+  a minute. Other sessions ask it. If it exits, exactly one successor
+  calls. A failed fetch says not available. The header does not paint
+  `SuperGrok period`. SuperGrok is paid. Tests:
+  `status_row_paints_weekly_limits_used_and_hover_shows_percent_remaining`,
+  `clicking_the_chip_opens_the_card_and_the_limits_tab_shows_ahead_or_behind_a_linear_week`,
+  `credits_tab_shows_personal_credits_separate_from_console_api_credits_and_a_failed_fetch_is_not_a_balance`,
+  `use_credits_spends_console_api_credits_while_limits_remain_and_does_not_spend_personal`,
+  `real_402_uses_console_api_credits_when_available_and_a_100_percent_printout_does_not`,
+  `both_limits_and_console_api_credits_exhausted_shows_days_hours_minutes_until_reset`,
+  `second_session_asks_the_first_over_ipc_and_does_not_call_the_api`,
+  `forced_refresh_inside_one_minute_does_not_call_the_api_again`,
+  `when_the_first_session_exits_exactly_one_successor_calls_the_api`,
+  `hit_credits_click_dispatches_show_limits`.
 - [x] **Forked-session upper-left header switcher plus dashboard**: a
   fork family paints `[‹][›]` and `[Dashboard]` on the status row, not
   git plus cwd only. The yellow `use /dashboard` transcript line is not
@@ -2297,6 +2316,7 @@ keeps Surmount pages. Do not paste those pages here.
 | [`22-permissions-and-safety`](crates/codegen/xai-grok-pager/docs/user-guide/22-permissions-and-safety.md) | Always-approve is tool permissions only, not plan Approve. | `exit_plan_mode_shows_overlay_even_in_yolo` |
 | [`23-dashboard`](crates/codegen/xai-grok-pager/docs/user-guide/23-dashboard.md) | Agent Dashboard is this pager. Running grok-oss sessions must not merge into `/dashboard`. L0 is Surmount GPUI, not this pager, and must not merge with either. Call L0 `grok-oss gui`. L0 action set remote host console API key is laptop-side, not this pager. Session todos stay in this TUI. | Cite `omits_prompt_text`, `set_remote_host_console_api_key_is_not_pager_dashboard`, `user_guide_machine_console_api_key_for_surmount_1`. |
 | [`24-monitoring-usage`](crates/codegen/xai-grok-pager/docs/user-guide/24-monitoring-usage.md) | `/spend` ledger vs org metrics. Do not mash meters. | `user_guide_names_token_economy_spend_order` |
+| [`25-limits`](crates/codegen/xai-grok-pager/docs/user-guide/25-limits.md) | Weekly limits chip `limits 28%`, hover `72% left`, Credits and Limits, one session calls the billing APIs at most once a minute. A failed fetch says not available. SuperGrok is paid. | `status_row_paints_weekly_limits_used_and_hover_shows_percent_remaining`, `second_session_asks_the_first_over_ipc_and_does_not_call_the_api`, `forced_refresh_inside_one_minute_does_not_call_the_api_again`, `when_the_first_session_exits_exactly_one_successor_calls_the_api`. |
 
 Also: `user_guide_operator_cli_examples_use_grok_oss` (leftover `grok login` /
 `grok sessions` must not return).
@@ -2521,9 +2541,22 @@ cargo `fn`):
    `DoubleEntryReport::default()`).
 4. **DOGE / Surmount chrome.** A theme file existing is not paint. Land must
    keep paint/render tests for human green rails plus box caret, magenta
-   model / running agent, the compact **included SuperGrok period limits**
-   meter, the titled composer frame (`prompt_border_active` white, yellow
-   title only), and the four-CTA idle plan panel (Clarify only after Comment).
+   model / running agent, the weekly limits chip (`limits 28%`, hover
+   `72% left`, click opens Credits and Limits), the titled composer frame
+   (`prompt_border_active` white, yellow title only), and the four-CTA idle
+   plan panel (Clarify only after Comment). One grok-oss session calls the
+   billing APIs at most once a minute. Other sessions ask that session. If
+   it exits, exactly one successor calls. A failed fetch says not available.
+   SuperGrok is paid. Tests:
+   `status_row_paints_weekly_limits_used_and_hover_shows_percent_remaining`,
+   `clicking_the_chip_opens_the_card_and_the_limits_tab_shows_ahead_or_behind_a_linear_week`,
+   `credits_tab_shows_personal_credits_separate_from_console_api_credits_and_a_failed_fetch_is_not_a_balance`,
+   `use_credits_spends_console_api_credits_while_limits_remain_and_does_not_spend_personal`,
+   `real_402_uses_console_api_credits_when_available_and_a_100_percent_printout_does_not`,
+   `both_limits_and_console_api_credits_exhausted_shows_days_hours_minutes_until_reset`,
+   `second_session_asks_the_first_over_ipc_and_does_not_call_the_api`,
+   `forced_refresh_inside_one_minute_does_not_call_the_api_again`,
+   `when_the_first_session_exits_exactly_one_successor_calls_the_api`.
 5. **Dual-auth hop after included SuperGrok period limits are full.** Rank
    helpers are not hop. `sampling_config` must fill console failover after
    those included limits are full, and must omit it while they still have
@@ -2987,6 +3020,12 @@ cargo test -p xai-grok-pager --lib -- user_prompt_block_accent user_prompt_entry
   doge_human_box_caret_plate_is_rgb_0_255_0 paint_composer_box_cursor_named_ansi_green_becomes_doge_rgb \
   agent_message_block_accent info_line_model_name_uses_accent_model \
   status_bar_pushes_credits_compact_included_supergrok_period_limits \
+  status_row_paints_weekly_limits_used_and_hover_shows_percent_remaining \
+  clicking_the_chip_opens_the_card_and_the_limits_tab_shows_ahead_or_behind_a_linear_week \
+  credits_tab_shows_personal_credits_separate_from_console_api_credits_and_a_failed_fetch_is_not_a_balance \
+  use_credits_spends_console_api_credits_while_limits_remain_and_does_not_spend_personal \
+  real_402_uses_console_api_credits_when_available_and_a_100_percent_printout_does_not \
+  both_limits_and_console_api_credits_exhausted_shows_days_hours_minutes_until_reset \
   hit_credits_click_dispatches_show_limits \
   titled_doge_composer_frame_is_prompt_border_not_context_yellow \
   plan_approval_footer_paints_five_cta_vocabulary \
@@ -3018,7 +3057,10 @@ cargo test -p xai-grok-shell --lib -- sampling_config_auto_use \
   billing_handler_uses_snapshot_hub_instead_of_unconditional_sibling_http \
   personal_included_period_limits_reset_uses_personal_supergrok_not_leftover_business_credits \
   business_with_no_period_limits_payload_still_switchable_via_use_business \
-  use_personal_switches_back_from_business_pin
+  use_personal_switches_back_from_business_pin \
+  second_session_asks_the_first_over_ipc_and_does_not_call_the_api \
+  forced_refresh_inside_one_minute_does_not_call_the_api_again \
+  when_the_first_session_exits_exactly_one_successor_calls_the_api
 cargo test -p xai-grok-pager --lib -- compact_meter_stays_included_while_sibling_pool_has_remaining \
   active_spend_driver_stays_included_while_any_distinct_pool_has_remaining \
   matching_percent_and_reset_does_not_collapse_combined_remaining_into_one_pool

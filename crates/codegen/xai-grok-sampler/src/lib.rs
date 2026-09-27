@@ -59,10 +59,12 @@ pub use exhausted_identity::{
 pub use handle::SamplerHandle;
 pub use metrics::{InferenceLatencyStats, compute_percentiles};
 pub use prefer_live_primary::{
+    both_included_session_and_console_key_refused,
     ensure_supergrok_recovery_after_console_credit_exhaust,
     prefer_console_identity_for_use_console_pin, prefer_live_identity_after_credit_exhaust,
     prefer_supergrok_identity_for_stay_pin, primary_is_memoized_credit_exhausted,
     prune_exhausted_failover_candidates, rotate_sampling_client_after_credit_exhaust,
+    withhold_model_request_when_both_refused,
 };
 pub use retry::{
     DEFAULT_MAX_RETRIES, DEFAULT_TRANSPORT_MAX_RETRIES, MAX_BACKOFF_SECS,

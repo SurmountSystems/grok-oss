@@ -447,6 +447,53 @@ pub fn ensure_supergrok_recovery_after_console_credit_exhaust(config: &mut Sampl
     config.failover_api_keys.insert(0, sess);
 }
 
+/// True when the included-period session and every other key on this config
+/// each have a real refusal memo. A client 100% printout does not write that
+/// memo. No other key means this is not both refused.
+pub fn both_included_session_and_console_key_refused(config: &SamplerConfig) -> bool {
+    let Some(session) = config
+        .session_identity_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|secret| !secret.is_empty())
+    else {
+        return false;
+    };
+    if !exhausted_identity::is_credential_exhausted(session) {
+        return false;
+    }
+    let mut others: Vec<&str> = Vec::new();
+    if let Some(active) = config.api_key.as_deref().map(str::trim) {
+        if !active.is_empty() && active != session && !others.contains(&active) {
+            others.push(active);
+        }
+    }
+    for key in &config.failover_api_keys {
+        let token = key.trim();
+        if !token.is_empty() && token != session && !others.contains(&token) {
+            others.push(token);
+        }
+    }
+    !others.is_empty()
+        && others
+            .iter()
+            .all(|token| exhausted_identity::is_credential_exhausted(token))
+}
+
+/// Clear the live key so no further model request is sent. Keeps the session
+/// identity and the refused failover keys. Does not select SuperGrok dollar
+/// credits and does not switch the API host.
+pub fn withhold_model_request_when_both_refused(config: &mut SamplerConfig) -> bool {
+    if !both_included_session_and_console_key_refused(config) {
+        return false;
+    }
+    config.api_key = None;
+    config.bearer_resolver = None;
+    config.session_bearer_resolver = None;
+    config.stashed_bearer_resolver = None;
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

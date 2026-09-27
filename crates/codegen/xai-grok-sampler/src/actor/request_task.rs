@@ -184,6 +184,16 @@ pub(crate) async fn run_request_task(
         resolve_max_retries(configured_max_retries)
     };
 
+    // Included period and console API credits are both refused. Do not open HTTP.
+    if crate::both_included_session_and_console_key_refused(&config) {
+        let err = SamplingError::auth_unknown(
+            "no further request until the included SuperGrok period resets",
+        );
+        emit_failed(&event_tx, &request_id, &err);
+        send_completion(&mut completion_tx, Err(err));
+        return request_id;
+    }
+
     // Build the initial client. Configuration errors here are fatal
     // (no point retrying with the same broken config).
     let mut client = match SamplingClient::new(config.clone()) {

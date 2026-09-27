@@ -164,7 +164,7 @@ check after these `fn`s exist.
 | `paint_composer_box_cursor_uses_human_green_not_agent_magenta` + `focused_composer_paints_human_green_box_caret_*` + `doge_human_box_caret_plate_is_rgb_0_255_0` | Box caret is Human green, never agent magenta; DOGE plate is `Rgb(0,255,0)` not named ANSI Green |
 | `agent_message_block_accent_is_magenta_rail_under_doge_while_running` | Running agent rail is magenta |
 | `info_line_model_name_uses_accent_model_not_gray` | Model label uses `accent_model` (magenta under DOGE) |
-| `status_bar_pushes_credits_compact_included_supergrok_period_limits` | Status bar pushes `"credits"` and paints `SuperGrok period · N%` |
+| `status_row_paints_weekly_limits_used_and_hover_shows_percent_remaining` | Status row paints `limits 28%`. Hover shows `72% left`. The row does not push `SuperGrok period` |
 | `hit_credits_click_dispatches_show_limits` | Click on the compact meter dispatches `ShowLimits` |
 | `titled_doge_composer_frame_is_prompt_border_not_context_yellow` | Titled composer frame is `prompt_border_active` (white); title only is yellow |
 | `plan_approval_footer_paints_five_cta_vocabulary` | Idle plan panel footer paints Approve / Comment / Revise / Exit. Clarify is only after Comment, not an idle top-level CTA |
@@ -188,6 +188,7 @@ cargo test -p xai-grok-pager --lib -- user_prompt_block_accent user_prompt_entry
   doge_human_box_caret_plate_is_rgb_0_255_0 paint_composer_box_cursor_named_ansi_green_becomes_doge_rgb \
   agent_message_block_accent info_line_model_name_uses_accent_model \
   status_bar_pushes_credits_compact_included_supergrok_period_limits \
+  status_row_paints_weekly_limits_used_and_hover_shows_percent_remaining \
   hit_credits_click_dispatches_show_limits \
   titled_doge_composer_frame_is_prompt_border_not_context_yellow \
   plan_approval_footer_paints_five_cta_vocabulary \
@@ -2167,7 +2168,7 @@ Do not call SuperGrok free.
 
 | Filter identifier | Contract | Land |
 |-------------------|----------|------|
-| `status_bar_pushes_credits_compact_included_supergrok_period_limits` | Draw pushes `status` key `"credits"` with `SuperGrok period · N%` | **Keep** (`credit_bar` helpers alone do not count) |
+| `status_row_paints_weekly_limits_used_and_hover_shows_percent_remaining` | Status row paints `limits 28%`. Hover shows `72% left`. It does not push `SuperGrok period` | **Keep** |
 | `hit_credits_click_dispatches_show_limits` | Click on the compact meter dispatches `Action::ShowLimits` | **Keep** |
 | `titled_doge_composer_frame_is_prompt_border_not_context_yellow` | Titled composer frame is white (`prompt_border_active`); title only is yellow | **Keep** |
 | `plan_approval_footer_paints_five_cta_vocabulary` | Idle plan panel footer paints Approve / Comment / Revise / Exit. Clarify is only after Comment, not an idle top-level CTA | **Keep** (old `soft_park_draw_paints_panel_*` names are gone; do not revive them) |
@@ -2208,6 +2209,7 @@ Do not call SuperGrok free.
 ```bash
 # Prove the names still exist (missing fn = land failed), then run:
 cargo test -p xai-grok-pager --lib -- status_bar_pushes_credits_compact_included_supergrok_period_limits \
+  status_row_paints_weekly_limits_used_and_hover_shows_percent_remaining \
   hit_credits_click_dispatches_show_limits \
   titled_doge_composer_frame_is_prompt_border_not_context_yellow \
   plan_approval_footer_paints_five_cta_vocabulary \
@@ -2357,6 +2359,7 @@ cargo test -p xai-grok-pager --lib -- user_prompt_block_accent user_prompt_entry
   doge_human_box_caret_plate_is_rgb_0_255_0 paint_composer_box_cursor_named_ansi_green_becomes_doge_rgb \
   agent_message_block_accent info_line_model_name_uses_accent_model \
   status_bar_pushes_credits_compact_included_supergrok_period_limits \
+  status_row_paints_weekly_limits_used_and_hover_shows_percent_remaining \
   hit_credits_click_dispatches_show_limits \
   titled_doge_composer_frame_is_prompt_border_not_context_yellow \
   plan_approval_footer_paints_five_cta_vocabulary \

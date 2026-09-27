@@ -193,17 +193,110 @@ pub fn apply_use_console() -> Result<(), std::io::Error> {
     save_limits_pins(&pins)
 }
 
+fn console_team_prepaid_available() -> bool {
+    let Some(doc) = super::limits_snapshot_hub::read_limits_snapshot_file(grok_home_path()) else {
+        return false;
+    };
+    matches!(
+        doc.management.as_ref().and_then(|mgmt| mgmt.prepaid_cents),
+        Some(cents) if cents > 0
+    )
+}
+
+/// True when this config's SuperGrok session has a real HTTP 402 memo.
+/// A client 100% printout does not write that memo.
+fn supergrok_session_marked_by_real_http_402(config: &xai_grok_sampler::SamplerConfig) -> bool {
+    let session = config
+        .session_identity_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|secret| !secret.is_empty());
+    if let Some(session_key) = session {
+        if xai_grok_sampler::is_credential_exhausted(session_key) {
+            return true;
+        }
+    }
+    let active = config.api_key.as_deref().unwrap_or("").trim();
+    if active.is_empty() {
+        return false;
+    }
+    let active_is_session = session.map(|token| token == active).unwrap_or(true);
+    active_is_session && xai_grok_sampler::is_credential_exhausted(active)
+}
+
+/// Use limits is on, a real SuperGrok HTTP 402 is memoized, and console API
+/// credits are available: the next request uses the console key. Does not set
+/// `use_console`. Does not select SuperGrok dollar credits. A missing console
+/// balance returns false so the caller stays on included period limits.
+fn use_console_api_credits_after_real_supergrok_http_402(
+    config: &mut xai_grok_sampler::SamplerConfig,
+) -> bool {
+    if !console_team_prepaid_available() {
+        return false;
+    }
+    if !supergrok_session_marked_by_real_http_402(config) {
+        return false;
+    }
+    inject_stored_console_keys_into_failover(config);
+    xai_grok_sampler::prefer_console_identity_for_use_console_pin(config);
+    let active = config.api_key.as_deref().unwrap_or("").trim();
+    let session = config
+        .session_identity_key
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or("");
+    !session.is_empty()
+        && !active.is_empty()
+        && active != session
+        && config.bearer_resolver.is_none()
+}
+
 /// Honor sidecar `stay_supergrok` / `use_console` / SuperGrok identity pin on
 /// a reconstructed sampler config. Does not write `[auth] preferred_method`.
 /// Stock `preferred_method = "api_key"` still pins console and wins over stay
 /// and `use-personal` / `use-business`. `use-console` switches live identity
 /// without that stock key. A stored console key is enough even when it is not
 /// already in live failover.
+/// A Console meter pin selects console API credits when snapshot team prepaid
+/// remaining is available, and does not set `use_console`. An Included meter
+/// pin, or no meter pin, selects the included period session. While that
+/// choice is on, a real SuperGrok HTTP 402 and available console API credits
+/// select the console key for the next request. A client 100% printout does
+/// not. A missing console balance keeps the included session and does not
+/// spend SuperGrok dollar credits. This path does not set `use_console`.
+/// When that session and every other key on the config are both refused, the
+/// next request is withheld. Personal cents stay put. A 100% printout does not
+/// withhold.
 pub fn apply_limits_pins_to_sampler_config(config: &mut xai_grok_sampler::SamplerConfig) {
+    if xai_grok_sampler::withhold_model_request_when_both_refused(config) {
+        return;
+    }
     if disk_preferred_is_console_primary() {
         return;
     }
     let pins = load_limits_pins();
+    match pins.meter_source {
+        Some(MeterSource::Console) => {
+            if console_team_prepaid_available() {
+                inject_stored_console_keys_into_failover(config);
+                xai_grok_sampler::prefer_console_identity_for_use_console_pin(config);
+            }
+            return;
+        }
+        Some(MeterSource::Included) => {
+            if use_console_api_credits_after_real_supergrok_http_402(config) {
+                return;
+            }
+            xai_grok_sampler::prefer_supergrok_identity_for_stay_pin(config);
+            return;
+        }
+        Some(MeterSource::DollarCredits) => {}
+        Some(MeterSource::Combined) | None => {
+            if use_console_api_credits_after_real_supergrok_http_402(config) {
+                return;
+            }
+        }
+    }
     if pins.use_console && pins.supergrok_identity.is_none() && !pins.stay_supergrok {
         inject_stored_console_keys_into_failover(config);
         xai_grok_sampler::prefer_console_identity_for_use_console_pin(config);
@@ -248,6 +341,44 @@ fn apply_supergrok_identity_pin_to_sampler_config(
     config.api_key = Some(token.clone());
     config.session_identity_key = Some(token);
     xai_grok_sampler::prefer_supergrok_identity_for_stay_pin(config);
+}
+
+/// True when the stored included-period session and the stored console API
+/// key each have a real refusal memo. A client 100% printout does not write
+/// that memo, so this stays false.
+pub fn included_period_and_console_api_credits_both_refused() -> bool {
+    let home = grok_home_path();
+    let Some(session) = stored_included_period_session_key(&home) else {
+        return false;
+    };
+    let Some(console) = super::read_api_key(&home) else {
+        return false;
+    };
+    let session = session.trim();
+    let console = console.trim();
+    if session.is_empty() || console.is_empty() || session == console {
+        return false;
+    }
+    xai_grok_sampler::is_credential_exhausted(session)
+        && xai_grok_sampler::is_credential_exhausted(console)
+}
+
+fn stored_included_period_session_key(home: &Path) -> Option<String> {
+    let map = super::read_auth_json(&home.join("auth.json")).ok()?;
+    map.iter().find_map(|(scope, auth)| {
+        if scope.as_str() == super::model::API_KEY_SCOPE {
+            return None;
+        }
+        if !super::model::is_supergrok_session_mode(auth.auth_mode) {
+            return None;
+        }
+        let key = auth.key.trim();
+        if key.is_empty() {
+            None
+        } else {
+            Some(key.to_owned())
+        }
+    })
 }
 
 /// True when `auth.json` holds a SuperGrok Team / Business login.
