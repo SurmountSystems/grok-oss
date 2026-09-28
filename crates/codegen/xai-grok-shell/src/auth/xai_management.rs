@@ -794,6 +794,19 @@ pub fn cached_console_team_prepaid_cents_default() -> Option<i64> {
     cached_console_team_prepaid(&team).map(|m| m.balance_cents)
 }
 
+/// Last fresh prepaid cents in this process, with no management team id.
+///
+/// A console inference key read stores the team balance here. Management team
+/// id may still be unset. Returns `None` when the cache is cold or stale.
+pub fn cached_console_team_prepaid_cents_any() -> Option<i64> {
+    let g = PREPAID_CACHE.lock().ok()?;
+    let entry = g.as_ref()?;
+    if entry.fetched_at.elapsed() > PREPAID_CACHE_TTL {
+        return None;
+    }
+    Some(entry.balance_cents)
+}
+
 fn remember_prepaid(meter: &ConsoleTeamPrepaidMeter) {
     if let Ok(mut g) = PREPAID_CACHE.lock() {
         *g = Some(PrepaidCacheEntry {

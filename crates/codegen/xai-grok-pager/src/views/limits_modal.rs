@@ -262,23 +262,45 @@ fn credits_tab_lines(state: &LimitsModalState) -> Vec<String> {
         }
         None => "  SuperGrok dollar credits: no data yet".to_string(),
     };
-    let console = match state.snapshot.console.balance_cents {
-        Some(cents) => format!("  Team prepaid remaining: {}", fmt_card_cents(cents)),
-        None => {
-            let inference_key =
-                state.snapshot.console.key_available || state.snapshot.console.is_live;
-            let gap = if inference_key
-                && state.snapshot.console.prepaid_gap
-                    == crate::views::credit_bar::ConsoleTeamPrepaidGap::MissingManagementKey
-            {
-                "not available"
-            } else {
-                state.snapshot.console.prepaid_gap.as_display_str()
-            };
-            format!("  Team prepaid remaining: {gap}")
-        }
-    };
+    let console = console_credits_line(state);
     vec![personal, console]
+}
+
+/// Team prepaid line for the Credits tab.
+///
+/// `from_billing` leaves the gap as missing management key and does not copy
+/// cents. When a console inference key already fetched the team balance, that
+/// cache is the amount. An explicit key-available gap with no cents stays
+/// `not available`.
+fn console_credits_line(state: &LimitsModalState) -> String {
+    if let Some(cents) = state
+        .snapshot
+        .console
+        .balance_cents
+        .or_else(|| inference_key_balance_for_unmarked_card(state))
+    {
+        return format!("  Team prepaid remaining: {}", fmt_card_cents(cents));
+    }
+    let inference_key = state.snapshot.console.key_available || state.snapshot.console.is_live;
+    let gap = state
+        .snapshot
+        .console
+        .prepaid_gap
+        .credits_tab_unknown_phrase(inference_key);
+    format!("  Team prepaid remaining: {gap}")
+}
+
+/// Cached inference-key team balance for a card that has not marked the key.
+fn inference_key_balance_for_unmarked_card(state: &LimitsModalState) -> Option<i64> {
+    let console = &state.snapshot.console;
+    if console.balance_cents.is_some() || console.key_available || console.is_live {
+        return None;
+    }
+    if console.prepaid_gap != crate::views::credit_bar::ConsoleTeamPrepaidGap::MissingManagementKey
+    {
+        return None;
+    }
+    crate::views::credit_bar::team_prepaid_cents_from_inference_key_cache()
 }
 
 /// Credits tab field names. Console API credits are team prepaid remaining.
@@ -313,7 +335,9 @@ fn using_console_api_credits(state: &LimitsModalState) -> bool {
 }
 
 fn spend_status_and_button(state: &LimitsModalState) -> (&'static str, &'static str) {
-    if using_console_api_credits(state) {
+    let team_balance =
+        inference_key_balance_for_unmarked_card(state).is_some_and(|cents| cents > 0);
+    if using_console_api_credits(state) || team_balance {
         ("Using credits", "Use limits")
     } else {
         ("Using limits", "Use credits")
@@ -2721,6 +2745,159 @@ mod tests {
         stop.store(true, Ordering::SeqCst);
         let _ = server.join();
     }
+    /// Named contract: no management key in the environment or the secret store.
+    /// A console inference key is present. A fixture billing response has 76674
+    /// cents. The Credits tab contains `Console API credits` and `$766.74`. It
+    /// does not contain `no management key`. The footer does not contain
+    /// `Using limits`, because this fixture is the team credit balance the
+    /// requests are spending, not included SuperGrok period limits.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn credits_tab_shows_team_billing_balance_without_a_management_key() {
+        use std::io::{Read, Write};
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use xai_grok_shell::auth::credentials_store::{CredentialsStore, FORCE_FILE_ENV};
+        use xai_grok_shell::auth::{
+            clear_management_api_key, fetch_management_into_snapshot,
+            load_stored_management_api_key, management_api_key_from_env,
+        };
+        use xai_grok_test_support::EnvGuard;
+
+        let inference_key = "inference-key-76674";
+        let team_id = "team-inference-76674";
+        let team_cents: i64 = 76674;
+        let home = tempfile::TempDir::new().expect("temp GROK_HOME");
+        let _home = EnvGuard::set("GROK_HOME", home.path());
+        let _force = EnvGuard::set(FORCE_FILE_ENV, "1");
+        let _mgmt = EnvGuard::unset("XAI_MANAGEMENT_API_KEY");
+        let _legacy = EnvGuard::unset("GROK_CODE_XAI_API_KEY");
+        let _team = EnvGuard::unset("XAI_MANAGEMENT_TEAM_ID");
+        let _key = EnvGuard::set("XAI_API_KEY", inference_key);
+        let store = CredentialsStore::default_store();
+        clear_management_api_key(&store).expect("clear management key from the secret store");
+        assert!(
+            management_api_key_from_env().is_none(),
+            "the environment must not hold a management key"
+        );
+        assert!(
+            load_stored_management_api_key(&store)
+                .expect("read secret store")
+                .is_none(),
+            "the secret store must not hold a management key"
+        );
+
+        let api_key_body = format!(r#"{{"team_id":"{team_id}","api_key_blocked":false}}"#);
+        let balance_body = format!(r#"{{"total":{{"val":"{team_cents}"}},"changes":[]}}"#);
+        let stop = Arc::new(AtomicBool::new(false));
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind fixture");
+        listener.set_nonblocking(true).expect("nonblocking");
+        let port = listener.local_addr().expect("port").port();
+        let stop_thread = Arc::clone(&stop);
+        let server = std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            while !stop_thread.load(Ordering::SeqCst) && std::time::Instant::now() < deadline {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(2)));
+                        let mut buf = Vec::new();
+                        let mut tmp = [0u8; 2048];
+                        let read_deadline =
+                            std::time::Instant::now() + std::time::Duration::from_secs(2);
+                        while std::time::Instant::now() < read_deadline {
+                            match stream.read(&mut tmp) {
+                                Ok(0) => break,
+                                Ok(n) => {
+                                    buf.extend_from_slice(&tmp[..n]);
+                                    if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                                        break;
+                                    }
+                                }
+                                Err(_) => break,
+                            }
+                        }
+                        let req = String::from_utf8_lossy(&buf);
+                        let first = req.lines().next().unwrap_or("").to_string();
+                        let authed = req
+                            .to_ascii_lowercase()
+                            .contains(&format!("bearer {inference_key}"));
+                        let balance_path =
+                            format!("GET /v1/billing/teams/{team_id}/prepaid/balance ");
+                        let (status, body) = if !authed {
+                            (
+                                "401 Unauthorized",
+                                r#"{"error":"unauthorized"}"#.to_string(),
+                            )
+                        } else if first.contains("GET /v1/api-key ") {
+                            ("200 OK", api_key_body.clone())
+                        } else if first.contains(&balance_path) {
+                            ("200 OK", balance_body.clone())
+                        } else {
+                            ("404 Not Found", r#"{"error":"not found"}"#.to_string())
+                        };
+                        let resp = format!(
+                            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                            body.len()
+                        );
+                        let _ = stream.write_all(resp.as_bytes());
+                    }
+                    Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+        let base = format!("http://127.0.0.1:{port}/v1");
+        let _base = EnvGuard::set("GROK_XAI_API_BASE_URL", &base);
+        // The fixture is the billing response. The live card below is the
+        // snapshot `/limits` opens. It does not copy these cents on.
+        let _fetched = fetch_management_into_snapshot().await;
+
+        let end = DateTime::parse_from_rfc3339("2026-08-08T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let now = DateTime::parse_from_rfc3339("2026-08-04T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let mut bal = weekly_bal(28.0, end);
+        bal.prepaid_balance_cents = None;
+        let snap =
+            LimitsSnapshot::from_billing(Some(&bal), None, SamplingIdentityKind::SuperGrokSession);
+        let mut state = LimitsModalState::new(snap);
+        let theme = Theme::default();
+        let area = Rect::new(0, 0, 100, 40);
+        let mut buf = Buffer::empty(area);
+        render_limits_modal(&mut buf, area, &mut state, &theme, false, now);
+        let painted = (0..area.height)
+            .map(|y| {
+                (0..area.width)
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !painted.contains("no management key"),
+            "the live card paints no management key from MissingManagementKey:\n{painted}"
+        );
+        assert!(
+            painted.contains("Console API credits"),
+            "Credits tab names console API credits: {painted}"
+        );
+        assert!(
+            painted.contains("$766.74"),
+            "76674 cents is $766.74: {painted}"
+        );
+        assert!(
+            !painted.contains("Using limits"),
+            "the footer must not say Using limits when the requests are spending this team credit balance, not included SuperGrok period limits:\n{painted}"
+        );
+
+        stop.store(true, Ordering::SeqCst);
+        let _ = server.join();
+    }
+
     /// `stay_supergrok` is set, `use_console` is not, and the meter pin is
     /// absent. `[auth] preferred_method` is `oidc`. The SuperGrok session is a
     /// bearer, and `api_key` is a console key. After
