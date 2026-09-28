@@ -202,6 +202,7 @@ xai-ratatui-inline = { workspace = true, features = ["test-support"] }
 xai-grok-gboom = { path = "../xai-grok-gboom", features = ["test-support"] }
 xai-grok-login = { workspace = true, features = ["test-support"] }
 xai-grok-shell = { path = "../xai-grok-shell", default-features = false, features = ["test-support"] }
+xai-grok-sampler = { workspace = true }
 pretty_assertions = { workspace = true }
 rstest = { workspace = true }
 wiremock = { workspace = true }
