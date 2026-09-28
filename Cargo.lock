@@ -14055,6 +14055,7 @@ dependencies = [
  "xai-grok-pager-pty-harness",
  "xai-grok-pager-render",
  "xai-grok-plugin-marketplace",
+ "xai-grok-sampler",
  "xai-grok-sampling-types",
  "xai-grok-sandbox",
  "xai-grok-shell",

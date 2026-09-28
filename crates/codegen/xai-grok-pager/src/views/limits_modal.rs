@@ -2721,4 +2721,118 @@ mod tests {
         stop.store(true, Ordering::SeqCst);
         let _ = server.join();
     }
+    /// `stay_supergrok` is set, `use_console` is not, and the meter pin is
+    /// absent. `[auth] preferred_method` is `oidc`. The SuperGrok session is a
+    /// bearer, and `api_key` is a console key. After
+    /// `apply_limits_pins_to_sampler_config`, the painted footer may say
+    /// `Using limits` only when the next request is that SuperGrok session.
+    /// It must not say `Using limits` when the next request is still the
+    /// console key.
+    #[test]
+    #[serial_test::serial]
+    fn stay_supergrok_with_oidc_does_not_say_using_limits_unless_the_request_is_the_supergrok_session()
+     {
+        use xai_grok_sampler::BearerResolver;
+        use xai_grok_shell::auth::limits_pins::{
+            LimitsPins, apply_limits_pins_to_sampler_config, load_limits_pins, save_limits_pins,
+        };
+        use xai_grok_shell::sampling::SamplerConfig;
+        use xai_grok_test_support::EnvGuard;
+
+        #[derive(Debug)]
+        struct SessionBearer;
+        impl BearerResolver for SessionBearer {
+            fn current_bearer(&self) -> Option<String> {
+                Some("included-period-session-token".to_owned())
+            }
+        }
+
+        let console_key = "console-api-credits-key";
+        let home = tempfile::TempDir::new().expect("temp GROK_HOME");
+        let _home = EnvGuard::set("GROK_HOME", home.path());
+        std::fs::write(
+            home.path().join("config.toml"),
+            "[auth]\npreferred_method = \"oidc\"\n",
+        )
+        .expect("write preferred_method oidc");
+        save_limits_pins(&LimitsPins {
+            stay_supergrok: true,
+            use_console: false,
+            meter_source: None,
+            supergrok_identity: None,
+        })
+        .expect("stay_supergrok pin");
+        let pins = load_limits_pins();
+        assert!(pins.stay_supergrok);
+        assert!(!pins.use_console);
+        assert!(pins.meter_source.is_none());
+
+        let session_bearer: xai_grok_sampler::SharedBearerResolver =
+            std::sync::Arc::new(SessionBearer);
+        let mut sampling = SamplerConfig {
+            api_key: Some(console_key.to_owned()),
+            failover_api_keys: Vec::new(),
+            base_url: "https://api.x.ai/v1".into(),
+            model: "grok-4".into(),
+            session_identity_key: None,
+            bearer_resolver: None,
+            session_bearer_resolver: Some(session_bearer),
+            failover_base_url: Some("https://api.x.ai/v1".into()),
+            session_base_url: Some("https://cli-chat-proxy.grok.com/v1".into()),
+            ..Default::default()
+        };
+        assert!(sampling.bearer_resolver.is_none());
+        assert!(sampling.session_bearer_resolver.is_some());
+        assert_eq!(sampling.api_key.as_deref(), Some(console_key));
+
+        apply_limits_pins_to_sampler_config(&mut sampling);
+
+        let active = sampling.api_key.as_deref().unwrap_or("").trim();
+        let session_on_config = sampling
+            .session_identity_key
+            .as_deref()
+            .unwrap_or("")
+            .trim();
+        let on_session = sampling.bearer_resolver.is_some()
+            || (!session_on_config.is_empty() && active == session_on_config);
+        let on_console = sampling.bearer_resolver.is_none()
+            && !active.is_empty()
+            && active == console_key
+            && active != session_on_config;
+        assert!(
+            on_console || on_session,
+            "after apply, the next request is the console key or the SuperGrok session; api_key={active:?}"
+        );
+
+        let end = DateTime::parse_from_rfc3339("2026-08-08T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let now = DateTime::parse_from_rfc3339("2026-08-04T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let mut bal = weekly_bal(28.0, end);
+        bal.prepaid_balance_cents = Some(4321);
+        let snap =
+            LimitsSnapshot::from_billing(Some(&bal), None, SamplingIdentityKind::SuperGrokSession)
+                .with_console_balance_cents(Some(8900));
+        let mut state = LimitsModalState::new(snap);
+        let theme = Theme::default();
+        let area = Rect::new(0, 0, 100, 40);
+        let mut buf = Buffer::empty(area);
+        render_limits_modal(&mut buf, area, &mut state, &theme, false, now);
+        let painted = (0..area.height)
+            .map(|y| {
+                (0..area.width)
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        if on_console {
+            assert!(
+                !painted.contains("Using limits"),
+                "the next request stayed on the console key, so the footer must not say Using limits:\n{painted}"
+            );
+        }
+    }
 }
