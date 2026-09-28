@@ -126,6 +126,17 @@ impl ConsoleTeamPrepaidGap {
         }
     }
 
+    /// Credits tab phrase when cents are still unknown.
+    ///
+    /// A console inference key is not a management key. That row says
+    /// `not available` instead of `no management key`.
+    pub fn credits_tab_unknown_phrase(self, inference_key: bool) -> &'static str {
+        match self {
+            Self::MissingManagementKey if inference_key => "not available",
+            other => other.as_display_str(),
+        }
+    }
+
     /// From whether Management key and team id are each present (pre-fetch).
     ///
     /// | key | team | gap |
@@ -171,6 +182,21 @@ pub fn resolve_console_team_prepaid_gap_default() -> ConsoleTeamPrepaidGap {
         xai_grok_shell::auth::resolve_management_api_key_default().is_some(),
         xai_grok_shell::auth::resolve_management_team_id_default().is_some(),
     )
+}
+
+/// Team prepaid cents from the console inference key billing cache.
+///
+/// No management key. Does not invent a balance and does not call the network.
+/// `None` when a management key is configured, when no console inference key
+/// exists, or when that cache is cold.
+pub fn team_prepaid_cents_from_inference_key_cache() -> Option<i64> {
+    if xai_grok_shell::auth::resolve_management_api_key_default().is_some() {
+        return None;
+    }
+    if !xai_grok_shell::auth::console_inference_key_present_default() {
+        return None;
+    }
+    xai_grok_shell::auth::cached_console_team_prepaid_cents_any()
 }
 
 /// Gap after a billing fetch completed with cents still unknown.
