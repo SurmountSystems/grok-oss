@@ -135,6 +135,31 @@ impl PlanFeedbackInFlight {
     }
 }
 
+/// Empty Updating wait yields when a real session plan file is already
+/// written. A non-empty Operator prompt stays quoted on rewrite-wait.
+/// Revise stays on rewrite-wait. A secondary plan stays on rewrite-wait.
+/// Leftover bodies that still say why the agent stopped, or that name
+/// TECH.md, are not that saved plan.
+pub fn rewrite_wait_should_yield_to_plan_file(
+    kind: PlanFeedbackInFlight,
+    operator_prompt: &str,
+    plan_file_body: Option<&str>,
+    shows_secondary_plan: bool,
+) -> bool {
+    if shows_secondary_plan || !matches!(kind, PlanFeedbackInFlight::Updating) {
+        return false;
+    }
+    if !operator_prompt.trim().is_empty() {
+        return false;
+    }
+    plan_file_body.is_some_and(|body| {
+        let trimmed = body.trim();
+        !trimmed.is_empty()
+            && !trimmed.contains("why the agent stopped")
+            && !trimmed.contains("TECH.md")
+    })
+}
+
 /// Status-line label while plan approval is parked.
 ///
 /// A new `exit_plan_mode` present is review park, not operator Approve.

@@ -1853,7 +1853,8 @@ fn isolated_preview_second_plan_prompt_must_not_paint_stale_plan_as_live_present
         let agent = app.agents.get_mut(&AgentId(0)).unwrap();
         agent.prompt.set_text("");
     }
-    let paste = format!("{APPROVE_NOTES}\nline 2 of the paste\nline 3 of the paste\nline 4 of the paste");
+    let paste =
+        format!("{APPROVE_NOTES}\nline 2 of the paste\nline 3 of the paste\nline 4 of the paste");
     let _pasted = app.handle_input(&Event::Paste(paste));
     {
         let agent = app.agents.get(&AgentId(0)).unwrap();
@@ -2553,10 +2554,8 @@ fn plan_soft_identity_collision_does_not_reset_primary() {
     }
 }
 
-/// `/plan --soft` writes `{slug}-{crockford-ulid}.md` under the session cwd
-/// `docs/features/`. A second soft plan adds another file and leaves the
-/// first bytes alone. The pane title is that filename, not
-/// `secondary-plan.md`.
+/// A second `/plan --soft` updates the session plan. It does not write a
+/// file under `docs/features`. It does not erase primary `plan.md`.
 #[test]
 #[serial_test::serial(GROK_HOME)]
 fn soft_plan_writes_a_new_feature_file_and_does_not_erase_the_older_one() {
@@ -2565,68 +2564,58 @@ fn soft_plan_writes_a_new_feature_file_and_does_not_erase_the_older_one() {
     let proj = tempfile::tempdir().expect("cwd");
     let cwd = proj.path().to_path_buf();
     let sid = "plan-soft-feature-files";
+    let primary = "# Primary plan stays\n\nDo not overwrite this primary plan.\n";
     let mut app = make_app_with_agent(sid);
     bind_session_home(&mut app, cwd.clone(), sid);
+    write_mill_session_plan_md(&cwd, sid, primary);
     let _ = crate::app::dispatch::dispatch(
         Action::SendPrompt("/plan --soft add feature one".into()),
         &mut app,
     );
-    let features = cwd.join("docs").join("features");
-    let first = feature_markdown_names(&features);
-    assert_eq!(
-        first.len(),
-        1,
-        "first `/plan --soft` must write one feature file; got {first:?}"
-    );
-    let first_name = first[0].clone();
-    assert!(
-        feature_filename_ends_with_crockford_ulid(&first_name),
-        "feature filename must end with `-` plus 26 Crockford chars plus `.md`; got {first_name}"
-    );
-    let first_bytes = std::fs::read(features.join(&first_name)).expect("first feature bytes");
     let _ = crate::app::dispatch::dispatch(
         Action::SendPrompt("/plan --soft add feature two".into()),
         &mut app,
     );
-    let names = feature_markdown_names(&features);
-    assert_eq!(
-        names.len(),
-        2,
-        "second `/plan --soft` must add a file and leave the first; got {names:?}"
-    );
     assert!(
-        names
-            .iter()
-            .all(|name| feature_filename_ends_with_crockford_ulid(name)),
-        "each feature filename must end with `-` plus 26 Crockford chars plus `.md`; got {names:?}"
+        feature_markdown_names(&cwd.join("docs").join("features")).is_empty(),
+        "a soft plan must not create a file under docs/features"
     );
+    let session_plan = {
+        let cwd_str = cwd.to_string_lossy();
+        let encoded = urlencoding::encode(&cwd_str);
+        xai_grok_shell::util::grok_home::grok_home()
+            .join("sessions")
+            .join(encoded.as_ref())
+            .join(sid)
+            .join("secondary-plan.md")
+    };
+    let body = std::fs::read_to_string(&session_plan).expect("session plan");
     assert!(
-        !names.iter().any(|name| name == "secondary-plan.md"),
-        "docs/features must not contain secondary-plan.md; got {names:?}"
+        body.contains("add feature two"),
+        "the session plan must hold the second soft plan; got {body:?}"
     );
-    let after = std::fs::read(features.join(&first_name)).expect("first feature still readable");
+    let disk = std::fs::read_to_string({
+        let cwd_str = cwd.to_string_lossy();
+        let encoded = urlencoding::encode(&cwd_str);
+        xai_grok_shell::util::grok_home::grok_home()
+            .join("sessions")
+            .join(encoded.as_ref())
+            .join(sid)
+            .join("plan.md")
+    })
+    .expect("primary plan.md");
     assert_eq!(
-        after, first_bytes,
-        "second `/plan --soft` must leave the first feature file bytes unchanged"
+        disk, primary,
+        "a second soft plan must not erase primary plan.md"
     );
-    let newer: Vec<_> = names
-        .into_iter()
-        .filter(|name| name != &first_name)
-        .collect();
-    assert_eq!(
-        newer.len(),
-        1,
-        "exactly one new feature file; got {newer:?}"
-    );
-    let second_name = &newer[0];
     let agent = app.agents.get(&AgentId(0)).unwrap();
     assert_eq!(
         agent
             .line_viewer
             .as_ref()
             .and_then(|viewer| viewer.title_override.as_deref()),
-        Some(second_name.as_str()),
-        "title_override must be the second feature filename, not secondary-plan.md"
+        Some("secondary-plan.md"),
+        "the preview must show the session plan file"
     );
     let painted = leftover_isolated_preview_body(&app)
         .expect("second `/plan --soft` must paint Isolated Preview");
@@ -2636,14 +2625,82 @@ fn soft_plan_writes_a_new_feature_file_and_does_not_erase_the_older_one() {
     );
 }
 
-/// A soft plan presentation creates a new `docs/features` file whose name
-/// is not `secondary-plan.md`. The soft-plan input is only an Operator
-/// prompt. The written body plans the work in complete sentences. It is
-/// not that prompt, and it is not a Job/State/Operator status recap. A
-/// template that only wraps the prompt still fails. It does not overwrite
-/// primary `plan.md`. It does not start implementation before Approve.
-/// After Approve, work starts. Always-approve does not click Approve.
-/// Empty Enter never Approves.
+/// A soft plan does not write a file under `docs/features`. The plan body
+/// is the session plan the preview shows. The Operator prompt is not pasted
+/// in as that body. The canned sentence does not return.
+#[test]
+#[serial_test::serial(GROK_HOME)]
+fn soft_plan_does_not_write_a_file_under_docs_features() {
+    let grok_home = tempfile::tempdir().expect("home");
+    let _home = xai_grok_test_support::EnvGuard::set("GROK_HOME", grok_home.path());
+    let proj = tempfile::tempdir().expect("cwd");
+    let cwd = proj.path().to_path_buf();
+    let sid = "plan-soft-not-docs-features";
+    let operator_prompt = concat!(
+        "Plan the weekly limits chip in the session plan. ",
+        "Do not store this prompt as the document and do not invent a docs home."
+    );
+    let mut app = make_app_with_agent(sid);
+    bind_session_home(&mut app, cwd.clone(), sid);
+    let features = cwd.join("docs").join("features");
+    let before = feature_markdown_names(&features);
+    let _ = crate::app::dispatch::dispatch(
+        Action::SendPrompt(format!("/plan --soft {operator_prompt}")),
+        &mut app,
+    );
+    let after = feature_markdown_names(&features);
+    assert_eq!(
+        after, before,
+        "a soft plan must not create a file under docs/features; before={before:?} after={after:?}"
+    );
+    let session_plan = {
+        let cwd_str = cwd.to_string_lossy();
+        let encoded = urlencoding::encode(&cwd_str);
+        xai_grok_shell::util::grok_home::grok_home()
+            .join("sessions")
+            .join(encoded.as_ref())
+            .join(sid)
+            .join("secondary-plan.md")
+    };
+    let body = std::fs::read_to_string(&session_plan).unwrap_or_else(|_| {
+        panic!(
+            "the session plan must contain the plan body; missing {}",
+            session_plan.display()
+        )
+    });
+    let painted = leftover_isolated_preview_body(&app)
+        .expect("soft plan must paint the session plan in Isolated Preview");
+    assert!(
+        body.contains(painted.trim()) || painted.contains(body.trim()),
+        "the session plan must contain the plan body the preview shows; file={body:?} painted={painted:?}"
+    );
+    assert_eq!(
+        app.agents
+            .get(&AgentId(0))
+            .unwrap()
+            .line_viewer
+            .as_ref()
+            .and_then(|viewer| viewer.title_override.as_deref()),
+        Some("secondary-plan.md"),
+        "the preview must show the session plan file"
+    );
+    assert!(
+        !body.contains(operator_prompt),
+        "the Operator prompt must not be pasted in as the body; got {body:?}"
+    );
+    assert!(
+        !body.contains("instead of planning"),
+        "the canned sentence must not return; got {body:?}"
+    );
+}
+
+/// A soft plan presentation writes the session plan, not a `docs/features`
+/// file. The soft-plan input is only an Operator prompt. The written body
+/// plans the work in complete sentences. It is not that prompt, and it is
+/// not a Job/State/Operator status recap. A template that only wraps the
+/// prompt still fails. It does not overwrite primary `plan.md`. It does not
+/// start implementation before Approve. After Approve, work starts.
+/// Always-approve does not click Approve. Empty Enter never Approves.
 #[test]
 #[serial_test::serial(GROK_HOME)]
 fn soft_plan_presentation_creates_a_feature_file_and_does_not_start_until_approve() {
@@ -2680,26 +2737,20 @@ fn soft_plan_presentation_creates_a_feature_file_and_does_not_start_until_approv
     // Presentation that only repeats a status recap must not become the document.
     let _rx = isolated_present(&mut app, "create-plan-call", status_recap);
     let features = cwd.join("docs").join("features");
-    let names = feature_markdown_names(&features);
     assert!(
-        !names.iter().any(|name| name == "secondary-plan.md"),
-        "soft plan presentation must not write secondary-plan.md; got {names:?}"
+        feature_markdown_names(&features).is_empty(),
+        "a soft plan must not create a file under docs/features"
     );
-    assert_eq!(
-        names.len(),
-        1,
-        "soft plan presentation must create one docs/features file that is not secondary-plan.md; got {names:?}"
-    );
-    let name = names[0].clone();
-    assert!(
-        feature_filename_ends_with_crockford_ulid(&name),
-        "feature filename must be a thoughtful name plus a ULID; got {name}"
-    );
-    assert!(
-        feature_slug_is_a_thoughtful_name(&name),
-        "feature filename must be a short thoughtful name plus a ULID, not the whole prompt and not secondary-plan.md; got {name}"
-    );
-    let bytes = std::fs::read_to_string(features.join(&name)).expect("feature file");
+    let session_plan = {
+        let cwd_str = cwd.to_string_lossy();
+        let encoded = urlencoding::encode(&cwd_str);
+        xai_grok_shell::util::grok_home::grok_home()
+            .join("sessions")
+            .join(encoded.as_ref())
+            .join(sid)
+            .join("secondary-plan.md")
+    };
+    let bytes = std::fs::read_to_string(&session_plan).expect("session plan");
     assert_feature_plan_body(&bytes, operator_prompt, status_recap);
     let agent = app.agents.get(&AgentId(0)).unwrap();
     assert_eq!(
@@ -2707,8 +2758,8 @@ fn soft_plan_presentation_creates_a_feature_file_and_does_not_start_until_approv
             .line_viewer
             .as_ref()
             .and_then(|viewer| viewer.title_override.as_deref()),
-        Some(name.as_str()),
-        "pane title must be the feature filename, not secondary-plan.md"
+        Some("secondary-plan.md"),
+        "the preview must show the session plan file"
     );
     let disk = {
         let cwd_str = cwd.to_string_lossy();
@@ -2782,6 +2833,143 @@ fn soft_plan_presentation_creates_a_feature_file_and_does_not_start_until_approv
     );
 }
 
+/// A `/limits` menu complaint is the Operator prompt. The session plan
+/// plans that menu: it names `use-limits` and `slash/commands/limits.rs`.
+/// It does not repeat the canned sentence. It does not write `docs/features`.
+#[test]
+#[serial_test::serial(GROK_HOME)]
+fn soft_plan_for_the_limits_menu_plans_use_limits_and_does_not_repeat_the_canned_template() {
+    let grok_home = tempfile::tempdir().expect("home");
+    let _home = xai_grok_test_support::EnvGuard::set("GROK_HOME", grok_home.path());
+    let proj = tempfile::tempdir().expect("cwd");
+    let cwd = proj.path().to_path_buf();
+    let sid = "plan-soft-limits-menu";
+    let operator_prompt = concat!(
+        "The /limits menu has no use-limits row and the descriptions ",
+        "do not say what is spent."
+    );
+    let mut app = make_app_with_agent(sid);
+    bind_session_home(&mut app, cwd.clone(), sid);
+    let _ = crate::app::dispatch::dispatch(
+        Action::SendPrompt(format!("/plan --soft {operator_prompt}")),
+        &mut app,
+    );
+    assert!(
+        feature_markdown_names(&cwd.join("docs").join("features")).is_empty(),
+        "a soft plan must not create a file under docs/features"
+    );
+    let session_plan = {
+        let cwd_str = cwd.to_string_lossy();
+        let encoded = urlencoding::encode(&cwd_str);
+        xai_grok_shell::util::grok_home::grok_home()
+            .join("sessions")
+            .join(encoded.as_ref())
+            .join(sid)
+            .join("secondary-plan.md")
+    };
+    let bytes = std::fs::read_to_string(&session_plan).expect("session plan");
+    assert!(
+        !bytes.contains("instead of planning"),
+        "compose_soft_feature_plan must not write the canned sentence; got {bytes:?}"
+    );
+    assert!(
+        bytes.contains("use-limits"),
+        "the session plan must name the use-limits row; got {bytes:?}"
+    );
+    assert!(
+        bytes.contains("slash/commands/limits.rs"),
+        "the session plan must name slash/commands/limits.rs; got {bytes:?}"
+    );
+    let painted = leftover_isolated_preview_body(&app)
+        .expect("the limits soft plan must paint Isolated Preview");
+    assert!(
+        painted.contains("use-limits"),
+        "Isolated Preview must show the session plan; got {painted:?}"
+    );
+}
+
+/// A non-empty Operator prompt is quoted. It is not `> (empty)`.
+/// After the plan file exists, Isolated Preview shows that body.
+/// Approve, Comment, Revise, and Exit are armed. Empty Enter does not
+/// Approve.
+#[test]
+#[serial_test::serial(GROK_HOME)]
+fn rewrite_wait_does_not_stay_up_with_an_empty_quote_after_the_plan_file_exists() {
+    let operator_prompt = "quote the operator prompt for the saved plan";
+    let quoted =
+        crate::views::plan_approval_view::isolated_preview_rewrite_wait_markdown(operator_prompt);
+    assert!(
+        quoted.contains(&format!("> {operator_prompt}")),
+        "a non-empty Operator prompt is quoted, not an empty quote; got {quoted:?}"
+    );
+    assert!(
+        !quoted.contains("> (empty)"),
+        "a non-empty Operator prompt must not be quoted as > (empty); got {quoted:?}"
+    );
+
+    let grok_home = tempfile::tempdir().expect("home");
+    let _home = xai_grok_test_support::EnvGuard::set("GROK_HOME", grok_home.path());
+    let proj = tempfile::tempdir().expect("cwd");
+    let cwd = proj.path().to_path_buf();
+    let sid = "plan-rewrite-wait-file-exists";
+    let plan_body = "# Saved plan file\n\nThe saved plan names the use-limits row.\n";
+    let mut app = make_app_with_agent(sid);
+    bind_session_home(&mut app, cwd.clone(), sid);
+    write_mill_session_plan_md(&cwd, sid, plan_body);
+    let _rx = isolated_present(&mut app, "create-plan-call", plan_body);
+    {
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        agent.enter_isolated_preview_rewrite_wait(PlanFeedbackInFlight::Updating);
+    }
+    let painted = leftover_isolated_preview_body(&app)
+        .expect("Isolated Preview must stay up after the plan file exists");
+    assert!(
+        !painted.contains("> (empty)"),
+        "rewrite-wait must not stay up with an empty quote after the plan file exists; got {painted:?}"
+    );
+    assert!(
+        !painted.contains(PLAN_REWRITE_WAIT_HEADING),
+        "rewrite-wait must not stay up after the plan file exists; got {painted:?}"
+    );
+    assert!(
+        painted.contains("The saved plan names the use-limits row."),
+        "Isolated Preview must show the plan file body; got {painted:?}"
+    );
+    {
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(
+            agent.line_viewer.as_ref().is_some_and(|viewer| viewer
+                .plan_ref()
+                .is_some_and(|plan| plan.show_action_buttons && plan.feedback_active)),
+            "Approve, Comment, Revise, and Exit must be armed after the plan file exists"
+        );
+        assert!(
+            agent.plan_approval_view.is_some() && !agent.plan_decision_resolved,
+            "showing the plan file is review, not Approve"
+        );
+    }
+    {
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        agent.prompt.set_text("");
+    }
+    let empty = app.handle_input(&enter_key());
+    let empty_effects = dispatch_outcome(&mut app, empty);
+    {
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(
+            agent.plan_approval_view.is_some() && !agent.plan_decision_resolved,
+            "empty Enter does not Approve"
+        );
+    }
+    assert!(
+        !empty_effects.iter().any(|effect| matches!(
+            effect,
+            Effect::SendPrompt { .. } | Effect::SendInterject { .. } | Effect::SendPromptNow { .. }
+        )),
+        "empty Enter must not start implementation; effects={empty_effects:?}"
+    );
+}
+
 fn feature_markdown_names(dir: &std::path::Path) -> Vec<String> {
     let mut names = std::fs::read_dir(dir)
         .map(|entries| {
@@ -2794,33 +2982,6 @@ fn feature_markdown_names(dir: &std::path::Path) -> Vec<String> {
         .unwrap_or_default();
     names.sort();
     names
-}
-
-fn feature_filename_ends_with_crockford_ulid(name: &str) -> bool {
-    const CROCKFORD: &[u8] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
-    let Some(stem) = name.strip_suffix(".md") else {
-        return false;
-    };
-    let Some((slug, ulid)) = stem.rsplit_once('-') else {
-        return false;
-    };
-    !slug.is_empty() && ulid.len() == 26 && ulid.bytes().all(|byte| CROCKFORD.contains(&byte))
-}
-
-/// A thoughtful feature name is a few words, not `secondary-plan` and not
-/// the entire Operator prompt pasted into the filename.
-fn feature_slug_is_a_thoughtful_name(name: &str) -> bool {
-    let Some(stem) = name.strip_suffix(".md") else {
-        return false;
-    };
-    let Some((slug, _)) = stem.rsplit_once('-') else {
-        return false;
-    };
-    if slug == "secondary-plan" || slug.is_empty() {
-        return false;
-    }
-    let words = slug.split('-').filter(|word| !word.is_empty()).count();
-    (2..=6).contains(&words)
 }
 
 fn plan_sentences(text: &str) -> Vec<String> {

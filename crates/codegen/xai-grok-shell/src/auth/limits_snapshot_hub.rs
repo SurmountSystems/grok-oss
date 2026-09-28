@@ -324,7 +324,10 @@ fn apply_management_snapshot(mgmt: &LimitsSnapshotManagement) {
 
 /// Fetch Management prepaid / postpaid / series into snapshot fields (no keys).
 ///
-/// Returns `None` when no management key is configured. Call only from a
+/// Returns `None` when neither a management key nor a console inference key
+/// can supply a meter. Console API credits use the inference key on
+/// `api.x.ai` and do not call `management-api.x.ai`. Postpaid and the usage
+/// series still use the management key. Call only from a
 /// hub leader fetch callback so followers do not stampede the Management API.
 /// Automatic HonorTtl leader HTTP is at most once an hour per machine
 /// ([`SNAPSHOT_TTL_SECS`]). ForceRefresh still fetches. Process Mutex 60s
@@ -332,14 +335,35 @@ fn apply_management_snapshot(mgmt: &LimitsSnapshotManagement) {
 /// HonorTtl.
 pub async fn fetch_management_into_snapshot() -> Option<LimitsSnapshotManagement> {
     use super::xai_management::{
-        USAGE_SERIES_DEFAULT_DAY_WINDOW, fetch_console_team_postpaid_preview_default,
-        fetch_console_team_prepaid_balance_default, fetch_console_team_usage_series_default,
-        resolve_management_api_key_default,
+        USAGE_SERIES_DEFAULT_DAY_WINDOW, fetch_console_api_credits_with_inference_key,
+        fetch_console_team_postpaid_preview_default, fetch_console_team_prepaid_balance_default,
+        fetch_console_team_usage_series_default, resolve_management_api_key_default,
     };
-    resolve_management_api_key_default()?;
-    let prepaid = fetch_console_team_prepaid_balance_default().await;
-    let postpaid = fetch_console_team_postpaid_preview_default().await;
-    let series = fetch_console_team_usage_series_default(USAGE_SERIES_DEFAULT_DAY_WINDOW).await;
+    let inference_key_present = super::xai_console::console_inference_key_present_default();
+    let inference_prepaid = if inference_key_present {
+        fetch_console_api_credits_with_inference_key().await
+    } else {
+        None
+    };
+    let management_key = resolve_management_api_key_default();
+    if management_key.is_none() && !inference_key_present {
+        return None;
+    }
+    let prepaid = if inference_key_present {
+        inference_prepaid
+    } else {
+        fetch_console_team_prepaid_balance_default().await
+    };
+    let postpaid = if management_key.is_some() {
+        fetch_console_team_postpaid_preview_default().await
+    } else {
+        None
+    };
+    let series = if management_key.is_some() {
+        fetch_console_team_usage_series_default(USAGE_SERIES_DEFAULT_DAY_WINDOW).await
+    } else {
+        None
+    };
     let team_id = prepaid
         .as_ref()
         .map(|m| m.team_id.clone())

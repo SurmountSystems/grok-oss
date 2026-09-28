@@ -297,11 +297,11 @@ pub(super) fn dispatch_show_context_info(app: &mut AppView) -> Vec<Effect> {
     }]
 }
 
-/// `/usage` — open the usage modal on its "Usage limit" tab. Minimal mode
+/// `/usage` opens the usage window on Context usage. Minimal mode
 /// keeps the scrollback flow: session token/cost, then consumer credits.
 pub(super) fn dispatch_show_usage(app: &mut AppView) -> Vec<Effect> {
     if !app.screen_mode.is_minimal() {
-        return open_usage_info_modal(app, crate::views::usage_modal::UsageInfoTab::UsageLimit);
+        return open_usage_info_modal(app, crate::views::usage_modal::UsageInfoTab::ContextUsage);
     }
     let ActiveView::Agent(id) = app.active_view else {
         return vec![];

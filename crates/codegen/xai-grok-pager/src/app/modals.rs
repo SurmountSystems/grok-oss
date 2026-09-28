@@ -1698,17 +1698,21 @@ impl AgentView {
             }
         }
 
-        // Limits: chrome (close / click-outside / X).
+        // Limits: close, tabs, and the spend button.
         if let Some(ActiveModal::Limits { state }) = &mut self.active_modal {
-            let outcome =
-                mw::handle_modal_mouse(&mut state.window, mouse.kind, mouse.column, mouse.row);
-            return match outcome {
-                ModalWindowOutcome::CloseRequested => {
+            use crate::views::limits_modal::LimitsModalOutcome;
+            return match crate::views::limits_modal::handle_limits_mouse(
+                state,
+                mouse.kind,
+                mouse.column,
+                mouse.row,
+            ) {
+                LimitsModalOutcome::Close => {
                     self.active_modal = None;
                     InputOutcome::Changed
                 }
-                ModalWindowOutcome::Handled => InputOutcome::Changed,
-                _ => InputOutcome::Changed,
+                LimitsModalOutcome::Changed => InputOutcome::Changed,
+                LimitsModalOutcome::Unchanged => InputOutcome::Unchanged,
             };
         }
 

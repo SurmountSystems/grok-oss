@@ -1428,12 +1428,16 @@ fn format_console(lines: &mut Vec<String>, c: &ConsoleMeter) {
     match c.balance_cents {
         Some(cents) => lines.push(format!("  Team prepaid remaining: {}", fmt_dollars(cents))),
         None => {
-            // Short gap only. No Management Key lecture wall; operators
-            // rejected that framing for chat-key honesty (dogfood).
-            lines.push(format!(
-                "  Team prepaid remaining: {}",
+            // Inference key on file and no balance yet: not available.
+            // Other gaps stay distinct. No inference key still names the gap.
+            let gap = if (c.key_available || c.is_live)
+                && c.prepaid_gap == ConsoleTeamPrepaidGap::MissingManagementKey
+            {
+                "not available"
+            } else {
                 c.prepaid_gap.as_display_str()
-            ));
+            };
+            lines.push(format!("  Team prepaid remaining: {gap}"));
         }
     }
     lines.push(format!(
@@ -1846,7 +1850,7 @@ mod tests {
         );
         assert!(!out.contains("Path:"), "Path: wording retired: {out}");
         assert!(
-            out.contains("Team prepaid remaining: no management key"),
+            out.contains("Team prepaid remaining: not available"),
             "no fake console $: {out}"
         );
         assert!(
@@ -1934,8 +1938,8 @@ mod tests {
             LimitsSnapshot::from_billing(None, None, SamplingIdentityKind::ConsoleKey);
         let out_k = format_limits_detail(&missing_key);
         assert!(
-            out_k.contains("Team prepaid remaining: no management key"),
-            "default missing key: {out_k}"
+            out_k.contains("Team prepaid remaining: not available"),
+            "inference key, balance missing: {out_k}"
         );
         assert!(
             !out_k.contains("no management key/team id"),
@@ -2064,8 +2068,8 @@ mod tests {
         );
     }
 
-    /// Named contract: SuperGrok live + no management key → Console team block
-    /// still present with honest Balance gap (not silent omit of whole team section).
+    /// Named contract: SuperGrok live, inference key on file, balance missing.
+    /// The console team block stays and says not available. It does not omit the section.
     #[test]
     fn format_supergrok_live_without_mgmt_key_keeps_honest_team_block() {
         let bal = weekly(65.0, "Aug 4, 12:00", None);
@@ -2076,7 +2080,7 @@ mod tests {
         let out = format_limits_detail(&snap);
         assert!(out.contains("Console API:"), "team section present: {out}");
         assert!(
-            out.contains("Team prepaid remaining: no management key"),
+            out.contains("Team prepaid remaining: not available"),
             "honest team gap, not silent omit: {out}"
         );
         assert!(

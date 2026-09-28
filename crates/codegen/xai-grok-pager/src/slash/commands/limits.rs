@@ -24,7 +24,7 @@ impl SlashCommand for LimitsCommand {
     }
 
     fn usage(&self) -> &str {
-        "/limits [--help | --json | stay-supergrok | use-console | use-personal | use-business | --use-credits | meter included|dollar-credits|console|combined | refresh]"
+        "/limits [--help | --json | stay-supergrok | use-limits | use-console | use-personal | use-business | --use-credits | meter included|dollar-credits|console|combined | refresh]"
     }
 
     /// Works once an agent view exists (billing cache is app/agent scoped).
@@ -48,34 +48,38 @@ impl SlashCommand for LimitsCommand {
                 display: crate::limits_cmd::LIMITS_WORD_STAY_SUPERGROK.into(),
                 match_text: crate::limits_cmd::LIMITS_WORD_STAY_SUPERGROK.into(),
                 insert_text: crate::limits_cmd::LIMITS_WORD_STAY_SUPERGROK.into(),
-                description: "Stay on SuperGrok and clear a false exhaust memo".into(),
+                description: "Stay on the SuperGrok session. This does not override preferred_method api_key.".into(),
+            },
+            ArgItem {
+                display: crate::limits_cmd::LIMITS_WORD_USE_LIMITS.into(),
+                match_text: crate::limits_cmd::LIMITS_WORD_USE_LIMITS.into(),
+                insert_text: crate::limits_cmd::LIMITS_WORD_USE_LIMITS.into(),
+                description: "Spend included SuperGrok period limits on the next request."
+                    .into(),
             },
             ArgItem {
                 display: crate::limits_cmd::LIMITS_WORD_USE_CONSOLE.into(),
                 match_text: crate::limits_cmd::LIMITS_WORD_USE_CONSOLE.into(),
                 insert_text: crate::limits_cmd::LIMITS_WORD_USE_CONSOLE.into(),
-                description: "Ask for the console key (sidecar pin)".into(),
+                description: "Spend console API credits with the stored console inference key. No management key.".into(),
             },
             ArgItem {
                 display: crate::limits_cmd::LIMITS_WORD_USE_PERSONAL.into(),
                 match_text: crate::limits_cmd::LIMITS_WORD_USE_PERSONAL.into(),
                 insert_text: crate::limits_cmd::LIMITS_WORD_USE_PERSONAL.into(),
-                description: "Ask for personal SuperGrok as the paying identity (sidecar pin)"
-                    .into(),
+                description: "The next request uses the personal SuperGrok session.".into(),
             },
             ArgItem {
                 display: crate::limits_cmd::LIMITS_WORD_USE_BUSINESS.into(),
                 match_text: crate::limits_cmd::LIMITS_WORD_USE_BUSINESS.into(),
                 insert_text: crate::limits_cmd::LIMITS_WORD_USE_BUSINESS.into(),
-                description: "Ask for Business SuperGrok as the paying identity (sidecar pin)"
-                    .into(),
+                description: "The next request uses the Business SuperGrok session.".into(),
             },
             ArgItem {
                 display: crate::limits_cmd::LIMITS_WORD_METER.into(),
                 match_text: crate::limits_cmd::LIMITS_WORD_METER.into(),
                 insert_text: crate::limits_cmd::LIMITS_WORD_METER.into(),
-                description: "Pin meter chrome: included | dollar-credits | console | combined"
-                    .into(),
+                description: "Included SuperGrok period limits, SuperGrok dollar credits, console API credits, or combined. meter included spends included limits the same way use-limits does.".into(),
             },
             ArgItem {
                 display: crate::limits_cmd::LIMITS_WORD_REFRESH.into(),
@@ -93,7 +97,7 @@ impl SlashCommand for LimitsCommand {
                 display: crate::limits_cmd::LIMITS_WORD_USE_CREDITS.into(),
                 match_text: crate::limits_cmd::LIMITS_WORD_USE_CREDITS.into(),
                 insert_text: crate::limits_cmd::LIMITS_WORD_USE_CREDITS.into(),
-                description: "Pin meter chrome to SuperGrok dollar credits".into(),
+                description: "Spend SuperGrok dollar credits, not console API credits.".into(),
             },
         ])
     }
@@ -459,5 +463,118 @@ mod tests {
                 "{credits} must pin SuperGrok dollar credits"
             );
         }
+    }
+
+    /// `/limits` offers use-limits. That command spends included SuperGrok
+    /// period limits. With preferred_method = api_key, the next request key
+    /// is the SuperGrok session.
+    #[test]
+    #[serial_test::serial]
+    fn limits_menu_offers_use_limits_and_that_command_spends_included_limits() {
+        use xai_grok_shell::auth::limits_pins::{
+            MeterSource, apply_limits_pins_to_sampler_config, apply_meter_source, load_limits_pins,
+        };
+        use xai_grok_shell::sampling::SamplerConfig;
+        use xai_grok_test_support::EnvGuard;
+
+        let models = ModelState::default();
+        let app_ctx = crate::slash::command::AppCtx {
+            models: &models,
+            cwd: std::path::Path::new("."),
+            has_session_announcements: false,
+            billing_surface_visible: true,
+            usage_command_visible: true,
+            workflows_available: false,
+            screen_mode: crate::app::ScreenMode::Inline,
+            current_title: None,
+        };
+        let suggested = LimitsCommand
+            .suggest_args(&app_ctx, "")
+            .expect("slash /limits suggestions");
+        let blob = suggested
+            .iter()
+            .map(|item| {
+                format!(
+                    "{} {} {} {}",
+                    item.display, item.match_text, item.insert_text, item.description
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            suggested
+                .iter()
+                .any(|item| item.insert_text == "use-limits"),
+            "suggestion list must contain use-limits: {blob}"
+        );
+        let use_limits = suggested
+            .iter()
+            .find(|item| item.insert_text == "use-limits")
+            .expect("use-limits row");
+        assert_eq!(
+            use_limits.description,
+            "Spend included SuperGrok period limits on the next request."
+        );
+        assert!(
+            !blob.contains("sidecar pin"),
+            "suggestion list must not say sidecar pin: {blob}"
+        );
+        assert!(
+            !blob.contains("pin meter chrome"),
+            "suggestion list must not say pin meter chrome: {blob}"
+        );
+
+        let home = tempfile::TempDir::new().expect("temp grok home");
+        let _env = EnvGuard::set("GROK_HOME", home.path());
+        let _force = EnvGuard::set(xai_grok_shell::auth::credentials_store::FORCE_FILE_ENV, "1");
+        let _xai = EnvGuard::unset("XAI_API_KEY");
+        let _legacy = EnvGuard::unset("GROK_CODE_XAI_API_KEY");
+        std::fs::write(
+            home.path().join("config.toml"),
+            "[auth]\npreferred_method = \"api_key\"\n",
+        )
+        .expect("write preferred_method = api_key");
+        apply_meter_source(MeterSource::Console).expect("start on console API credits");
+
+        let session = "included-period-session-token";
+        let console = "console-inference-key";
+        let mut ctx = make_ctx(&models);
+        let result = LimitsCommand.run(&mut ctx, "use-limits");
+        let msg = match result {
+            CommandResult::Message(msg) => msg,
+            other => panic!("use-limits must confirm, not {other:?}"),
+        };
+        assert!(
+            !msg.contains("still pins console") && !msg.contains("api_key still pins"),
+            "use-limits confirmation must not say that api_key still pins console: {msg}"
+        );
+        assert_eq!(
+            load_limits_pins().meter_source,
+            Some(MeterSource::Included),
+            "use-limits must set MeterSource::Included"
+        );
+
+        let mut config = SamplerConfig {
+            api_key: Some(console.into()),
+            failover_api_keys: vec![session.into()],
+            base_url: "https://api.x.ai/v1".into(),
+            model: "grok-4".into(),
+            session_identity_key: Some(session.into()),
+            failover_base_url: Some("https://api.x.ai/v1".into()),
+            session_base_url: Some("https://cli-chat-proxy.grok.com/v1".into()),
+            ..Default::default()
+        };
+        apply_limits_pins_to_sampler_config(&mut config);
+        assert_eq!(
+            config.api_key.as_deref(),
+            Some(session),
+            "use-limits with preferred_method api_key must make the next request key the SuperGrok session"
+        );
+        assert_ne!(config.api_key.as_deref(), Some(console));
+        assert!(
+            config.base_url.contains("cli-chat-proxy"),
+            "included limits stay on the SuperGrok session host: {}",
+            config.base_url
+        );
     }
 }
