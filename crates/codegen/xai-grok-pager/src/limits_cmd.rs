@@ -43,10 +43,12 @@ pub const LIMITS_WORD_METER: &str = "meter";
 pub const LIMITS_WORD_REFRESH: &str = "refresh";
 /// Pin compact chrome to SuperGrok dollar credits (`meter dollar-credits`).
 pub const LIMITS_WORD_USE_CREDITS: &str = "use-credits";
+/// Spend included SuperGrok period limits on the next request.
+pub const LIMITS_WORD_USE_LIMITS: &str = "use-limits";
 
 /// Usage listing for unknown extra args (slash and CLI share these words).
 pub fn limits_named_words_usage() -> &'static str {
-    "/limits, /limits --help, /limits --json, /limits stay-supergrok, /limits use-console, /limits use-personal, /limits use-business, /limits --use-credits, /limits meter included|dollar-credits|console|combined, or /limits refresh"
+    "/limits, /limits --help, /limits --json, /limits stay-supergrok, /limits use-limits, /limits use-console, /limits use-personal, /limits use-business, /limits --use-credits, /limits meter included|dollar-credits|console|combined, or /limits refresh"
 }
 
 /// Operator-facing `/limits --help` / `help` body. Hyphenated aliases match
@@ -58,11 +60,12 @@ pub fn limits_help_text() -> String {
   --help | help | -h
   --json | json
   stay-supergrok | --stay-supergrok
+  use-limits | --use-limits   (spend included SuperGrok period limits)
   use-console | --use-console
   use-personal | --use-personal
   use-business | --use-business
-  use-credits | --use-credits   (meter SuperGrok dollar credits)
-  meter included|dollar-credits|console|combined
+  use-credits | --use-credits   (SuperGrok dollar credits, not console API credits)
+  meter included|dollar-credits|console|combined   (included spends included limits the same way use-limits does)
   refresh | --refresh
 Meters stay distinct: included SuperGrok period limits, SuperGrok dollar credits, console team prepaid / console API credits.
 SuperGrok is a paid product. Never call SuperGrok free. grok-oss limits is a client printout, not xAI billing truth.
@@ -100,6 +103,8 @@ pub enum LimitsCommand {
     UsePersonal,
     /// Persist Business SuperGrok as the paying identity (sidecar, not `[auth]`).
     UseBusiness,
+    /// Spend included SuperGrok period limits on the next request.
+    UseLimits,
     /// Persist which meter chrome `/limits` should emphasize.
     Meter {
         #[arg(value_enum)]
@@ -168,6 +173,7 @@ pub enum LimitsNamedAction {
     UseConsole,
     UsePersonal,
     UseBusiness,
+    UseLimits,
     Meter(LimitsMeterWord),
     Refresh,
 }
@@ -189,6 +195,7 @@ pub fn parse_limits_named_args(args: &str) -> Result<LimitsNamedAction, String> 
         [w] if limits_word_alias(w) == LIMITS_WORD_USE_BUSINESS => {
             Ok(LimitsNamedAction::UseBusiness)
         }
+        [w] if limits_word_alias(w) == LIMITS_WORD_USE_LIMITS => Ok(LimitsNamedAction::UseLimits),
         [w] if limits_word_alias(w) == LIMITS_WORD_USE_CREDITS => {
             Ok(LimitsNamedAction::Meter(LimitsMeterWord::DollarCredits))
         }
@@ -210,6 +217,7 @@ pub fn parse_limits_named_args(args: &str) -> Result<LimitsNamedAction, String> 
         ["use", "credits"] | ["--use", "credits"] => {
             Ok(LimitsNamedAction::Meter(LimitsMeterWord::DollarCredits))
         }
+        ["use", "limits"] | ["--use", "limits"] => Ok(LimitsNamedAction::UseLimits),
         _ => Err(format!(
             "Unknown argument: {args}. Use {}",
             limits_named_words_usage()
@@ -267,6 +275,14 @@ pub fn apply_limits_named_action(action: LimitsNamedAction) -> Result<String, St
             ),
             Err(e) => Err(format!("Could not write use-business pin: {e}")),
         },
+        LimitsNamedAction::UseLimits => apply_meter_source(
+            xai_grok_shell::auth::limits_pins::MeterSource::Included,
+        )
+        .map(|()| {
+            "Use limits: the next request spends included SuperGrok period limits with the SuperGrok session key."
+                .into()
+        })
+        .map_err(|e| format!("Could not write use-limits: {e}")),
         LimitsNamedAction::Meter(src) => apply_meter_source(src.to_meter_source())
             .map(|()| format!("Meter source pin written: {}.", src.as_word()))
             .map_err(|e| format!("Could not write meter source pin: {e}")),
@@ -1536,6 +1552,12 @@ pub async fn run(args: LimitsArgs) -> Result<()> {
             writeln!(std::io::stdout().lock(), "{msg}")?;
             Ok(())
         }
+        Some(LimitsCommand::UseLimits) => {
+            let msg = apply_limits_named_action(LimitsNamedAction::UseLimits)
+                .map_err(|e| anyhow::anyhow!(e))?;
+            writeln!(std::io::stdout().lock(), "{msg}")?;
+            Ok(())
+        }
         Some(LimitsCommand::Meter { source }) => {
             let msg = apply_limits_named_action(LimitsNamedAction::Meter(source))
                 .map_err(|e| anyhow::anyhow!(e))?;
@@ -2421,7 +2443,7 @@ mod tests {
         );
         assert!(human.contains("Console API:"), "console section: {human}");
         assert!(
-            human.contains("Team prepaid remaining: no management key"),
+            human.contains("Team prepaid remaining: not available"),
             "honest gap: {human}"
         );
         // Slice 3: poll-reading honesty in body; no forbidden burn overclaim.

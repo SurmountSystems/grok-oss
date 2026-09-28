@@ -1572,7 +1572,26 @@ impl AgentView {
             return self.apply_usage_modal_outcome(outcome);
         }
 
-        // ResetSettingsConfirm: route mouse events through the modal-window chrome
+        // Limits: close, tabs, and the spend button.
+        if let Some(ActiveModal::Limits { state }) = &mut self.active_modal {
+            use crate::views::limits_modal::LimitsModalOutcome;
+            return match crate::views::limits_modal::handle_limits_mouse(
+                state,
+                mouse.kind,
+                mouse.column,
+                mouse.row,
+            ) {
+                LimitsModalOutcome::Close => {
+                    self.active_modal = None;
+                    InputOutcome::Changed
+                }
+                LimitsModalOutcome::Changed => InputOutcome::Changed,
+                LimitsModalOutcome::Unchanged => InputOutcome::Unchanged,
+            };
+        }
+
+        // ResetSettingsConfirm: route mouse events through the
+        // modal-window chrome.
         if let Some(ActiveModal::ResetSettingsConfirm { settings_state, .. }) =
             &mut self.active_modal
         {
@@ -2369,20 +2388,6 @@ impl AgentView {
                     &theme,
                     compact,
                     chrono::Utc::now(),
-                );
-            } else if let modal::ActiveModal::MemoryBrowser { state: mem_state } = active_modal {
-                crate::views::memory_modal::render_memory_modal(buf, area, mem_state, compact);
-            } else if let modal::ActiveModal::Limits {
-                state: limits_state,
-            } = active_modal
-            {
-                crate::views::limits_modal::render_limits_modal(
-                    buf,
-                    area,
-                    state,
-                    self.credit_balance.as_ref(),
-                    compact,
-                    &theme,
                 );
             } else if let modal::ActiveModal::MemoryBrowser { state: mem_state } = active_modal {
                 crate::views::memory_modal::render_memory_modal(buf, area, mem_state, compact);

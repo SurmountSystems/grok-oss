@@ -181,7 +181,7 @@ fn tone_color(tone: AllowanceMeterTone, theme: &Theme) -> ratatui::style::Color 
     }
 }
 
-/// Credits is the meter card. Limits is included-period pacing for the week.
+/// Credits is personal credits and console API credits. Limits is the included allowance, the bar, and the short week line.
 const CARD_TABS: &[&str] = &["Credits", "Limits"];
 
 /// Limits tab copy. The status row does not use this phrase.
@@ -200,25 +200,85 @@ fn limits_tab_lines(state: &LimitsModalState, now: DateTime<Utc>) -> Vec<String>
     let Some(included) = state.snapshot.primary.included.as_ref() else {
         return vec!["Pacing for this week is not known yet.".to_string()];
     };
+    let used = included.used_pct_floored();
+    let rem = included.remaining_pct_floored();
+    let allowance = match included.period_label {
+        "Included" => format!("  Included allowance: {used}% used · {rem}% remaining"),
+        other => format!(
+            "  Included {} allowance: {used}% used · {rem}% remaining",
+            other.to_lowercase()
+        ),
+    };
+    let reset = match &included.next_reset_display {
+        Some(text) => format!("  Next reset: {text}"),
+        None => "  Next reset: not known yet".to_string(),
+    };
+    vec![allowance, reset, short_week_line(included, now)]
+}
+
+fn short_week_line(
+    included: &crate::views::limits_snapshot::IncludedAllowanceMeter,
+    now: DateTime<Utc>,
+) -> String {
     if included.period_label != "Weekly" {
-        return vec!["Pacing for this week is not known yet.".to_string()];
+        return "Pacing for this week is not known yet.".to_string();
     }
     let Some(end) = included.next_reset_at else {
-        return vec!["Pacing for this week is not known yet.".to_string()];
+        return "Pacing for this week is not known yet.".to_string();
     };
     let Some(start) = xai_grok_shell::token_economy::resolve_period_start(
         None,
         Some(end),
         Some("USAGE_PERIOD_TYPE_WEEKLY"),
     ) else {
-        return vec!["Pacing for this week is not known yet.".to_string()];
+        return "Pacing for this week is not known yet.".to_string();
     };
     let Some(pacing) =
         xai_grok_shell::token_economy::compute_period_pacing(included.used_pct, start, end, now)
     else {
-        return vec!["Pacing for this week is not known yet.".to_string()];
+        return "Pacing for this week is not known yet.".to_string();
     };
-    vec![linear_week_label(pacing)]
+    linear_week_label(pacing)
+}
+
+fn fmt_card_cents(cents: i64) -> String {
+    let dollars = cents.abs() as f64 / 100.0;
+    if dollars.fract() == 0.0 {
+        format!("${dollars:.0}")
+    } else {
+        format!("${dollars:.2}")
+    }
+}
+
+/// Credits tab body. Personal credits and console API credits only.
+fn credits_tab_lines(state: &LimitsModalState) -> Vec<String> {
+    let personal = match &state.snapshot.primary.dollar_credits {
+        Some(meter) => format!(
+            "  SuperGrok dollar credits: {}",
+            fmt_card_cents(meter.balance_cents)
+        ),
+        None if state.snapshot.primary.dollar_credits_observed => {
+            "  SuperGrok dollar credits: none on file".to_string()
+        }
+        None => "  SuperGrok dollar credits: no data yet".to_string(),
+    };
+    let console = match state.snapshot.console.balance_cents {
+        Some(cents) => format!("  Team prepaid remaining: {}", fmt_card_cents(cents)),
+        None => {
+            let inference_key =
+                state.snapshot.console.key_available || state.snapshot.console.is_live;
+            let gap = if inference_key
+                && state.snapshot.console.prepaid_gap
+                    == crate::views::credit_bar::ConsoleTeamPrepaidGap::MissingManagementKey
+            {
+                "not available"
+            } else {
+                state.snapshot.console.prepaid_gap.as_display_str()
+            };
+            format!("  Team prepaid remaining: {gap}")
+        }
+    };
+    vec![personal, console]
 }
 
 /// Credits tab field names. Console API credits are team prepaid remaining.
@@ -361,11 +421,10 @@ pub fn render_limits_modal(
     });
     let mut display_lines: Vec<String> = Vec::new();
     let mut injected_bar = false;
-    let meter_source = xai_grok_shell::auth::limits_pins::load_limits_pins().meter_source;
     let body = if state.window.active_tab == 1 {
         limits_tab_lines(state, now)
     } else {
-        state.content_lines_emphasizing_meter_source(now, meter_source)
+        credits_tab_lines(state)
     };
     for raw in body {
         let is_allowance_meter = is_included_allowance_used_line(&raw);
@@ -402,7 +461,7 @@ pub fn render_limits_modal(
         if text.as_str() == REMAINING_BAR_SENTINEL {
             if let Some((rem, tone)) = primary_bar {
                 // Tracked bar: brackets + ░ empty so remaining extent is obvious.
-                let bar_w = content.width.saturating_sub(2).min(34);
+                let bar_w = content.width.saturating_sub(2);
                 if bar_w >= 4 {
                     let fg = tone_color(tone, theme);
                     let spans =
@@ -638,7 +697,7 @@ mod tests {
         assert!(!joined.contains("Path:"), "Path: wording retired: {joined}");
         // Short Balance gap only — no Management Key lecture wall.
         assert!(
-            joined.contains("Team prepaid remaining: no management key"),
+            joined.contains("Team prepaid remaining: not available"),
             "short balance gap: {joined}"
         );
         assert!(
@@ -686,6 +745,161 @@ mod tests {
         );
     }
 
+    #[test]
+    fn remaining_bar_at_60_percent_fills_60_percent_of_the_track() {
+        let reset = DateTime::parse_from_rfc3339("2026-08-08T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let now = DateTime::parse_from_rfc3339("2026-08-04T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let bal = weekly_bal(40.0, reset);
+        let snap =
+            LimitsSnapshot::from_billing(Some(&bal), None, SamplingIdentityKind::SuperGrokSession);
+        let mut state = LimitsModalState::new(snap);
+        let theme = Theme::default();
+        let area = Rect::new(0, 0, 160, 40);
+        let mut painted = String::new();
+        for tab in 0..2 {
+            state.window.active_tab = tab;
+            let mut buf = Buffer::empty(area);
+            render_limits_modal(&mut buf, area, &mut state, &theme, false, now);
+            for y in 0..area.height {
+                for x in 0..area.width {
+                    painted.push_str(buf[(x, y)].symbol());
+                }
+                painted.push('\n');
+            }
+        }
+        assert!(
+            painted.contains("40% used · 60% remaining"),
+            "allowance line:\n{painted}"
+        );
+        let mut saw_wide_track = false;
+        for row in painted.lines() {
+            let Some(open) = row.find('[') else {
+                continue;
+            };
+            let Some(close) = row.rfind(']') else {
+                continue;
+            };
+            if close <= open + 1 {
+                continue;
+            }
+            let inner: Vec<char> = row[open + 1..close].chars().collect();
+            let looks_like_bar = inner
+                .iter()
+                .any(|glyph| matches!(*glyph, '█' | '░' | '▏' | '▎' | '▍' | '▌' | '▋' | '▊' | '▉'));
+            if !looks_like_bar {
+                continue;
+            }
+            let inner_width = inner.len();
+            assert!(
+                inner_width > 34,
+                "track must be wider than the 34-cell cap, got {inner_width}: {row}"
+            );
+            let filled = inner.iter().filter(|glyph| **glyph != '░').count();
+            let expected = inner_width as f64 * 0.60;
+            let delta = (filled as f64 - expected).abs();
+            assert!(
+                delta <= 1.0,
+                "filled {filled} of {inner_width} should be about 60 percent of the track: {row}"
+            );
+            saw_wide_track = true;
+        }
+        assert!(saw_wide_track, "no remaining track:\n{painted}");
+    }
+
+    #[test]
+    fn limits_tab_shows_the_allowance_and_the_bar_and_credits_tab_shows_only_the_two_balances() {
+        let reset = DateTime::parse_from_rfc3339("2026-08-08T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let now = DateTime::parse_from_rfc3339("2026-08-04T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let mut bal = weekly_bal(40.0, reset);
+        bal.prepaid_balance_cents = Some(4321);
+        let snap =
+            LimitsSnapshot::from_billing(Some(&bal), None, SamplingIdentityKind::SuperGrokSession)
+                .with_console_balance_cents(Some(8900));
+        let mut state = LimitsModalState::new(snap);
+        let theme = Theme::default();
+        let area = Rect::new(0, 0, 160, 40);
+        let paint_tab = |state: &mut LimitsModalState, tab: usize| -> String {
+            state.window.active_tab = tab;
+            let mut buf = Buffer::empty(area);
+            render_limits_modal(&mut buf, area, state, &theme, false, now);
+            (0..area.height)
+                .map(|y| {
+                    (0..area.width)
+                        .map(|x| buf[(x, y)].symbol())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let limits = paint_tab(&mut state, 1);
+        assert!(
+            limits.contains("40% used · 60% remaining"),
+            "Limits tab allowance:\n{limits}"
+        );
+        assert!(
+            limits.contains("Next reset:"),
+            "Limits tab reset:\n{limits}"
+        );
+        assert!(
+            limits.contains("behind a linear week") || limits.contains("ahead of a linear week"),
+            "Limits tab short week line:\n{limits}"
+        );
+        assert!(
+            limits.contains("10% behind a linear week"),
+            "halfway through the week at 40% used is 10% behind a linear week:\n{limits}"
+        );
+        let saw_bar = limits.lines().any(|row| {
+            row.contains('[') && row.contains(']') && (row.contains('█') || row.contains('░'))
+        });
+        assert!(saw_bar, "Limits tab bar:\n{limits}");
+        assert!(
+            !limits.contains("Personal credits"),
+            "Limits tab must not show personal credits:\n{limits}"
+        );
+        assert!(
+            !limits.contains("behind linear burn"),
+            "Limits tab must not show the long burn note:\n{limits}"
+        );
+        let credits = paint_tab(&mut state, 0);
+        assert!(
+            credits.contains("Personal credits"),
+            "Credits tab personal:\n{credits}"
+        );
+        assert!(
+            credits.contains("Console API credits"),
+            "Credits tab console:\n{credits}"
+        );
+        assert!(
+            !credits.contains("allowance:"),
+            "Credits tab must not show the allowance:\n{credits}"
+        );
+        assert!(
+            !credits.contains('█') && !credits.contains('░'),
+            "Credits tab must not show the bar:\n{credits}"
+        );
+        for banned in [
+            "Next reset:",
+            "linear week",
+            "behind linear burn",
+            "Live sampling:",
+            "Auto topup",
+            "Note:",
+        ] {
+            assert!(
+                !credits.contains(banned),
+                "Credits tab is only the two balances, not {banned}:\n{credits}"
+            );
+        }
+    }
+
     /// Named contract: remaining bar paints track end bounds (`[` `]`) and
     /// visible empty track cells (`░`), not space-only fill that hides max extent.
     #[test]
@@ -702,6 +916,7 @@ mod tests {
         let mut state = LimitsModalState::new(snap);
         let theme = Theme::default();
         let area = Rect::new(0, 0, 80, 30);
+        state.window.active_tab = 1;
         let mut buf = Buffer::empty(area);
         render_limits_modal(&mut buf, area, &mut state, &theme, false, now);
 
@@ -1941,5 +2156,569 @@ mod tests {
             !invented_clock,
             "a missing period end must not invent a clock:\n{missing}"
         );
+    }
+    fn card_text(buf: &Buffer, area: Rect) -> String {
+        (0..area.height)
+            .map(|y| {
+                (0..area.width)
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn recorded_spend_point(
+        buf: &Buffer,
+        agent: &crate::app::agent_view::AgentView,
+        label: &str,
+    ) -> (u16, u16) {
+        let hits = match agent.active_modal.as_ref() {
+            Some(crate::views::modal::ActiveModal::Limits { state }) => &state.window.shortcut_hits,
+            _ => panic!("limits card stays open"),
+        };
+        let text_of = |rect: Rect| -> String {
+            (0..rect.width)
+                .map(|dx| buf[(rect.x.saturating_add(dx), rect.y)].symbol())
+                .collect::<String>()
+                .trim()
+                .to_string()
+        };
+        let texts: Vec<String> = hits.iter().map(|hit| text_of(hit.rect)).collect();
+        let hit = hits
+            .iter()
+            .find(|hit| hit.clickable && text_of(hit.rect) == label)
+            .unwrap_or_else(|| panic!("recorded shortcut rect for {label}; painted {texts:?}"));
+        (hit.rect.x, hit.rect.y)
+    }
+
+    /// A click on the painted spend button goes through the app mouse handler.
+    /// Use credits selects console API credits and does not spend personal
+    /// credits. Use limits selects included period limits.
+    #[test]
+    fn click_on_the_painted_spend_button_changes_the_next_request() {
+        use crossterm::event::{Event, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+        use xai_grok_shell::auth::limits_pins::{
+            MeterSource, apply_limits_pins_to_sampler_config, load_limits_pins,
+        };
+        use xai_grok_shell::auth::{
+            LimitsSnapshotDocument, LimitsSnapshotManagement, read_limits_snapshot_file,
+            write_limits_snapshot_file,
+        };
+        use xai_grok_shell::sampling::SamplerConfig;
+
+        struct EnvGuard {
+            prev_home: Option<std::ffi::OsString>,
+        }
+        impl Drop for EnvGuard {
+            fn drop(&mut self) {
+                // Safety: this test runs alone (`--test-threads=1`) and restores GROK_HOME.
+                unsafe {
+                    match self.prev_home.take() {
+                        Some(value) => std::env::set_var("GROK_HOME", value),
+                        None => std::env::remove_var("GROK_HOME"),
+                    }
+                }
+            }
+        }
+
+        let home = tempfile::TempDir::new().expect("temp GROK_HOME");
+        let _env = EnvGuard {
+            prev_home: std::env::var_os("GROK_HOME"),
+        };
+        // Safety: restored by EnvGuard. No stock preferred_method file is written.
+        unsafe {
+            std::env::set_var("GROK_HOME", home.path());
+        }
+
+        let personal_cents = 4321_i64;
+        let console_prepaid_cents = 8900_i64;
+        let session_key = "included-period-session-token";
+        let console_key = "console-api-credits-key";
+        let end = DateTime::parse_from_rfc3339("2026-08-08T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let mut bal = weekly_bal(28.0, end);
+        bal.prepaid_balance_cents = Some(personal_cents);
+        assert_eq!(bal.usage_pct, 28.0, "included period limits still remain");
+
+        let mut doc = LimitsSnapshotDocument::empty(1);
+        doc.management = Some(LimitsSnapshotManagement {
+            prepaid_cents: Some(console_prepaid_cents),
+            ..Default::default()
+        });
+        write_limits_snapshot_file(home.path(), &doc).expect("console prepaid snapshot");
+        assert!(
+            !home.path().join("limits_pins.json").exists(),
+            "this click starts with no meter pin"
+        );
+
+        let snap =
+            LimitsSnapshot::from_billing(Some(&bal), None, SamplingIdentityKind::SuperGrokSession)
+                .with_console_balance_cents(Some(console_prepaid_cents));
+        let _theme = crate::theme::cache::pin_theme();
+        let registry = crate::actions::ActionRegistry::defaults();
+        let mut agent = crate::app::agent_view::test_fixtures::make_agent();
+        agent.active_modal = Some(crate::views::modal::ActiveModal::Limits {
+            state: Box::new(LimitsModalState::new(snap)),
+        });
+        let area = Rect::new(0, 0, 100, 40);
+        let paint = |agent: &mut crate::app::agent_view::AgentView| -> Buffer {
+            let mut buf = Buffer::empty(area);
+            agent.draw_active_modal(area, &mut buf, Theme::default(), false);
+            buf
+        };
+        let session_primary = || SamplerConfig {
+            api_key: Some(session_key.into()),
+            failover_api_keys: vec![console_key.into()],
+            base_url: "https://cli-chat-proxy.grok.com/v1".into(),
+            model: "grok-4".into(),
+            session_identity_key: Some(session_key.into()),
+            failover_base_url: Some("https://api.x.ai/v1".into()),
+            session_base_url: Some("https://cli-chat-proxy.grok.com/v1".into()),
+            ..Default::default()
+        };
+        let deliver = |agent: &mut crate::app::agent_view::AgentView, column: u16, row: u16| {
+            agent.handle_input(
+                &Event::Mouse(MouseEvent {
+                    kind: MouseEventKind::Down(MouseButton::Left),
+                    column,
+                    row,
+                    modifiers: KeyModifiers::NONE,
+                }),
+                &registry,
+            );
+        };
+
+        let buf = paint(&mut agent);
+        let card = card_text(&buf, area);
+        assert!(card.contains("Using limits"), "{card}");
+        assert!(card.contains("Use credits"), "{card}");
+        let (column, row) = recorded_spend_point(&buf, &agent, "Use credits");
+        deliver(&mut agent, column, row);
+
+        let pins = load_limits_pins();
+        assert!(!pins.use_console, "Use credits must not set use_console");
+        assert_eq!(pins.meter_source, Some(MeterSource::Console));
+        assert_ne!(pins.meter_source, Some(MeterSource::DollarCredits));
+        let Some(crate::views::modal::ActiveModal::Limits { state }) = agent.active_modal.as_ref()
+        else {
+            panic!("limits card stays open after Use credits");
+        };
+        assert_eq!(
+            state
+                .snapshot
+                .primary
+                .dollar_credits
+                .as_ref()
+                .map(|meter| meter.balance_cents),
+            Some(personal_cents),
+            "Use credits must not spend personal credits"
+        );
+        assert_eq!(bal.prepaid_balance_cents, Some(personal_cents));
+        assert_eq!(
+            read_limits_snapshot_file(home.path())
+                .and_then(|saved| saved.management)
+                .and_then(|mgmt| mgmt.prepaid_cents),
+            Some(console_prepaid_cents)
+        );
+        let mut next = session_primary();
+        apply_limits_pins_to_sampler_config(&mut next);
+        assert_eq!(
+            next.api_key.as_deref(),
+            Some(console_key),
+            "Use credits makes the next request use console API credits while included period limits remain"
+        );
+        assert!(next.base_url.contains("api.x.ai"), "{}", next.base_url);
+        assert_ne!(next.api_key.as_deref(), Some(session_key));
+
+        let buf = paint(&mut agent);
+        let using_credits = card_text(&buf, area);
+        assert!(using_credits.contains("Using credits"), "{using_credits}");
+        assert!(using_credits.contains("Use limits"), "{using_credits}");
+        let (column, row) = recorded_spend_point(&buf, &agent, "Use limits");
+        deliver(&mut agent, column, row);
+        let pins = load_limits_pins();
+        assert!(!pins.use_console);
+        assert_eq!(pins.meter_source, Some(MeterSource::Included));
+        assert_ne!(pins.meter_source, Some(MeterSource::DollarCredits));
+        apply_limits_pins_to_sampler_config(&mut next);
+        assert_eq!(
+            next.api_key.as_deref(),
+            Some(session_key),
+            "Use limits makes the next request use included period limits"
+        );
+        assert!(
+            next.base_url.contains("cli-chat-proxy"),
+            "{}",
+            next.base_url
+        );
+        assert_eq!(bal.prepaid_balance_cents, Some(personal_cents));
+    }
+
+    /// No pin file. The card says `Using limits`. The next request uses
+    /// included period limits. A meter pin that is already set stays set.
+    #[test]
+    fn missing_meter_pin_defaults_to_included_limits() {
+        use xai_grok_shell::auth::limits_pins::{
+            MeterSource, apply_limits_pins_to_sampler_config, apply_meter_source, load_limits_pins,
+        };
+        use xai_grok_shell::auth::{
+            LimitsSnapshotDocument, LimitsSnapshotManagement, write_limits_snapshot_file,
+        };
+        use xai_grok_shell::sampling::SamplerConfig;
+
+        struct EnvGuard {
+            prev_home: Option<std::ffi::OsString>,
+        }
+        impl Drop for EnvGuard {
+            fn drop(&mut self) {
+                // Safety: this test runs alone (`--test-threads=1`) and restores GROK_HOME.
+                unsafe {
+                    match self.prev_home.take() {
+                        Some(value) => std::env::set_var("GROK_HOME", value),
+                        None => std::env::remove_var("GROK_HOME"),
+                    }
+                }
+            }
+        }
+
+        let home = tempfile::TempDir::new().expect("temp GROK_HOME");
+        let _env = EnvGuard {
+            prev_home: std::env::var_os("GROK_HOME"),
+        };
+        // Safety: restored by EnvGuard. No stock preferred_method file is written.
+        unsafe {
+            std::env::set_var("GROK_HOME", home.path());
+        }
+
+        let personal_cents = 4321_i64;
+        let console_prepaid_cents = 8900_i64;
+        let session_key = "included-period-session-token";
+        let console_key = "console-api-credits-key";
+        let end = DateTime::parse_from_rfc3339("2026-08-08T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let now = DateTime::parse_from_rfc3339("2026-08-04T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let mut bal = weekly_bal(28.0, end);
+        bal.prepaid_balance_cents = Some(personal_cents);
+        assert_eq!(bal.usage_pct, 28.0, "included period limits still remain");
+
+        let mut doc = LimitsSnapshotDocument::empty(1);
+        doc.management = Some(LimitsSnapshotManagement {
+            prepaid_cents: Some(console_prepaid_cents),
+            ..Default::default()
+        });
+        write_limits_snapshot_file(home.path(), &doc).expect("console prepaid snapshot");
+        let snap =
+            LimitsSnapshot::from_billing(Some(&bal), None, SamplingIdentityKind::SuperGrokSession)
+                .with_console_balance_cents(Some(console_prepaid_cents));
+        assert_eq!(
+            snap.console.balance_cents,
+            Some(console_prepaid_cents),
+            "console API credits are available, so the default is not an empty balance"
+        );
+
+        let area = Rect::new(0, 0, 100, 40);
+        let paint = |state: &mut LimitsModalState| -> String {
+            let theme = Theme::default();
+            let mut buf = Buffer::empty(area);
+            render_limits_modal(&mut buf, area, state, &theme, false, now);
+            card_text(&buf, area)
+        };
+        let session_primary = || SamplerConfig {
+            api_key: Some(session_key.into()),
+            failover_api_keys: vec![console_key.into()],
+            base_url: "https://cli-chat-proxy.grok.com/v1".into(),
+            model: "grok-4".into(),
+            session_identity_key: Some(session_key.into()),
+            failover_base_url: Some("https://api.x.ai/v1".into()),
+            session_base_url: Some("https://cli-chat-proxy.grok.com/v1".into()),
+            ..Default::default()
+        };
+        let console_primary = || SamplerConfig {
+            api_key: Some(console_key.into()),
+            failover_api_keys: vec![session_key.into()],
+            base_url: "https://api.x.ai/v1".into(),
+            model: "grok-4".into(),
+            session_identity_key: Some(session_key.into()),
+            failover_base_url: Some("https://api.x.ai/v1".into()),
+            session_base_url: Some("https://cli-chat-proxy.grok.com/v1".into()),
+            ..Default::default()
+        };
+
+        apply_meter_source(MeterSource::Console).expect("existing meter pin");
+        let pinned = load_limits_pins();
+        assert_eq!(pinned.meter_source, Some(MeterSource::Console));
+        assert!(!pinned.use_console);
+        let mut state = LimitsModalState::new(snap);
+        let _while_pinned = paint(&mut state);
+        let mut honored = session_primary();
+        apply_limits_pins_to_sampler_config(&mut honored);
+        assert_eq!(honored.api_key.as_deref(), Some(console_key));
+        assert_eq!(
+            load_limits_pins(),
+            pinned,
+            "a meter pin that is already set must not be cleared"
+        );
+
+        std::fs::remove_file(home.path().join("limits_pins.json")).expect("no pin file");
+        assert_eq!(load_limits_pins().meter_source, None);
+        let card = paint(&mut state);
+        assert!(card.contains("Using limits"), "{card}");
+        assert!(!card.contains("Using credits"), "{card}");
+        let mut next = console_primary();
+        apply_limits_pins_to_sampler_config(&mut next);
+        assert_eq!(
+            next.api_key.as_deref(),
+            Some(session_key),
+            "a missing meter pin uses included period limits for the next request"
+        );
+        assert!(
+            next.base_url.contains("cli-chat-proxy"),
+            "{}",
+            next.base_url
+        );
+        assert_ne!(next.api_key.as_deref(), Some(console_key));
+        assert_eq!(bal.prepaid_balance_cents, Some(personal_cents));
+        assert!(!load_limits_pins().use_console);
+        assert_ne!(
+            load_limits_pins().meter_source,
+            Some(MeterSource::DollarCredits)
+        );
+    }
+
+    /// Named contract: console API credits balance and spend use the console
+    /// inference key. No management key. A fixture of 90035 cents paints
+    /// Console API credits and $900.35, and Use credits sends that inference
+    /// key. Personal cents stay unchanged.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn console_api_credits_balance_and_spend_without_a_management_key() {
+        use std::io::{Read, Write};
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::{Arc, Mutex};
+        use xai_grok_shell::auth::credentials_store::FORCE_FILE_ENV;
+        use xai_grok_shell::auth::limits_pins::{
+            apply_limits_pins_to_sampler_config, load_limits_pins,
+        };
+        use xai_grok_shell::auth::{
+            LimitsSnapshotDocument, clear_console_team_prepaid_cache,
+            fetch_management_into_snapshot, write_limits_snapshot_file,
+        };
+        use xai_grok_shell::sampling::SamplerConfig;
+        use xai_grok_test_support::EnvGuard;
+
+        let inference_key = "inference-key-90035";
+        let session_key = "included-period-session-token";
+        let personal_cents = 4321_i64;
+        let home = tempfile::TempDir::new().expect("temp GROK_HOME");
+        let _home = EnvGuard::set("GROK_HOME", home.path());
+        let _force = EnvGuard::set(FORCE_FILE_ENV, "1");
+        let _mgmt = EnvGuard::unset("XAI_MANAGEMENT_API_KEY");
+        let _legacy = EnvGuard::unset("GROK_CODE_XAI_API_KEY");
+        let _team = EnvGuard::unset("XAI_MANAGEMENT_TEAM_ID");
+        let _key = EnvGuard::set("XAI_API_KEY", inference_key);
+        clear_console_team_prepaid_cache();
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let paths = Arc::new(Mutex::new(Vec::<String>::new()));
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind fixture");
+        listener.set_nonblocking(true).expect("nonblocking");
+        let port = listener.local_addr().expect("port").port();
+        let stop_thread = Arc::clone(&stop);
+        let paths_thread = Arc::clone(&paths);
+        let server = std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            while !stop_thread.load(Ordering::SeqCst) && std::time::Instant::now() < deadline {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(2)));
+                        let mut buf = Vec::new();
+                        let mut tmp = [0u8; 2048];
+                        let read_deadline =
+                            std::time::Instant::now() + std::time::Duration::from_secs(2);
+                        while std::time::Instant::now() < read_deadline {
+                            match stream.read(&mut tmp) {
+                                Ok(0) => break,
+                                Ok(n) => {
+                                    buf.extend_from_slice(&tmp[..n]);
+                                    if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                                        break;
+                                    }
+                                }
+                                Err(_) => break,
+                            }
+                        }
+                        let req = String::from_utf8_lossy(&buf);
+                        let first = req.lines().next().unwrap_or("").to_string();
+                        if let Ok(mut seen) = paths_thread.lock() {
+                            seen.push(first.clone());
+                        }
+                        let authed = req
+                            .to_ascii_lowercase()
+                            .contains(&format!("bearer {inference_key}"));
+                        let (status, body) = if !authed {
+                            ("401 Unauthorized", r#"{"error":"unauthorized"}"#)
+                        } else if first.contains("GET /v1/api-key ") {
+                            (
+                                "200 OK",
+                                r#"{"team_id":"team-inference-90035","api_key_blocked":false}"#,
+                            )
+                        } else if first
+                            .contains("GET /v1/billing/teams/team-inference-90035/prepaid/balance ")
+                        {
+                            ("200 OK", r#"{"total":{"val":"90035"},"changes":[]}"#)
+                        } else {
+                            ("404 Not Found", r#"{"error":"not found"}"#)
+                        };
+                        let resp = format!(
+                            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                            body.len()
+                        );
+                        let _ = stream.write_all(resp.as_bytes());
+                    }
+                    Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+        let base = format!("http://127.0.0.1:{port}/v1");
+        let _base = EnvGuard::set("GROK_XAI_API_BASE_URL", &base);
+
+        let fetched = fetch_management_into_snapshot().await;
+        let cents = fetched.as_ref().and_then(|mgmt| mgmt.prepaid_cents);
+        assert_eq!(
+            cents,
+            Some(90035),
+            "console API credits must be read with the inference key, not a management key"
+        );
+        let seen = paths
+            .lock()
+            .expect("paths")
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            seen.contains("GET /v1/api-key "),
+            "balance read must ask api.x.ai for the team id: {seen}"
+        );
+        assert!(
+            seen.contains("/prepaid/balance"),
+            "balance read must use the inference host: {seen}"
+        );
+        assert!(
+            !seen.contains("management-api"),
+            "must not call management-api.x.ai for console API credits: {seen}"
+        );
+
+        let mut doc = LimitsSnapshotDocument::empty(1);
+        doc.management = fetched;
+        write_limits_snapshot_file(home.path(), &doc).expect("write fetched balance");
+
+        let end = DateTime::parse_from_rfc3339("2026-08-08T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let now = DateTime::parse_from_rfc3339("2026-08-04T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let mut bal = weekly_bal(28.0, end);
+        bal.prepaid_balance_cents = Some(personal_cents);
+        let snap =
+            LimitsSnapshot::from_billing(Some(&bal), None, SamplingIdentityKind::SuperGrokSession)
+                .with_console_balance_cents(cents)
+                .with_console_key_available(true);
+        let mut state = LimitsModalState::new(snap);
+        let theme = Theme::default();
+        let area = Rect::new(0, 0, 100, 40);
+        let mut buf = Buffer::empty(area);
+        render_limits_modal(&mut buf, area, &mut state, &theme, false, now);
+        let painted = (0..area.height)
+            .map(|y| {
+                (0..area.width)
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            painted.contains("Console API credits"),
+            "Credits tab names console API credits: {painted}"
+        );
+        assert!(
+            painted.contains("$900.35"),
+            "90035 cents is $900.35: {painted}"
+        );
+        assert!(
+            !painted.contains("no management key"),
+            "Credits tab must not say no management key when the balance is known: {painted}"
+        );
+
+        let hit = state
+            .window
+            .shortcut_hits
+            .iter()
+            .find(|hit| hit.clickable && hit.id == SPEND_OTHER_CHOICE_ID)
+            .map(|hit| hit.rect)
+            .expect("Use credits is a button");
+        let outcome = handle_limits_mouse(
+            &mut state,
+            crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            hit.x,
+            hit.y,
+        );
+        assert_eq!(outcome, LimitsModalOutcome::Changed);
+        let mut next = SamplerConfig {
+            api_key: Some(session_key.into()),
+            failover_api_keys: Vec::new(),
+            base_url: "https://cli-chat-proxy.grok.com/v1".into(),
+            model: "grok-4".into(),
+            session_identity_key: Some(session_key.into()),
+            failover_base_url: Some("https://api.x.ai/v1".into()),
+            session_base_url: Some("https://cli-chat-proxy.grok.com/v1".into()),
+            ..Default::default()
+        };
+        apply_limits_pins_to_sampler_config(&mut next);
+        assert_eq!(
+            next.api_key.as_deref(),
+            Some(inference_key),
+            "Use credits sets the next request to the console inference key"
+        );
+        assert_ne!(next.api_key.as_deref(), Some(session_key));
+        assert!(next.base_url.contains("api.x.ai"), "{}", next.base_url);
+        assert_eq!(bal.prepaid_balance_cents, Some(personal_cents));
+        assert!(!load_limits_pins().use_console);
+
+        let gap =
+            LimitsSnapshot::from_billing(Some(&bal), None, SamplingIdentityKind::SuperGrokSession)
+                .with_console_key_available(true)
+                .with_console_prepaid_gap(ConsoleTeamPrepaidGap::MissingManagementKey);
+        let mut gap_state = LimitsModalState::new(gap);
+        let mut gap_buf = Buffer::empty(area);
+        render_limits_modal(&mut gap_buf, area, &mut gap_state, &theme, false, now);
+        let gap_paint = (0..area.height)
+            .map(|y| {
+                (0..area.width)
+                    .map(|x| gap_buf[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !gap_paint.contains("no management key"),
+            "an inference key must not paint no management key: {gap_paint}"
+        );
+        assert!(
+            gap_paint.contains("Console API credits: not available"),
+            "no balance yet is not available, not an invented dollar amount: {gap_paint}"
+        );
+
+        stop.store(true, Ordering::SeqCst);
+        let _ = server.join();
     }
 }

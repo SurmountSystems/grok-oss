@@ -205,20 +205,10 @@ impl AgentView {
         }
         self.view_plan_requested = true;
         self.snapshot_or_clear_plan_feedback_draft();
-        let title = if let Some(text) = feature.as_deref() {
-            let filename = format!(
-                "{}-{}.md",
-                thoughtful_feature_slug(text),
-                xai_grok_tools::util::ulid::mint()
-            );
-            let dir = self.session.cwd.join("docs").join("features");
-            let _ = std::fs::create_dir_all(&dir);
-            let file_body = planned.as_deref().unwrap_or(text);
-            let _ = std::fs::write(dir.join(&filename), file_body);
-            filename
-        } else {
-            xai_grok_shell::grok_oss::SECONDARY_PLAN_IDENTITY.to_string()
-        };
+        let title = xai_grok_shell::grok_oss::SECONDARY_PLAN_IDENTITY.to_string();
+        if feature.is_some() {
+            self.write_session_plan_markdown(&title, &body);
+        }
         self.paint_secondary_isolated_preview(body.clone(), &title);
         if feature.is_some() {
             self.persist_session_plan_body_for(
@@ -283,11 +273,24 @@ impl AgentView {
 
     /// A soft-plan present that is only the Operator prompt, or only a
     /// Job/State/Operator status recap, is not the document. Repaint the
-    /// feature plan that `/plan --soft` wrote, and do not add a second file.
+    /// session plan that `/plan --soft` wrote. Do not write `docs/features`.
     pub(crate) fn restore_soft_feature_plan_over_prompt_or_status(&mut self) {
-        let dir = self.session.cwd.join("docs").join("features");
-        let Some((filename, body)) = load_soft_feature_plan(&dir) else {
+        let filename = xai_grok_shell::grok_oss::SECONDARY_PLAN_IDENTITY.to_string();
+        let Some(path) = self.session_plan_markdown_path(&filename) else {
             return;
+        };
+        let Ok(on_disk) = std::fs::read_to_string(&path) else {
+            return;
+        };
+        if on_disk.trim().is_empty() {
+            return;
+        }
+        let body = if feature_plan_states_the_work(&on_disk) {
+            on_disk
+        } else {
+            let planned = compose_soft_feature_plan(&on_disk);
+            self.write_session_plan_markdown(&filename, &planned);
+            planned
         };
         if let Some(pav) = self.plan_approval_view.as_mut() {
             pav.plan_content = Some(body.clone());
@@ -307,6 +310,29 @@ impl AgentView {
             plan.feedback_active = self.plan_approval_view.is_some();
         }
     }
+
+    fn session_plan_markdown_path(&self, plan_identity: &str) -> Option<std::path::PathBuf> {
+        let session_id = self.session.session_id.as_ref()?;
+        let cwd_str = self.session.cwd.to_string_lossy();
+        let encoded = urlencoding::encode(&cwd_str);
+        Some(
+            xai_grok_shell::util::grok_home::grok_home()
+                .join("sessions")
+                .join(encoded.as_ref())
+                .join(session_id.0.as_ref())
+                .join(plan_identity),
+        )
+    }
+
+    fn write_session_plan_markdown(&self, plan_identity: &str, body: &str) {
+        let Some(path) = self.session_plan_markdown_path(plan_identity) else {
+            return;
+        };
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(path, body);
+    }
 }
 
 /// True when this present must not become the feature document.
@@ -321,62 +347,6 @@ pub(crate) fn soft_present_should_keep_feature_plan(body: &str) -> bool {
     // can still show the document it wrote. Unheaded text that does not
     // plan the work is the Operator prompt, or a wrap of that prompt.
     !body.trim_start().starts_with('#')
-}
-
-fn load_soft_feature_plan(dir: &std::path::Path) -> Option<(String, String)> {
-    let (name, body) = newest_feature_markdown(dir)?;
-    if feature_plan_states_the_work(&body) {
-        return Some((name, body));
-    }
-    let planned = compose_soft_feature_plan(&body);
-    let _ = std::fs::write(dir.join(&name), &planned);
-    Some((name, planned))
-}
-
-fn newest_feature_markdown(dir: &std::path::Path) -> Option<(String, String)> {
-    let mut best: Option<(std::time::SystemTime, String, String)> = None;
-    let entries = std::fs::read_dir(dir).ok()?;
-    for entry in entries.flatten() {
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if !feature_filename_has_crockford_ulid(&name) {
-            continue;
-        }
-        let modified = entry
-            .metadata()
-            .and_then(|meta| meta.modified())
-            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
-        let body = std::fs::read_to_string(entry.path()).unwrap_or_default();
-        let replace = match &best {
-            None => true,
-            Some((when, _, _)) => modified >= *when,
-        };
-        if replace {
-            best = Some((modified, name, body));
-        }
-    }
-    best.map(|(_, name, body)| (name, body))
-}
-
-fn feature_filename_has_crockford_ulid(name: &str) -> bool {
-    const CROCKFORD: &[u8] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
-    let Some(stem) = name.strip_suffix(".md") else {
-        return false;
-    };
-    let Some((slug, ulid)) = stem.rsplit_once('-') else {
-        return false;
-    };
-    !slug.is_empty() && ulid.len() == 26 && ulid.bytes().all(|byte| CROCKFORD.contains(&byte))
-}
-
-/// First six words. The filename names the feature. It does not paste the
-/// whole Operator prompt.
-fn thoughtful_feature_slug(prompt: &str) -> String {
-    let words = thoughtful_words(prompt);
-    if words.is_empty() {
-        "feature".to_string()
-    } else {
-        words.join("-")
-    }
 }
 
 fn thoughtful_words(prompt: &str) -> Vec<String> {
@@ -410,13 +380,17 @@ fn thoughtful_title(prompt: &str) -> String {
     }
     title
 }
-
 /// Plan the work. Do not copy the Operator prompt in as the document.
 /// A short request stays visible so an earlier seed such as "add feature"
 /// still appears. A long prompt is not pasted, and a status recap is not
 /// pasted. The sentences state what is wrong, what will change, the files,
 /// what the Operator will see, and which test proves it.
+/// A `/limits` menu with no use-limits row plans that menu. A different
+/// short request, such as "add feature", is not rewritten into that plan.
 fn compose_soft_feature_plan(operator_prompt: &str) -> String {
+    if prompt_is_limits_menu_missing_use_limits_row(operator_prompt) {
+        return compose_limits_menu_feature_plan(operator_prompt);
+    }
     let title = thoughtful_title(operator_prompt);
     let topic_words = thoughtful_words(operator_prompt);
     let topic = if topic_words.is_empty() {
@@ -433,11 +407,28 @@ fn compose_soft_feature_plan(operator_prompt: &str) -> String {
         };
     format!(
         "# {title}\n\n\
-         What is wrong is that a soft plan would store the Operator prompt or a status recap instead of planning {topic}.\n\n\
-         What will change is that the product writes this feature plan and starts the named work only after Approve.{request_sentence}\n\n\
-         The files that change are docs/features and crates/codegen/xai-grok-pager/src/slash/commands/plan.rs.\n\n\
-         The Operator will see the feature filename as the pane title and will see this plan instead of a status recap.\n\n\
-         The test soft_plan_presentation_creates_a_feature_file_and_does_not_start_until_approve proves it.\n"
+         What is wrong is that a soft plan would store the Operator prompt or a status recap and would not plan {topic}.\n\n\
+         What will change is that the product writes this plan in the session file and starts the named work only after Approve.{request_sentence}\n\n\
+         The files that change are the session plan file and crates/codegen/xai-grok-pager/src/slash/commands/plan.rs.\n\n\
+         The Operator will see the session plan in Isolated Preview and will see this plan, not a status recap.\n\n\
+         The test soft_plan_does_not_write_a_file_under_docs_features proves it.\n"
+    )
+}
+
+fn prompt_is_limits_menu_missing_use_limits_row(prompt: &str) -> bool {
+    let lower = prompt.to_ascii_lowercase();
+    lower.contains("use-limits") && (lower.contains("/limits") || lower.contains("limits menu"))
+}
+
+fn compose_limits_menu_feature_plan(operator_prompt: &str) -> String {
+    let title = thoughtful_title(operator_prompt);
+    format!(
+        "# {title}\n\n\
+         What is wrong is that the /limits menu has no use-limits row and the descriptions do not say what is spent.\n\n\
+         What will change is that the /limits menu gains a use-limits row and the descriptions say what is spent. Work starts only after Approve.\n\n\
+         The files that change are crates/codegen/xai-grok-pager/src/slash/commands/limits.rs.\n\n\
+         The Operator will see the use-limits row and will see what is spent.\n\n\
+         The test soft_plan_for_the_limits_menu_plans_use_limits_and_does_not_repeat_the_canned_template proves it.\n"
     )
 }
 

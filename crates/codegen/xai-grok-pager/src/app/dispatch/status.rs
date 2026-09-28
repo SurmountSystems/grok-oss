@@ -40,6 +40,7 @@ pub(super) fn usage_modal_state_mut(
 
 /// Open (or re-tab) the usage/session-info modal and fire the fetch effects that populate it.
 /// Full-TUI only; minimal mode keeps scrollback blocks.
+/// The dashboard opens the session-less modal. Any other non-agent view does nothing.
 pub(super) fn open_usage_info_modal(
     app: &mut AppView,
     tab: crate::views::usage_modal::UsageInfoTab,
@@ -50,16 +51,6 @@ pub(super) fn open_usage_info_modal(
     if matches!(app.active_view, ActiveView::AgentDashboard) {
         return open_dashboard_usage_modal(app, tab);
     }
-}
-
-/// Open (or re-tab) the usage/session-info modal and fire the fetch effects
-/// that populate it. Full-TUI only — minimal mode keeps scrollback blocks.
-pub(super) fn open_usage_info_modal(
-    app: &mut AppView,
-    tab: crate::views::usage_modal::UsageInfoTab,
-) -> Vec<Effect> {
-    use crate::views::modal::ActiveModal;
-    use crate::views::usage_modal::{UsageInfoContext, UsageInfoModalState};
 
     let ActiveView::Agent(id) = app.active_view else {
         return vec![];
@@ -346,11 +337,11 @@ pub(super) fn dispatch_show_context_info(app: &mut AppView) -> Vec<Effect> {
     }]
 }
 
-/// `/usage`: open the usage modal on its "Usage limit" tab.
-/// Minimal mode keeps the scrollback flow: session token/cost, then consumer credits.
+/// `/usage` opens the usage window on Context usage. Minimal mode
+/// keeps the scrollback flow: session token/cost, then consumer credits.
 pub(super) fn dispatch_show_usage(app: &mut AppView) -> Vec<Effect> {
     if !app.screen_mode.is_minimal() {
-        return open_usage_info_modal(app, crate::views::usage_modal::UsageInfoTab::UsageLimit);
+        return open_usage_info_modal(app, crate::views::usage_modal::UsageInfoTab::ContextUsage);
     }
     let ActiveView::Agent(id) = app.active_view else {
         return vec![];

@@ -4,8 +4,11 @@
 //! directory. Missing or unreadable file is fail-open (no stay pin, no
 //! meter-source pin). Not `[auth]`, not `[token_economy]`, not `grok_oss.db`.
 //! Same words on TUI `/limits` and CLI `grok-oss limits`. Stock
-//! `preferred_method = "api_key"` still pins console. A client 100% /
-//! remaining 0 / $0 printout must not mark SuperGrok used up. Sampler
+//! `preferred_method = "api_key"` still wins over stay-supergrok and
+//! use-personal / use-business. It does not keep the console key when the
+//! card is Using limits. A Console meter pin still spends console API
+//! credits when that balance is available. A client 100% / remaining 0 /
+//! $0 printout must not mark SuperGrok used up. Sampler
 //! reconstruct honors `stay_supergrok` / `use_console` from this sidecar.
 
 use std::fs::{self, File, OpenOptions};
@@ -253,13 +256,16 @@ fn use_console_api_credits_after_real_supergrok_http_402(
 
 /// Honor sidecar `stay_supergrok` / `use_console` / SuperGrok identity pin on
 /// a reconstructed sampler config. Does not write `[auth] preferred_method`.
-/// Stock `preferred_method = "api_key"` still pins console and wins over stay
-/// and `use-personal` / `use-business`. `use-console` switches live identity
+/// Stock `preferred_method = "api_key"` still wins over stay and
+/// `use-personal` / `use-business`. It does not beat Using limits. An
+/// Included pin, or no meter pin, selects the included period session before
+/// that stock key returns. `use-console` switches live identity
 /// without that stock key. A stored console key is enough even when it is not
 /// already in live failover.
 /// A Console meter pin selects console API credits when snapshot team prepaid
-/// remaining is available, and does not set `use_console`. An Included meter
-/// pin, or no meter pin, selects the included period session. While that
+/// remaining is available, even when that stock key is set, and does not set
+/// `use_console`. An Included meter pin, or no meter pin, selects the
+/// included period session. While that
 /// choice is on, a real SuperGrok HTTP 402 and available console API credits
 /// select the console key for the next request. A client 100% printout does
 /// not. A missing console balance keeps the included session and does not
@@ -271,10 +277,29 @@ pub fn apply_limits_pins_to_sampler_config(config: &mut xai_grok_sampler::Sample
     if xai_grok_sampler::withhold_model_request_when_both_refused(config) {
         return;
     }
+    let pins = load_limits_pins();
+    let using_included_limits = pins.meter_source == Some(MeterSource::Included)
+        || (pins.meter_source.is_none()
+            && !pins.use_console
+            && !pins.stay_supergrok
+            && pins.supergrok_identity.is_none());
+    if using_included_limits {
+        if use_console_api_credits_after_real_supergrok_http_402(config) {
+            return;
+        }
+        xai_grok_sampler::prefer_supergrok_identity_for_stay_pin(config);
+        return;
+    }
+    if pins.meter_source == Some(MeterSource::Console) {
+        if console_team_prepaid_available() {
+            inject_stored_console_keys_into_failover(config);
+            xai_grok_sampler::prefer_console_identity_for_use_console_pin(config);
+        }
+        return;
+    }
     if disk_preferred_is_console_primary() {
         return;
     }
-    let pins = load_limits_pins();
     match pins.meter_source {
         Some(MeterSource::Console) => {
             if console_team_prepaid_available() {
@@ -291,8 +316,19 @@ pub fn apply_limits_pins_to_sampler_config(config: &mut xai_grok_sampler::Sample
             return;
         }
         Some(MeterSource::DollarCredits) => {}
-        Some(MeterSource::Combined) | None => {
+        Some(MeterSource::Combined) => {
             if use_console_api_credits_after_real_supergrok_http_402(config) {
+                return;
+            }
+        }
+        None => {
+            if use_console_api_credits_after_real_supergrok_http_402(config) {
+                return;
+            }
+            // Missing meter pin selects included period limits. Do not write
+            // the pin file, and do not clear a pin that is already set.
+            if !pins.use_console && !pins.stay_supergrok && pins.supergrok_identity.is_none() {
+                xai_grok_sampler::prefer_supergrok_identity_for_stay_pin(config);
                 return;
             }
         }
@@ -1205,5 +1241,130 @@ preferred_method = "api_key"
             load_limits_pins().supergrok_identity.is_none(),
             "must not persist a Business pin when no Team login is stored"
         );
+    }
+
+    /// Named contract: an Included pin, or no pin so the card says Using
+    /// limits, puts the SuperGrok session key on the sampler even when stock
+    /// `[auth] preferred_method = "api_key"` would keep the console key.
+    #[test]
+    #[serial_test::serial]
+    fn included_limits_beat_preferred_method_api_key() {
+        let home = TempDir::new().expect("temp grok home");
+        let _env = EnvGuard::set("GROK_HOME", home.path());
+        fs::write(
+            home.path().join("config.toml"),
+            "[auth]\npreferred_method = \"api_key\"\n",
+        )
+        .expect("write stock preferred_method");
+
+        let session = "included-period-session-token";
+        let console = "console-inference-key";
+        save_limits_pins(&LimitsPins {
+            stay_supergrok: false,
+            use_console: false,
+            meter_source: Some(MeterSource::Included),
+            supergrok_identity: None,
+        })
+        .expect("Included pin");
+
+        let mut config = dual_auth_sampler(session, console);
+        config.api_key = Some(console.into());
+        config.failover_api_keys = vec![session.into()];
+        config.base_url = "https://api.x.ai/v1".into();
+        config.bearer_resolver = None;
+        apply_limits_pins_to_sampler_config(&mut config);
+        assert_eq!(
+            config.api_key.as_deref(),
+            Some(session),
+            "Included limits must beat preferred_method=api_key"
+        );
+        assert_ne!(config.api_key.as_deref(), Some(console));
+        assert!(
+            config.base_url.contains("cli-chat-proxy"),
+            "Included limits stay on the SuperGrok session host: {}",
+            config.base_url
+        );
+
+        fs::remove_file(home.path().join(LIMITS_PINS_FILE)).expect("clear pin");
+        assert_eq!(load_limits_pins().meter_source, None);
+        let mut again = dual_auth_sampler(session, console);
+        again.api_key = Some(console.into());
+        again.failover_api_keys = vec![session.into()];
+        again.base_url = "https://api.x.ai/v1".into();
+        again.bearer_resolver = None;
+        apply_limits_pins_to_sampler_config(&mut again);
+        assert_eq!(
+            again.api_key.as_deref(),
+            Some(session),
+            "no meter pin (Using limits) must beat preferred_method=api_key"
+        );
+        assert_ne!(again.api_key.as_deref(), Some(console));
+        assert!(
+            again.base_url.contains("cli-chat-proxy"),
+            "Using limits stays on the SuperGrok session host: {}",
+            again.base_url
+        );
+    }
+
+    /// Named contract: Use credits, then Use limits, with
+    /// `preferred_method = api_key` puts the SuperGrok session key back.
+    #[test]
+    #[serial_test::serial]
+    fn use_limits_after_console_credits_returns_to_the_supergrok_session_despite_api_key() {
+        let home = TempDir::new().expect("temp grok home");
+        let _env = EnvGuard::set("GROK_HOME", home.path());
+        fs::write(
+            home.path().join("config.toml"),
+            "[auth]\npreferred_method = \"api_key\"\n",
+        )
+        .expect("write stock preferred_method");
+
+        let session = "included-period-session-token";
+        let console = "console-inference-key";
+        let mut doc = crate::auth::LimitsSnapshotDocument::empty(1);
+        doc.management = Some(crate::auth::LimitsSnapshotManagement {
+            prepaid_cents: Some(90035),
+            ..Default::default()
+        });
+        crate::auth::write_limits_snapshot_file(home.path(), &doc).expect("prepaid snapshot");
+
+        save_limits_pins(&LimitsPins {
+            stay_supergrok: false,
+            use_console: false,
+            meter_source: Some(MeterSource::Console),
+            supergrok_identity: None,
+        })
+        .expect("Use credits pin");
+
+        let mut config = dual_auth_sampler(session, console);
+        apply_limits_pins_to_sampler_config(&mut config);
+        assert_eq!(
+            config.api_key.as_deref(),
+            Some(console),
+            "Use credits must spend the console inference key despite preferred_method=api_key"
+        );
+        assert!(config.base_url.contains("api.x.ai"), "{}", config.base_url);
+
+        save_limits_pins(&LimitsPins {
+            stay_supergrok: false,
+            use_console: false,
+            meter_source: Some(MeterSource::Included),
+            supergrok_identity: None,
+        })
+        .expect("Use limits pin");
+        apply_limits_pins_to_sampler_config(&mut config);
+        assert_eq!(
+            config.api_key.as_deref(),
+            Some(session),
+            "Use limits must return the SuperGrok session key despite preferred_method=api_key"
+        );
+        assert_ne!(config.api_key.as_deref(), Some(console));
+        assert!(
+            config.base_url.contains("cli-chat-proxy"),
+            "{}",
+            config.base_url
+        );
+        assert!(!load_limits_pins().use_console);
+        assert_eq!(load_limits_pins().meter_source, Some(MeterSource::Included));
     }
 }

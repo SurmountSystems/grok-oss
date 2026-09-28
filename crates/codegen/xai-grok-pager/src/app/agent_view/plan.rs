@@ -194,6 +194,22 @@ impl AgentView {
         if !self.is_plan_viewer() {
             return;
         }
+        let plan_file = self
+            .plan_file_path()
+            .and_then(|path| std::fs::read_to_string(path).ok());
+        if crate::views::plan_approval_view::rewrite_wait_should_yield_to_plan_file(
+            kind,
+            operator_prompt,
+            plan_file.as_deref(),
+            self.isolated_preview_shows_secondary_plan,
+        ) {
+            if let Some(body) = plan_file {
+                self.plan_feedback_in_flight = None;
+                self.isolated_preview_rewrite_wait_prompt = None;
+                self.paint_isolated_preview_from_mill_plan_md(body);
+            }
+            return;
+        }
         self.plan_feedback_in_flight = Some(kind);
         self.isolated_preview_rewrite_wait_prompt = Some(operator_prompt.trim().to_string());
         let body = crate::views::plan_approval_view::isolated_preview_rewrite_wait_markdown(

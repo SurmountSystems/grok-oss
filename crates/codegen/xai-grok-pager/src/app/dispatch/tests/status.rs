@@ -2656,13 +2656,13 @@ fn usage_modal_state(app: &AppView) -> &crate::views::usage_modal::UsageInfoModa
 }
 
 #[test]
-fn show_usage_opens_modal_on_usage_limit_tab_with_fetches() {
+fn show_usage_opens_modal_on_context_usage_with_fetches() {
     let mut app = test_app_with_agent();
     let effects = dispatch(Action::ShowUsage, &mut app);
     let state = usage_modal_state(&app);
     assert_eq!(
         state.active_tab,
-        crate::views::usage_modal::UsageInfoTab::UsageLimit
+        crate::views::usage_modal::UsageInfoTab::ContextUsage
     );
     assert_eq!(state.ctx.session_id.as_deref(), Some("test-session"));
     assert!(state.billing_loading);

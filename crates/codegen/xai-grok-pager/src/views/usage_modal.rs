@@ -29,7 +29,8 @@ pub const COPY_SESSION_ID_SHORTCUT: usize = 1;
 /// Footer shortcut ID for "copy all session info".
 pub const COPY_ALL_SESSION_INFO_SHORTCUT: usize = 2;
 
-/// The three tabs, in display order.
+/// Painted tabs are Context usage and Session info, in that order.
+/// `UsageLimit` is not in [`UsageInfoTab::ALL`], so the window has no Usage limit tab.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UsageInfoTab {
     ContextUsage,
@@ -38,11 +39,7 @@ pub enum UsageInfoTab {
 }
 
 impl UsageInfoTab {
-    pub const ALL: [UsageInfoTab; 3] = [
-        UsageInfoTab::ContextUsage,
-        UsageInfoTab::UsageLimit,
-        UsageInfoTab::SessionInfo,
-    ];
+    pub const ALL: [UsageInfoTab; 2] = [UsageInfoTab::ContextUsage, UsageInfoTab::SessionInfo];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -955,7 +952,7 @@ mod tests {
 
     fn state_with_session() -> UsageInfoModalState {
         UsageInfoModalState::new(
-            UsageInfoTab::UsageLimit,
+            UsageInfoTab::ContextUsage,
             UsageInfoContext {
                 session_id: Some("sid-123".to_string()),
                 usage_visible: true,
@@ -964,6 +961,51 @@ mod tests {
                 subscription_tier: Some("SuperGrok".to_string()),
             },
         )
+    }
+
+    #[test]
+    fn usage_window_from_the_context_figure_has_no_usage_limit_tab() {
+        let area = Rect::new(0, 0, 80, 24);
+        let theme = Theme::current();
+        let mut state = UsageInfoModalState::new(
+            UsageInfoTab::ContextUsage,
+            UsageInfoContext {
+                session_id: Some("sid-123".to_string()),
+                usage_visible: false,
+                chat_kind: false,
+                billing_redirect_url: None,
+                subscription_tier: Some("SuperGrok".to_string()),
+            },
+        );
+        let mut painted = String::new();
+        for _ in 0..UsageInfoTab::ALL.len() {
+            let mut buf = Buffer::empty(area);
+            render_usage_modal(&mut buf, area, &mut state, None, false, &theme);
+            for y in 0..area.height {
+                for x in 0..area.width {
+                    painted.push_str(buf[(x, y)].symbol());
+                }
+                painted.push('\n');
+            }
+            handle_usage_modal_key(&mut state, &key(KeyCode::Tab));
+        }
+        assert!(
+            painted.contains("Context usage"),
+            "context figure opens Context usage:\n{painted}"
+        );
+        assert!(
+            painted.contains("Session info"),
+            "Session info stays:\n{painted}"
+        );
+        assert!(
+            !painted.contains("Usage limit"),
+            "the usage window has no Usage limit tab:\n{painted}"
+        );
+        assert!(
+            !painted.contains("Usage limits are managed by your team."),
+            "that body is gone:\n{painted}"
+        );
+        assert_eq!(state.window.tab_rects.len(), 2);
     }
 
     #[test]
@@ -1003,12 +1045,15 @@ mod tests {
             usage_pct: 50.67,
             effective_usage_pct: 50.67,
             period_end_display: Some("May 29, 00:00".to_string()),
+            period_end_at: None,
             pay_as_you_go: true,
             on_demand_cap_cents: Some(10_000),
             on_demand_used_cents: Some(0),
             prepaid_balance_cents: None,
             period_type: Some("USAGE_PERIOD_TYPE_WEEKLY".to_string()),
             is_unified_billing_user: None,
+            grok_build_usage_pct: None,
+            included_usage_known: true,
         };
         let theme = Theme::current();
         let lines = usage_limit_lines(&state, Some(&bal), &theme);
@@ -1077,7 +1122,6 @@ mod tests {
         let area = Rect::new(0, 0, 80, 24);
         let mut buf = Buffer::empty(area);
         let mut state = state_with_session();
-        state.session_usage_text = Some("Session usage: no model calls yet.".to_string());
         let theme = Theme::current();
         render_usage_modal(&mut buf, area, &mut state, None, false, &theme);
         let text: String = (0..area.height)
@@ -1088,17 +1132,68 @@ mod tests {
                     + "\n"
             })
             .collect();
-        for needle in [
-            "Context usage",
-            "Usage limit",
-            "Session info",
-            "copy session ID",
-            "Session usage: no model calls yet.",
-        ] {
+        for needle in ["Context usage", "Session info", "copy session ID"] {
             assert!(text.contains(needle), "missing {needle:?} in:\n{text}");
         }
-        assert_eq!(state.window.tab_rects.len(), 3);
+        assert_eq!(state.window.tab_rects.len(), 2);
         assert!(state.window.close_button_rect.is_some());
+    }
+
+    #[test]
+    fn every_value_row_is_click_to_copy() {
+        let area = Rect::new(0, 0, 80, 24);
+        let mut buf = Buffer::empty(area);
+        let mut state = state_with_session();
+        state.set_tab(UsageInfoTab::SessionInfo);
+        state.session_fields = Some(vec![
+            field("Session ID", "sid-123", false),
+            field("Model", "Grok", true),
+            field("Model Hash", "fp-abc", true),
+            field("Turn", "3", true),
+        ]);
+        let theme = Theme::current();
+        render_usage_modal(&mut buf, area, &mut state, None, false, &theme);
+
+        // Non-compact rows copy just the value; compact model/runtime rows copy
+        // the whole `Label: value` line.
+        let values: Vec<&str> = state.copy_hits.iter().map(|h| h.value.as_str()).collect();
+        assert_eq!(
+            values,
+            ["sid-123", "Model: Grok", "Model Hash: fp-abc", "Turn: 3"]
+        );
+
+        // Clicking the Model Hash row copies the whole line.
+        let hash_hit = state
+            .copy_hits
+            .iter()
+            .find(|h| h.value == "Model Hash: fp-abc")
+            .expect("model hash row visible")
+            .clone();
+        assert_eq!(
+            handle_usage_modal_mouse(
+                &mut state,
+                MouseEventKind::Down(crossterm::event::MouseButton::Left),
+                hash_hit.rect.x,
+                hash_hit.rect.y,
+            ),
+            UsageModalOutcome::CopyText("Model Hash: fp-abc".to_string())
+        );
+
+        // Clicks in empty content don't copy.
+        assert_eq!(
+            handle_usage_modal_mouse(
+                &mut state,
+                MouseEventKind::Down(crossterm::event::MouseButton::Left),
+                hash_hit.rect.x,
+                area.height - 1,
+            ),
+            UsageModalOutcome::Unchanged
+        );
+
+        // Other tabs never expose copy hits.
+        state.set_tab(UsageInfoTab::ContextUsage);
+        render_usage_modal(&mut buf, area, &mut state, None, false, &theme);
+        assert!(state.copy_hits.is_empty());
     }
 
     #[test]
@@ -1142,6 +1237,7 @@ mod tests {
                 "Session ID: sid-123\nModel Hash: fp-abc\nTurn: 3".to_string()
             )
         );
+        // On other tabs the button and shortcut are gone.
         state.set_tab(UsageInfoTab::UsageLimit);
         assert_eq!(state.session_info_copy_all(), None);
         assert_eq!(
