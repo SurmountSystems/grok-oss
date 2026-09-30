@@ -1001,6 +1001,11 @@ impl AgentView {
     }
 
     fn finish_approve_plan(&mut self, _from_enter: bool) -> InputOutcome {
+        // This Approve click reaches here. Leftover `/` is not notes.
+        // A longer slash the operator is typing stays.
+        if self.composer_is_leftover_slash_palette_only() {
+            self.clear_leftover_view_plan_slash_palette();
+        }
         if self.is_freeform_builtin_slash_command()
             && let Some(pav) = self.plan_approval_view.as_mut()
         {

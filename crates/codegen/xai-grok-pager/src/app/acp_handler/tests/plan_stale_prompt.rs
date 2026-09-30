@@ -1391,6 +1391,72 @@ fn restored_plan_approval_view_plan_after_slash_leftover_still_approves() {
     drop(rx);
 }
 
+/// Composer text is only `/` and the slash palette is open while the plan
+/// pane is open. A left click on the Approve word must clear that leftover
+/// palette, answer the live plan waiter, and leave plan mode. Empty Enter
+/// never Approves.
+#[test]
+fn left_click_on_approve_while_the_composer_is_only_a_slash_leaves_plan_mode() {
+    let mut app = make_app_with_agent("sess-approve-slash-only");
+    let mut rx = isolated_present(
+        &mut app,
+        "exit-plan-approve-slash-only",
+        "# Plan GBT3703Repro\n\nApprove must leave plan mode.\n",
+    );
+    {
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        agent.prompt.set_text("/");
+        agent.prompt.refresh_slash(&agent.session.models);
+        agent.pane_areas.prompt = Rect::new(0, 22, 80, 3);
+    }
+    {
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert_eq!(
+            agent.prompt.text().trim(),
+            "/",
+            "fixture: composer text is only `/`"
+        );
+        assert!(agent.prompt.slash_open(), "fixture: slash palette is open");
+        assert!(
+            agent.line_viewer.is_some() && agent.plan_approval_view.is_some(),
+            "fixture: plan pane is open on a live waiter"
+        );
+        assert!(
+            !agent.plan_decision_resolved,
+            "fixture: the waiter is not answered yet"
+        );
+    }
+    arm_comment_and_approve_hit_rects(&mut app);
+    {
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        // This click reaches Approve. The slash palette area does not
+        // block that hit. Leftover `/` must still be cleared.
+        agent.slash_dropdown_items_area = Some(APPROVE_HIT);
+    }
+    let outcome = app.handle_input(&mouse_down(APPROVE_HIT.x + 2, APPROVE_HIT.y));
+    let _ = dispatch_outcome(&mut app, outcome);
+    let agent = app.agents.get(&AgentId(0)).unwrap();
+    let composer = agent.prompt.text().to_string();
+    let slash_open = agent.prompt.slash_open();
+    let left_plan_mode = agent.plan_decision_resolved && agent.plan_approval_view.is_none();
+    let outcome_name = match rx.try_recv() {
+        Ok(Ok(raw)) => serde_json::from_str::<serde_json::Value>(raw.0.get())
+            .ok()
+            .and_then(|v| v.get("outcome").and_then(|o| o.as_str()).map(str::to_owned)),
+        _ => None,
+    };
+    assert!(
+        !slash_open
+            && !matches!(
+                composer.trim(),
+                "/" | "/view-plan" | "/show-plan" | "/plan-view"
+            )
+            && left_plan_mode
+            && outcome_name.as_deref() == Some("approved"),
+        "left click on Approve while the composer is only `/` must clear the leftover slash palette and answer the live plan waiter with approved; composer={composer:?} slash_open={slash_open} left_plan_mode={left_plan_mode} outcome={outcome_name:?}"
+    );
+}
+
 /// Failed mill L2 must not auto-run leftover `/implement`.
 #[test]
 fn mill_nested_failed_finish_does_not_auto_run_next_implement() {
