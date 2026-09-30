@@ -1063,6 +1063,11 @@ impl AgentView {
     }
 
     fn finish_approve_plan(&mut self, from_enter: bool) -> InputOutcome {
+        // This Approve click reaches here. Leftover `/` is not notes.
+        // A longer slash the operator is typing stays.
+        if self.composer_is_leftover_slash_palette_only() {
+            self.clear_leftover_view_plan_slash_palette();
+        }
         // Image chips insert `[Image #N]` into the buffer. Those tokens are
         // not review notes. Strip them before deciding implement text.
         let live_notes = self.prompt.text_without_image_chips();
