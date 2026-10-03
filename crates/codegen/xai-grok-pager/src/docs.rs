@@ -641,6 +641,34 @@ mod tests {
                 && !auth_lower.contains("billing credits card is supergrok dollar credits"),
             "02-authentication.md must not classify the Billing Credits card as another meter"
         );
+        assert!(
+            auth.content.contains("postpaid preview defaultCredits")
+                && auth.content.contains("not Credits remaining")
+                && auth.content.contains("not the prepaid wallet"),
+            "02-authentication.md must say team default credits are postpaid preview defaultCredits, not Credits remaining, and not the prepaid wallet"
+        );
+        assert!(
+            !auth_lower.contains("dashboard allotment"),
+            "02-authentication.md must not call postpaid preview defaultCredits a dashboard allotment"
+        );
+        assert!(
+            auth.content
+                .contains("default credits issued on this invoice preview")
+                && auth
+                    .content
+                    .contains("the issued amount was not in the preview"),
+            "02-authentication.md must name default credits issued and the absent preview sentence"
+        );
+        assert!(
+            auth.content.contains(
+                "30-day dashboard Credits remaining and Credits usage were not in the management bodies"
+            ),
+            "02-authentication.md must say those dashboard figures were not parsed"
+        );
+        assert!(
+            auth.content.contains("does not print a guessed sum"),
+            "02-authentication.md must say grok-oss does not print a guessed sum as a dashboard figure"
+        );
     }
 
     /// Grok OSS Named contract: product skills are not a Python runtime. Restack must
