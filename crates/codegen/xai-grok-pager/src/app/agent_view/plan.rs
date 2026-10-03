@@ -955,6 +955,30 @@ impl AgentView {
         } else if !self.plan_comments.is_empty() {
             viewer.rebuild_with_comments(&self.plan_comments);
         }
+        // `/view-plan` replaces this viewer in the same input batch as the
+        // footer click. The new state has no hit rects until the next paint.
+        // Keep the rects from the pane that was just on screen so Approve
+        // still lands.
+        if !rewrite_wait
+            && let Some(old) = self.line_viewer.as_ref()
+            && old.kind == crate::views::file_search::line_viewer::LineViewerKind::PlanPreview
+        {
+            viewer.last_modal_area = old.last_modal_area;
+            viewer.last_popup_area = old.last_popup_area;
+            viewer.close_button_area = old.close_button_area;
+            viewer.fullscreen_button_area = old.fullscreen_button_area;
+            if let Some(old_plan) = old.plan_ref() {
+                let plan = viewer.plan_mut();
+                plan.approve_button_area = old_plan.approve_button_area;
+                plan.comment_button_area = old_plan.comment_button_area;
+                plan.questions_button_area = old_plan.questions_button_area;
+                plan.send_button_area = old_plan.send_button_area;
+                plan.abandon_button_area = old_plan.abandon_button_area;
+                plan.copy_button_area = old_plan.copy_button_area;
+                plan.search_button_area = old_plan.search_button_area;
+                plan.approve_notes_button_area = old_plan.approve_notes_button_area;
+            }
+        }
         self.line_viewer = Some(viewer);
         self.persist_session_plan_dock_open(true);
         if let Some(sid) = self.session.session_id.as_ref() {
@@ -1808,6 +1832,11 @@ impl AgentView {
         }
         match self.prompt.handle_key(key) {
             PromptEvent::Edited => {
+                // Letters typed under the plan pane skip the normal prompt
+                // path. Refresh before Enter in the same batch, or a typed
+                // `/view-plan` is still the previous `/` snapshot and Enter
+                // accepts highlighted `/quit`.
+                self.prompt.refresh_slash(&self.session.models);
                 if let Some(req) = self.prompt.pending_viewer_request.take() {
                     self.open_line_viewer(&req.path, req.initial_range);
                 }

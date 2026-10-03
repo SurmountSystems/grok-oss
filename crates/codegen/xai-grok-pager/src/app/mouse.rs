@@ -430,6 +430,9 @@ impl AgentView {
                 if let Some(dd_area) = self.slash_dropdown_items_area
                     && dd_area.contains((mouse.column, mouse.row).into())
                 {
+                    if let Some(outcome) = self.plan_approve_mouse_hit(mouse) {
+                        return outcome;
+                    }
                     let snap = self.prompt.slash_snapshot();
                     let has_scrollbar = self.slash_dropdown_hit.has_scrollbar;
                     let on_scrollbar = has_scrollbar

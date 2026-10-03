@@ -3615,6 +3615,7 @@ impl AgentView {
                         .unwrap_or_default()
                 })
                 .unwrap_or_default();
+            self.clip_slash_dropdown_off_plan_pane();
             self.inline_media_hits = super::InlineMediaHitAreas::default();
             self.paint_diagram_affordances(buf, mermaid_placements, &theme);
             let Some(viewer) = self.line_viewer.as_mut() else {

@@ -268,12 +268,33 @@ impl AgentView {
                     if let Some(outcome) = self.try_apply_unique_model_slash_row() {
                         return outcome;
                     }
+                    // A current menu sends the highlight when it is a different
+                    // command (`/log` highlighted `/login`). A finished
+                    // command sends as typed when the highlight is that
+                    // command, or when the snapshot is stale (query still
+                    // empty, highlight `/quit`, typed `/view-plan`). Unknown
+                    // prefixes still accept the highlight.
+                    let typed_owned = self.prompt.text().trim().to_string();
+                    let typed_complete = {
+                        let registry = self.prompt.slash_controller.registry();
+                        crate::slash::parse_invocation(&typed_owned).is_some_and(|invocation| {
+                            invocation.args.is_empty()
+                                && registry.get_for_dispatch(invocation.token).is_some()
+                                && crate::slash::is_command_complete(&typed_owned, registry)
+                        })
+                    };
                     let snap = self.prompt.slash_snapshot();
-                    let exact_command = crate::slash::is_typed_slash_selected(
+                    let menu_matches_typed = crate::slash::parse_invocation(&typed_owned)
+                        .is_some_and(|invocation| {
+                            snap.query.eq_ignore_ascii_case(invocation.token)
+                        });
+                    let highlight_is_typed = crate::slash::is_typed_slash_selected(
                         &snap,
                         self.prompt.text(),
                         self.prompt.slash_controller.registry(),
                     );
+                    let exact_command =
+                        highlight_is_typed || (typed_complete && !menu_matches_typed);
                     if exact_command {
                         self.prompt.slash_commit_preview();
                         self.prompt.slash_close();

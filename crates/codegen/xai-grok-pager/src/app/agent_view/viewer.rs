@@ -347,6 +347,72 @@ impl AgentView {
         InputOutcome::Changed
     }
 
+    /// Left click on the painted Approve word. Wins over the slash palette
+    /// and over scrollback routing. The slash list is full prompt width and
+    /// shares the footer row after resume.
+    ///
+    /// `pub(crate)` because `app/mouse.rs` is a sibling of `agent_view`, not
+    /// inside it. `pub(super)` is invisible there.
+    pub(crate) fn plan_approve_mouse_hit(
+        &mut self,
+        mouse: &crossterm::event::MouseEvent,
+    ) -> Option<InputOutcome> {
+        use crossterm::event::{MouseButton, MouseEventKind};
+
+        if mouse.kind != MouseEventKind::Down(MouseButton::Left) {
+            return None;
+        }
+        if self.plan_approval_view.is_none() || self.plan_feedback_in_flight.is_some() {
+            return None;
+        }
+        let hit = self
+            .line_viewer
+            .as_ref()
+            .and_then(|viewer| viewer.plan_ref())
+            .and_then(|plan| plan.approve_button_area)?;
+        if !hit.contains((mouse.column, mouse.row).into()) {
+            return None;
+        }
+        Some(self.click_plan_cta(SelectedPlanCta::Approve))
+    }
+
+    /// The slash list is painted full width, then the plan pane covers the
+    /// right side. Clicks on that covered strip are Approve, not slash rows.
+    pub(super) fn clip_slash_dropdown_off_plan_pane(&mut self) {
+        let Some(modal) = self
+            .line_viewer
+            .as_ref()
+            .and_then(|viewer| viewer.last_modal_area)
+        else {
+            return;
+        };
+        let pane = Rect {
+            x: modal.x.saturating_sub(1),
+            y: modal.y.saturating_sub(1),
+            width: modal.width.saturating_add(2),
+            height: modal.height.saturating_add(2),
+        };
+        let Some(dropdown) = self.slash_dropdown_items_area else {
+            return;
+        };
+        if !dropdown.intersects(pane) {
+            return;
+        }
+        if dropdown.x < pane.x {
+            let width = pane.x - dropdown.x;
+            if width > 0 {
+                self.slash_dropdown_items_area = Some(Rect {
+                    x: dropdown.x,
+                    y: dropdown.y,
+                    width,
+                    height: dropdown.height,
+                });
+                return;
+            }
+        }
+        self.slash_dropdown_items_area = None;
+    }
+
     /// Click marks the CTA and runs it. Enter also submits the marked CTA.
     /// First click on Approve still Approves. Letter keys type; they do
     /// not steal Approve. A second click on an already-marked CTA still
