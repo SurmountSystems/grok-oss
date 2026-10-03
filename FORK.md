@@ -1739,14 +1739,14 @@ User-guide [`06-theming`](crates/codegen/xai-grok-pager/docs/user-guide/06-themi
   `grok_oss_workers_nix_does_not_disable_surmount_scram`,
   `grok_oss_workers_nix_has_no_docker`,
   `grok_oss_workers_nix_no_boot_tui_and_sshd_class_nice`.
-- [x] **Rust 1.98.0 (file pin only; not cargo-proven)**: project
-  `rust-toolchain.toml` channel `stable` (current rust-stable 1.98.0) plus
+- [x] **Rust 1.99.0 (file pin only; not cargo-proven)**: project
+  `rust-toolchain.toml` channel `stable` (current rust-stable 1.99.0) plus
   matching fenix FOD in `flake/rust-toolchain.nix` (`channel-rust-stable.toml`). After an
-  upstream export that still lists 1.94.x, keep Surmount **stable / 1.98.0**
+  upstream export that still lists 1.94.x, keep Surmount **stable / 1.99.0**
   unless the operator chooses another channel.
   **`rust-toolchain.toml` is not in `FORK_PATHS`.** Import can keep the flake
   and take upstream's toolchain file. There is no cargo `fn` that asserts
-  channel `1.98.0`. Do not add rustc 1.98.0 as a cargo land class until a
+  channel `1.99.0`. Do not add rustc 1.99.0 as a cargo land class until a
   named test or assert sniff exists. Report:
   [`.agents/reports/impl-toolchain-1971-2026-08-12.md`](.agents/reports/impl-toolchain-1971-2026-08-12.md)
 - [x] **justfile**: `just check` / `just ci` full Nix quality gate; `just check-local`
@@ -2952,7 +2952,7 @@ that drops them while keeping the seven is still a seam loss):
   `prepare_sampler_for_turn_does_not_flatten_dollar_credits_on_both`).
   Rank `hop_*` helpers are still not hop.
 
-**Not a cargo land class:** rustc 1.98.0 (file pin only;
+**Not a cargo land class:** rustc 1.99.0 (file pin only;
 `rust-toolchain.toml` not in `FORK_PATHS`). Stuck-retry **pager** chrome is
 not fully proven. Token Economy `/settings` table rows were not re-proven on
 2026-08-15. CLI `grok-oss rebuild` is clap-wired (`rebuild_subcommand_parses`).
