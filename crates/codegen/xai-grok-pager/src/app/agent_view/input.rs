@@ -884,6 +884,9 @@ impl AgentView {
                             })
                     }
                     Event::Mouse(mouse) => {
+                        if let Some(outcome) = self.plan_approve_mouse_hit(mouse) {
+                            return outcome;
+                        }
                         let in_prompt = self
                             .pane_areas
                             .prompt
@@ -926,6 +929,9 @@ impl AgentView {
                     self.insert_or_defer_bracketed_prompt_paste(text)
                 }
                 Event::Mouse(mouse) => {
+                    if let Some(outcome) = self.plan_approve_mouse_hit(mouse) {
+                        return outcome;
+                    }
                     let in_prompt = self
                         .pane_areas
                         .prompt
