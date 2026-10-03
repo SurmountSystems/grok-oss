@@ -856,13 +856,13 @@ pub async fn call_mcp_tool(
                     crate::session::mcp_servers::mcp_server_name(c) == server_name
                         && mcp_server_url(c) == Some(url)
                 })
-                .map(&config_name)
+                .map(config_name)
                 .or_else(|| {
                     state
                         .configs
                         .iter()
                         .find(|c| mcp_server_url(c) == Some(url))
-                        .map(&config_name)
+                        .map(config_name)
                 })
                 .unwrap_or_else(|| server_name.to_string())
         } else {
