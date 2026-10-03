@@ -5,8 +5,9 @@
 //! prints raw API keys, JWTs, or management secrets.
 //!
 //! Meters stay distinct: included SuperGrok period limits % ≠ SuperGrok dollar credits ≠
-//! console team prepaid ≠ team postpaid OAuth/API class ≠ team default credits
-//! (dashboard allotment) ≠ Management usage series window.
+//! console team prepaid ≠ team postpaid OAuth/API class ≠ postpaid preview
+//! defaultCredits ≠ default credits issued on this invoice preview ≠
+//! Management usage series window.
 //! Named words persist `$GROK_HOME/limits_pins.json` (not `[auth]`). grok-oss
 //! limits JSON is a client printout, not xAI billing truth. A client 100% /
 //! remaining 0 / $0 printout must not mark SuperGrok used up.
@@ -532,10 +533,16 @@ pub struct ConsoleCliSection {
     /// API / ApiKey class spend USD on the postpaid invoice.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub team_postpaid_api_class_usd: Option<f64>,
-    /// Team default credits (dashboard allotment) USD from postpaid preview.
-    /// Distinct from [`Self::team_prepaid_usd`] (prepaid wallet remaining).
+    /// Postpaid preview `defaultCredits` USD. Not Credits remaining.
+    /// Not the prepaid wallet ([`Self::team_prepaid_usd`]).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub team_default_credits_usd: Option<f64>,
+    /// Default credits issued on this invoice preview, USD, when
+    /// `coreInvoice.defaultCreditsIssued` was present. Not the granted share
+    /// of dashboard Credits remaining. Omitted when the issued amount was
+    /// not in the preview.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub team_default_credits_issued_usd: Option<f64>,
     /// Honest gap when postpaid preview unknown.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub team_postpaid_gap: Option<&'static str>,
@@ -730,6 +737,38 @@ pub fn report_from_snapshot(snap: &LimitsSnapshot, notes: Vec<String>) -> Limits
     report_from_snapshot_with_meter_source(snap, notes, None)
 }
 
+/// Drop Billing Credits card notes that do not match the card state on `snap`.
+///
+/// `collect_limits_report` stores honesty notes before the card is attached.
+/// A later fetched or error state must not keep the sentence that grok-oss
+/// did not parse the Billing Credits card. One card note only.
+fn drop_stale_billing_credits_card_notes(
+    notes: &mut Vec<String>,
+    card: xai_grok_sampling_types::BillingCreditsCard,
+) {
+    use crate::views::limits_honesty::{
+        NOTE_BILLING_CREDITS_CARD_FETCH_FAILED, NOTE_BILLING_CREDITS_CARD_FETCHED,
+        NOTE_BILLING_CREDITS_CARD_NOT_FETCHED,
+    };
+    notes.retain(|note| {
+        let kind = if note.as_str() == NOTE_BILLING_CREDITS_CARD_NOT_FETCHED
+            || note.contains("grok-oss did not parse the")
+        {
+            Some(xai_grok_sampling_types::BillingCreditsCard::NotFetched)
+        } else if note.as_str() == NOTE_BILLING_CREDITS_CARD_FETCHED {
+            Some(xai_grok_sampling_types::BillingCreditsCard::Fetched)
+        } else if note.as_str() == NOTE_BILLING_CREDITS_CARD_FETCH_FAILED {
+            Some(xai_grok_sampling_types::BillingCreditsCard::Error)
+        } else {
+            None
+        };
+        match kind {
+            Some(kind) => kind == card,
+            None => true,
+        }
+    });
+}
+
 /// Same as [`report_from_snapshot`], with JSON `active_driver_label` honoring
 /// the same `meter_source` pin as human CLI and TUI **Active:**.
 ///
@@ -760,6 +799,7 @@ pub fn report_from_snapshot_with_meter_source(
     // `/limits` body (dedupe if a collector already pushed the same text).
     // Dual poll fail + shared-pool fill lines match human format_limits_detail.
     let mut notes = notes;
+    drop_stale_billing_credits_card_notes(&mut notes, snap.console.billing_credits_card);
     for honesty in crate::views::limits_snapshot::dual_poll_honesty_notes_for_snapshot(snap) {
         if !notes.iter().any(|n| n == &honesty) {
             notes.push(honesty);
@@ -831,6 +871,10 @@ pub fn report_from_snapshot_with_meter_source(
                 .postpaid
                 .as_ref()
                 .and_then(|p| p.default_credits_cents.map(|c| c.abs() as f64 / 100.0)),
+            team_default_credits_issued_usd: snap.console.postpaid.as_ref().and_then(|p| {
+                p.default_credits_issued_cents
+                    .map(|c| c.abs() as f64 / 100.0)
+            }),
             team_postpaid_gap: if snap.console.postpaid.is_some() {
                 None
             } else {
@@ -1485,9 +1529,14 @@ async fn collect_limits_report_at(grok_home: &Path) -> Result<(LimitsCliReport, 
     };
     let (report, snap) = if let Some(mgmt) = hub_doc.management.as_ref() {
         let snap = snap.with_billing_credits(mgmt.billing_credits_card, mgmt.billing_credits_cents);
+        let mut notes = report.notes;
+        // Notes were stored while the card was still not fetched. Drop that
+        // stale did-not-parse sentence when the later card state is fetched
+        // or error. The rebuild keeps one card note for the later state.
+        drop_stale_billing_credits_card_notes(&mut notes, snap.console.billing_credits_card);
         let report = report_from_snapshot_with_meter_source(
             &snap,
-            report.notes,
+            notes,
             xai_grok_shell::auth::limits_pins::load_limits_pins().meter_source,
         );
         (report, snap)
@@ -2886,6 +2935,32 @@ mod tests {
             "fetched honesty must refuse hop from this card: {:?}",
             report.notes
         );
+        assert!(
+            !report
+                .notes
+                .iter()
+                .any(|n| n.contains("grok-oss did not parse the")),
+            "when billingCreditsCard is fetched, notes must not say grok-oss did not parse the Billing Credits card: {:?}",
+            report.notes
+        );
+        let card_notes = report
+            .notes
+            .iter()
+            .filter(|n| {
+                n.contains("grok-oss did not parse the")
+                    || n.contains("does not hop sampling from this card")
+                    || n.contains("could not fetch the")
+            })
+            .count();
+        assert_eq!(
+            card_notes, 1,
+            "one Billing Credits card note only: {:?}",
+            report.notes
+        );
+        assert!(
+            !human.contains("grok-oss did not parse the"),
+            "human printout must not keep the stale did-not-parse sentence after fetch: {human}"
+        );
         let mut buf = Vec::new();
         write_limits_output(&report, &snap, true, &mut buf).expect("write json");
         let v: serde_json::Value =
@@ -2902,6 +2977,337 @@ mod tests {
             v["console"]["billingCreditsUsd"],
             v["supergrok"]["principals"][0]["dollarCreditsUsd"]
         );
+    }
+
+    /// Empty inference-key prepaid read plus Management `total.val` fills
+    /// `teamPrepaidUsd`. Billing Credits stays abs(prepaidCredits) minus
+    /// abs(prepaidCreditsUsed). The prepaid line does not say Credits remaining.
+    /// A successful inference balance is not replaced. Both empty reads leave
+    /// team prepaid unavailable. The prepaid balance is not copied onto the card.
+    #[test]
+    fn empty_inference_read_plus_management_total_val_sets_team_prepaid_usd_not_credits_remaining()
+    {
+        use xai_grok_sampling_types::{
+            BillingCreditsCard, billing_credits_cents_from_core_invoice_prepaid_remaining,
+        };
+        use xai_grok_shell::auth::{
+            ConsoleTeamPrepaidMeter, PrepaidBalanceResponse, UsdCentsVal,
+            console_team_prepaid_from_response, select_team_prepaid_meter,
+            should_also_call_management_prepaid_balance,
+        };
+
+        assert!(
+            should_also_call_management_prepaid_balance(true, false, true, true),
+            "empty inference read with a management key and team id must also call prepaid/balance"
+        );
+        assert!(
+            !should_also_call_management_prepaid_balance(true, true, true, true),
+            "a successful inference balance must not be replaced"
+        );
+        assert!(
+            !should_also_call_management_prepaid_balance(true, false, false, true),
+            "no management key must not call prepaid/balance"
+        );
+        assert!(
+            !should_also_call_management_prepaid_balance(true, false, true, false),
+            "no team id must not call prepaid/balance"
+        );
+
+        let management = console_team_prepaid_from_response(
+            "team-1",
+            &PrepaidBalanceResponse {
+                total: UsdCentsVal {
+                    val: "-11245".into(),
+                },
+                changes: vec![],
+            },
+        )
+        .expect("management total.val");
+        assert_eq!(management.balance_cents, 11_245);
+        let chosen = select_team_prepaid_meter(None, Some(management.clone())).expect("prepaid");
+        assert_eq!(chosen.balance_cents, 11_245);
+
+        let kept = select_team_prepaid_meter(
+            Some(ConsoleTeamPrepaidMeter {
+                team_id: "team-1".into(),
+                balance_cents: 5_000,
+            }),
+            Some(management),
+        )
+        .expect("inference wins");
+        assert_eq!(
+            kept.balance_cents, 5_000,
+            "do not replace a successful inference balance with total.val"
+        );
+        assert!(
+            select_team_prepaid_meter(None, None).is_none(),
+            "both reads empty keeps team prepaid unavailable"
+        );
+
+        let card = billing_credits_cents_from_core_invoice_prepaid_remaining("-10000", "-5297")
+            .expect("card formula");
+        assert_eq!(
+            card, 4_703,
+            "abs(prepaidCredits) minus abs(prepaidCreditsUsed)"
+        );
+        assert_ne!(card, chosen.balance_cents);
+
+        let input = PrincipalLimitsInput {
+            label: "SuperGrok".into(),
+            role_label: None,
+            balance: Some(bal(12.0)),
+            autotopup: None,
+            included_billing_only: false,
+            poll_succeeded: Some(true),
+            poll_error_class: None,
+        };
+        let (report, snap) = build_limits_cli_from_parts(
+            SamplingIdentityKind::SuperGrokSession,
+            None,
+            &[input],
+            true,
+            Some(chosen.balance_cents),
+            ConsoleTeamPrepaidGap::Loading,
+            vec![],
+        );
+        let snap = snap.with_billing_credits(BillingCreditsCard::Fetched, Some(card));
+        let report = report_from_snapshot(&snap, report.notes);
+        assert_eq!(report.console.team_prepaid_usd, Some(112.45));
+        assert_eq!(report.console.billing_credits_usd, Some(47.03));
+        assert_ne!(
+            report.console.billing_credits_usd, report.console.team_prepaid_usd,
+            "do not copy the prepaid balance onto the Billing Credits card"
+        );
+        let human = format_limits_human(&snap, &report.notes);
+        let prepaid_line = human
+            .lines()
+            .find(|line| line.contains("Team prepaid remaining"))
+            .expect("prepaid line");
+        assert!(
+            prepaid_line.contains("$112.45"),
+            "prepaid line prints total.val: {prepaid_line}"
+        );
+        assert!(
+            !prepaid_line.contains("Credits remaining"),
+            "prepaid line must not use the words Credits remaining: {prepaid_line}"
+        );
+        assert!(
+            human.contains("Billing Credits card: $47.03"),
+            "card stays on the formula: {human}"
+        );
+        assert!(
+            !human.contains("Billing Credits card: $112.45"),
+            "must not paint total.val as the Billing Credits card: {human}"
+        );
+    }
+
+    /// `defaultCreditsIssued` prints as default credits issued on this invoice
+    /// preview. Absent cents say the issued amount was not in the preview.
+    /// That line is not the granted share of dashboard Credits remaining.
+    #[test]
+    fn limits_json_prints_default_credits_issued_on_this_invoice_preview() {
+        let input = PrincipalLimitsInput {
+            label: "SuperGrok".into(),
+            role_label: None,
+            balance: Some(bal(12.0)),
+            autotopup: None,
+            included_billing_only: false,
+            poll_succeeded: Some(true),
+            poll_error_class: None,
+        };
+        let present = ConsoleTeamPostpaidMeter {
+            period_total_cents: 20_756,
+            oauth_class_cents: 20_176,
+            api_class_cents: 580,
+            other_class_cents: 0,
+            default_credits_cents: Some(150_000),
+            default_credits_issued_cents: Some(20_756),
+        };
+        let (report, snap) = build_limits_cli_from_parts_with_postpaid(
+            SamplingIdentityKind::SuperGrokSession,
+            None,
+            std::slice::from_ref(&input),
+            true,
+            Some(34_000),
+            ConsoleTeamPrepaidGap::Loading,
+            Some(present),
+            ConsoleTeamPostpaidGap::Unavailable,
+            vec![],
+        );
+        assert_eq!(report.console.team_default_credits_issued_usd, Some(207.56));
+        let human = format_limits_human(&snap, &report.notes);
+        let issued_line = human
+            .lines()
+            .find(|line| line.contains("Default credits issued on this invoice preview"))
+            .expect("issued line");
+        assert!(
+            issued_line.contains("$207.56"),
+            "fixture amount must print as default credits issued on this invoice preview: {issued_line}"
+        );
+        assert!(
+            !issued_line.contains("granted share") && !issued_line.contains("Credits remaining"),
+            "issued line is not the granted share of dashboard Credits remaining: {issued_line}"
+        );
+        assert!(
+            !issued_line.to_ascii_lowercase().contains("free supergrok"),
+            "must not call SuperGrok free: {issued_line}"
+        );
+        let pretty = format_limits_json_pretty(&report).expect("json");
+        let v: serde_json::Value = serde_json::from_str(&pretty).expect("parse");
+        assert_eq!(v["console"]["teamDefaultCreditsIssuedUsd"], 207.56);
+        assert!(
+            !report
+                .notes
+                .iter()
+                .any(|n| n.contains("the issued amount was not in the preview")),
+            "present cents must not say the issued amount was absent: {:?}",
+            report.notes
+        );
+
+        let absent = ConsoleTeamPostpaidMeter {
+            period_total_cents: 20_756,
+            oauth_class_cents: 20_176,
+            api_class_cents: 580,
+            other_class_cents: 0,
+            default_credits_cents: Some(150_000),
+            default_credits_issued_cents: None,
+        };
+        let (report, snap) = build_limits_cli_from_parts_with_postpaid(
+            SamplingIdentityKind::SuperGrokSession,
+            None,
+            &[input],
+            true,
+            Some(34_000),
+            ConsoleTeamPrepaidGap::Loading,
+            Some(absent),
+            ConsoleTeamPostpaidGap::Unavailable,
+            vec![],
+        );
+        assert!(report.console.team_default_credits_issued_usd.is_none());
+        let human = format_limits_human(&snap, &report.notes);
+        assert!(
+            human.contains(
+                "Default credits issued on this invoice preview: the issued amount was not in the preview."
+            ),
+            "absent issued cents must say the issued amount was not in the preview: {human}"
+        );
+        assert!(
+            report
+                .notes
+                .iter()
+                .any(|n| n.contains("the issued amount was not in the preview")),
+            "JSON note must say the issued amount was not in the preview: {:?}",
+            report.notes
+        );
+        let pretty = format_limits_json_pretty(&report).expect("json");
+        let v: serde_json::Value = serde_json::from_str(&pretty).expect("parse");
+        assert!(
+            v["console"].get("teamDefaultCreditsIssuedUsd").is_none(),
+            "JSON must omit the issued dollar when the preview lacked it: {v}"
+        );
+    }
+
+    /// The 30-day dashboard Credits remaining and Credits usage were not parsed.
+    /// Do not print $4,164.49, $6,326.72, or a sum of the card, default credits,
+    /// and the postpaid total as either dashboard figure.
+    #[test]
+    fn limits_printout_does_not_invent_dashboard_credits_remaining_or_usage() {
+        use crate::views::limits_honesty::NOTE_DASHBOARD_THIRTY_DAY_CREDITS_NOT_PARSED;
+        use xai_grok_sampling_types::BillingCreditsCard;
+
+        let input = PrincipalLimitsInput {
+            label: "SuperGrok".into(),
+            role_label: None,
+            balance: Some(bal(12.0)),
+            autotopup: None,
+            included_billing_only: false,
+            poll_succeeded: Some(true),
+            poll_error_class: None,
+        };
+        let postpaid = ConsoleTeamPostpaidMeter {
+            period_total_cents: 20_756,
+            oauth_class_cents: 20_176,
+            api_class_cents: 580,
+            other_class_cents: 0,
+            default_credits_cents: Some(150_000),
+            default_credits_issued_cents: Some(20_756),
+        };
+        let (report, snap) = build_limits_cli_from_parts_with_postpaid(
+            SamplingIdentityKind::SuperGrokSession,
+            None,
+            &[input],
+            true,
+            Some(34_000),
+            ConsoleTeamPrepaidGap::Loading,
+            Some(postpaid),
+            ConsoleTeamPostpaidGap::Unavailable,
+            vec![],
+        );
+        let snap = snap.with_billing_credits(BillingCreditsCard::Fetched, Some(4_703));
+        let report = report_from_snapshot(&snap, report.notes);
+        assert_eq!(report.console.billing_credits_usd, Some(47.03));
+        assert_eq!(report.console.team_default_credits_usd, Some(1500.0));
+        assert_eq!(report.console.team_postpaid_period_total_usd, Some(207.56));
+        let guessed_sum: f64 = 47.03 + 1500.0 + 207.56;
+        assert!(
+            (guessed_sum - 1754.59).abs() < 0.001,
+            "fixture sum of card, default credits, and postpaid total is 1754.59, not a dashboard figure"
+        );
+        assert!(
+            report
+                .notes
+                .iter()
+                .any(|n| n.as_str() == NOTE_DASHBOARD_THIRTY_DAY_CREDITS_NOT_PARSED),
+            "JSON note must say the 30-day dashboard figures were not parsed: {:?}",
+            report.notes
+        );
+        assert_eq!(
+            report
+                .notes
+                .iter()
+                .filter(|n| n.as_str() == NOTE_DASHBOARD_THIRTY_DAY_CREDITS_NOT_PARSED)
+                .count(),
+            1,
+            "one JSON note for the unparsed dashboard figures: {:?}",
+            report.notes
+        );
+        let human = format_limits_human(&snap, &report.notes);
+        assert!(
+            human.contains(NOTE_DASHBOARD_THIRTY_DAY_CREDITS_NOT_PARSED),
+            "human sentence must say the 30-day dashboard figures were not parsed: {human}"
+        );
+        let pretty = format_limits_json_pretty(&report).expect("json");
+        for surface in [&human, &pretty] {
+            assert!(
+                !surface.contains("4,164.49")
+                    && !surface.contains("4164.49")
+                    && !surface.contains("$4164.49"),
+                "must not print dashboard Credits remaining $4,164.49: {surface}"
+            );
+            assert!(
+                !surface.contains("6,326.72")
+                    && !surface.contains("6326.72")
+                    && !surface.contains("$6326.72"),
+                "must not print dashboard Credits usage $6,326.72: {surface}"
+            );
+            assert!(
+                !surface.contains("1754.59") && !surface.contains("1,754.59"),
+                "must not print a guessed sum of the card, default credits, and the postpaid total: {surface}"
+            );
+        }
+        for line in human.lines().chain(pretty.lines()) {
+            let presents_dashboard =
+                line.contains("Credits remaining") || line.contains("Credits usage");
+            let presents_guessed_sum = line.contains("1754.59") || line.contains("1,754.59");
+            assert!(
+                !(presents_dashboard && presents_guessed_sum),
+                "must not present the guessed sum as dashboard Credits remaining or Credits usage: {line}"
+            );
+            assert!(
+                !(presents_dashboard && (line.contains("4164.49") || line.contains("6326.72"))),
+                "must not present the operator dashboard dollars as a parsed figure: {line}"
+            );
+        }
     }
 
     /// Named contract: `grok-oss limits --json` names printout vs Usage,
@@ -3617,6 +4023,7 @@ mod tests {
             api_class_cents: 580,
             other_class_cents: 0,
             default_credits_cents: Some(150_000),
+            default_credits_issued_cents: None,
         };
         let (report, snap) = build_limits_cli_from_parts_with_postpaid(
             SamplingIdentityKind::SuperGrokSession,
@@ -3691,11 +4098,15 @@ mod tests {
         // Item 5b: default credits own line, not folded into prepaid $340.
         assert!(
             human.contains(
-                "Team default credits (dashboard allotment; not the prepaid wallet): $1500"
+                "Team default credits (postpaid preview defaultCredits; not Credits remaining; not the prepaid wallet): $1500"
             ) || human.contains(
-                "Team default credits (dashboard allotment; not the prepaid wallet): $1500.00"
+                "Team default credits (postpaid preview defaultCredits; not Credits remaining; not the prepaid wallet): $1500.00"
             ),
-            "default credits must be its own labeled line: {human}"
+            "default credits must be postpaid preview defaultCredits, not Credits remaining, and not the prepaid wallet: {human}"
+        );
+        assert!(
+            !human.contains("dashboard allotment"),
+            "dashboard allotment wording is the defect: {human}"
         );
         assert!(
             !human.contains("Team prepaid remaining: $1500"),
@@ -3722,6 +4133,7 @@ mod tests {
             api_class_cents: 580,
             other_class_cents: 0,
             default_credits_cents: Some(150_000),
+            default_credits_issued_cents: None,
         };
         let series = ConsoleTeamUsageSeriesSummary {
             start_time: "2026-07-28 00:00:00".into(),
@@ -3780,8 +4192,14 @@ mod tests {
             "series API class: {human}"
         );
         assert!(
-            human.contains("Team default credits (dashboard allotment; not the prepaid wallet)"),
+            human.contains(
+                "Team default credits (postpaid preview defaultCredits; not Credits remaining; not the prepaid wallet)"
+            ),
             "default credits full label: {human}"
+        );
+        assert!(
+            !human.contains("dashboard allotment"),
+            "dashboard allotment wording is the defect: {human}"
         );
         assert!(
             human.contains("Team prepaid remaining: $340")

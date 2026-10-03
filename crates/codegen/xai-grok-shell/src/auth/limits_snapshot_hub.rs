@@ -322,6 +322,42 @@ fn apply_management_snapshot(mgmt: &LimitsSnapshotManagement) {
     }
 }
 
+/// Whether `fetch_management_into_snapshot` must also call Management
+/// `GET /v1/billing/teams/{team_id}/prepaid/balance`.
+///
+/// True only when the inference-key prepaid read returned no cents and a
+/// management key plus team id exist. A successful inference balance is not
+/// replaced. No inference key uses the Management read as the only prepaid
+/// read, which is not this also-call.
+pub fn should_also_call_management_prepaid_balance(
+    inference_key_present: bool,
+    inference_returned_meter: bool,
+    management_key_present: bool,
+    management_team_id_present: bool,
+) -> bool {
+    inference_key_present
+        && !inference_returned_meter
+        && management_key_present
+        && management_team_id_present
+}
+
+/// Team prepaid remaining after the inference-key read and the Management
+/// `prepaid/balance` `total.val` read.
+///
+/// A successful inference meter wins. An empty inference read keeps the
+/// Management meter when that read returned cents. Both empty stays `None`
+/// (team prepaid unavailable). Neither meter is the Billing Credits card.
+pub fn select_team_prepaid_meter(
+    inference: Option<super::xai_management::ConsoleTeamPrepaidMeter>,
+    management: Option<super::xai_management::ConsoleTeamPrepaidMeter>,
+) -> Option<super::xai_management::ConsoleTeamPrepaidMeter> {
+    if inference.is_some() {
+        inference
+    } else {
+        management
+    }
+}
+
 /// Fetch Management prepaid / postpaid / series into snapshot fields (no keys).
 ///
 /// Returns `None` when neither a management key nor a console inference key
@@ -338,6 +374,7 @@ pub async fn fetch_management_into_snapshot() -> Option<LimitsSnapshotManagement
         USAGE_SERIES_DEFAULT_DAY_WINDOW, fetch_console_api_credits_with_inference_key,
         fetch_console_team_postpaid_preview_default, fetch_console_team_prepaid_balance_default,
         fetch_console_team_usage_series_default, resolve_management_api_key_default,
+        resolve_management_team_id_default,
     };
     let inference_key_present = super::xai_console::console_inference_key_present_default();
     let inference_prepaid = if inference_key_present {
@@ -349,11 +386,23 @@ pub async fn fetch_management_into_snapshot() -> Option<LimitsSnapshotManagement
     if management_key.is_none() && !inference_key_present {
         return None;
     }
-    let prepaid = if inference_key_present {
-        inference_prepaid
-    } else {
+    let management_team_present = resolve_management_team_id_default().is_some();
+    // No inference key: Management prepaid/balance is the only prepaid read.
+    // Inference key with no cents, plus a management key and team id: also
+    // call GET /v1/billing/teams/{team_id}/prepaid/balance. Do not call that
+    // route to replace a successful inference balance.
+    let management_prepaid = if !inference_key_present
+        || should_also_call_management_prepaid_balance(
+            inference_key_present,
+            inference_prepaid.is_some(),
+            management_key.is_some(),
+            management_team_present,
+        ) {
         fetch_console_team_prepaid_balance_default().await
+    } else {
+        None
     };
+    let prepaid = select_team_prepaid_meter(inference_prepaid, management_prepaid);
     let postpaid = if management_key.is_some() {
         fetch_console_team_postpaid_preview_default().await
     } else {
@@ -708,6 +757,58 @@ mod tests {
         assert_ne!(
             SNAPSHOT_TTL_SECS,
             crate::auth::CONSOLE_TEAM_BILLING_METER_CACHE_TTL_SECS
+        );
+    }
+
+    /// Empty inference read plus Management `total.val` is team prepaid.
+    /// A successful inference balance is not replaced. Both empty stays unset.
+    /// `total.val` is not copied onto the Billing Credits card by this choice.
+    #[test]
+    fn empty_inference_read_plus_management_total_val_is_team_prepaid_not_the_card() {
+        use crate::auth::{
+            PrepaidBalanceResponse, UsdCentsVal, console_team_prepaid_from_response,
+        };
+
+        assert!(should_also_call_management_prepaid_balance(
+            true, false, true, true
+        ));
+        assert!(!should_also_call_management_prepaid_balance(
+            true, true, true, true
+        ));
+        assert!(!should_also_call_management_prepaid_balance(
+            true, false, true, false
+        ));
+        assert!(!should_also_call_management_prepaid_balance(
+            true, false, false, true
+        ));
+
+        let management = console_team_prepaid_from_response(
+            "team-1",
+            &PrepaidBalanceResponse {
+                total: UsdCentsVal {
+                    val: "-11245".into(),
+                },
+                changes: vec![],
+            },
+        )
+        .expect("total.val");
+        assert_eq!(management.balance_cents, 11_245);
+        let chosen = select_team_prepaid_meter(None, Some(management.clone())).expect("prepaid");
+        assert_eq!(chosen.balance_cents, 11_245);
+        let kept = select_team_prepaid_meter(
+            Some(crate::auth::ConsoleTeamPrepaidMeter {
+                team_id: "team-1".into(),
+                balance_cents: 5_000,
+            }),
+            Some(management),
+        )
+        .expect("inference wins");
+        assert_eq!(kept.balance_cents, 5_000);
+        assert!(select_team_prepaid_meter(None, None).is_none());
+        assert_eq!(
+            crate::auth::billing_credits_card_from_prepaid_total("-11245"),
+            xai_grok_sampling_types::BillingCreditsCard::NotFetched,
+            "prepaid total.val must not become the Billing Credits card"
         );
     }
 

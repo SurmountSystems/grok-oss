@@ -167,11 +167,11 @@ impl ModeTracker {
                     // entry for `<0u`, and over-counting depth here risks the
                     // destructive extra pop at exit.
                     let n = parse_decimal(&body[1..]).filter(|&n| n > 0).unwrap_or(1);
-                    let _ = self.kitty_depth.fetch_update(
-                        Ordering::SeqCst,
-                        Ordering::SeqCst,
-                        |depth| Some(depth.saturating_sub(n)),
-                    );
+                    let _ =
+                        self.kitty_depth
+                            .try_update(Ordering::SeqCst, Ordering::SeqCst, |depth| {
+                                Some(depth.saturating_sub(n))
+                            });
                 }
                 // `CSI u` restores the cursor, `CSI ? u` queries, and
                 // `CSI = .. u` sets flags without pushing — none are stack

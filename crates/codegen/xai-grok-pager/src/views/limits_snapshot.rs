@@ -130,17 +130,25 @@ pub enum AutoTopupLine {
 /// SuperGrok dollar credits. Amounts are non-negative USD cents for the current
 /// invoice period.
 ///
-/// [`Self::default_credits_cents`] is the dashboard-class **team default credits**
-/// allotment (often ~$1500 on the wire). It is **not** the prepaid wallet,
-/// **not** included SuperGrok period limits, and **not** SuperGrok top-up dollars.
+/// [`Self::default_credits_cents`] is postpaid preview `defaultCredits`
+/// (often ~$1500 on the wire). It is **not** Credits remaining, **not** the
+/// prepaid wallet, **not** included SuperGrok period limits, and **not**
+/// SuperGrok top-up dollars.
+/// [`Self::default_credits_issued_cents`] is default credits issued on this
+/// invoice preview. It is not the granted share of dashboard Credits remaining.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConsoleTeamPostpaidMeter {
     pub period_total_cents: i64,
     pub oauth_class_cents: i64,
     pub api_class_cents: i64,
     pub other_class_cents: i64,
-    /// Team default credits (dashboard allotment) in USD cents when present.
+    /// Postpaid preview `defaultCredits` in USD cents when present.
+    /// Not Credits remaining. Not the prepaid wallet.
     pub default_credits_cents: Option<i64>,
+    /// Default credits issued on this invoice preview, in USD cents, when
+    /// `coreInvoice.defaultCreditsIssued` was in the preview. `None` means
+    /// the issued amount was not in the preview.
+    pub default_credits_issued_cents: Option<i64>,
 }
 
 impl ConsoleTeamPostpaidMeter {
@@ -157,6 +165,7 @@ impl ConsoleTeamPostpaidMeter {
             api_class_cents: p.api_class_cents,
             other_class_cents: p.other_class_cents,
             default_credits_cents: p.default_credits_cents,
+            default_credits_issued_cents: p.default_credits_issued_cents,
         }
     }
 }
@@ -1027,6 +1036,17 @@ fn dollar_credits_from_balance(
     })
 }
 
+/// Human label for postpaid preview `defaultCredits`.
+/// Not Credits remaining. Not the prepaid wallet.
+const TEAM_DEFAULT_CREDITS_HUMAN_LABEL: &str = "Team default credits (postpaid preview \
+defaultCredits; not Credits remaining; not the prepaid wallet)";
+
+/// Human label for default credits issued on this invoice preview.
+const DEFAULT_CREDITS_ISSUED_HUMAN_LABEL: &str = "Default credits issued on this invoice preview";
+
+/// Shown when `coreInvoice.defaultCreditsIssued` was not in the preview.
+const DEFAULT_CREDITS_ISSUED_ABSENT: &str = "the issued amount was not in the preview.";
+
 /// Format cents as `$N` or `$N.NN` (absolute value).
 fn fmt_dollars(cents: i64) -> String {
     let dollars = cents.abs() as f64 / 100.0;
@@ -1218,7 +1238,7 @@ pub fn honesty_notes_for_snapshot(snap: &LimitsSnapshot) -> Vec<String> {
         .is_some();
     // Pure guard from snapshot + config (no re-scan of poll history rings).
     let turns_blocked = turns_blocked_free_period_debit_unproven_for_snapshot(snap);
-    honesty_notes_for_limits(LimitsHonestyInput {
+    let mut notes = honesty_notes_for_limits(LimitsHonestyInput {
         live: snap.live_identity,
         has_included_reading: has_included,
         flat_poll_unproven_debit: snap.flat_poll_unproven_debit,
@@ -1229,7 +1249,25 @@ pub fn honesty_notes_for_snapshot(snap: &LimitsSnapshot) -> Vec<String> {
         has_team_default_credits_reading: has_team_default_credits,
         turns_blocked_free_period_debit_unproven: turns_blocked,
         billing_credits_card: snap.console.billing_credits_card,
-    })
+    });
+    let dashboard = super::limits_honesty::NOTE_DASHBOARD_THIRTY_DAY_CREDITS_NOT_PARSED.to_string();
+    if !notes.iter().any(|n| n == &dashboard) {
+        notes.push(dashboard);
+    }
+    if snap.console.postpaid.is_some()
+        && snap
+            .console
+            .postpaid
+            .as_ref()
+            .and_then(|p| p.default_credits_issued_cents)
+            .is_none()
+    {
+        let absent = super::limits_honesty::NOTE_DEFAULT_CREDITS_ISSUED_NOT_IN_PREVIEW.to_string();
+        if !notes.iter().any(|n| n == &absent) {
+            notes.push(absent);
+        }
+    }
+    notes
 }
 
 /// Whether sampler turns would be blocked under unproven free SuperGrok period
@@ -1471,12 +1509,22 @@ fn format_console(lines: &mut Vec<String>, c: &ConsoleMeter) {
                 "  Team postpaid API class: {}",
                 fmt_dollars(p.api_class_cents)
             ));
-            // Team default credits: dashboard allotment, own line (not prepaid).
+            // Postpaid preview defaultCredits. Not Credits remaining.
+            // Not the prepaid wallet.
             if let Some(dc) = p.default_credits_cents {
                 lines.push(format!(
-                    "  Team default credits (dashboard allotment; not the prepaid wallet): {}",
+                    "  {TEAM_DEFAULT_CREDITS_HUMAN_LABEL}: {}",
                     fmt_dollars(dc)
                 ));
+            }
+            match p.default_credits_issued_cents {
+                Some(issued) => lines.push(format!(
+                    "  {DEFAULT_CREDITS_ISSUED_HUMAN_LABEL}: {}",
+                    fmt_dollars(issued)
+                )),
+                None => lines.push(format!(
+                    "  {DEFAULT_CREDITS_ISSUED_HUMAN_LABEL}: {DEFAULT_CREDITS_ISSUED_ABSENT}"
+                )),
             }
         }
         None => {
@@ -2204,6 +2252,7 @@ mod tests {
             api_class_cents: 129,
             other_class_cents: 0,
             default_credits_cents: None,
+            default_credits_issued_cents: None,
         };
         let snap =
             LimitsSnapshot::from_billing(Some(&bal), None, SamplingIdentityKind::SuperGrokSession)

@@ -33,8 +33,34 @@ fn local_pager_binary_path() -> Result<PathBuf> {
         .join(format!("{PAGER_BIN_NAME}{}", std::env::consts::EXE_SUFFIX)))
 }
 
+/// Crane `buildDepsOnly` replaces workspace bins with `pub fn main() {}` and
+/// still runs `cargo build`. `target/debug/grok-oss` then exists, exits
+/// immediately, and writes nothing. A real pager is either at least this
+/// large or contains the startup line from `xai-grok-pager-bin`.
+const REAL_PAGER_MIN_LEN: u64 = 64 * 1024 * 1024;
+const REAL_PAGER_MARKER: &[u8] = b"Couldn't start Grok";
+
+fn existing_binary_is_real_pager(binary: &std::path::Path) -> bool {
+    let Ok(meta) = std::fs::metadata(binary) else {
+        return false;
+    };
+    if !meta.is_file() {
+        return false;
+    }
+    if meta.len() >= REAL_PAGER_MIN_LEN {
+        return true;
+    }
+    std::fs::read(binary)
+        .map(|bytes| {
+            bytes
+                .windows(REAL_PAGER_MARKER.len())
+                .any(|window| window == REAL_PAGER_MARKER)
+        })
+        .unwrap_or(false)
+}
+
 fn ensure_local_pager_binary(binary: &std::path::Path) -> Result<()> {
-    if binary.exists() {
+    if existing_binary_is_real_pager(binary) {
         return Ok(());
     }
 
@@ -57,9 +83,9 @@ fn ensure_local_pager_binary(binary: &std::path::Path) -> Result<()> {
             String::from_utf8_lossy(&output.stderr),
         );
     }
-    if !binary.exists() {
+    if !existing_binary_is_real_pager(binary) {
         bail!(
-            "{PAGER_BIN_NAME} build completed but binary missing at {}",
+            "{PAGER_BIN_NAME} at {} is still the crane deps stub after cargo build",
             binary.display()
         );
     }
@@ -97,4 +123,35 @@ pub fn pager_binary() -> Result<PathBuf> {
     let binary = local_pager_binary_path()?;
     ensure_local_pager_binary(&binary)?;
     Ok(binary)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::existing_binary_is_real_pager;
+
+    #[test]
+    fn crane_deps_stub_is_not_a_real_pager() {
+        let dir = std::env::temp_dir().join(format!(
+            "grok-pager-stub-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let stub = dir.join("grok-oss");
+        std::fs::write(&stub, b"pub fn main() {}\n").expect("stub");
+        assert!(
+            !existing_binary_is_real_pager(&stub),
+            "empty crane main must be rebuilt"
+        );
+        let marked = dir.join("marked");
+        std::fs::write(&marked, b"prefix Couldn't start Grok: suffix").expect("marked");
+        assert!(
+            existing_binary_is_real_pager(&marked),
+            "startup marker is a real pager"
+        );
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
 }
