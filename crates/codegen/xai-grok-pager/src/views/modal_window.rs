@@ -1043,7 +1043,7 @@ pub fn handle_modal_mouse(
         column >= r.x && column < r.x + r.width && row >= r.y && row < r.y + r.height
     };
 
-    let on_close = state.close_button_rect.is_some_and(&in_rect);
+    let on_close = state.close_button_rect.is_some_and(in_rect);
 
     // Check if on a tab.
     let on_tab: Option<usize> = state

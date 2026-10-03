@@ -819,8 +819,8 @@ pub fn handle_memory_mouse(
 
     let on_list = in_rect(state.list_area);
     let on_preview = in_rect(state.preview_area);
-    let on_list_sb = state.list_scrollbar_area.is_some_and(&in_rect);
-    let on_preview_sb = state.preview_scrollbar_area.is_some_and(&in_rect);
+    let on_list_sb = state.list_scrollbar_area.is_some_and(in_rect);
+    let on_preview_sb = state.preview_scrollbar_area.is_some_and(in_rect);
 
     match kind {
         MouseEventKind::Down(crossterm::event::MouseButton::Left)

@@ -1237,7 +1237,7 @@ fn print_columns<T>(
         println!("  {TREE} (none)");
         return;
     }
-    let names: Vec<String> = items.iter().map(&name).collect();
+    let names: Vec<String> = items.iter().map(name).collect();
     let pad = names.iter().map(|n| n.len()).max().unwrap_or(0).min(50);
     for (item, n) in items.iter().zip(&names) {
         println!("  {TREE} {:<pad$}  {}", n, label(item));

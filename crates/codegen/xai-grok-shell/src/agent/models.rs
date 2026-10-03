@@ -72,7 +72,7 @@ pub(crate) fn task_model_error_for_catalog(
     let is_available = |entry: &ModelEntry| {
         entry.info.user_selectable && entry.info.visible_for_auth(is_session_auth)
     };
-    if config::find_model_by_id(available, requested).is_some_and(&is_available) {
+    if config::find_model_by_id(available, requested).is_some_and(is_available) {
         return None;
     }
 
