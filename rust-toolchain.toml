@@ -1,8 +1,18 @@
 [toolchain]
-channel = "1.94.0"
+# We use the latest stable, but bump it manually (current pin: 1.99.0).
+# To avoid unnecessary churn and simplify regression detection
+# - bump one point version at a time
+# - wait at least a couple of weeks after the release before bumping
+# After bumping the version, run
+# ```
+# cargo check --all-targets --workspace
+# cargo clippy --all-targets --workspace
+# ```
+channel = "stable"
 components = ["rustfmt", "clippy"]
-profile = "default"
+profile = "default" # this will override global preferred profile if such is set
 targets = [
     "x86_64-unknown-linux-gnu",
     "aarch64-unknown-linux-gnu",
-]
+] # host target will be added automatically
+# force CI

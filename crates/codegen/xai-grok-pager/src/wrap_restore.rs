@@ -149,7 +149,7 @@ impl ModeTracker {
                         .and_then(parse_decimal)
                         .filter(|&n| n > 0)
                         .unwrap_or(1);
-                    let _ = self.kitty_depth.fetch_update(
+                    let _ = self.kitty_depth.try_update(
                         Ordering::SeqCst,
                         Ordering::SeqCst,
                         |depth| Some(depth.saturating_sub(n)),
