@@ -1235,19 +1235,17 @@ impl SessionActor {
             None
         };
 
-            let mut slot_guard = TrackerDropGuard::new(&self.goal_tracker, |t| {
-                use crate::session::goal_tracker::GoalStatus;
-                if !matches!(
-                    t.status(),
-                    Some(
-                        GoalStatus::BackOffPaused
-                            | GoalStatus::NoProgressPaused
-                            | GoalStatus::Blocked
-                    ),
-                ) {
-                    t.rollback_classifier_attempt();
-                }
-            });
+        let mut slot_guard = TrackerDropGuard::new(&self.goal_tracker, |t| {
+            use crate::session::goal_tracker::GoalStatus;
+            if !matches!(
+                t.status(),
+                Some(
+                    GoalStatus::BackOffPaused | GoalStatus::NoProgressPaused | GoalStatus::Blocked
+                ),
+            ) {
+                t.rollback_classifier_attempt();
+            }
+        });
 
         if apply_turn_end && self.enforce_goal_token_budget(current_tokens).await {
             return None;
@@ -1571,6 +1569,7 @@ impl SessionActor {
                 queue_meta: None,
                 queue_mutation_policy: QueueMutationPolicy::hidden(),
                 send_now: false,
+                unstick_retry: false,
                 traceparent: None,
             });
         }

@@ -516,9 +516,7 @@ pub(crate) async fn run_read_file(
                             )
                             .await;
                             if let Some(suggestion) = verified_skill_suggestion {
-                                msg.push_str(
-                                    "\nThe skill you are looking for is registered at:\n",
-                                );
+                                msg.push_str("\nThe skill you are looking for is registered at:\n");
                                 msg.push_str(&suggestion.display_path.to_string_lossy());
                             }
                             ReadFileOutput::FileNotFound(msg)

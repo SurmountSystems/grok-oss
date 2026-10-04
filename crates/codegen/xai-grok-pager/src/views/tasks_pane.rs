@@ -9,10 +9,12 @@ use super::list_pane::{
 use super::overlay::OverlayState;
 use crate::app::agent::{BgTaskState, BgTaskStatus, ScheduledTaskInfo};
 use crate::app::agent_view::l2_token_tracking::{
-    display_live_job_row, shown_nested_count, sum_shown_counts_once, LiveJobRowInput,
-    STANDING_WRAP_ESTIMATE_TOKENS, STANDING_WRAP_ESTIMATE_WALL,
+    LiveJobRowInput, STANDING_WRAP_ESTIMATE_TOKENS, STANDING_WRAP_ESTIMATE_WALL,
+    display_live_job_row, shown_nested_count, sum_shown_counts_once,
 };
-use crate::app::subagent::{SubagentInfo, format_context_badge, format_subagent_label};
+use crate::app::subagent::{
+    SubagentInfo, format_context_badge, format_live_l3_count, format_subagent_label,
+};
 use crate::appearance::LayoutConfig;
 use crate::scrollback::layout::HorizontalLayout;
 use crate::syntax::get_syntect;
@@ -428,6 +430,9 @@ impl TaskEntry {
                 Style::default().fg(theme.gray),
             ));
         }
+        let l3_suffix = format_live_l3_count(live_l3)
+            .map(|c| format!(" · {c}"))
+            .unwrap_or_default();
         let label = match (description.is_empty(), model_suffix.is_empty()) {
             (true, true) => format!("{type_label}{l3_suffix}"),
             (true, false) => format!("{type_label} {model_suffix}{l3_suffix}"),
@@ -1808,6 +1813,9 @@ mod tests {
                 workflow_run_id: None,
                 context_normalized: false,
                 parent_prompt_id: None,
+                parent_session_id: None,
+                depth: None,
+                tokens_past: 0,
                 started_at: now,
                 last_progress_at: now,
                 status: None,

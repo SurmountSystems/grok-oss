@@ -217,6 +217,10 @@ pub async fn run_command_hook(
         .stderr(std::process::Stdio::piped())
         .current_dir(ctx.workspace_root)
         // SECURITY: extra_env is applied before the GROK_* identity vars so a hook cannot spoof them.
+        // Clear the parent environment first. The hook inherits only PATH and HOME, then extra_env, then the GROK_* identity vars.
+        .env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .env("HOME", std::env::var_os("HOME").unwrap_or_default())
         .envs(&spec.extra_env)
         .env("GROK_HOOK_EVENT", envelope.hook_event_name.to_string())
         .env("GROK_HOOK_NAME", &spec.name)
@@ -1046,6 +1050,7 @@ mod tests {
                 ..
             }
         ));
+    }
 
     #[test]
     fn unknown_decision_with_exit_2_still_denies() {

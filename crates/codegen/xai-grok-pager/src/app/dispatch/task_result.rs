@@ -597,40 +597,6 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             autotopup,
             nonce,
         } => {
-            use crate::views::credit_bar::{
-                CreditBalanceFetch, should_apply_included_usage_side_effects,
-            };
-            // SuperGrok three-state (same as agent BillingFetched).
-            match &balance {
-                CreditBalanceFetch::Resolved(bal) => {
-                    app.credit_balance = bal.clone();
-                }
-                CreditBalanceFetch::Unchanged => {}
-            }
-            // Same memo + meter identity path as agent BillingFetched: period
-            // reset (free SuperGrok period used percent drops below 100) must
-            // clear out-of-allowance memo and re-label SuperGrok when session is
-            // preferred (not preferred_method=api_key). Only known included
-            // readings feed exhaust (never placeholder 0 with unknown flag).
-            let exhaust_action = match app.credit_balance.as_ref() {
-                Some(bal) if should_apply_included_usage_side_effects(bal) => {
-                    let grok_home = xai_grok_shell::util::grok_home::grok_home();
-                    xai_grok_shell::auth::apply_billing_usage_to_session_exhaust(
-                        bal.usage_pct,
-                        &grok_home,
-                    )
-                }
-                if !silent {
-                    agent.scrollback.push_block(RenderBlock::System(
-                        crate::scrollback::blocks::SystemMessageBlock::new(format!(
-                            "Billing error: {error}"
-                        )),
-                    ));
-                }
-            }
-            vec![]
-        }
-        TaskResult::AppBillingFetched { balance, autotopup } => {
             app.credit_balance = balance;
             apply_auto_topup(&mut app.auto_topup, &autotopup);
             if let Some(state) = app.dashboard.as_mut().and_then(|d| d.usage_modal.as_mut())
@@ -647,9 +613,6 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             {
                 state.billing_loading = false;
                 state.billing_error = Some(error);
-            }
-            if let Some(cents) = console_team_prepaid_cents {
-                app.console_team_prepaid_cents = Some(cents);
             }
             vec![]
         }

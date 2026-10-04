@@ -1133,6 +1133,26 @@ fn subagents_max_depth_toml_beats_remote() {
 fn subagents_max_depth_remote_used_when_local_absent() {
     assert_eq!(SubagentsConfig::resolve_max_depth(None, None, Some(5)), 5);
 }
+/// Named contract: remote grok_build_settings must not strip spawn_subagent
+/// from a first-level nested coordinator. Operator TOML/env may still set 1.
+#[test]
+fn resolve_max_depth_remote_one_does_not_block_l2_spawn() {
+    assert_eq!(
+        SubagentsConfig::resolve_max_depth(None, None, Some(1)),
+        SubagentsConfig::DEFAULT_MAX_DEPTH,
+        "remote max_depth 1 must fall through to the L1→L2→L3 default"
+    );
+    assert_eq!(
+        SubagentsConfig::resolve_max_depth(None, None, Some(3)),
+        3,
+        "remote max_depth at or above the default still applies"
+    );
+    assert_eq!(
+        SubagentsConfig::resolve_max_depth(None, Some(1), Some(1)),
+        1,
+        "operator TOML max_depth 1 still wins over remote"
+    );
+}
 #[test]
 fn subagents_max_depth_clamps_below_one_to_one() {
     assert_eq!(SubagentsConfig::clamp_max_depth(-3, "test"), 1);

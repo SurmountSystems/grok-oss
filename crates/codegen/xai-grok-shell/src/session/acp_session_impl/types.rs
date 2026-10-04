@@ -49,6 +49,10 @@ pub(crate) enum SamplerFailureRecovery {
         credential: xai_grok_sampling_types::SentCredential,
         store: RecoveredStore,
     },
+    /// L3 hit the nested window. End the child. Do not compact-and-continue.
+    /// An L3 specialist, or a once-run nested role, filled its sampling window.
+    /// End that session. Do not compact-and-continue. An ordinary L2 does not take this arm.
+    EndChildWithoutCompact,
     /// Transient failure: back off and resubmit instead of killing the turn.
     /// Retries are bounded.
     RetryTransient {
@@ -72,6 +76,9 @@ pub(crate) enum SamplerTurnOutcome {
         credential: xai_grok_sampling_types::SentCredential,
         store: RecoveredStore,
     },
+    /// L3 hit the nested window. End the child. Do not compact-and-continue.
+    /// Mirrors [`SamplerFailureRecovery::EndChildWithoutCompact`].
+    EndChildWithoutCompact,
     /// Mirrors [`SamplerFailureRecovery::RetryTransient`].
     RetryTransient {
         kind: xai_grok_sampler::SamplingErrorKind,

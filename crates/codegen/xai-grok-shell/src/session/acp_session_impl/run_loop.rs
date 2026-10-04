@@ -745,7 +745,7 @@ pub(super) async fn run_session(
                         SessionCommand::SetToolOverrides { overrides } => {
                             session.set_tool_overrides(overrides);
                         }
-                        SessionCommand::Prompt { prompt_id, prompt_blocks, prompt_mode, artifact_upload_ctx, client_identifier, screen_mode, verbatim, traceparent, json_schema, send_now, admission, tool_overrides_update, respond_to, prompt_admitted, persist_ack, parsed_prompt_tx } => {
+                        SessionCommand::Prompt { prompt_id, prompt_blocks, prompt_mode, artifact_upload_ctx, client_identifier, screen_mode, verbatim, traceparent, json_schema, send_now, unstick_retry, admission, tool_overrides_update, respond_to, prompt_admitted, persist_ack, parsed_prompt_tx } => {
                             let origin = super::PromptOrigin::from_prompt_id(&prompt_id);
                             let (actor_admitted, task_wake_fallback) = match admission {
                                 Some(admission) => {
@@ -2167,6 +2167,7 @@ pub(super) async fn run_session(
                                     queue_meta: None,
                                     queue_mutation_policy: QueueMutationPolicy::hidden(),
                                     send_now: false,
+                                    unstick_retry: false,
                                     traceparent: None,
                                 });
                             }
@@ -2226,6 +2227,7 @@ pub(super) async fn run_session(
                                     queue_meta: None,
                                     queue_mutation_policy: QueueMutationPolicy::hidden(),
                                     send_now: false,
+                                    unstick_retry: false,
                                     traceparent: None,
                                 });
                             }

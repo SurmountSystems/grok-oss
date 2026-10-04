@@ -20,7 +20,6 @@ pub mod defs;
 pub mod registry;
 
 pub use registry::{
-
     AutoCompactThresholdChoice, DynamicEnumSource, EnumChoice, OwnedEnumChoice, PagerLocalSnapshot,
     SettingCategory, SettingKey, SettingKind, SettingMeta, SettingOwner, SettingValue,
     SettingsRegistry, StringValidator, canonical_auto_compact_threshold,

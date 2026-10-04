@@ -1,7 +1,6 @@
 //! Settings UI: command palette, settings modal, toggles, resets, and rollback.
 
 use super::setters::{
-
     pr13_effective_default, set_ask_user_question_timeout_enabled_inner,
     set_auto_compact_threshold_percent_inner, set_auto_compact_threshold_tokens_inner,
     set_auto_dark_theme_inner, set_auto_light_theme_inner, set_auto_run_implement_inner,

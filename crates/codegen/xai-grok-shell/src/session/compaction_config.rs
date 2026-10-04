@@ -173,7 +173,9 @@ pub(crate) struct CompactionConfig {
     /// Locks the context window when `GROK_DEBUG_CONTEXT_WINDOW` is set.
     pub context_window_override: Option<std::num::NonZeroU64>,
 
-    /// Soft-cap effective context at 200K for pricing (see
+    /// Economic-mode Cell (implement-effort / Token Economy). Nested L2/L3
+    /// sampling is capped at 200k via [`crate::util::config::session_sampling_window`];
+    /// L1 uses the catalog window. Soft-cap effective context at 200K for pricing (see
     /// [`crate::util::config::ECONOMIC_CONTEXT_CAP`]). Seeded from
     /// `[ui].economic_mode` at session spawn; toggled per conversation with
     /// `/economic-mode`. `Cell` so slash handlers can flip without `&mut self`.

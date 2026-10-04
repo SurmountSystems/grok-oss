@@ -622,8 +622,18 @@ impl AgentView {
             return InputOutcome::Changed;
         }
 
+        // Empty-prompt `c` opens a line comment. A live draft types `c`.
         if in_plan_approval && key!('c').matches(key) {
-            return self.enter_plan_commenting();
+            let already_commenting = self
+                .plan_approval_view
+                .as_ref()
+                .is_some_and(|pav| pav.focus == PlanApprovalFocus::Commenting);
+            if !already_commenting && self.prompt.text().trim().is_empty() {
+                return self.enter_plan_commenting();
+            }
+            if plan_preview_key_is_composer_text(key) {
+                return self.handle_plan_feedback_key(key);
+            }
         }
 
         // Casual mode: same `c` / `s` shortcuts as plan approval so the footer hints actually work
@@ -638,8 +648,10 @@ impl AgentView {
             return self.send_casual_plan_comments();
         }
 
-        if in_plan_approval && key!('a').matches(key) {
-            return self.approve_plan();
+        // Bare `a` types. Approve is the button. Do not switch to Prompt
+        // first: empty Prompt `a` still Approves revision notes.
+        if in_plan_approval && key!('a').matches(key) && plan_preview_key_is_composer_text(key) {
+            return self.handle_plan_feedback_key(key);
         }
 
         // s: switch to prompt so the user can type an overall revision message before submitting
@@ -972,6 +984,7 @@ impl AgentView {
         let questions_area = viewer.plan_ref().and_then(|p| p.questions_button_area);
         let comment_btn_area = viewer.plan_ref().and_then(|p| p.comment_button_area);
         let copy_btn_area = viewer.plan_ref().and_then(|p| p.copy_button_area);
+        let search_btn_area = viewer.plan_ref().and_then(|p| p.search_button_area);
         let close_hit = viewer.comment_close_button_at(mouse.column, mouse.row);
         // Cached `is_plan_viewer()` so we don't need to call self while the line_viewer is mutably borrowed below
         let is_plan_preview =

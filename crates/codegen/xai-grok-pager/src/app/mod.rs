@@ -21,6 +21,7 @@ pub mod cli;
 pub(crate) mod command_catalog;
 pub mod consent;
 pub(crate) mod deferred_subagent_finishes;
+pub(crate) mod l0_enqueue;
 pub use crate::link_opener;
 use xai_grok_telemetry::region;
 use xai_grok_telemetry::region::Parent;
@@ -706,12 +707,15 @@ async fn bounded_connect(
 /// Main entry point: connect to agent, init terminal, run event loop, restore.
 /// If a session ID is provided via `--resume` / `--load` / `--continue`, the pager skips the welcome screen and immediately loads that session.
 /// The load replays the session's history; sessions not found locally are restored from remote storage.
+/// Returns `Ok(true)` when the user accepted a pending update. The caller should print a message telling the user to relaunch `grok-oss`.
+/// A grok-oss relaunch re-execs this binary.
 pub async fn run(
     mut args: PagerArgs,
     bg_update_rx: Option<
         tokio::sync::oneshot::Receiver<Option<xai_grok_update::auto_update::UpdateAvailable>>,
     >,
 ) -> anyhow::Result<bool> {
+    dispatch::rebuild::note_process_start_unix_secs();
     let screen_mode_override = screen_mode_relaunch::take_screen_mode_env_override();
     let cancel = CancellationToken::new();
     let startup_start = std::time::Instant::now();
@@ -1308,19 +1312,23 @@ pub async fn run(
                     }
                     return Ok(false);
                 }
-                if let Err(e) = screen_mode_relaunch::exec_screen_mode_relaunch(
-                    &relaunch.session_id,
-                    relaunch.minimal,
-                ) {
-                    tracing::error!(error = %e, "screen-mode relaunch failed");
-                    if terminal_reading {
-                        print_relaunch_failure_hint(
-                            &e,
-                            &relaunch.session_id,
-                            relaunch.minimal,
-                            &mut io::stderr(),
-                        );
-                    }
+                dispatch::rebuild::PostRestoreRelaunch::BlockedScreenMode => {
+                    let relaunch = run_result
+                        .relaunch
+                        .as_ref()
+                        .expect("BlockedScreenMode requires relaunch");
+                    let cleanup_error = restore_result
+                        .as_ref()
+                        .err()
+                        .map(|e| e.to_string())
+                        .unwrap_or_else(|| "terminal restore failed".into());
+                    print_relaunch_failure_hint(
+                        &cleanup_error,
+                        &relaunch.session_id,
+                        relaunch.minimal,
+                        &mut io::stderr(),
+                    );
+                    return Ok(false);
                 }
                 dispatch::rebuild::PostRestoreRelaunch::None => {}
             }
@@ -1368,6 +1376,21 @@ fn print_exit_resume_hint(info: &ExitInfo, max_width: usize, w: &mut impl Write)
         w,
         "  {}",
         resume_session_command(&info.session_id, info.minimal)
+    );
+}
+/// Screen-mode relaunch failure fallback (same quit tail as plain resume).
+fn print_relaunch_failure_hint(
+    error: &impl std::fmt::Display,
+    session_id: &str,
+    want_minimal: bool,
+    w: &mut impl Write,
+) {
+    let _ = writeln!(w, "Failed to relaunch in requested mode: {error}");
+    let _ = writeln!(w, "Resume this session with:");
+    let _ = writeln!(
+        w,
+        "  {}",
+        screen_mode_relaunch::screen_mode_relaunch_resume_hint(session_id, want_minimal),
     );
 }
 /// `crossterm::enable_raw_mode()` sets flags on stdin only.

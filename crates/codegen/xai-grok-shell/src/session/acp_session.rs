@@ -314,6 +314,8 @@ pub(crate) struct InputItem {
     /// Send-now inserts land behind earlier still-queued send-now prompts, so stacked sends run FIFO.
     /// Sends stack e.g. during a goal turn, which promotes but never cancels.
     pub(crate) send_now: bool,
+    /// `_meta.unstickRetry`: skip a second user turn when the last query matches.
+    pub(crate) unstick_retry: bool,
     /// See [`SessionCommand::Prompt::traceparent`].
     pub(crate) traceparent: Option<String>,
 }

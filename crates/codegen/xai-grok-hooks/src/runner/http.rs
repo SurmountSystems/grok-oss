@@ -401,6 +401,7 @@ fn parse_http_blocking_result(
     }
 
     match serde_json::from_str::<super::GateHookJson>(response_text) {
+        // HTTP hooks have no stderr channel, so there is no fallback reason.
         Ok(json) if json.is_gate_document() => {
             let health = HookHealth::from_success(status.is_success());
             match super::gate_outcome(json, hook_name, /* fallback_reason */ None, health) {

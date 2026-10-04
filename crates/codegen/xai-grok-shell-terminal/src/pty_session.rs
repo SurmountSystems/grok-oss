@@ -679,6 +679,13 @@ fn reap(entry: &Arc<Mutex<PtySession>>) {
     wait_for_exit(entry, REAP_GRACE);
 }
 
+#[cfg(unix)]
+fn signal_groups(groups: &[xai_tty_utils::ProcessGroupId], sig: nix::sys::signal::Signal) {
+    for group in groups {
+        let _ = nix::sys::signal::killpg(nix::unistd::Pid::from_raw(group.get() as i32), sig);
+    }
+}
+
 /// Polls rather than blocking on `wait`, re-locking each turn: a shell that ignores its hangup must not wedge teardown or stall the pty's own I/O.
 fn wait_for_exit(entry: &Arc<Mutex<PtySession>>, budget: std::time::Duration) -> bool {
     let deadline = std::time::Instant::now() + budget;

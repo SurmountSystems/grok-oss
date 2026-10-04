@@ -1216,6 +1216,12 @@ impl acp::Agent for MvpAgent {
             .and_then(|m| m.get("sendNow"))
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
+        let unstick_retry = arguments
+            .meta
+            .as_ref()
+            .and_then(|m| m.get("unstickRetry"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         let mut before_upload_handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
         if let Some(ctx) = trace_context.clone() {
             let (tx, parsed_prompt_rx) = oneshot::channel::<ParsedPromptInfo>();
@@ -1397,7 +1403,7 @@ impl acp::Agent for MvpAgent {
             .as_ref()
             .map(|ctx| ctx.artifact_upload_context());
         let traceparent = xai_grok_otel::current_traceparent();
-        let dispatch_result: Result<(), acp::Error> = if send_now {
+        let dispatch_result: Result<(), acp::Error> = if send_now || unstick_retry {
             handle
                 .cmd_tx
                 .send(SessionCommand::Prompt {
@@ -1410,7 +1416,8 @@ impl acp::Agent for MvpAgent {
                     verbatim,
                     traceparent,
                     json_schema,
-                    send_now: true,
+                    send_now,
+                    unstick_retry,
                     admission: None,
                     tool_overrides_update,
                     respond_to: tx,

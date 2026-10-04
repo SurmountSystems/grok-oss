@@ -353,11 +353,12 @@ impl SubagentInfo {
     /// so the surviving window is not counted twice.
     pub(crate) fn record_compact(&mut self, tokens_before: Option<u64>, tokens_after: u64) {
         if let Some(before) = tokens_before {
-            self.tokens_past = self
+            self.attempt.tokens_past = self
+                .attempt
                 .tokens_past
                 .saturating_add(before.saturating_sub(tokens_after));
         }
-        self.tokens_used = Some(tokens_after);
+        self.attempt.tokens_used = Some(tokens_after);
     }
 
     /// Last operator-visible tool or progress for wait chrome.
@@ -367,10 +368,11 @@ impl SubagentInfo {
     /// progress: nested progress often leaves that leftover while `tools_used`
     /// still names the last tool.
     pub(crate) fn wait_progress_label(&self) -> Option<String> {
-        if let Some(label) = meaningful_wait_progress(self.activity_label.as_deref()) {
+        if let Some(label) = meaningful_wait_progress(self.attempt.activity_label.as_deref()) {
             return Some(label);
         }
         if let Some(tool) = self
+            .attempt
             .tools_used
             .last()
             .map(|s| s.as_ref())
@@ -378,7 +380,7 @@ impl SubagentInfo {
         {
             return Some(tool);
         }
-        match self.tool_call_count.or(self.tool_calls) {
+        match self.attempt.tool_call_count.or(self.attempt.tool_calls) {
             Some(1) => Some("1 tool".to_string()),
             Some(n) if n > 1 => Some(format!("{n} tools")),
             _ => None,
@@ -503,6 +505,10 @@ fn replay_inherited_updates(
     #[cfg(test)]
     test_support::record_transcript_read();
 
+    child_view
+        .session
+        .tracker
+        .forget_pending_tools_absent_from_scrollback(&child_view.scrollback);
     child_view.scrollback.begin_batch();
     let outcome = stream_replay_updates_at_hinted(child_session_id, &home, hint, |update| {
         match update {
@@ -577,6 +583,9 @@ pub(crate) mod test_support {
                 workflow_run_id: None,
                 context_normalized: false,
                 parent_prompt_id: None,
+                parent_session_id: None,
+                depth: None,
+                tokens_past: 0,
                 started_at: now,
                 last_progress_at: now,
                 status: None,
@@ -657,6 +666,7 @@ pub(crate) fn ensure_subagent_child_replayed(
         return ChildReplayOutcome::UnknownChild;
     };
     if !info.transcript.needs_replay() {
+        idle_finished_nested_overlay(parent, child_sid);
         return ChildReplayOutcome::NothingToRead;
     }
     let finished = info.is_finished();
@@ -711,11 +721,15 @@ pub(crate) fn ensure_subagent_child_replayed(
         detached_state,
         finished_elapsed,
     );
-    match outcome {
+    let outcome = match outcome {
         Ok(ReplayEmission::Emitted) => ChildReplayOutcome::Replayed,
         Ok(ReplayEmission::Empty) => ChildReplayOutcome::FoundNothingOnDisk,
         Err(_) => ChildReplayOutcome::ReadFailed,
-    }
+    };
+    // Open goes through this replay. A finished child must not keep TurnRunning,
+    // or the overlay title clock climbs from spawn instead of the host duration.
+    idle_finished_nested_overlay(parent, child_sid);
+    outcome
 }
 
 /// The tail of [`ensure_subagent_child_replayed`].
@@ -947,6 +961,66 @@ pub(crate) fn finalize_finished_child_view(
         ));
 }
 
+/// Reopening a finished nested overlay must idle leftover `TurnRunning`
+/// instead of starting a climbing title clock. Does not push a second
+/// `TurnCompleted` footer when the child is already idle.
+pub(crate) fn idle_finished_nested_overlay(
+    parent: &mut crate::app::agent_view::AgentView,
+    child_sid: &str,
+) {
+    let Some(info) = parent.subagent_sessions.get(child_sid) else {
+        return;
+    };
+    if !info.is_finished() {
+        return;
+    }
+    let elapsed = info
+        .attempt
+        .duration_ms
+        .map(std::time::Duration::from_millis)
+        .unwrap_or_else(|| info.display_elapsed());
+    let Some(child_view) = parent.subagent_views.get_mut(child_sid) else {
+        return;
+    };
+    if !child_view.session.state.is_busy() && child_view.session.tracker.activity().is_none() {
+        return;
+    }
+    child_view.session.state = crate::app::agent::AgentState::Idle;
+    finalize_finished_child_view(child_view, elapsed);
+    child_view.mark_turn_finished(crate::app::cancel_latency::TurnEnd::Completed);
+}
+
+/// Nested child views never receive `PromptResponse`. ACP turn-end on the
+/// child session must idle overlay chrome so last-assistant `Responding`
+/// cannot keep a climbing clock and `[pause] [stop]`.
+/// An active row keeps a live clock. A turn that ends before `SubagentFinished`
+/// freezes `duration_ms` so a later overlay does not climb from spawn.
+pub(crate) fn finish_nested_child_session_turn(
+    parent: &mut crate::app::agent_view::AgentView,
+    child_sid: &str,
+) -> bool {
+    let Some(child_view) = parent.subagent_views.get_mut(child_sid) else {
+        return false;
+    };
+    let live =
+        child_view.session.state.is_busy() || child_view.session.tracker.activity().is_some();
+    if !live {
+        return false;
+    }
+    child_view.session.finish_turn(&mut child_view.scrollback);
+    child_view.scrollback.finish_all_running();
+    child_view.mark_turn_finished(crate::app::cancel_latency::TurnEnd::Completed);
+    if let Some(info) = parent.subagent_sessions.get_mut(child_sid)
+        && !info.is_finished()
+    {
+        info.attempt.activity_label = None;
+        if info.attempt.duration_ms.is_none() {
+            info.attempt.duration_ms = Some(info.elapsed().as_millis() as u64);
+        }
+    }
+    true
+}
+
 fn join_meta_parts(parts: &[Option<&str>]) -> String {
     let non_empty: Vec<&str> = parts.iter().copied().flatten().collect();
     if non_empty.is_empty() {
@@ -1047,11 +1121,122 @@ pub(crate) fn format_subagent_label(info: &SubagentInfo) -> (String, String) {
     (label, clean_desc.to_string())
 }
 
+/// Subagents list description using the full registry. The current label has
+/// no compact-count suffix, so the registry does not change the pair.
+pub(crate) fn format_subagent_label_among(
+    info: &SubagentInfo,
+    _all: &[&SubagentInfo],
+) -> (String, String) {
+    format_subagent_label(info)
+}
+
+/// Running, non-workflow L2 rows for the L1 Subagents list.
+///
+/// L3 specialists stay in the registry so each L2 can report a count, but they
+/// do not get their own L1 list rows. Two live L2s with the same trimmed
+/// description collapse to the earliest row. Finished children are not listed.
+/// An active row is in this list and shows a live clock. A finished row is not.
+pub(crate) fn live_subagent_list<'a, I>(infos: I) -> Vec<&'a SubagentInfo>
+where
+    I: IntoIterator<Item = &'a SubagentInfo>,
+{
+    let all: Vec<_> = infos.into_iter().collect();
+    let child_ids: std::collections::HashSet<&str> = all
+        .iter()
+        .map(|info| info.child_session_id.as_ref())
+        .collect();
+    let mut live: Vec<_> = all
+        .into_iter()
+        .filter(|info| info.is_running() && info.attempt.workflow_run_id.is_none())
+        .filter(|info| is_l2_list_row(info, &child_ids))
+        .collect();
+    live.sort_by_key(|info| info.attempt.started_at);
+    dedupe_live_by_description(live)
+}
+
+fn dedupe_live_by_description<'a>(live: Vec<&'a SubagentInfo>) -> Vec<&'a SubagentInfo> {
+    let mut seen = std::collections::HashSet::<&str>::new();
+    let mut out = Vec::new();
+    for info in live {
+        let key = info.description.trim();
+        if key.is_empty() {
+            out.push(info);
+            continue;
+        }
+        if seen.insert(key) {
+            out.push(info);
+        }
+    }
+    out
+}
+
+/// L2 for the main-thread list: spawned by the main session, not by another
+/// subagent in this registry, and not depth 2 or deeper.
+pub(crate) fn is_l2_list_row(
+    info: &SubagentInfo,
+    child_ids: &std::collections::HashSet<&str>,
+) -> bool {
+    if info.attempt.depth.is_some_and(|d| d >= 2) {
+        return false;
+    }
+    !matches!(
+        info.attempt.parent_session_id.as_deref(),
+        Some(parent) if child_ids.contains(parent)
+    )
+}
+
+/// True when this overlay child is an L2 coordinator the operator may ask.
+///
+/// Missing registry rows stay observational. Depth 2 or a parent that is
+/// itself a listed child is an L3 specialist and stays unbothered.
+pub(crate) fn overlay_child_is_l2_coordinator(
+    sessions: &std::collections::HashMap<String, SubagentInfo>,
+    child_sid: &str,
+) -> bool {
+    let Some(info) = sessions.get(child_sid) else {
+        return false;
+    };
+    if info.attempt.depth.is_some_and(|d| d >= 2) {
+        return false;
+    }
+    let child_ids: std::collections::HashSet<&str> = sessions
+        .values()
+        .map(|row| row.child_session_id.as_ref())
+        .collect();
+    is_l2_list_row(info, &child_ids)
+}
+
+/// How many live L3 specialists an L2 is using.
+///
+/// Counts running, non-workflow rows whose parent session is this L2.
+pub(crate) fn live_l3_count<'a, I>(infos: I, l2_child_session_id: &str) -> usize
+where
+    I: IntoIterator<Item = &'a SubagentInfo>,
+{
+    infos
+        .into_iter()
+        .filter(|info| {
+            info.is_running()
+                && info.attempt.workflow_run_id.is_none()
+                && info.attempt.parent_session_id.as_deref() == Some(l2_child_session_id)
+        })
+        .count()
+}
+
+/// L2 row suffix: how many L3 specialists that coordinator is using.
+pub(crate) fn format_live_l3_count(n: usize) -> Option<String> {
+    match n {
+        0 => None,
+        1 => Some("1 specialist".to_string()),
+        n => Some(format!("{n} specialists")),
+    }
+}
+
 /// Present plus past for one nested session. Each unit once.
 ///
 /// `None` before the first usage tick and before any compact.
 pub(crate) fn nested_session_present_plus_past(info: &SubagentInfo) -> Option<u64> {
-    match (info.tokens_used, info.tokens_past) {
+    match (info.attempt.tokens_used, info.attempt.tokens_past) {
         (None, 0) => None,
         (present, past) => Some(present.unwrap_or(0).saturating_add(past)),
     }
@@ -1071,10 +1256,10 @@ where
     let mut specialist_total = 0u64;
     let mut any_specialist = false;
     for info in infos {
-        if info.workflow_run_id.is_some() {
+        if info.attempt.workflow_run_id.is_some() {
             continue;
         }
-        if info.parent_session_id.as_deref() != Some(l2.child_session_id.as_ref()) {
+        if info.attempt.parent_session_id.as_deref() != Some(l2.child_session_id.as_ref()) {
             continue;
         }
         if let Some(usage) = nested_session_present_plus_past(info) {
@@ -1115,7 +1300,7 @@ where
 {
     infos
         .into_iter()
-        .filter(|info| info.is_running() && info.workflow_run_id.is_none())
+        .filter(|info| info.is_running() && info.attempt.workflow_run_id.is_none())
         .filter_map(nested_session_present_plus_past)
         .fold(0u64, u64::saturating_add)
 }

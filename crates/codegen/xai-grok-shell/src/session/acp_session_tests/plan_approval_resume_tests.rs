@@ -533,7 +533,7 @@ async fn same_batch_plan_write_before_exit_plan_mode_returns_new_body() {
             };
 
             actor
-                .execute_tool_calls(vec![write_call, exit_call])
+                .execute_tool_calls(vec![write_call, exit_call], None)
                 .await
                 .expect("execute_tool_calls");
 
@@ -563,6 +563,76 @@ async fn same_batch_plan_write_before_exit_plan_mode_returns_new_body() {
             assert!(
                 !exit_text.contains("old_token_economy_marker"),
                 "exit_plan_mode must not embed frozen plan A; got {exit_text:?}"
+            );
+        })
+        .await;
+}
+
+/// Reconnect flush can persist Inactive over a seeded `plan_mode.json`.
+/// `RestorePlanApproval` still carries the pre-flush snapshot.
+#[tokio::test(flavor = "current_thread")]
+async fn resume_uses_pre_flush_snapshot_when_disk_was_clobbered() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (actor, mut gateway_rx, _persistence_rx) = actor_with_channels().await;
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(dir.path().join("plan.md"), "# Seeded after quit\n\nBody\n").unwrap();
+            std::fs::write(
+                dir.path().join("plan_mode.json"),
+                serde_json::to_vec_pretty(&serde_json::json!({
+                    "state": "Inactive",
+                    "was_previously_active": true,
+                    "reminder_count": 0,
+                    "pending_exit_reminder": false,
+                    "awaiting_plan_approval": false,
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+            {
+                let mut tracker = actor.plan_mode.lock();
+                *tracker =
+                    crate::session::plan_mode::PlanModeTracker::new(dir.path().to_path_buf());
+            }
+
+            let responder = tokio::task::spawn_local(async move {
+                let mut seen = false;
+                while let Some(msg) = gateway_rx.recv().await {
+                    match msg {
+                        xai_acp_lib::AcpClientMessage::ExtMethod(args) => {
+                            seen = &*args.request.method == "x.ai/exit_plan_mode";
+                            let _ = args
+                                .response_tx
+                                .send(Ok(acp::ExtResponse::new(ext_response("abandoned"))));
+                            break;
+                        }
+                        xai_acp_lib::AcpClientMessage::SessionNotification(args) => {
+                            let _ = args.response_tx.send(Ok(()));
+                        }
+                        _ => {}
+                    }
+                }
+                seen
+            });
+
+            actor.adopt_parked_plan_snapshot(crate::session::plan_mode::PlanModeSnapshot {
+                state: crate::session::plan_mode::PlanModeState::Active,
+                was_previously_active: true,
+                reminder_count: 0,
+                pending_exit_reminder: false,
+                awaiting_plan_approval: true,
+                plan_decision_resolved: false,
+            });
+            let (completion_tx, _completion_rx) = tokio::sync::mpsc::unbounded_channel();
+            actor.clone().resume_plan_approval(completion_tx).await;
+            assert!(
+                responder.await.unwrap(),
+                "resume must re-issue x.ai/exit_plan_mode from the pre-flush snapshot"
+            );
+            assert!(
+                !actor.plan_mode.lock().is_awaiting_plan_approval(),
+                "abandoned decision must clear the adopted awaiting flag"
             );
         })
         .await;

@@ -7720,6 +7720,7 @@ mod plan_turn_row_revising_copy_tests {
             "fresh present is not Revising:\n{text}"
         );
     }
+}
 
 #[cfg(test)]
 mod voice_recording_overlay_tests {

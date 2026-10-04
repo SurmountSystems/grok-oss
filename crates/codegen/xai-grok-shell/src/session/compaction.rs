@@ -229,6 +229,10 @@ impl SessionActor {
     /// Per-turn prefire decision: usage has reached `threshold - lead` (so there
     /// is still runway before the hard auto-compact line at `threshold`).
     pub(crate) async fn should_prefire_two_pass(&self) -> bool {
+        // L3 and once-run nested roles never AUTO compact.
+        if self.never_auto_compact() {
+            return false;
+        }
         if self.compaction.is_suppressed() {
             return false;
         }
@@ -2212,27 +2216,51 @@ impl SessionActor {
             None
         }
     }
-    /// Returns true if the error response indicates tokens exceed the model's context window.
-    /// Inspects only the model-metadata portion of the [`SamplingErrorInfo`] (the `context_window` field) against the tracked token estimate.
+    /// Returns true when an ordinary session should compact after this sampling error.
+    /// An L3 or a once-run nested role returns false and must not CompactAndResubmit.
+    /// Otherwise this is [`Self::estimate_exceeds_error_context_window`] unless compaction is suppressed.
     /// Called from `handle_sampling_failure` with the `SamplingErrorInfo` the sampler hands back.
     pub(crate) async fn should_compact_on_error(
         &self,
         err: &xai_grok_sampler::SamplingErrorInfo,
     ) -> bool {
+        // L3 and once-run nested roles never AUTO compact. Do not CompactAndResubmit.
+        if self.never_auto_compact() {
+            return false;
+        }
         if self.compaction.is_suppressed() {
             return false;
         }
         self.estimate_exceeds_error_context_window(err).await
     }
-    /// The request's token estimate exceeds the failed response's reported context window.
+    /// The request's token estimate is at or over the tighter of the session
+    /// sampling window and the failed response's reported context window.
     /// This probable-overflow signal is shared by compact-and-resubmit and the mid-salvage truncated-complete arm.
     /// The latter must see overflows even while compaction is suppressed.
+    /// Missing model metadata uses the session window. It does not return false by itself.
     pub(crate) async fn estimate_exceeds_error_context_window(
         &self,
         err: &xai_grok_sampler::SamplingErrorInfo,
     ) -> bool {
-        let Some(ref metadata) = err.model_metadata else {
-            return false;
+        let estimated_total = self.chat_state_handle.get_estimated_total_tokens().await;
+        let session_window = self
+            .chat_state_handle
+            .get_sampling_config()
+            .await
+            .map(|c| c.context_window.get())
+            .filter(|cw| *cw > 0)
+            .unwrap_or(0);
+        let error_window = err
+            .model_metadata
+            .as_ref()
+            .and_then(|m| m.context_window)
+            .filter(|cw| *cw > 0)
+            .unwrap_or(0);
+        let gate = match (session_window > 0, error_window > 0) {
+            (true, true) => session_window.min(error_window),
+            (true, false) => session_window,
+            (false, true) => error_window,
+            (false, false) => return false,
         };
         estimated_total >= gate
     }
@@ -2362,6 +2390,10 @@ impl SessionActor {
     }
     /// Returns `Some` when tool call outputs have pushed the estimated token count past the context window, so pre-emptive compaction is needed.
     pub(crate) async fn check_preflight_overflow(&self) -> Option<AutoCompactTriggerInfo> {
+        // L3 and once-run nested roles never AUTO compact.
+        if self.never_auto_compact() {
+            return None;
+        }
         if self.compaction.is_suppressed() {
             return None;
         }

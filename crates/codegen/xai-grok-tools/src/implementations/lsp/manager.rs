@@ -691,7 +691,6 @@ mod tests {
             .map(|i| diagnostic(i, DiagnosticSeverity::ERROR, &format!("error {i}")))
             .collect()
     }
-}
 
     /// A file with forty problems is usually one mistake seen forty times, and
     /// the reader is worse off for having all of them.

@@ -246,6 +246,42 @@ fn set_permission_mode_auto_persists_without_yolo() {
     );
 }
 
+/// SetPermissionMode(ContextOnly) persists canonical context-only, toasts,
+/// arms the session flag, and does not enable yolo or auto.
+#[test]
+fn set_permission_mode_context_only_persists() {
+    use crate::app::actions::PermissionModeKind;
+    let mut app = test_app_with_agent();
+    let effects = dispatch(
+        Action::SetPermissionMode(PermissionModeKind::ContextOnly),
+        &mut app,
+    );
+    assert!(!agent_ref(&app, AgentId(0)).session.is_yolo());
+    assert!(!agent_ref(&app, AgentId(0)).session.is_auto());
+    assert!(
+        agent_ref(&app, AgentId(0)).session.is_context_only(),
+        "session flag must be on after ContextOnly"
+    );
+    assert_eq!(
+        app.current_ui.permission_mode.as_deref(),
+        Some("context-only")
+    );
+    assert_eq!(
+        agent_toast(&app).as_deref(),
+        Some("\u{2713} Permission mode: context-only (no tools)")
+    );
+    assert!(
+        effects.iter().any(|e| matches!(
+            e,
+            Effect::PersistPermissionMode {
+                canonical: "context-only",
+                ..
+            }
+        )),
+        "expected PersistPermissionMode(context-only), got {effects:?}"
+    );
+}
+
 /// Feature gate OFF: a SetPermissionMode(Auto) commit (e.g. from the settings modal) degrades to Ask.
 /// It reads the same `app.auto_mode_gate` the Shift+Tab cycle uses, so the two never disagree.
 #[test]

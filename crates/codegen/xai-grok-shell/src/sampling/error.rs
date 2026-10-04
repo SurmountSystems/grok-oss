@@ -579,19 +579,23 @@ mod tests {
 
     #[test]
     fn format_rate_limited_surfaces_nonempty_server_detail() {
-        let service = "The service is temporarily at capacity. Please retry your request shortly.";
-        assert_eq!(
-            format_rate_limited_user_message(Some(service), false),
-            service
-        );
-        assert_eq!(
-            format_rate_limited_user_message(Some(service), true),
-            service
-        );
+        let body = "The service is temporarily at capacity. Please retry your request shortly.";
+        // Unprefixed detail still passes through for both auth methods.
+        assert_eq!(format_rate_limited_user_message(Some(body), false), body);
+        assert_eq!(format_rate_limited_user_message(Some(body), true), body);
+        // Production detail is SamplingError::Api Display (prefixed).
+        let wire = format!("API error (status 429 Too Many Requests): {body}");
+        assert_eq!(format_rate_limited_user_message(Some(&wire), false), body);
+        assert_eq!(format_rate_limited_user_message(Some(&wire), true), body);
 
         // Team console rate-limit copy has no personal SuperGrok upsell; it passes through as-is
         let team = "resource-exhausted: Too many requests for team abc. See https://console.x.ai/team/default/rate-limits.";
         assert_eq!(format_rate_limited_user_message(Some(team), true), team);
+        let team_wire = format!("API error (status 429 Too Many Requests): {team}");
+        assert_eq!(
+            format_rate_limited_user_message(Some(&team_wire), true),
+            team
+        );
         assert_eq!(
             format_rate_limited_user_message(Some("slow down"), false),
             "slow down"
@@ -600,14 +604,15 @@ mod tests {
 
     #[test]
     fn format_rate_limited_api_key_rewrites_consumer_subscription_upsell() {
-        let rpm = "Some resource has been exhausted: You are sending requests too quickly. \
+        let body = "Some resource has been exhausted: You are sending requests too quickly. \
              Please slow down, or upgrade to a Grok subscription for higher limits: \
              https://grok.com/supergrok";
+        let wire = format!("API error (status 429 Too Many Requests): {body}");
         // OAuth keeps the IC body (personal plan upgrade is correct).
         assert_eq!(format_rate_limited_user_message(Some(&wire), false), body);
         // API key must not push grok.com SuperGrok; it gets the team credits / rate-limit tiers copy
         assert_eq!(
-            format_rate_limited_user_message(Some(rpm), true),
+            format_rate_limited_user_message(Some(&wire), true),
             RATE_LIMITED_USER_MESSAGE_API_KEY
         );
         assert!(

@@ -75,6 +75,70 @@ pub(super) enum AdmissionError {
     ConcurrentLimitReached { limit: usize },
 }
 
+/// Whether a Review-row description may join the live Subagent list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImplementLoopReviewAdmit {
+    Admit,
+    Reject,
+}
+
+/// Token Economy implement-loop effort is thoroughness, not reviewer count.
+/// One reviewer unless the operator explicitly asked for more.
+pub fn review_row_count_for_implement_effort(
+    effort: u8,
+    operator_asked_for_more_reviewers: bool,
+) -> u8 {
+    if operator_asked_for_more_reviewers {
+        effort.max(1)
+    } else {
+        1
+    }
+}
+
+/// Review-row spawn text (not an implementer or explore job).
+pub fn is_implement_loop_review_description(description: &str) -> bool {
+    let d = description.trim();
+    if d.is_empty() {
+        return false;
+    }
+    let lower = d.to_ascii_lowercase();
+    lower.starts_with("[reviewer]")
+        || lower.starts_with("review ")
+        || lower.starts_with("review:")
+        || lower.contains("review implementation")
+}
+
+/// Admit or reject a candidate Review description for this implement-loop
+/// effort. `operator_asked == false` caps live Review rows at one even when
+/// the new text is distinct. Effort 2 with an operator ask may still be 2.
+pub fn admit_implement_loop_review_description(
+    effort: u8,
+    operator_asked: bool,
+    live_review_descriptions: impl IntoIterator<Item = impl AsRef<str>>,
+    candidate: &str,
+) -> ImplementLoopReviewAdmit {
+    if !is_implement_loop_review_description(candidate) {
+        return ImplementLoopReviewAdmit::Admit;
+    }
+    let allowed = usize::from(review_row_count_for_implement_effort(
+        effort,
+        operator_asked,
+    ));
+    let candidate_trim = candidate.trim();
+    let mut distinct: Vec<String> = live_review_descriptions
+        .into_iter()
+        .map(|s| s.as_ref().trim().to_string())
+        .filter(|s| is_implement_loop_review_description(s) && s.as_str() != candidate_trim)
+        .collect();
+    distinct.sort();
+    distinct.dedup();
+    if distinct.len() >= allowed {
+        ImplementLoopReviewAdmit::Reject
+    } else {
+        ImplementLoopReviewAdmit::Admit
+    }
+}
+
 impl AdmissionError {
     /// Model-facing failure text; reachable only when an operator opts
     /// into `GROK_SUBAGENT_LIMIT_BEHAVIOR=fail`.

@@ -322,8 +322,15 @@ impl AgentView {
             && inner.height > 3
             && let Some(child_view) = self.subagent_views.get_mut(child_sid)
         {
-            // Local clocks on this nested window. The child keeps its role.
-            child_view.activity_row_clocks = true;
+            // Row clocks only on the L2 window, not every nested draw.
+            // A known L3 specialist leaves the flag off. An overlay with no
+            // registry row keeps the flag so that window can still show clocks.
+            let l2_window = !self.subagent_sessions.contains_key(child_sid)
+                || crate::app::subagent::overlay_child_is_l2_coordinator(
+                    &self.subagent_sessions,
+                    child_sid,
+                );
+            child_view.activity_row_clocks = l2_window;
             let (cursor, post_flush) = child_view.draw(
                 inner,
                 buf,

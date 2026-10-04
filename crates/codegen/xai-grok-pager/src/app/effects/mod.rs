@@ -14,7 +14,7 @@ pub(super) use helpers::{
     parse_session_load_running_prompt_id, parse_session_memory_mode,
 };
 pub(crate) use helpers::{
-    EffectMeta, RestoreProgressMsg, SessionFlags, acp_send_bounded, compact_error,
+    EffectMeta, RestoreProgressMsg, SessionFlags, compact_error,
     is_disk_full_error, parse_worktree_restore_payload, parse_worktree_strategy_summary,
     persist_permission_mode_and_notify, persist_setting, sanitize_user_error,
 };
@@ -94,6 +94,19 @@ fn apply_permission_mode_override(
     meta.insert("yoloMode".into(), serde_json::Value::Bool(mode.is_always_approve()));
     meta.insert("autoMode".into(), serde_json::Value::Bool(mode.is_auto()));
 }
+/// Bounded session RPC for callers that do not report a timeout warning.
+/// [`helpers::acp_send_bounded`] is the four-argument form `Effect::LoadSession` uses.
+pub(crate) async fn acp_send_bounded<R, T>(
+    request: T,
+    tx: &tokio::sync::mpsc::UnboundedSender<R>,
+    action: &str,
+) -> Result<T::Response, SessionRpcError>
+where
+    T: xai_acp_lib::AcpRequest,
+    R: From<xai_acp_lib::AcpArgs<T>> + std::fmt::Debug,
+{
+    helpers::acp_send_bounded(request, tx, action, |_message| {}).await
+}
 /// Send `session/new` inside the `session_create.backend_rpc` region and stamp that region's
 /// traceparent, so the agent-side leg nests under this round-trip, not the enclosing phase span.
 async fn create_session_in_backend_rpc(
@@ -117,7 +130,7 @@ async fn create_session_in_backend_rpc(
         }
     };
     stamp_span_traceparent(&mut meta, rpc_span.span());
-    helpers::acp_send_bounded(request.meta(meta), tx, action).await
+    acp_send_bounded(request.meta(meta), tx, action).await
 }
 pub(crate) fn execute(
     effect: Effect,
@@ -132,12 +145,15 @@ pub(crate) fn execute(
     match effect {
         Effect::RegisterActiveSession { session_id, cwd, activity, activity_line } => {
             crate::app::signal_handler::set_current_session_id(Some(session_id.clone()));
-            if let Err(e) = xai_grok_active_sessions::register(xai_grok_active_sessions::ActiveSession {
-                session_id,
-                std::process::id(),
-                cwd.clone(),
-                chrono::Utc::now(),
-            )) {
+            let heartbeat_sid = session_id.clone();
+            if let Err(e) = xai_grok_active_sessions::register(
+                xai_grok_active_sessions::ActiveSession::new(
+                    session_id,
+                    std::process::id(),
+                    cwd.clone(),
+                    chrono::Utc::now(),
+                ),
+            ) {
                 tracing::warn!(?e, "Failed to register active session");
             } else {
                 crate::app::active_session_heartbeat::write_blocking(
@@ -1389,6 +1405,72 @@ pub(crate) fn execute(
                     let req = acp::PromptRequest::new(session_id.clone(), prompt)
                         .meta(meta.as_object().cloned());
                     let result = acp_send(req, &tx).await;
+                    log_prompt_result(&session_id, &result);
+                    let http_status = result
+                        .as_ref()
+                        .err()
+                        .and_then(http_status_from_error);
+                    TaskResult::PromptResponse {
+                        agent_id,
+                        result: result
+                            .map_err(|e| format_acp_error(&e, is_api_key_auth)),
+                        http_status,
+                        prompt_id: Some(prompt_id),
+                    }
+                });
+        }
+        Effect::UnstickResendPrompt {
+            agent_id,
+            session_id,
+            text,
+            prompt_id,
+            images,
+            images_dir,
+        } => {
+            let tx = acp_tx.clone();
+            let screen_mode = session_flags.screen_mode_label;
+            let is_api_key_auth = session_flags.is_api_key_auth;
+            tasks
+                .spawn(async move {
+                    ulog::info(
+                        "prompt.acp_send.start",
+                        Some(&session_id.0),
+                        Some(
+                            serde_json::json!({
+                        "kind": "unstick",
+                        "len": text.len(),
+                        "prompt_id": prompt_id,
+                        "image_count": images.len(),
+                    }),
+                        ),
+                    );
+                    let send_start = std::time::Instant::now();
+                    let mut prompt = vec![plain_prompt_content_block(text, &[])];
+                    if let Some(dir) = images_dir {
+                        prompt.extend(super::dispatch::unstick::wal_image_resource_blocks(
+                            &dir, &images,
+                        ));
+                    }
+                    let mut meta = prompt_request_meta(&prompt_id, screen_mode);
+                    if let Some(map) = meta.as_object_mut() {
+                        map.insert("unstickRetry".into(), serde_json::Value::Bool(true));
+                    }
+                    let req = acp::PromptRequest::new(session_id.clone(), prompt)
+                        .meta(meta.as_object().cloned());
+                    let result = acp_send(req, &tx).await;
+                    let send_elapsed_ms = send_start.elapsed().as_millis() as u64;
+                    ulog::info(
+                        "prompt.acp_send.done",
+                        Some(&session_id.0),
+                        Some(
+                            serde_json::json!({
+                        "kind": "unstick",
+                        "elapsed_ms": send_elapsed_ms,
+                        "ok": result.is_ok(),
+                        "prompt_id": prompt_id,
+                    }),
+                        ),
+                    );
                     log_prompt_result(&session_id, &result);
                     let http_status = result
                         .as_ref()

@@ -1672,6 +1672,10 @@ fn has_own_credentials_guards_session_vs_external_key() {
         for (model_id, entry) in default_model_entries(&endpoints) {
             assert!(
                 !entry.has_own_credentials(),
+                "{model_id}: Default model must not claim own credentials"
+            );
+            assert!(
+                !entry.has_own_credentials(),
                 "{model_id}: default catalog must not claim own credentials when OPENROUTER_API_KEY is unset"
             );
         }

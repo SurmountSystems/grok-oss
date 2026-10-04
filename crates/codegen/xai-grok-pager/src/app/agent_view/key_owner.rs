@@ -119,6 +119,19 @@ impl AgentView {
         self.key_owner_when_parked(self.active_pane == AgentPane::Scrollback)
     }
 
+    /// Prompt or Commenting owns keys only when a line viewer is open or the composer is empty.
+    /// A shut panel with a mid-compose draft leaves the main composer typeable.
+    /// Empty-composer Prompt still owns keys so Ctrl+C can Exit.
+    fn plan_feedback_owns_keys(&self) -> bool {
+        self.plan_approval_view.as_ref().is_some_and(|pav| {
+            matches!(
+                pav.focus,
+                crate::views::plan_approval_view::PlanApprovalFocus::Prompt
+                    | crate::views::plan_approval_view::PlanApprovalFocus::Commenting
+            )
+        }) && (self.line_viewer.is_some() || self.prompt.text().trim().is_empty())
+    }
+
     /// The ranking itself.
     /// `parked` (the keyboard sitting in the scrollback) is what takes a card or the plan approval out of the running.
     /// [`Self::parked_card`] can therefore ask the same question with it set false to learn who the keyboard would come back to.
@@ -130,7 +143,7 @@ impl AgentView {
             KeyOwner::LineViewer
         } else if self.block_viewer.is_some() {
             KeyOwner::BlockViewer
-        } else if self.plan_approval_view.is_some() && !parked {
+        } else if self.plan_feedback_owns_keys() && !parked {
             KeyOwner::PlanApproval
         } else if let Some(card) = card {
             KeyOwner::Card(card)

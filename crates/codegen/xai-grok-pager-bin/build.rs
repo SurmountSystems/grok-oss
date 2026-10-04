@@ -8,7 +8,11 @@ fn git_stdout(args: &[&str]) -> Option<String> {
     }
     let text = String::from_utf8(output.stdout).ok()?;
     let trimmed = text.trim().to_string();
-    if trimmed.is_empty() { None } else { Some(trimmed) }
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed)
+    }
 }
 
 fn main() {

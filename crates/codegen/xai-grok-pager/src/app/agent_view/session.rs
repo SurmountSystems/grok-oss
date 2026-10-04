@@ -27,6 +27,24 @@ use xai_grok_telemetry::events::{CancellationCompleted, CancellationScope};
 fn post_turn_plan_review_default() -> bool {
     false
 }
+
+/// How chrome should read an open turn's wait.
+///
+/// `Waiting for the model` is the live sampler wait. It is also the false
+/// wait after a nested id already exited. Do not call that string a hang
+/// without distinguishing these cases. Queued `pending_prompts` are
+/// orthogonal: a live nested wait can hold one queued follow-up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OpenTurnWaitKind {
+    /// Nested subagent still running. Live work, not idle.
+    NestedSubagentStillRunning,
+    /// Sampler / `TurnRunning` with no completed-wait fallthrough.
+    LiveSampler,
+    /// Waited nested ids already completed. Chrome must not stay on
+    /// `Waiting for the model`.
+    FalseWaitAfterNestedCompleted,
+}
+
 impl AgentView {
     /// Always bumps [`Self::last_turn_summary_gen`] so a concurrent disk hydrate that captured an older generation cannot overwrite this write.
     pub(crate) fn set_last_turn_summary(&mut self, summary: Option<String>) {
@@ -127,7 +145,7 @@ impl AgentView {
         let rows: Vec<PersistedNestedOccupancy> = self
             .subagent_sessions
             .values()
-            .filter(|info| !info.finished)
+            .filter(|info| info.is_running())
             .map(occupancy_from_nested_info)
             .collect();
         if rows.is_empty() {
@@ -1519,6 +1537,42 @@ impl AgentView {
         };
         Some(TurnActivity::Waiting(reason))
     }
+    /// How chrome should read an open turn's wait.
+    ///
+    /// Live nested wait, live sampler wait, and false wait after nested
+    /// completion are distinct. Queued `pending_prompts` are orthogonal
+    /// (specs-class: 1 queued while a nested subagent is still running).
+    pub(crate) fn open_turn_wait_kind(&self) -> Option<OpenTurnWaitKind> {
+        use crate::acp::tracker::{TurnActivity, WaitingReason};
+        if !self.session.state.is_turn_running() || self.bash_turn {
+            return None;
+        }
+        if self.running_live_specialists().next().is_some() {
+            return Some(OpenTurnWaitKind::NestedSubagentStillRunning);
+        }
+        match self.resolve_turn_activity_unenriched() {
+            Some(TurnActivity::Waiting(
+                WaitingReason::Subagent { .. } | WaitingReason::TaskOutput { waits: true, .. },
+            )) => Some(OpenTurnWaitKind::NestedSubagentStillRunning),
+            Some(TurnActivity::Waiting(WaitingReason::Model)) => {
+                if self.this_turn_waited_nested_already_finished() {
+                    Some(OpenTurnWaitKind::FalseWaitAfterNestedCompleted)
+                } else {
+                    Some(OpenTurnWaitKind::LiveSampler)
+                }
+            }
+            None => Some(OpenTurnWaitKind::FalseWaitAfterNestedCompleted),
+            Some(_) => None,
+        }
+    }
+    /// Nested ids this turn waited on, now finished. Historical leftover
+    /// rows in `subagent_sessions` are not this turn.
+    fn this_turn_waited_nested_already_finished(&self) -> bool {
+        if self.running_live_specialists().next().is_some() {
+            return false;
+        }
+        !self.finished_nested_wait_ids.is_empty()
+    }
     /// Adds the display subject to a `TaskOutput` or `Subagent` wait.
     fn enrich_waiting_activity(
         &self,
@@ -1637,11 +1691,153 @@ impl AgentView {
             s.is_running() && !s.attempt.is_background && s.attempt.workflow_run_id.is_none()
         })
     }
+    /// Running specialists the nested overlay can name: foreground or
+    /// background, excluding workflow runs.
+    pub(crate) fn running_live_specialists(
+        &self,
+    ) -> impl Iterator<Item = &crate::app::subagent::SubagentInfo> {
+        self.subagent_sessions
+            .values()
+            .filter(|s| s.is_running() && s.attempt.workflow_run_id.is_none())
+    }
+    /// Wait chrome stays while at least one named id is still running, or is
+    /// not in the bg-task / subagent maps yet and has no `SubagentFinished`
+    /// evidence. A completed nested id missing from the map is not live.
+    fn waited_work_still_running(&self, task_ids: &[String]) -> bool {
+        use crate::app::agent::BgTaskStatus;
+        if task_ids.is_empty() {
+            return self.running_live_specialists().next().is_some()
+                || self
+                    .session
+                    .bg_tasks
+                    .values()
+                    .any(|task| task.status == BgTaskStatus::Running);
+        }
+        task_ids.iter().any(|id| self.wait_id_still_running(id))
+    }
+    fn wait_id_still_running(&self, id: &str) -> bool {
+        use crate::app::agent::BgTaskStatus;
+        if self.finished_nested_wait_ids.contains(id) {
+            return false;
+        }
+        if let Some(task) = self.session.bg_tasks.get(id) {
+            return task.status == BgTaskStatus::Running;
+        }
+        if let Some(info) = self.subagent_sessions.get(id) {
+            return info.is_running();
+        }
+        match self
+            .subagent_sessions
+            .values()
+            .find(|info| info.subagent_id.as_ref() == id)
+        {
+            Some(info) => info.is_running(),
+            // Wait tool is still pending; missing maps is not completed
+            // unless `SubagentFinished` already recorded the id.
+            None => true,
+        }
+    }
+    /// Record nested ids this turn waited on (wait tool / spawn wait) so
+    /// wait chrome cannot hang after the nested row is dropped from
+    /// [`Self::subagent_sessions`]. Do not record every `SubagentFinished`.
+    pub(crate) fn note_finished_nested_wait_ids(
+        &mut self,
+        child_session_id: &str,
+        subagent_id: &str,
+    ) {
+        if !self.this_turn_waited_on_nested(child_session_id, subagent_id) {
+            return;
+        }
+        if !child_session_id.is_empty() {
+            self.finished_nested_wait_ids
+                .insert(child_session_id.to_string());
+        }
+        if !subagent_id.is_empty() {
+            self.finished_nested_wait_ids
+                .insert(subagent_id.to_string());
+        }
+    }
+    /// Wait tool (`get_command_or_subagent_output`) targeting these ids, or
+    /// spawn wait / `wait_commands_or_subagents`. Background nested finish
+    /// with no wait is not a this-turn wait.
+    fn this_turn_waited_on_nested(&self, child_session_id: &str, subagent_id: &str) -> bool {
+        use crate::acp::tracker::{TurnActivity, WaitingReason};
+        match self.session.tracker.activity() {
+            Some(TurnActivity::Waiting(WaitingReason::Subagent { .. }))
+            | Some(TurnActivity::Waiting(WaitingReason::TasksComplete)) => true,
+            _ => self
+                .session
+                .tracker
+                .task_output_blocking_waits()
+                .iter()
+                .any(|(_, ids)| {
+                    ids.is_empty()
+                        || ids
+                            .iter()
+                            .any(|id| id == child_session_id || id == subagent_id)
+                }),
+        }
+    }
+    /// Mark satisfied `get_command_or_subagent_output` waits completed so a
+    /// leftover Pending wait cannot keep the parent turn blocked after
+    /// `SubagentFinished`.
+    pub(crate) fn complete_satisfied_task_output_wait_tools(&mut self) {
+        use crate::acp::meta::NotificationMeta;
+        use agent_client_protocol as acp;
+        use std::sync::Arc;
+        let waits = self.session.tracker.task_output_blocking_waits();
+        let done: Vec<String> = waits
+            .into_iter()
+            .filter(|(_, ids)| !self.waited_work_still_running(ids))
+            .map(|(key, _)| key)
+            .collect();
+        if done.is_empty() {
+            return;
+        }
+        let meta = NotificationMeta::default();
+        for key in done {
+            self.session.handle_update(
+                acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
+                    acp::ToolCallId::new(Arc::from(key)),
+                    acp::ToolCallUpdateFields::new().status(Some(acp::ToolCallStatus::Completed)),
+                )),
+                &meta,
+                &mut self.scrollback,
+            );
+        }
+    }
+    /// Drop tracker task-output waits whose waited-on children have all
+    /// completed, so ACP `SubagentFinished` ends wait chrome even if the wait
+    /// tool call is still Pending.
+    pub(crate) fn drop_satisfied_task_output_waits(&mut self) {
+        let waits = self.session.tracker.task_output_blocking_waits();
+        let drop: Vec<(String, Vec<String>)> = waits
+            .into_iter()
+            .filter(|(_, ids)| !self.waited_work_still_running(ids))
+            .collect();
+        for (_, ids) in &drop {
+            for id in ids {
+                if !id.is_empty() {
+                    self.finished_nested_wait_ids.insert(id.clone());
+                }
+            }
+        }
+        let keys: Vec<String> = drop.into_iter().map(|(key, _)| key).collect();
+        self.session.tracker.remove_blocking_waits(&keys);
+    }
     /// The subagent wait label with the running subagent count, such as `Waiting for 2 subagents`.
     fn subagent_wait_subject(&self) -> String {
         crate::acp::tracker::waiting_on_subagents_subject(
             self.running_foreground_subagents().count(),
         )
+    }
+    /// Name a live specialist (description, else id) plus last tool/progress
+    /// when the registry has it. Used when a task-output wait has no resolved
+    /// subject, including background L3s the nested overlay is blocked on.
+    fn live_specialist_wait_subject(&self) -> Option<String> {
+        let mut running: Vec<_> = self.running_live_specialists().collect();
+        running.sort_by_key(|info| info.attempt.started_at);
+        specialist_wait_subject_from(&running, true)
     }
     /// Update context state with a full snapshot from live callers.
     ///
@@ -1869,6 +2065,117 @@ fn honest_turn_elapsed(params: TurnElapsedParams<'_>) -> std::time::Duration {
 fn wall_since_ms(start_ms: i64, now_ms: i64) -> std::time::Duration {
     std::time::Duration::from_millis(u64::try_from(now_ms.saturating_sub(start_ms)).unwrap_or(0))
 }
+const SUBJECT_DESC_FLOOR: usize = 8;
+/// Best operator-facing name for a specialist: description first, else id
+/// when `allow_id_fallback` is set.
+fn specialist_identity(
+    info: &crate::app::subagent::SubagentInfo,
+    allow_id_fallback: bool,
+) -> Option<String> {
+    use crate::acp::tracker::clamp_activity_subject;
+    let (_, desc) = crate::app::subagent::parse_tag_prefix(info.description.trim());
+    let desc = clamp_activity_subject(desc);
+    if !desc.is_empty() {
+        return Some(desc);
+    }
+    if !allow_id_fallback {
+        return None;
+    }
+    let id = info.subagent_id.trim();
+    if !id.is_empty() {
+        return Some(clamp_activity_subject(id));
+    }
+    let sid = info.child_session_id.trim();
+    if sid.is_empty() {
+        None
+    } else {
+        Some(clamp_activity_subject(sid))
+    }
+}
+/// Matched wait-id subject: description (or id), plus last tool/progress.
+fn specialist_lookup_subject(info: &crate::app::subagent::SubagentInfo) -> Option<String> {
+    use crate::acp::tracker::MAX_ACTIVITY_SUBJECT_CHARS;
+    let name = specialist_identity(info, true)?;
+    let activity = info.wait_progress_label();
+    match activity.as_deref() {
+        Some(activity) => {
+            const SEP: &str = ": ";
+            let name_claim = name
+                .chars()
+                .count()
+                .min(MAX_ACTIVITY_SUBJECT_CHARS.saturating_sub(SEP.len() + 8));
+            let activity: String = activity
+                .chars()
+                .take(MAX_ACTIVITY_SUBJECT_CHARS.saturating_sub(name_claim + SEP.len()))
+                .collect();
+            Some(budgeted_subject("", &name, &format!("{SEP}{activity}")))
+        }
+        None => Some(name),
+    }
+}
+/// Shared wait-chrome subject for one or more live specialists.
+fn specialist_wait_subject_from(
+    running: &[&crate::app::subagent::SubagentInfo],
+    allow_id_fallback: bool,
+) -> Option<String> {
+    use crate::acp::tracker::MAX_ACTIVITY_SUBJECT_CHARS;
+    let description = running
+        .iter()
+        .find_map(|info| specialist_identity(info, allow_id_fallback))?;
+    if running.len() > 1 {
+        let n = running.len();
+        return Some(budgeted_subject(
+            &format!("{n} subagents: "),
+            &description,
+            &format!(" +{}", n - 1),
+        ));
+    }
+    let activity = running.first().and_then(|info| info.wait_progress_label());
+    match activity.as_deref() {
+        Some(activity) => {
+            const PREFIX: &str = "Subagent (";
+            const SUFFIX_HEAD: &str = "): ";
+            const SUBAGENT_AFFIX_CHARS: usize = PREFIX.len() + SUFFIX_HEAD.len();
+            const ACTIVITY_FLOOR: usize = 8;
+            let desc_claim = description
+                .chars()
+                .count()
+                .min(MAX_ACTIVITY_SUBJECT_CHARS - SUBAGENT_AFFIX_CHARS - ACTIVITY_FLOOR);
+            let activity: String = activity
+                .chars()
+                .take(MAX_ACTIVITY_SUBJECT_CHARS - SUBAGENT_AFFIX_CHARS - desc_claim)
+                .collect();
+            Some(budgeted_subject(
+                PREFIX,
+                &description,
+                &format!("{SUFFIX_HEAD}{activity}"),
+            ))
+        }
+        None => Some(budgeted_subject("Subagent: ", &description, "")),
+    }
+}
+/// `{prefix}{description}{suffix}` with the description cut to the leftover
+/// budget; a cut description ends with `…` inside that budget. Callers size
+/// `prefix` + `suffix` so the composed subject stays within
+/// `MAX_ACTIVITY_SUBJECT_CHARS` (debug-asserted on the result).
+fn budgeted_subject(prefix: &str, description: &str, suffix: &str) -> String {
+    use crate::acp::tracker::MAX_ACTIVITY_SUBJECT_CHARS;
+    let budget = MAX_ACTIVITY_SUBJECT_CHARS
+        .saturating_sub(prefix.chars().count() + suffix.chars().count())
+        .max(SUBJECT_DESC_FLOOR);
+    let description: String = if description.chars().count() <= budget {
+        description.to_string()
+    } else {
+        let head: String = description.chars().take(budget - 1).collect();
+        format!("{head}…")
+    };
+    let subject = format!("{prefix}{description}{suffix}");
+    debug_assert!(
+        subject.chars().count() <= MAX_ACTIVITY_SUBJECT_CHARS,
+        "over-budget subject {subject:?}"
+    );
+    subject
+}
 #[cfg(test)]
 mod honest_turn_elapsed_tests {
     use super::*;
@@ -2094,7 +2401,7 @@ mod resolve_turn_activity_tests {
     fn first_token_wait_after_unwaited_this_turn_nested_finish_paints_waiting_for_the_model() {
         let mut view = running_view();
         let mut nested = running_child("this-turn background nested this turn did not wait on");
-        nested.is_background = true;
+        nested.attempt.is_background = true;
         nested.subagent_id = std::sync::Arc::from("sa-bg-nowait");
         view.subagent_sessions.insert("l2-bg-nowait".into(), nested);
         mark_specialist_completed(view.subagent_sessions.get_mut("l2-bg-nowait").unwrap());
@@ -2566,6 +2873,9 @@ mod resolve_turn_activity_tests {
                     workflow_run_id: None,
                     context_normalized: false,
                     parent_prompt_id: None,
+                    parent_session_id: None,
+                    depth: None,
+                    tokens_past: 0,
                     started_at: now,
                     last_progress_at: now,
                     status: None,
@@ -2701,8 +3011,8 @@ mod resolve_turn_activity_tests {
         use std::sync::Arc;
         let mut view = running_view();
         let mut specialist = running_child("prove cert DNS-01");
-        specialist.is_background = true;
-        specialist.activity_label = Some("read_file".into());
+        specialist.attempt.is_background = true;
+        specialist.attempt.activity_label = Some("read_file".into());
         specialist.subagent_id = Arc::from("sa-l3-cert");
         view.subagent_sessions.insert("l3-cert".into(), specialist);
         let meta = NotificationMeta::default();
@@ -2749,10 +3059,10 @@ mod resolve_turn_activity_tests {
     fn nested_l2_task_output_wait_names_last_tool_from_progress() {
         let mut view = running_view();
         let mut specialist = running_child("Land check-remote");
-        specialist.is_background = true;
-        specialist.activity_label = Some("Waiting on task output…".into());
-        specialist.tools_used = vec![std::sync::Arc::from("read_file")];
-        specialist.tool_call_count = Some(4);
+        specialist.attempt.is_background = true;
+        specialist.attempt.activity_label = Some("Waiting on task output…".into());
+        specialist.attempt.tools_used = vec![std::sync::Arc::from("read_file")];
+        specialist.attempt.tool_call_count = Some(4);
         view.subagent_sessions.insert("l3-gate".into(), specialist);
         pending_task_output_wait(&mut view, serde_json::json!({ "timeout_ms": 30_000 }));
         let activity = view.resolve_turn_activity().expect("activity");
@@ -2781,9 +3091,9 @@ mod resolve_turn_activity_tests {
     fn nested_l2_model_wait_names_live_background_specialist() {
         let mut view = running_view();
         let mut specialist = running_child("CheckersLater");
-        specialist.is_background = true;
-        specialist.tools_used = vec![std::sync::Arc::from("read_file")];
-        specialist.tool_call_count = Some(6);
+        specialist.attempt.is_background = true;
+        specialist.attempt.tools_used = vec![std::sync::Arc::from("read_file")];
+        specialist.attempt.tool_call_count = Some(6);
         view.subagent_sessions.insert("l3-impl".into(), specialist);
         let activity = view.resolve_turn_activity().expect("activity");
         let label = crate::app::subagent::format_activity_label(&activity);
@@ -2811,9 +3121,9 @@ mod resolve_turn_activity_tests {
             .tracker
             .note_tool_call_arguments_delta(Some("search_replace"), 0);
         let mut specialist = running_child("remote compile");
-        specialist.is_background = true;
+        specialist.attempt.is_background = true;
         specialist.child_session_id = std::sync::Arc::from("l3-impl");
-        specialist.tools_used = vec![std::sync::Arc::from("read_file")];
+        specialist.attempt.tools_used = vec![std::sync::Arc::from("read_file")];
         view.subagent_sessions.insert("l3-impl".into(), specialist);
         let activity = view.resolve_turn_activity().expect("activity");
         let label = crate::app::subagent::format_activity_label(&activity);
@@ -2829,10 +3139,10 @@ mod resolve_turn_activity_tests {
 
     fn mark_specialist_completed(info: &mut crate::app::subagent::SubagentInfo) {
         use std::sync::Arc;
-        info.finished = true;
-        info.status = Some(Arc::from("completed"));
-        info.duration_ms = Some(1_500);
-        info.activity_label = None;
+        info.set_finished_for_test(true);
+        info.attempt.status = Some(Arc::from("completed"));
+        info.attempt.duration_ms = Some(1_500);
+        info.attempt.activity_label = None;
     }
 
     fn pending_task_output_wait(view: &mut AgentView, raw_input: serde_json::Value) {
@@ -2866,8 +3176,8 @@ mod resolve_turn_activity_tests {
         use std::sync::Arc;
         let mut view = running_view();
         let mut specialist = running_child("prove cert DNS-01");
-        specialist.is_background = true;
-        specialist.activity_label = Some("read_file".into());
+        specialist.attempt.is_background = true;
+        specialist.attempt.activity_label = Some("read_file".into());
         specialist.subagent_id = Arc::from("sa-l3-cert");
         view.subagent_sessions.insert("l3-cert".into(), specialist);
         pending_task_output_wait(&mut view, serde_json::json!({ "timeout_ms": 600_000 }));
@@ -2927,12 +3237,12 @@ mod resolve_turn_activity_tests {
             "completed nested-agent timer must stop at SubagentFinished duration"
         );
         assert_ne!(
-            info.activity_label.as_deref(),
+            info.attempt.activity_label.as_deref(),
             Some("Responding"),
             "list must not keep painting Responding after the nested agent completed"
         );
         assert_ne!(
-            info.activity_label.as_deref(),
+            info.attempt.activity_label.as_deref(),
             Some("Thinking"),
             "list must not keep painting Thinking after the nested agent completed"
         );
@@ -2945,7 +3255,7 @@ mod resolve_turn_activity_tests {
         use std::sync::Arc;
         let mut view = running_view();
         let mut specialist = running_child("remote Lake");
-        specialist.is_background = true;
+        specialist.attempt.is_background = true;
         specialist.subagent_id = Arc::from("sa-l3-lake");
         view.subagent_sessions.insert("l3-lake".into(), specialist);
         pending_task_output_wait(
@@ -2979,7 +3289,7 @@ mod resolve_turn_activity_tests {
         use std::sync::Arc;
         let mut view = running_view();
         let mut specialist = running_child("General Fix image token counting grok-4.6");
-        specialist.is_background = true;
+        specialist.attempt.is_background = true;
         specialist.subagent_id = Arc::from("sa-l2-done");
         view.subagent_sessions.insert("l2-done".into(), specialist);
         pending_task_output_wait(
@@ -3050,7 +3360,7 @@ mod resolve_turn_activity_tests {
         use std::sync::Arc;
         let mut view = running_view();
         let mut specialist = running_child("remote Lake");
-        specialist.is_background = true;
+        specialist.attempt.is_background = true;
         specialist.subagent_id = Arc::from("sa-l3-lake");
         view.subagent_sessions.insert("l3-lake".into(), specialist);
         pending_task_output_wait(&mut view, serde_json::json!({ "timeout_ms": 600_000 }));
@@ -3083,7 +3393,7 @@ mod resolve_turn_activity_tests {
         use std::sync::Arc;
         let mut view = running_view();
         let mut specialist = running_child("General Fix image token counting grok-4.6");
-        specialist.is_background = true;
+        specialist.attempt.is_background = true;
         specialist.subagent_id = Arc::from("sa-l2-done");
         view.subagent_sessions.insert("l2-done".into(), specialist);
         pending_task_output_wait(

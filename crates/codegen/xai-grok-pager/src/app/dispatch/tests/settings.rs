@@ -3,7 +3,9 @@ use super::*;
 /// Product contract: built-in default preference is 95 percent, not a token preset.
 #[test]
 fn auto_compact_threshold_default_is_95_percent() {
-    use crate::settings::{AutoCompactThresholdChoice, SettingValue, canonical_auto_compact_threshold};
+    use crate::settings::{
+        AutoCompactThresholdChoice, SettingValue, canonical_auto_compact_threshold,
+    };
     assert_eq!(
         xai_grok_shell::util::config::DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT,
         95

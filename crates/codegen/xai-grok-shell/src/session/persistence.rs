@@ -2688,6 +2688,12 @@ fn collect_session_files_recursive_with_artifacts(
             let Some(name) = rel_path.to_str() else {
                 continue;
             };
+            // Session-local prompt WAL is not conversation and is not model tokens.
+            if rel_path.file_name().is_some_and(|n| {
+                n == crate::session::unsent_prompt_draft::prompt_wal::PROMPT_WAL_FILE
+            }) {
+                continue;
+            }
             let Ok(Some(mut file)) = artifacts.open_non_artifact(&path) else {
                 continue;
             };

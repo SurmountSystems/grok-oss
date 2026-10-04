@@ -66,6 +66,7 @@ impl SessionActor {
             queue_mutation_policy: QueueMutationPolicy::hidden(),
             // Send-now placement (see doc): a later real send-now must not leapfrog this fallback in `queue_input`'s FIFO scan
             send_now: front,
+            unstick_retry: false,
             traceparent: None,
         };
         let mut state = self.state.lock().await;

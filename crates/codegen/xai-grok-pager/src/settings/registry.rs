@@ -434,7 +434,6 @@ pub fn canonical_voice_capture_mode(value: Option<&str>) -> &'static str {
     }
 }
 
-
 /// Parsed auto-compact modal choice: percent of window or absolute tokens.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AutoCompactThresholdChoice {
@@ -1851,7 +1850,6 @@ mod tests {
         assert_eq!(canonical_voice_capture_mode(Some("")), "hold");
         assert_eq!(canonical_voice_capture_mode(None), "hold");
     }
-
 
     #[test]
     fn canonical_auto_compact_threshold_exact_and_nearest() {

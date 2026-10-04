@@ -207,6 +207,10 @@ async fn test_compacted_history_minimal_no_state_context() {
         !summary.contains("<system-reminder>"),
         "Summary message should NOT contain system-reminder (it is now separate)"
     );
+    assert!(
+        !summary.contains("<system-reminder>"),
+        "No state context means no <system-reminder> block"
+    );
     assert_eq!(compacted[5].role(), Role::User);
     let reminder = compacted[5].text_content();
     assert!(

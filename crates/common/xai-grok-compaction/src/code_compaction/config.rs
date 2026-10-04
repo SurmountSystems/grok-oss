@@ -28,6 +28,32 @@ pub const GROK_45_CONTEXT_WINDOW_TOKENS: u64 = 500_000;
 /// this cliff keeps short-context pricing.
 pub const GROK_45_LONG_CONTEXT_PRICE_THRESHOLD_TOKENS: u64 = 200_000;
 
+/// Nested L2/L3 sessions never exceed this sampling/compaction window, even
+/// when the model catalog is larger (500k on Grok 4.5). Same token count as
+/// the long-context price cliff. The main (L1) session does not use this cap.
+pub const NESTED_SESSION_CONTEXT_CAP: u64 = GROK_45_LONG_CONTEXT_PRICE_THRESHOLD_TOKENS;
+
+/// Keep-near attention target as a percent of this session's sampling window.
+/// Main session: 40% of 500k = 200k. Nested: 40% of 200k = 80k.
+pub const SESSION_ATTENTION_TARGET_PERCENT: u8 = 40;
+
+/// Sampling/compaction window for the session that is running.
+///
+/// L1 (parent TUI) uses the catalog window. Nested L2/L3 never exceed
+/// [`NESTED_SESSION_CONTEXT_CAP`].
+pub fn session_sampling_window(catalog: u64, is_nested: bool) -> u64 {
+    if is_nested {
+        catalog.min(NESTED_SESSION_CONTEXT_CAP)
+    } else {
+        catalog
+    }
+}
+
+/// 40% of `sampling_window` (attention target for the running session).
+pub fn session_attention_target_tokens(sampling_window: u64) -> u64 {
+    sampling_window.saturating_mul(u64::from(SESSION_ATTENTION_TARGET_PERCENT)) / 100
+}
+
 /// 95% of [`GROK_45_CONTEXT_WINDOW_TOKENS`], the token equivalent of the
 /// default percent threshold on the Grok 4.5 card.
 pub const GROK_45_DEFAULT_AUTO_COMPACT_TOKENS: u64 =

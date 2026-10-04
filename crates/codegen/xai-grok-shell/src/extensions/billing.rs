@@ -693,26 +693,47 @@ async fn handle_get_billing(agent: &MvpAgent, force_refresh: bool) -> ExtResult 
     let home_for_fetch = grok_home.clone();
     let base_for_fetch = base.to_owned();
 
-    // Fetch the credits balance and usage (new billing system) via the CLI proxy, which forwards to the backend `GetGrokCreditsConfig`
-    let credits_url = format!("{}/billing?format=credits", base);
-    let credits_resp = crate::http::shared_client()
-        .get(&credits_url)
-        .header("Authorization", format!("Bearer {}", &auth.key))
-        .header(
-            "X-XAI-Token-Auth",
-            xai_grok_login::GrokComConfig::default().token_header,
-        )
-        .header("x-userid", &auth.user_id)
-        .header("x-grok-client-version", xai_grok_version::VERSION)
-        .header(
-            crate::http::CLIENT_MODE_HEADER,
-            crate::http::process_client_mode(),
-        )
-        .timeout(std::time::Duration::from_secs(15))
-        .send()
-        .await
-        .map_err(|e| {
-            tracing::error!(error = %e, "billing: upstream request failed");
+    // One flock leader fetches SuperGrok credits (active + siblings) and
+    // Management meters. Followers apply the snapshot into remember maps.
+    let (role, doc) = match collect_billing_via_snapshot_hub(
+        &grok_home,
+        limits_snapshot_mode_for_get_billing(force_refresh),
+        now,
+        || {
+            let live_active = &live_active;
+            let live_active_err = &live_active_err;
+            let token = token.clone();
+            let user_id = user_id.clone();
+            let identity_for_fetch = identity_for_fetch.clone();
+            let home_for_fetch = home_for_fetch.clone();
+            let base_for_fetch = base_for_fetch.clone();
+            async move {
+                if should_clear_management_caches_on_billing_leader_fetch(
+                    force_refresh,
+                    crate::auth::resolve_management_api_key_default().is_some(),
+                ) {
+                    crate::auth::clear_console_team_billing_meter_caches();
+                }
+                fetch_supergrok_credits_snapshot_document(
+                    &home_for_fetch,
+                    &base_for_fetch,
+                    Some((
+                        token.as_str(),
+                        user_id.as_str(),
+                        identity_for_fetch.as_str(),
+                    )),
+                    Some(live_active),
+                    Some(live_active_err),
+                )
+                .await
+            }
+        },
+    )
+    .await
+    {
+        Ok(pair) => pair,
+        Err(e) => {
+            tracing::error!(error = %e, "billing: limits snapshot hub failed");
             xai_grok_telemetry::unified_log::warn(
                 "billing: limits snapshot hub failed",
                 None,
@@ -756,8 +777,29 @@ async fn handle_get_billing(agent: &MvpAgent, force_refresh: bool) -> ExtResult 
             .or_else(|| rs.subscription_tier.clone())
     });
 
-    // Every prompt, `/usage`, and poll path hits `x.ai/billing`
-    // Log the fetched credits snapshot so support can correlate the limit UI with real balances
+    // Hub apply already filled remember maps. Re-apply exhaust + align so
+    // sibling included SuperGrok period remaining can hop the SessionToken.
+    if let Some(ref config) = billing.config {
+        let (usage_pct, period_end) = included_usage_and_period_end(config);
+        if let Some(pct) = usage_pct {
+            let _ = crate::auth::apply_billing_usage_to_session_exhaust_with_period(
+                pct,
+                &grok_home,
+                period_end.as_deref(),
+            );
+        }
+    }
+    if agent.cfg.borrow().grok_com_config.auto_use_included_limits {
+        let _ = agent.auth_manager.align_to_ranked_free_period_primary();
+    }
+
+    // Leader or follower: log the credits snapshot so support can correlate
+    // limit UX with real balances. HTTP only runs when this process is leader.
+    // Prefer identity from the GrokAuth that just polled (not disk-only scan)
+    // so success lines keep identity_id even when auth.json listing lags.
+    // Include productUsage / Build % when present so flat top-level % cannot
+    // hide principal or product mismatch.
+    let (identity_id, role) = billing_log_identity_from_auth(&auth);
     xai_grok_telemetry::unified_log::info(
         "billing: fetched credits config",
         None,

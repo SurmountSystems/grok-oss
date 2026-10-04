@@ -645,7 +645,8 @@ pub(super) fn maybe_drain_queue(agent: &mut AgentView, notices: &mut Vec<String>
                 page_flip_entry: None,
             }
         }
-    }
+    };
+    drain
 }
 
 /// Whether [`apply_turn_start_shim`] renders its own user block (i.e. `display_block` is `Some`).

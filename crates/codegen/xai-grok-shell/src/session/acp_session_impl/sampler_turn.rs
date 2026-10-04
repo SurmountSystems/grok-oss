@@ -1290,13 +1290,52 @@ impl SessionActor {
             );
             return Err(acp::Error::internal_error().data(message));
         }
+        // An L3 specialist, and a once-run nested role, does not auto-compact.
+        // `never_auto_compact` is that gate (not `is_l3_session` alone).
+        // Full is the session sampling window at or over (`>=`). A catalog
+        // window on the error must not replace it. Missing model metadata
+        // still uses the session window. An ordinary L2 skips this arm.
+        if self.never_auto_compact() {
+            let session_cw = self
+                .chat_state_handle
+                .get_sampling_config()
+                .await
+                .map(|c| c.context_window.get())
+                .filter(|cw| *cw > 0);
+            let error_cw = error
+                .model_metadata
+                .as_ref()
+                .and_then(|m| m.context_window)
+                .filter(|cw| *cw > 0);
+            if let Some(cw) = session_cw.or(error_cw) {
+                let estimated_total = self.chat_state_handle.get_estimated_total_tokens().await;
+                if estimated_total >= cw {
+                    tracing::info!(
+                        session_id = %self.session_info.id,
+                        estimated_total,
+                        context_window = cw,
+                        "nested window is full; ending child without compact"
+                    );
+                    return Ok(SamplerFailureRecovery::EndChildWithoutCompact);
+                }
+            }
+        }
 
         // Never compact mid-salvage: the rewrite would drop the continue reminder and split the joined report
         // Genuine overflows already completed truncated in the quiet arm above
         // The remaining mid-salvage kinds (rate limit) take their terminal arms below
         if !mid_salvage_continuation && self.should_compact_on_error(&error).await {
-            // SAFETY: `should_compact_on_error` returned true only when `model_metadata.context_window` was Some(>0)
-            let cw = error
+            // Compact against the session sampling window already in chat-state
+            // (catalog on L1, nested 200k on L2). Http/timeout errors have
+            // `model_metadata: None`; catalog 500k on a 5xx must not replace
+            // a nested 200k session window.
+            let session_cw = self
+                .chat_state_handle
+                .get_sampling_config()
+                .await
+                .map(|c| c.context_window.get())
+                .filter(|cw| *cw > 0);
+            let error_cw = error
                 .model_metadata
                 .as_ref()
                 .and_then(|m| m.context_window)
@@ -1315,7 +1354,6 @@ impl SessionActor {
                     && let Some(new_cw) = std::num::NonZeroU64::new(cw)
                     && self.compaction.context_window_override.is_none()
                 {
-
                     if new_cw.get() > self.compaction.model_context_window.get() {
                         self.compaction.model_context_window.set(new_cw.get());
                     }
@@ -2017,6 +2055,9 @@ impl SessionActor {
             }
             SamplerFailureRecovery::RefreshAuthAndResubmit { credential, store } => {
                 Ok(SamplerTurnOutcome::RefreshAuthAndResubmit { credential, store })
+            }
+            SamplerFailureRecovery::EndChildWithoutCompact => {
+                Ok(SamplerTurnOutcome::EndChildWithoutCompact)
             }
             SamplerFailureRecovery::RetryTransient { kind, status_code } => {
                 Ok(SamplerTurnOutcome::RetryTransient { kind, status_code })

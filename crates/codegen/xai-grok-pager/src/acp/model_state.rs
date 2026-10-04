@@ -208,13 +208,18 @@ impl ModelState {
         effort_override: Option<ReasoningEffort>,
     ) {
         let same_model = self.current.as_ref() == Some(&model_id);
+        let previous_effort = self.reasoning_effort;
         self.current = Some(model_id.clone());
         self.served_model_name = None;
         self.reasoning_effort = effort_override.or_else(|| {
-            self.available
-                .get(&model_id)
-                .and_then(|info| parse_reasoning_effort_meta(info.meta.as_ref())),
-        };
+            if same_model {
+                previous_effort
+            } else {
+                self.available
+                    .get(&model_id)
+                    .and_then(|info| parse_reasoning_effort_meta(info.meta.as_ref()))
+            }
+        });
     }
 
     /// After SessionCreated / SessionLoaded replace the catalog, keep the

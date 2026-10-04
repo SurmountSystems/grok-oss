@@ -588,6 +588,7 @@ pub mod tool_index;
 pub mod turn_completion;
 pub mod unified_list;
 pub mod unsent_prompt_draft;
+pub use unsent_prompt_draft::prompt_wal;
 pub(crate) mod usage_log;
 pub(crate) mod user_message;
 pub(crate) mod wire_tags;

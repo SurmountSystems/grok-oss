@@ -529,6 +529,37 @@ fn wheel_on_border_column_scrolls_plan() {
     );
 }
 
+/// Overlay router is skipped: empty-composer Ctrl+C in the line viewer must
+/// abandon plan approval, not return Changed and swallow the chord.
+#[test]
+fn line_viewer_empty_ctrl_c_abandons_plan_approval() {
+    let mut agent = agent_with_scrollable_plan();
+    agent.prompt.set_text("");
+    {
+        let pav = agent.plan_approval_view.as_mut().unwrap();
+        pav.focus = PlanApprovalFocus::Preview;
+    }
+
+    let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+    let outcome = agent.handle_line_viewer_key(&ctrl_c);
+    assert!(
+        matches!(
+            outcome,
+            crate::app::app_view::InputOutcome::Changed
+                | crate::app::app_view::InputOutcome::Action(_)
+        ),
+        "empty Ctrl+C must be consumed as plan quit; got {outcome:?}"
+    );
+    assert!(
+        agent.plan_approval_view.is_none(),
+        "line-viewer empty Ctrl+C must abandon, not swallow as Changed"
+    );
+    assert!(
+        agent.plan_decision_resolved,
+        "line-viewer Ctrl+C abandon must set the same sticky as q / Quit"
+    );
+}
+
 fn enter_key() -> KeyEvent {
     KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)
 }
@@ -1352,6 +1383,84 @@ fn empty_enter_never_approves_even_when_approve_is_marked() {
     );
 }
 
+/// A single click on a plan body row focuses or scrolls. It must not
+/// enter Commenting or wipe the composer.
+#[test]
+fn plan_row_click_does_not_enter_commenting() {
+    let mut agent = agent_with_scrollable_plan();
+    agent.prompt.set_text("keep typing");
+    agent.prompt.set_cursor(agent.prompt.text().len());
+    let registry = ActionRegistry::defaults();
+
+    let _ = agent.handle_input(
+        &mouse(MouseEventKind::Down(MouseButton::Left), 10, 4),
+        &registry,
+    );
+
+    let pav = agent.plan_approval_view.as_ref().unwrap();
+    assert_ne!(
+        pav.focus,
+        PlanApprovalFocus::Commenting,
+        "clicking a plan row must not steal the composer into Commenting"
+    );
+    assert_eq!(
+        agent.prompt.text(),
+        "keep typing",
+        "clicking a plan row must leave the composer typeable"
+    );
+
+    let _ = agent.handle_input(
+        &Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE)),
+        &registry,
+    );
+    let pav = agent.plan_approval_view.as_ref().unwrap();
+    assert_ne!(
+        pav.focus,
+        PlanApprovalFocus::Commenting,
+        "a live Preview draft must type `c`, not stash-and-wipe into Commenting"
+    );
+    assert_eq!(
+        agent.prompt.text(),
+        "keep typingc",
+        "typed `c` must stay in the Human box, got {:?}",
+        agent.prompt.text()
+    );
+}
+
+/// Empty Enter on the default parked Preview stays on Preview.
+/// Commenting is explicit `c` only. Empty Enter never Approves.
+#[test]
+fn empty_enter_on_soft_park_preview_does_not_enter_commenting() {
+    let mut agent = agent_with_scrollable_plan();
+    let viewer = agent.line_viewer.as_ref().expect("preview is open");
+    assert!(
+        viewer.selected_line_range().is_some(),
+        "fixture must have a selected line so Enter would enter Commenting if routed there"
+    );
+    assert!(agent.prompt.text().trim().is_empty());
+    let pav = agent.plan_approval_view.as_ref().unwrap();
+    assert_eq!(pav.focus, PlanApprovalFocus::Preview);
+
+    let _ = agent.handle_input(
+        &Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        &ActionRegistry::defaults(),
+    );
+
+    let pav = agent
+        .plan_approval_view
+        .as_ref()
+        .expect("empty Enter must leave the parked plan open");
+    assert_eq!(
+        pav.focus,
+        PlanApprovalFocus::Preview,
+        "empty Enter on Preview must not enter Commenting"
+    );
+    assert!(
+        !agent.plan_decision_resolved,
+        "empty Enter must never Approve a parked plan"
+    );
+}
+
 /// Operator: Enter submits the marked idle CTA.
 #[test]
 fn enter_submits_the_marked_idle_cta() {
@@ -1477,6 +1586,77 @@ fn letter_key_types_and_is_not_the_only_submit() {
     assert!(
         agent.plan_approval_view.is_some() && !agent.plan_decision_resolved,
         "letters are not the only submit"
+    );
+}
+
+/// Isolated plan.md viewer: a mid-compose draft means `a` is text, not Approve.
+#[test]
+fn plan_md_preview_mid_compose_a_types_does_not_approve() {
+    let mut agent = agent_with_scrollable_plan();
+    agent.prompt.set_text("oh you interrupted my typing");
+    {
+        let pav = agent.plan_approval_view.as_mut().unwrap();
+        pav.focus = PlanApprovalFocus::Preview;
+    }
+
+    let a = Event::Key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+    let _ = agent.handle_input(&a, &ActionRegistry::defaults());
+    assert!(
+        agent.plan_approval_view.is_some(),
+        "plan.md Preview must not Approve while the composer has a draft"
+    );
+    assert!(
+        agent.prompt.text().contains("oh you interrupted my typing"),
+        "draft must stay in the composer, got {:?}",
+        agent.prompt.text()
+    );
+    assert!(
+        agent.prompt.text().contains('a'),
+        "typed `a` must land in the composer, got {:?}",
+        agent.prompt.text()
+    );
+}
+
+/// Empty-prompt `a` on the isolated plan.md Preview path types, not Approves.
+#[test]
+fn plan_md_preview_empty_a_still_approves() {
+    let mut agent = agent_with_scrollable_plan();
+    agent.prompt.set_text("");
+    {
+        let pav = agent.plan_approval_view.as_mut().unwrap();
+        pav.focus = PlanApprovalFocus::Preview;
+    }
+
+    let a = Event::Key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+    let _ = agent.handle_input(&a, &ActionRegistry::defaults());
+    assert!(
+        agent.plan_approval_view.is_some(),
+        "empty-prompt `a` on plan.md Preview must type, not Approve"
+    );
+    assert_eq!(agent.prompt.text(), "a");
+}
+
+/// Isolated plan.md Preview is non-capturing: a non-accelerator letter types.
+#[test]
+fn plan_md_preview_empty_printable_goes_to_composer() {
+    let mut agent = agent_with_scrollable_plan();
+    agent.prompt.set_text("");
+    {
+        let pav = agent.plan_approval_view.as_mut().unwrap();
+        pav.focus = PlanApprovalFocus::Preview;
+    }
+
+    let h = Event::Key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE));
+    let _ = agent.handle_input(&h, &ActionRegistry::defaults());
+    assert!(
+        agent.plan_approval_view.is_some(),
+        "a non-accelerator letter must not decide the plan"
+    );
+    assert_eq!(
+        agent.prompt.text(),
+        "h",
+        "printable keys go to the composer while plan.md is open, got {:?}",
+        agent.prompt.text()
     );
 }
 

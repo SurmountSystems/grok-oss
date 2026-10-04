@@ -56,99 +56,156 @@ struct Daemon {
 
 const MAX_RESULTS: usize = 100;
 
-impl Daemon {
-    /// Spawn the matcher thread.
-    /// `None` when the spawn fails: no half-constructed daemon whose only effect on drop is a `Stop` into a channel nobody reads.
-    fn spawn() -> Option<Self> {
-        let shared = Arc::new(Mutex::new(Snapshot::default()));
-        let (tx, rx) = sync_channel::<Msg>(256);
+/// Test-only count of OS `history-search` threads ever started in this process.
+/// The leak contract is: many live `HistorySearchState`s share one matcher
+/// thread, they do not each spawn another.
+#[cfg(test)]
+static HISTORY_SEARCH_THREADS_SPAWNED: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
 
-        let out = shared.clone();
-        let worker = move || {
-            let mut pattern = MultiPattern::new(1);
-            let mut matcher = Matcher::new(Config::DEFAULT);
-            let mut items: Vec<(String, Utf32String)> = Vec::new();
-            let mut generation: usize = 0;
-            let mut prev_q = String::new();
+static NEXT_CLIENT_ID: AtomicU64 = AtomicU64::new(1);
+static SHARED_TX: Mutex<Option<SyncSender<Work>>> = Mutex::new(None);
 
-            while let Ok(msg) = rx.recv() {
-                let msg = drain_to_latest(msg, &rx);
+/// Work for the process-wide matcher thread. `Stop` forgets one client; the
+/// thread stays up for the next composer.
+enum Work {
+    Client {
+        id: u64,
+        msg: Msg,
+        out: Arc<Mutex<Snapshot>>,
+    },
+}
 
-                match msg {
-                    Msg::SetItems(new) => {
-                        items = build_items(new);
-                        prev_q.clear();
-                        generation += 1;
-                        publish_matches(&items, "", &mut pattern, &mut matcher, &out, generation);
-                    }
-                    Msg::SetItemsAndQuery(new, query) => {
-                        items = build_items(new);
-                        prev_q.clear();
-                        generation += 1;
-                        let trimmed = query.trim().to_string();
-                        publish_matches(
-                            &items,
-                            &trimmed,
-                            &mut pattern,
-                            &mut matcher,
-                            &out,
-                            generation,
-                        );
-                        prev_q = trimmed;
-                    }
-                    Msg::SetQuery(query) => {
-                        generation += 1;
-                        let trimmed = query.trim().to_string();
+struct ClientCtx {
+    items: Vec<(String, Utf32String)>,
+    pattern: MultiPattern,
+    prev_q: String,
+    generation: usize,
+}
 
-                        if trimmed.is_empty() {
-                            publish_matches(
-                                &items,
-                                "",
-                                &mut pattern,
-                                &mut matcher,
-                                &out,
-                                generation,
-                            );
-                            prev_q.clear();
-                        } else {
-                            let append = !prev_q.is_empty()
-                                && trimmed.as_bytes().starts_with(prev_q.as_bytes())
-                                && !trimmed.ends_with('\\')
-                                && !trimmed
-                                    .as_bytes()
-                                    .last()
-                                    .is_some_and(|b| b.is_ascii_whitespace());
-                            publish_query_matches(
-                                &items,
-                                &trimmed,
-                                append,
-                                &mut pattern,
-                                &mut matcher,
-                                &out,
-                                generation,
-                            );
-                            prev_q = trimmed;
-                        }
-                    }
-                    Msg::Stop => break,
-                }
+fn shared_sender() -> Option<SyncSender<Work>> {
+    let mut guard = SHARED_TX.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(tx) = guard.as_ref() {
+        return Some(tx.clone());
+    }
+    let (tx, rx) = sync_channel::<Work>(256);
+    #[cfg(test)]
+    HISTORY_SEARCH_THREADS_SPAWNED.fetch_add(1, Ordering::Relaxed);
+    match thread::Builder::new()
+        .name("history-search".into())
+        .spawn(move || shared_worker(rx))
+    {
+        Ok(_) => {
+            *guard = Some(tx.clone());
+            Some(tx)
+        }
+        Err(e) => {
+            tracing::error!(
+                error = %e,
+                "history search daemon thread spawn failed; history search disabled"
+            );
+            None
+        }
+    }
+}
+
+fn shared_worker(rx: Receiver<Work>) {
+    let mut matcher = Matcher::new(Config::DEFAULT);
+    let mut clients: HashMap<u64, ClientCtx> = HashMap::new();
+    let mut peeked: Option<Work> = None;
+
+    loop {
+        let first = if let Some(p) = peeked.take() {
+            p
+        } else {
+            match rx.recv() {
+                Ok(w) => w,
+                Err(_) => break,
             }
         };
-        match thread::Builder::new()
-            .name("history-search".into())
-            .spawn(worker)
-        {
-            Ok(handle) => Some(Self {
-                shared,
-                tx,
-                _handle: handle,
-            }),
-            Err(e) => {
-                tracing::error!(
-                    error = %e,
-                    "history search daemon thread spawn failed; history search disabled"
+        let work = drain_same_client(first, &rx, &mut peeked);
+        let Work::Client { id, msg, out } = work;
+        if matches!(msg, Msg::Stop) {
+            clients.remove(&id);
+            continue;
+        }
+        let ctx = clients.entry(id).or_insert_with(|| ClientCtx {
+            items: Vec::new(),
+            pattern: MultiPattern::new(1),
+            prev_q: String::new(),
+            generation: 0,
+        });
+        apply_client_msg(ctx, &mut matcher, msg, &out);
+    }
+}
+
+fn apply_client_msg(
+    ctx: &mut ClientCtx,
+    matcher: &mut Matcher,
+    msg: Msg,
+    out: &Arc<Mutex<Snapshot>>,
+) {
+    match msg {
+        Msg::SetItems(new) => {
+            ctx.items = build_items(new);
+            ctx.prev_q.clear();
+            ctx.generation += 1;
+            publish_matches(
+                &ctx.items,
+                "",
+                &mut ctx.pattern,
+                matcher,
+                out,
+                ctx.generation,
+            );
+        }
+        Msg::SetItemsAndQuery(new, query) => {
+            ctx.items = build_items(new);
+            ctx.prev_q.clear();
+            ctx.generation += 1;
+            let trimmed = query.trim().to_string();
+            publish_matches(
+                &ctx.items,
+                &trimmed,
+                &mut ctx.pattern,
+                matcher,
+                out,
+                ctx.generation,
+            );
+            ctx.prev_q = trimmed;
+        }
+        Msg::SetQuery(query) => {
+            ctx.generation += 1;
+            let trimmed = query.trim().to_string();
+
+            if trimmed.is_empty() {
+                publish_matches(
+                    &ctx.items,
+                    "",
+                    &mut ctx.pattern,
+                    matcher,
+                    out,
+                    ctx.generation,
                 );
-                None
+                ctx.prev_q.clear();
+            } else {
+                let append = !ctx.prev_q.is_empty()
+                    && trimmed.as_bytes().starts_with(ctx.prev_q.as_bytes())
+                    && !trimmed.ends_with('\\')
+                    && !trimmed
+                        .as_bytes()
+                        .last()
+                        .is_some_and(|b| b.is_ascii_whitespace());
+                publish_query_matches(
+                    &ctx.items,
+                    &trimmed,
+                    append,
+                    &mut ctx.pattern,
+                    matcher,
+                    out,
+                    ctx.generation,
+                );
+                ctx.prev_q = trimmed;
             }
         }
         Msg::Stop => {}
@@ -248,11 +305,38 @@ fn publish_query_matches(
     };
 }
 
-/// Drain the channel to the most recent message, coalescing queries.
-fn drain_to_latest(first: Msg, rx: &std::sync::mpsc::Receiver<Msg>) -> Msg {
-    let mut current = first;
-    while let Ok(next) = rx.try_recv() {
-        current = match (current, next) {
+/// Drain same-client messages, coalescing queries. A different client's work
+/// is peeked and left for the next loop so two composers cannot drop each
+/// other's updates.
+fn drain_same_client(first: Work, rx: &Receiver<Work>, peeked: &mut Option<Work>) -> Work {
+    let Work::Client { id, mut msg, out } = first;
+    loop {
+        let next = if let Some(Work::Client { id: nid, .. }) = peeked.as_ref() {
+            if *nid == id {
+                peeked.take().expect("peeked same-id work")
+            } else {
+                break;
+            }
+        } else {
+            match rx.try_recv() {
+                Ok(Work::Client {
+                    id: nid,
+                    msg: next_msg,
+                    out: next_out,
+                }) if nid == id => Work::Client {
+                    id: nid,
+                    msg: next_msg,
+                    out: next_out,
+                },
+                Ok(other) => {
+                    *peeked = Some(other);
+                    break;
+                }
+                Err(_) => break,
+            }
+        };
+        let Work::Client { msg: next_msg, .. } = next;
+        msg = match (msg, next_msg) {
             // Coalesce consecutive SetQuery, keeping the latest
             (Msg::SetQuery(_), next @ Msg::SetQuery(_)) => next,
             (Msg::SetItems(items), Msg::SetQuery(query)) => Msg::SetItemsAndQuery(items, query),
@@ -260,9 +344,11 @@ fn drain_to_latest(first: Msg, rx: &std::sync::mpsc::Receiver<Msg>) -> Msg {
                 Msg::SetItemsAndQuery(items, query)
             }
             // Stop always wins.
-            (_, stop @ Msg::Stop) => return stop,
+            (_, stop @ Msg::Stop) => {
+                return Work::Client { id, msg: stop, out };
+            }
             // SetItems after SetQuery: keep the SetItems (a reset)
-            (_, next) => next,
+            (_, next_msg) => next_msg,
         };
     }
     Work::Client { id, msg, out }
@@ -361,16 +447,15 @@ impl HistorySearchState {
         let Some(daemon) = &self.daemon else {
             return;
         };
-        if daemon.tx.send(msg).is_err() {
+        let work = Work::Client {
+            id: daemon.id,
+            msg,
+            out: daemon.shared.clone(),
+        };
+        if daemon.tx.send(work).is_err() {
+            *SHARED_TX.lock().unwrap_or_else(|e| e.into_inner()) = None;
             self.daemon = None;
         }
-    }
-
-    /// Whether the matcher daemon has been spawned.
-    /// Regression accessor for the subagent storm test: child views must never build one.
-    #[cfg(test)]
-    pub(crate) fn daemon_built(&self) -> bool {
-        self.daemon.is_some()
     }
 
     /// Whether the matcher daemon has been spawned. Regression accessor for

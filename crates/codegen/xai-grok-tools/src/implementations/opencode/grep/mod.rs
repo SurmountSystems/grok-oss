@@ -160,21 +160,26 @@ impl xai_tool_runtime::Tool for GrepTool {
             _ => cwd,
         };
 
-        // Build rg command.
-        let rg_exec = rg_path()?;
-        let mut cmd = Command::new(rg_exec);
-        cmd.args([
-            "-n",
-            "-H",
-            "--hidden",
-            "--no-messages",
-            "--field-match-separator=|",
-            "--regexp",
-        ]);
-        cmd.arg(&input.pattern);
-
-        if let Some(ref include) = input.include
-            && !include.is_empty()
+        let req = SearchRequest {
+            pattern: input.pattern.clone(),
+            path: search_path,
+            case_insensitive: false,
+            literal: false,
+            glob: input.include.clone(),
+            extra_globs: Vec::new(),
+            deny_globs: Vec::new(),
+            file_type: None,
+            hidden: true,
+            no_ignore: false,
+            multiline: false,
+            before_context: 0,
+            after_context: 0,
+            max_filesize: None,
+            max_columns: None,
+            print: PrintMode::Content,
+            max_output_lines: None,
+        };
+        let hits = match tokio::task::spawn_blocking(move || embedded::search_line_hits(&req)).await
         {
             Ok(Ok(h)) => h,
             Ok(Err(e)) => {

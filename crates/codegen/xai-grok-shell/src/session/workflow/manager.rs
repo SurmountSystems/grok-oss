@@ -198,9 +198,9 @@ impl WorkflowManager {
                 let mut journal = match existing
                     .journal_path
                     .as_ref()
-                    .zip(self.session_dir.as_ref())
+                    .and_then(|p| self.session_dir.as_ref().map(|d| (d, p)))
                 {
-                    Some((relative, session_dir)) => {
+                    Some((session_dir, relative)) => {
                         let expected = format!("workflows/{run_id}/journal.jsonl");
                         if relative != &expected {
                             return Err(LaunchError::Journal(
@@ -2031,5 +2031,31 @@ mod tests {
             WorkflowOutcome::Completed { result } => assert_eq!(result, serde_json::json!(N)),
             other => panic!("expected Completed, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn cancel_drops_queued_spawns_before_coordinator() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut manager, mut subagent_rx) = test_manager(Some(dir.path().to_path_buf()));
+        manager.test_set_max_concurrent_agents(1);
+        let (run_id, outcome_rx) = manager
+            .launch(resolve_inline(parallel_n_script(4)).unwrap(), spec())
+            .unwrap();
+
+        let first = recv_spawn(&mut subagent_rx).await;
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(150), subagent_rx.recv())
+                .await
+                .is_err(),
+            "queued agents reached the coordinator before cancel"
+        );
+
+        assert!(manager.cancel(&run_id));
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), outcome_rx)
+            .await
+            .expect("cancel must complete the run outcome")
+            .expect("run outcome channel must stay open through cancel");
+        assert!(first.cancel_token.is_cancelled());
+        assert!(subagent_rx.try_recv().is_err());
     }
 }

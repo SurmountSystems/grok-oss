@@ -512,32 +512,30 @@ async fn first_turn_memory_injection_persists_to_chat_history() {
                 cwd: session_dir.path().to_string_lossy().to_string(),
             };
             let sampling_client = crate::sampling::Client::new(xai_grok_sampler::SamplerConfig {
-                    api_key: Some("test-key".to_string()),
-                    base_url: "http://localhost".to_string(),
-                    model: "test-model".to_string(),
-                    context_window: 100_000,
-                    ..Default::default()
-                })
-                .expect("sampling client should build for persistence actor");
+                api_key: Some("test-key".to_string()),
+                base_url: "http://localhost".to_string(),
+                model: "test-model".to_string(),
+                context_window: 100_000,
+                ..Default::default()
+            })
+            .expect("sampling client should build for persistence actor");
             let persistence = crate::session::persistence::new_with_explicit_dir(
-                    &crate::session::info::Info {
-                        id: session_info.id.clone(),
-                        cwd: session_info.cwd.clone(),
-                    },
-                    session_dir.path().to_path_buf(),
-                    acp::ModelId::new("test-model"),
-                    sampling_client,
-                    crate::test_support::TEST_MODEL.to_owned(),
-                    crate::session::persistence::ExplicitSessionOpen::New {
-                        identity: None,
-                        next_trace_turn: None,
-                    },
-                )
-                .await
-                .expect("persistence actor should start");
-            let (_event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel::<
-                SessionEvent,
-            >();
+                &crate::session::info::Info {
+                    id: session_info.id.clone(),
+                    cwd: session_info.cwd.clone(),
+                },
+                session_dir.path().to_path_buf(),
+                acp::ModelId::new("test-model"),
+                sampling_client,
+                crate::test_support::TEST_MODEL.to_owned(),
+                crate::session::persistence::ExplicitSessionOpen::New {
+                    identity: None,
+                    next_trace_turn: None,
+                },
+            )
+            .await
+            .expect("persistence actor should start");
+            let (_event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel::<SessionEvent>();
             let (chat_event_tx, _chat_event_rx) = tokio::sync::mpsc::unbounded_channel();
             let chat_state_handle = xai_chat_state::ChatStateActor::spawn(
                 vec![
@@ -595,8 +593,8 @@ async fn first_turn_memory_injection_persists_to_chat_history() {
                 matches!(loaded.chat_history.first(), Some(ConversationItem::System(sys))
                 if sys.content.contains("Persist this memory reminder."))
             );
-        });
-    });
+        })
+        .await;
 }
 #[test]
 fn first_turn_memory_injection_disabled_does_not_persist_to_chat_history() {
@@ -1343,6 +1341,7 @@ async fn cancel_running_task_teardown_clears_running_and_pending_work() {
                         queue_meta: None,
                         queue_mutation_policy: QueueMutationPolicy::hidden(),
                         send_now: false,
+                        unstick_retry: false,
                         traceparent: None,
                     });
             }
@@ -1789,8 +1788,8 @@ fn handle_prompt_verbatim_skips_interrupt_envelope() {
             assert_eq!(text, frame_user_turn(INTERRUPT_NOTE, &expected_assembled));
             assert!(!actor.events.take_pending_interrupt_reminder());
             prompt_task.abort();
-        })
-        .await;
+        });
+    });
 }
 /// Integration: a verbatim user turn must stay byte-identical to the caller text even when the interrupt one-shot is armed.
 #[tokio::test(flavor = "current_thread")]
@@ -1837,8 +1836,8 @@ async fn handle_prompt_verbatim_skips_interrupt_envelope() {
             assert!(!user.text_content().contains(INTERRUPT_NOTE));
             assert!(!actor.events.take_pending_interrupt_reminder());
             prompt_task.abort();
-        });
-    });
+        })
+        .await;
 }
 /// Send-now must use the full interjection envelope (prefix + already-wrapped
 /// `<user_query>` + unfinished-task trailer), not the note prefix alone.
@@ -1993,8 +1992,8 @@ async fn handle_prompt_synthetic_origin_preserves_interrupt_reminder() {
                 "a synthetic-origin turn must not inject the interrupt envelope"
             );
             prompt_task.abort();
-        });
-    });
+        })
+        .await;
 }
 #[tokio::test(flavor = "current_thread")]
 async fn cancel_running_task_interactive_preserves_queued_work() {
@@ -2032,6 +2031,7 @@ async fn cancel_running_task_interactive_preserves_queued_work() {
             }),
             queue_mutation_policy: QueueMutationPolicy::editable(),
             send_now: false,
+            unstick_retry: false,
             traceparent: None,
         };
         (item, rx)
@@ -2576,6 +2576,7 @@ async fn cancel_resolves_front_when_running_task_is_none() {
             }),
             queue_mutation_policy: QueueMutationPolicy::editable(),
             send_now: false,
+            unstick_retry: false,
             traceparent: None,
         };
         (item, rx)
@@ -3179,6 +3180,7 @@ async fn cancel_keeps_remaining_queued_prompts_visible_to_clients() {
             }),
             queue_mutation_policy: QueueMutationPolicy::editable(),
             send_now: false,
+            unstick_retry: false,
             traceparent: None,
         }
     }

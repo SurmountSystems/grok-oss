@@ -268,10 +268,10 @@ pub fn replay_would_emit(
     grok_home: &std::path::Path,
     hint: ReplayPathHint<'_>,
 ) -> std::io::Result<bool> {
-    let Some(path) = resolve_replay_updates_path(session_id, grok_home, hint)? else {
+    let Some(updates_path) = resolve_replay_updates_path(session_id, grok_home, hint)? else {
         return Ok(false);
     };
-    let raw_contents = std::fs::read_to_string(&path)?;
+    let raw_contents = std::fs::read_to_string(&updates_path)?;
     for line in rewind_filtered_live(&raw_contents) {
         if line_is_dropped_on_replay(line) {
             continue;

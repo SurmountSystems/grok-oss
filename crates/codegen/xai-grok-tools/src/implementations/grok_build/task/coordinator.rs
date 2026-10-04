@@ -1802,6 +1802,12 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                     .flatten()
                     .map(|waiter| waiter.deadline),
             )
+            .chain(
+                self.queries_waiting_for_spawn
+                    .values()
+                    .flatten()
+                    .map(|query| query.grace_deadline),
+            )
             .chain(self.teardown_drains.values().map(|drain| drain.deadline))
             .chain(self.spawn_ready.deadlines())
             .min()

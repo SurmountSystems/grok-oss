@@ -68,6 +68,44 @@ pub struct MouseButtons {
     /// Whether the mouse is over the still-running watcher cue.
     pub watching_hovered: bool,
 }
+/// Discoverable work-control hit targets for the turn-status row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct WorkControlChrome {
+    pub show_pause: bool,
+    pub show_stop: bool,
+    /// When true, the pause control is labeled `[resume]` (global pause active).
+    pub pause_is_resume: bool,
+}
+/// Resolve which pause and stop buttons should paint for the current work state.
+pub fn work_control_chrome(
+    show_buttons: bool,
+    turn_running: bool,
+    subagents: usize,
+    global_paused: bool,
+) -> WorkControlChrome {
+    if !show_buttons {
+        return WorkControlChrome::default();
+    }
+    let work_live = turn_running || subagents > 0;
+    WorkControlChrome {
+        show_pause: work_live || global_paused,
+        show_stop: work_live,
+        pause_is_resume: global_paused,
+    }
+}
+/// Label for the pause or resume control (`leading_space` when a neighbor sits immediately to the left).
+fn pause_button_str(is_resume: bool, leading_space: bool) -> &'static str {
+    match (is_resume, leading_space) {
+        (false, true) => " [pause]",
+        (false, false) => "[pause]",
+        (true, true) => " [resume]",
+        (true, false) => "[resume]",
+    }
+}
+/// Label for the hard-stop control.
+fn stop_button_str(leading_space: bool) -> &'static str {
+    if leading_space { " [stop]" } else { "[stop]" }
+}
 /// Counts of "watcher" work: background jobs that can wake the agent for a new turn while it sits
 /// idle. This is broader than the tasks-pane `Watchers` group (monitors and loops only).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -144,6 +182,21 @@ pub fn is_sendable_wait(activity: &Option<TurnActivity>) -> bool {
         ))
     )
 }
+/// Parked cue stem: the wait reason without its spinner ellipsis.
+/// Unknown activity falls back to generic `waiting`.
+fn parked_wait_name(activity: &Option<TurnActivity>) -> String {
+    match activity {
+        Some(TurnActivity::Waiting(reason)) => reason.label().trim_end_matches('…').to_string(),
+        _ => "waiting".to_string(),
+    }
+}
+/// First-token model wait or Retrying chrome that `[pause]` must replace.
+fn is_pauseable_sampler_wait(activity: &Option<TurnActivity>) -> bool {
+    matches!(
+        activity,
+        Some(TurnActivity::Waiting(WaitingReason::Model) | TurnActivity::Retrying { .. })
+    )
+}
 /// Inputs to [`render_turn_status`]: one frame's worth of turn state.
 #[derive(Debug)]
 pub struct TurnStatusArgs<'a> {
@@ -211,6 +264,17 @@ pub fn render_turn_status(
         return TurnStatusOutput::default();
     }
     let theme = Theme::current();
+    let timer_bg = if flat_background {
+        Color::Reset
+    } else {
+        theme.bg_base
+    };
+    let right_style = |fg| {
+        Style::default()
+            .fg(fg)
+            .bg(timer_bg)
+            .remove_modifier(Modifier::all())
+    };
     if state.is_idle()
         && !drain_blocked
         && let Some(started) = session_starting_since
@@ -278,18 +342,86 @@ pub fn render_turn_status(
                 ..TurnStatusOutput::default()
             };
         }
-        return TurnStatusOutput::default();
+        if parked {
+            return TurnStatusOutput::default();
+        }
+        // Idle with no watchers: a mouse host keeps a one-line [pause] row.
+        // Keyboard-only stays empty. Global pause uses the resume row below.
+        if !global_paused {
+            if show_buttons && state.is_idle() && session_starting_since.is_none() {
+                let pause_str = pause_button_str(false, true);
+                let right_width = pause_str.width();
+                let pause_x = area.x + area.width.saturating_sub(right_width as u16);
+                let pause_fg = if pause_hovered {
+                    theme.text_primary
+                } else {
+                    theme.gray
+                };
+                let span = Span::styled(pause_str, right_style(pause_fg));
+                buf.set_span(pause_x, area.y, &span, right_width as u16);
+                return TurnStatusOutput {
+                    pause_button: Some(Rect::new(pause_x, area.y, right_width as u16, 1)),
+                    ..TurnStatusOutput::default()
+                };
+            }
+            return TurnStatusOutput::default();
+        }
     }
-    let show_cancel = show_buttons
-        && matches!(
-            state,
-            AgentState::TurnRunning
-                | AgentState::CommandRunning { .. }
-                | AgentState::TurnCancelling
-                | AgentState::CommandCancelling { .. }
-        );
-    let (activity_style, label, is_tool) =
+    if global_paused && state.is_idle() && !parked {
+        let chrome = work_control_chrome(show_buttons, false, 0, true);
+        let pause_str = if chrome.show_pause {
+            pause_button_str(true, true)
+        } else {
+            ""
+        };
+        let right_width = pause_str.width();
+        let left_budget = (area.width as usize).saturating_sub(right_width);
+        let label = "Paused all work";
+        let spans = vec![Span::styled(
+            truncate_str(label, left_budget),
+            Style::default().fg(theme.gray),
+        )];
+        buf.set_line(area.x, area.y, &Line::from(spans), left_budget as u16);
+        let pause_button = if chrome.show_pause && !pause_str.is_empty() {
+            let pause_x = area.x + area.width.saturating_sub(right_width as u16);
+            let pause_fg = if pause_hovered {
+                theme.text_primary
+            } else {
+                theme.gray
+            };
+            let span = Span::styled(pause_str, right_style(pause_fg));
+            buf.set_span(pause_x, area.y, &span, right_width as u16);
+            Some(Rect::new(pause_x, area.y, right_width as u16, 1))
+        } else {
+            None
+        };
+        return TurnStatusOutput {
+            pause_button,
+            ..TurnStatusOutput::default()
+        };
+    }
+    let turn_running_for_buttons = matches!(
+        state,
+        AgentState::TurnRunning | AgentState::CommandRunning { .. }
+    );
+    let chrome = work_control_chrome(
+        show_buttons,
+        turn_running_for_buttons,
+        watchers.subagents,
+        global_paused,
+    );
+    let is_cancelling = matches!(
+        state,
+        AgentState::TurnCancelling | AgentState::CommandCancelling { .. }
+    );
+    let show_cancel = chrome.show_stop || (show_buttons && is_cancelling);
+    let show_pause = chrome.show_pause;
+    let (mut activity_style, mut label, is_tool) =
         compute_activity(&theme, state, activity, is_bash_turn, goal_verifying);
+    if global_paused && is_pauseable_sampler_wait(activity) {
+        activity_style = Style::default().fg(theme.gray);
+        label = "Paused all work".to_string();
+    }
     if matches!(state, AgentState::Idle) {
         return TurnStatusOutput::default();
     }
@@ -322,13 +454,19 @@ pub fn render_turn_status(
         ""
     };
     let bg_width = bg_str.width();
-    let cancel_str: &str = match (show_cancel, show_bg) {
-        (false, _) => "",
-        (true, true) => "[stop]",
-        (true, false) => " [stop]",
+    let pause_str: &str = if show_pause {
+        pause_button_str(chrome.pause_is_resume, show_bg || turn_timer_width > 0)
+    } else {
+        ""
+    };
+    let pause_width = pause_str.width();
+    let cancel_str: &str = if show_cancel {
+        stop_button_str(show_bg || show_pause || turn_timer_width > 0)
+    } else {
+        ""
     };
     let cancel_width = cancel_str.width();
-    let right_width = turn_timer_width + bg_width + cancel_width;
+    let right_width = turn_timer_width + bg_width + pause_width + cancel_width;
     let spinner_str = if is_pending_user_input {
         format!("{} ", crate::glyphs::diamond_filled())
     } else {
@@ -354,11 +492,6 @@ pub fn render_turn_status(
             .unwrap_or_default()
     };
     let phase_timer_width = phase_timer_str.width();
-    let timer_bg = if flat_background {
-        Color::Reset
-    } else {
-        theme.bg_base
-    };
     let timer_style = Style::default()
         .fg(theme.gray)
         .bg(timer_bg)
@@ -451,12 +584,6 @@ pub fn render_turn_status(
     let left_line = Line::from(left_spans);
     buf.set_line(area.x, area.y, &left_line, area.width);
     let right_start_x = area.x + area.width.saturating_sub(right_width as u16);
-    let right_style = |fg| {
-        Style::default()
-            .fg(fg)
-            .bg(timer_bg)
-            .remove_modifier(Modifier::all())
-    };
     let mut x = right_start_x;
     if !turn_timer_str.is_empty() {
         let span = Span::styled(turn_timer_str.clone(), timer_style);
@@ -474,6 +601,21 @@ pub fn render_turn_status(
         buf.set_span(x, area.y, &span, bg_width as u16);
         x += bg_width as u16;
         Some(Rect::new(bg_x, area.y, bg_str.width() as u16, 1))
+    } else {
+        None
+    };
+    // Pause / resume. Quiet white (`text_primary`) on hover, gray at rest.
+    let pause_button_rect = if show_pause && !pause_str.is_empty() {
+        let pause_x = x;
+        let pause_style = if pause_hovered {
+            right_style(theme.text_primary)
+        } else {
+            right_style(theme.gray)
+        };
+        let span = Span::styled(pause_str, pause_style);
+        buf.set_span(x, area.y, &span, pause_width as u16);
+        x += pause_width as u16;
+        Some(Rect::new(pause_x, area.y, pause_width as u16, 1))
     } else {
         None
     };
@@ -640,7 +782,7 @@ pub fn should_show(
     should_show_with_global_pause(
         state,
         drain_blocked,
-        mcp_init_progress,
+        session_starting_since,
         watchers,
         parked,
         false,
@@ -655,7 +797,7 @@ pub fn should_show(
 pub fn should_show_with_global_pause(
     state: &AgentState,
     drain_blocked: bool,
-    mcp_init_progress: Option<&McpInitProgress>,
+    session_starting_since: Option<Instant>,
     watchers: Watchers,
     parked: bool,
     global_paused: bool,
@@ -665,6 +807,14 @@ pub fn should_show_with_global_pause(
         return true;
     }
     if parked {
+        return true;
+    }
+    if mouse_host
+        && state.is_idle()
+        && !drain_blocked
+        && session_starting_since.is_none()
+        && watchers.total() == 0
+    {
         return true;
     }
     !state.is_idle() || drain_blocked || session_starting_since.is_some() || watchers.total() > 0
@@ -1191,6 +1341,7 @@ mod tests {
                 flat_background: false,
                 held_queue: 0,
                 held_queue_top_sendable: false,
+                global_paused: false,
             },
         );
         assert!(
@@ -1856,6 +2007,16 @@ mod tests {
         assert!(
             !text.contains("[stop]"),
             "watcherless parked must not render the running-turn chrome, got: {text:?}"
+        );
+    }
+    #[test]
+    fn idle_with_no_watchers_renders_nothing() {
+        let mut args = idle_args(Watchers::default());
+        args.buttons = None;
+        let text = render_row_text(args, 72);
+        assert!(
+            text.trim().is_empty(),
+            "idle with no watchers must render nothing, got: {text:?}"
         );
     }
     #[test]

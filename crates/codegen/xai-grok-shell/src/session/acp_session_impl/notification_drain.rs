@@ -385,6 +385,7 @@ impl SessionActor {
             running_display,
             tool_overrides_update,
             traceparent,
+            unstick_retry,
         ) = {
             let Some(front) = state.pending_inputs.front_mut() else {
                 return;
@@ -408,6 +409,7 @@ impl SessionActor {
                 running_display,
                 front.tool_overrides_update.take(),
                 front.traceparent.clone(),
+                front.unstick_retry,
             )
         };
         self.apply_tool_overrides_update(tool_overrides_update);
@@ -496,6 +498,7 @@ impl SessionActor {
                 persist_ack,
                 parsed_prompt_tx,
                 traceparent,
+                unstick_retry,
                 start_gate,
             },
             epoch,
@@ -828,6 +831,7 @@ impl SessionActor {
             queue_meta: None,
             queue_mutation_policy: QueueMutationPolicy::hidden(),
             send_now: false,
+            unstick_retry: false,
             traceparent: None,
         });
 

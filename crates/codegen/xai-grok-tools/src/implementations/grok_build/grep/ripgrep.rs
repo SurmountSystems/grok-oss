@@ -28,20 +28,18 @@ fn resolve_bundled_rg() -> Result<Option<PathBuf>, crate::util::vendor::InstallE
 
 pub fn rg_path() -> Result<PathBuf, ToolError> {
     static RG_EXEC: OnceLock<Result<PathBuf, String>> = OnceLock::new();
-    RG_EXEC
-        .get_or_init(|| {
-            #[cfg(bundle_rg)]
-            {
-                resolve_bundled_rg()
-                    .map(|found| found.unwrap_or_else(|| PathBuf::from("rg")))
-                    .map_err(|e| e.to_string())
-            }
-            #[cfg(not(bundle_rg))]
-            {
-                Ok(rg_from_path_or_runfiles())
-            }
+    RG_EXEC.get_or_init(|| {
+        #[cfg(bundle_rg)]
+        {
+            resolve_bundled_rg()
+                .map(|found| found.unwrap_or_else(|| PathBuf::from("rg")))
+                .map_err(|e| e.to_string())
         }
-    }
+        #[cfg(not(bundle_rg))]
+        {
+            Ok(rg_from_path_or_runfiles())
+        }
+    });
 
     let truncated = writer.truncated;
     let bytes = writer.inner;
@@ -249,7 +247,8 @@ mod tests {
             max_output_lines: None,
         })
         .clone()
-        .map_err(|msg| ToolError::new(ToolErrorKind::Execution, msg))
+        .map_err(|msg| ToolError::new(ToolErrorKind::Execution, msg));
+    }
 }
 
 #[cfg(not(bundle_rg))]

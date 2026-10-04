@@ -311,6 +311,7 @@ impl SessionActor {
             queue_meta,
             queue_mutation_policy,
             send_now: false,
+            unstick_retry,
             traceparent,
         };
 

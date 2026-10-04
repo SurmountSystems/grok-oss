@@ -60,11 +60,14 @@ impl std::error::Error for SessionRpcError {
         }
     }
 }
-/// `acp_send` bounded by [`session_rpc_timeout`], returning a typed [`SessionRpcError`] on expiry.
+/// `acp_send` bounded by [`session_rpc_timeout`].
+/// On expiry, `on_timeout` receives the timeout warning, then this returns
+/// [`SessionRpcError::TimedOut`] and does not keep the RPC value.
 pub(crate) async fn acp_send_bounded<R, T>(
     request: T,
     tx: &tokio::sync::mpsc::UnboundedSender<R>,
     action: &str,
+    on_timeout: impl FnOnce(String) + Send,
 ) -> Result<T::Response, SessionRpcError>
 where
     T: xai_acp_lib::AcpRequest,
@@ -75,10 +78,12 @@ where
         Ok(Ok(resp)) => Ok(resp),
         Ok(Err(e)) => Err(SessionRpcError::Rpc(e)),
         Err(_elapsed) => {
-            Err(SessionRpcError::TimedOut {
+            let err = SessionRpcError::TimedOut {
                 action: action.to_owned(),
                 timeout,
-            })
+            };
+            on_timeout(err.to_string());
+            Err(err)
         }
     }
 }

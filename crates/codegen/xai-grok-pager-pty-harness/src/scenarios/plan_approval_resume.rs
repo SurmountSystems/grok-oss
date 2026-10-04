@@ -18,6 +18,11 @@ use crate::{ContentController, MousePoint, PtyHarness, ScriptedResponse, SseEven
 const DEFAULT_ROWS: u16 = 50;
 const DEFAULT_COLS: u16 = 120;
 const WELCOME_TIMEOUT: Duration = Duration::from_secs(20);
+/// Direct pager-to-shell ACP so resume reverse-requests are not dropped by a
+/// leader with no ExtMethod waiter. `--trust` skips the folder-trust gate
+/// that can stall `--continue` on the welcome recap. `--yolo` skips a
+/// permission card on the live `exit_plan_mode` park.
+const PAGER_E2E_ARGS: &[&str] = &["--yolo", "--trust", "--no-leader"];
 /// Turn 1 seeds the session before quit; turn 2 is the implement turn the shell injects after the resumed approval is approved.
 const SETUP_SENTINEL: &str = "GBT3703SETUP";
 const IMPLEMENT_SENTINEL: &str = "GBT3703IMPLEMENTED";
@@ -108,36 +113,37 @@ pub async fn assert_plan_approval_restored_after_resume() -> Result<()> {
     // Prefer the chrome markers (product signal) over SETUP_SENTINEL, which may not be visible under the plan viewer
     // Without the shell re-park this times out.
     //
-    // Markers, any of:
-    // - full TUI status (`Plan ready. Side panel open`)
-    // - minimal-mode card header (`Plan ready for review`)
-    // - word-only footer (`approve  |  clarify  |  revise  |  exit`), or
-    //   the same four words with space separators on a narrow dock.
+    // Markers:
+    // - full TUI status (`Plan ready. Side panel open`) in the last 16
+    //   lines, and the Approve footer
+    // - that same footer when the status line is absent
+    // `Plan ready for review` with no Approve footer does not count.
     // Default spawn is fullscreen TUI, not `--minimal`, so the first wait
     // must accept the fullscreen status line. Waiting only for the minimal
     // card header times out even when the side-panel CTAs are already up.
-    wait_for_any_text(
-        &mut resumed,
-        &[
-            "Plan ready. Side panel open",
-            "Plan ready for review",
-            LABELED_FOOTER_STRIP,
-            NARROW_FOOTER_STRIP,
-            LABELED_APPROVE_CTA,
-        ],
-        WELCOME_TIMEOUT,
-    )
-    .context("restored plan-ready chrome after resume")?;
-    wait_for_any_text(
-        &mut resumed,
-        &[
-            LABELED_FOOTER_STRIP,
-            NARROW_FOOTER_STRIP,
-            LABELED_APPROVE_CTA,
-        ],
-        WELCOME_TIMEOUT,
-    )
-    .context("restored approval CTA chrome after --continue")?;
+    // That status line counts only in the last 16 screen lines, and only
+    // with the footer.
+    wait_for_restored_plan_ready_chrome(&mut resumed)
+        .context("restored plan-ready chrome after resume")?;
+    {
+        let deadline = Instant::now() + WELCOME_TIMEOUT;
+        loop {
+            resumed.update(Duration::from_millis(50));
+            let screen = resumed.screen_contents();
+            let footer_painted = screen.contains(LABELED_FOOTER_STRIP)
+                || screen.contains(NARROW_FOOTER_STRIP)
+                || screen.contains(LABELED_APPROVE_CTA);
+            if footer_painted {
+                break;
+            }
+            if Instant::now() >= deadline {
+                bail!(
+                    "timed out after {:?} waiting for Approve footer\n{screen}",
+                    WELCOME_TIMEOUT,
+                );
+            }
+        }
+    }
     let screen = resumed.screen_contents();
     if !screen.contains("approve") {
         bail!("expected approval primary action after resume\n{screen}");
@@ -167,9 +173,257 @@ pub async fn assert_plan_approval_restored_after_resume() -> Result<()> {
     Ok(())
 }
 
-/// For every session dir under the sandbox home, write `plan.md` and flip `awaiting_plan_approval` to `true` in `plan_mode.json`.
-fn seed_parked_approval(home: &Path) -> Result<usize> {
-    let sessions_root = home.join(".grok").join("sessions");
+/// After `--continue`, fullscreen "Plan ready. Side panel open" counts only
+/// in the last 16 screen lines, and only when the Approve footer is painted.
+/// A leftover first-session line above that window is not a bound waiter.
+/// "Plan ready for review" does not succeed without that footer. A word-only
+/// footer still counts when that status line is absent.
+fn wait_for_restored_plan_ready_chrome(harness: &mut PtyHarness) -> Result<()> {
+    const BOUND_APPROVE_STATUS: &str = "Plan ready. Side panel open";
+    let deadline = Instant::now() + WELCOME_TIMEOUT;
+    loop {
+        harness.update(Duration::from_millis(50));
+        let screen = harness.screen_contents();
+        let footer_painted = screen.contains(LABELED_FOOTER_STRIP)
+            || screen.contains(NARROW_FOOTER_STRIP)
+            || screen.contains(LABELED_APPROVE_CTA);
+        // Do not treat leftover first-session "Plan ready. Side panel open"
+        // in scrollback as a bound waiter after `--continue`.
+        let recent_status = screen
+            .lines()
+            .rev()
+            .take(16)
+            .any(|line| line.contains(BOUND_APPROVE_STATUS));
+        if (recent_status && footer_painted)
+            || (footer_painted && !screen.contains(BOUND_APPROVE_STATUS))
+        {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            bail!(
+                "timed out after {:?} waiting for {BOUND_APPROVE_STATUS:?} in the last 16 lines with Approve footer, or Approve footer with that status line absent\n{screen}",
+                WELCOME_TIMEOUT,
+            );
+        }
+    }
+}
+
+/// Click the painted plan-approval Approve word.
+///
+/// Prefer the separated strip. Fall back to the narrow four-word strip.
+/// Empty Enter is not an Approve path.
+fn click_plan_approve_cta(harness: &mut PtyHarness) -> Result<()> {
+    let screen = harness.screen_contents();
+    if screen.contains("a approve")
+        || screen.contains("A notes")
+        || screen.contains("s revise")
+        || screen.contains("q quit")
+    {
+        bail!("old letter-prefixed plan CTAs must not paint\n{screen}");
+    }
+    if screen.contains(LABELED_APPROVE_CTA) {
+        // Inset one cell into "approve" so the hit lands in the button rect.
+        return click_screen_text(harness, LABELED_APPROVE_CTA, 0, 1)
+            .context("click labeled Approve word");
+    }
+    if screen.contains(NARROW_FOOTER_STRIP) {
+        return click_screen_text(harness, NARROW_FOOTER_STRIP, 0, 1)
+            .context("click narrow-dock Approve word");
+    }
+    bail!(
+        "no plan Approve control found (expected '{LABELED_FOOTER_STRIP}' \
+         or '{NARROW_FOOTER_STRIP}')\n{screen}"
+    )
+}
+
+/// Click the `occurrence`-th on-screen match of `text` (0-indexed), SGR mouse.
+///
+/// Coordinates match scripted runner convention: 0-indexed row/col from the
+/// visible screen text snapshot, converted to 1-indexed SGR in the wire bytes.
+/// `col_offset` shifts right from the match start (1 = into the Approve word).
+fn click_screen_text(
+    harness: &mut PtyHarness,
+    text: &str,
+    occurrence: usize,
+    col_offset: u16,
+) -> Result<()> {
+    let point = locate_screen_text(harness, text, occurrence)?;
+    let col = point.col.saturating_add(col_offset);
+    let click = format!(
+        "{}{}",
+        sgr_mouse(0, point.row, col, 'M'),
+        sgr_mouse(0, point.row, col, 'm'),
+    );
+    harness
+        .inject_keys(click.as_bytes())
+        .with_context(|| format!("inject click at row={} col={col}", point.row))?;
+    harness.update(Duration::from_millis(150));
+    Ok(())
+}
+
+fn locate_screen_text(harness: &PtyHarness, text: &str, occurrence: usize) -> Result<MousePoint> {
+    if text.is_empty() {
+        bail!("cannot locate empty text");
+    }
+    let output = harness.screen_output();
+    let mut seen = 0usize;
+    for (row, line) in output.lines.iter().enumerate() {
+        let mut start_byte = 0usize;
+        while let Some(rel_byte) = line[start_byte..].find(text) {
+            let byte = start_byte + rel_byte;
+            if seen == occurrence {
+                let col = line[..byte].chars().count();
+                return Ok(MousePoint {
+                    row: row as u16,
+                    col: col as u16,
+                });
+            }
+            seen += 1;
+            start_byte = byte + text.len();
+        }
+    }
+    bail!(
+        "could not locate occurrence {occurrence} of {text:?} on screen\n{}",
+        harness.screen_contents()
+    )
+}
+
+fn sgr_mouse(button: u16, row: u16, col: u16, suffix: char) -> String {
+    format!("\x1b[<{button};{};{}{suffix}", col + 1, row + 1)
+}
+
+/// Scripted model turn that invokes `exit_plan_mode` (both pager backends).
+fn expect_exit_plan_mode_turn(
+    content: &ContentController,
+    call_id: &str,
+) -> crate::AgentTurnExpectation {
+    content.expect_agent_turn_with_responses(
+        format!("exit_plan_mode park {call_id}"),
+        ScriptedResponse::sse(responses_api_tool_call_events(
+            call_id,
+            "exit_plan_mode",
+            "{}",
+        )),
+        ScriptedResponse::sse(chat_completions_tool_call_events(
+            call_id,
+            "exit_plan_mode",
+            "{}",
+        )),
+    )
+}
+
+fn responses_api_tool_call_events(call_id: &str, name: &str, arguments: &str) -> Vec<SseEvent> {
+    let mut events = Vec::new();
+    let mut seq = 0u64;
+    events.push(SseEvent::data(
+        serde_json::json!({
+            "type": "response.created",
+            "sequence_number": seq,
+            "response": {
+                "id": "resp_plan_park",
+                "object": "response",
+                "created_at": 1234567890,
+                "model": "test-model",
+                "status": "in_progress",
+                "output": []
+            }
+        })
+        .to_string(),
+    ));
+    seq += 1;
+    events.push(SseEvent::data(
+        serde_json::json!({
+            "type": "response.function_call_arguments.delta",
+            "sequence_number": seq,
+            "item_id": call_id,
+            "output_index": 0,
+            "delta": arguments
+        })
+        .to_string(),
+    ));
+    seq += 1;
+    events.push(SseEvent::data(
+        serde_json::json!({
+            "type": "response.completed",
+            "sequence_number": seq,
+            "response": {
+                "id": "resp_plan_park",
+                "object": "response",
+                "created_at": 1234567890,
+                "model": "test-model",
+                "status": "completed",
+                "output": [{
+                    "type": "function_call",
+                    "call_id": call_id,
+                    "name": name,
+                    "arguments": arguments
+                }],
+                "usage": {
+                    "input_tokens": 10,
+                    "output_tokens": 20,
+                    "total_tokens": 30,
+                    "input_tokens_details": { "cached_tokens": 0 },
+                    "output_tokens_details": { "reasoning_tokens": 0 }
+                }
+            }
+        })
+        .to_string(),
+    ));
+    events.push(SseEvent::data("[DONE]".to_string()));
+    events
+}
+
+fn chat_completions_tool_call_events(call_id: &str, name: &str, arguments: &str) -> Vec<SseEvent> {
+    let tool_calls = vec![serde_json::json!({
+        "index": 0,
+        "id": call_id,
+        "type": "function",
+        "function": { "name": name, "arguments": arguments }
+    })];
+    vec![
+        SseEvent::data(
+            serde_json::json!({
+                "id": "chatcmpl-plan-park",
+                "object": "chat.completion.chunk",
+                "created": 1234567890,
+                "model": "test-model",
+                "choices": [{
+                    "index": 0,
+                    "delta": {
+                        "role": "assistant",
+                        "content": null,
+                        "tool_calls": tool_calls
+                    },
+                    "finish_reason": null
+                }]
+            })
+            .to_string(),
+        ),
+        SseEvent::data(
+            serde_json::json!({
+                "id": "chatcmpl-plan-park",
+                "object": "chat.completion.chunk",
+                "created": 1234567890,
+                "model": "test-model",
+                "choices": [{
+                    "index": 0,
+                    "delta": {},
+                    "finish_reason": "tool_calls"
+                }],
+                "usage": {
+                    "prompt_tokens": 10,
+                    "completion_tokens": 20,
+                    "total_tokens": 30
+                }
+            })
+            .to_string(),
+        ),
+        SseEvent::data("[DONE]".to_string()),
+    ]
+}
+
+/// For every session dir under the sandbox sessions root, write `plan.md` and flip `awaiting_plan_approval` to `true` in `plan_mode.json`.
+fn seed_parked_approval(sessions_root: &Path) -> Result<usize> {
     if !sessions_root.is_dir() {
         bail!(
             "expected sessions under {} after first turn",

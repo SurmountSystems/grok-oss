@@ -2047,6 +2047,34 @@ fn api_error_with_context_window(context_window: u64) -> xai_grok_sampler::Sampl
         credential: xai_grok_sampling_types::SentCredential::Unknown,
     }
 }
+/// If the proxy hasn't been updated yet, model_metadata is None — must be
+/// a no-op for backwards compatibility.
+#[tokio::test(flavor = "current_thread")]
+async fn test_compact_on_error_noop_without_model_metadata() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (gateway_tx, _) = mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
+            let (persistence_tx, _) = mpsc::unbounded_channel::<PersistenceMsg>();
+            let actor = create_test_actor(500_000, 200_000, 85, gateway_tx, persistence_tx).await;
+            let err = xai_grok_sampler::SamplingErrorInfo {
+                kind: xai_grok_sampler::SamplingErrorKind::Api,
+                status_code: Some(400),
+                message: "prompt is too long".to_string(),
+                is_retryable: false,
+                retry_after_secs: None,
+                should_retry: None,
+                error_code: None,
+                model_metadata: None,
+                empty_response_context: None,
+                doom_loop_triggers: None,
+                doom_loop_aborted_at_chunk: None,
+                credential: xai_grok_sampling_types::SentCredential::Unknown,
+            };
+            assert!(!actor.should_compact_on_error(&err).await);
+        })
+        .await;
+}
 /// Pre-sampling check uses estimated tokens (includes tool-result delta).
 #[tokio::test(flavor = "current_thread")]
 async fn test_pre_sampling_uses_estimated_tokens() {

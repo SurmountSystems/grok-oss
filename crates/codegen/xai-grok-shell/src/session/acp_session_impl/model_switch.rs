@@ -37,7 +37,6 @@ impl SessionActor {
     }
 
     pub(super) async fn handle_set_session_model(
-
         &self,
         sampling_config: xai_grok_sampler::SamplerConfig,
         use_concise: bool,
@@ -86,7 +85,8 @@ impl SessionActor {
             std::num::NonZeroU64::new(sampling_config.context_window).unwrap_or_else(|| {
                 std::num::NonZeroU64::new(DEFAULT_CONTEXT_WINDOW)
                     .expect("DEFAULT_CONTEXT_WINDOW is non-zero")
-            });
+            })
+        });
         self.compaction
             .model_context_window
             .set(catalog_context_window.get());

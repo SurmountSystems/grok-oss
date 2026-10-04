@@ -24,8 +24,8 @@ mod coordinator_state;
 pub use coordinator_state::{cap_completion_output, completion_summary, terminal_snapshot};
 pub mod model_policy;
 pub use model_policy::TaskParams;
-pub mod root_control;
 pub mod l1_session_harness;
+pub mod root_control;
 pub mod types;
 
 use self::backend::SubagentBackendResource;

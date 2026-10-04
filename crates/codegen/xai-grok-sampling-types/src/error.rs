@@ -2604,6 +2604,22 @@ mod tests {
             should_retry: None,
             error_code: Some(ApiErrorCode::parse(code)),
         }
+    }
+
+    fn api_status(code: u16, message: &str) -> SamplingError {
+        SamplingError::Api {
+            status: StatusCode::from_u16(code).expect("valid status"),
+            message: message.into(),
+            model_metadata: None,
+            retry_after_secs: None,
+            should_retry: None,
+            error_code: None,
+        }
+    }
+
+    /// 525 and 526 stay transient for sampler classify. Origin TLS is not `SamplingError::is_retryable`.
+    #[test]
+    fn origin_tls_stays_transient_for_classify_but_not_sampling_retryable() {
         for code in [525u16, 526] {
             assert!(
                 is_transient_api_status(code),

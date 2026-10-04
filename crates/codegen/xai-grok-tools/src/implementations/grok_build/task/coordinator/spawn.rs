@@ -2,7 +2,10 @@
 
 use tokio::sync::oneshot;
 
-use super::super::admission::{AdmissionDecision, AdmissionError};
+use super::super::admission::{
+    AdmissionDecision, AdmissionError, ImplementLoopReviewAdmit,
+    admit_implement_loop_review_description, is_implement_loop_review_description,
+};
 use super::super::coordinator_state::PendingChild;
 use super::super::types::{SubagentOwner, SubagentRequest, SubagentResult, SubagentSpawnRequest};
 use super::graph::NestedSpawner;
@@ -33,6 +36,7 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
         let spawner = match self.reparent_nested_spawn(&mut request) {
             Ok(spawner) => spawner,
             Err(rejection) => {
+                self.reject_queries_waiting_for_spawn(&request.id);
                 let _ = result_tx.send(rejection);
                 return;
             }
@@ -43,6 +47,7 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                 .spawn_blocked_sessions
                 .contains(&request.parent_session_id)
         {
+            self.reject_queries_waiting_for_spawn(&request.id);
             let _ = result_tx.send(rejected_spawn_result(
                 &request.id,
                 "parent session is stopped",
@@ -56,11 +61,38 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
             || self.completed.contains_key(&id)
             || self.queued.contains_id(&id)
         {
+            // The live child, not this duplicate request, owns parked waits.
+            self.attach_queries_waiting_for_spawn(&id, &request);
+            // Current `SubagentSpawnRequest` has `registered_tx`, not
+            // `admitted_tx`. `None` signals only `result_tx`.
             reply_rejected(
-                admitted_tx,
+                None,
                 result_tx,
                 rejected_spawn_result(&id, &format!("Subagent id '{id}' already exists"), false),
             );
+            return;
+        }
+        // Token Economy implement-loop effort is thoroughness. Distinct
+        // Review descriptions still count as extra Review rows. Live
+        // `/implement --effort` is on the request. No operator-ask bit:
+        // one live Review description at any setting.
+        let implement_loop_effort = request.implement_loop_effort_or_default();
+        if !request.owner.is_workflow()
+            && admit_implement_loop_review_description(
+                implement_loop_effort,
+                false,
+                self.live_review_descriptions(&request),
+                &request.description,
+            ) == ImplementLoopReviewAdmit::Reject
+        {
+            self.reject_queries_waiting_for_spawn(&request.id);
+            let _ = result_tx.send(rejected_spawn_result(
+                &id,
+                &format!(
+                    "Implement-loop effort {implement_loop_effort} admits one Review description unless the operator asked for more"
+                ),
+                false,
+            ));
             return;
         }
         // Capture before `insert_nested` moves `spawner`.
@@ -74,6 +106,7 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                     .insert_nested(&id, &request.parent_session_id, spawner)
                     .is_err()
                 {
+                    self.reject_queries_waiting_for_spawn(&id);
                     let _ = result_tx.send(rejected_spawn_result(
                         &id,
                         "parent subagent lineage is unknown; refusing to spawn",
@@ -86,6 +119,7 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                 .graph
                 .insert_root_child(&id, &request.parent_session_id),
         }
+        self.attach_queries_waiting_for_spawn(&id, &request);
         self.inherit_resume_subagent_type(request.as_mut());
         let running = self.session_running_count(&request.parent_session_id);
         match self.admission.admit(&request, running) {
@@ -161,6 +195,37 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                 );
             }
         }
+    }
+
+    /// Live Task-owned Review-row descriptions on this parent.
+    fn live_review_descriptions(&self, request: &SubagentRequest) -> Vec<String> {
+        if request.owner.is_workflow() {
+            return Vec::new();
+        }
+        let parent = &request.parent_session_id;
+        let collect = |other: &SubagentRequest| {
+            !other.owner.is_workflow()
+                && other.parent_session_id == *parent
+                && other.id != request.id
+                && is_implement_loop_review_description(&other.description)
+        };
+        let mut out = Vec::new();
+        for child in self.pending.values() {
+            if collect(&child.request) {
+                out.push(child.request.description.clone());
+            }
+        }
+        for child in self.active.values() {
+            if collect(&child.request) {
+                out.push(child.request.description.clone());
+            }
+        }
+        for queued in self.queued.iter() {
+            if collect(&queued.request) {
+                out.push(queued.request.description.clone());
+            }
+        }
+        out
     }
 
     /// Re-key a nested spawn (its parent is itself a subagent) to the root

@@ -56,6 +56,7 @@ impl HumanPromptContent {
             traceparent: self.traceparent,
             json_schema: self.json_schema,
             send_now: false,
+            unstick_retry: false,
             admission: None,
             tool_overrides_update: self.tool_overrides_update,
             respond_to: self.respond_to,

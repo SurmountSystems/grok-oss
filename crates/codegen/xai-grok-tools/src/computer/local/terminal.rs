@@ -245,7 +245,9 @@ enum TerminalCommand {
     },
 
     /// Warm static login-shell / login-env capture for the non-persistent path.
-    WarmShell { cwd: PathBuf },
+    WarmShell {
+        cwd: PathBuf,
+    },
 
     KillForegroundCommandsByOwner {
         owner_session_id: String,

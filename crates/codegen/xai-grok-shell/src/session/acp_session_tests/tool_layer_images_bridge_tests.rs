@@ -55,7 +55,7 @@ fn followup_has_data_image(followups: &[ConversationItem]) -> bool {
             .iter()
             .any(|p| matches!(p, ContentPart::Image { .. })),
         _ => false,
-    }
+    })
 }
 /// Multimodal: the image drained from the MCP output becomes a deferred vision follow-up; the tool result text keeps the placeholder.
 #[tokio::test(flavor = "current_thread")]
@@ -95,6 +95,16 @@ async fn handle_bridge_tool_success_multimodal_mcp_image_deferred_followup() {
                 })
                 .await
                 .expect("bridge success");
+            assert!(
+                followups.iter().any(|item| matches!(
+                    item,
+                    ConversationItem::User(u) if u
+                        .content
+                        .iter()
+                        .any(|p| matches!(p, ContentPart::Text { text } if text.contains("Image extracted from tool result")))
+                )),
+                "expected extracted-image caption: {followups:?}"
+            );
             assert!(
                 !followups.iter().any(item_contains_data_image_url),
                 "parent follow-ups must not store data:image: {followups:?}"

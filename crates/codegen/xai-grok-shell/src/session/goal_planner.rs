@@ -3,7 +3,6 @@
 //! The spawn is hidden behind [`GoalPlannerSpawner`] so tests can inject a deterministic spawner.
 
 #![allow(dead_code)]
-
 #![allow(dead_code)]
 
 use crate::session::events::{Event, GoalPlannerFailClosedReason, GoalRoleModelFailOpenReason};

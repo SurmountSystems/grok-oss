@@ -719,7 +719,7 @@
         );
 
         // p2: a mid-turn submit sends to the server immediately and leaves an optimistic echo
-        let effects = dispatch(Action::SendPrompt("second".into()), &mut app);
+        let effects = dispatch(Action::SubmitFollowUp("second".into()), &mut app);
         let Some(second) = effects.first() else {
             panic!("expected an effect: {effects:?}");
         };
@@ -827,7 +827,7 @@
         assert_eq!(user_block_count(&app, id, "first"), 1);
 
         // p2 is submitted while running, so it goes to the server immediately
-        let effects = dispatch(Action::SendPrompt("second".into()), &mut app);
+        let effects = dispatch(Action::SubmitFollowUp("second".into()), &mut app);
         let Some(second) = effects.first() else {
             panic!("expected an effect: {effects:?}");
         };

@@ -598,6 +598,19 @@ mod tests {
     }
 
     #[test]
+    fn wrap_ranges_empty_text_has_one_insertion_line() {
+        let ranges = wrap_ranges(
+            "",
+            Options::new(20).wrap_algorithm(textwrap::WrapAlgorithm::FirstFit),
+        );
+        assert_eq!(
+            ranges,
+            vec![0..0],
+            "empty buffer keeps one visual line so a caret can sit at column 0"
+        );
+    }
+
+    #[test]
     fn wrap_ranges_many_newlines_width_one_does_not_panic() {
         let text = "\n".repeat(30);
         let ranges = wrap_ranges(

@@ -186,6 +186,99 @@ pub fn accent_bar() -> &'static str {
     }
 }
 
+/// Composer caret: **solid** half of the classic full-cell block blink.
+///
+/// Paired with [`cursor_box_hollow`] as one **box/block caret family**: solid
+/// filled cell ↔ visible off-half of the **same terminal-cell silhouette**.
+/// Outer height is the cell itself via the background plate on the solid
+/// half — not outline glyph metrics. Live blank-insertion paint keeps this
+/// glyph on the off-half (Human-green ink, canvas bg) so the caret does not
+/// vanish.
+///
+/// Glyph (paint pairs with `fg = bg = accent` solid plate):
+/// - `█` U+2588 FULL BLOCK (classic solid block ink on the plate).
+/// - Legacy ConHost: `#`.
+///
+/// Rejected mates for the *empty* half: canvas hole-punch on an accent plate
+/// (`■` with `fg=canvas bg=accent` — reads as a green tile with a void),
+/// dimming the solid `█`, skinny `▯`, medium `◼`/`◻`, tiny mid-cell `□`,
+/// and short outline quads (`⎕` / `□`) whose ink is only a fraction of the
+/// cell in common monospace (e.g. Noto Sans Mono).
+pub fn cursor_box_filled() -> &'static str {
+    if is_legacy_windows_console() {
+        "#"
+    } else {
+        "\u{2588}" // █ FULL BLOCK
+    }
+}
+
+/// Composer caret: **empty** half helper (plain space).
+///
+/// The blank-insertion **paint** path does not use this glyph for the live
+/// off-half: it keeps [`cursor_box_filled`] with Human-green ink on canvas
+/// so an empty Human box still shows a caret. This helper stays a space
+/// for phase tests and for `cursor_box_glyph`.
+///
+/// Rejected empty shapes: `■` hole-punch on accent plate, dim `█`, skinny
+/// `▯`, medium `◻`/`◼`, tiny `□`, short APL quad `⎕`, and a true empty
+/// cell (space + canvas plate) that vanished until the next key.
+pub fn cursor_box_hollow() -> &'static str {
+    // Classic block empty half: plain space. Paint path must not put an
+    // accent background plate behind this glyph.
+    " "
+}
+
+/// Half-period for the composer filled↔empty block blink (milliseconds).
+/// ~600ms keeps the blink slow and readable (not seizure-fast).
+pub const CURSOR_BOX_BLINK_HALF_MS: u64 = 600;
+
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    static CURSOR_BOX_FILLED_PHASE_PIN: std::cell::Cell<Option<bool>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Guard from [`pin_cursor_box_filled_phase`]. Drop restores the prior pin.
+#[cfg(any(test, feature = "test-support"))]
+pub struct CursorBoxFilledPhasePin {
+    prev: Option<bool>,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl Drop for CursorBoxFilledPhasePin {
+    fn drop(&mut self) {
+        CURSOR_BOX_FILLED_PHASE_PIN.with(|c| c.set(self.prev));
+    }
+}
+
+/// Force the composer box caret into the filled or empty blink half for
+/// this thread. Production paint still uses wall-clock [`cursor_box_filled_phase`];
+/// tests must not sleep hoping the clock lands in the solid half.
+#[cfg(any(test, feature = "test-support"))]
+pub fn pin_cursor_box_filled_phase(filled: bool) -> CursorBoxFilledPhasePin {
+    let prev = CURSOR_BOX_FILLED_PHASE_PIN.with(|c| c.replace(Some(filled)));
+    CursorBoxFilledPhasePin { prev }
+}
+
+/// Whether the filled (solid plate) phase is showing at `now_ms` (unix millis
+/// in production; tests may pin a phase via [`pin_cursor_box_filled_phase`]).
+pub fn cursor_box_filled_phase(now_ms: u64) -> bool {
+    #[cfg(any(test, feature = "test-support"))]
+    if let Some(pinned) = CURSOR_BOX_FILLED_PHASE_PIN.with(std::cell::Cell::get) {
+        return pinned;
+    }
+    (now_ms / CURSOR_BOX_BLINK_HALF_MS).is_multiple_of(2)
+}
+
+/// Glyph for the composer caret at `now_ms` (filled `█` or empty space).
+pub fn cursor_box_glyph(now_ms: u64) -> &'static str {
+    if cursor_box_filled_phase(now_ms) {
+        cursor_box_filled()
+    } else {
+        cursor_box_hollow()
+    }
+}
+
 /// Timeline up-chevron. Small triangles are absent from CP437; legacy ConHost uses full-size `▲`.
 pub fn timeline_chevron_up() -> &'static str {
     if is_legacy_windows_console() {
@@ -537,6 +630,130 @@ mod tests {
         {
             assert_eq!(frame.width(), 1, "spinner frame {frame:?} must be 1 column");
         }
+    }
+
+    /// Composer box cursors are 1 column.
+    #[test]
+    fn cursor_box_glyphs_are_one_column() {
+        assert_eq!(cursor_box_filled().width(), 1);
+        assert_eq!(cursor_box_hollow().width(), 1);
+        // Solid block vs empty space are distinct glyphs, both 1 col.
+        assert_ne!(
+            cursor_box_filled(),
+            cursor_box_hollow(),
+            "solid filled and empty space must be different glyphs"
+        );
+        for t in 0..32u64 {
+            assert_eq!(cursor_box_glyph(t * CURSOR_BOX_BLINK_HALF_MS).width(), 1);
+        }
+    }
+
+    /// Classic block pair: solid = full-cell `█` plate mate; empty = space
+    /// (true empty cell, no accent plate). Same cell silhouette via on/off
+    /// fill — not hole-punch `■` on green plate, not dim `█`, not short
+    /// outline quads. Outer height is the terminal cell, not glyph metrics.
+    #[test]
+    fn cursor_box_pair_is_matching_box_rectangles() {
+        // Empty half is always a plain space (classic block off).
+        assert_eq!(cursor_box_hollow(), " ");
+        if is_legacy_windows_console() {
+            assert_eq!(cursor_box_filled(), "#");
+            assert_ne!(cursor_box_filled(), cursor_box_hollow());
+            return;
+        }
+        // Solid: █ FULL BLOCK. Empty: space (no hole-punch square).
+        assert_eq!(cursor_box_filled(), "\u{2588}");
+        assert_ne!(
+            cursor_box_filled(),
+            cursor_box_hollow(),
+            "empty half must be space, not the solid full block"
+        );
+        // Reject empty shapes operator already turned down / hole-punch / short.
+        assert_ne!(
+            cursor_box_hollow(),
+            "\u{2588}",
+            "empty must not be FULL BLOCK (dim-of-solid / style-on-█ path)"
+        );
+        assert_ne!(
+            cursor_box_hollow(),
+            "\u{25a0}",
+            "empty must not be BLACK SQUARE hole-punch (green plate + void)"
+        );
+        assert_ne!(
+            cursor_box_hollow(),
+            "\u{25af}",
+            "must not be WHITE VERTICAL RECTANGLE (skinny ▯)"
+        );
+        assert_ne!(
+            cursor_box_filled(),
+            "\u{25fc}",
+            "must not be BLACK MEDIUM SQUARE"
+        );
+        assert_ne!(
+            cursor_box_hollow(),
+            "\u{25fb}",
+            "must not be WHITE MEDIUM SQUARE"
+        );
+        assert_ne!(
+            cursor_box_hollow(),
+            "\u{25a1}",
+            "must not be tiny WHITE SQUARE"
+        );
+        assert_ne!(
+            cursor_box_hollow(),
+            "\u{2395}",
+            "must not be short APL QUAD outline (mid-cell in common mono)"
+        );
+        assert_ne!(
+            cursor_box_hollow(),
+            "O",
+            "empty must not be legacy ASCII hole stand-in"
+        );
+    }
+
+    /// Composer caret slowly alternates solid ↔ empty (~600ms half).
+    /// Glyph and phase both change: solid `█` vs empty space.
+    #[test]
+    fn cursor_box_blink_alternates_filled_and_hollow() {
+        let half = CURSOR_BOX_BLINK_HALF_MS;
+        assert!(
+            (500..=800).contains(&half),
+            "half-period must be slow/readable"
+        );
+        assert!(cursor_box_filled_phase(0));
+        assert_eq!(cursor_box_glyph(0), cursor_box_filled());
+        assert!(!cursor_box_filled_phase(half));
+        assert_eq!(cursor_box_glyph(half), cursor_box_hollow());
+        // Solid vs empty: glyphs differ across the half-period.
+        assert_ne!(
+            cursor_box_glyph(0),
+            cursor_box_glyph(half),
+            "filled and empty phases must use different glyphs"
+        );
+        assert_ne!(
+            cursor_box_filled_phase(0),
+            cursor_box_filled_phase(half),
+            "filled↔empty phase must toggle with time"
+        );
+        assert!(cursor_box_filled_phase(half * 2));
+        assert_eq!(cursor_box_glyph(half * 2), cursor_box_filled());
+    }
+
+    /// Tests drive the solid half with a pin. Wall-clock `now_ms` must not
+    /// win while the pin is held, and Drop must restore timestamp phase.
+    #[test]
+    fn pin_cursor_box_filled_phase_overrides_timestamp() {
+        let half = CURSOR_BOX_BLINK_HALF_MS;
+        assert!(!cursor_box_filled_phase(half));
+        {
+            let _pin = pin_cursor_box_filled_phase(true);
+            assert!(cursor_box_filled_phase(half));
+            assert_eq!(cursor_box_glyph(half), cursor_box_filled());
+        }
+        assert!(!cursor_box_filled_phase(half));
+        let _pin = pin_cursor_box_filled_phase(false);
+        assert!(!cursor_box_filled_phase(0));
+        assert_eq!(cursor_box_glyph(0), cursor_box_hollow());
     }
 
     // On the (non-Windows) test host the helpers must return the fancy glyphs, and the `char` helpers must agree with their `&str` siblings

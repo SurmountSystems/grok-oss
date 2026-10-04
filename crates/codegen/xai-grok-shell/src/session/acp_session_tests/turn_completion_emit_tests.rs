@@ -100,6 +100,7 @@ pub(super) fn pending_input(prompt_id: &str) -> (InputItem, oneshot::Receiver<Pr
         queue_meta: None,
         queue_mutation_policy: QueueMutationPolicy::hidden(),
         send_now: false,
+        unstick_retry: false,
         traceparent: None,
     };
     (item, rx)

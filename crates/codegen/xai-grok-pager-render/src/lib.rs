@@ -1,5 +1,4 @@
 #![deny(clippy::indexing_slicing)]
-
 #![cfg_attr(feature = "test-support", allow(dead_code, unused_imports))]
 pub mod appearance;
 pub mod clipboard;

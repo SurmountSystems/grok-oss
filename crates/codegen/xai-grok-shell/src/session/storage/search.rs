@@ -41,7 +41,6 @@ impl SearchIndex {
             Self::Off { .. } => None,
         }
     }
-}
 
     pub fn started(self) -> Option<SearchIndexManager> {
         match self {

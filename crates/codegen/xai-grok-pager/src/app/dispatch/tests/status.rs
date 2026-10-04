@@ -1728,49 +1728,49 @@ fn dispatch_confirm_reset_setting_reset_dispatches_typed_setter_for_shared_bool(
 
     setup_reset_confirm_open(&mut app, "compact_mode");
 
-        // Write 1: Settings opt-out from currently in.
-        let write1 = dispatch(Action::SetCodingDataSharing { opted_in: false }, &mut app);
-        assert!(
-            write1.iter().any(|e| matches!(
-                e,
-                Effect::SetCodingDataSharing {
-                    opted_in: false,
-                    ..
-                }
-            )),
-            "write 1 must be a real opt-out: {write1:?}"
-        );
-        assert_eq!(app.coding_data_write_seq, 1);
-
-        // Write 2: the user opts in from settings, and it confirms.
-        let _ = dispatch(Action::SetCodingDataSharing { opted_in: true }, &mut app);
-        assert_eq!(app.coding_data_write_seq, 2);
-        let _ = dispatch(
-            Action::TaskComplete(TaskResult::CodingDataSharingUpdated {
-                agent_id: AgentId(0),
-                opted_in: true,
-                seq: 2,
-            }),
-            &mut app,
-        );
-        assert!(!app.coding_data_retention_opt_out, "opted in");
-
-        // Write 1 finally answers, either way it can.
-        let stale_reply = if stale_failed {
-            TaskResult::CodingDataSharingFailed {
-                agent_id: AgentId(0),
-                error: "network timeout".into(),
-                rollback_to_opted_in: true,
-                seq: 1,
-            }
-        } else {
-            TaskResult::CodingDataSharingUpdated {
-                agent_id: AgentId(0),
+    // Write 1: Settings opt-out from currently in.
+    let write1 = dispatch(Action::SetCodingDataSharing { opted_in: false }, &mut app);
+    assert!(
+        write1.iter().any(|e| matches!(
+            e,
+            Effect::SetCodingDataSharing {
                 opted_in: false,
-                seq: 1,
+                ..
             }
-        };
-        let effects = dispatch(Action::TaskComplete(stale_reply), &mut app);
+        )),
+        "write 1 must be a real opt-out: {write1:?}"
+    );
+    assert_eq!(app.coding_data_write_seq, 1);
+
+    // Write 2: the user opts in from settings, and it confirms.
+    let _ = dispatch(Action::SetCodingDataSharing { opted_in: true }, &mut app);
+    assert_eq!(app.coding_data_write_seq, 2);
+    let _ = dispatch(
+        Action::TaskComplete(TaskResult::CodingDataSharingUpdated {
+            agent_id: AgentId(0),
+            opted_in: true,
+            seq: 2,
+        }),
+        &mut app,
+    );
+    assert!(!app.coding_data_retention_opt_out, "opted in");
+
+    // Write 1 finally answers, either way it can.
+    let stale_reply = if stale_failed {
+        TaskResult::CodingDataSharingFailed {
+            agent_id: AgentId(0),
+            error: "network timeout".into(),
+            rollback_to_opted_in: true,
+            seq: 1,
+        }
+    } else {
+        TaskResult::CodingDataSharingUpdated {
+            agent_id: AgentId(0),
+            opted_in: false,
+            seq: 1,
+        }
+    };
+    let effects = dispatch(Action::TaskComplete(stale_reply), &mut app);
 
     // Recursive dispatch into Action::SetCompactMode(false) emits the persist effect
     assert_eq!(effects.len(), 1);
@@ -1809,14 +1809,14 @@ fn dispatch_confirm_reset_setting_reset_dispatches_typed_setter_for_shared_enum(
         let _ = dispatch(Action::SetTheme("tokyonight".to_string()), &mut app);
         assert_eq!(app.current_ui.theme.as_deref(), Some("tokyonight"));
 
-/// Settings Opt out while already out (banner eligible): acks, no ACP write.
-#[test]
-fn settings_opt_out_while_already_out_acks_without_write() {
-    let mut app = privacy_banner_ready_app();
-    assert!(app.privacy_banner_should_show());
-    assert!(app.coding_data_retention_opt_out);
+        setup_reset_confirm_open(&mut app, "theme");
 
-    let effects = dispatch(Action::SetCodingDataSharing { opted_in: false }, &mut app);
+        let effects = dispatch(
+            Action::ConfirmResetSetting {
+                choice: ResetSettingsResult::Reset,
+            },
+            &mut app,
+        );
 
         // Reset dispatches SetTheme("groknight"), the registered default
         assert_eq!(effects.len(), 1);
@@ -2432,52 +2432,6 @@ fn dispatch_confirm_reset_setting_reset_dispatches_typed_setter_for_shared_bool(
         }
         _ => panic!("Reset branch must restore the Settings modal"),
     }
-}
-
-/// `ConfirmResetSetting { choice: Reset }` on a SHARED Enum
-/// target (`theme`) dispatches `Action::SetTheme(default)` via
-/// recursive dispatch — verifies the action_for_reset Enum arm.
-#[test]
-fn dispatch_confirm_reset_setting_reset_dispatches_typed_setter_for_shared_enum() {
-    use crate::settings::SettingValue;
-    use crate::views::modal::ResetSettingsResult;
-    // SetTheme mutates the global theme cache — serialize with the
-    // other theme tests via the theme test lock.
-    with_theme_test_env(|| {
-        let mut app = test_app_with_agent();
-        // Flip theme to a non-default first.
-        let _ = dispatch(Action::SetTheme("tokyonight".to_string()), &mut app);
-        assert_eq!(app.current_ui.theme.as_deref(), Some("tokyonight"));
-
-        setup_reset_confirm_open(&mut app, "theme");
-
-        let effects = dispatch(
-            Action::ConfirmResetSetting {
-                choice: ResetSettingsResult::Reset,
-            },
-            &mut app,
-        );
-
-        // Reset → SetTheme("doge") (the registered product default).
-        assert_eq!(effects.len(), 1);
-        match &effects[0] {
-            Effect::PersistSetting { key, value, .. } => {
-                assert_eq!(*key, "theme");
-                assert_eq!(value, &SettingValue::Enum("doge"));
-            }
-            other => panic!("expected PersistSetting, got {other:?}"),
-        }
-        assert_eq!(app.current_ui.theme.as_deref(), Some("doge"));
-    });
-}
-
-fn seed_scrolled_up(app: &mut AppView) {
-    let sb = &mut app.agents.get_mut(&AgentId(0)).unwrap().scrollback;
-    for i in 0..40 {
-        sb.push_block(RenderBlock::agent_message(format!("seed {i}")));
-    }
-    sb.prepare_layout(80, 8);
-    sb.goto_top();
 }
 
 fn current_usage_nonce(app: &AppView) -> u64 {

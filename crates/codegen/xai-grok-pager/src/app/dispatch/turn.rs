@@ -105,14 +105,7 @@ pub(super) fn dispatch_cancel_turn(app: &mut AppView) -> Vec<Effect> {
         let retrying = agent.any_cancel_pending();
         crate::unified_log::info(
             if retrying {
-                agent.clear_send_now_expectation();
-                effects.push(emit_cancel_turn(
-                    agent, session_id, /* cancel_subagents */ true,
-                    /* rewind_if_no_output */ false,
-                ));
-                // `[stop]` during Cancelling must finish, not reset grace
-                // and sit on the spinner (plan-mode overlay hang).
-                force_finish_local_cancel(agent);
+                "cancel.retry"
             } else {
                 "cancel.overlay"
             },
@@ -182,11 +175,8 @@ pub(super) fn dispatch_cancel_turn(app: &mut AppView) -> Vec<Effect> {
             );
             // Explicit user cancel supersedes any pending send-now expectation (its marker renders).
             agent.clear_send_now_expectation();
-            // `emit_cancel_turn` takes the live hint; capture it first.
-            let gesture_retry = agent.cancel_trigger_hint.is_some();
-            let has_recorded_choice = agent.pending_cancel_resend.is_some();
             let cancel_subagents = resolve_cancel_subagents(agent);
-            let effect = emit_cancel_turn(
+            return vec![emit_cancel_turn(
                 agent,
                 session_id,
                 cancel_subagents,
@@ -958,31 +948,58 @@ pub(super) fn dispatch_kill_subagent(app: &mut AppView, subagent_id: String) -> 
     let ActiveView::Agent(id) = app.active_view else {
         return vec![];
     };
-    let Some(agent) = app.agents.get_mut(&id) else {
-        return vec![];
-    };
-    let Some(session_id) = agent.session.session_id.clone() else {
-        return vec![];
+    let (session_id, drop_idle_listed, attempt_id) = {
+        let Some(agent) = app.agents.get_mut(&id) else {
+            return vec![];
+        };
+        let Some(session_id) = agent.session.session_id.clone() else {
+            return vec![];
+        };
+
+        // Child view already idle: the list row is stale. Finish it now so
+        // list [x] does not wait on ACP. A still-running child stays listed.
+        let drop_idle_listed = {
+            let sessions = &agent.subagent_sessions;
+            let views = &agent.subagent_views;
+            sessions.values().any(|info| {
+                info.subagent_id.as_ref() == subagent_id
+                    && info.is_running()
+                    && views
+                        .get(info.child_session_id.as_ref())
+                        .is_some_and(|child| !child.session.state.is_busy())
+            })
+        };
+
+        let attempt_id = agent
+            .subagent_sessions
+            .values_mut()
+            .find(|info| info.subagent_id.as_ref() == subagent_id)
+            .and_then(|info| {
+                info.attempt.pending_kill = true;
+                info.attempt.kill_requested_at = Some(Instant::now());
+                info.attempt
+                    .lifecycle
+                    .current_attempt_id()
+                    .map(str::to_owned)
+            });
+        (session_id, drop_idle_listed, attempt_id)
     };
 
-    let attempt_id = agent
-        .subagent_sessions
-        .values_mut()
-        .find(|info| info.subagent_id.as_ref() == subagent_id)
-        .and_then(|info| {
-            info.attempt.pending_kill = true;
-            info.attempt.kill_requested_at = Some(Instant::now());
-            info.attempt
-                .lifecycle
-                .current_attempt_id()
-                .map(str::to_owned)
-        });
-
-    vec![Effect::KillSubagent {
-        session_id,
-        subagent_id,
-        attempt_id,
-    }]
+    let effects = vec![Effect::KillSubagent {
+        session_id: session_id.clone(),
+        subagent_id: subagent_id.clone(),
+        attempt_id: attempt_id.clone(),
+    }];
+    if drop_idle_listed {
+        let _ = crate::app::acp_handler::finalize_killed_subagent(
+            app,
+            &session_id,
+            &subagent_id,
+            attempt_id.as_deref(),
+            "completed",
+        );
+    }
+    effects
 }
 
 pub(super) fn dispatch_demote_to_background(app: &mut AppView) -> Vec<Effect> {

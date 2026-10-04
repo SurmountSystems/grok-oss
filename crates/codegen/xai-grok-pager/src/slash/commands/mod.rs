@@ -388,7 +388,6 @@ pub fn builtin_commands() -> Vec<Arc<dyn SlashCommand>> {
         Arc::new(model::ModelCommand),
         Arc::new(context::ContextCommand),
         Arc::new(compact::CompactCommand),
-
         Arc::new(economic_mode::EconomicModeCommand),
         Arc::new(copy::CopyCommand),
         Arc::new(find::FindCommand),

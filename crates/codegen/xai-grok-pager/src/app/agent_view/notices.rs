@@ -111,7 +111,7 @@ impl AgentView {
             // The privacy upsell banner owns the slot until acted on, a session-long occluder like the session announcement banner
             || self.privacy_banner.active
             // Subagent fullscreen takeover: draw early-returns into draw_subagent_fullscreen and never paints the parent banner
-            || self.active_subagent.is_some()
+            || self.visible_nested_overlay_sid().is_some()
             // Fullscreen viewers render after the banner paints: image/video/block dim the whole region down to the shortcuts row (banner included)
             // line_viewer's overlay stops at turn_status.y when a turn status shows, so it does NOT always cover the banner
             // Kept anyway as a safe over-refusal: the gate cannot know layout heights, and a tip during viewer reading is unwanted regardless

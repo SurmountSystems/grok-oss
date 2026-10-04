@@ -67,6 +67,8 @@ pub(crate) struct TurnInputRequest {
     pub(crate) persist_ack: Option<oneshot::Sender<()>>,
     pub(crate) parsed_prompt_tx: Option<oneshot::Sender<ParsedPromptInfo>>,
     pub(crate) traceparent: Option<String>,
+    /// `_meta.unstickRetry`: skip a second user turn when the last query matches.
+    pub(crate) unstick_retry: bool,
     pub(crate) start_gate: Option<oneshot::Receiver<()>>,
 }
 
@@ -579,6 +581,7 @@ mod start_gate_tests {
                         persist_ack: None,
                         parsed_prompt_tx: None,
                         traceparent: None,
+                        unstick_retry: false,
                         start_gate: Some(start_gate),
                     },
                     TurnEpoch::default(),

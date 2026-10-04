@@ -22,6 +22,7 @@ impl SlashCommand for PrivacyCommand {
             key: CODING_DATA_SHARING_KEY,
         })
     }
+}
 
 #[cfg(test)]
 mod tests {

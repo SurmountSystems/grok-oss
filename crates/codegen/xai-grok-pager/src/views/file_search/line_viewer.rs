@@ -1862,21 +1862,22 @@ pub fn render_line_viewer(
             let questions_hovered = viewer.plan_ref().is_some_and(|p| p.questions_hovered);
             let send_hovered = viewer.plan_ref().is_some_and(|p| p.send_hovered);
 
-        let mut base_w: u16 = 0;
-        if action_w > 0 {
-            base_w = base_w.saturating_add(action_w).saturating_add(sep_w);
-        }
-        if revise_w > 0 {
-            base_w = base_w.saturating_add(revise_w).saturating_add(sep_w);
-        }
-        base_w = base_w.saturating_add(comment_w).saturating_add(badge_w);
-        if let Some((_, w)) = &quit_spans {
-            base_w = base_w.saturating_add(sep_w).saturating_add(*w);
-        }
-        let with_copy_w = base_w.saturating_add(sep_w).saturating_add(copy_w);
-        let show_copy = with_copy_w <= inner.width;
-        let total_w = if show_copy { with_copy_w } else { base_w };
+            let mut base_w: u16 = 0;
+            if action_w > 0 {
+                base_w = base_w.saturating_add(action_w).saturating_add(sep_w);
+            }
+            if revise_w > 0 {
+                base_w = base_w.saturating_add(revise_w).saturating_add(sep_w);
+            }
+            base_w = base_w.saturating_add(comment_w).saturating_add(badge_w);
+            if let Some((_, w)) = &quit_spans {
+                base_w = base_w.saturating_add(sep_w).saturating_add(*w);
+            }
+            let with_copy_w = base_w.saturating_add(sep_w).saturating_add(copy_w);
+            let show_copy = with_copy_w <= inner.width;
+            let total_w = if show_copy { with_copy_w } else { base_w };
 
+            {
                 let mut x = inner.x + (inner.width - total_w) / 2;
                 let mut areas: [Option<Rect>; 4] = [None; 4];
                 for i in 0..4 {
@@ -1966,85 +1967,88 @@ pub fn render_line_viewer(
                 total_w = total_w.saturating_add(sep_w).saturating_add(send_w);
             }
 
-            // Revise button, approval mode with comments
-            if let Some(spans) = &revise_spans {
-                let revise_x = x;
-                for span in spans {
+            if total_w <= inner.width {
+                // Revise button, approval mode with comments
+                if let Some(spans) = &revise_spans {
+                    let revise_x = x;
+                    for span in spans {
+                        let w = span.width() as u16;
+                        buf.set_span(x, bottom_y, span, w);
+                        x += w;
+                    }
+                    viewer.plan_mut().send_button_area =
+                        Some(Rect::new(revise_x, bottom_y, revise_w, 1));
+
+                    buf.set_string(x, bottom_y, separator, sep_style);
+                    x += sep_w;
+                } else {
+                    viewer.plan_mut().send_button_area = None;
+                }
+
+                // Comment button, always present in both modes
+                let comment_x = x;
+                for span in &comment_spans {
                     let w = span.width() as u16;
                     buf.set_span(x, bottom_y, span, w);
                     x += w;
                 }
-                viewer.plan_mut().send_button_area =
-                    Some(Rect::new(revise_x, bottom_y, revise_w, 1));
+                viewer.plan_mut().comment_button_area =
+                    Some(Rect::new(comment_x, bottom_y, comment_w, 1));
 
-                buf.set_string(x, bottom_y, separator, sep_style);
-                x += sep_w;
-            } else {
-                viewer.plan_mut().send_button_area = None;
-            }
-
-            // Comment button, always present in both modes
-            let comment_x = x;
-            for span in &comment_spans {
-                let w = span.width() as u16;
-                buf.set_span(x, bottom_y, span, w);
-                x += w;
-            }
-            viewer.plan_mut().comment_button_area =
-                Some(Rect::new(comment_x, bottom_y, comment_w, 1));
-
-            if badge_w > 0 {
-                buf.set_string(x, bottom_y, &badge_text, badge_style);
-                x += badge_w;
-            }
-
-            if show_copy {
-                buf.set_string(x, bottom_y, separator, sep_style);
-                x += sep_w;
-                let copy_x = x;
-                for span in &copy_spans {
-                    let w = span.width() as u16;
-                    buf.set_span(x, bottom_y, span, w);
-                    x += w;
-                }
-                viewer.plan_mut().copy_button_area = Some(Rect::new(copy_x, bottom_y, copy_w, 1));
-            } else {
-                viewer.plan_mut().copy_button_area = None;
-            }
-
-            // Quit button, approval mode only
-            if let Some((spans, w)) = quit_spans {
-                buf.set_string(x, bottom_y, separator, sep_style);
-                x += sep_w;
-                let quit_x = x;
-                for span in &spans {
-                    let sw = span.width() as u16;
-                    buf.set_span(x, bottom_y, span, sw);
-                    x += sw;
+                if badge_w > 0 {
+                    buf.set_string(x, bottom_y, &badge_text, badge_style);
+                    x += badge_w;
                 }
 
-                let plan = viewer.plan_mut();
-                plan.approve_notes_button_area = None;
-                plan.questions_button_area = None;
-                plan.send_button_area = None;
-                plan.abandon_button_area = None;
+                if show_copy {
+                    buf.set_string(x, bottom_y, separator, sep_style);
+                    x += sep_w;
+                    let copy_x = x;
+                    for span in &copy_spans {
+                        let w = span.width() as u16;
+                        buf.set_span(x, bottom_y, span, w);
+                        x += w;
+                    }
+                    viewer.plan_mut().copy_button_area =
+                        Some(Rect::new(copy_x, bottom_y, copy_w, 1));
+                } else {
+                    viewer.plan_mut().copy_button_area = None;
+                }
+
+                // Quit button, approval mode only
+                if let Some((spans, w)) = quit_spans {
+                    buf.set_string(x, bottom_y, separator, sep_style);
+                    x += sep_w;
+                    let quit_x = x;
+                    for span in &spans {
+                        let sw = span.width() as u16;
+                        buf.set_span(x, bottom_y, span, sw);
+                        x += sw;
+                    }
+
+                    let plan = viewer.plan_mut();
+                    plan.approve_notes_button_area = None;
+                    plan.questions_button_area = None;
+                    plan.send_button_area = None;
+                    plan.abandon_button_area = None;
+                } else {
+                    let plan = viewer.plan_mut();
+                    plan.approve_button_area = None;
+                    plan.approve_notes_button_area = None;
+                    plan.questions_button_area = None;
+                    plan.send_button_area = None;
+                    plan.comment_button_area = None;
+                    plan.copy_button_area = None;
+                    plan.abandon_button_area = None;
+                }
             } else {
+                // Footer too narrow: disable hit-tests so stale rects from a previous render don't fire
                 let plan = viewer.plan_mut();
                 plan.approve_button_area = None;
-                plan.approve_notes_button_area = None;
-                plan.questions_button_area = None;
-                plan.send_button_area = None;
                 plan.comment_button_area = None;
                 plan.copy_button_area = None;
                 plan.abandon_button_area = None;
             }
-        } else {
-            // Footer too narrow: disable hit-tests so stale rects from a previous render don't fire
-            let plan = viewer.plan_mut();
-            plan.approve_button_area = None;
-            plan.comment_button_area = None;
-            plan.copy_button_area = None;
-            plan.abandon_button_area = None;
         }
     }
 }

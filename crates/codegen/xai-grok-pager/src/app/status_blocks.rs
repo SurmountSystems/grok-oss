@@ -5,8 +5,8 @@
 use crate::app::agent::{BgTaskState, BgTaskStatus};
 use crate::app::agent_view::AgentView;
 use crate::app::agent_view::l2_token_tracking::{
-    display_live_job_row, LiveJobRowInput, STANDING_WRAP_ESTIMATE_TOKENS,
-    STANDING_WRAP_ESTIMATE_WALL,
+    LiveJobRowInput, STANDING_WRAP_ESTIMATE_TOKENS, STANDING_WRAP_ESTIMATE_WALL,
+    display_live_job_row,
 };
 use crate::app::subagent::{
     format_live_l3_count, format_subagent_label, format_subagent_label_among, is_l2_list_row,

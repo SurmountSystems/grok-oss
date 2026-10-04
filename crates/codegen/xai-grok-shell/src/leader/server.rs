@@ -427,6 +427,53 @@ fn is_session_attach_request(json: &serde_json::Value) -> bool {
         .and_then(|m| m.as_str())
         .is_some_and(|m| m == "session/load" || m == "session/resume")
 }
+
+/// In-flight `session/prompt` RPCs keyed by namespaced request id.
+/// Value is `(client_id, session_id)`.
+type InFlightSessionPrompts = HashMap<String, (ClientId, String)>;
+
+/// `/unstick` stamps `_meta.unstickRetry` on `session/prompt`.
+fn session_prompt_is_unstick_retry(json: &serde_json::Value) -> bool {
+    if json.get("method").and_then(|m| m.as_str()) != Some(AGENT_METHOD_NAMES.session_prompt) {
+        return false;
+    }
+    let meta = json
+        .get("params")
+        .and_then(|p| p.get("_meta"))
+        .or_else(|| json.get("_meta"));
+    meta.and_then(|m| m.get("unstickRetry"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+}
+
+/// Take in-flight `session/prompt` ids for this client and session so `/unstick`
+/// can drop them like a disconnected client's RPC. Other sessions stay.
+fn take_in_flight_session_prompts_for_unstick(
+    in_flight: &mut InFlightSessionPrompts,
+    client_id: ClientId,
+    session_id: &str,
+) -> Vec<String> {
+    let mut taken = Vec::new();
+    in_flight.retain(|ns, (cid, sid)| {
+        if *cid == client_id && sid == session_id {
+            taken.push(ns.clone());
+            false
+        } else {
+            true
+        }
+    });
+    taken
+}
+
+/// Drop a response when the client is gone or `/unstick` marked this RPC.
+fn response_is_orphaned(
+    client_still_connected: bool,
+    namespaced_id: &str,
+    orphaned_request_ids: &mut HashSet<String>,
+) -> bool {
+    !client_still_connected || orphaned_request_ids.remove(namespaced_id)
+}
+
 /// Extract the leader unicast target `ClientId` from a notification's `params._meta["x.ai/leaderClientId"]`.
 /// The agent stamps this onto every `session/load` replay notification, echoing the id the leader injected into the load request.
 /// The replay then routes back to ONLY the loading client instead of broadcasting to all subscribers. Live (non-replay) turn deltas are never tagged, so they keep broadcasting.
@@ -2010,12 +2057,20 @@ pub async fn run_leader_server(
                         } else {
                             "disconnected"
                         };
-                        warn!(
-                            client_id = orphan_client.0,
-                            request_id = orphan_req_id.as_str(),
-                            reason,
-                            "Dropping RPC response: requesting client disconnected or /unstick orphaned this request"
-                        );
+                        if client_still_connected {
+                            warn!(
+                                client_id = orphan_client.0,
+                                request_id = orphan_req_id.as_str(),
+                                reason,
+                                "Dropping RPC response: requesting client disconnected or /unstick orphaned this request"
+                            );
+                        } else {
+                            warn!(
+                                client_id = orphan_client.0,
+                                request_id = orphan_req_id.as_str(),
+                                "Dropping RPC response: requesting client disconnected (response orphaned)"
+                            );
+                        }
                         xai_grok_telemetry::unified_log::warn(
                             "leader.response.orphaned",
                             None,

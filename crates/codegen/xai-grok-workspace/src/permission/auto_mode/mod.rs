@@ -1034,6 +1034,10 @@ pub fn is_auto_mode_allowlisted_access(access: &AccessKind) -> bool {
 }
 
 /// Tool names that are metadata / coordination only (safe allowlist by name).
+///
+/// `enter_plan_mode` is not listed. Mode entry needs operator consent
+/// (see [`auto_mode_fast_path`]). Explicit `/plan` and settings stay
+/// operator-initiated and bypass this tool.
 pub fn is_auto_mode_allowlisted_tool_name(tool_name: &str) -> bool {
     matches!(
         tool_name,
@@ -1045,8 +1049,6 @@ pub fn is_auto_mode_allowlisted_tool_name(tool_name: &str) -> bool {
             | "WaitTasks"
             | "ask_user_question"
             | "AskUserQuestion"
-            | "enter_plan_mode"
-            | "EnterPlanMode"
             | "exit_plan_mode"
             | "ExitPlanMode"
             | "switch_mode"
@@ -1088,6 +1090,13 @@ pub fn auto_mode_fast_path(
     requires_user_interaction: bool,
 ) -> AutoFastPath {
     if requires_user_interaction {
+        return AutoFastPath::PromptUser;
+    }
+    // enter_plan_mode maps to AccessKind::Read (read-only capability) and would
+    // otherwise fast-path Allow via the access allowlist. Force a user prompt
+    // so incidental model calls do not flip plan mode without consent.
+    // Explicit `/plan` and settings bypass this tool entirely.
+    if matches!(tool_name, "enter_plan_mode" | "EnterPlanMode") {
         return AutoFastPath::PromptUser;
     }
     if is_auto_mode_allowlisted_access(access) || is_auto_mode_allowlisted_tool_name(tool_name) {

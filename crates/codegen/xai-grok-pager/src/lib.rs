@@ -30,12 +30,12 @@ pub mod headless;
 pub mod hyperlink_route;
 pub mod inline_media_ffmpeg;
 pub mod input_log;
+pub mod l1_session_harness;
 pub mod limits_cmd;
 pub mod mcp_cmd;
 pub mod memory_cmd;
 pub mod memory_release;
 pub mod memory_trace;
-pub mod l1_session_harness;
 #[path = "minimal/api.rs"]
 pub mod minimal_api;
 #[path = "minimal/hook.rs"]

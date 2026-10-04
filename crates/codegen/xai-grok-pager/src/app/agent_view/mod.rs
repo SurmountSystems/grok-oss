@@ -162,8 +162,8 @@ mod interactions;
 mod jump;
 mod key_owner;
 pub(crate) use key_owner::{BlockingCard, EscStep, KeyOwner};
-mod kept_plan;
 mod isolated_preview_revise;
+mod kept_plan;
 mod links;
 mod media;
 mod modals;
@@ -190,10 +190,10 @@ pub use render::{AppRenderParams, OverlayHeader};
 mod dock_input_tests;
 #[cfg(test)]
 mod header_tests;
-#[cfg(test)]
-mod model_notice_tests;
 pub(crate) mod l2_token_tracking;
 mod live_prompt_task;
+#[cfg(test)]
+mod model_notice_tests;
 #[cfg(test)]
 mod plan_approval_action_spacing_tests;
 mod rewind;
@@ -2464,6 +2464,9 @@ pub(crate) mod test_fixtures {
                 workflow_run_id: None,
                 context_normalized: false,
                 parent_prompt_id: None,
+                parent_session_id: None,
+                depth: None,
+                tokens_past: 0,
                 started_at: now,
                 last_progress_at: now,
                 status: None,

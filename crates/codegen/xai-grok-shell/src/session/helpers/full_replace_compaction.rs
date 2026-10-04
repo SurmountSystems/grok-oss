@@ -210,6 +210,19 @@ impl ShellCompactionSampler {
     }
 }
 
+fn compact_failure_is_credit(failure: &CompactFailure) -> bool {
+    match failure {
+        CompactFailure::Cancelled => false,
+        // Size overflow steps the input ladder. It is not a credit hop.
+        CompactFailure::Overflow(_) => false,
+        CompactFailure::Deterministic(err) | CompactFailure::Transient(err) => {
+            // Fail-open: bare "Payment Required" without HTTP 402 (or 400/403/429
+            // plus credit wording) must not hop. 5xx / Bad Gateway still does not.
+            xai_grok_sampling_types::is_credit_exhausted_compact_wrap(&acp_error_message(err))
+        }
+    }
+}
+
 /// Map grok-build's [`CompactFailure`] onto the shared engine's [`CompactionSampleError`].
 /// `Overflow` → [`CompactionSampleError::ContextOverflow`] — sets the.
 /// `false`), so the engine retries it.

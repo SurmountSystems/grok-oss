@@ -618,15 +618,11 @@ fn render_setting_row_shows_full_label_when_one_line_fits() {
     );
 }
 
-
-/// The default registry contains Appearance settings
-/// (3 bools + 3 enums + 1 int = 7 entries), the Editor entry
-/// `multiline_mode`, the Agent entries `permission_mode` and
-/// `plan_mode`, the Privacy entry `coding_data_sharing`, the
-/// Models entry `default_model`, the Session entry
-/// `auto_compact_threshold_percent`, and the Advanced entries
-/// `show_tips` and `auto_update`. `default_reasoning_effort` is
-/// not exposed in the modal.
+/// Top-level rows from `default_settings()`, in `SettingCategory::ALL`
+/// order, then registration order. Voice rows stay hidden while the
+/// voice gate is off. Group children stay off this list.
+/// Session is present: continue-interrupted, ULID ids, recap, and
+/// auto-compact are registered.
 #[test]
 fn rows_contain_categories_and_settings_through_pr_14() {
     let prev_voice = crate::app::voice_mode_enabled();
@@ -652,7 +648,7 @@ fn rows_contain_categories_and_settings_through_pr_14() {
             &SettingCategory::Agent,
             &SettingCategory::Privacy,
             &SettingCategory::Models,
-            // The Session category has no registered settings, so its header is not emitted
+            &SettingCategory::Session,
             // Advanced category (first entries: `show_tips`, `auto_update`)
             &SettingCategory::Advanced,
         ]
@@ -718,6 +714,13 @@ fn rows_contain_categories_and_settings_through_pr_14() {
             "confirm_before_rewind",
             // PAGER-owned multiline (Editor category).
             "multiline_mode",
+            // SHELL-owned composer_multiline (Editor; persist `[ui]
+            // composer_multiline`. Sits immediately below session
+            // Multiline).
+            "composer_multiline",
+            // SHELL-owned allow_session_multiline (Editor; registered
+            // immediately after composer_multiline).
+            "allow_session_multiline",
             // SHELL-owned prompt_suggestions (Editor; tab autocomplete ghost text, live cache)
             "prompt_suggestions",
             // voice_keybind_enabled, voice_capture_mode, and voice_stt_language hidden when the voice gate is off
@@ -725,12 +728,9 @@ fn rows_contain_categories_and_settings_through_pr_14() {
             "permission_mode",
             // SHELL-owned remember_tool_approvals (Agent category, registered right after permission_mode)
             "remember_tool_approvals",
-            // SHELL-owned default_selected_permission (Agent category, colocated with permission_mode / plan_mode)
-            "default_selected_permission",
-            // SHELL-owned ask_user_question timeout (Agent category, registered directly above plan_mode)
-            "toolset.ask_user_question.timeout_enabled",
-            // PAGER-owned plan_mode (Agent category).
-            "plan_mode",
+            "plan_approval_park",
+            "allow_worktree",
+            "cancel_subagents_on_turn_cancel",
             // SHELL-owned auto_run_implement (Agent category; live cache).
             "auto_run_implement",
             "economic_mode",
@@ -750,13 +750,20 @@ fn rows_contain_categories_and_settings_through_pr_14() {
             "plan_mode",
             // SHELL-owned coding_data_sharing (Privacy category).
             "coding_data_sharing",
+            // SHELL-owned `[features]` row (Models). Registered before default_model.
+            "subagent_model_inheritance",
             // SHELL-owned default_model (Models category).
             "default_model",
-            // SHELL-owned `[features]` row (Models category, registered right after default_model)
-            "subagent_model_inheritance",
-            // Models category. `default_reasoning_effort`, `web_search_model`, and `session_summary_model` are not exposed in the modal.
+            "default_reasoning_effort",
+            // Models category. `web_search_model` and `session_summary_model` are not in the registry.
             "fork_secondary_model",
-            // `auto_compact_threshold_percent` (Session category) is not exposed in the modal
+            // Session category.
+            "resume_canceled_turn_on_restart",
+            "ulid_session_ids",
+            "notifications.session_recap",
+            "notifications.session_recap_threshold_secs",
+            "features.session_recap",
+            "auto_compact_threshold_percent",
             // Advanced category.
             "show_tips",
             // Per-tip contextual-hints GROUP row, placed right after `show_tips`
@@ -4535,8 +4542,10 @@ fn find_text_col(buf: &Buffer, y: u16, needle: &str) -> Option<u16> {
 #[test]
 fn section_headers_have_blank_line_above_except_first() {
     let mut s = make_state();
-    // Allocate a generous viewport so every category fits
-    // The default registry contains 6 categories with 16 settings; the blank lines push us to ~23 lines, fits in 60
+    // Viewport of 60 lines. The default registry plus blank lines
+    // above later section headers is taller than that; the
+    // renderer must still keep a blank line above every non-first
+    // header that it does paint.
     let area = Rect {
         x: 0,
         y: 0,

@@ -1665,6 +1665,27 @@ impl AgentView {
             self.discard_in_progress_comment();
             return InputOutcome::Changed;
         }
+        // Line-viewer empty Ctrl+C abandons. A draft falls through and clears.
+        // Revision-notes Prompt focus has no line viewer and must not abandon.
+        if crate::key!('c', CONTROL).matches(key)
+            && self.prompt.text().is_empty()
+            && self.prompt.images.is_empty()
+            && self.line_viewer.is_some()
+        {
+            if self.plan_approval_view.is_some() {
+                let after_turn = self
+                    .plan_approval_view
+                    .as_ref()
+                    .is_some_and(|pav| pav.is_after_turn());
+                if !self.is_post_turn_build_starting() && !after_turn {
+                    self.plan_decision_resolved = true;
+                    self.persist_plan_decision_resolved_flag(true);
+                }
+                return self.abandon_plan();
+            }
+            self.cancel_line_viewer();
+            return InputOutcome::Changed;
+        }
         // Empty Preview `y` copies the plan. A focused plan comment composer
         // inserts `y`. A live Preview or Prompt draft inserts `y`.
         let empty_prompt =
@@ -1676,7 +1697,9 @@ impl AgentView {
         if crate::key!('y').matches(key) && !is_commenting && empty_prompt && preview_focused {
             return self.copy_plan_full();
         }
+        // Preview types `a`. Empty Prompt (revision notes) still Approves.
         if !is_commenting
+            && !preview_focused
             && key.code == KeyCode::Char('a')
             && key.modifiers.is_empty()
             && self.prompt.text_without_image_chips().trim().is_empty()

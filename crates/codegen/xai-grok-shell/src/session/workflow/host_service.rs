@@ -131,10 +131,21 @@ pub(crate) fn spawn_workflow_host_service(
                     }
                     None => break,
                 },
-                _ = service.params.cancel.cancelled(), if !service.params.cancel.is_cancelled() => {
+                _ = service.params.cancel.cancelled() => {
                     while let Ok(req) = rx.try_recv() {
                         reply_cancelled(req);
                     }
+                    // The cancel future stays ready. Keep reading until the
+                    // executor drops the channel so in-flight replies still
+                    // complete the run outcome. Breaking here immediately
+                    // leaves that recv hanging.
+                    loop {
+                        match rx.recv().await {
+                            Some(req) => reply_cancelled(req),
+                            None => break,
+                        }
+                    }
+                    break;
                 }
             }
         }

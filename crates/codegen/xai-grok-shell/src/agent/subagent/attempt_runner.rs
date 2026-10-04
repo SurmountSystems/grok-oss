@@ -145,6 +145,7 @@ pub(super) async fn run_one_turn_attempt(
         traceparent: xai_grok_otel::current_traceparent(),
         json_schema: input.request.runtime_overrides.output_schema.clone(),
         send_now: false,
+        unstick_retry: false,
         admission: None,
         tool_overrides_update: None,
         respond_to: prompt_tx,

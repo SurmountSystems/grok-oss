@@ -153,6 +153,34 @@ fn session_mode_id_from_prompt_mode_inverts_the_parse() {
         assert_eq!(round_tripped.0.as_ref(), id);
     }
 }
+/// Context-only plus a JSON schema still advertises no tools (no StructuredOutput).
+#[test]
+fn context_only_structured_output_turn_advertises_no_tools() {
+    let base = vec![ToolSpec {
+        name: "read_file".into(),
+        description: None,
+        parameters: serde_json::json!({"type": "object"}),
+    }];
+    let schema = serde_json::json!({
+        "type": "object",
+        "properties": { "ok": { "type": "boolean" } }
+    });
+    let tools = effective_tools_for_turn(base.clone(), true, Some(schema.clone()));
+    assert!(
+        tools.is_empty(),
+        "context-only + JSON schema must keep an empty tool list, got {tools:?}"
+    );
+    assert!(
+        !tools.iter().any(|t| t.name == STRUCTURED_OUTPUT_TOOL),
+        "must not push StructuredOutput in context-only"
+    );
+    let with_schema = effective_tools_for_turn(base, false, Some(schema));
+    assert!(
+        with_schema.iter().any(|t| t.name == STRUCTURED_OUTPUT_TOOL),
+        "without context-only, structured-output is advertised"
+    );
+}
+
 /// A prompt that declares `_meta.mode` is the client changing mode, and the client has to be told it took effect.
 /// Both arms used to persist the transition and inject the model's reminder but emit nothing.
 /// A client that carries its mode on the prompt could enter or leave plan mode with no signal, and `updates.jsonl` carried no mode line for replay.

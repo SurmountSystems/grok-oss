@@ -517,7 +517,6 @@ pub(super) fn handle_session_notification_with_origin(
             parent_prompt_id,
             parent_session_id,
             workflow_run_id,
-            depth,
             ..
         } => {
             tracing::info!(
@@ -601,6 +600,16 @@ pub(super) fn handle_session_notification_with_origin(
                 workflow_run_id: workflow_run_id.clone().map(Arc::from),
                 context_normalized,
                 parent_prompt_id: parent_prompt_id.map(Arc::from),
+                parent_session_id: Some(Arc::from(parent_session_id.as_str())),
+                depth: None,
+                tokens_past: if is_new_attempt {
+                    0
+                } else {
+                    prior_info
+                        .as_ref()
+                        .map(|info| info.attempt.tokens_past)
+                        .unwrap_or(0)
+                },
                 started_at: now,
                 last_progress_at: now,
                 status: None,
@@ -734,14 +743,13 @@ pub(super) fn handle_session_notification_with_origin(
                     .restricted_commands();
                 child_view.set_restricted_commands(&restricted);
                 let link = crate::app::agent_view::ChildLink::unaddressable(acp::SessionId::new(
-                    parent_session_id,
+                    parent_session_id.clone(),
                 ));
                 agent.insert_subagent_view(child_session_id.clone(), Box::new(child_view), link);
             }
-            let is_l3 = depth.is_some_and(|d| d >= 2)
-                || agent
-                    .subagent_sessions
-                    .contains_key(parent_session_id.as_str());
+            let is_l3 = agent
+                .subagent_sessions
+                .contains_key(parent_session_id.as_str());
             if is_l3 {
                 // L3 specialists stay in the registry for the L2 count. They
                 // do not get an L1 scrollback lifecycle row.
@@ -814,6 +822,7 @@ pub(super) fn handle_session_notification_with_origin(
             true
         }
         XaiSessionUpdate::SubagentFinished {
+            subagent_id,
             attempt_id: _,
             child_session_id,
             status,
@@ -1682,7 +1691,7 @@ pub(super) fn handle_child_session_notification(
             let row_live = agent
                 .subagent_sessions
                 .get(child_sid)
-                .is_some_and(|info| !info.finished);
+                .is_some_and(|info| info.is_running());
             if !row_live {
                 return false;
             }
@@ -1710,6 +1719,7 @@ fn apply_nested_subagent_update(agent: &mut AgentView, update: XaiSessionUpdate)
     match update {
         XaiSessionUpdate::SubagentSpawned {
             subagent_id,
+            attempt_id,
             child_session_id,
             subagent_type,
             description,
@@ -1723,53 +1733,78 @@ fn apply_nested_subagent_update(agent: &mut AgentView, update: XaiSessionUpdate)
             parent_prompt_id,
             parent_session_id,
             workflow_run_id,
-            depth,
+            ..
         } => {
-            agent.subagent_sessions.insert(
-                child_session_id.clone(),
-                SubagentInfo {
-                    subagent_id: Arc::from(subagent_id),
-                    child_session_id: Arc::from(child_session_id.clone()),
-                    description: Arc::from(description.clone()),
-                    subagent_type: Arc::from(subagent_type),
-                    persona: persona.map(Arc::from),
-                    role: role.map(Arc::from),
-                    model: model.map(Arc::from),
-                    context_source: effective_context_source.map(Arc::from),
-                    resumed_from: resumed_from.map(Arc::from),
-                    capability_mode: capability_mode.map(Arc::from),
-                    workflow_run_id: workflow_run_id.map(Arc::from),
-                    context_normalized,
-                    parent_prompt_id: parent_prompt_id.map(Arc::from),
-                    parent_session_id: Some(Arc::from(parent_session_id)),
-                    depth,
-                    started_at: std::time::Instant::now(),
-                    last_progress_at: std::time::Instant::now(),
-                    finished: false,
-                    status: None,
-                    error: None,
-                    duration_ms: None,
-                    tool_calls: None,
-                    turns: None,
-                    turn_count: None,
-                    tool_call_count: None,
-                    tokens_used: None,
-                    tokens_past: 0,
-                    context_window_tokens: None,
-                    context_usage_pct: None,
-                    tools_used: Vec::new(),
-                    error_count: None,
-                    activity_label: None,
-                    is_background: false,
-                    pending_kill: false,
-                    kill_requested_at: None,
-                    scrollback_entry_id: None,
-                    prompt: None,
-                    child_cwd: None,
-                    worktree_path: None,
-                    child_updates_replayed: false,
+            use crate::app::subagent::{
+                SubagentAttemptInfo, SubagentChildInfo, SubagentLifecycleReduction,
+                SubagentLifecycleState, SubagentLifecycleTransition,
+            };
+            let now = std::time::Instant::now();
+            let prior_info = agent.subagent_sessions.remove(&child_session_id);
+            let lifecycle = match SubagentLifecycleState::default().reduce(
+                SubagentLifecycleTransition::Spawned,
+                attempt_id.as_deref(),
+                None,
+            ) {
+                SubagentLifecycleReduction::Accepted(accepted) => accepted.into_state(),
+                SubagentLifecycleReduction::Dropped => {
+                    if let Some(prior_info) = prior_info {
+                        agent
+                            .subagent_sessions
+                            .insert(child_session_id.clone(), prior_info);
+                    }
+                    return false;
+                }
+            };
+            let attempt = SubagentAttemptInfo {
+                lifecycle,
+                persona: persona.map(Arc::from),
+                role: role.map(Arc::from),
+                model: model.map(Arc::from),
+                context_source: effective_context_source.map(Arc::from),
+                resumed_from: resumed_from.map(Arc::from),
+                capability_mode: capability_mode.map(Arc::from),
+                workflow_run_id: workflow_run_id.map(Arc::from),
+                context_normalized,
+                parent_prompt_id: parent_prompt_id.map(Arc::from),
+                parent_session_id: Some(Arc::from(parent_session_id)),
+                depth: None,
+                started_at: now,
+                last_progress_at: now,
+                status: None,
+                error: None,
+                duration_ms: None,
+                tool_calls: None,
+                turns: None,
+                turn_count: None,
+                tool_call_count: None,
+                tokens_used: None,
+                tokens_past: 0,
+                context_window_tokens: None,
+                context_usage_pct: None,
+                tools_used: Vec::new(),
+                error_count: None,
+                activity_label: None,
+                is_background: false,
+                pending_kill: false,
+                kill_requested_at: None,
+                scrollback_entry_id: None,
+                terminal_entry_id: None,
+            };
+            let info = SubagentInfo::from_spawn(
+                prior_info,
+                SubagentChildInfo {
+                    subagent_id,
+                    child_session_id: child_session_id.clone(),
+                    description: description.clone(),
+                    subagent_type,
                 },
+                attempt,
+                true,
             );
+            agent
+                .subagent_sessions
+                .insert(child_session_id.clone(), info);
             crate::app::agent_view::l2_token_tracking::on_nested_l2_spawn(
                 &child_session_id,
                 &description,
@@ -1792,18 +1827,18 @@ fn apply_nested_subagent_update(agent: &mut AgentView, update: XaiSessionUpdate)
             let Some(info) = agent.subagent_sessions.get_mut(&child_session_id) else {
                 return false;
             };
-            if info.finished {
+            if info.is_finished() {
                 return true;
             }
-            info.duration_ms = Some(duration_ms);
-            info.turn_count = Some(turn_count);
-            info.tool_call_count = Some(tool_call_count);
-            info.tokens_used = Some(tokens_used);
-            info.context_window_tokens = Some(context_window_tokens);
-            info.context_usage_pct = Some(context_usage_pct);
-            info.tools_used = tools_used.into_iter().map(Arc::from).collect();
-            info.error_count = Some(error_count);
-            info.last_progress_at = std::time::Instant::now();
+            info.attempt.duration_ms = Some(duration_ms);
+            info.attempt.turn_count = Some(turn_count);
+            info.attempt.tool_call_count = Some(tool_call_count);
+            info.attempt.tokens_used = Some(tokens_used);
+            info.attempt.context_window_tokens = Some(context_window_tokens);
+            info.attempt.context_usage_pct = Some(context_usage_pct);
+            info.attempt.tools_used = tools_used.into_iter().map(Arc::from).collect();
+            info.attempt.error_count = Some(error_count);
+            info.attempt.last_progress_at = std::time::Instant::now();
             crate::app::agent_view::l2_token_tracking::on_nested_l2_usage(
                 &child_session_id,
                 tokens_used,
@@ -1812,6 +1847,7 @@ fn apply_nested_subagent_update(agent: &mut AgentView, update: XaiSessionUpdate)
         }
         XaiSessionUpdate::SubagentFinished {
             subagent_id,
+            attempt_id,
             child_session_id,
             status,
             error,
@@ -1821,25 +1857,36 @@ fn apply_nested_subagent_update(agent: &mut AgentView, update: XaiSessionUpdate)
             tokens_used,
             ..
         } => {
+            use crate::app::subagent::{SubagentLifecycleReduction, SubagentLifecycleTransition};
             let Some(info) = agent.subagent_sessions.get_mut(&child_session_id) else {
                 return false;
             };
-            info.finished = true;
-            info.status = Some(Arc::from(status));
-            info.error = error.map(Arc::from);
-            info.tool_calls = Some(tool_calls);
-            info.turns = Some(turns);
-            info.duration_ms = Some(duration_ms);
-            info.tokens_used = Some(tokens_used);
+            if let SubagentLifecycleReduction::Accepted(accepted) = info.attempt.lifecycle.reduce(
+                SubagentLifecycleTransition::Finished,
+                attempt_id.as_deref(),
+                None,
+            ) {
+                accepted.commit(&mut info.attempt.lifecycle);
+            }
+            info.attempt.status = Some(Arc::from(status));
+            info.attempt.error = error.map(Arc::from);
+            info.attempt.tool_calls = Some(tool_calls);
+            info.attempt.turns = Some(turns);
+            info.attempt.duration_ms = Some(duration_ms);
+            if tokens_used > 0 {
+                info.attempt.tokens_used = Some(tokens_used);
+            }
+            info.seal_current_attempt_tokens();
             crate::app::agent_view::l2_token_tracking::on_nested_l2_usage(
                 &child_session_id,
                 tokens_used,
             );
             crate::app::agent_view::l2_token_tracking::on_nested_l2_exit(&child_session_id);
-            info.activity_label = None;
-            info.pending_kill = false;
-            info.kill_requested_at = None;
-            info.last_progress_at = std::time::Instant::now();
+            info.attempt.activity_label = None;
+            info.attempt.pending_kill = false;
+            info.attempt.kill_requested_at = None;
+            info.attempt.last_progress_at = std::time::Instant::now();
+            info.transcript.retry_disk_after_finish();
             let elapsed = std::time::Duration::from_millis(duration_ms);
             let resuming = agent.session.loading_replay;
             if let Some(child_view) = agent.subagent_views.get_mut(&child_session_id) {

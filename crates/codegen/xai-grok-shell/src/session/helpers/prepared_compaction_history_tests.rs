@@ -2,6 +2,39 @@ use super::*;
 use xai_chat_state::image_budget::IMAGE_COMPACT_TRIGGER_BYTES;
 use xai_grok_sampling_types::ContentPart;
 
+fn data_image(bytes: usize) -> ContentPart {
+    let prefix = "data:image/png;base64,";
+    ContentPart::Image {
+        url: format!("{prefix}{}", "A".repeat(bytes - prefix.len())).into(),
+    }
+}
+
+#[test]
+fn compact_history_does_not_copy_the_data_url_crate() {
+    let crate_url = format!("data:image/jpeg;base64,{}", "C".repeat(200_000));
+    let source = vec![ConversationItem::user_with_parts(vec![
+        ContentPart::Text { text: "see".into() },
+        ContentPart::Image {
+            url: crate_url.clone().into(),
+        },
+    ])];
+    let prepared = build_compaction_chat_history(source, None, true, None, 0);
+    let json = serde_json::to_string(&prepared.items).expect("serialize");
+    assert!(
+        !json.contains(&crate_url),
+        "compact HTTP must not re-inline the data URL crate"
+    );
+    assert!(
+        json.len() < 20_000,
+        "compact history JSON must stay small, got {}",
+        json.len()
+    );
+    assert_eq!(
+        prepared.image_budget.inline_images, 0,
+        "stripped compact history has no inline images for the 47MB budget"
+    );
+}
+
 #[test]
 fn reserved_tool_headroom_triggers_small_history_once() {
     let source = vec![ConversationItem::user_with_parts(vec![data_image(500)])];
@@ -18,7 +51,6 @@ fn reserved_tool_headroom_triggers_small_history_once() {
         prepared.image_budget.inline_images, 0,
         "stripped compact history has no inline images for the 47MB budget"
     );
-}
 
     let expected_items = serde_json::to_value(&prepared.items).unwrap();
     let expected_budget = prepared.image_budget;
@@ -28,7 +60,6 @@ fn reserved_tool_headroom_triggers_small_history_once() {
         serde_json::to_value(final_boundary.items).unwrap(),
         expected_items
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]

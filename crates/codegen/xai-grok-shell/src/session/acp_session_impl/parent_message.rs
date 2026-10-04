@@ -241,6 +241,7 @@ impl PendingParentAgentMessage {
             queue_meta: Some(queue_meta),
             queue_mutation_policy: QueueMutationPolicy::new(true, false),
             send_now: false,
+            unstick_retry: false,
             traceparent: None,
         }
     }

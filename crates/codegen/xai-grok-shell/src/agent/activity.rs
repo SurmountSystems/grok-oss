@@ -95,6 +95,12 @@ impl AgentActivity {
         self.inner.subagents.clone()
     }
 
+    /// Whether initializing or running nested subagents are still on this process.
+    /// Distinct from a parent turn: a TUI disconnect leaves this true; `/rebuild` must not exec-replace while it is.
+    pub fn has_live_subagents(&self) -> bool {
+        self.inner.subagents.load(Ordering::Relaxed) > 0
+    }
+
     pub fn is_busy(&self) -> bool {
         self.has_live_subagents() || self.lock_live_sessions().iter().any(|e| e.is_busy())
     }

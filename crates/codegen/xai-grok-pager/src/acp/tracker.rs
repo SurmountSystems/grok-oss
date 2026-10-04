@@ -520,6 +520,20 @@ impl AcpUpdateTracker {
             self.session_cwd = Some(cwd.to_path_buf());
         }
     }
+    /// Drop in-flight tool rows whose scrollback blocks are gone.
+    ///
+    /// Overlay hydrate onto an empty or prompt-only child must not let a
+    /// spawn-time pending tool id swallow the same `ToolCall` from disk.
+    pub(crate) fn forget_pending_tools_absent_from_scrollback(
+        &mut self,
+        scrollback: &ScrollbackState,
+    ) {
+        self.pending_tools.retain(|_, pending| {
+            pending
+                .entry_id
+                .is_some_and(|id| scrollback.get_by_id(id).is_some())
+        });
+    }
     /// Current activity within the turn, derived from in-flight state. When [`Self::session_cwd`] is set, execute
     /// activity titles omit a leading `cd <cwd> &&` / `;` that only restates the session working directory.
     pub fn activity(&self) -> Option<TurnActivity> {
@@ -597,6 +611,26 @@ impl AcpUpdateTracker {
                 WaitingReason::Model | WaitingReason::PromptAck | WaitingReason::Hooks { .. } => 4,
             })
             .map(|w| w.reason.clone())
+    }
+    /// Pending blocking `get_command_or_subagent_output` waits: tool-call id
+    /// plus the waited-on task ids (empty when the model omitted them).
+    pub(crate) fn task_output_blocking_waits(&self) -> Vec<(String, Vec<String>)> {
+        self.blocking_waits
+            .iter()
+            .filter_map(|(key, wait)| match &wait.reason {
+                WaitingReason::TaskOutput {
+                    task_ids,
+                    waits: true,
+                    ..
+                } => Some((key.clone(), task_ids.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+    pub(crate) fn remove_blocking_waits(&mut self, keys: &[String]) {
+        for key in keys {
+            self.blocking_waits.remove(key);
+        }
     }
     /// Drop waits not registered under `current_stream` (stale earlier rounds, or an unknown `None` stream); co-batched same-stream waits survive.
     fn drop_stale_blocking_waits(&mut self, current_stream: Option<i64>) {

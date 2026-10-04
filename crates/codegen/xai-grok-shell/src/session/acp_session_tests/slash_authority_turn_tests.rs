@@ -60,6 +60,7 @@ fn runtime_request(text: &str) -> TurnInputRequest {
         persist_ack: None,
         parsed_prompt_tx: None,
         traceparent: None,
+        unstick_retry: false,
         start_gate: None,
     }
 }
@@ -80,6 +81,7 @@ fn human_request(text: &str) -> TurnInputRequest {
         persist_ack: None,
         parsed_prompt_tx: None,
         traceparent: None,
+        unstick_retry: false,
         start_gate: None,
     }
 }
@@ -108,6 +110,7 @@ fn parent_request(text: &str, prompt_blocks: Vec<acp::ContentBlock>) -> TurnInpu
         persist_ack: None,
         parsed_prompt_tx: None,
         traceparent: None,
+        unstick_retry: false,
         start_gate: None,
     }
 }

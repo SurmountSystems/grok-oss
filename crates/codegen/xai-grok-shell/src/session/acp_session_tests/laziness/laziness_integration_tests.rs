@@ -303,6 +303,7 @@ async fn idle_recheck_after_sleep_short_circuits_silently() {
                         queue_meta: None,
                         queue_mutation_policy: QueueMutationPolicy::hidden(),
                         send_now: false,
+                        unstick_retry: false,
                         traceparent: None,
                     });
             });

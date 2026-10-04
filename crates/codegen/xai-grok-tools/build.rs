@@ -69,8 +69,7 @@ fn bundle_fd() -> Result<(), Box<dyn std::error::Error>> {
     let dest = gen_dir.join(format!("fd-{FD_VER}-cargo-built.bin"));
     let _ = fs::remove_file(&dest);
     cargo_install_fd_find(&dest)?;
-    Ok(())
-}
+    Ok(());
 
     let url = format!(
         "https://github.com/sharkdp/fd/releases/download/v{ver}/fd-v{ver}-{asset_triple}.tar.gz"

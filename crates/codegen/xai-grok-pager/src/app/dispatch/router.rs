@@ -75,7 +75,6 @@ use super::session::load::{
 };
 use super::session::modal::{dispatch_rename_session, dispatch_reset_session_title};
 use super::settings::setters::{
-
     clear_default_model, clear_fork_secondary_model, preview_auto_dark_theme,
     preview_auto_light_theme, preview_theme, set_ask_user_question_timeout_enabled,
     set_auto_compact_threshold, set_auto_dark_theme, set_auto_light_theme, set_auto_run_implement,
@@ -83,7 +82,6 @@ use super::settings::setters::{
     set_contextual_hint_plan_mode, set_contextual_hint_send_now, set_contextual_hint_small_screen,
     set_contextual_hint_ssh_wrap, set_contextual_hint_undo, set_contextual_hint_word_select,
     set_default_model, set_default_selected_permission, set_display_refresh_auto_cadence,
-
     set_economic_mode, set_fork_secondary_model, set_group_tool_verbs, set_hunk_tracker_mode,
     set_invert_scroll, set_keep_text_selection, set_max_thoughts_width, set_multiline_mode,
     set_prompt_suggestions, set_remember_tool_approvals, set_render_mermaid,

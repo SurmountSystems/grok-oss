@@ -140,7 +140,6 @@ mod compaction_wall_clock_budget_tests {
     }
 }
 
-
 #[cfg(test)]
 mod compaction_tool_choice_tests {
     use super::{CompactionToolChoice, resolve_compaction_tool_choice_from as resolve};

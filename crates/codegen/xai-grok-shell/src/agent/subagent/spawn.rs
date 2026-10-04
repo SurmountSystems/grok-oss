@@ -545,6 +545,7 @@ pub(crate) fn inject_subagent_completed_prompt(params: InjectParams) {
             traceparent: None,
             json_schema: None,
             send_now: false,
+            unstick_retry: false,
             admission: None,
             tool_overrides_update: None,
             respond_to,

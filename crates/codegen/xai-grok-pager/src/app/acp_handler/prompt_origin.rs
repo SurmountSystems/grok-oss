@@ -51,6 +51,8 @@ pub(super) fn rate_limited_wake_failure_event(
 /// Returns true for the auto-wake turn families (`task-completed-…`, `subagent-completed-…`, `workflow-completed-…`, `notifications-…`).
 /// These run non-adopted: no `PromptResponse`, no viewer finalize.
 /// Their durable `TurnCompleted` is the only signal that the session went back to idle.
+/// A chatty wake closes with a marker. A silent task-completed wake stays markerless.
+/// A silent `subagent-completed-*` wake still surfaces `TurnCompleted` so an L2 finish is visible on L1 without opening the overlay.
 pub(crate) fn is_wake_prompt(prompt_id: &str) -> bool {
     matches!(
         xai_grok_shell::session::PromptOrigin::from_prompt_id(prompt_id),
@@ -211,7 +213,7 @@ pub(super) fn log_failed_wake(prompt_id: &str, agent_result: Option<&str>, rail:
 /// Close out a wake turn. This is the only place that flushes its streamed entries still in flight, because wake turns skip `PromptResponse`.
 /// An errored wake closes silently (see [`log_failed_wake`]); a chatty rate-limited wake keeps its upgrade-URL row.
 /// The `HookAnnotation` warning attributes the deny but is not turn output, so a silently blocked wake closes without a marker.
-/// Returns true when the wake closed with a visible `TurnCompleted` marker (chatty EndTurn).
+/// Returns true when the wake closed with a visible `TurnCompleted` marker (chatty EndTurn, or a silent `subagent-completed-*` wake).
 pub(super) fn finish_wake_turn(
     agent: &mut AgentView,
     prompt_id: &str,
@@ -263,7 +265,20 @@ pub(super) fn finish_wake_turn(
                 Some(rate_limited_wake_failure_event(agent_result, elapsed))
             }
         }
-        // Silent wakes stay markerless; `terminal_marker` below cannot see the turn's origin, so skip it here
+        // Silent cancel stays markerless. A silent `subagent-completed-*` wake
+        // still surfaces `TurnCompleted` (elapsed stays `None`) so an L2 finish
+        // is visible on L1 without opening the overlay. `terminal_marker`
+        // cannot see the turn's origin, so this arm is here.
+        _ if !had_output
+            && stop_reason != "cancelled"
+            && matches!(
+                xai_grok_shell::session::PromptOrigin::from_prompt_id(prompt_id),
+                xai_grok_shell::session::PromptOrigin::SubagentCompleted { .. }
+            ) =>
+        {
+            Some(SessionEvent::TurnCompleted { elapsed })
+        }
+        // Other silent wakes stay markerless; `terminal_marker` below cannot see the turn's origin, so skip it here
         _ if !had_output => None,
         _ => crate::app::turn_completion::terminal_marker(
             crate::app::turn_completion::TerminalMarkerInput {

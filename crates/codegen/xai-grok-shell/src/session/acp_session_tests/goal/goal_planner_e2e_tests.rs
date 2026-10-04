@@ -1431,6 +1431,7 @@ async fn stop_then_slash_goal_resume_reopens_spawn_admission_before_planner_retr
                     persist_ack: None,
                     parsed_prompt_tx: None,
                     traceparent: None,
+                    unstick_retry: false,
                     start_gate: None,
                 }),
             )

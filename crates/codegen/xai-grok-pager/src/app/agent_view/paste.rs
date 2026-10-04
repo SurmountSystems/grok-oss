@@ -358,15 +358,12 @@ impl AgentView {
                 if !ActionRegistry::interjection_possible(self.can_send_now(), !text.is_empty()) {
                     return None;
                 }
-                let image_notice = self.unbound_image_placeholder_notice();
+                // Rebind and log orphan placeholders. Interject has no image_notice field.
+                let _image_notice = self.unbound_image_placeholder_notice();
                 let images = self.prompt.drain_images();
                 self.prompt.set_text("");
                 self.note_draft_consumed();
-                Some(Action::SendPromptNow {
-                    text,
-                    images,
-                    image_notice,
-                })
+                Some(Action::Interject { text, images })
             }
             AgentDeferredSend::Stash => {
                 self.handle_stash_prompt_key();
