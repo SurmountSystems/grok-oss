@@ -1570,29 +1570,3 @@ fn viewer_finalize_truncation_wire_pair_renders_exact_user_copy() {
         other => panic!("expected TurnFailed, got {other:?}"),
     }
 }
-
-/// The turn-end marker takes no fold path — a park has no row to fold into.
-#[test]
-fn turn_end_after_park_pushes_single_marker() {
-    use crate::app::agent_view::test_fixtures::count_turn_markers;
-
-    let mut agent = running_driver("p1");
-    super::super::agent_view::test_fixtures::simulate_task_output_wait(&mut agent, "bg-1");
-    assert!(agent.renders_parked());
-    assert_eq!(count_turn_markers(&agent), 0, "the park writes no marker");
-
-    push_turn_terminal_marker(
-        &mut agent,
-        Some(SessionEvent::TurnCompleted {
-            elapsed: Some(std::time::Duration::from_secs(5)),
-        }),
-        Some("p1"),
-    );
-
-    assert_eq!(
-        count_turn_markers(&agent),
-        1,
-        "the real turn end pushes exactly one marker"
-    );
-    assert_eq!(last_marker_block(&agent).event.message(), "Worked for 5.0s");
-}

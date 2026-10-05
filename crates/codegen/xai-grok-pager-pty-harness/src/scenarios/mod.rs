@@ -62,6 +62,18 @@ impl Scenario {
         Scenario::MixedInteraction,
     ];
 
+    /// Stable slug used in JSON output and baseline files.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Scenario::ScrollStress => "scroll_stress",
+            Scenario::StreamingRender => "streaming_render",
+            Scenario::ResizeStorm => "resize_storm",
+            Scenario::LargeCodeblock => "large_codeblock",
+            Scenario::IdleCost => "idle_cost",
+            Scenario::MixedInteraction => "mixed_interaction",
+        }
+    }
+
     /// Dispatch to the scenario implementation.
     pub async fn run(
         self,

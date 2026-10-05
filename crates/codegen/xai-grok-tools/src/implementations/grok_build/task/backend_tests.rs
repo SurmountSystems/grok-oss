@@ -213,6 +213,8 @@ async fn spawn_registered_returns_on_admit_before_the_child_finishes() {
         owner: super::super::types::SubagentOwner::Task,
         implement_loop_effort: None,
         cancel_token: tokio_util::sync::CancellationToken::new(),
+        spawn_root: Default::default(),
+        tool_call_id: None,
     };
 
     let handle = tokio::spawn(async move { backend.spawn_registered(request).await });
@@ -259,6 +261,8 @@ fn background_request(id: &str, description: &str) -> SubagentRequest {
         owner: super::super::types::SubagentOwner::Task,
         implement_loop_effort: None,
         cancel_token: tokio_util::sync::CancellationToken::new(),
+        spawn_root: Default::default(),
+        tool_call_id: None,
     }
 }
 
@@ -297,7 +301,6 @@ async fn parent_spawn_subagent_second_l2_while_first_still_running_without_wait(
 
     let mill_notice = xai_tool_types::format_subagent_started_background(
         "mill-l2",
-        "general-purpose",
         "mill compile on nixbuilder",
         &xai_tool_types::BackgroundNoticeNaming {
             task_output_tool: "get_command_or_subagent_output",

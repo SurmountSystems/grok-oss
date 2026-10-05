@@ -159,6 +159,7 @@ pub(crate) use elicitation::UnansweredElicitation;
 mod input;
 pub(crate) use input::ExternalPromptEditorAccess;
 mod interactions;
+pub(crate) use interactions::QuestionViewFeedback;
 mod jump;
 mod key_owner;
 pub(crate) use key_owner::{BlockingCard, EscStep, KeyOwner};
@@ -800,6 +801,12 @@ pub(crate) struct BlockViewerResume {
     pub scroll_offset: usize,
     pub follow_mode: bool,
 }
+/// Stop-hook runs held until the turn marker can paint them.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct PendingStopHooks {
+    pub groups: Vec<(String, Vec<crate::scrollback::blocks::tool::HookRunEntry>)>,
+}
+
 pub struct AgentView {
     pub session: AgentSession,
     pub(crate) session_binding_epoch: u32,
@@ -1169,15 +1176,26 @@ pub struct AgentView {
     pub hit_overlay_next: HitArea,
     /// Cancel button in turn status line (`[stop]`).
     pub hit_cancel_button: HitArea,
+    /// Pause button in the turn status line.
+    pub hit_pause_button: HitArea,
+    /// Fork-family dashboard chip, distinct from [`Self::hit_dashboard`].
+    pub hit_header_dashboard: HitArea,
+    /// Fork-family previous chip.
+    pub hit_header_prev: HitArea,
+    /// Fork-family next chip.
+    pub hit_header_next: HitArea,
+    /// This session's sampling window when the footer has one.
+    pub session_sampling_window: Option<u64>,
+    /// Which identity is live for sampling in the prompt footer.
+    pub sampling_identity: crate::views::credit_bar::SamplingIdentityKind,
+    /// Last inline plan body docked for Isolated Preview.
+    pub latest_inline_plan_content: Option<String>,
     /// Still-running watcher cue on the turn-status row (click opens the tasks pane, same as `Ctrl+G`).
     /// tasks pane, same as `Ctrl+G`).
     pub hit_watching_cue: HitArea,
     /// Snapshot of process-level global work pause for this frame (set by
     /// [`AgentView::draw`] from [`AppRenderParams::global_paused`]).
     pub(crate) global_work_paused: bool,
-    /// Still-running watcher cue on the turn-status row (click opens the
-    /// tasks pane, same as `Ctrl+G`).
-    pub hit_watching_cue: HitArea,
     /// One-time Ctrl+G toast already fired for a watching-cue click.
     pub(crate) watching_cue_toast_shown: bool,
     /// `[hide]` button on the announcement banner (click runs `/announcements hide`).
@@ -1332,6 +1350,8 @@ pub struct AgentView {
     pub(crate) hit_sb_copy: HitArea,
     /// Always-on bubble copy ⧉ hit rects from the last frame: `(rect, entry_idx)`.
     pub(crate) hit_bubble_copy: Vec<(Rect, usize)>,
+    /// Stop-hook batch stashed for the turn marker. `None` until a `stop` batch lands.
+    pub(crate) pending_stop_hooks: Option<PendingStopHooks>,
     /// True when the pointer is over a bubble copy ⧉ (hover style + pointer cursor).
     pub(crate) hovered_bubble_copy: bool,
     /// Hit area for scrollback selection box view button.
@@ -1685,6 +1705,10 @@ pub struct AgentView {
     /// Composer `[Copy]` hit rectangle. Rebuilt each frame next to the
     /// inline prompt. `None` when the button is not painted.
     pub(crate) composer_copy_button: Option<Rect>,
+    /// True after `FetchBilling` lands, so the compact footer stops saying loading.
+    pub console_prepaid_billing_settled: bool,
+    /// In-progress `/rebuild` bar. A failed rebuild clears it so `/rebuild` can run again.
+    pub rebuild_progress: Option<RebuildUiProgress>,
 }
 /// Cap on [`AgentView::self_originated_prompt_ids`]. Only recent ids matter (a stale post-rewind chunk arrives right after its turn ends), so a small bounded ring is plenty and keeps a long-lived session from growing the set without bound.
 const SELF_ORIGINATED_PROMPT_CAP: usize = 64;
@@ -1831,6 +1855,7 @@ fn translate_local_submit(
                 confirmed: *idx == 0,
             })
         }
+        LocalQuestionKind::Feedback => InputOutcome::Changed,
     }
 }
 /// Convert an [`OverlayAction`] to an [`InputOutcome`].
@@ -2453,6 +2478,8 @@ pub(crate) mod test_fixtures {
             child_session_id: Arc::from(child_sid),
             description: Arc::from("test"),
             subagent_type: Arc::from("general-purpose"),
+            finished: false,
+            status: None,
             attempt: crate::app::subagent::SubagentAttemptInfo {
                 lifecycle: crate::app::subagent::SubagentLifecycleState::running_legacy_for_test(),
                 persona: None,
@@ -2578,7 +2605,6 @@ pub(crate) mod test_fixtures {
             next_queue_id: 0,
             yolo_mode: false,
             auto_mode: false,
-            context_only_mode: false,
             prompt_history: Vec::new(),
             prompt_history_loading: false,
             loading_replay: false,
@@ -2645,7 +2671,6 @@ pub(crate) mod test_fixtures {
                 next_queue_id: 0,
                 yolo_mode: false,
                 auto_mode: false,
-                context_only_mode: false,
                 prompt_history: Vec::new(),
                 prompt_history_loading: false,
                 loading_replay: false,
@@ -3482,7 +3507,6 @@ pub(crate) fn test_agent_view(session_id: Option<&str>, cwd: std::path::PathBuf)
             next_queue_id: 0,
             yolo_mode: false,
             auto_mode: false,
-            context_only_mode: false,
             prompt_history: Vec::new(),
             prompt_history_loading: false,
             loading_replay: false,

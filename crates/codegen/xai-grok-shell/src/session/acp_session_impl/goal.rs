@@ -1251,6 +1251,7 @@ impl SessionActor {
             return None;
         }
 
+        let (tokens_used, finished_marginal) = self.goal_tokens(current_tokens);
         if apply_turn_end {
             let notify = self.goal_notify_sender();
             notify.emit_goal_updated(

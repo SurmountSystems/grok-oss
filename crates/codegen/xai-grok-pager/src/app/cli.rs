@@ -35,22 +35,43 @@ pub enum Command {
     /// Manage running leader processes
     Leader(LeaderMgmtArgs),
     /// Sign out and clear cached credentials
-    Logout,
+    Logout {
+        /// Clear only the stored OpenRouter API key (not the xAI session).
+        #[arg(long = "openrouter")]
+        openrouter: bool,
+    },
     /// Sign in to Grok
     Login {
         /// Ignored (kept for backwards compatibility). OAuth2 is now the only auth method.
         #[arg(long, hide = true)]
         legacy: bool,
         /// Use Grok OAuth via auth.x.ai.
-        #[arg(long = "oauth", alias = "oidc", conflicts_with_all = ["device_auth"])]
+        #[arg(
+            long = "oauth",
+            alias = "oidc",
+            conflicts_with_all = ["device_auth", "openrouter", "api_key"]
+        )]
         oauth: bool,
         /// Use device-code authentication for headless/remote environments.
         #[arg(
             long = "device-auth",
             visible_alias = "device-code",
-            conflicts_with_all = ["oauth"]
+            conflicts_with_all = ["oauth", "openrouter", "api_key"]
         )]
         device_auth: bool,
+        /// Store an OpenRouter API key. Does not replace xAI login.
+        #[arg(long = "openrouter", conflicts_with_all = ["oauth", "device_auth"])]
+        openrouter: bool,
+        /// OpenRouter key material. Bare flag prompts. `-` reads non-TTY stdin.
+        /// A non-empty argv value is refused by `materialize_cli_api_key`.
+        #[arg(
+            long = "api-key",
+            num_args = 0..=1,
+            default_missing_value = "",
+            value_name = "VALUE",
+            conflicts_with_all = ["oauth", "device_auth"]
+        )]
+        api_key: Option<String>,
         /// Authenticate for remote development environments (hidden).
         /// Field is always present so match arms stay feature-unification-safe; clap registers `--devbox` only when that feature is enabled (`arg(skip)` otherwise → always false).
         #[arg(skip)]
@@ -158,18 +179,6 @@ See ~/.grok/README.md for more information.
         /// Internal compat alias for `--trigger=auto_background` (older parents still spawn children with it).
         #[arg(long, hide = true)]
         auto: bool,
-    },
-    /// Rebuild this tree's `grok-oss` and soft-relaunch live leaders.
-    ///
-    /// Runs `just install` (or fixed cargo argv) from a resolved Grok OSS
-    /// checkout, verifies `--version`, then signals reachable leaders with
-    /// `RelaunchForUpdate`. Does **not** use the SpaceXAI auto-updater.
-    /// Prefer `/rebuild` in the TUI so this session re-execs onto the new
-    /// binary with the same session id.
-    Rebuild {
-        /// Source tree to build (default: walk up from the process cwd).
-        #[arg(long, value_name = "DIR")]
-        source: Option<std::path::PathBuf>,
     },
     /// Print version information
     #[command(visible_alias = "v")]
@@ -877,6 +886,18 @@ impl PagerArgs {
             Some("--no-memory")
         } else {
             None
+        }
+    }
+    /// `Some(false)` is plain `grok-oss --version` / `version`.
+    /// `Some(true)` is `version --json`.
+    /// `None` is every other argv, including `update --version <semver>`.
+    pub fn version_only_json(&self) -> Option<bool> {
+        if self.version && self.command.is_none() {
+            return Some(false);
+        }
+        match &self.command {
+            Some(Command::Version { json }) => Some(*json),
+            _ => None,
         }
     }
     /// Parse CLI arguments without applying side effects.
@@ -1673,7 +1694,10 @@ mod tests {
     #[test]
     fn subcommand_takes_precedence_over_positional_prompt() {
         let args = PagerArgs::try_parse_from(["grok", "logout"]).expect("subcommand parses");
-        assert!(matches!(args.command, Some(Command::Logout)));
+        assert!(matches!(
+            args.command,
+            Some(Command::Logout { openrouter: false })
+        ));
         assert!(args.prompt.is_none());
     }
     #[test]

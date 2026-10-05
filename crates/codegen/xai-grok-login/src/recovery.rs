@@ -187,7 +187,7 @@ enum RecoveryStep {
     Done,
 }
 /// State machine that walks through recovery strategies after a 401.
-pub(crate) struct UnauthorizedRecovery {
+pub struct UnauthorizedRecovery {
     auth_manager: Arc<AuthManager>,
     /// The token that was rejected by the server.
     rejected_token: String,
@@ -232,7 +232,7 @@ impl UnauthorizedRecovery {
         skip(self),
         fields(step = ?self.step, token_type = tracing::field::Empty),
     )]
-    pub(crate) async fn next(&mut self) -> Result<GrokAuth, AuthError> {
+    pub async fn next(&mut self) -> Result<GrokAuth, AuthError> {
         let span = tracing::Span::current();
         if !span.is_disabled() {
             span.record(
@@ -382,7 +382,11 @@ impl UnauthorizedRecovery {
                 }
                 let result = self
                     .auth_manager
-                    .refresh_chain(tt, crate::manager::RefreshReason::ServerRejected)
+                    .refresh_chain(
+                        tt,
+                        crate::manager::RefreshReason::ServerRejected,
+                        self.source.urgency(),
+                    )
                     .await;
                 match &result {
                     Ok(auth) => {

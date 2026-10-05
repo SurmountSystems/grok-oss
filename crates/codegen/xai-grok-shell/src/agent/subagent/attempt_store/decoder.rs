@@ -562,16 +562,15 @@ pub(super) fn decode_fixed_hex<const N: usize>(
         return Err(CodecError::Invalid(field));
     }
     let mut decoded = [0; N];
-    for (output, pair) in decoded.iter_mut().zip(encoded.chunks_exact(2)) {
+    // `as_chunks` splits off a trailing odd byte the same way `chunks_exact` did.
+    let (pairs, _) = encoded.as_chunks::<2>();
+    for (output, &[hi, lo]) in decoded.iter_mut().zip(pairs) {
         let nibble = |byte| match byte {
             b'0'..=b'9' => Ok(byte - b'0'),
             b'a'..=b'f' => Ok(byte - b'a' + 10),
             _ => Err(CodecError::Invalid(field)),
         };
-        let [hi, lo] = pair else {
-            return Err(CodecError::Invalid(field));
-        };
-        *output = (nibble(*hi)? << 4) | nibble(*lo)?;
+        *output = (nibble(hi)? << 4) | nibble(lo)?;
     }
     Ok(decoded)
 }

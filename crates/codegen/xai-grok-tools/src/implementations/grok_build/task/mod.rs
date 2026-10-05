@@ -36,7 +36,6 @@ use crate::types::output::ToolOutput;
 use crate::types::requirements::{Expr, ToolRequirement};
 use crate::types::resources::{SessionFolder, SharedResources};
 use crate::types::tool::{ToolKind, ToolNamespace};
-use regex::Regex;
 use xai_tool_types::{SubagentCompletedOutput, SubagentIsolationMode, TaskToolInput};
 
 pub const TASK_TOOL_NAME: &str = "task";
@@ -277,6 +276,7 @@ impl crate::types::tool_metadata::ToolMetadata for TaskTool {
                 resume_from_param: "${{ params.task.resume_from }}",
                 background_retrieval_tool: "${{ tools.by_kind.background_task_action }}",
                 isolation_param: "${{ params.task.isolation }}",
+                write_paths_param: "${{ params.task.write_paths }}",
             })
         });
         &DESC
@@ -409,7 +409,10 @@ fn stop_text_is_repeating_sentence(text: &str) -> bool {
         .map(str::trim)
         .filter(|line| !line.is_empty())
         .collect();
-    lines.len() >= 2 && lines.iter().all(|line| *line == lines[0])
+    lines.len() >= 2
+        && lines
+            .iter()
+            .all(|line| *line == lines.first().copied().expect("index out of bounds"))
 }
 
 fn harness_layer_for_depth(depth: u32) -> l1_session_harness::AgentLayer {
@@ -468,6 +471,11 @@ async fn record_exit_feedback(
             let _ = l1_session_harness::append_harness_feedback(dir, &feedback);
         }
     }
+}
+
+/// Same sentinel rule as `resume_from`: blank, null, none, and undefined are absent.
+fn is_valid_resume_id(id: &str) -> bool {
+    xai_tool_types::is_not_sentinel(id)
 }
 
 /// On a blocking exit, call [`l1_session_harness::l2_exit_action`].
@@ -535,7 +543,7 @@ async fn resume_same_l2_after_exit(
     request.resume_from = Some(l2_id.clone());
     #[cfg(test)]
     tests::stash_resume_echo(&l2_id, &result);
-    backend.backend().spawn(request).await
+    backend.backend().spawn(request, None).await
 }
 
 impl xai_tool_runtime::Tool for TaskTool {
@@ -593,6 +601,7 @@ impl xai_tool_runtime::Tool for TaskTool {
             model_rejection_sink,
             parent_session_id,
             parent_prompt_id,
+            implement_loop_effort,
             foreground_wait,
         ) = {
             let res = resources.lock().await;
@@ -974,21 +983,18 @@ impl xai_tool_runtime::Tool for TaskTool {
                 with_sibling_write_path_reminder(
                     xai_tool_types::format_subagent_started_background(
                         &id,
-                        &input.subagent_type,
                         &input.description,
                         &naming,
                         continue_parent,
                     ),
                     &id,
-                    &input.description,
-                    &naming,
-                    continue_parent,
                 )
                 .into(),
             ));
         }
 
         // 5. Blocking mode (default): spawn via backend and await result
+        let resume_request = request.clone();
         let result = backend.backend().spawn(request, None).await;
         if let Some(forwarder) = cancellation_forwarder {
             forwarder.abort();
@@ -1014,17 +1020,12 @@ impl xai_tool_runtime::Tool for TaskTool {
             let text = with_sibling_write_path_reminder(
                 xai_tool_types::format_subagent_auto_backgrounded(
                     &id,
-                    &input.subagent_type,
                     &input.description,
                     &naming,
                     notified_on_completion,
                     continue_parent,
                 ),
                 &id,
-                &input.description,
-                &naming,
-                notified_on_completion,
-                continue_parent,
             );
             return Ok(ToolOutput::Text(text.into()));
         }
@@ -1267,6 +1268,7 @@ mod tests {
         async fn spawn(
             &self,
             request: SubagentRequest,
+            registered_tx: Option<tokio::sync::oneshot::Sender<()>>,
         ) -> Result<SubagentResult, xai_tool_runtime::ToolError> {
             let admit = self
                 .admit
@@ -1277,6 +1279,9 @@ mod tests {
                 let _ = admit.await;
             }
             self.admitted.store(true, Ordering::SeqCst);
+            if let Some(registered_tx) = registered_tx {
+                let _ = registered_tx.send(());
+            }
             Ok(SubagentResult {
                 success: true,
                 subagent_id: request.id.clone(),
@@ -1357,6 +1362,7 @@ mod tests {
         async fn spawn(
             &self,
             _request: SubagentRequest,
+            _registered_tx: Option<tokio::sync::oneshot::Sender<()>>,
         ) -> Result<SubagentResult, xai_tool_runtime::ToolError> {
             self.spawned.store(true, Ordering::SeqCst);
             Err(xai_tool_runtime::ToolError::custom(
@@ -2647,6 +2653,8 @@ mod tests {
     async fn background_spawn_returns_coordinator_rejection() {
         let (backend, mut rx) = make_backend();
         let resources = resources_for_task(backend);
+        let captured = super::types::test_capture::capture();
+        let (_done_tx, done_rx) = tokio::sync::oneshot::channel::<()>();
 
         let drain = tokio::spawn(async move {
             if let Some(SubagentEvent::Spawn(boxed)) = rx.recv().await {
@@ -2840,7 +2848,6 @@ mod tests {
             let _ = capture_tx.send(parent_session_id.to_string());
             SubagentValidateTypeOutcome::Ok
         });
-        let drain = drain_spawn_ok(rx);
         let mut resources = Resources::new();
         resources.insert(backend);
         resources.insert(SubagentDepthCounter(0));

@@ -33,6 +33,7 @@ impl xai_grok_login::refresh::TokenRefresher for WakeGapRefresher {
         if self.fail_pre_request && reason == xai_grok_login::refresh::RefreshReason::PreRequest {
             return xai_grok_login::refresh::RefreshOutcome::TransientFailure {
                 message: "simulated post-wake network gap".to_string(),
+                suspected_consumed_rt: None,
             };
         }
         xai_grok_login::refresh::RefreshOutcome::success(GrokAuth {
@@ -563,6 +564,7 @@ impl xai_grok_login::refresh::TokenRefresher for DeferredRefreshNeverLands {
         }
         xai_grok_login::refresh::RefreshOutcome::TransientFailure {
             message: "refresh deferred: system sleep imminent".to_string(),
+            suspected_consumed_rt: None,
         }
     }
 }
@@ -1039,6 +1041,7 @@ impl xai_grok_login::refresh::TokenRefresher for DeferredThenRecovers {
         if !self.recovers.load(Ordering::SeqCst) {
             return xai_grok_login::refresh::RefreshOutcome::TransientFailure {
                 message: "refresh deferred: system sleep imminent".to_string(),
+                suspected_consumed_rt: None,
             };
         }
         xai_grok_login::refresh::RefreshOutcome::success(GrokAuth {

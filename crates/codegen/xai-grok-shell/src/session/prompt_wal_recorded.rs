@@ -69,7 +69,8 @@ pub fn user_texts_from_chat_history_jsonl(blob: &str) -> Vec<String> {
         if !json_line_is_user(&value) {
             continue;
         }
-        let Some(text) = json_content_text(&value["content"]) else {
+        let Some(text) = json_content_text(value.get("content").expect("index out of bounds"))
+        else {
             continue;
         };
         if !text.trim().is_empty() {

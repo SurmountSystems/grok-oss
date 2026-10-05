@@ -253,7 +253,7 @@ pub async fn run_external_auth_provider(
     Ok((auth, true))
 }
 /// GUI auth: bridges external provider stderr to `url_tx`, pipes code submission via `code_rx`.
-pub(crate) async fn run_auth_flow_with_stderr_bridge(
+pub async fn run_auth_flow_with_stderr_bridge(
     auth_manager: &Arc<AuthManager>,
     grok_com_config: &GrokComConfig,
     config_device_flow: Option<bool>,
@@ -336,7 +336,7 @@ pub(crate) async fn run_auth_flow_with_stderr_bridge(
 }
 /// Full auth chain: cache, then refresh, then external provider, then interactive (OIDC/OAuth2/legacy).
 /// When `url_tx` and `code_rx` are `None`, falls back to stderr/stdin (CLI mode).
-pub(crate) async fn run_auth_flow(
+pub async fn run_auth_flow(
     auth_manager: &Arc<AuthManager>,
     grok_com_config: &GrokComConfig,
     config_device_flow: Option<bool>,
@@ -449,64 +449,6 @@ pub(super) async fn run_auth_flow_steps(
     auth_manager: &Arc<AuthManager>,
     grok_com_config: &GrokComConfig,
     config_device_flow: Option<bool>,
-    reauth: bool,
-    force_interactive: bool,
-    on_stderr: Option<StderrCallback>,
-    url_tx: Option<Rc<RefCell<Option<oneshot::Sender<AuthUrlInfo>>>>>,
-    code_rx: Option<mpsc::Receiver<String>>,
-    login_override: LoginTransportOverride,
-) -> anyhow::Result<(GrokAuth, bool)> {
-    let result = run_auth_flow_steps(
-        auth_manager,
-        grok_com_config,
-        reauth,
-        force_interactive,
-        on_stderr,
-        url_tx,
-        code_rx,
-        login_override,
-    )
-    .await;
-    if let Err(err) = &result
-        && let Some(event) = login_failure_event(err)
-    {
-        xai_grok_telemetry::session_ctx::log_event(event);
-    }
-    result
-}
-
-/// `None` when nothing in the chain failed over HTTP (the user backed out, the
-/// loopback listener couldn't bind, the id_token didn't validate) rather than
-/// inventing a transport verdict for it.
-fn login_failure_event(err: &anyhow::Error) -> Option<LoginFailed> {
-    let source = err
-        .chain()
-        .find_map(|cause| cause.downcast_ref::<reqwest::Error>())?;
-    Some(LoginFailed {
-        error_kind: failure_kind(
-            crate::http::TransportFailure::classify(source).kind,
-            source.is_decode(),
-        ),
-        os_error: crate::http::find_os_error_code(source),
-    })
-}
-
-/// A body that won't parse is a decode failure, not a transport one — even
-/// though `reqwest` also reports it as a body-phase error.
-fn failure_kind(transport: TransportFailureKind, is_decode: bool) -> LoginFailureKind {
-    if is_decode {
-        return LoginFailureKind::Decode;
-    }
-    match transport {
-        TransportFailureKind::Unreachable => LoginFailureKind::TransportConnect,
-        TransportFailureKind::Interrupted => LoginFailureKind::TransportInterrupted,
-        TransportFailureKind::Permanent => LoginFailureKind::TransportPermanent,
-    }
-}
-
-async fn run_auth_flow_steps(
-    auth_manager: &Arc<AuthManager>,
-    grok_com_config: &GrokComConfig,
     reauth: bool,
     force_interactive: bool,
     on_stderr: Option<StderrCallback>,
@@ -1886,6 +1828,7 @@ mod tests {
         ) -> crate::refresh::RefreshOutcome {
             crate::refresh::RefreshOutcome::TransientFailure {
                 message: "simulated network failure".into(),
+                suspected_consumed_rt: None,
             }
         }
     }

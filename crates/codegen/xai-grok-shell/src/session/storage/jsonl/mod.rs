@@ -70,8 +70,6 @@ impl std::fmt::Display for AppendLineError {
         }
     }
 }
-#[cfg(test)]
-type AppendProbe = dyn Fn(AppendDurability) -> io::Result<()> + Send + Sync;
 impl Default for JsonlStorageAdapter {
     fn default() -> Self {
         Self::new()
@@ -333,7 +331,7 @@ impl JsonlStorageAdapter {
                 candidates.push((summary_path, mtime));
             }
         }
-        candidates.sort_unstable_by(|a, b| b.1.cmp(&a.1));
+        candidates.sort_unstable_by_key(|a| std::cmp::Reverse(a.1));
         let max_reads = limit
             .saturating_mul(Self::RECENT_LIST_READ_SLACK)
             .max(limit);
@@ -1351,13 +1349,6 @@ impl StorageAdapter for JsonlStorageAdapter {
         )
         .await
         .map_err(super::AppendChatError::Committed)
-    }
-    async fn append_cwd_switch_commit_aware(
-        &self,
-        info: &Info,
-        message: &ConversationItem,
-    ) -> Result<StrictAppendAck, super::AppendCwdSwitchError> {
-        self.append_cwd_switch_with_bookkeeping(info, message).await
     }
     async fn append_cwd_switch_commit_aware(
         &self,

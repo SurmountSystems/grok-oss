@@ -2,7 +2,7 @@
 //!
 //! grok-oss grep is embedded Rust (`grep` crate + `ignore`), not a sidecar
 //! `rg`. This script does not cargo-install ripgrep and does not copy a
-//! bundled `rg` binary.
+//! bundled `rg` binary. Nix already supplies `pkgs.ripgrep`.
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -20,9 +20,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Download + embed fd as an optional vendored file-search binary, mirroring the ripgrep bundling
-/// (release-only or `GROK_TOOLS_BUNDLE_FD_PATH` override), plus pinned per-asset SHA-256
-/// verification of the downloaded tarball.
+/// Declare `bundle_rg` and never set it.
+///
+/// grok-oss search is the embedded `grep` crate. This function does not
+/// cargo-install ripgrep, does not download a GitHub release tarball, and
+/// does not copy a bundled `rg` binary.
+fn bundle_rg() -> Result<(), Box<dyn std::error::Error>> {
+    println!("cargo:rustc-check-cfg=cfg(bundle_rg)");
+    Ok(())
+}
+
+/// Embed fd when the `pi` feature is on.
+///
+/// A `GROK_TOOLS_BUNDLE_FD_PATH` copy uses `FD_VER` in the file name. A
+/// release build without that path runs `cargo install fd-find --bin fd`.
+/// A debug build without that path does not bundle. GitHub release tarballs
+/// are not the install path, and this does not select a musl asset.
 fn bundle_fd() -> Result<(), Box<dyn std::error::Error>> {
     println!("cargo:rerun-if-env-changed=GROK_TOOLS_BUNDLE_FD_PATH");
     println!("cargo:rustc-check-cfg=cfg(bundle_fd)");
@@ -30,9 +43,6 @@ fn bundle_fd() -> Result<(), Box<dyn std::error::Error>> {
     if env::var_os("CARGO_FEATURE_PI").is_none() {
         return Ok(());
     }
-
-    let gen_dir = PathBuf::from(env::var("OUT_DIR")?).join("bundle-fd");
-    fs::create_dir_all(&gen_dir)?;
 
     // The consuming vendor extraction is unix-only. Never bundle on Windows.
     let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
@@ -47,6 +57,9 @@ fn bundle_fd() -> Result<(), Box<dyn std::error::Error>> {
     if path_override.is_none() && !is_release {
         return Ok(());
     }
+
+    let gen_dir = PathBuf::from(env::var("OUT_DIR")?).join("bundle-fd");
+    fs::create_dir_all(&gen_dir)?;
 
     println!("cargo:rustc-cfg=bundle_fd");
     println!("cargo:rustc-env=GROK_TOOLS_FD_VER={FD_VER}");
@@ -69,62 +82,41 @@ fn bundle_fd() -> Result<(), Box<dyn std::error::Error>> {
     let dest = gen_dir.join(format!("fd-{FD_VER}-cargo-built.bin"));
     let _ = fs::remove_file(&dest);
     cargo_install_fd_find(&dest)?;
-    Ok(());
+    compress_and_pin(&dest, "FD")?;
+    Ok(())
+}
 
-    let url = format!(
-        "https://github.com/sharkdp/fd/releases/download/v{ver}/fd-v{ver}-{asset_triple}.tar.gz"
-    );
+/// Cargo-build `fd` from the `fd-find` crate.
+///
+/// Does not download a GitHub release tarball. Does not rewrite the target
+/// to musl. Passes `--target` only when Cargo already set `TARGET`.
+fn cargo_install_fd_find(dest: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let cargo = env::var("CARGO").map_err(|_| "CARGO is unset")?;
+    let out_dir = PathBuf::from(env::var("OUT_DIR")?);
+    let root = out_dir.join("cargo-install-fd");
+    let target_dir = out_dir.join("cargo-install-fd-target");
+    fs::create_dir_all(&root)?;
+    fs::create_dir_all(&target_dir)?;
 
-    let bytes: Vec<u8> = {
-        let resp = reqwest::blocking::get(&url).map_err(|e| {
-            format!(
-                "Failed to download fd: {e}\nSet GROK_TOOLS_BUNDLE_FD_PATH to a local fd for offline builds."
-            )
-        })?;
-        if !resp.status().is_success() {
-            return Err(format!(
-                "HTTP {} downloading fd. Set GROK_TOOLS_BUNDLE_FD_PATH for offline builds.",
-                resp.status()
-            )
-            .into());
-        }
-        resp.bytes()?.to_vec()
-    };
-
-    // Verify the tarball against the pinned per-asset hash before unpacking.
-    let expected_sha = FD_TARBALL_SHA256
-        .iter()
-        .find(|(v, t, _)| *v == ver && *t == asset_triple)
-        .map(|(_, _, sha)| *sha)
-        .ok_or_else(|| format!("No pinned SHA-256 for fd {ver} {asset_triple}"))?;
-    let actual_sha = {
-        use sha2::Digest as _;
-        let mut hasher = sha2::Sha256::new();
-        hasher.update(&bytes);
-        hex_encode(&hasher.finalize())
-    };
-    if actual_sha != expected_sha {
-        return Err(format!(
-            "SHA-256 mismatch for {url}:\n  expected {expected_sha}\n  actual   {actual_sha}"
-        )
-        .into());
-    }
-
-    let gz = flate2::read::GzDecoder::new(bytes.as_slice());
-    let mut ar = tar::Archive::new(gz);
-    let mut found = false;
-    for entry in ar.entries()? {
-        let mut e = entry?;
-        let p = e.path()?;
-        if p.file_name().is_some_and(|n| n == "fd") {
-            let data: Vec<u8> = {
-                let mut v = Vec::new();
-                io::copy(&mut e, &mut v)?;
-                v
-            };
-            fs::write(&dest, &data)?;
-            found = true;
-            break;
+    let mut cmd = Command::new(&cargo);
+    cmd.arg("install")
+        .arg("--version")
+        .arg(FD_VER)
+        .arg("--locked")
+        .arg("--no-track")
+        .arg("--force")
+        .arg("--root")
+        .arg(&root)
+        .arg("--bin")
+        .arg("fd")
+        .arg("fd-find")
+        .env("CARGO_TARGET_DIR", &target_dir);
+    cmd.env_remove("RUSTFLAGS");
+    cmd.env_remove("CARGO_ENCODED_RUSTFLAGS");
+    cmd.env_remove("GROK_TOOLS_BUNDLE_FD_PATH");
+    if let Ok(target) = env::var("TARGET") {
+        if !target.is_empty() {
+            cmd.arg("--target").arg(target);
         }
     }
 
@@ -138,7 +130,14 @@ fn bundle_fd() -> Result<(), Box<dyn std::error::Error>> {
         .into());
     }
 
-    compress_and_pin(&dest, "FD")?;
+    let bin = root.join("bin").join("fd");
+    fs::copy(&bin, dest).map_err(|e| {
+        format!(
+            "copy cargo-built fd from {} to {}: {e}",
+            bin.display(),
+            dest.display()
+        )
+    })?;
     Ok(())
 }
 
@@ -169,9 +168,11 @@ fn compress_and_pin(
     Ok(())
 }
 
-/// Bundle a prebuilt **static** search-tool binary (`bfs`/`ugrep`) when `GROK_TOOLS_BUNDLE_<NAME>_PATH` points at one (supplied by the release
-/// pipeline). Emits `cfg(bundle_<name>)` so the crate's `include_bytes!` + self-extract engages. No auto-download (unlike ripgrep): bfs/ugrep
-/// publish no prebuilt static release assets, so the release pipeline supplies the path.
+/// Bundle a prebuilt static search-tool binary (`bfs`/`ugrep`) when
+/// `GROK_TOOLS_BUNDLE_<NAME>_PATH` points at one (supplied by the release
+/// pipeline). Emits `cfg(bundle_<name>)` so the crate's `include_bytes!` +
+/// self-extract engages. No auto-download: bfs/ugrep publish no prebuilt
+/// static release assets, so the release pipeline supplies the path.
 fn bundle_search_tool(
     name: &str,
     name_uc: &str,
@@ -182,7 +183,7 @@ fn bundle_search_tool(
     println!("cargo:rustc-check-cfg=cfg(bundle_{name})");
 
     // The consumer (`embedded_search_tools`) is `#[cfg(unix)]`, so embedding on a
-    // Windows target is dead weight — skip (mirrors the ripgrep Windows skip).
+    // Windows target is dead weight.
     if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
         return Ok(());
     }
@@ -202,122 +203,5 @@ fn bundle_search_tool(
     println!("cargo:rustc-env=GROK_TOOLS_{name_uc}_VER={ver}");
     println!("cargo:rustc-env=GROK_TOOLS_{name_uc}_TARGET=override");
     compress_and_pin(&dest, name_uc)?;
-    Ok(())
-}
-
-/// Download + embed ripgrep. Unchanged behavior; split out of `main` so the new
-/// search-tool bundling runs regardless of ripgrep's early returns.
-fn bundle_rg() -> Result<(), Box<dyn std::error::Error>> {
-    // Only bundle in release builds to avoid slowing down cargo check.
-    println!("cargo:rerun-if-env-changed=GROK_TOOLS_BUNDLE_RG_PATH");
-    println!("cargo:rustc-check-cfg=cfg(bundle_rg)");
-
-    let gen_dir = PathBuf::from(env::var("OUT_DIR")?).join("bundle-rg");
-    fs::create_dir_all(&gen_dir)?;
-
-    // Decide whether to bundle: path override OR release build
-    let path_override = env::var("GROK_TOOLS_BUNDLE_RG_PATH").ok();
-    let is_release = env::var("PROFILE").as_deref() == Ok("release");
-    if path_override.is_none() && !is_release {
-        return Ok(());
-    }
-
-    // Skip auto-bundling on Windows: ripgrep ships .zip on Windows (not .tar.gz) and we have no zip-extraction path. Returning here BEFORE
-    // emitting `cargo:rustc-cfg=bundle_rg` keeps include_bytes! macros gated on cfg(bundle_rg) compiled-out, so the runtime falls back to `rg` on
-    // PATH. Users install ripgrep separately (winget / scoop). An explicit GROK_TOOLS_BUNDLE_RG_PATH still bundles regardless of target.
-    let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
-    if target_os == "windows" && path_override.is_none() {
-        return Ok(());
-    }
-
-    // Expose cfg so the crate can include the bundled bytes.
-    println!("cargo:rustc-cfg=bundle_rg");
-    println!("cargo:rustc-env=GROK_TOOLS_RG_VER={}", RG_VER);
-
-    // If a local rg binary is provided, copy it directly (skips target check).
-    if let Some(path) = path_override {
-        let dest = gen_dir.join(format!("rg-{}-override.bin", RG_VER));
-        println!("cargo:rustc-env=GROK_TOOLS_RG_TARGET=override");
-        let _ = fs::remove_file(&dest);
-        fs::copy(PathBuf::from(path.clone()), &dest).map_err(|e| {
-            format!(
-                "Failed copying GROK_TOOLS_BUNDLE_RG_PATH: {e} from path {path} to dest {}",
-                dest.display()
-            )
-        })?;
-        compress_and_pin(&dest, "RG")?;
-        return Ok(());
-    }
-
-    // Determine supported ripgrep asset triple for auto-download.
-    let target_arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
-    let asset_triple = match (target_os.as_str(), target_arch.as_str()) {
-        ("macos", "aarch64") => "aarch64-apple-darwin",
-        ("macos", "x86_64") => "x86_64-apple-darwin",
-        ("linux", "x86_64") => "x86_64-unknown-linux-musl",
-        ("linux", "aarch64") => "aarch64-unknown-linux-gnu",
-        _ => {
-            return Err(format!(
-                "Unsupported target for ripgrep bundling: {os}-{arch}. Set GROK_TOOLS_BUNDLE_RG_PATH to a local rg binary for offline or unsupported builds.",
-                os = target_os,
-                arch = target_arch
-            ).into());
-        }
-    };
-
-    println!("cargo:rustc-env=GROK_TOOLS_RG_TARGET={}", asset_triple);
-    let dest = gen_dir.join(format!("rg-{}-{}.bin", RG_VER, asset_triple));
-    let _ = fs::remove_file(&dest);
-
-    let url = format!(
-        "https://github.com/BurntSushi/ripgrep/releases/download/{v}/ripgrep-{v}-{t}.tar.gz",
-        v = RG_VER,
-        t = asset_triple
-    );
-
-    let bytes: Vec<u8> = {
-        let resp = reqwest::blocking::get(&url).map_err(|e| {
-            format!(
-                "Failed to download ripgrep: {}\nSet GROK_TOOLS_BUNDLE_RG_PATH to a local rg for offline builds.",
-                e
-            )
-        })?;
-        if !resp.status().is_success() {
-            return Err(format!(
-                "HTTP {} downloading ripgrep. Set GROK_TOOLS_BUNDLE_RG_PATH for offline builds.",
-                resp.status()
-            )
-            .into());
-        }
-        resp.bytes()?.to_vec()
-    };
-
-    let gz = flate2::read::GzDecoder::new(bytes.as_slice());
-    let mut ar = tar::Archive::new(gz);
-    let mut found = false;
-    for entry in ar.entries()? {
-        let mut e = entry?;
-        let p = e.path()?;
-        if p.file_name().is_some_and(|n| n == "rg") {
-            let data: Vec<u8> = {
-                let mut v = Vec::new();
-                io::copy(&mut e, &mut v)?;
-                v
-            };
-            fs::write(&dest, &data)?;
-            found = true;
-            break;
-        }
-    }
-
-    if !found {
-        return Err(format!(
-            "Could not find 'rg' in ripgrep archive {}. Set GROK_TOOLS_BUNDLE_RG_PATH for offline builds.",
-            url
-        )
-        .into());
-    }
-
-    compress_and_pin(&dest, "RG")?;
     Ok(())
 }

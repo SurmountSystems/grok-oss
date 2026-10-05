@@ -21,6 +21,11 @@ pub struct UiConfig {
     /// Read by pager, declared here for `serde_ignored`.
     #[serde(default)]
     pub compact_mode: bool,
+    /// Hide the in-app status bar, welcome top bar, and dashboard header.
+    /// Default off. A missing key stays off. Distinct from the retired
+    /// `hide_title_bar` key, which deserialize ignores.
+    #[serde(default)]
+    pub hide_header: bool,
     /// Read by pager, declared here for `serde_ignored`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub simple_mode: Option<bool>,
@@ -54,6 +59,11 @@ pub struct UiConfig {
     /// `None` means on (default). Env `GROK_SCRUB_ASCII_PUNCT=0` also disables.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scrub_ascii_punct: Option<bool>,
+    /// Use a ULID as the primary session id. `None` means on (default).
+    /// `Some(false)` shows the Grok Build UUID as the primary id. The ULID
+    /// map still exists either way.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ulid_session_ids: Option<bool>,
     /// Ask before rewinding conversation history. `None` means on (default).
     /// Written by the pager's settings modal / rewind "Yes, and don't ask again".
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -64,6 +74,11 @@ pub struct UiConfig {
     /// stored `session.models.reasoning_effort`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turbo_planning: Option<bool>,
+    /// How plan approval opens. `"soft"` is the side panel (default when
+    /// unset). `"modal"` opens fullscreen. Any other string falls back to
+    /// soft.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_approval_park: Option<String>,
     /// Soft process-rule reminders injected into nested spawn. `None` = on.
     /// Off injects no extra reminder text. Not a deny and not a spawn cap.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -199,6 +214,15 @@ pub struct UiConfig {
     /// `"fullscreen"` | `"minimal"`; unset uses the product default, fullscreen.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub screen_mode: Option<String>,
+    /// Whether the Human box may insert newlines from Enter / Shift+Enter.
+    /// `None` means on (default). `Some(false)` keeps the box single-line.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub composer_multiline: Option<bool>,
+    /// Whether session Multiline may be enabled from slash, Ctrl+M, or the
+    /// settings row. `None` means on (default). Distinct from
+    /// `composer_multiline`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_session_multiline: Option<bool>,
     /// Retired hidden opt-in for terminal-like double/triple-click word/line selection. Superseded by `keep_text_selection =
     /// "word_select"`. Still read only when `keep_text_selection` is unset; Settings clears this on write. `"word_select"` |
     /// unset.
@@ -318,6 +342,7 @@ impl Default for UiConfig {
             ulid_session_ids: None,
             confirm_before_rewind: None,
             turbo_planning: None,
+            plan_approval_park: None,
             process_rule_reminders_enabled: None,
             process_rule_reminders: None,
             auto_dark_theme: None,
@@ -403,6 +428,15 @@ impl UiConfig {
     pub fn scrub_ascii_punct_enabled(&self) -> bool {
         self.scrub_ascii_punct
             .unwrap_or(Self::SCRUB_ASCII_PUNCT_DEFAULT)
+    }
+
+    /// Default for [`Self::ulid_session_ids`] when unset (on).
+    pub const ULID_SESSION_IDS_DEFAULT: bool = true;
+
+    /// Whether the primary session id is a ULID. Unset means on.
+    pub fn ulid_session_ids_enabled(&self) -> bool {
+        self.ulid_session_ids
+            .unwrap_or(Self::ULID_SESSION_IDS_DEFAULT)
     }
 
     pub fn confirm_before_rewind_enabled(&self) -> bool {
@@ -544,16 +578,6 @@ mod tests {
             ..Default::default()
         };
         assert!(!off.confirm_before_rewind_enabled());
-    }
-
-    #[test]
-    fn page_flip_on_send_defaults_on() {
-        assert!(UiConfig::default().page_flip_on_send_enabled());
-        let off = UiConfig {
-            page_flip_on_send: Some(false),
-            ..Default::default()
-        };
-        assert!(!off.page_flip_on_send_enabled());
     }
 
     #[test]

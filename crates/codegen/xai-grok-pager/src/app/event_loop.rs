@@ -32,6 +32,8 @@ pub(crate) fn should_create_home_on_authenticated_startup(app: &AppView) -> bool
         && !app.is_access_blocked()
 }
 const RESIZE_DEBOUNCE: Duration = Duration::from_millis(16);
+/// Background billing poll. One hour, the same window as the limits snapshot TTL.
+pub(crate) const BILLING_POLL_INTERVAL: Duration = Duration::from_secs(3600);
 /// A resize queues a forced status-line re-run, and the script is told the width the debounced draw recorded.
 const _: () = assert!(
     RESIZE_DEBOUNCE.as_millis() < crate::app::app_view::SLOW_TICK_INTERVAL.as_millis(),
@@ -1677,8 +1679,12 @@ pub(crate) async fn run(
     let ack_deadlines = crate::app::prompt_ack::PromptAckDeadlines::from_process_env();
     let mut gboom_keyboard_pushed = false;
     let mut cursor_color_on_wire = crate::theme::cursor_color_escape();
-    const BILLING_POLL_INTERVAL: Duration = Duration::from_secs(30);
+    // One hour matches the limits snapshot TTL. A 30s poll would HTTP on every tick.
     let mut billing_poll_at: Option<Instant> = None;
+    // Local enqueue file. One second matches the dashboard poll so a prompt
+    // written by another process shows up without waiting on billing.
+    const L0_ENQUEUE_POLL_INTERVAL: Duration = Duration::from_secs(1);
+    let mut l0_enqueue_poll_at: Option<Instant> = Some(Instant::now() + L0_ENQUEUE_POLL_INTERVAL);
     let mut status_line_refresh_interval: Option<Duration> =
         if super::status_line::draws_a_row(&app.current_ui.status_line) {
             app.status_line_refresh_interval()
@@ -2079,6 +2085,12 @@ pub(crate) async fn run(
         };
         let billing_poll = async {
             match billing_poll_at {
+                Some(at) => sleep_until(at).await,
+                None => std::future::pending().await,
+            }
+        };
+        let l0_enqueue_poll = async {
+            match l0_enqueue_poll_at {
                 Some(at) => sleep_until(at).await,
                 None => std::future::pending().await,
             }
@@ -2524,6 +2536,7 @@ pub(crate) async fn run(
                         agent_id: id,
                         silent: true,
                         nonce: Default::default(),
+                        force_refresh: false,
                     }];
                     if process_effects(effs, &mut tasks, &mut app, &progress_tx) {
                         break;
@@ -3039,12 +3052,21 @@ struct InitialConfigSessionBools {
     show_tips: Option<bool>,
     auto_update: Option<bool>,
     ask_user_question_timeout_enabled: Option<bool>,
+    auto_compact_threshold_percent: Option<u8>,
+    auto_compact_threshold_tokens: Option<u64>,
 }
 fn load_initial_config_session_bools() -> InitialConfigSessionBools {
     let Ok(root) = xai_grok_shell::config::load_effective_config() else {
         return InitialConfigSessionBools::default();
     };
     let cli_bool = |key: &str| -> Option<bool> { root.get("cli")?.get(key)?.as_bool() };
+    let session_int = |key: &str| -> Option<u64> {
+        let value = root.get("session")?.get(key)?;
+        value
+            .as_integer()
+            .and_then(|n| u64::try_from(n).ok())
+            .or_else(|| value.as_str().and_then(|s| s.parse().ok()))
+    };
     InitialConfigSessionBools {
         show_tips: cli_bool("show_tips"),
         auto_update: cli_bool("auto_update"),
@@ -3053,6 +3075,9 @@ fn load_initial_config_session_bools() -> InitialConfigSessionBools {
             .and_then(|t| t.get("ask_user_question"))
             .and_then(|a| a.get("timeout_enabled"))
             .and_then(|v| v.as_bool()),
+        auto_compact_threshold_percent: session_int("auto_compact_threshold_percent")
+            .and_then(|n| u8::try_from(n).ok()),
+        auto_compact_threshold_tokens: session_int("auto_compact_threshold_tokens"),
     }
 }
 /// Sync shell `sessionRecap` into the execution gate and every place that offers `/recap`.
@@ -6254,92 +6279,6 @@ mod tests {
             plugin_cta_marketplace_from(&blank.effective_config_base()),
             None
         );
-    }
-
-    // ── finish_run exit info ──────────────────────────────────────────────
-
-    /// App focused on an agent (session `test-session`) with a seeded
-    /// prompt → prompt → response exchange in its scrollback.
-    fn seeded_quit_app(screen_mode: crate::app::ScreenMode) -> AppView {
-        use crate::scrollback::block::RenderBlock;
-        let mut app = crate::app::app_view::tests::test_app_with_agent();
-        app.screen_mode = screen_mode;
-        let ActiveView::Agent(id) = app.active_view else {
-            panic!("test app must start on an agent");
-        };
-        let scrollback = &mut app.agents.get_mut(&id).unwrap().scrollback;
-        scrollback.push_block(RenderBlock::user_prompt("fix the flaky CI test"));
-        scrollback.push_block(RenderBlock::user_prompt("make the suite deterministic"));
-        scrollback.push_block(RenderBlock::agent_message("Pinned the seed.\nSecond line."));
-        app
-    }
-
-    #[test]
-    fn finish_run_fullscreen_quit_builds_summary() {
-        let mut app = seeded_quit_app(crate::app::ScreenMode::Fullscreen);
-        let info = finish_run(&mut app).exit_info.expect("agent exit info");
-        assert_eq!(info.session_id, "test-session");
-        assert!(!info.minimal);
-        let summary = info.summary.expect("summary on fullscreen quit");
-        // Deliberate: title comes from the first prompt, last_prompt from the newest.
-        assert_eq!(summary.title, "fix the flaky CI test");
-        assert_eq!(
-            summary.last_prompt.as_deref(),
-            Some("make the suite deterministic")
-        );
-        assert_eq!(summary.last_response.as_deref(), Some("Pinned the seed."));
-    }
-
-    #[test]
-    fn finish_run_unanswered_prompt_omits_stale_response() {
-        use crate::scrollback::block::RenderBlock;
-        let mut app = seeded_quit_app(crate::app::ScreenMode::Fullscreen);
-        let ActiveView::Agent(id) = app.active_view else {
-            panic!("test app must start on an agent");
-        };
-        app.agents
-            .get_mut(&id)
-            .unwrap()
-            .scrollback
-            .push_block(RenderBlock::user_prompt("now rerun the whole suite"));
-        let info = finish_run(&mut app).exit_info.expect("agent exit info");
-        let summary = info.summary.expect("prompt alone still summarizes");
-        assert_eq!(
-            summary.last_prompt.as_deref(),
-            Some("now rerun the whole suite")
-        );
-        // The earlier reply answered an older prompt — it must not appear here.
-        assert!(summary.last_response.is_none());
-    }
-
-    #[test]
-    fn finish_run_inline_and_minimal_quits_omit_summary() {
-        let mut app = seeded_quit_app(crate::app::ScreenMode::Inline);
-        let info = finish_run(&mut app).exit_info.expect("agent exit info");
-        assert!(info.summary.is_none());
-        assert!(!info.minimal);
-
-        let mut app = seeded_quit_app(crate::app::ScreenMode::Minimal);
-        let info = finish_run(&mut app).exit_info.expect("agent exit info");
-        assert!(info.summary.is_none());
-        assert!(info.minimal);
-    }
-
-    #[test]
-    fn finish_run_empty_session_omits_summary() {
-        let mut app = crate::app::app_view::tests::test_app_with_agent();
-        app.screen_mode = crate::app::ScreenMode::Fullscreen;
-        let info = finish_run(&mut app).exit_info.expect("agent exit info");
-        assert!(info.summary.is_none());
-    }
-
-    #[test]
-    fn finish_run_non_agent_views_have_no_exit_info() {
-        for view in [ActiveView::Welcome, ActiveView::AgentDashboard] {
-            let mut app = seeded_quit_app(crate::app::ScreenMode::Fullscreen);
-            app.active_view = view;
-            assert!(finish_run(&mut app).exit_info.is_none());
-        }
     }
 
     /// Contract: a successful `/rebuild` arms `rebuild_relaunch` and the

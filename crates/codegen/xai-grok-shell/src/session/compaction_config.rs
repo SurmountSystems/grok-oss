@@ -172,6 +172,8 @@ pub(crate) struct CompactionConfig {
     pub last_auto_compact_saved_too_little: AtomicBool,
     /// Locks the context window when `GROK_DEBUG_CONTEXT_WINDOW` is set.
     pub context_window_override: Option<std::num::NonZeroU64>,
+    /// Selected context window in tokens. Zero means none. Model switch loads and stores this.
+    pub context_window_selection: std::sync::atomic::AtomicU64,
 
     /// Economic-mode Cell (implement-effort / Token Economy). Nested L2/L3
     /// sampling is capped at 200k via [`crate::util::config::session_sampling_window`];

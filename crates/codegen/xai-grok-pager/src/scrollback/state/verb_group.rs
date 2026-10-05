@@ -234,8 +234,8 @@ pub fn truncation_header_label(
             continue;
         }
         match &entry.block {
-            RenderBlock::ToolCall(block) => acc.push(block.label_kind()?, entry),
-            RenderBlock::Subagent(_) => acc.push(VerbGroupKind::Subagent, entry),
+            RenderBlock::ToolCall(block) => acc.push(block.label_kind()?, entry, true),
+            RenderBlock::Subagent(_) => acc.push(VerbGroupKind::Subagent, entry, true),
             // A participant the vocabulary can't name would leave the label dishonest about what's hidden
             // Decline so the numerically exact plain count renders instead
             _ => return None,
@@ -361,6 +361,10 @@ impl<'e> BucketAccumulator<'e> {
             let suffix = format!(" · {} failed", self.failed_count);
             text.push_str(&suffix);
             spans.push(Span::styled(suffix, theme.fg(theme.accent_error)));
+        }
+        for span in render_group_hook_counts_inline_suffix(&self.hook_counts, theme) {
+            text.push_str(span.content.as_ref());
+            spans.push(span);
         }
         VerbGroupHeaderLabel {
             line: Line::from(spans),

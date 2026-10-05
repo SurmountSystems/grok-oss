@@ -554,6 +554,7 @@ fn measure_entries(entries: &[PickerEntry<'_>]) -> u16 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::buffer_text;
     use ratatui::layout::Rect;
     use xai_grok_pager::views::extensions_modal::ExtensionsModalState;
     use xai_grok_pager::views::mcps_modal::{McpServerDisplayStatus, McpServerInfo, McpWireSource};

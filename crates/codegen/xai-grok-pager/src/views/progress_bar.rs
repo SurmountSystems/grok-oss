@@ -53,6 +53,28 @@ fn bar_cells(width: u16, value: f32) -> impl Iterator<Item = (&'static str, /* f
     })
 }
 
+/// Tracked bar: filled cells use the block glyphs; empty cells use a shade
+/// so the remaining extent stays visible. Callers add their own brackets.
+pub fn progress_bar_tracked_spans(
+    width: u16,
+    value: f32,
+    fg: Color,
+    track: Color,
+    bg: Color,
+) -> Vec<Span<'static>> {
+    let fg_style = Style::default().fg(fg).bg(bg);
+    let track_style = Style::default().fg(track).bg(bg);
+    bar_cells(width, value)
+        .map(|(symbol, filled)| {
+            if filled {
+                Span::styled(symbol.to_string(), fg_style)
+            } else {
+                Span::styled("\u{2591}".to_string(), track_style)
+            }
+        })
+        .collect()
+}
+
 /// Build a progress bar as styled spans (one per cell).
 ///
 /// Each span has `fg` on `bg`, suitable for composing into a `Line`.

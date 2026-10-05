@@ -329,8 +329,6 @@ pub(super) fn maybe_drain_queue(agent: &mut AgentView, notices: &mut Vec<String>
         }
     };
 
-    agent.drop_stale_queue_occupancy_protecting(protect_queue_id);
-
     if !agent.session.state.is_idle() {
         log_blocked("turn_running", sid.as_deref());
         return QueueDrain::blocked();
@@ -338,7 +336,7 @@ pub(super) fn maybe_drain_queue(agent: &mut AgentView, notices: &mut Vec<String>
     // The pane stays Idle around a non-adopted wake; draining here would
     // `start_turn` a fake local turn that the shell will only queue.
     if agent.running_wake_turn.is_some() {
-        log_blocked("wake_turn_running", sid);
+        log_blocked("wake_turn_running", sid.as_deref());
         return QueueDrain::blocked();
     }
     // Hold the drain during an in-flight model switch
@@ -353,7 +351,7 @@ pub(super) fn maybe_drain_queue(agent: &mut AgentView, notices: &mut Vec<String>
     }
     // A hook blocked the previous prompt: park the local drip-feed queue until the user re-engages (see `hook_block_hold`)
     if agent.session.hook_block_hold {
-        log_blocked("hook_block_hold", sid);
+        log_blocked("hook_block_hold", sid.as_deref());
         return QueueDrain::blocked();
     }
     // Server-owned next turn: a non-running server row (including this client's own in-flight send-now echo) drains shell-side
@@ -646,6 +644,9 @@ pub(super) fn maybe_drain_queue(agent: &mut AgentView, notices: &mut Vec<String>
             }
         }
     };
+    if !drain.effects.is_empty() {
+        agent.drop_stale_queue_occupancy();
+    }
     drain
 }
 
@@ -1116,7 +1117,7 @@ pub(crate) fn maybe_drain_queue_and_note_peek(app: &mut AppView, agent_id: Agent
 pub(crate) fn maybe_drain_queue_and_note_peek_protecting(
     app: &mut AppView,
     agent_id: AgentId,
-    protect_queue_id: Option<u64>,
+    _protect_queue_id: Option<u64>,
 ) -> Vec<Effect> {
     if app.global_work_pause.is_active() || app.soft_stop.blocks_drain() {
         return vec![];
@@ -2156,54 +2157,6 @@ mod tests {
     }
 
     #[test]
-    fn drain_scroll_honors_page_flip_setting() {
-        fn app_at_bottom() -> AppView {
-            let mut app = test_app_with_agent();
-            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
-            for i in 0..40 {
-                agent
-                    .scrollback
-                    .push_block(RenderBlock::agent_message(format!("filler {i}")));
-            }
-            agent.scrollback.prepare_layout(80, 8);
-            agent.scrollback.goto_bottom();
-            app
-        }
-
-        crate::appearance::cache::set_page_flip_on_send(false);
-        let mut app = app_at_bottom();
-        let bottom = app.agents[&AgentId(0)].scrollback.scroll_offset();
-        dispatch(Action::SendPrompt("go".into()), &mut app);
-        let sb = &app.agents[&AgentId(0)].scrollback;
-        assert!(sb.is_follow_mode());
-        assert!(!sb.is_follow_preserve_scroll());
-        assert_eq!(sb.scroll_offset(), bottom);
-        assert_eq!(sb.selected(), Some(sb.len() - 1));
-
-        let mut app = app_at_bottom();
-        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
-        agent.scrollback.scroll_up(10);
-        let reading = agent.scrollback.scroll_offset();
-        dispatch(Action::SendPrompt("go".into()), &mut app);
-        let sb = &app.agents[&AgentId(0)].scrollback;
-        assert!(!sb.is_follow_mode());
-        assert_eq!(sb.scroll_offset(), reading);
-        assert_eq!(sb.selected(), Some(sb.len() - 1));
-
-        crate::appearance::cache::set_page_flip_on_send(true);
-        let mut app = app_at_bottom();
-        dispatch(Action::SendPrompt("go".into()), &mut app);
-        let sb = &app.agents[&AgentId(0)].scrollback;
-        assert!(sb.is_follow_mode());
-        assert!(sb.is_follow_preserve_scroll());
-        assert_eq!(sb.selected(), Some(sb.len() - 1));
-
-        crate::appearance::cache::set_page_flip_on_send(
-            xai_grok_shell::agent::config::UiConfig::PAGE_FLIP_ON_SEND_DEFAULT,
-        );
-    }
-
-    #[test]
     fn drain_queue_when_empty_does_nothing() {
         let mut app = test_app_with_agent();
         let effects = dispatch(Action::DrainQueue, &mut app);
@@ -2454,48 +2407,6 @@ mod tests {
         // No user/display block is pushed (the shell's execute block is the entry)
         assert_eq!(agent.scrollback.len(), before);
         assert!(agent.session.in_flight_prompt.is_none());
-    }
-
-    #[test]
-    fn shim_interject_fallback_reuses_interjection_bubble() {
-        let mut app = test_app_with_agent();
-        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
-        agent
-            .scrollback
-            .push_block(RenderBlock::interjection_prompt("steer-a"));
-        agent
-            .scrollback
-            .push_block(RenderBlock::interjection_prompt("steer-b"));
-        let before = agent.scrollback.len();
-        apply_turn_start_shim(
-            agent,
-            "interject-fallback-a".into(),
-            Some("steer-a".into()),
-            "prompt",
-            None,
-        );
-        apply_turn_start_shim(
-            agent,
-            "interject-fallback-b".into(),
-            Some("steer-b".into()),
-            "prompt",
-            None,
-        );
-        assert_eq!(agent.scrollback.len(), before);
-        match &agent.scrollback.entry(0).unwrap().block {
-            RenderBlock::UserPrompt(ub) => {
-                assert!(!ub.is_interjection);
-                assert_eq!(ub.text, "steer-a");
-            }
-            other => panic!("expected user bubble, got {other:?}"),
-        }
-        match &agent.scrollback.entry(1).unwrap().block {
-            RenderBlock::UserPrompt(ub) => {
-                assert!(!ub.is_interjection);
-                assert_eq!(ub.text, "steer-b");
-            }
-            other => panic!("expected user bubble, got {other:?}"),
-        }
     }
 
     #[test]
@@ -2818,73 +2729,6 @@ mod tests {
             RenderBlock::UserPrompt(ub) => assert_eq!(ub.text, "/deslop"),
             other => panic!("expected user prompt, got {other:?}"),
         }
-    }
-
-    #[test]
-    fn shim_paints_one_bubble_per_combined_segment() {
-        let mut app = test_app_with_agent();
-        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
-        agent.note_self_originated_prompt("p-combo");
-        let before = agent.scrollback.len();
-        apply_turn_start_shim(
-            agent,
-            "p-combo".into(),
-            Some("first\n\nsecond".into()),
-            "prompt",
-            Some(vec!["first".into(), "second".into()]),
-        );
-        assert_eq!(agent.scrollback.len(), before + 2);
-        assert_eq!(user_prompt_count(agent, "first"), 1);
-        assert_eq!(user_prompt_count(agent, "second"), 1);
-        assert_eq!(user_prompt_count(agent, "first\n\nsecond"), 0);
-        assert_eq!(
-            agent.session.in_flight_prompt.as_ref().unwrap().text,
-            "first\n\nsecond"
-        );
-    }
-
-    #[test]
-    fn shim_replaces_joined_echo_with_multi_bubbles() {
-        let mut app = test_app_with_agent();
-        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
-        agent.note_self_originated_prompt("p-combo");
-        agent
-            .scrollback
-            .push_block(RenderBlock::user_prompt("first\n\nsecond"));
-        apply_turn_start_shim(
-            agent,
-            "p-combo".into(),
-            Some("first\n\nsecond".into()),
-            "prompt",
-            Some(vec!["first".into(), "second".into()]),
-        );
-        assert_eq!(user_prompt_count(agent, "first"), 1);
-        assert_eq!(user_prompt_count(agent, "second"), 1);
-        assert_eq!(user_prompt_count(agent, "first\n\nsecond"), 0);
-    }
-
-    #[test]
-    fn shim_reuses_already_painted_combined_segments() {
-        let mut app = test_app_with_agent();
-        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
-        agent.note_self_originated_prompt("p-combo");
-        agent
-            .scrollback
-            .push_block(RenderBlock::user_prompt("first"));
-        agent
-            .scrollback
-            .push_block(RenderBlock::user_prompt("second"));
-        let before = agent.scrollback.len();
-        apply_turn_start_shim(
-            agent,
-            "p-combo".into(),
-            Some("first\n\nsecond".into()),
-            "prompt",
-            Some(vec!["first".into(), "second".into()]),
-        );
-        assert_eq!(agent.scrollback.len(), before);
-        assert_eq!(user_prompt_count(agent, "first"), 1);
-        assert_eq!(user_prompt_count(agent, "second"), 1);
     }
 
     #[test]

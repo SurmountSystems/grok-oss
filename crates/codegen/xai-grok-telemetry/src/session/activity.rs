@@ -68,7 +68,7 @@ impl ActivityGauge {
     fn dec(&self) {
         let _ = self
             .value
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
                 Some(v.saturating_sub(1))
             });
     }

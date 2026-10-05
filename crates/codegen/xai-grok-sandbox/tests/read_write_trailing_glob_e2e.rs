@@ -56,8 +56,8 @@ fn isolation_root_outside_temp_grants() -> PathBuf {
             .expect("clock before epoch")
             .as_millis()
     );
-    let mut bases = Vec::new();
-    if let Some(home) = dirs::home_dir() {
+    let mut bases: Vec<PathBuf> = Vec::new();
+    if let Some(home) = xai_dirs::home_dir() {
         bases.push(home.join(".cache").join("grok-starstar-e2e"));
     }
     bases.push(PathBuf::from("/dev/shm").join("grok-starstar-e2e"));
@@ -93,18 +93,7 @@ fn trailing_glob_read_write_grants_parent_directory() {
     }
 
     // Not under TMPDIR or the test workspace: base profiles already write-allow those trees, which would hide allow-path isolation
-    let root = xai_dirs::home_dir()
-        .expect("home dir required: the control probe relies on HOME-relative paths")
-        .join(".cache")
-        .join("grok-starstar-e2e")
-        .join(format!(
-            "run-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("clock before epoch")
-                .as_millis()
-        ));
+    let root = isolation_root_outside_temp_grants();
     let _cleanup = CleanupGuard(root.clone());
     let workspace = root.join("ws");
     let home = root.join("home");

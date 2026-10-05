@@ -126,7 +126,7 @@ pub(crate) fn task_model_error_for_catalog(
     is_session_auth: bool,
 ) -> Option<String> {
     let is_available = |entry: &ModelEntry| entry.info.is_picker_eligible(is_session_auth);
-    if config::find_model_by_id(available, requested).is_some_and(&is_available) {
+    if config::find_model_by_id(available, requested).is_some_and(is_available) {
         return None;
     }
 

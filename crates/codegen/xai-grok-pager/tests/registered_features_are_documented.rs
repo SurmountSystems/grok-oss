@@ -3,8 +3,8 @@
 
 use xai_grok_shell::agent::config::FEATURES;
 
-const ENTERPRISE: &str = include_str!("../docs/internal/25-enterprise.md");
-const ENV_VARS: &str = include_str!("../docs/internal/22-environment-variables.md");
+const ENTERPRISE: &str = include_str!("../docs/user-guide/26-config-reference.md");
+const ENV_VARS: &str = include_str!("../docs/user-guide/26-config-reference.md");
 
 #[test]
 fn every_registered_feature_reaches_the_operator() {

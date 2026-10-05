@@ -88,12 +88,12 @@ fn refuse_message(shape: &str) -> String {
 fn find_subcommand(args: &[String]) -> Option<(&str, &[String])> {
     let mut i = 0;
     while i < args.len() {
-        let t = args[i].as_str();
+        let t = args.get(i).expect("index out of bounds").as_str();
         if t == "--" {
             return None;
         }
         if matches!(t, "fmt" | "clippy" | "test" | "nextest") {
-            return Some((t, &args[i + 1..]));
+            return Some((t, args.get(i + 1..).expect("index out of bounds")));
         }
         i += 1;
     }
@@ -102,7 +102,10 @@ fn find_subcommand(args: &[String]) -> Option<(&str, &[String])> {
 
 fn split_passthrough(args: &[String]) -> (&[String], &[String]) {
     match args.iter().position(|t| t == "--") {
-        Some(i) => (&args[..i], &args[i + 1..]),
+        Some(i) => (
+            args.get(..i).expect("index out of bounds"),
+            args.get(i + 1..).expect("index out of bounds"),
+        ),
         None => (args, &[]),
     }
 }
@@ -124,7 +127,7 @@ fn has_package_selector(args: &[String]) -> bool {
 fn rustfmt_has_file_list(passthrough: &[String]) -> bool {
     let mut i = 0;
     while i < passthrough.len() {
-        let t = passthrough[i].as_str();
+        let t = passthrough.get(i).expect("index out of bounds").as_str();
         if t == "--" {
             i += 1;
             continue;
@@ -162,12 +165,12 @@ fn rustfmt_flag_takes_value(flag: &str) -> bool {
 fn nextest_run_args(args: &[String]) -> Option<&[String]> {
     let mut i = 0;
     while i < args.len() {
-        let t = args[i].as_str();
+        let t = args.get(i).expect("index out of bounds").as_str();
         if t == "--" {
             return None;
         }
         if t == "run" {
-            return Some(&args[i + 1..]);
+            return Some(args.get(i + 1..).expect("index out of bounds"));
         }
         if t.starts_with('-') {
             i += 1;
@@ -181,7 +184,7 @@ fn nextest_run_args(args: &[String]) -> Option<&[String]> {
 fn has_nextest_filter(args: &[String]) -> bool {
     let mut i = 0;
     while i < args.len() {
-        let t = args[i].as_str();
+        let t = args.get(i).expect("index out of bounds").as_str();
         if t == "--" {
             break;
         }
@@ -238,9 +241,15 @@ fn cargo_argvs(command: &str) -> Vec<Vec<String>> {
     let mut out = Vec::new();
     let mut start = 0;
     for i in 0..=tokens.len() {
-        let is_sep = i == tokens.len() || matches!(tokens[i].as_str(), "&&" | "||" | ";" | "|");
+        let is_sep = i == tokens.len()
+            || matches!(
+                tokens.get(i).expect("index out of bounds").as_str(),
+                "&&" | "||" | ";" | "|"
+            );
         if is_sep {
-            if let Some(argv) = cargo_argv_from_statement(&tokens[start..i]) {
+            if let Some(argv) =
+                cargo_argv_from_statement(tokens.get(start..i).expect("index out of bounds"))
+            {
                 out.push(argv);
             }
             start = i + 1;
@@ -251,23 +260,23 @@ fn cargo_argvs(command: &str) -> Vec<Vec<String>> {
 
 fn cargo_argv_from_statement(stmt: &[String]) -> Option<Vec<String>> {
     let mut i = skip_env_prefix(stmt, 0);
-    if i >= stmt.len() || !is_cargo_bin(&stmt[i]) {
+    if i >= stmt.len() || !is_cargo_bin(stmt.get(i).expect("index out of bounds")) {
         return None;
     }
     i += 1;
-    if i < stmt.len() && stmt[i].starts_with('+') {
+    if i < stmt.len() && stmt.get(i).expect("index out of bounds").starts_with('+') {
         i += 1;
     }
-    Some(stmt[i..].to_vec())
+    Some(stmt.get(i..).expect("index out of bounds").to_vec())
 }
 
 fn skip_env_prefix(stmt: &[String], mut i: usize) -> usize {
-    while i < stmt.len() && is_env_assign(&stmt[i]) {
+    while i < stmt.len() && is_env_assign(stmt.get(i).expect("index out of bounds")) {
         i += 1;
     }
-    if i < stmt.len() && is_env_bin(&stmt[i]) {
+    if i < stmt.len() && is_env_bin(stmt.get(i).expect("index out of bounds")) {
         i += 1;
-        while i < stmt.len() && is_env_assign(&stmt[i]) {
+        while i < stmt.len() && is_env_assign(stmt.get(i).expect("index out of bounds")) {
             i += 1;
         }
     }

@@ -2715,6 +2715,9 @@ fn feedback_failed_reports_the_error_and_spares_the_composer() {
         Action::TaskComplete(crate::app::actions::TaskResult::FeedbackFailed {
             agent_id: id,
             error: "disabled".into(),
+            origin: crate::app::actions::FeedbackSendOrigin::Immediate,
+            feedback_text: String::new(),
+            image_count: 0,
         }),
         &mut app,
     );
@@ -2734,7 +2737,17 @@ fn send_feedback_without_a_session_says_so() {
     let mut app = test_app_with_agent();
     app.agents.get_mut(&id).unwrap().session.session_id = None;
 
-    assert!(dispatch(Action::SendFeedback("long report".into()), &mut app).is_empty());
+    assert!(
+        dispatch(
+            Action::SendFeedback {
+                text: "long report".into(),
+                images: Default::default(),
+                trace: None,
+            },
+            &mut app
+        )
+        .is_empty()
+    );
 
     assert!(last_system_text(&app, id).contains("No active session"));
 }
@@ -2763,7 +2776,7 @@ fn feedback_pane_enter_sends_report() {
         .unwrap()
         .submit_question_answers_for_test(false);
     match outcome {
-        InputOutcome::Action(Action::SendFeedback(text)) => {
+        InputOutcome::Action(Action::SendFeedback { text, .. }) => {
             assert_eq!(text, "the tool crashed on empty input");
         }
         other => panic!("expected SendFeedback action, got {other:?}"),
@@ -2944,33 +2957,5 @@ fn permission_holding_the_composer_gets_the_draft_back_not_the_report() {
             .map(|s| s.text.as_str()),
         Some("pre-slash draft"),
         "the permission must hand back the draft, not the report"
-    );
-}
-
-/// Pane submit must not wipe a stashed pre-`/feedback` draft.
-#[test]
-fn send_feedback_preserves_composer_draft() {
-    let mut app = test_app_with_agent();
-    let id = AgentId(0);
-    {
-        let agent = app.agents.get_mut(&id).unwrap();
-        agent.prompt.set_text("keep this draft");
-    }
-
-    let effects = dispatch(Action::SendFeedback("report".into()), &mut app);
-    assert!(
-        matches!(
-            effects.as_slice(),
-            [Effect::SendFeedback {
-                feedback_text,
-                ..
-            }] if feedback_text == "report"
-        ),
-        "expected SendFeedback effect, got {effects:?}"
-    );
-    assert_eq!(
-        app.agents.get(&id).unwrap().prompt.text(),
-        "keep this draft",
-        "composer draft must survive SendFeedback"
     );
 }

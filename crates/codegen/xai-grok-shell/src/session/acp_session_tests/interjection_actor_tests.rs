@@ -298,6 +298,16 @@ async fn drain_interjection_expands_skill_slash_reference() {
         .await;
 }
 
+fn user_image_urls(user: &xai_grok_sampling_types::UserItem) -> Vec<&str> {
+    user.content
+        .iter()
+        .filter_map(|part| match part {
+            xai_grok_sampling_types::ContentPart::Image { url } => Some(url.as_ref()),
+            _ => None,
+        })
+        .collect()
+}
+
 /// `format_interjection`'s large-prompt truncation applies to the text only.
 /// Image data travels as structured parts and is never truncated or inlined.
 #[tokio::test]

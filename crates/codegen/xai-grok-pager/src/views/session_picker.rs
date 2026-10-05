@@ -1238,27 +1238,6 @@ mod tests {
         assert_eq!(state.expanded, HashSet::from([1, CONTENT_EXPAND_OFFSET]),);
         assert!(!state.expanded.contains(&0), "group header is not an item");
     }
-    #[test]
-    fn expand_all_mapped_session_items_uses_backing_indices() {
-        let entries = vec![make_entry("zero", "repo-a"), make_entry("needle", "repo-b")];
-        let hits = vec![make_content_hit("content")];
-        let map = build_entry_map(
-            Some(&entries),
-            Some(&hits),
-            "needle",
-            true,
-            false,
-            SourceFilter::All,
-            None,
-        );
-        let mut state = PickerState::default();
-        state.set_query("needle");
-
-        expand_all_mapped_session_items(&mut state, &map);
-
-        assert_eq!(state.expanded, HashSet::from([1, CONTENT_EXPAND_OFFSET]),);
-        assert!(!state.expanded.contains(&0), "group header is not an item");
-    }
 
     #[test]
     fn foreign_id_does_not_suppress_native_content_result() {

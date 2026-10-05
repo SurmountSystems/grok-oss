@@ -1,3 +1,4 @@
+#[allow(dead_code)] // shared support module; this binary does not call every helper
 mod support;
 
 use std::fs;

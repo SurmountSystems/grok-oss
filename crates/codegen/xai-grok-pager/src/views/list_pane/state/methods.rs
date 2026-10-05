@@ -1702,6 +1702,12 @@ impl ListPaneState {
         false
     }
 
+    /// Open search the same way `/` does: leave visual mode, then the input bar.
+    pub fn open_search<T: ListItem>(&mut self, items: &[T]) {
+        self.clear_visual_if_active();
+        self.open_input(InputBarMode::Search, items);
+    }
+
     /// Open the input bar in the given mode.
     fn open_input<T: ListItem>(&mut self, mode: InputBarMode, items: &[T]) {
         self.input_mode = Some(mode);

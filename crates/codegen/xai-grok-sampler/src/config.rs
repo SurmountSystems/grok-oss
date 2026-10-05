@@ -34,7 +34,7 @@ pub enum RequestCompression {
 
 /// All knobs that control a single sampling request.
 /// Auth is selected separately via `auth_scheme`, while `api_backend` controls only the request/response protocol shape.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct SamplerConfig {
     pub api_key: Option<String>,
     /// Additional API keys tried when the active key hits a credit /

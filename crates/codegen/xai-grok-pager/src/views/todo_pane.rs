@@ -2,6 +2,9 @@
 //!
 //! Wraps the canonical `TodoItem` type with a `ListItem` implementation that provides status-icon prefixes and styled content.
 
+use std::collections::HashMap;
+use std::path::PathBuf;
+
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use xai_grok_shell::tools::{TodoItem, TodoStatus};

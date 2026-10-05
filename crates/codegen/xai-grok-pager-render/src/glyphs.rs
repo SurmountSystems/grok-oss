@@ -84,6 +84,41 @@ pub fn copy_icon() -> &'static str {
     }
 }
 
+/// Magnifying glass on the Isolated Preview title bar, immediately left of copy.
+/// U+2315 normally, `"s"` on legacy ConHost. Always 1 column.
+pub fn search_icon() -> &'static str {
+    if is_legacy_windows_console() {
+        "s"
+    } else {
+        "\u{2315}"
+    }
+}
+
+/// How long one nested-overlay sparkler frame stays up.
+/// Wide enough that a single draw stays inside the frame the elapsed clock asked for.
+pub const SPARKLER_FRAME_MS: u64 = 2_000;
+
+/// Live-work glyph at `elapsed_ms` on the nested overlay title.
+/// Non-DOGE themes use the dot spinner. DOGE uses the striped downward marquee.
+/// Frame 0 is the start of the clock. One [`SPARKLER_FRAME_MS`] dwell advances one frame.
+pub fn sparkler_frame_at_ms(elapsed_ms: u64) -> &'static str {
+    let frames = if prefers_doge_striped_spinners() {
+        if is_legacy_windows_console() {
+            doge_striped_down_frames_ascii()
+        } else {
+            doge_striped_down_frames()
+        }
+    } else {
+        dot_spinner_frames()
+    };
+    if frames.is_empty() {
+        return "";
+    }
+    let step = SPARKLER_FRAME_MS.max(1);
+    let idx = ((elapsed_ms / step) as usize) % frames.len();
+    frames.get(idx).copied().unwrap_or("")
+}
+
 /// `"⇣"` (U+21E3 DOWNWARDS DASHED ARROW) normally, `"↓"` (U+2193) on legacy ConHost. Always 1 column wide.
 ///
 /// Used for the context-token count in the turn-status line.
@@ -142,6 +177,27 @@ pub fn diamond_filled_char() -> char {
 /// Hollow-diamond glyph as a [`char`] (see [`diamond_hollow`]).
 pub fn diamond_hollow_char() -> char {
     diamond_hollow().chars().next().unwrap_or('\u{25C7}')
+}
+
+/// Striped downward marquee used as the DOGE activity spinner.
+pub fn doge_striped_down_frames() -> &'static [&'static str] {
+    const FRAMES: &[&str] = &[
+        "\u{2503}", "\u{2507}", "\u{250b}", "\u{250a}", "\u{2502}", "\u{2506}", "\u{00b7}",
+        "\u{2577}",
+    ];
+    FRAMES
+}
+
+fn doge_striped_down_frames_ascii() -> &'static [&'static str] {
+    const FRAMES: &[&str] = &["|", "!", ":", ".", ":", "!", "|", "."];
+    FRAMES
+}
+
+fn prefers_doge_striped_spinners() -> bool {
+    matches!(
+        crate::theme::Theme::current_kind(),
+        crate::theme::ThemeKind::Doge
+    )
 }
 
 /// Braille spinner; U+2800 is not CP437, so legacy ConHost uses a 1-column ASCII spinner. Frames stay 1 column so layout does not shift.
@@ -421,6 +477,17 @@ pub fn ballot_x_button() -> &'static str {
     }
 }
 
+/// `"[\u{2212}]"` normally, `"[-]"` on legacy ConHost. Always 3 columns wide.
+///
+/// Clear-finished control. Minus, not ballot X.
+pub fn clear_finished_button() -> &'static str {
+    if is_legacy_windows_console() {
+        "[-]"
+    } else {
+        "[\u{2212}]"
+    }
+}
+
 /// `"[↗]"` normally, `"[o]"` on legacy ConHost. Always 3 columns wide.
 ///
 /// Pre-composed bracketed sibling of [`ballot_x_button`] for the bg-task view / enlarge button.
@@ -632,6 +699,22 @@ mod tests {
         }
     }
 
+    /// DOGE activity spinner is the striped downward marquee, not braille.
+    #[test]
+    fn doge_activity_spinners_use_striped_down_marquee_not_braille() {
+        let _pin = crate::theme::cache::pin_theme();
+        crate::theme::cache::set(crate::theme::ThemeKind::Doge);
+        let striped = doge_striped_down_frames();
+        assert!(striped.len() >= 6);
+        assert_eq!(braille_spinner_frames(), striped);
+        assert_ne!(striped.first().copied(), Some("\u{280b}"));
+        assert!(striped.contains(&"\u{2507}"));
+        assert!(striped.contains(&"\u{250b}"));
+        assert!(striped.contains(&"\u{250a}"));
+        assert_eq!(dot_spinner_frames().get(2).copied(), Some("\u{2e2c}"));
+        assert_ne!(braille_spinner_frames(), dot_spinner_frames());
+    }
+
     /// Composer box cursors are 1 column.
     #[test]
     fn cursor_box_glyphs_are_one_column() {
@@ -767,7 +850,7 @@ mod tests {
         assert_eq!(diamond_dotted(), "\u{25C8}");
         assert_eq!(diamond_filled_char(), '\u{25C6}');
         assert_eq!(diamond_hollow_char(), '\u{25C7}');
-        assert_eq!(braille_spinner_frames().first().copied(), Some("\u{280b}"));
+        assert_eq!(braille_spinner_frames(), doge_striped_down_frames());
         assert_eq!(dot_spinner_frames().get(2).copied(), Some("\u{2e2c}"));
         assert_eq!(
             monitor_icon_frames(),

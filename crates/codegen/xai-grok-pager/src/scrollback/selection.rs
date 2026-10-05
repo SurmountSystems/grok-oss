@@ -67,6 +67,8 @@ pub struct RenderOutput {
     pub selection_model: ResolvedSelectionModel,
     /// OSC 8 link overlay for post-flush emission.
     pub link_overlay: LinkOverlay,
+    /// Hit rects for always-on bubble copy glyphs, paired with the entry index.
+    pub bubble_copy_hits: Vec<(Rect, usize)>,
     /// Inline media to render via post-flush escape sequences.
     pub inline_media: Vec<crate::scrollback::render::InlineMediaPlacement>,
     /// Mermaid diagram affordance rows to paint + register click hit-rects for.
@@ -194,6 +196,65 @@ impl SelectionBox {
             width: label_w,
             height: 1,
         })
+    }
+
+    /// Hit-test rect for the optional action left of close.
+    /// A one-column close slot is reserved even when close is not painted,
+    /// so the action x matches the closable layout.
+    pub fn action_button_rect(&self) -> Option<Rect> {
+        let label = self.action_label?;
+        if self.top_clipped || self.inner_area.y == 0 {
+            return None;
+        }
+        let action_w = label.chars().count() as u16;
+        if action_w == 0 {
+            return None;
+        }
+        let close_w = if self.closable {
+            self.close_label
+                .map(|s| s.chars().count() as u16)
+                .unwrap_or(1)
+                .max(1)
+        } else {
+            1
+        };
+        let right_x = self.inner_area.x + self.inner_area.width.saturating_sub(1);
+        let close_x = right_x.saturating_sub(close_w.saturating_sub(1));
+        let action_x = close_x.saturating_sub(1).saturating_sub(action_w);
+        Some(Rect {
+            x: action_x,
+            y: self.inner_area.y - 1,
+            width: action_w,
+            height: 1,
+        })
+    }
+
+    fn action_style(&self) -> Style {
+        let theme = Theme::current();
+        let fg = if !self.action_enabled {
+            theme.gray_dim
+        } else if self.action_hovered {
+            theme.text_primary
+        } else {
+            theme.gray
+        };
+        Style::default().fg(fg)
+    }
+
+    fn paint_action_label(&self, buf: &mut Buffer) {
+        let Some(rect) = self.action_button_rect() else {
+            return;
+        };
+        let Some(label) = self.action_label else {
+            return;
+        };
+        use crate::render::SafeBuf;
+        buf.set_string_safe(rect.x, rect.y, label, self.action_style());
+    }
+
+    /// Paint only the action label. Tests use this without the border pass.
+    pub fn render_action_only(&self, buf: &mut Buffer) {
+        self.paint_action_label(buf);
     }
 
     /// Render the selection box to the buffer. Side borders (│) on left and right edges of inner_area. Top corners (┌┐)

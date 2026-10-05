@@ -843,36 +843,7 @@ impl LocalTerminalActor {
     /// Spawn a command with persistent shell state: restore the prior snapshot
     /// via fd 3, run the user command, dump the new state to fd 4.
     #[cfg(unix)]
-    async fn ensure_static_shell_initialized(&mut self, cwd: &std::path::Path) {
-        if self.static_shell.is_some() && self.login_env.is_some() {
-            return;
-        }
-        let (snapshot, login_env) = tokio::join!(
-            async {
-                if self.static_shell.is_none() {
-                    Some(super::static_shell::StaticShellSnapshot::init(cwd).await)
-                } else {
-                    None
-                }
-            },
-            async {
-                if self.login_env.is_none() {
-                    Some(capture_login_env().await)
-                } else {
-                    None
-                }
-            }
-        );
-        if let Some(snapshot) = snapshot {
-            self.static_shell = Some(snapshot);
-        }
-        if let Some(env) = login_env {
-            self.login_env = Some(env);
-        }
-    }
-
-    #[cfg(unix)]
-    async fn spawn_static_command(
+    async fn spawn_persistent_command(
         &mut self,
         command: &str,
         cwd: &std::path::Path,
@@ -881,27 +852,7 @@ impl LocalTerminalActor {
     ) -> Result<SpawnResult, ComputerError> {
         use command_fds::CommandFdExt;
 
-        let static_shell = self.static_shell.as_ref().unwrap();
-        let prep = static_shell
-            .prepare_command(command, self.search_shadows)
-            .map_err(|e| ComputerError::io(format!("prepare static command: {e}")))?;
-
-        let mut cmd = tokio::process::Command::new(&prep.binary);
-        cmd.args(&prep.args)
-            .current_dir(cwd)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true);
-
-        if let Some(login) = self.login_env.as_ref() {
-            for (key, value) in login {
-                if key != "PATH" && std::env::var_os(key).is_none() {
-                    cmd.env(key, value);
-                }
-            }
-        }
-
+        self.ensure_persistent_shell_initialized(cwd).await;
         let shell_state = self.shell_state.as_ref().unwrap();
         let tracked_cwd_alive = match tokio::fs::metadata(&shell_state.cwd).await {
             Ok(m) => m.is_dir(),
@@ -2085,7 +2036,7 @@ impl LocalTerminalActor {
 
     async fn shutdown_all(&mut self) {
         let sandbox_hook = self.sandbox_launch.as_deref();
-        for (_, process) in self.processes.iter_mut() {
+        for process in self.processes.values_mut() {
             send_sigkill_to_group(process);
             // The dump reader's spawn_blocking thread must not outlive the actor.
             if let Some(handle) = process.state_dump_handle.take() {

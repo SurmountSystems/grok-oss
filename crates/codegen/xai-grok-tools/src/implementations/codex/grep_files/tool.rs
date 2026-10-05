@@ -9,9 +9,10 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
+use tokio::process::Command;
 use tokio::time::timeout;
 
-use crate::implementations::grok_build::grep::embedded::{self, PrintMode, SearchRequest};
+use crate::implementations::grok_build::grep::ripgrep::rg_path;
 use crate::types::output::CodexGrepFilesOutput;
 use crate::types::requirements::Expr;
 #[allow(unused_imports)]
@@ -255,6 +256,7 @@ impl xai_tool_runtime::Tool for CodexGrepFilesTool {
 mod tests {
     use super::*;
     use crate::types::resources::Resources;
+    use std::process::Command as StdCommand;
     use tempfile::TempDir;
 
     /// Build a runtime `ToolCallContext` with the given resources.

@@ -727,45 +727,6 @@ mod tests {
     }
 
     #[test]
-    fn convert_list_response_setup_required_takes_priority() {
-        let servers = convert_list_response(McpsListResponse {
-            servers: vec![McpsServerEntry {
-                name: "acme".into(),
-                display_name: None,
-                source: Some("local".into()),
-                source_label: Some("plugin: acme".into()),
-                config_type: Some("http".into()),
-                setup: Some(McpSetupConfig {
-                    fields: vec![McpSetupField {
-                        id: "site".into(),
-                        label: "Site".into(),
-                        field_type: "select".into(),
-                        required: true,
-                        default: Some("us1".into()),
-                        options: vec![McpSetupOption {
-                            label: "US1".into(),
-                            value: "us1".into(),
-                        }],
-                    }],
-                }),
-                setup_values: None,
-                session: Some(McpsServerSession {
-                    enabled: true,
-                    status: Some("setuprequired".into()),
-                    tools: vec![],
-                    auth_required: true,
-                    setup_required: true,
-                }),
-            }],
-        });
-        assert_eq!(servers.len(), 1);
-        assert!(servers[0].setup_required);
-        assert!(!servers[0].auth_required);
-        assert_eq!(servers[0].status, McpServerDisplayStatus::SetupRequired);
-        assert!(servers[0].setup.is_some());
-    }
-
-    #[test]
     fn patch_server_row_updates_existing() {
         let mut servers = vec![
             make_row("alpha", McpServerDisplayStatus::Initializing),

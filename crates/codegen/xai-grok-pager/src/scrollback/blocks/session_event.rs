@@ -89,6 +89,10 @@ pub enum SessionEvent {
         threshold_tokens: Option<u64>,
         /// Tip banner reason. The model-family switch text wins over the threshold line.
         reason: String,
+        /// Sampling window the compact measured, when the shell sent one.
+        sampling_window: Option<u64>,
+        /// Catalog window painted beside the sampling window, when the shell sent one.
+        catalog_window: Option<u64>,
     },
     /// Auto-compaction completed successfully.
     CompactionCompleted {
@@ -430,9 +434,24 @@ impl SessionEvent {
                 threshold_percent,
                 threshold_tokens,
                 reason,
+                sampling_window,
+                catalog_window,
             } => {
                 if reason == MODEL_FAMILY_SWITCH_COMPACT_BANNER {
                     return MODEL_FAMILY_SWITCH_COMPACT_BANNER.to_string();
+                }
+                if let (Some(sampling), Some(catalog)) = (sampling_window, catalog_window)
+                    && sampling != catalog
+                    && *sampling > 0
+                {
+                    let label = if *sampling >= 1000 {
+                        format!("{}k", sampling / 1000)
+                    } else {
+                        sampling.to_string()
+                    };
+                    return format!(
+                        "Sampling window {label} tokens (catalog window differs). Compacting…"
+                    );
                 }
                 match (threshold_tokens, threshold_percent) {
                     (Some(t), _) => {
@@ -865,6 +884,8 @@ mod tests {
             threshold_percent: Some(80),
             threshold_tokens: None,
             reason: String::new(),
+            sampling_window: None,
+            catalog_window: None,
         };
         assert_eq!(
             with_threshold.message(),
@@ -876,6 +897,8 @@ mod tests {
             threshold_percent: Some(95),
             threshold_tokens: None,
             reason: String::new(),
+            sampling_window: None,
+            catalog_window: None,
         };
         assert_eq!(
             at_product_default.message(),
@@ -887,6 +910,8 @@ mod tests {
             threshold_percent: None,
             threshold_tokens: Some(200_000),
             reason: String::new(),
+            sampling_window: None,
+            catalog_window: None,
         };
         assert_eq!(
             tokens_mode.message(),
@@ -898,6 +923,8 @@ mod tests {
             threshold_percent: None,
             threshold_tokens: None,
             reason: String::new(),
+            sampling_window: None,
+            catalog_window: None,
         };
         assert_eq!(legacy.message(), "Context 81% full. Compacting…");
     }
@@ -1061,26 +1088,6 @@ mod tests {
             headline: "Server error (500)".into(),
             detail: "upstream exploded".into(),
         };
-        assert_eq!(
-            event.message(),
-            "Server error (500) \u{2014} upstream exploded"
-        );
-        let block = SessionEventBlock::new(event);
-        let theme = Theme::current();
-        assert_eq!(
-            block.accent(&ctx()).map(|a| a.color),
-            Some(theme.warning),
-            "request-failed banner must stand out like re-auth"
-        );
-    }
-
-    #[test]
-    fn request_failed_message_and_warning_accent() {
-        let event = SessionEvent::RequestFailed {
-            status: Some(500),
-            headline: "Server error (500)".into(),
-            detail: "upstream exploded".into(),
-        };
         assert_eq!(event.message(), "Server error (500): upstream exploded");
         let block = SessionEventBlock::new(event);
         let theme = Theme::current();
@@ -1123,6 +1130,8 @@ mod tests {
             threshold_percent: None,
             threshold_tokens: None,
             reason: MODEL_FAMILY_SWITCH_COMPACT_BANNER.into(),
+            sampling_window: None,
+            catalog_window: None,
         };
         assert_eq!(event.message(), MODEL_FAMILY_SWITCH_COMPACT_BANNER);
     }
@@ -1135,6 +1144,8 @@ mod tests {
                 threshold_percent: None,
                 threshold_tokens: None,
                 reason: reason.into(),
+                sampling_window: None,
+                catalog_window: None,
             };
             assert_eq!(event.message(), "Context 9% full. Compacting…");
         }
@@ -1227,6 +1238,9 @@ mod tests {
     fn compaction_started_names_sampling_window_when_catalog_differs() {
         let event = SessionEvent::CompactionStarted {
             percentage: 100,
+            threshold_percent: None,
+            threshold_tokens: None,
+            reason: String::new(),
             sampling_window: Some(200_000),
             catalog_window: Some(500_000),
         };
@@ -1258,6 +1272,9 @@ mod tests {
     fn compaction_started_keeps_legacy_copy_when_windows_match() {
         let event = SessionEvent::CompactionStarted {
             percentage: 95,
+            threshold_percent: None,
+            threshold_tokens: None,
+            reason: String::new(),
             sampling_window: Some(500_000),
             catalog_window: Some(500_000),
         };

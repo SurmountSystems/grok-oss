@@ -390,9 +390,8 @@ pub(super) fn format_restore_elapsed(d: std::time::Duration) -> String {
     if secs >= 60 {
         crate::views::dock::fmt_elapsed(secs)
     } else {
-        "Restore complete"
-    };
-    format!("{status} ({}).", format_restore_elapsed(elapsed))
+        format!("{secs}s")
+    }
 }
 /// CANONICAL wire parser for the worktree resume response.
 /// Any other code consuming the `codeRestored` / `restoreSummary` / `restoreDegree` shape MUST go through this function; do not re-implement.
@@ -515,6 +514,8 @@ pub(crate) struct SessionFlags {
     /// Auto (classifier) permission mode (`_meta.autoMode`). Mutually exclusive
     /// with `yolo_mode` on the agent; both may be set only if yolo wins at spawn.
     pub auto_mode: bool,
+    /// Context-only (no tools) for this session. Ignored when yolo or auto win.
+    pub context_only_mode: bool,
     /// Gateway light-frontend (`kind: "chat"`); `--chat` / `/chat`.
     /// Mutually exclusive with Build plan profiles: profiles are omitted and a warn is logged when plan flags are also set.
     pub chat_mode: bool,

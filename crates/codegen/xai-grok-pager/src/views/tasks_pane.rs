@@ -10,10 +10,11 @@ use super::overlay::OverlayState;
 use crate::app::agent::{BgTaskState, BgTaskStatus, ScheduledTaskInfo};
 use crate::app::agent_view::l2_token_tracking::{
     LiveJobRowInput, STANDING_WRAP_ESTIMATE_TOKENS, STANDING_WRAP_ESTIMATE_WALL,
-    display_live_job_row, shown_nested_count, sum_shown_counts_once,
+    display_live_job_row, format_measured_tokens_suffix, shown_nested_count, sum_shown_counts_once,
 };
 use crate::app::subagent::{
     SubagentInfo, format_context_badge, format_live_l3_count, format_subagent_label,
+    subagent_list_row_usage,
 };
 use crate::appearance::LayoutConfig;
 use crate::scrollback::layout::HorizontalLayout;
@@ -32,6 +33,15 @@ use std::hash::{Hash, Hasher};
 use std::time::{Instant, SystemTime};
 use unicode_width::UnicodeWidthStr;
 const SPINNER_DIVISOR: u64 = 4;
+
+/// Running-row frames. DOGE uses the striped downward marquee. Other themes use the dot spinner.
+fn activity_spinner_frames() -> &'static [&'static str] {
+    if Theme::current_kind() == ThemeKind::Doge {
+        crate::glyphs::doge_striped_down_frames()
+    } else {
+        crate::glyphs::dot_spinner_frames()
+    }
+}
 /// Highlight a shell command string into styled spans. Uses syntect with the best available grammar
 /// for the platform: tries "powershell" first on Windows, falls back to "bash". Returns plain
 /// `theme.command` color if no grammar matches. Results should be cached.
@@ -385,6 +395,10 @@ impl TaskEntry {
             None => description.clone(),
         };
         let type_sep = if description.is_empty() { "" } else { " " };
+        let compact = host_tokens_for_painted_row(info, all)
+            .or_else(|| subagent_list_row_usage(info, all))
+            .map(format_measured_tokens_suffix)
+            .filter(|text| !text.is_empty());
         let mut spans = vec![
             Span::styled(format!("{type_label}{type_sep}"), type_style),
             Span::styled(shown_desc, desc_style),
@@ -409,12 +423,14 @@ impl TaskEntry {
             });
             debug_assert_eq!(shown.l1_tokens_added, 0);
             debug_assert!(!shown.wrote_grok_oss_sqlite);
+            let token_clause = if shown.actual_tokens.is_empty() {
+                String::new()
+            } else {
+                format!(" · {}", shown.actual_tokens)
+            };
             let live_text = format!(
                 " {} · {} · {}{}",
-                shown.estimate_wall,
-                shown.estimate_tokens,
-                shown.elapsed,
-                shown.actual_tokens_clause()
+                shown.estimate_wall, shown.estimate_tokens, shown.elapsed, token_clause
             );
             spans.push(Span::styled(live_text, desc_style));
         }
@@ -1592,6 +1608,8 @@ impl TasksPane {
                 Style::default().fg(theme.accent_error),
             )
         } else if info.is_running() {
+            let frames = activity_spinner_frames();
+            let frame_idx = (self.tick / SPINNER_DIVISOR) as usize % frames.len();
             let elapsed = info.display_elapsed();
             (
                 frames.get(frame_idx).copied().unwrap_or(""),
@@ -1802,6 +1820,8 @@ mod tests {
             child_session_id: Arc::from("cs-1"),
             description: Arc::from("Find API endpoints"),
             subagent_type: Arc::from("explore"),
+            finished: false,
+            status: None,
             attempt: crate::app::subagent::SubagentAttemptInfo {
                 lifecycle: crate::app::subagent::SubagentLifecycleState::running_legacy_for_test(),
                 persona: None,
@@ -2342,35 +2362,28 @@ mod tests {
         a.description = Arc::from("[reviewer] Review implementation");
         a.subagent_type = Arc::from("general-purpose");
         a.finished = false;
-        a.started_at = t0;
+        a.attempt.started_at = t0;
         let mut b = make_info();
         b.subagent_id = Arc::from("sa-b");
         b.child_session_id = Arc::from("cs-b");
         b.description = Arc::from("[reviewer] Review implementation");
         b.subagent_type = Arc::from("general-purpose");
         b.finished = false;
-        b.started_at = t0 + std::time::Duration::from_millis(10);
+        b.attempt.started_at = t0 + std::time::Duration::from_millis(10);
         let mut other = make_info();
         other.subagent_id = Arc::from("sa-other");
         other.child_session_id = Arc::from("cs-other");
         other.description = Arc::from("[implementer] Land the slice");
         other.subagent_type = Arc::from("general-purpose");
         other.finished = false;
-        other.started_at = t0 + std::time::Duration::from_millis(20);
+        other.attempt.started_at = t0 + std::time::Duration::from_millis(20);
 
         let mut subagents = HashMap::new();
         subagents.insert("cs-a".into(), a);
         subagents.insert("cs-b".into(), b);
         subagents.insert("cs-other".into(), other);
 
-        pane.sync(
-            &BTreeMap::new(),
-            &subagents,
-            &HashMap::new(),
-            None,
-            &HashSet::new(),
-            &[],
-        );
+        pane.sync(&BTreeMap::new(), &subagents, &HashMap::new(), &[]);
 
         let same: Vec<_> = pane
             .items
@@ -2671,8 +2684,8 @@ mod tests {
         specialist.child_session_id = "cs-l3".into();
         specialist.subagent_type = "general-purpose".into();
         specialist.description = "Read the tasks pane sort".into();
-        specialist.parent_session_id = Some(Arc::from("cs-plan"));
-        specialist.depth = Some(2);
+        specialist.attempt.parent_session_id = Some(Arc::from("cs-plan"));
+        specialist.attempt.depth = Some(2);
         subagents.insert("cs-plan".into(), plan);
         subagents.insert("cs-explore".into(), explore);
         pane.sync(
@@ -2724,7 +2737,7 @@ mod tests {
     #[test]
     fn entry_label_includes_type_badge() {
         let info = make_info();
-        let entry = entry_from_subagent(&info);
+        let entry = TaskEntry::from_subagent(&info);
         let label = match &entry {
             TaskEntry::Agent { label, .. } => label.as_str(),
             _ => panic!("expected Agent variant"),
@@ -2756,7 +2769,7 @@ mod tests {
     #[test]
     fn entry_label_no_meta_when_empty() {
         let info = make_info();
-        let entry = entry_from_subagent(&info);
+        let entry = TaskEntry::from_subagent(&info);
         let label = match &entry {
             TaskEntry::Agent { label, .. } => label.as_str(),
             _ => panic!("expected Agent variant"),
@@ -2793,8 +2806,8 @@ mod tests {
         info.description = Arc::from(
             "Residual mill occupancy leftover primary plan rewrite that is longer than forty columns",
         );
-        info.tokens_used = Some(112_600);
-        info.activity_label = Some("read_file".into());
+        info.attempt.tokens_used = Some(112_600);
+        info.attempt.activity_label = Some("read_file".into());
         let entry = TaskEntry::from_subagent_with_l3_count(&info, 1, std::slice::from_ref(&&info));
         let (label, styled) = match &entry {
             TaskEntry::Agent { label, styled, .. } => (label, styled),
@@ -2826,16 +2839,16 @@ mod tests {
         let mut l2 = make_info();
         l2.child_session_id = Arc::from("l2-residual");
         l2.description = Arc::from("Residual");
-        l2.depth = Some(1);
-        l2.tokens_used = Some(25_000);
-        l2.tokens_past = 65_000;
+        l2.attempt.depth = Some(1);
+        l2.attempt.tokens_used = Some(25_000);
+        l2.attempt.tokens_past = 65_000;
         let mut l3 = make_info();
         l3.subagent_id = Arc::from("sa-l3");
         l3.child_session_id = Arc::from("l3-specialist");
-        l3.parent_session_id = Some(Arc::from("l2-residual"));
-        l3.depth = Some(2);
+        l3.attempt.parent_session_id = Some(Arc::from("l2-residual"));
+        l3.attempt.depth = Some(2);
         l3.description = Arc::from("read Residual lockstep");
-        l3.tokens_used = Some(50_000);
+        l3.attempt.tokens_used = Some(50_000);
         let all = [&l2, &l3];
         let entry = TaskEntry::from_subagent_with_l3_count(&l2, 1, &all);
         let (label, styled) = match &entry {
@@ -2878,8 +2891,8 @@ mod tests {
     fn l2_row_paints_atomic_figure_once_and_strips_duplicate_token_tail() {
         let mut info = make_info();
         info.description = Arc::from("Wrap the parser (106.8k)");
-        info.tokens_used = Some(106_800);
-        let joined = styled_agent_line(&entry_from_subagent(&info));
+        info.attempt.tokens_used = Some(106_800);
+        let joined = styled_agent_line(&TaskEntry::from_subagent(&info));
         assert_eq!(
             joined.matches("106.8k").count(),
             1,
@@ -2891,7 +2904,7 @@ mod tests {
         );
 
         info.description = Arc::from("Wrap the parser (review notes) (106.8k)");
-        let joined = styled_agent_line(&entry_from_subagent(&info));
+        let joined = styled_agent_line(&TaskEntry::from_subagent(&info));
         assert!(
             joined.contains("(review notes)"),
             "unrelated parentheses stay, got {joined:?}"
@@ -2940,31 +2953,31 @@ mod tests {
         l2.subagent_id = Arc::from("sa-l2-sum");
         l2.child_session_id = Arc::from(L2);
         l2.description = Arc::from("Wrap the parser");
-        l2.depth = Some(1);
-        l2.parent_session_id = Some(Arc::from("sess-l1"));
-        l2.tokens_used = Some(1_000);
-        l2.tokens_past = 0;
+        l2.attempt.depth = Some(1);
+        l2.attempt.parent_session_id = Some(Arc::from("sess-l1"));
+        l2.attempt.tokens_used = Some(1_000);
+        l2.attempt.tokens_past = 0;
         let mut l3a = make_info();
         l3a.subagent_id = Arc::from("sa-l3a-sum");
         l3a.child_session_id = Arc::from(L3A);
-        l3a.parent_session_id = Some(Arc::from(L2));
-        l3a.depth = Some(2);
+        l3a.attempt.parent_session_id = Some(Arc::from(L2));
+        l3a.attempt.depth = Some(2);
         l3a.description = Arc::from("read one file");
-        l3a.tokens_used = Some(2_000);
+        l3a.attempt.tokens_used = Some(2_000);
         let mut l3b = make_info();
         l3b.subagent_id = Arc::from("sa-l3b-sum");
         l3b.child_session_id = Arc::from(L3B);
-        l3b.parent_session_id = Some(Arc::from(L2));
-        l3b.depth = Some(2);
+        l3b.attempt.parent_session_id = Some(Arc::from(L2));
+        l3b.attempt.depth = Some(2);
         l3b.description = Arc::from("read another file");
-        l3b.tokens_used = Some(3_000);
+        l3b.attempt.tokens_used = Some(3_000);
         let mut other = make_info();
         other.subagent_id = Arc::from("sa-l3-other-sum");
         other.child_session_id = Arc::from(L3_OTHER);
-        other.parent_session_id = Some(Arc::from("some-other-l2"));
-        other.depth = Some(2);
+        other.attempt.parent_session_id = Some(Arc::from("some-other-l2"));
+        other.attempt.depth = Some(2);
         other.description = Arc::from("someone else");
-        other.tokens_used = Some(9_000);
+        other.attempt.tokens_used = Some(9_000);
         let all = [&l2, &l3a, &l3b, &other];
 
         let paint = |rows: &[&SubagentInfo]| -> String {
@@ -3052,10 +3065,10 @@ mod tests {
         quiet.subagent_id = Arc::from("sa-quiet-sum");
         quiet.child_session_id = Arc::from(QUIET);
         quiet.description = Arc::from("Quiet row");
-        quiet.depth = Some(1);
-        quiet.parent_session_id = Some(Arc::from("sess-l1"));
-        quiet.tokens_used = None;
-        quiet.tokens_past = 0;
+        quiet.attempt.depth = Some(1);
+        quiet.attempt.parent_session_id = Some(Arc::from("sess-l1"));
+        quiet.attempt.tokens_used = None;
+        quiet.attempt.tokens_past = 0;
         let quiet_row = styled_agent_line(&TaskEntry::from_subagent_with_l3_count(
             &quiet,
             0,
@@ -3104,32 +3117,32 @@ mod tests {
         l2.subagent_id = Arc::from("sa-l2-own-plus-l3");
         l2.child_session_id = Arc::from(L2);
         l2.description = Arc::from("Wrap the parser");
-        l2.depth = Some(1);
-        l2.parent_session_id = Some(Arc::from("sess-l1"));
+        l2.attempt.depth = Some(1);
+        l2.attempt.parent_session_id = Some(Arc::from("sess-l1"));
         // Stale snapshot. The row must read the live counts above, not these.
-        l2.tokens_used = Some(1_000);
-        l2.tokens_past = 0;
+        l2.attempt.tokens_used = Some(1_000);
+        l2.attempt.tokens_past = 0;
         let mut l3a = make_info();
         l3a.subagent_id = Arc::from("sa-l3a-own-plus-l3");
         l3a.child_session_id = Arc::from(L3A);
-        l3a.parent_session_id = Some(Arc::from(L2));
-        l3a.depth = Some(2);
+        l3a.attempt.parent_session_id = Some(Arc::from(L2));
+        l3a.attempt.depth = Some(2);
         l3a.description = Arc::from("read one file");
-        l3a.tokens_used = Some(2_000);
+        l3a.attempt.tokens_used = Some(2_000);
         let mut l3b = make_info();
         l3b.subagent_id = Arc::from("sa-l3b-own-plus-l3");
         l3b.child_session_id = Arc::from(L3B);
-        l3b.parent_session_id = Some(Arc::from(L2));
-        l3b.depth = Some(2);
+        l3b.attempt.parent_session_id = Some(Arc::from(L2));
+        l3b.attempt.depth = Some(2);
         l3b.description = Arc::from("read another file");
-        l3b.tokens_used = Some(3_000);
+        l3b.attempt.tokens_used = Some(3_000);
         let mut other = make_info();
         other.subagent_id = Arc::from("sa-l3-outside-own-plus-l3");
         other.child_session_id = Arc::from(L3_OTHER);
-        other.parent_session_id = Some(Arc::from("some-other-l2"));
-        other.depth = Some(2);
+        other.attempt.parent_session_id = Some(Arc::from("some-other-l2"));
+        other.attempt.depth = Some(2);
         other.description = Arc::from("someone else");
-        other.tokens_used = Some(9_000);
+        other.attempt.tokens_used = Some(9_000);
         let all = [&l2, &l3a, &l3b, &other];
 
         let paint = |rows: &[&SubagentInfo]| -> String {
@@ -3204,10 +3217,10 @@ mod tests {
         quiet.subagent_id = Arc::from("sa-quiet-own-plus-l3");
         quiet.child_session_id = Arc::from(QUIET);
         quiet.description = Arc::from("Quiet row");
-        quiet.depth = Some(1);
-        quiet.parent_session_id = Some(Arc::from("sess-l1"));
-        quiet.tokens_used = None;
-        quiet.tokens_past = 0;
+        quiet.attempt.depth = Some(1);
+        quiet.attempt.parent_session_id = Some(Arc::from("sess-l1"));
+        quiet.attempt.tokens_used = None;
+        quiet.attempt.tokens_past = 0;
         let quiet_row = styled_agent_line(&TaskEntry::from_subagent_with_l3_count(
             &quiet,
             0,
@@ -3266,9 +3279,9 @@ mod tests {
     #[test]
     fn subagent_activity_suffix_skips_stale_preparing_and_uses_last_tool() {
         let mut info = make_info();
-        info.activity_label = Some("Preparing search_replace…".into());
-        info.tools_used = vec![Arc::from("read_file")];
-        let entry = entry_from_subagent(&info);
+        info.attempt.activity_label = Some("Preparing search_replace…".into());
+        info.attempt.tools_used = vec![Arc::from("read_file")];
+        let entry = TaskEntry::from_subagent(&info);
         let styled = match &entry {
             TaskEntry::Agent { styled, .. } => styled,
             _ => panic!("expected Agent variant"),
@@ -3616,14 +3629,7 @@ mod tests {
         subagents.insert("cs-1".into(), info);
         let mut pane = TasksPane::new();
         pane.overlay.show();
-        pane.sync(
-            &BTreeMap::new(),
-            &subagents,
-            &HashMap::new(),
-            None,
-            &HashSet::new(),
-            &[],
-        );
+        pane.sync(&BTreeMap::new(), &subagents, &HashMap::new(), &[]);
 
         let width = 160u16;
         let height = 6u16;

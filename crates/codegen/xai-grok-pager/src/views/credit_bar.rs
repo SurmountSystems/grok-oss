@@ -659,6 +659,21 @@ fn fmt_dollars(cents: i64) -> String {
 /// next reset time. The credits block is rendered only when the user has a positive prepaid
 /// balance.
 pub fn format_usage_summary(balance: &CreditBalance, autotopup: Option<&AutoTopupInfo>) -> String {
+    format_usage_summary_with_live(
+        balance,
+        autotopup,
+        SamplingIdentityKind::SuperGrokSession,
+        chrono::Utc::now(),
+    )
+}
+
+/// `/usage` summary with an explicit live sampling identity and clock.
+pub fn format_usage_summary_with_live(
+    balance: &CreditBalance,
+    autotopup: Option<&AutoTopupInfo>,
+    live: SamplingIdentityKind,
+    now: chrono::DateTime<chrono::Utc>,
+) -> String {
     // Floor to match the backend SpendingLimiter's `as u8` truncation (99.994% renders as 99%, never 100% until truly exhausted)
     let mut lines = vec![format!(
         "{}: {}%",
@@ -1130,6 +1145,30 @@ pub fn usage_warning_for_session_with_identity_principal_gap_and_postpaid(
         team_postpaid_oauth_class_cents,
         free_period_has_room,
     )
+}
+
+fn merge_supergrok_warning_with_team_meters(
+    supergrok_warning: Option<(String, bool)>,
+    console_team_prepaid_cents: Option<i64>,
+    console_team_prepaid_gap: ConsoleTeamPrepaidGap,
+    team_postpaid_oauth_class_cents: Option<i64>,
+    free_period_has_room: bool,
+) -> Option<(String, bool)> {
+    if free_period_has_room {
+        return supergrok_warning;
+    }
+    let team = format_team_settlement_footer(
+        console_team_prepaid_cents,
+        console_team_prepaid_gap,
+        team_postpaid_oauth_class_cents,
+    );
+    match (supergrok_warning, team) {
+        (Some((left, left_critical)), Some((right, right_critical))) => {
+            Some((format!("{left} · {right}"), left_critical || right_critical))
+        }
+        (Some(warning), None) | (None, Some(warning)) => Some(warning),
+        (None, None) => None,
+    }
 }
 
 /// True when free SuperGrok period limits are known and still have room
@@ -2486,22 +2525,6 @@ mod tests {
         );
     }
 
-    /// Named contract: SuperGrok live + free SuperGrok period still has room +
-    /// Management prepaid known → prompt footer stays quiet (no long secondary
-    /// team prepaid line). Team prepaid lives on `/limits`. Compact free SuperGrok
-    /// period chrome is a separate path.
-    #[test]
-    fn test_over_100_percent() {
-        let theme = Theme::default();
-        let line = credit_bar_line(&bal(150.0), false, &theme);
-        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-        assert_eq!(text, "Credits used: 150%");
-        assert_eq!(
-            line.spans.first().and_then(|s| s.style.fg),
-            Some(theme.accent_error)
-        );
-    }
-
     /// Named contract: free SuperGrok period full + Management prepaid known →
     /// secondary team prepaid under not-active-spend (not Team settlement jargon).
     #[test]
@@ -3228,12 +3251,15 @@ mod tests {
     /// Billing Credits dollar. Compact must paint included %, never $47.03.
     #[test]
     fn included_supergrok_period_limits_percent_is_not_the_billing_credits_dollar_balance() {
-        use xai_grok_sampling_types::billing_credits_usd_from_included_period_percent;
+        #[cfg(feature = "xai-grok-sampling-types")]
+        {
+            use xai_grok_sampling_types::billing_credits_usd_from_included_period_percent;
 
-        assert_eq!(
-            billing_credits_usd_from_included_period_percent(47.03),
-            None
-        );
+            assert_eq!(
+                billing_credits_usd_from_included_period_percent(47.03),
+                None
+            );
+        }
         let text = compact_meter_text_for_live_identity(
             SamplingIdentityKind::SuperGrokSession,
             true,

@@ -1,5 +1,3 @@
-use fs2::FileExt as _;
-
 use super::*;
 use crate::{FeedbackFailureMode, FeedbackTaskCategory, FeedbackType};
 

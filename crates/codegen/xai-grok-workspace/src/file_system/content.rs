@@ -1,7 +1,10 @@
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::process::Stdio;
 use std::time::Instant;
 
+use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::process::Command;
 use xai_grok_tools::implementations::grok_build::grep::embedded::{
     PrintMode, SearchRequest, search_line_hits,
 };
@@ -196,7 +199,9 @@ where
         .take()
         .ok_or_else(|| anyhow::anyhow!("Failed to capture ripgrep stdout"))?;
 
-    let mut reader = BufReader::new(stdout).lines();
+    // Hold the pipe until this function returns. Dropping the future drops
+    // the child, which kills rg. The matches themselves come from embedded grep.
+    let _stdout_lines = BufReader::new(stdout).lines();
     let mut files: Vec<ContentMatchFile> = Vec::new();
     let mut pending_files: Vec<ContentMatchFile> = Vec::new();
     let mut total_matches = 0usize;

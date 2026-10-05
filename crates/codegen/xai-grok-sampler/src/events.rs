@@ -20,6 +20,17 @@ pub enum SamplingChannel {
     Narration,
 }
 
+impl SamplingChannel {
+    /// Stable channel name stored on a repetitive-generation error.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Text => "text",
+            Self::Reasoning => "reasoning",
+            Self::Narration => "narration",
+        }
+    }
+}
+
 /// Why the in-flight request was stripped.
 /// What to do about it (e.g. persist the strip to stored history) is the consumer's decision, not the sampler's.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, strum::AsRefStr, strum::IntoStaticStr)]
@@ -252,6 +263,7 @@ impl std::str::FromStr for SamplingErrorKind {
             "empty_response" => Self::EmptyResponse,
             "max_tokens_truncation" => Self::MaxTokensTruncation,
             "doom_loop_detected" => Self::DoomLoopDetected,
+            "repetitive_generation" => Self::RepetitiveGeneration,
             _ => return Err(UnknownSamplingErrorKind),
         })
     }
@@ -575,14 +587,16 @@ mod tests {
             EmptyResponse,
             MaxTokensTruncation,
             DoomLoopDetected,
+            RepetitiveGeneration,
         ];
         for kind in all {
             // Exhaustive match, no `_` arm: a new variant refuses to compile this test until an arm is added
             // That failure is the reminder to also extend `all` and `from_str`
             // Only variants listed in `all` are round-trip-checked; the compiler cannot force those two edits
+            // Repetitive generation is a real stop, not a silent success and not a size overflow.
             match kind {
                 Auth | Http | Api | Serialization | IdleTimeout | RateLimited | EmptyResponse
-                | MaxTokensTruncation | DoomLoopDetected => {}
+                | MaxTokensTruncation | DoomLoopDetected | RepetitiveGeneration => {}
             }
             assert_eq!(kind.as_ref().parse(), Ok(kind));
         }

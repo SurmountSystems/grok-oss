@@ -660,27 +660,6 @@ fn set_confirm_before_rewind_emits_persist_setting_with_correct_payload() {
 fn set_page_flip_on_send_emits_persist_setting_with_correct_payload() {
     use crate::settings::SettingValue;
     let mut app = test_app_with_agent();
-    let default_on = app.current_ui.confirm_before_rewind_enabled();
-    let effects = dispatch(Action::SetConfirmBeforeRewind(!default_on), &mut app);
-    assert_eq!(effects.len(), 1);
-    match effects.first() {
-        Some(Effect::PersistSetting {
-            key,
-            value,
-            rollback_value,
-        }) => {
-            assert_eq!(*key, "page_flip_on_send");
-            assert_eq!(value, &SettingValue::Bool(!default_on));
-            assert_eq!(rollback_value, &SettingValue::Bool(default_on));
-        }
-        other => panic!("expected PersistSetting, got {other:?}"),
-    }
-    assert_eq!(app.current_ui.confirm_before_rewind, Some(!default_on));
-}
-#[test]
-fn set_page_flip_on_send_emits_persist_setting_with_correct_payload() {
-    use crate::settings::SettingValue;
-    let mut app = test_app_with_agent();
     let default_on = app.current_ui.page_flip_on_send_enabled();
     crate::appearance::cache::set_page_flip_on_send(default_on);
     let effects = dispatch(Action::SetPageFlipOnSend(!default_on), &mut app);
@@ -1868,39 +1847,43 @@ fn move_setting_away_from_default(app: &mut AppView, key: crate::settings::Setti
             let _ = dispatch(Action::SetShowThinkingBlocks(true), app);
         }
         "hide_header" => {
-            let _ = dispatch(Action::SetHideHeader(true), app);
+            let _ = super::super::settings::setters::set_hide_header(app, true);
         }
         "always_expand_thinking" => {
-            let _ = dispatch(Action::SetAlwaysExpandThinking(true), app);
+            let _ = super::super::settings::setters::set_always_expand_thinking(app, true);
         }
         "scrub_ascii_punct" => {
-            let _ = dispatch(Action::SetScrubAsciiPunct(false), app);
+            let _ = super::super::settings::setters::set_scrub_ascii_punct(app, false);
         }
         "ulid_session_ids" => {
-            let _ = dispatch(Action::SetUlidSessionIds(false), app);
+            let _ = super::super::settings::setters::set_ulid_session_ids(app, false);
         }
         "allow_worktree" => {
-            let _ = dispatch(Action::SetAllowWorktree(true), app);
+            let _ = super::super::settings::setters::set_allow_worktree(app, true);
         }
         "turbo_planning" => {
             let away = !crate::appearance::cache::load_turbo_planning();
-            let _ = dispatch(Action::SetTurboPlanning(away), app);
+            let _ = super::super::settings::setters::set_turbo_planning(app, away);
         }
         "process_rule_reminders_enabled" => {
-            let away = !app.current_ui.process_rule_reminders_enabled();
-            let _ = dispatch(Action::SetProcessRuleRemindersEnabled(away), app);
+            let away = !app
+                .current_ui
+                .process_rule_reminders_enabled
+                .unwrap_or(true);
+            let _ = super::super::settings::setters::set_process_rule_reminders_enabled(app, away);
         }
         "process_rule_reminders" => {
-            let _ = dispatch(
-                Action::SetProcessRuleReminders("only two implementor L2s allowed".to_string()),
+            let _ = super::super::settings::setters::set_process_rule_reminders(
                 app,
+                "only two implementor L2s allowed".to_string(),
             );
         }
         "bubble_copy_buttons" => {
-            let _ = dispatch(Action::SetBubbleCopyButtons(false), app);
+            let _ = super::super::settings::setters::set_bubble_copy_buttons(app, false);
         }
         "plan_approval_park" => {
-            let _ = dispatch(Action::SetPlanApprovalPark("modal".to_string()), app);
+            let _ =
+                super::super::settings::setters::set_plan_approval_park(app, "modal".to_string());
         }
         "group_tool_verbs" => {
             let _ = dispatch(Action::SetGroupToolVerbs(false), app);
@@ -1993,19 +1976,21 @@ fn move_setting_away_from_default(app: &mut AppView, key: crate::settings::Setti
             );
         }
         "cancel_subagents_on_turn_cancel" => {
-            let _ = dispatch(
-                Action::SetCancelSubagentsOnTurnCancel("always_stop".to_string()),
+            let _ = super::super::settings::setters::set_cancel_subagents_on_turn_cancel(
                 app,
+                "always_stop".to_string(),
             );
         }
         "notifications.session_recap" => {
-            let _ = dispatch(Action::SetNotificationsSessionRecap(false), app);
+            let _ = super::super::settings::setters::set_notifications_session_recap(app, false);
         }
         "notifications.session_recap_threshold_secs" => {
-            let _ = dispatch(Action::SetNotificationsSessionRecapThresholdSecs(90), app);
+            let _ = super::super::settings::setters::set_notifications_session_recap_threshold_secs(
+                app, 90,
+            );
         }
         "features.session_recap" => {
-            let _ = dispatch(Action::SetFeaturesSessionRecap(false), app);
+            let _ = super::super::settings::setters::set_features_session_recap(app, false);
         }
         "auto_compact_threshold_percent" => {
             let _ = dispatch(
@@ -2136,7 +2121,6 @@ fn set_simple_mode_propagates_to_every_agent() {
             next_queue_id: 0,
             yolo_mode: false,
             auto_mode: false,
-            context_only_mode: false,
             prompt_history: Vec::new(),
             prompt_history_loading: false,
             loading_replay: false,
@@ -2804,7 +2788,7 @@ fn set_always_expand_thinking_refolds_live_thinking_in_parent_and_nested_overlay
         "always-expand off paints nested overlay thinking as a header"
     );
 
-    let _ = dispatch(Action::SetAlwaysExpandThinking(true), &mut app);
+    let _ = super::super::settings::setters::set_always_expand_thinking(&mut app, true);
     assert_eq!(
         app.agents[&id]
             .scrollback
@@ -2824,7 +2808,7 @@ fn set_always_expand_thinking_refolds_live_thinking_in_parent_and_nested_overlay
         "Settings on must expand nested overlay thinking immediately"
     );
 
-    let _ = dispatch(Action::SetAlwaysExpandThinking(false), &mut app);
+    let _ = super::super::settings::setters::set_always_expand_thinking(&mut app, false);
     assert_eq!(
         app.agents[&id]
             .scrollback
@@ -2886,7 +2870,6 @@ fn ctrl_t_collapse_persists_always_expand_thinking_off() {
     let id = AgentId(0);
     {
         let parent = app.agents.get_mut(&id).unwrap();
-        parent.scrollback.apply_always_expand_thinking_flip(true);
         parent
             .scrollback
             .push_block(RenderBlock::thinking("open thought"));

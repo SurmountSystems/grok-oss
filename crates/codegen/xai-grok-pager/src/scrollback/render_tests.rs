@@ -1288,6 +1288,10 @@ fn message_block_content_width_subtracts_timestamp_reservation() {
 
     let pane_content_width = result.selection_model.content_area.width;
     let block = &at(&result.selection_model.visible_blocks, 0);
+    let reserved = crate::scrollback::wrappers::message_right_chrome_reserve(
+        &AppearanceConfig::default(),
+        true,
+    );
     assert_eq!(
         block.content_width,
         pane_content_width.saturating_sub(reserved),

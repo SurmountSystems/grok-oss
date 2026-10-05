@@ -356,6 +356,7 @@ pub(super) fn handle_billing_fetched(
     let summary_topup = app.auto_topup.clone();
     let tier_now = app.subscription_tier.clone();
     if let Some(agent) = app.agents.get_mut(&agent_id) {
+        agent.console_prepaid_billing_settled = true;
         // Gateway/chat-kind: do not attach Build coding credits.
         let mut topup = agent.auto_topup.clone();
         apply_auto_topup(&mut topup, &autotopup);
@@ -532,6 +533,7 @@ pub(super) fn handle_credit_limit_recheck_complete(
         agent_id,
         silent: true,
         nonce: Default::default(),
+        force_refresh: false,
     });
     note_peek_page_flip(app, agent_id, drain.page_flip_entry);
     drain.effects

@@ -92,6 +92,7 @@ async fn blocked_user_prompt_cancels_turn_without_sampling() {
                 /* json_schema */ None,
                 /* persist_ack */ None,
                 /* parsed_prompt_tx */ None,
+                /* unstick_retry */ false,
             ))
             .await;
 
@@ -158,6 +159,7 @@ async fn hook_system_message_reaches_user_as_annotation() {
                 /* json_schema */ None,
                 /* persist_ack */ None,
                 /* parsed_prompt_tx */ None,
+                /* unstick_retry */ false,
             ))
             .await;
             let ok = result.expect("a hook block must resolve Ok(Cancelled)");
@@ -267,6 +269,7 @@ async fn synthetic_prompt_ignores_hook_block() {
                     None,
                     None,
                     None,
+                    false,
                 ))
                 .await
             });
@@ -334,6 +337,7 @@ async fn subagent_session_ignores_hook_block() {
                     None,
                     None,
                     None,
+                    false,
                 ))
                 .await
             });
@@ -664,6 +668,7 @@ async fn synthetic_prompt_commits_despite_blocking_hook() {
                     None,
                     None,
                     None,
+                    false,
                 ))
                 .await
             });
@@ -725,6 +730,7 @@ async fn blocked_prompt_never_enters_chat_state() {
                 /* json_schema */ None,
                 /* persist_ack */ None,
                 /* parsed_prompt_tx */ None,
+                /* unstick_retry */ false,
             ))
             .await;
             let ok = result.expect("a hook block must resolve Ok(Cancelled)");
@@ -759,6 +765,7 @@ async fn blocked_prompt_never_enters_chat_state() {
                     /* json_schema */ None,
                     /* persist_ack */ None,
                     /* parsed_prompt_tx */ None,
+                    /* unstick_retry */ false,
                 )),
             )
             .await
@@ -840,6 +847,7 @@ async fn blocked_prompt_never_reaches_persistence() {
                 /* json_schema */ None,
                 /* persist_ack */ None,
                 /* parsed_prompt_tx */ None,
+                /* unstick_retry */ false,
             ))
             .await;
             let ok = result.expect("a hook block must resolve Ok(Cancelled)");
@@ -872,6 +880,7 @@ async fn blocked_prompt_never_reaches_persistence() {
                     /* json_schema */ None,
                     /* persist_ack */ None,
                     /* parsed_prompt_tx */ None,
+                    /* unstick_retry */ false,
                 )),
             )
             .await
@@ -918,6 +927,7 @@ async fn blocked_prompt_resolves_persist_ack() {
                 /* json_schema */ None,
                 /* persist_ack */ Some(ack_tx),
                 /* parsed_prompt_tx */ None,
+                /* unstick_retry */ false,
             ))
             .await;
             result.expect("a hook block must resolve Ok(Cancelled)");
@@ -964,6 +974,7 @@ async fn blocked_turn_preserves_prior_interrupt_marker() {
                 /* json_schema */ None,
                 /* persist_ack */ None,
                 /* parsed_prompt_tx */ None,
+                /* unstick_retry */ false,
             ))
             .await;
             result.expect("a hook block must resolve Ok(Cancelled)");
@@ -1012,6 +1023,7 @@ async fn blocked_turn_preserves_redirect_marker() {
                 /* json_schema */ None,
                 /* persist_ack */ None,
                 /* parsed_prompt_tx */ None,
+                /* unstick_retry */ false,
             ))
             .await;
             result.expect("a hook block must resolve Ok(Cancelled)");
@@ -1059,6 +1071,7 @@ async fn blocked_prompt_consumes_no_prompt_index() {
                 /* json_schema */ None,
                 /* persist_ack */ None,
                 /* parsed_prompt_tx */ None,
+                /* unstick_retry */ false,
             ))
             .await;
             result.expect("a hook block must resolve Ok(Cancelled)");
@@ -1084,6 +1097,7 @@ async fn blocked_prompt_consumes_no_prompt_index() {
                     /* json_schema */ None,
                     /* persist_ack */ None,
                     /* parsed_prompt_tx */ None,
+                    /* unstick_retry */ false,
                 )),
             )
             .await

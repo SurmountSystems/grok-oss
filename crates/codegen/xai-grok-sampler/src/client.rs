@@ -793,6 +793,13 @@ impl SamplingClient {
         Self::sent_fragment_from_headers(&self.default_headers, &self.defaults.auth_scheme)
     }
 
+    /// Truncated credential fragment for [`Self::auth_error_for_wire`].
+    /// Same tail as [`Self::current_sent_bearer_suffix`]: the historical prefix
+    /// length was [`crate::attribution::BEARER_SUFFIX_LEN`].
+    fn current_sent_bearer_prefix(&self) -> Option<String> {
+        self.current_sent_bearer_suffix()
+    }
+
     /// Invoke the optional 401 attribution callback for one logical 401 response.
     /// The emit happens at the lowest layer that saw the status, so higher layers that react to a 401 must not emit a duplicate event.
     /// `sent_suffix` is the fragment [`Self::post`] captured for the rejected request.
@@ -913,7 +920,10 @@ impl SamplingClient {
             }
             let message = user_facing_api_error_message(status, bytes.as_ref());
             if is_forbidden_credentials_rejection(status, &message) {
-                self.record_401_attribution(crate::attribution::SamplingConsumer::ChatCompletions);
+                self.record_401_attribution(
+                    crate::attribution::SamplingConsumer::ChatCompletions,
+                    sent_bearer,
+                );
                 return Err(
                     self.auth_error_for_wire(format!("Unauthorized (token rejected): {message}"))
                 );
@@ -1383,7 +1393,10 @@ impl SamplingClient {
 
             let message = user_facing_api_error_message(status, bytes.as_ref());
             if is_forbidden_credentials_rejection(status, &message) {
-                self.record_401_attribution(crate::attribution::SamplingConsumer::Responses);
+                self.record_401_attribution(
+                    crate::attribution::SamplingConsumer::Responses,
+                    sent_bearer.as_deref(),
+                );
                 let endpoint = self.endpoint("responses");
                 return Err(self.auth_error_for_wire(format!(
                     "Unauthorized (token rejected) from {endpoint}: {message}"
@@ -1749,7 +1762,10 @@ impl SamplingClient {
 
             let message = user_facing_api_error_message(status, bytes.as_ref());
             if is_forbidden_credentials_rejection(status, &message) {
-                self.record_401_attribution(crate::attribution::SamplingConsumer::Messages);
+                self.record_401_attribution(
+                    crate::attribution::SamplingConsumer::Messages,
+                    sent_bearer.as_deref(),
+                );
                 let endpoint = self.endpoint("messages");
                 return Err(self.auth_error_for_wire(format!(
                     "Unauthorized (token rejected) from {endpoint}: {message}"
@@ -2232,7 +2248,7 @@ impl SamplingClient {
         };
         let response = result
             .map(|(response, _metrics)| response)
-            .map_err(stream_collect_error)?;
+            .map_err(|info| stream_collect_error(*info))?;
         apply_length_policy(length_policy, response)
     }
 }
@@ -2267,6 +2283,48 @@ pub(crate) fn apply_length_policy(
             );
             Ok(response)
         }
+    }
+}
+
+fn is_forbidden_credentials_rejection(status: reqwest::StatusCode, message: &str) -> bool {
+    status == reqwest::StatusCode::FORBIDDEN
+        && xai_grok_sampling_types::error::is_credentials_rejected_message(message)
+}
+
+const DEFAULT_STREAM_HEADERS_TIMEOUT_SECS: u64 = 120;
+
+fn stream_headers_timeout_secs(env: Option<&str>) -> u64 {
+    env.and_then(|value| value.parse::<u64>().ok())
+        .filter(|secs| *secs > 0)
+        .unwrap_or(DEFAULT_STREAM_HEADERS_TIMEOUT_SECS)
+}
+
+/// Headers / first-token budget. `GROK_STREAM_HEADERS_TIMEOUT_SECS` overrides the 120s default.
+pub(crate) fn stream_headers_timeout() -> std::time::Duration {
+    let env = std::env::var("GROK_STREAM_HEADERS_TIMEOUT_SECS").ok();
+    std::time::Duration::from_secs(stream_headers_timeout_secs(env.as_deref()))
+}
+
+fn error_cause_chain(err: &dyn std::error::Error) -> String {
+    let mut msg = err.to_string();
+    let mut source = err.source();
+    while let Some(cause) = source {
+        msg.push_str(": ");
+        msg.push_str(&cause.to_string());
+        source = cause.source();
+    }
+    msg
+}
+
+fn format_event_stream_error<E>(e: eventsource_stream::EventStreamError<E>) -> String
+where
+    E: std::error::Error,
+{
+    match e {
+        eventsource_stream::EventStreamError::Transport(inner) => {
+            format!("Transport error: {}", error_cause_chain(&inner))
+        }
+        other => other.to_string(),
     }
 }
 
@@ -2873,56 +2931,6 @@ mod tests {
             &map,
             |var| match var {
                 // Leading space and trailing newline exercise trimming
-                "TENANT" => Some(" tenant-secret\n".to_string()),
-                "BLANK" => Some("   ".to_string()),
-                "OVERRIDE" => Some("from-env".to_string()),
-                "INVALID" => Some("value".to_string()),
-                _ => None,
-            },
-            &mut headers,
-        );
-
-        assert_eq!(headers.get("x-tenant-token").unwrap(), "tenant-secret");
-        assert!(headers.get("x-blank").is_none());
-        assert!(headers.get("x-missing").is_none());
-        // A resolved env value overrides an existing header of the same name.
-        assert_eq!(headers.get("x-override").unwrap(), "from-env");
-        // An invalid header name is skipped rather than panicking.
-        assert!(headers.get("x invalid").is_none());
-    }
-
-    #[test]
-    fn endpoint_appends_path_before_a_base_url_query_without_configured_params() {
-        let template =
-            EndpointTemplate::new("https://gateway.example/v1?api-version=x", &IndexMap::new());
-        let url = template.url_for_path("responses");
-        assert!(
-            url.starts_with("https://gateway.example/v1/responses?"),
-            "url: {url}"
-        );
-        assert!(url.contains("api-version=x"), "url: {url}");
-        assert!(!url.contains("x/responses"), "url: {url}");
-    }
-
-    #[test]
-    fn apply_env_http_headers_resolves_trims_skips_and_overrides() {
-        let mut map = IndexMap::new();
-        map.insert("x-tenant-token".to_string(), "TENANT".to_string());
-        map.insert("x-blank".to_string(), "BLANK".to_string());
-        map.insert("x-missing".to_string(), "MISSING".to_string());
-        map.insert("x-override".to_string(), "OVERRIDE".to_string());
-        map.insert("x invalid".to_string(), "INVALID".to_string());
-
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            HeaderName::from_static("x-override"),
-            HeaderValue::from_static("static"),
-        );
-
-        apply_env_http_headers(
-            &map,
-            |var| match var {
-                // Leading space + trailing newline exercises trimming.
                 "TENANT" => Some(" tenant-secret\n".to_string()),
                 "BLANK" => Some("   ".to_string()),
                 "OVERRIDE" => Some("from-env".to_string()),

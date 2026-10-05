@@ -9,7 +9,7 @@
 
 use std::time::{Duration, Instant};
 
-use ratatui::buffer::Buffer;
+use ratatui::buffer::{Buffer, CellDiffOption};
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier};
 use unicode_width::UnicodeWidthStr as _;
@@ -154,7 +154,7 @@ pub(crate) fn last_visible_column(buf: &Buffer, y: u16) -> Option<u16> {
     let area = buf.area;
     for x in (area.x..area.x.saturating_add(area.width)).rev() {
         if let Some(cell) = buf.cell((x, y)) {
-            if cell.skip {
+            if cell.diff_option == CellDiffOption::Skip {
                 continue;
             }
             let s = cell.symbol();
@@ -215,7 +215,7 @@ pub(crate) fn trim_trailing_pads(buf: &mut Buffer) {
                 continue;
             }
             cell.reset();
-            cell.skip = true;
+            cell.set_diff_option(CellDiffOption::Skip);
         }
     }
 }
@@ -401,6 +401,7 @@ fn color_code(color: Color, bg: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::buffer::CellDiffOption;
     use xai_grok_pager::scrollback::block::RenderBlock;
 
     fn test_cwd() -> &'static std::path::Path {
@@ -610,7 +611,10 @@ mod tests {
 
         let last_pad = buf.cell((width.saturating_sub(1), 0)).expect("last pad");
         assert_eq!(last_pad.bg, band, "commit paint keeps the diff-band pad");
-        assert!(!last_pad.skip, "painted pad is not a skip cell");
+        assert!(
+            last_pad.diff_option != CellDiffOption::Skip,
+            "painted pad is not a skip cell"
+        );
         assert_eq!(
             last_visible_column(&buf, 0),
             Some(1),
@@ -720,7 +724,10 @@ mod tests {
             cont.symbol().is_empty(),
             "wide-glyph spacer must survive trim"
         );
-        assert!(!cont.skip, "continuation is not a pad");
+        assert!(
+            cont.diff_option != CellDiffOption::Skip,
+            "continuation is not a pad"
+        );
 
         let wraps = [true, false];
         let rows = buffer_to_semantic_rows(&buf, &wraps);
@@ -749,7 +756,10 @@ mod tests {
 
         trim_trailing_pads(&mut buf);
         let cont = buf.cell((3, 0)).expect("continuation after trim");
-        assert!(!cont.skip, "space continuation must survive trim: {cont:?}");
+        assert!(
+            cont.diff_option != CellDiffOption::Skip,
+            "space continuation must survive trim: {cont:?}"
+        );
         assert_eq!(cont.symbol(), " ", "continuation stays a space cell");
 
         let wraps = [true, false];

@@ -21,7 +21,7 @@ use crate::app::dispatch::ctx::{
     SwitchCause, find_agent_id_by_session_id, get_active_agent, get_active_agent_mut,
     switch_to_agent, with_active_agent,
 };
-use crate::app::dispatch::modes::{inherit_auto_mode, inherit_context_only_mode};
+use crate::app::dispatch::modes::inherit_auto_mode;
 use crate::app::dispatch::prompt::{defer_to_open_reload_window, supersede_open_reload_window};
 use crate::app::dispatch::queue::{maybe_drain_queue, note_peek_page_flip};
 use crate::app::dispatch::router::dispatch;
@@ -201,7 +201,6 @@ fn dispatch_load_session_ungated(
             next_queue_id: 0,
             yolo_mode: app.default_yolo,
             auto_mode: inherit_auto_mode(app),
-            context_only_mode: inherit_context_only_mode(app),
             prompt_history: Vec::new(),
             prompt_history_loading: true,
             loading_replay: true,
@@ -295,7 +294,6 @@ fn dispatch_load_session_ungated(
         .slash_controller
         .registry_mut()
         .set_plugins_visible(!app.appearance.disable_plugins);
-    wire_forked_from_from_disk(app, agent_id);
     if focus {
         switch_to_agent(app, agent_id, SwitchCause::Load);
     }
@@ -858,6 +856,7 @@ pub(in crate::app::dispatch) fn dispatch_trigger_deep_search(
             generation,
             query,
             seq,
+            kind_filter: super::foreign::welcome_history_kind_filter(app),
         }];
     }
     if app
@@ -895,6 +894,7 @@ pub(in crate::app::dispatch) fn dispatch_trigger_deep_search(
             generation,
             query,
             seq,
+            kind_filter: super::foreign::welcome_history_kind_filter(app),
         }]
     }
 }
@@ -950,6 +950,7 @@ fn dispatch_chat_search_refetch(app: &mut AppView, force: bool) -> Vec<Effect> {
             generation,
             query,
             seq,
+            kind_filter: super::foreign::welcome_history_kind_filter(app),
         }]
     }
 }
@@ -1135,7 +1136,6 @@ pub(in crate::app::dispatch) fn dispatch_load_session_with_restore(
             next_queue_id: 0,
             yolo_mode: app.default_yolo,
             auto_mode: inherit_auto_mode(app),
-            context_only_mode: inherit_context_only_mode(app),
             prompt_history: Vec::new(),
             prompt_history_loading: true,
             loading_replay: true,
@@ -1237,7 +1237,11 @@ fn session_load_keeps_rebuild_flushed_queue(agent: &AgentView) -> bool {
     };
     let cwd = agent.session.cwd.to_string_lossy();
     let sid = session_id.0.as_ref();
-    let Ok(rows) = xai_grok_shell::session::pending_prompts::load_pending_prompts(&cwd, sid) else {
+    let Ok(rows) =
+        xai_grok_shell::session::unsent_prompt_draft::pending_prompts::load_pending_prompts(
+            &cwd, sid,
+        )
+    else {
         return false;
     };
     let Ok(wal) = xai_grok_shell::session::prompt_wal::load_prompt_wal(&cwd, sid) else {
@@ -1319,7 +1323,7 @@ pub(in crate::app::dispatch) fn handle_session_loaded(
     crate::app::workspace_sync::allow_loaded_session(app, session_id.0.as_ref());
     if let Some(agent) = app.agents.get_mut(&agent_id) {
         let hydrate_sid = session_id.clone();
-        agent.scheduler_background_loops = scheduler_background_loops;
+        let _ = scheduler_background_loops;
         agent.scrollback.end_batch();
         agent.session.loading_replay = false;
         agent.arm_late_replay_grace();
@@ -1428,6 +1432,7 @@ pub(in crate::app::dispatch) fn handle_session_loaded(
             agent_id,
             silent: true,
             nonce: Default::default(),
+            force_refresh: false,
         });
         if let Some(switch) = deferred {
             agent.session.model_switch_pending = true;
@@ -1557,7 +1562,8 @@ pub(in crate::app::dispatch) fn handle_session_load_failed(
         if defer_to_open_reload_window(agent, agent_id, "SessionLoadFailed") {
             return vec![];
         }
-        if crate::app::effects::is_session_rpc_timeout_error(&error) {
+        if error.contains("timed out after") && error.contains("may still finish in the background")
+        {
             agent.scrollback.push_block(RenderBlock::system(format!(
                 "Couldn't load session: {error}"
             )));
@@ -1856,9 +1862,6 @@ fn invalidate_picker_fetch_on_dismiss(app: &mut AppView) {
     next_picker_list_generation(app);
     let is_welcome_dismissal = matches!(app.active_view, crate::app::app_view::ActiveView::Welcome);
     if is_welcome_dismissal {
-        app.session_picker_loading = false;
-    }
-    if welcome_dismissal {
         app.session_picker_loading = false;
     }
     app.session_picker_deep_search_seq += 1;

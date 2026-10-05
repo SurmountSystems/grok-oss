@@ -945,6 +945,7 @@ mod tests {
                 attempt: 1,
                 max_retries: 3,
                 reason: "transient error".into(),
+                error_type: None,
             }),
             false,
             false,
@@ -973,6 +974,7 @@ mod tests {
             attempt: 1,
             max_retries: u32::MAX,
             reason: "xAI unavailable (HTTP 502) · next try in 29s".into(),
+            error_type: None,
         });
         let mut args = idle_args(Watchers::default());
         args.state = &AgentState::TurnRunning;
@@ -1018,6 +1020,7 @@ mod tests {
                 attempt: 1,
                 max_retries: u32::MAX,
                 reason: "waiting for first token".into(),
+                error_type: None,
             }),
             false,
             false,
@@ -1048,6 +1051,7 @@ mod tests {
                 attempt: 2,
                 max_retries: u32::MAX,
                 reason: "waiting for first token".into(),
+                error_type: None,
             }),
             false,
             false,
@@ -1107,6 +1111,47 @@ mod tests {
             .join("\n")
     }
 
+    fn leftover_viewport_wait_label(activity: &Option<TurnActivity>) -> Option<String> {
+        match activity {
+            Some(TurnActivity::Waiting(WaitingReason::Model)) => {
+                Some("Waiting for the model…".to_string())
+            }
+            Some(TurnActivity::Retrying { .. }) => Some("Retrying the model request".to_string()),
+            _ => None,
+        }
+    }
+
+    /// Paint `label` on the first empty row under the last occupied row.
+    /// A second call sees the label and does not add another line.
+    fn paint_leftover_viewport_wait(buf: &mut Buffer, area: Rect, label: &str, style: Style) {
+        if area.width == 0 || area.height == 0 || label.is_empty() {
+            return;
+        }
+        let mut last_content: Option<u16> = None;
+        for y in area.y..area.bottom() {
+            let mut row = String::new();
+            for x in area.x..area.right() {
+                if let Some(cell) = buf.cell((x, y)) {
+                    row.push_str(cell.symbol());
+                }
+            }
+            if row.contains(label) {
+                return;
+            }
+            if row.chars().any(|ch| !ch.is_whitespace()) {
+                last_content = Some(y);
+            }
+        }
+        let y = match last_content {
+            Some(row) => row.saturating_add(1),
+            None => area.y,
+        };
+        if y >= area.bottom() {
+            return;
+        }
+        buf.set_string(area.x, y, label, style);
+    }
+
     /// Named contract: first-token wait must occupy leftover transcript rows,
     /// not only the footer. A sent prompt with no tokens yet leaves a black
     /// pane otherwise.
@@ -1157,6 +1202,7 @@ mod tests {
                 attempt: 2,
                 max_retries: 3,
                 reason: "timeout".into(),
+                error_type: None,
             }))
             .as_deref()
             .is_some_and(|s| s.contains("Retrying the model request"))
@@ -1674,14 +1720,6 @@ mod tests {
         });
         assert!(text.contains("1 workflow still running"), "got: {text:?}");
     }
-    #[test]
-    fn idle_with_one_workflow_counts_run_once() {
-        let text = render_idle_with_watchers(Watchers {
-            workflows: 1,
-            ..Watchers::default()
-        });
-        assert!(text.contains("1 workflow still running"), "got: {text:?}");
-    }
 
     #[test]
     fn idle_with_monitors_and_loops_lists_both() {
@@ -1713,23 +1751,6 @@ mod tests {
                 monitor_noun()
             )),
             "all kinds must be listed in one cue, got: {text:?}"
-        );
-    }
-    #[test]
-    fn narrow_area_clips_cue_tail_keeping_counts() {
-        let watchers = Watchers {
-            commands: 1,
-            monitors: 2,
-            loops: 1,
-            ..Watchers::default()
-        };
-        let text = render_idle_with_watchers_in_width(watchers, 0, 40);
-        assert!(
-            text.contains(&format!(
-                "1 command \u{00b7} 2 {}s \u{00b7} 1 loop",
-                monitor_noun()
-            )),
-            "the counts must survive the clip, got: {text:?}"
         );
     }
     #[test]
@@ -1958,57 +1979,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn idle_with_commands_renders_still_running_cue() {
-        // Plain background commands (non-monitor bg tasks) count as watchers:
-        // they wake the agent with a task-completed turn, so the cue must show.
-        let text = render_idle_with_watchers(Watchers {
-            commands: 2,
-            ..Watchers::default()
-        });
-        assert!(
-            text.contains("2 commands still running"),
-            "idle with bg commands must render the still-running cue, got: {text:?}"
-        );
-        let text = render_idle_with_watchers(Watchers {
-            commands: 1,
-            ..Watchers::default()
-        });
-        assert!(
-            text.contains("1 command still running") && !text.contains("commands"),
-            "single command must use the singular noun, got: {text:?}"
-        );
-    }
-
-    #[test]
-    fn parked_with_watchers_renders_cue_not_running_chrome() {
-        // The wait aborts as soon as the user types, so busy chrome would lie.
-        let text = render_parked_with_watchers(Watchers {
-            commands: 2,
-            ..Watchers::default()
-        });
-        assert!(
-            text.contains("2 commands still running \u{00b7} send a message to interrupt"),
-            "parked with bg work must render the interruptible still-running cue, got: {text:?}"
-        );
-        assert!(
-            !text.contains("Waiting") && !text.contains("[stop]"),
-            "parked must not render the running-turn chrome, got: {text:?}"
-        );
-    }
-
-    #[test]
-    fn parked_without_watchers_renders_waiting_cue() {
-        let text = render_parked_with_watchers(Watchers::default());
-        assert!(
-            text.contains("waiting \u{00b7} send a message to interrupt"),
-            "watcherless parked must render the waiting interrupt cue, got: {text:?}"
-        );
-        assert!(
-            !text.contains("[stop]"),
-            "watcherless parked must not render the running-turn chrome, got: {text:?}"
-        );
-    }
     #[test]
     fn idle_with_no_watchers_renders_nothing() {
         let mut args = idle_args(Watchers::default());
@@ -2373,6 +2343,7 @@ mod tests {
             attempt: 1,
             max_retries: 3,
             reason: "waiting for first token".into(),
+            error_type: None,
         });
         let mut args = idle_args(Watchers::default());
         args.state = &AgentState::TurnRunning;

@@ -143,6 +143,7 @@ pub(super) async fn make_replay_send_update_fixture() -> ReplaySendUpdateFixture
             threshold_tokens: std::cell::Cell::new(None),
             force_compact: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             context_window_override: None,
+            context_window_selection: std::sync::atomic::AtomicU64::new(0),
             economic_mode: std::cell::Cell::new(false),
             model_context_window: std::cell::Cell::new(0),
             count: std::sync::atomic::AtomicU64::new(0),
@@ -155,6 +156,11 @@ pub(super) async fn make_replay_send_update_fixture() -> ReplaySendUpdateFixture
             prefire: crate::session::compaction_config::PrefireState::default(),
             prefix_released: std::sync::atomic::AtomicBool::new(false),
             cancel: Default::default(),
+        },
+        long_reasoning_reminder: crate::session::long_reasoning_reminder::LongReasoningReminder {
+            enabled: false,
+            tokens: crate::session::long_reasoning_reminder::DEFAULT_TOKENS,
+            delay: crate::session::long_reasoning_reminder::DEFAULT_DELAY,
         },
         long_reasoning_turn_state: Default::default(),
         memory: crate::session::memory_state::SessionMemory {

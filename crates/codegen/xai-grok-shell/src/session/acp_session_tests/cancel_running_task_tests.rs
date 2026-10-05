@@ -40,7 +40,11 @@ fn cancel_opts(
     crate::session::CancelOptions {
         cancel_subagents,
         kill_background_tasks,
-        rewind_if_no_output,
+        history: if rewind_if_no_output {
+            crate::session::CancelHistoryDisposition::RewindIfNoOutput { prompt_id: None }
+        } else {
+            crate::session::CancelHistoryDisposition::Keep
+        },
         trigger: trigger.map(crate::session::CancelTrigger::from_client),
         user_initiated: trigger.is_some(),
     }
@@ -53,14 +57,13 @@ fn cancel_opts(
 async fn cancel_running_task_and_gate_drain(
     actor: &Arc<SessionActor>,
     options: crate::session::CancelOptions,
-) -> WakeBarrier {
-    let barrier = actor.cancel_running_task(options).await;
-    if barrier == WakeBarrier::Clear {
-        let (completion_tx, _completion_rx) =
-            tokio::sync::mpsc::unbounded_channel::<(String, PromptTurnResult)>();
+) -> super::cancel::WakeBarrier {
+    let outcome = actor.cancel_running_task(options).await;
+    if outcome.barrier == super::cancel::WakeBarrier::Clear {
+        let (completion_tx, _completion_rx) = tokio::sync::mpsc::unbounded_channel();
         SessionActor::maybe_drain_notifications(Arc::clone(actor), completion_tx).await;
     }
-    barrier
+    outcome.barrier
 }
 
 #[async_trait::async_trait]
@@ -172,6 +175,7 @@ fn persist_ack_waits_for_disk_flush_before_success() {
                     client_caps: crate::session::notifications::SessionClientCaps::new(false, true),
                 },
                 permissions: PermissionHandle::allow_all(),
+                context_only: std::sync::atomic::AtomicBool::new(false),
                 tool_context,
                 deny_read_globs: Vec::new(),
                 mcp_state: Arc::new(TokioMutex::new(McpState::new(vec![]))),
@@ -206,6 +210,7 @@ fn persist_ack_waits_for_disk_flush_before_success() {
                     threshold_tokens: std::cell::Cell::new(None),
                     force_compact: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
                     context_window_override: None,
+                    context_window_selection: std::sync::atomic::AtomicU64::new(0),
                     economic_mode: std::cell::Cell::new(false),
                     model_context_window: std::cell::Cell::new(0),
                     count: std::sync::atomic::AtomicU64::new(0),
@@ -216,7 +221,16 @@ fn persist_ack_waits_for_disk_flush_before_success() {
                     tool_choice: crate::util::config::CompactionToolChoice::Auto,
                     prefire: crate::session::compaction_config::PrefireState::default(),
                     prefix_released: std::sync::atomic::AtomicBool::new(false),
+                    last_auto_compact_saved_too_little: std::sync::atomic::AtomicBool::new(false),
+                    cancel: Default::default(),
                 },
+                long_reasoning_reminder:
+                    crate::session::long_reasoning_reminder::LongReasoningReminder {
+                        enabled: false,
+                        tokens: crate::session::long_reasoning_reminder::DEFAULT_TOKENS,
+                        delay: crate::session::long_reasoning_reminder::DEFAULT_DELAY,
+                    },
+                long_reasoning_turn_state: Default::default(),
                 memory: crate::session::memory_state::SessionMemory {
                     configured_mode: None,
                     v2_config: Default::default(),
@@ -471,6 +485,7 @@ async fn plain_user_prompt_without_persist_ack_still_sends_flush_barrier_behind_
                         None,
                         None,
                         None,
+                        /* unstick_retry */ false,
                     )
                     .await
             });
@@ -683,6 +698,21 @@ fn first_turn_memory_injection_disabled_does_not_persist_to_chat_history() {
                 observation_sink: crate::session::memory::noop_memory_observation_sink(),
                 embedding_credentials: crate::session::memory::EndpointScopedCredentials::none(),
             };
+            let cwd = AbsPathBuf::new(session_dir.path().to_path_buf()).expect("abs session dir");
+            let fs = Arc::new(xai_grok_workspace::file_system::MockFs::new(
+                cwd.to_path_buf(),
+            ));
+            let terminal = Arc::new(DummyTerminal {});
+            let (hunk_tx, _hunk_rx) = tokio::sync::mpsc::unbounded_channel();
+            let hunk_tracker_handle = xai_hunk_tracker::HunkTrackerActor::spawn(
+                "persist-memory-disabled".to_string(),
+                cwd.to_path_buf(),
+                hunk_tx,
+                xai_hunk_tracker::TrackingMode::AgentOnly,
+                tokio_util::sync::CancellationToken::new(),
+            );
+            let tool_context =
+                ToolContext::new(cwd, None, None, fs, terminal, hunk_tracker_handle);
             let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel::<SessionEvent>();
             let actor = Arc::new(SessionActor {
                 vcs_root: None,
@@ -717,6 +747,7 @@ fn first_turn_memory_injection_disabled_does_not_persist_to_chat_history() {
                     client_caps: crate::session::notifications::SessionClientCaps::new(false, true),
                 },
                 permissions: PermissionHandle::allow_all(),
+                context_only: std::sync::atomic::AtomicBool::new(false),
                 tool_context,
                 deny_read_globs: Vec::new(),
                 mcp_state: Arc::new(TokioMutex::new(McpState::new(vec![]))),
@@ -751,6 +782,7 @@ fn first_turn_memory_injection_disabled_does_not_persist_to_chat_history() {
                     threshold_tokens: std::cell::Cell::new(None),
                     force_compact: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
                     context_window_override: None,
+                    context_window_selection: std::sync::atomic::AtomicU64::new(0),
                     economic_mode: std::cell::Cell::new(false),
                     model_context_window: std::cell::Cell::new(0),
                     count: std::sync::atomic::AtomicU64::new(0),
@@ -761,7 +793,15 @@ fn first_turn_memory_injection_disabled_does_not_persist_to_chat_history() {
                     tool_choice: crate::util::config::CompactionToolChoice::Auto,
                     prefire: crate::session::compaction_config::PrefireState::default(),
                     prefix_released: std::sync::atomic::AtomicBool::new(false),
+                    last_auto_compact_saved_too_little: std::sync::atomic::AtomicBool::new(false),
+                    cancel: Default::default(),
                 },
+                long_reasoning_reminder: crate::session::long_reasoning_reminder::LongReasoningReminder {
+                    enabled: false,
+                    tokens: crate::session::long_reasoning_reminder::DEFAULT_TOKENS,
+                    delay: crate::session::long_reasoning_reminder::DEFAULT_DELAY,
+                },
+                long_reasoning_turn_state: Default::default(),
                 memory: crate::session::memory_state::SessionMemory {
                     configured_mode: Some(crate::config::MemoryMode::Legacy),
                     v2_config: Default::default(),
@@ -1055,6 +1095,7 @@ async fn cancel_running_task_teardown_clears_running_and_pending_work() {
                     persistence_tx,
                 ),
                 permissions: PermissionHandle::allow_all(),
+                context_only: std::sync::atomic::AtomicBool::new(false),
                 tool_context,
                 deny_read_globs: Vec::new(),
                 mcp_state: Arc::new(TokioMutex::new(McpState::new(vec![]))),
@@ -1097,6 +1138,7 @@ async fn cancel_running_task_teardown_clears_running_and_pending_work() {
                         std::sync::atomic::AtomicBool::new(false),
                     ),
                     context_window_override: None,
+                    context_window_selection: std::sync::atomic::AtomicU64::new(0),
                     economic_mode: std::cell::Cell::new(false),
                     model_context_window: std::cell::Cell::new(0),
                     count: std::sync::atomic::AtomicU64::new(0),
@@ -1107,6 +1149,13 @@ async fn cancel_running_task_teardown_clears_running_and_pending_work() {
                     tool_choice: crate::util::config::CompactionToolChoice::Auto,
                     prefire: crate::session::compaction_config::PrefireState::default(),
                     prefix_released: std::sync::atomic::AtomicBool::new(false),
+                    last_auto_compact_saved_too_little: std::sync::atomic::AtomicBool::new(false),
+                    cancel: Default::default(),
+                },
+                long_reasoning_reminder: crate::session::long_reasoning_reminder::LongReasoningReminder {
+                    enabled: false,
+                    tokens: crate::session::long_reasoning_reminder::DEFAULT_TOKENS,
+                    delay: crate::session::long_reasoning_reminder::DEFAULT_DELAY,
                 },
                 long_reasoning_turn_state: Default::default(),
                 memory: crate::session::memory_state::SessionMemory {
@@ -1652,26 +1701,6 @@ async fn maybe_apply_interrupt_envelope_skips_verbatim() {
         })
         .await;
 }
-/// Integration: with the one-shot armed, a real user turn driven through `handle_prompt` frames the query in the same envelope as an interjection.
-/// The envelope is a lead-in, the `<user_query>` block, and an unfinished-task trailer, rather than a preceding `<system-reminder>`.
-/// The test synchronizes on the persist-ack, which fires after the user item is pushed and before the model call.
-#[tokio::test(flavor = "current_thread")]
-async fn handle_prompt_frames_interrupt_on_user_message() {
-    let local = tokio::task::LocalSet::new();
-    local
-        .run_until(async {
-            let (actor, _gateway_rx) = build_actor().await;
-            actor.events.set_pending_interrupt_reminder();
-            let assembled = "caller-owned follow-up";
-            let framed = actor.maybe_apply_interrupt_envelope(assembled.into(), true);
-            assert_eq!(framed, assembled, "verbatim text must stay byte-identical");
-            assert!(
-                !actor.events.take_pending_interrupt_reminder(),
-                "verbatim still consumes the one-shot"
-            );
-        })
-        .await;
-}
 /// Integration: with the one-shot armed, a real user turn driven through
 /// `handle_prompt` frames the query in the same envelope as an interjection
 /// (lead-in + `<user_query>` + unfinished-task trailer) instead of a
@@ -1724,7 +1753,7 @@ fn handle_prompt_frames_interrupt_on_user_message() {
                         let user = conv
                 .iter()
                 .find(|item| {
-                    matches!(item, ConversationItem::User(u) if u.synthetic_reason.is_none())
+                    matches!(item, ConversationItem::User(u) if u.synthetic_reason.is_human())
                         && item.text_content().contains(query)
                 })
                 .expect("the user message must be in the conversation");
@@ -1740,56 +1769,6 @@ fn handle_prompt_frames_interrupt_on_user_message() {
         .expect("spawn larger-stack test thread")
         .join()
         .expect("handle-prompt-interrupt-frame thread");
-}
-/// Integration: a verbatim user turn must stay byte-identical to the caller
-/// text even when the interrupt one-shot is armed.
-#[test]
-fn handle_prompt_verbatim_skips_interrupt_envelope() {
-    run_on_large_stack("handle-prompt-verbatim", || {
-        block_on_local(async {
-            let actor = actor_with_persistence_drain().await;
-            actor.events.set_pending_interrupt_reminder();
-            let query = "follow-up after interrupt";
-            let prompt_blocks = vec![acp::ContentBlock::Text(acp::TextContent::new(
-                query.to_string(),
-            ))];
-            let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
-            let actor_for_prompt = actor.clone();
-            let prompt_task = tokio::task::spawn_local(async move {
-                actor_for_prompt
-                    .handle_prompt(
-                        "interrupt-verbatim-test",
-                        prompt_blocks,
-                        PromptMode::Agent,
-                        None,
-                        None,
-                        None,
-                        None,
-                        false,
-                        false,
-                        None,
-                        Some(ack_tx),
-                        None,
-                        false,
-                    )
-                    .await
-            });
-            assert!(ack_rx.await.is_ok(), "persist ack should resolve");
-            let conv = actor.chat_state_handle.get_conversation().await;
-            let user = conv
-                .iter()
-                .find(|item| {
-                    matches!(item, ConversationItem::User(u) if u.synthetic_reason.is_human())
-                        && item.text_content().contains(query)
-                })
-                .expect("the user message must be in the conversation");
-            let text = user.text_content();
-            let expected_assembled = format!("<user_query>\n{query}\n</user_query>");
-            assert_eq!(text, frame_user_turn(INTERRUPT_NOTE, &expected_assembled));
-            assert!(!actor.events.take_pending_interrupt_reminder());
-            prompt_task.abort();
-        });
-    });
 }
 /// Integration: a verbatim user turn must stay byte-identical to the caller text even when the interrupt one-shot is armed.
 #[tokio::test(flavor = "current_thread")]
@@ -1820,6 +1799,7 @@ async fn handle_prompt_verbatim_skips_interrupt_envelope() {
                         None,
                         Some(ack_tx),
                         None,
+                        /* unstick_retry */ false,
                     )
                     .await
             });
@@ -1838,59 +1818,6 @@ async fn handle_prompt_verbatim_skips_interrupt_envelope() {
             prompt_task.abort();
         })
         .await;
-}
-/// Send-now must use the full interjection envelope (prefix + already-wrapped
-/// `<user_query>` + unfinished-task trailer), not the note prefix alone.
-#[test]
-fn handle_prompt_send_now_frames_interjection_envelope() {
-    run_on_large_stack("handle-prompt-send-now", || {
-        block_on_local(async {
-            let actor = actor_with_persistence_drain().await;
-            let query = "create /tmp/A";
-            let prompt_blocks = vec![acp::ContentBlock::Text(acp::TextContent::new(
-                query.to_string(),
-            ))];
-            let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
-            let actor_for_prompt = actor.clone();
-            let prompt_task = tokio::task::spawn_local(async move {
-                actor_for_prompt
-                    .handle_prompt(
-                        "send-now-envelope-test",
-                        prompt_blocks,
-                        PromptMode::Agent,
-                        None,
-                        None,
-                        None,
-                        None,
-                        false,
-                        true,
-                        None,
-                        Some(ack_tx),
-                        None,
-                        false,
-                    )
-                    .await
-            });
-            assert!(ack_rx.await.is_ok(), "persist ack should resolve");
-            let conv = actor.chat_state_handle.get_conversation().await;
-            let user = conv
-                .iter()
-                .find(|item| {
-                    matches!(item, ConversationItem::User(u) if u.synthetic_reason.is_none())
-                        && item.text_content().contains(query)
-                })
-                .expect("the send-now user message must be in the conversation");
-            let expected_assembled = format!("<user_query>\n{query}\n</user_query>");
-            assert_eq!(
-                user.text_content(),
-                frame_user_turn(
-                    xai_interjection_core::INTERJECTION_NOTE,
-                    &expected_assembled
-                )
-            );
-            prompt_task.abort();
-        });
-    });
 }
 /// Send-now must use the full interjection envelope, not the note prefix alone.
 /// The envelope is the prefix, the already-wrapped `<user_query>`, and the unfinished-task trailer.
@@ -1921,6 +1848,7 @@ async fn handle_prompt_send_now_frames_interjection_envelope() {
                         None,
                         Some(ack_tx),
                         None,
+                        /* unstick_retry */ false,
                     )
                     .await
             });
@@ -2768,6 +2696,7 @@ async fn cancel_propagates_to_sampler_handle_so_no_further_emission() {
                     persistence_tx,
                 ),
                 permissions: PermissionHandle::allow_all(),
+                context_only: std::sync::atomic::AtomicBool::new(false),
                 tool_context,
                 deny_read_globs: Vec::new(),
                 mcp_state: Arc::new(TokioMutex::new(McpState::new(vec![]))),
@@ -2810,6 +2739,7 @@ async fn cancel_propagates_to_sampler_handle_so_no_further_emission() {
                         std::sync::atomic::AtomicBool::new(false),
                     ),
                     context_window_override: None,
+                    context_window_selection: std::sync::atomic::AtomicU64::new(0),
                     economic_mode: std::cell::Cell::new(false),
                     model_context_window: std::cell::Cell::new(0),
                     count: std::sync::atomic::AtomicU64::new(0),
@@ -2820,6 +2750,13 @@ async fn cancel_propagates_to_sampler_handle_so_no_further_emission() {
                     tool_choice: crate::util::config::CompactionToolChoice::Auto,
                     prefire: crate::session::compaction_config::PrefireState::default(),
                     prefix_released: std::sync::atomic::AtomicBool::new(false),
+                    last_auto_compact_saved_too_little: std::sync::atomic::AtomicBool::new(false),
+                    cancel: Default::default(),
+                },
+                long_reasoning_reminder: crate::session::long_reasoning_reminder::LongReasoningReminder {
+                    enabled: false,
+                    tokens: crate::session::long_reasoning_reminder::DEFAULT_TOKENS,
+                    delay: crate::session::long_reasoning_reminder::DEFAULT_DELAY,
                 },
                 long_reasoning_turn_state: Default::default(),
                 memory: crate::session::memory_state::SessionMemory {

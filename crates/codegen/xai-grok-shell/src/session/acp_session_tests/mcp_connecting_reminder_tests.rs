@@ -369,6 +369,7 @@ fn blocking_prompt_mid_handshake_gets_no_stale_connecting_reminder() {
                     None,
                     Some(ack_tx),
                     None,
+                    /* unstick_retry */ false,
                 )
                 .await
         });
@@ -419,6 +420,7 @@ fn progressive_prompt_mid_handshake_still_announces_connecting() {
                     None,
                     Some(ack_tx),
                     None,
+                    /* unstick_retry */ false,
                 )
                 .await
         });

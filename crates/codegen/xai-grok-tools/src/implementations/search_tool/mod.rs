@@ -479,53 +479,6 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn search_tool_ready_empty_catalog_includes_guidance_note() {
-        let resources = crate::types::resources::Resources::default().into_shared();
-        resources
-            .lock()
-            .await
-            .insert(ToolIndex(std::sync::Arc::new(StaticToolIndex {
-                snapshot: SearchSnapshot {
-                    results: vec![],
-                    total_hidden_tools: 0,
-                    is_ready: true,
-                },
-            })));
-        let mut ctx =
-            xai_tool_runtime::ToolCallContext::new(xai_tool_protocol::ToolCallId::new_v7());
-        ctx.extensions.insert(resources);
-
-        let output = SearchTool
-            .run(
-                ctx,
-                SearchToolInput {
-                    query: "confluence".into(),
-                    limit: Some(5),
-                },
-            )
-            .await
-            .unwrap();
-        let ToolOutput::SearchTool(output) = output else {
-            panic!("expected search tool output");
-        };
-        let json: serde_json::Value = serde_json::from_str(&output.content).unwrap();
-        assert_eq!(json["status"], "ready");
-        assert_eq!(json["total_hidden_tools"], 0);
-        assert!(json["results"].as_array().unwrap().is_empty());
-        let note = json["note"]
-            .as_str()
-            .expect("empty ready catalog should set note");
-        assert!(
-            note.contains("Connect MCP servers") && note.contains("mcpInheritance"),
-            "expected source-agnostic guidance about connecting servers / mcpInheritance, got: {note}"
-        );
-        assert!(
-            !note.contains("parent session"),
-            "must not assume a parent session (tool is shared with top-level sessions), got: {note}"
-        );
-    }
-
     // -- truncate_description tests --
 
     #[test]

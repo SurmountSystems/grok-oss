@@ -82,26 +82,6 @@ fn dispatch_billing(
     dispatch(
         Action::TaskComplete(TaskResult::BillingFetched {
             agent_id: AgentId(0),
-            balance: crate::views::credit_bar::CreditBalanceFetch::Resolved(balance),
-            silent,
-            subscription_tier,
-            autotopup: crate::views::credit_bar::AutoTopupFetch::Unchanged,
-            nonce,
-        }),
-        app,
-    );
-}
-
-fn dispatch_billing(
-    app: &mut AppView,
-    balance: Option<crate::views::credit_bar::CreditBalance>,
-    silent: bool,
-    subscription_tier: Option<String>,
-) {
-    let nonce = open_usage_modal_nonce(app);
-    dispatch(
-        Action::TaskComplete(TaskResult::BillingFetched {
-            agent_id: AgentId(0),
             balance,
             silent,
             subscription_tier,
@@ -1048,21 +1028,17 @@ fn billing_fetched_high_usage_enables_poll() {
 #[test]
 fn background_billing_poll_wanted_is_honor_ttl_not_force_refresh() {
     assert_eq!(
-        background_billing_poll_snapshot_mode(),
+        crate::app::dispatch::billing::background_billing_poll_snapshot_mode(),
         xai_grok_shell::auth::LimitsSnapshotMode::HonorTtl,
         "near-full included SuperGrok period poll FetchBilling is HonorTtl"
     );
-    let Effect::FetchBilling {
-        force_refresh,
-        silent,
-        nonce,
-        ..
-    } = background_billing_poll_fetch_billing(AgentId(0))
+    let Effect::FetchBilling { silent, nonce, .. } =
+        crate::app::dispatch::billing::background_billing_poll_fetch_billing(AgentId(0))
     else {
         panic!("background billing poll must queue FetchBilling");
     };
     assert!(
-        !force_refresh,
+        !crate::app::dispatch::billing::background_billing_poll_force_refresh(),
         "near-full included SuperGrok period poll FetchBilling is HonorTtl, not ForceRefresh"
     );
     assert!(silent, "background billing poll is silent chrome refresh");

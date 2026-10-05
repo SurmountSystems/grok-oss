@@ -330,7 +330,7 @@ pub(super) async fn capture_and_fold_one_turn_usage(
         match super::handle_request::child_actor_query(
             "session_usage",
             input.child_handle.chat_state_handle.try_get_session_usage(),
-            Err(()),
+            Err(xai_chat_state::ChatStateActorUnreachable),
         )
         .await
         {
@@ -346,7 +346,7 @@ pub(super) async fn capture_and_fold_one_turn_usage(
                     Some(total_tokens),
                 )
             }
-            Err(()) => (None, true, None, None),
+            Err(_) => (None, true, None, None),
         };
     result.total_tokens_used = total_tokens.unwrap_or(0);
     if let Some((task_spent, task_incomplete)) = input.task_budget_usage {

@@ -1,5 +1,7 @@
 //! Prompt and bash-command submission dispatchers and reload-window helpers.
 
+use crate::slash::commands::doctor as doctor_src;
+
 use super::auth::{
     scrollback_has_recent_context_too_large, scrollback_has_recent_disk_full,
     scrollback_has_recent_reauth_prompt, scrollback_has_recent_request_failed,
@@ -70,7 +72,7 @@ pub(super) fn collect_live_doctor_report_for_terminal(
     terminal: &crate::terminal::TerminalContext,
 ) -> Option<crate::diagnostics::DiagnosticReport> {
     let agent = app.agents.get(&agent_id)?;
-    let mut report = crate::slash::commands::doctor::DoctorCommand::report_for_terminal(
+    let mut report = doctor_src::DoctorCommand::report_for_terminal(
         terminal,
         app.screen_mode,
         crate::diagnostics::TuiRuntimeRequest {
@@ -679,7 +681,7 @@ fn enqueue_if_interject_dropped(
                     crate::app::agent::QueueEntryKind::Prompt,
                 )
             });
-        agent.persist_pending_prompts();
+        persist_pending_prompts(agent);
         enqueued = agent
             .session
             .pending_prompts
@@ -735,7 +737,7 @@ fn enqueue_goal_clear_without_interject(
         agent.prompt.set_text("");
         agent.clear_sent_human_from_plan_feedback_draft(&text);
     }
-    agent.persist_pending_prompts();
+    persist_pending_prompts(agent);
     vec![]
 }
 
@@ -798,7 +800,10 @@ fn text_names_subagent(text: &str, info: &crate::app::subagent::SubagentInfo) ->
 
 /// Main-thread text that names exactly one live L2. Ambiguous matches stay on L1.
 /// An L3 specialist is not a target.
-fn resolve_uniquely_named_live_l2(agent: &AgentView, text: &str) -> Option<acp::SessionId> {
+pub(super) fn resolve_uniquely_named_live_l2(
+    agent: &AgentView,
+    text: &str,
+) -> Option<acp::SessionId> {
     let child_ids: std::collections::HashSet<&str> = agent
         .subagent_sessions
         .values()
@@ -820,7 +825,200 @@ fn resolve_uniquely_named_live_l2(agent: &AgentView, text: &str) -> Option<acp::
     if matches.len() != 1 {
         return None;
     }
-    Some(acp::SessionId::new(matches[0].child_session_id.as_ref()))
+    Some(acp::SessionId::new(
+        matches
+            .first()
+            .expect("index out of bounds")
+            .child_session_id
+            .as_ref(),
+    ))
+}
+
+fn persist_pending_prompts(agent: &mut crate::app::agent_view::AgentView) {
+    agent.drop_stale_queue_occupancy_with_chat_history();
+    let Some(sid) = agent.session.session_id.as_ref() else {
+        return;
+    };
+    let cwd = agent.session.cwd.to_string_lossy();
+    let rows: Vec<_> = agent
+        .session
+        .pending_prompts
+        .iter()
+        .map(|prompt| {
+            xai_grok_shell::session::unsent_prompt_draft::pending_prompts::PersistedQueuedPrompt {
+                id: prompt.id,
+                text: prompt.text.clone(),
+                kind: prompt.kind.as_label().to_string(),
+            }
+        })
+        .collect();
+    let _ = xai_grok_shell::session::unsent_prompt_draft::pending_prompts::write_pending_prompts_with_fsync(
+        cwd.as_ref(),
+        sid.0.as_ref(),
+        &rows,
+        xai_grok_shell::session::unsent_prompt_draft::pending_prompts::PENDING_PROMPTS_QUEUE_SNAPSHOT_FSYNC,
+    );
+}
+
+fn queue_kind_from_label(label: &str) -> crate::app::agent::QueueEntryKind {
+    match label {
+        "command" => crate::app::agent::QueueEntryKind::Command,
+        "bash_command" => crate::app::agent::QueueEntryKind::BashCommand,
+        _ => crate::app::agent::QueueEntryKind::Prompt,
+    }
+}
+
+fn collapse_consecutive_queue_bodies(agent: &mut crate::app::agent_view::AgentView) {
+    let mut kept = std::collections::VecDeque::new();
+    for prompt in agent.session.pending_prompts.drain(..) {
+        let duplicate = kept
+            .back()
+            .is_some_and(|prev: &crate::app::agent::QueuedPrompt| {
+                let trimmed = prompt.text.trim();
+                !trimmed.is_empty() && prev.text.trim() == trimmed
+            });
+        if !duplicate {
+            kept.push_back(prompt);
+        }
+    }
+    agent.session.pending_prompts = kept;
+}
+
+impl crate::app::agent_view::AgentView {
+    pub(crate) fn persist_pending_prompts(&mut self) {
+        persist_pending_prompts(self);
+    }
+
+    /// Scrollback Human turns are stale queue occupancy. `continue_prior_work`
+    /// rows stay. Nested sessions are not queue rows.
+    pub(crate) fn drop_stale_queue_occupancy(&mut self) {
+        self.drop_stale_queue_occupancy_inner(false);
+    }
+
+    /// Same drop, plus `chat_history.jsonl` when live scrollback was compacted away.
+    pub(crate) fn drop_stale_queue_occupancy_with_chat_history(&mut self) {
+        self.drop_stale_queue_occupancy_inner(true);
+    }
+
+    fn drop_stale_queue_occupancy_inner(&mut self, include_chat_history: bool) {
+        let needles = self.committed_human_turn_texts(true, include_chat_history);
+        let matches = |text: &str| {
+            needles.iter().any(|recorded| {
+                xai_grok_shell::session::prompt_wal::operator_text_matches_recorded(text, recorded)
+            })
+        };
+        self.session.pending_prompts.retain(|prompt| {
+            prompt.continue_prior_work
+                || prompt.kind != crate::app::agent::QueueEntryKind::Prompt
+                || !matches(&prompt.text)
+        });
+        self.shared_queue
+            .retain(|wire| wire.kind != "prompt" || !matches(&wire.text));
+        collapse_consecutive_queue_bodies(self);
+    }
+
+    pub(crate) fn restore_pending_prompts_from_disk(&mut self) {
+        let Some(sid) = self.session.session_id.as_ref() else {
+            return;
+        };
+        let cwd = self.session.cwd.to_string_lossy();
+        let Ok(rows) =
+            xai_grok_shell::session::unsent_prompt_draft::pending_prompts::load_pending_prompts(
+                cwd.as_ref(),
+                sid.0.as_ref(),
+            )
+        else {
+            return;
+        };
+        if self.session.pending_prompts.is_empty() {
+            self.session.pending_prompts = rows
+                .into_iter()
+                .map(|row| {
+                    crate::app::agent::QueuedPrompt::plain(
+                        row.id,
+                        row.text,
+                        queue_kind_from_label(&row.kind),
+                    )
+                })
+                .collect();
+        } else {
+            let have: std::collections::HashSet<u64> = self
+                .session
+                .pending_prompts
+                .iter()
+                .map(|prompt| prompt.id)
+                .collect();
+            for row in rows {
+                if have.contains(&row.id) {
+                    continue;
+                }
+                self.session
+                    .pending_prompts
+                    .push_back(crate::app::agent::QueuedPrompt::plain(
+                        row.id,
+                        row.text,
+                        queue_kind_from_label(&row.kind),
+                    ));
+            }
+        }
+        if let Some(max_id) = self
+            .session
+            .pending_prompts
+            .iter()
+            .map(|prompt| prompt.id)
+            .max()
+            && self.session.next_queue_id <= max_id
+        {
+            self.session.next_queue_id = max_id.saturating_add(1);
+        }
+        self.drop_stale_queue_occupancy_with_chat_history();
+        self.sync_queue_pane();
+    }
+
+    pub(crate) fn restore_unsent_composer_draft_from_disk(&mut self) {
+        self.maybe_restore_unsent_prompt_draft();
+    }
+
+    pub(crate) fn committed_human_turn_texts(
+        &self,
+        include_scrollback: bool,
+        include_chat_history: bool,
+    ) -> Vec<String> {
+        use crate::scrollback::block::RenderBlock;
+        let mut texts = Vec::new();
+        if include_scrollback {
+            for idx in 0..self.scrollback.len() {
+                let Some(entry) = self.scrollback.entry(idx) else {
+                    continue;
+                };
+                let RenderBlock::UserPrompt(block) = &entry.block else {
+                    continue;
+                };
+                texts.push(block.text.clone());
+            }
+        }
+        if include_chat_history && let Some(sid) = self.session.session_id.as_ref() {
+            let cwd = self.session.cwd.to_string_lossy();
+            if let Some(blob) =
+                xai_grok_shell::session::prompt_wal::chat_history_path(cwd.as_ref(), sid.0.as_ref())
+                    .and_then(|path| std::fs::read_to_string(path).ok())
+            {
+                texts.extend(
+                    xai_grok_shell::session::prompt_wal::user_texts_from_chat_history_jsonl(&blob),
+                );
+            }
+        }
+        texts
+    }
+
+    pub(crate) fn queue_text_matches_committed_human_turn(
+        text: &str,
+        committed: &[String],
+    ) -> bool {
+        committed.iter().any(|recorded| {
+            xai_grok_shell::session::prompt_wal::operator_text_matches_recorded(text, recorded)
+        })
+    }
 }
 
 /// Body of [`dispatch_send_prompt`], parameterized over whether to consume the prompt textarea after the command is processed.
@@ -917,6 +1115,13 @@ pub(super) fn dispatch_send_prompt_submission(
     } else {
         text
     };
+    let economy = xai_grok_shell::token_economy::token_economy_from_disk();
+    let implement_rewrite = xai_grok_shell::token_economy::apply_implement_effort_policy(
+        &text,
+        crate::appearance::cache::load_economic_mode(),
+        &economy,
+    );
+    let text = implement_rewrite.command;
 
     // Capture app-level fields before the mut-borrow on `agent`.
     let coding_data_sharing_opt_out_from_app = app.coding_data_retention_opt_out;
@@ -928,6 +1133,12 @@ pub(super) fn dispatch_send_prompt_submission(
     let ask_user_question_timeout_enabled_from_app = app.ask_user_question_timeout_enabled;
     let voice_stt_language_from_app = app.voice_config.language.clone();
     let subagent_model_inheritance_from_app = app.subagent_model_inheritance;
+    let notifications_session_recap_from_app = app.notification_service.config().session_recap;
+    let notifications_session_recap_threshold_from_app = app
+        .notification_service
+        .config()
+        .session_recap_threshold_secs;
+    let features_session_recap_from_app = app.session_recap_available;
     let login_method_id_from_app = app.login_method_id.as_ref().map(|id| id.0.to_string());
     let leader_mode = app.leader_mode;
     let screen_mode_is_minimal = app.screen_mode.is_minimal();
@@ -1080,7 +1291,6 @@ pub(super) fn dispatch_send_prompt_submission(
                     multiline_mode: agent.multiline_mode,
                     yolo_mode: agent.session.is_yolo(),
                     auto_mode: agent.session.is_auto(),
-                    context_only_mode: agent.session.is_context_only(),
                     current_model_name: agent.session.models.current_model_name(),
                     available_models: agent
                         .session
@@ -1097,6 +1307,10 @@ pub(super) fn dispatch_send_prompt_submission(
                     auto_update: auto_update_from_app,
                     auto_compact_threshold_percent: app.auto_compact_threshold_percent,
                     auto_compact_threshold_tokens: app.auto_compact_threshold_tokens,
+                    notifications_session_recap: notifications_session_recap_from_app,
+                    notifications_session_recap_threshold_secs:
+                        notifications_session_recap_threshold_from_app,
+                    features_session_recap: features_session_recap_from_app,
                     vim_mode: crate::appearance::cache::load_vim_mode(),
                     scroll_speed: crate::appearance::cache::load_scroll_speed(),
                     respect_manual_folds: respect_manual_folds_from_app,
@@ -1104,6 +1318,14 @@ pub(super) fn dispatch_send_prompt_submission(
                     ask_user_question_timeout_enabled: ask_user_question_timeout_enabled_from_app,
                     voice_stt_language: voice_stt_language_from_app,
                     subagent_model_inheritance: subagent_model_inheritance_from_app,
+                    context_only_mode: !agent.session.is_yolo()
+                        && !agent.session.is_auto()
+                        && matches!(
+                            app.current_ui.permission_mode.as_deref(),
+                            Some("context-only")
+                        ),
+                    default_reasoning_effort: app.default_reasoning_effort.clone(),
+                    scheduler_background_loops: app.scheduler_background_loops_seed,
                 },
             };
 
@@ -1163,6 +1385,7 @@ pub(super) fn dispatch_send_prompt_submission(
             exec_result,
             CommandResult::QueueCommand(_)
                 | CommandResult::InjectSkill { .. }
+                | CommandResult::QueueLater { .. }
                 | CommandResult::PassThrough(_)
         ) && refuse_on_failed_tab(agent, app.screen_mode.is_minimal())
         {
@@ -1225,6 +1448,7 @@ pub(super) fn dispatch_send_prompt_submission(
             exec_result,
             CommandResult::QueueCommand(_)
                 | CommandResult::InjectSkill { .. }
+                | CommandResult::QueueLater { .. }
                 | CommandResult::PassThrough(_)
         );
         // The typed text reaches a model as a queued row or as the `/btw` side question; a feedback
@@ -1307,22 +1531,19 @@ pub(super) fn dispatch_send_prompt_submission(
                 agent.session.enqueue_command(cmd_text);
             }
             CommandResult::QueueLater {
-                text: held,
+                text,
                 as_command,
                 wire_blocks,
                 display_as_skill,
             } => {
                 if as_command {
-                    agent.session.enqueue_command(held);
+                    agent.session.enqueue_command(text);
                 } else {
-                    agent.append_prompt_wal(
-                        xai_grok_shell::session::prompt_wal::PromptWalKind::Queue,
-                        &held,
-                        &agent.prompt.images,
-                    );
-                    let qid = agent.session.next_queue_id;
+                    let id = agent.session.next_queue_id;
                     agent.session.next_queue_id += 1;
-                    agent.start_pending_live_prompt_task(&held);
+                    if display_as_skill {
+                        agent.start_pending_live_prompt_task(&text);
+                    }
                     agent
                         .session
                         .pending_prompts
@@ -1330,13 +1551,12 @@ pub(super) fn dispatch_send_prompt_submission(
                             wire_blocks,
                             display_as_skill,
                             ..crate::app::agent::QueuedPrompt::plain(
-                                qid,
-                                held,
+                                id,
+                                text,
                                 crate::app::agent::QueueEntryKind::Prompt,
                             )
                         });
                 }
-                skip_drain = true;
             }
             CommandResult::InjectSkill {
                 display_text,
@@ -1348,7 +1568,6 @@ pub(super) fn dispatch_send_prompt_submission(
                 // Leading skill invocation: display_as_skill owns styling (no ranges)
                 let id = agent.session.next_queue_id;
                 agent.session.next_queue_id += 1;
-                protect_queue_id = Some(id);
                 agent.start_pending_live_prompt_task(&display_text);
                 agent
                     .session
@@ -1388,7 +1607,7 @@ pub(super) fn dispatch_send_prompt_submission(
                 // `x.ai/interject`. `/goal clear` is not that path: dismiss
                 // the card immediately and enqueue the shell builtin so it
                 // runs when the actor can, without steering the model.
-                // Named `/queue /finish` is QueueLater above. Send now of
+                // Named `/queue /finish` still waits. Send now of
                 // an already-queued `/goal` row is GoalSet (`SendPromptNow`
                 // in `force_interject_queue_row`), a different path. Idle
                 // `/goal` still enqueues as GoalSet.
@@ -1415,11 +1634,9 @@ pub(super) fn dispatch_send_prompt_submission(
                         &agent.prompt.images,
                     );
                     agent.start_pending_live_prompt_task(&pass_text);
-                    protect_queue_id = Some(
-                        agent
-                            .session
-                            .enqueue_prompt_with_skill_tokens(pass_text, skill_token_ranges),
-                    );
+                    agent
+                        .session
+                        .enqueue_prompt_with_skill_tokens(pass_text, skill_token_ranges);
                 }
             }
         }
@@ -1662,42 +1879,21 @@ pub(super) fn dispatch_send_prompt_submission(
         if !inline_hint_shown {
             maybe_show_send_now_tip(app);
         }
-        if let Some(agent) = app.agents.get_mut(&id) {
-            agent.maybe_toast_plan_feedback_queue();
-        }
-    }
-
-    if skip_drain {
-        if let Some(agent) = app.agents.get_mut(&id)
-            && consume_input
-        {
-            let trimmed_key = text.trim().to_string();
-            if !trimmed_key.is_empty() {
-                agent
-                    .session
-                    .prompt_history
-                    .retain(|p| p.trim() != trimmed_key);
-                agent.session.prompt_history.insert(0, text.clone());
-                if agent.session.prompt_history.len() > 200 {
-                    agent.session.prompt_history.truncate(200);
-                }
-            }
-        }
-        app.show_toast("Queued on the prompt queue. It will not run this turn.");
-        if let Some(agent) = app.agents.get_mut(&id) {
-            agent.persist_pending_prompts();
-            if consume_input {
-                agent.clear_sent_human_from_plan_feedback_draft(&text);
-            }
-        }
-        return vec![];
     }
 
     let drain = {
         let Some(agent) = app.agents.get_mut(&id) else {
             return effects;
         };
-        stamp_session_request_effort(agent);
+        let _ = crate::acp::turbo_planning::stamp_request_effort(
+            agent.session.models.reasoning_effort,
+            crate::appearance::cache::load_turbo_planning(),
+            crate::acp::turbo_planning::live_plan_turn(
+                agent.plan_mode_pending,
+                agent.plan_mode_active,
+                agent.isolated_preview_shows_secondary_plan,
+            ),
+        );
 
         // Skipped for modal-driven dispatch: the user didn't type these commands and shouldn't see them in up-arrow history.
         // `PassThrough`, `QueueCommand` and `InjectSkill` reach here, so a command recorded above would land twice.
@@ -1715,7 +1911,7 @@ pub(super) fn dispatch_send_prompt_submission(
         app, None,
     ));
     if let Some(agent) = app.agents.get_mut(&id) {
-        agent.persist_pending_prompts();
+        persist_pending_prompts(agent);
     }
     // Drain dropped with no model ask and no queued copy: put the paste back.
     // Do not fit a silent wipe. Pause-button chrome must not swallow Enter.
@@ -1788,9 +1984,6 @@ fn consume_plan_update_composer(
         .iter()
         .any(|p| p.text == desc || p.text.contains(desc));
     if landed || enqueued {
-        if enqueued {
-            super::queue::drain_prompt_state_to_last_queued(agent);
-        }
         agent.prompt.set_text("");
         agent.clear_sent_human_from_plan_feedback_draft(desc);
     }
@@ -1868,7 +2061,7 @@ pub(super) fn dispatch_send_bash_command(app: &mut AppView, command: String) -> 
         }];
     }
 
-    let protect_queue_id = Some(agent.session.enqueue_bash_command(command.clone()));
+    agent.session.enqueue_bash_command(command.clone());
     agent.prompt.set_text("");
     agent.note_draft_consumed();
 
@@ -2098,7 +2291,15 @@ pub(super) fn handle_prompt_response(
             || context_overflow
             || disk_full
             || request_failed_shown
-            || written_report_not_turn_failure;
+            || crate::app::error_display::written_report_with_nested_running_is_not_turn_failure(
+                agent
+                    .subagent_sessions
+                    .values()
+                    .any(|info| info.is_running()),
+                agent.session.tracker.output_since_last_finish(),
+                None,
+                result.as_ref().err().map(String::as_str).unwrap_or(""),
+            );
         let elapsed = agent.turn_elapsed();
 
         {
@@ -2153,6 +2354,12 @@ pub(super) fn handle_prompt_response(
             "turn ended; client returning to idle",
         );
 
+        let cancel_resume_keep_text = agent
+            .session
+            .in_flight_prompt
+            .as_ref()
+            .map(|prompt| prompt.text.clone());
+        let cancel_resume_keep_pid = agent.session.current_prompt_id.clone();
         agent.session.finish_turn(&mut agent.scrollback);
 
         // Insert the session event message (skip TurnCompleted for bash-mode, which has no agent turn)
@@ -2462,6 +2669,7 @@ pub(super) fn handle_prompt_response(
             agent_id,
             silent: true,
             nonce: Default::default(),
+            force_refresh: false,
         });
         note_peek_page_flip(app, agent_id, page_flip_entry);
         return effects;
@@ -2759,9 +2967,9 @@ mod tests {
             "image chip must leave the composer after the send starts Waiting for the model"
         );
         assert!(
-            !agent.unsent_composer_draft_to_persist().contains(typed),
+            !agent.prompt.text().contains(typed),
             "unsent persist must not keep the sent Human body; persist={:?}",
-            agent.unsent_composer_draft_to_persist()
+            agent.prompt.text()
         );
         let rows =
             xai_grok_shell::session::prompt_wal::load_prompt_wal(&cwd_str, sid).expect("load WAL");

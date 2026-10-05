@@ -563,7 +563,7 @@ impl PipeDrain {
                             cut.store(true, Ordering::Relaxed);
                             break;
                         }
-                        buf.extend_from_slice(&chunk[..n]);
+                        buf.extend_from_slice(chunk.get(..n).expect("index out of bounds"));
                     }
                     Err(e)
                         if e.kind() == std::io::ErrorKind::WouldBlock

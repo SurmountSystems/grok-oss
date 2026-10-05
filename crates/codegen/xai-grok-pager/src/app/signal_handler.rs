@@ -93,7 +93,7 @@ pub(crate) fn unix_lifecycle_signal_exit_code(signal: UnixLifecycleSignal) -> i3
 
 fn apply_unix_lifecycle_signal(signal: UnixLifecycleSignal) {
     if unix_lifecycle_signal_arms_peer_rebuild(signal) {
-        mark_peer_rebuild_relaunch_from_sigusr1();
+        crate::app::dispatch::rebuild::mark_peer_rebuild_relaunch_from_sigusr1();
     }
     request_graceful_or_exit(unix_lifecycle_signal_exit_code(signal));
 }
@@ -302,22 +302,22 @@ mod tests {
     /// A failed `/rebuild` never sends the signal; this only arms the receiver.
     #[test]
     fn sigusr1_sets_peer_rebuild_flag_once() {
-        let _ = take_peer_rebuild_relaunch();
-        mark_peer_rebuild_relaunch_from_sigusr1();
+        let _ = crate::app::dispatch::rebuild::take_peer_rebuild_relaunch();
+        crate::app::dispatch::rebuild::mark_peer_rebuild_relaunch_from_sigusr1();
         assert!(
-            peek_peer_rebuild_relaunch(),
+            crate::app::dispatch::rebuild::peek_peer_rebuild_relaunch(),
             "SIGUSR1 must set the cooperative re-exec flag (peek must not consume)"
         );
         assert!(
-            peek_peer_rebuild_relaunch(),
+            crate::app::dispatch::rebuild::peek_peer_rebuild_relaunch(),
             "peek must leave the flag so a later arm retry still sees SIGUSR1"
         );
         assert!(
-            take_peer_rebuild_relaunch(),
+            crate::app::dispatch::rebuild::take_peer_rebuild_relaunch(),
             "SIGUSR1 must set the cooperative re-exec flag"
         );
         assert!(
-            !take_peer_rebuild_relaunch(),
+            !crate::app::dispatch::rebuild::take_peer_rebuild_relaunch(),
             "flag is one-shot so a later /exit does not re-exec"
         );
     }
@@ -326,7 +326,7 @@ mod tests {
     /// SIGUSR1 still rebuilds grok-oss.
     #[test]
     fn sigint_does_not_arm_peer_rebuild_sigusr1_does() {
-        let _ = take_peer_rebuild_relaunch();
+        let _ = crate::app::dispatch::rebuild::take_peer_rebuild_relaunch();
         assert!(
             !unix_lifecycle_signal_arms_peer_rebuild(UnixLifecycleSignal::Interrupt),
             "SIGINT / Ctrl-C must quit without arming peer re-exec"
@@ -348,19 +348,19 @@ mod tests {
             unix_lifecycle_signal_exit_code(UnixLifecycleSignal::User1),
             0
         );
-        let _ = take_peer_rebuild_relaunch();
+        let _ = crate::app::dispatch::rebuild::take_peer_rebuild_relaunch();
         if unix_lifecycle_signal_arms_peer_rebuild(UnixLifecycleSignal::Interrupt) {
-            mark_peer_rebuild_relaunch_from_sigusr1();
+            crate::app::dispatch::rebuild::mark_peer_rebuild_relaunch_from_sigusr1();
         }
         assert!(
-            !take_peer_rebuild_relaunch(),
+            !crate::app::dispatch::rebuild::take_peer_rebuild_relaunch(),
             "SIGINT must not set the peer-rebuild flag"
         );
         if unix_lifecycle_signal_arms_peer_rebuild(UnixLifecycleSignal::User1) {
-            mark_peer_rebuild_relaunch_from_sigusr1();
+            crate::app::dispatch::rebuild::mark_peer_rebuild_relaunch_from_sigusr1();
         }
         assert!(
-            take_peer_rebuild_relaunch(),
+            crate::app::dispatch::rebuild::take_peer_rebuild_relaunch(),
             "SIGUSR1 must set the peer-rebuild flag"
         );
     }

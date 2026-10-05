@@ -151,6 +151,7 @@ fn request() -> SubagentRequest {
         await_to_completion: false,
         fork_context: false,
         owner: SubagentOwner::Task,
+        implement_loop_effort: None,
         cancel_token: CancellationToken::new(),
         spawn_root: Default::default(),
         tool_call_id: None,

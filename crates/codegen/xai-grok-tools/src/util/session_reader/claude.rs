@@ -18,7 +18,7 @@ fn claude_config_dir() -> PathBuf {
     if let Ok(configured) = std::env::var("CLAUDE_CONFIG_DIR") {
         PathBuf::from(configured)
     } else {
-        dirs::home_dir()
+        xai_dirs::home_dir()
             .unwrap_or_else(|| PathBuf::from("."))
             .join(".claude")
     }

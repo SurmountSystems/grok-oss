@@ -738,11 +738,6 @@ impl MockInferenceServer {
         self.tls_ca.as_ref().map(ThrowawayCa::pem_path)
     }
 
-    /// Origin without the `/v1` inference prefix (`http://127.0.0.1:PORT`).
-    pub fn origin(&self) -> String {
-        format!("http://{}", self.addr)
-    }
-
     pub fn request_count(&self) -> u32 {
         self.state.log.count()
     }
@@ -776,11 +771,6 @@ impl MockInferenceServer {
             .overrides
             .conversation_scripts()
             .answered_turns(conversation)
-    }
-
-    /// Stop retaining entries. [`Self::request_count`] stays exact.
-    pub fn set_keep_requests(&self, enabled: bool) {
-        self.log.keep_entries.store(enabled, Ordering::SeqCst);
     }
 
     pub fn requests(&self) -> Vec<LogEntry> {
@@ -1080,60 +1070,6 @@ impl MockInferenceServer {
                             state
                                 .log
                                 .record("PUT", &format!("/sessions/{id}"), &body, &headers);
-                            StatusCode::OK.into_response()
-                        }
-                    }
-                }),
-            )
-            .route(
-                "/sessions/{id}/data",
-                post({
-                    let log = log_session_data;
-                    let overrides = overrides_session_data;
-                    move |axum::extract::Path(id): axum::extract::Path<String>,
-                          headers: HeaderMap,
-                          Json(body): Json<Value>| {
-                        let log = log.clone();
-                        let overrides = overrides.clone();
-                        async move {
-                            if let Some(reject) = overrides.auth_rejection(&headers) {
-                                return reject;
-                            }
-                            let auth = Self::extract_auth(&headers);
-                            log.record(
-                                "POST",
-                                &format!("/sessions/{id}/data"),
-                                Some(&body),
-                                auth.as_deref(),
-                                Self::headers_vec(&headers),
-                            );
-                            StatusCode::OK.into_response()
-                        }
-                    }
-                }),
-            )
-            .route(
-                "/sessions/{id}",
-                put({
-                    let log = log_session_upsert;
-                    let overrides = overrides_session_upsert;
-                    move |axum::extract::Path(id): axum::extract::Path<String>,
-                          headers: HeaderMap,
-                          Json(body): Json<Value>| {
-                        let log = log.clone();
-                        let overrides = overrides.clone();
-                        async move {
-                            if let Some(reject) = overrides.auth_rejection(&headers) {
-                                return reject;
-                            }
-                            let auth = Self::extract_auth(&headers);
-                            log.record(
-                                "PUT",
-                                &format!("/sessions/{id}"),
-                                Some(&body),
-                                auth.as_deref(),
-                                Self::headers_vec(&headers),
-                            );
                             StatusCode::OK.into_response()
                         }
                     }

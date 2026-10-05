@@ -57,8 +57,6 @@ impl SubagentOwner {
     }
 }
 
-use crate::register_resource;
-
 pub use super::active_message::{
     ActiveAgentMessage, ActiveAgentMessageDelivery, ActiveAgentMessageOperation,
     ActiveAgentMessageOutcome, ActiveAgentMessageQuotaKind, ActiveAgentMessageRequest,
@@ -68,34 +66,6 @@ pub use super::active_message::{
 pub use super::agent_message_sender::{
     AgentMessageHolder, AgentMessageSender, AgentMessageSenderResource,
 };
-
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub enum SubagentOwner {
-    #[default]
-    Task,
-    Workflow {
-        run_id: String,
-    },
-}
-
-impl SubagentOwner {
-    pub fn workflow(run_id: impl Into<String>) -> Self {
-        Self::Workflow {
-            run_id: run_id.into(),
-        }
-    }
-
-    pub fn workflow_run_id(&self) -> Option<&str> {
-        match self {
-            Self::Task => None,
-            Self::Workflow { run_id } => Some(run_id),
-        }
-    }
-
-    pub fn is_workflow(&self) -> bool {
-        matches!(self, Self::Workflow { .. })
-    }
-}
 
 // Request / Response
 
@@ -182,18 +152,6 @@ impl SubagentRequest {
         self.runtime_overrides.loop_task_id.is_some()
     }
 
-    /// The caller blocks on the foreground await budget (neither backgrounded
-    /// nor awaiting to completion).
-    pub fn awaits_in_foreground(&self) -> bool {
-        !self.run_in_background && !self.await_to_completion
-    }
-}
-
-impl SubagentRequest {
-    pub fn from_scheduler_loop(&self) -> bool {
-        self.runtime_overrides.loop_task_id.is_some()
-    }
-
     /// Live implement-loop effort for the Review-row planner. Out of range
     /// or missing falls back to 2 (the Token Economy desired default).
     pub fn implement_loop_effort_or_default(&self) -> u8 {
@@ -221,6 +179,11 @@ pub struct SubagentSpawnRequest {
     /// mode attaches this; scheduler-loop fires leave it `None`.
     #[educe(Debug(ignore))]
     pub registered_tx: Option<oneshot::Sender<()>>,
+    /// Fired once when this spawn is admitted (pending or queued) or rejected
+    /// before a child starts. `spawn_registered` waits on this and does not
+    /// wait for the terminal [`Self::result_tx`] value.
+    #[educe(Debug(ignore))]
+    pub admitted_tx: Option<oneshot::Sender<Result<(), String>>>,
 }
 
 impl std::ops::Deref for SubagentSpawnRequest {
@@ -1249,6 +1212,17 @@ pub struct GoalLoopActive(pub bool);
 
 register_resource!("grok_build", "GoalLoopActive", GoalLoopActive);
 
+/// Token Economy implement-loop `--effort` for this turn (1 through 5).
+/// `None` is the coordinator default.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ImplementLoopEffortResource(pub Option<u8>);
+
+register_resource!(
+    "grok_build",
+    "ImplementLoopEffortResource",
+    ImplementLoopEffortResource
+);
+
 /// Thread-local tracing capture for behavioral log-emission tests.
 #[cfg(test)]
 pub(crate) mod test_capture {
@@ -1329,6 +1303,7 @@ mod tests {
 
     use super::SubagentCapabilityMode;
     use super::SubagentCapabilityModeExt;
+    use super::SubagentRuntimeOverrides;
 
     /// Ordinary task spawns are not disposable once-run roles. Goal Plan Writer
     /// sets `once_run` on the spawn request; Default must stay false.

@@ -18,6 +18,7 @@
 //! Cost magnitudes: see `benches/edit_highlight`.
 //! Hunk-only first paint is cheap; full-file runs once per upgrade; the naïve prefix-per-hunk approach is not shipped.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::ops::Range;
 use std::path::Path;
@@ -766,6 +767,8 @@ pub struct EditToolCallBlock {
     pub highlight: EditHighlightPhase,
     /// Whether this ordinary edit targets a memory v2 scope.
     pub is_memory_activity: bool,
+    /// Paint the new-file body as a preview, without unified-diff chrome.
+    pub paint_as_file_preview: bool,
 }
 
 fn workflow_script_name(path: &str) -> Option<String> {
@@ -808,6 +811,7 @@ impl EditToolCallBlock {
             change_counts,
             highlight: EditHighlightPhase::HunkOnly,
             is_memory_activity: false,
+            paint_as_file_preview: false,
         }
     }
 
@@ -2444,64 +2448,6 @@ mod tests {
     }
 
     #[test]
-    fn hunk_separator_singular_gap() {
-        let hunk1 = vec![DiffLine {
-            text: "line1\n".into(),
-            lo: 1,
-            ln: 1,
-            tag: ChangeTag::Equal,
-        }];
-        let hunk2 = vec![DiffLine {
-            text: "line3\n".into(),
-            lo: 3,
-            ln: 3,
-            tag: ChangeTag::Equal,
-        }];
-
-        let theme = Theme::current();
-        let config = DiffRenderConfig::default();
-        let path = Path::new("test.txt");
-        let outputs = render_diff_hunks_highlighted(&[hunk1, hunk2], path, &theme, 80, &config);
-
-        assert_eq!(line_to_string(&outputs[1].line), "  … 1 unchanged line");
-    }
-
-    #[test]
-    fn hunk_separator_bare_for_non_monotonic_or_adjacent() {
-        let mk = |ln: usize| {
-            vec![DiffLine {
-                text: format!("line{ln}\n"),
-                lo: ln,
-                ln,
-                tag: ChangeTag::Equal,
-            }]
-        };
-        let theme = Theme::current();
-        let config = DiffRenderConfig::default();
-        let path = Path::new("test.txt");
-
-        // Non-monotonic ln (a coalesced later edit above an earlier one):
-        // never render a negative/zero count, keep the bare separator.
-        let outputs = render_diff_hunks_highlighted(&[mk(20), mk(4)], path, &theme, 80, &config);
-        assert_eq!(line_to_string(&outputs[1].line), "  …");
-
-        // Adjacent hunks (no hidden lines) keep the bare separator too.
-        let outputs = render_diff_hunks_highlighted(&[mk(5), mk(6)], path, &theme, 80, &config);
-        assert_eq!(line_to_string(&outputs[1].line), "  …");
-
-        // A hunk with no new-file lines (pure deletion) is not computable.
-        let pure_delete = vec![DiffLine {
-            text: "gone\n".into(),
-            lo: 9,
-            ln: 9,
-            tag: ChangeTag::Delete,
-        }];
-        let outputs =
-            render_diff_hunks_highlighted(&[mk(5), pure_delete], path, &theme, 80, &config);
-        assert_eq!(line_to_string(&outputs[1].line), "  …");
-    }
-
-    #[test]
     fn snapshot_diff_basic() {
         let theme = Theme::current();
         let config = DiffRenderConfig::default();
@@ -2867,7 +2813,7 @@ mod tests {
 
     /// Pins GrokNight via the shared test-lock guard.
     /// Hold it for the whole test so a concurrent theme flip can't skew the compared highlighter walks.
-    fn pin_groknight_syntect() -> std::sync::MutexGuard<'static, ()> {
+    fn pin_groknight_syntect() -> crate::theme::cache::ThemePinGuard {
         let guard = crate::theme::cache::pin_theme();
         assert!(
             !Theme::groknight().diff_uses_line_fg(),

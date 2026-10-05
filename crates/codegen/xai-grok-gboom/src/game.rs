@@ -646,7 +646,7 @@ impl Game {
     }
 }
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 mod tests {
     use super::*;
 

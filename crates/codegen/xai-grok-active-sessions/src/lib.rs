@@ -12,12 +12,73 @@ use agent_client_protocol as acp;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+/// What the TUI was doing when it last wrote a heartbeat. Unknown is the
+/// registry default so an older row without the field still parses.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum SessionActivity {
+    Working,
+    Idle,
+    #[default]
+    Unknown,
+}
+
+impl SessionActivity {
+    fn is_unknown(activity: &Self) -> bool {
+        matches!(activity, Self::Unknown)
+    }
+}
+
+/// Short status phrase for a safe activity line. Not prompt text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HeartbeatPhrase {
+    Paused,
+    TurnRunning,
+    Idle,
+}
+
+/// Fields a heartbeat may refresh on an existing registry row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeartbeatUpdate {
+    pub activity: SessionActivity,
+    pub title: Option<String>,
+    pub activity_line: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ActiveSession {
     pub session_id: acp::SessionId,
     pub pid: u32,
     pub cwd: String,
     pub opened_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "SessionActivity::is_unknown")]
+    pub activity: SessionActivity,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activity_line: Option<String>,
+}
+
+impl ActiveSession {
+    pub fn new(
+        session_id: acp::SessionId,
+        pid: u32,
+        cwd: impl Into<String>,
+        opened_at: DateTime<Utc>,
+    ) -> Self {
+        Self {
+            session_id,
+            pid,
+            cwd: cwd.into(),
+            opened_at,
+            updated_at: None,
+            activity: SessionActivity::Unknown,
+            title: None,
+            activity_line: None,
+        }
+    }
 }
 
 const DATA_FILENAME: &str = "active_sessions.json";
@@ -63,6 +124,114 @@ pub fn try_unregister_in(root: &Path, session_id: &acp::SessionId) -> io::Result
 pub fn list_in(root: &Path) -> io::Result<Vec<ActiveSession>> {
     let data_path = root.join(DATA_FILENAME);
     read_data_file(&data_path)
+}
+
+/// Registry rows under the default Grok home, including dead PIDs.
+pub fn list() -> io::Result<Vec<ActiveSession>> {
+    list_in(&xai_grok_config::grok_home())
+}
+
+/// Registry rows under `root` whose PID is still alive.
+pub fn list_live_in(root: &Path) -> io::Result<Vec<ActiveSession>> {
+    let mut sessions = list_in(root)?;
+    sessions.retain(|session| is_pid_alive(session.pid));
+    Ok(sessions)
+}
+
+/// Safe one-line status. Model id and a count only. Never prompt text.
+pub fn format_safe_activity_line(
+    model: Option<&str>,
+    phrase: HeartbeatPhrase,
+    subagent_count: u32,
+) -> Option<String> {
+    let phrase = match phrase {
+        HeartbeatPhrase::Paused => "paused",
+        HeartbeatPhrase::TurnRunning => "turn running",
+        HeartbeatPhrase::Idle => "idle",
+    };
+    let mut line = phrase.to_string();
+    if let Some(model) = model.map(str::trim).filter(|text| !text.is_empty()) {
+        line.push_str(" · ");
+        line.push_str(model);
+    }
+    if subagent_count > 0 {
+        line.push_str(" · ");
+        line.push_str(&subagent_count.to_string());
+        line.push_str(if subagent_count == 1 {
+            " subagent"
+        } else {
+            " subagents"
+        });
+    }
+    Some(line)
+}
+
+fn apply_heartbeat(
+    sessions: &mut [ActiveSession],
+    session_id: &acp::SessionId,
+    update: &HeartbeatUpdate,
+) -> bool {
+    let mut found = false;
+    for session in sessions.iter_mut() {
+        if session.session_id != *session_id {
+            continue;
+        }
+        found = true;
+        session.activity = update.activity;
+        session.title = update.title.clone();
+        session.activity_line = update.activity_line.clone();
+        session.updated_at = Some(Utc::now());
+    }
+    found
+}
+
+/// Refresh activity on the row `register` already wrote for this session.
+pub fn heartbeat(
+    _pid: u32,
+    session_id: &acp::SessionId,
+    update: HeartbeatUpdate,
+) -> io::Result<()> {
+    let found = with_locked_state(
+        &xai_grok_config::grok_home(),
+        LOCK_ACQUIRE_TIMEOUT,
+        |sessions| apply_heartbeat(sessions, session_id, &update),
+    )?;
+    if found {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "no matching active session",
+        ))
+    }
+}
+
+/// Like [`heartbeat`], but lock contention is `Ok(None)` and a missing row is `Ok(Some(false))`.
+pub fn try_heartbeat(
+    _pid: u32,
+    session_id: &acp::SessionId,
+    update: HeartbeatUpdate,
+) -> io::Result<Option<bool>> {
+    match with_locked_state(&xai_grok_config::grok_home(), Duration::ZERO, |sessions| {
+        apply_heartbeat(sessions, session_id, &update)
+    }) {
+        Ok(found) => Ok(Some(found)),
+        Err(err) if err.kind() == io::ErrorKind::TimedOut => Ok(None),
+        Err(err) => Err(err),
+    }
+}
+
+/// Drop registry rows whose PID is dead. Returns how many rows were removed.
+pub fn collect_crashed() -> io::Result<usize> {
+    with_locked_state(
+        &xai_grok_config::grok_home(),
+        LOCK_ACQUIRE_TIMEOUT,
+        |sessions| {
+            let before = sessions.len();
+            sessions.retain(|session| is_pid_alive(session.pid));
+            before.saturating_sub(sessions.len())
+        },
+    )
 }
 
 fn with_locked_state<F, R>(root: &Path, timeout: Duration, mutate: F) -> io::Result<R>
@@ -174,18 +343,53 @@ pub fn is_pid_alive(pid: u32) -> bool {
     }
 }
 
+/// Install artifact and process basename for this product. Not stock `grok`.
+pub const PRODUCT_CLI_NAME: &str = "grok-oss";
+
+/// Stock process named `grok` is not grok-oss. Rebuild `SIGUSR1` must not target it.
+///
+/// When `exe` is present it is authoritative: the basename must be [`PRODUCT_CLI_NAME`].
+/// Linux appends ` (deleted)` after unlink; that suffix is not part of the name.
+/// A cargo binary whose name only contains `grok` is not this CLI. With no exe,
+/// the first cmdline (`NUL`-separated) or comm token is classified the same way.
+pub fn is_grok_oss_cli_identity(cmdline_or_comm: &str, exe: Option<&str>) -> bool {
+    if let Some(exe) = exe.map(str::trim).filter(|exe| !exe.is_empty()) {
+        return is_product_cli_token(exe);
+    }
+    first_identity_token(cmdline_or_comm).is_some_and(is_product_cli_token)
+}
+
+fn is_product_cli_token(path_or_name: &str) -> bool {
+    let trimmed = path_or_name.trim();
+    let without_deleted = trimmed.strip_suffix(" (deleted)").unwrap_or(trimmed);
+    let basename = without_deleted
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(without_deleted);
+    basename == PRODUCT_CLI_NAME
+}
+
+fn first_identity_token(cmdline_or_comm: &str) -> Option<&str> {
+    let has_nul = cmdline_or_comm.contains('\0');
+    cmdline_or_comm
+        .split(|c: char| {
+            if has_nul {
+                c == '\0'
+            } else {
+                c.is_whitespace()
+            }
+        })
+        .map(str::trim)
+        .find(|part| !part.is_empty())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use tempfile::TempDir;
 
     fn make_session(id: &str, pid: u32) -> ActiveSession {
-        ActiveSession {
-            session_id: acp::SessionId::new(id),
-            pid,
-            cwd: "/tmp/test".into(),
-            opened_at: Utc::now(),
-        }
+        ActiveSession::new(acp::SessionId::new(id), pid, "/tmp/test", Utc::now())
     }
 
     /// Contract: stock process named `grok` is not grok-oss. Rebuild SIGUSR1

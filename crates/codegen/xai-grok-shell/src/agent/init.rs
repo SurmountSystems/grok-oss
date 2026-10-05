@@ -33,6 +33,12 @@ impl From<String> for BootstrapError {
         Self::Config(message)
     }
 }
+impl BootstrapError {
+    /// True when the displayed refusal includes `needle`.
+    pub fn contains(&self, needle: &str) -> bool {
+        self.to_string().contains(needle)
+    }
+}
 /// The owned handoff from the async boot pre-resolve to sync bootstrap: the
 /// settled settings wait and the pre-resolved catalog, moved by value so a
 /// concurrent boot in the same process cannot observe another boot's. Fields are
@@ -170,7 +176,9 @@ pub fn bootstrap_with_cancel(
                 Some(resolved) => resolved,
                 None => crate::agent::remote_config::fetch_initial_models_blocking(
                     cancel,
-                    Some(cfg.grok_com_config.clone()),
+                    Some(crate::agent::config::to_login_grok_com(
+                        &cfg.grok_com_config,
+                    )),
                     warmed_auth.clone(),
                 ),
             },
@@ -216,7 +224,9 @@ pub async fn resolve_boot_startup_settings(
     let models_load = if start_models_prefetch {
         crate::agent::remote_config::start_initial_models_load(
             cancel.clone(),
-            Some(cfg.grok_com_config.clone()),
+            Some(crate::agent::config::to_login_grok_com(
+                &cfg.grok_com_config,
+            )),
             warmed_auth.clone(),
         )
     } else {
@@ -227,7 +237,12 @@ pub async fn resolve_boot_startup_settings(
     let started = std::time::Instant::now();
     let need_settings = cfg.remote_settings.is_none();
     let query = need_settings.then(|| {
-        settings_get::SettingsQuery::resolve(warmed_auth.clone(), Some(cfg.grok_com_config.clone()))
+        settings_get::SettingsQuery::resolve(
+            warmed_auth.clone(),
+            Some(crate::agent::config::to_login_grok_com(
+                &cfg.grok_com_config,
+            )),
+        )
     });
     let (wait, models) = tokio::join!(
         async {
@@ -307,8 +322,9 @@ fn install_allowed(
     cfg: &AgentConfig,
     warmed_auth: Option<&GrokAuth>,
 ) -> bool {
+    let login_cfg = crate::agent::config::to_login_grok_com(&cfg.grok_com_config);
     outcome.install_allowed(
-        &cfg.grok_com_config,
+        &login_cfg,
         warmed_auth,
         xai_grok_cloud_config::managed_config::policy_repair_pending,
     )
@@ -342,7 +358,9 @@ fn ensure_remote_settings_side_effects(
         let started = std::time::Instant::now();
         let query = settings_get::SettingsQuery::resolve(
             warmed_auth.cloned(),
-            Some(cfg.grok_com_config.clone()),
+            Some(crate::agent::config::to_login_grok_com(
+                &cfg.grok_com_config,
+            )),
         );
         let wait = settings_get::block_on_startup_settings(query, deadline, cancel);
         if matches!(wait, settings_get::SettingsWait::Cancelled) {

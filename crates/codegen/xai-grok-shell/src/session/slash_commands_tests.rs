@@ -1,5 +1,6 @@
 use super::*;
 use xai_grok_test_support::acp_fixtures::text_block;
+use xai_grok_tools::implementations::grok_build::LoopFireMode;
 use xai_grok_tools::implementations::skills::types::SkillScope;
 
 /// Shadows [`super::resolve_human_intent`] for the cases that route something other than `/loop`.
@@ -18,6 +19,7 @@ fn resolve(
         availability,
         skill_rewrite,
         workflows,
+        LoopFireMode::Detached,
     )
 }
 
@@ -738,7 +740,10 @@ fn loop_does_not_resolve_when_scheduler_unavailable() {
 }
 
 fn loop_text(args: &str) -> String {
-    match build_loop_prompt_blocks(args).into_iter().next() {
+    match build_loop_prompt_blocks(args, LoopFireMode::Detached)
+        .into_iter()
+        .next()
+    {
         Some(acp::ContentBlock::Text(t)) => t.text,
         other => panic!("expected a text block, got {other:?}"),
     }
@@ -771,12 +776,12 @@ fn loop_instruction_derives_interval_without_default_or_inline_execute() {
 fn loop_prompt_matches_pager_wording() {
     // The shell and pager must stay textually identical so they don't drift.
     use xai_grok_tools::implementations::grok_build::{
-        loop_schedule_instruction, loop_usage_message,
+        LoopFireMode, loop_schedule_instruction, loop_usage_message,
     };
     assert_eq!(loop_text(""), loop_usage_message());
     assert_eq!(
         loop_text("2h run tests"),
-        loop_schedule_instruction("2h run tests")
+        loop_schedule_instruction("2h run tests", LoopFireMode::Detached)
     );
 }
 

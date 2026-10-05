@@ -7,6 +7,7 @@ description = "Actor-based sampling/inference layer for xAI grok (HTTP streaming
 
 [dependencies]
 # Internal
+xai-dirs = { workspace = true }
 xai-grok-auth = { workspace = true }
 xai-grok-extra-ca = { workspace = true }
 grok-rate-limit = { workspace = true }
@@ -39,6 +40,7 @@ axum = { workspace = true }
 axum-server = { workspace = true, features = ["tls-rustls"] }
 rcgen = { workspace = true }
 rustls = { workspace = true }
+tempfile = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["registry"] }
 # Shared SSE generators for the happy-path mock payloads.
 xai-grok-test-support = { workspace = true }

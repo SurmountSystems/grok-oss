@@ -673,6 +673,11 @@ mod tests {
             running_tasks: vec![],
             connected_mcp_servers: vec![],
             todos: vec![],
+            agent_message_anchor: None,
+            images: Default::default(),
+            scheduled_loops: vec![],
+            workflows: vec![],
+            workflow_tool_name: None,
         }
     }
 
@@ -683,7 +688,7 @@ mod tests {
     #[test]
     // Grok OSS: empty live-state still injects standing law as the first system-reminder section after compact. This diverges from upstream xAI because Surmount standing law must not be a buried AGENTS.md paragraph.
     fn post_compact_reminder_includes_surmount_standing_law() {
-        let text = to_system_reminder_sync(&empty_compaction_ctx(), &[], &[], None, None)
+        let text = to_system_reminder_sync(&empty_compaction_ctx(), &[], &[], None, None, None)
             .expect("standing law must produce a post-compact reminder even with empty live state");
         assert!(
             text.starts_with("<system-reminder>"),
@@ -733,7 +738,7 @@ mod tests {
         let mut with_files = empty_compaction_ctx();
         with_files.agent_edited_paths = vec!["src/auth.rs".into()];
         let with_files_text =
-            to_system_reminder_sync(&with_files, &[], &[], None, None).expect("reminder");
+            to_system_reminder_sync(&with_files, &[], &[], None, None, None).expect("reminder");
         let law_pos = with_files_text
             .find("## Surmount standing law (after compact)")
             .expect("standing law");

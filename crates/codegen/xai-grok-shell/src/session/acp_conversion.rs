@@ -639,7 +639,7 @@ pub(crate) fn acp_plan_update(output: &ToolOutput) -> Option<acp::Plan> {
                 .todos
                 .iter()
                 .cloned()
-                .map(plan_entry_from_todo_item)
+                .map(|item| plan_entry_from_todo_item(None, item))
                 .collect();
             Some(acp::Plan::new(entries))
         }
@@ -868,7 +868,7 @@ mod tests {
         let entries: Vec<acp::PlanEntry> = items
             .iter()
             .map(|item| {
-                let mut entry = plan_entry_from_todo_item(item.clone());
+                let mut entry = plan_entry_from_todo_item(None, item.clone());
                 if item.status == TodoStatus::InProgress {
                     entry.status = acp::PlanEntryStatus::Completed;
                 }

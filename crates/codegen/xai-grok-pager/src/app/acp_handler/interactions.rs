@@ -157,6 +157,7 @@ pub(crate) fn handle_ask_user_question(
         if let Some(kind) = old_qv.local_kind.take() {
             use crate::views::question_view::LocalQuestionKind;
             match kind {
+                LocalQuestionKind::Feedback => {}
                 LocalQuestionKind::DoctorFix { .. } => {
                     agent.scrollback.push_block(RenderBlock::system(
                         "/doctor fix was cancelled because another question opened.".to_owned(),
@@ -178,6 +179,7 @@ pub(crate) fn handle_ask_user_question(
                         LocalQuestionKind::AgentTypeMismatch { .. } => "model switch",
                         LocalQuestionKind::DeleteCurrentSession => "/delete",
                         LocalQuestionKind::DoctorFix { .. } => "/doctor fix",
+                        LocalQuestionKind::Feedback => "feedback",
                         // The dedicated arm above owns this variant; the label is kept for exhaustiveness
                         LocalQuestionKind::PromptBlocked { .. } => "blocked prompt",
                     };
@@ -263,6 +265,12 @@ pub(super) fn handle_exit_plan_mode(
     agent.displace_feedback_modal(
         crate::views::feedback_modal::FeedbackModalDisplacement::PlanApproval,
     );
+
+    // Replay of a stored present keeps comments. A live present starts clean.
+    let is_restore = agent.session.loading_replay;
+    let mut carried_comments = Vec::new();
+    let mut carried_next_comment_id = 0u64;
+    let mut carried_feedback_draft: Option<String> = None;
 
     if let Some(mut old) = agent.unmount_plan_review() {
         tracing::warn!(
@@ -372,6 +380,9 @@ pub(super) fn handle_exit_plan_mode(
     // Keep a mid-compose draft visible. stash() copies text and does not
     // clear it; only wipe when the composer was already empty so empty-prompt
     // `a` / `s` / `q` stay accelerators.
+    let keep_draft =
+        !agent.prompt.text().trim().is_empty() && !agent.composer_holds_view_plan_slash();
+    let live_cursor = agent.prompt.cursor();
     if keep_draft {
         agent.prompt.set_cursor(live_cursor);
         if is_restore && let Some(ref mut pav) = agent.plan_approval_view {
@@ -410,7 +421,7 @@ pub(super) fn handle_exit_plan_mode(
         pav.focus = crate::views::plan_approval_view::PlanApprovalFocus::Prompt;
     }
     agent.restore_plan_feedback_draft_if_composer_lost();
-    agent.persist_unsent_composer_draft();
+    agent.persist_unsent_composer_draft_now();
 
     // Soft plan present: a body that is only the Operator prompt, or only
     // a Job/State/Operator status recap, is not the feature document.

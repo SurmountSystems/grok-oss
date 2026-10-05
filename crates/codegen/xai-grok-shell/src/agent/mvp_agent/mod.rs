@@ -162,22 +162,6 @@ pub(crate) fn jwt_claim_matches_user_subscription_tier(
         "SuperGrokPlus" => jwt_claim == "supergrok_plus",
         _ => jwt_claim.parse::<u64>().is_ok_and(|n| n != 0),
     }
-    let server_id = meta_non_empty_str(local, "server_id")
-        .or_else(|| {
-            meta
-                .and_then(|m| m.get(CLOUD_EXISTING_WORKSPACE_META_KEY))
-                .and_then(|w| meta_non_empty_str(w, "server_id"))
-        })?;
-    let cwd = meta_non_empty_str(local, "cwd")
-        .or_else(|| {
-            meta
-                .and_then(|m| m.get(CLOUD_EXISTING_WORKSPACE_META_KEY))
-                .and_then(|w| meta_non_empty_str(w, "cwd"))
-        });
-    Some(ComputerSession::ExistingWorkspace {
-        server_id,
-        cwd,
-    })
 }
 /// ACP `_meta` key for the intent to run a chat session on a local workspace (pager stamps it on chat create).
 #[cfg(feature = "local-workspace")]
@@ -191,6 +175,21 @@ fn local_workspace_intent_present(meta: Option<&acp::Meta>) -> bool {
         .and_then(|m| m.as_str())
         .is_some_and(|mode| mode == "own" || mode == "attach")
 }
+/// ACP `_meta` key for an already-running workspace server the attach path may reuse.
+#[cfg(feature = "local-workspace")]
+const CLOUD_EXISTING_WORKSPACE_META_KEY: &str = "x.ai/cloud_existing_workspace";
+
+/// Non-empty string field on a JSON object. Blank and non-string values are absent.
+#[cfg(feature = "local-workspace")]
+fn meta_non_empty_str(value: &serde_json::Value, key: &str) -> Option<String> {
+    value
+        .get(key)
+        .and_then(|field| field.as_str())
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(str::to_owned)
+}
+
 /// Maps a valid local-workspace intent to ExistingWorkspace only.
 /// `server_id` comes from the intent object, else `cloud_existing_workspace`.
 /// Never reads `envId` and never emits `SandboxEnvironment`.
@@ -221,10 +220,53 @@ fn parse_local_workspace_existing(
         cwd,
     })
 }
+#[cfg(feature = "local-workspace")]
+fn sandbox_from_env_id(meta: &acp::Meta) -> Option<crate::gateway_bridge::ComputerSession> {
+    use crate::gateway_bridge::ComputerSession;
+    let environment_id = meta
+        .get("envId")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(str::to_owned)?;
+    Some(ComputerSession::SandboxEnvironment {
+        environment_id: Some(environment_id),
+    })
+}
+
+#[cfg(feature = "local-workspace")]
+fn parse_session_computer_sessions(
+    meta: Option<&acp::Meta>,
+) -> Option<Vec<crate::gateway_bridge::ComputerSession>> {
+    let meta = meta?;
+    if let Some(existing) = parse_local_workspace_existing(Some(meta)) {
+        return Some(vec![existing]);
+    }
+    if local_workspace_intent_present(Some(meta)) {
+        return None;
+    }
+    sandbox_from_env_id(meta).map(|session| vec![session])
+}
+
+#[cfg(not(feature = "local-workspace"))]
 #[allow(dead_code)]
 fn parse_session_computer_sessions(_meta: Option<&acp::Meta>) -> Option<Vec<()>> {
     None
 }
+
+#[cfg(feature = "local-workspace")]
+fn resolve_session_computer_sessions(
+    meta: Option<&acp::Meta>,
+) -> Result<Option<Vec<crate::gateway_bridge::ComputerSession>>, acp::Error> {
+    if local_workspace_intent_present(meta) && parse_local_workspace_existing(meta).is_none() {
+        return Err(acp::Error::invalid_params().data(serde_json::json!({
+            "code": "local_workspace_server_id_missing",
+        })));
+    }
+    Ok(parse_session_computer_sessions(meta))
+}
+
+#[cfg(not(feature = "local-workspace"))]
 fn resolve_session_computer_sessions(
     _meta: Option<&acp::Meta>,
 ) -> Result<Option<Vec<()>>, acp::Error> {
@@ -742,6 +784,8 @@ pub struct MvpAgent {
     /// Per-session YOLO tracking lives in SessionHandle.yolo_mode.
     default_yolo_mode: bool,
     default_auto_mode: bool,
+    /// Launch default for context-only. Per-session state lives on the session actor.
+    default_context_only_mode: bool,
     /// `Send` mirror of `cfg.is_trace_upload_enabled()` for the per-session live collection gates.
     /// `cfg` is `!Send`; the gates run on the tokio pool.
     /// Kept current by [`Self::sync_collection_config_gate`] on every mid-session `remote_settings` rewrite.
@@ -2407,6 +2451,7 @@ fn spawn_post_unblock_jwt_and_catalog_retry(
                             .refresh_chain(
                                 xai_grok_login::token_type::TokenType::OidcSession,
                                 xai_grok_login::manager::RefreshReason::ServerRejected,
+                                xai_grok_login::manager::RefreshUrgency::Background,
                             )
                             .await;
                         let jwt_claim = auth_manager

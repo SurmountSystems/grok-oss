@@ -6,7 +6,6 @@
     dead_code
 )]
 //! xai-grok-pager: Grok Build TUI.
-#![cfg_attr(feature = "test-support", allow(dead_code, unused_imports))]
 //! xai-grok-pager — Grok Build TUI.
 //!
 //! A clean-room implementation built on the v3 pager rendering engine.
@@ -49,6 +48,7 @@ pub mod obf;
 pub mod plugin_cmd;
 pub mod pty_wrap;
 pub mod recent_dirs;
+pub mod running_sessions;
 pub mod scrollback;
 pub mod sessions_cmd;
 pub mod settings;

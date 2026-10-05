@@ -201,7 +201,10 @@ pub(crate) async fn run_request_task(
         }
 
         // Cross-process rate-limit coordination: wait until peers say the provider is open.
-        wait_before_attempt(&config).await;
+        if !wait_before_attempt(&config, &cancel_token).await {
+            handle_cancellation(&event_tx, &request_id, &mut completion);
+            return request_id;
+        }
         if cancel_token.is_cancelled() {
             handle_cancellation(&event_tx, &request_id, &mut completion);
             return request_id;
@@ -270,6 +273,7 @@ pub(crate) async fn run_request_task(
                     Ok((*response, metrics)),
                     terminal_event_queued,
                 );
+                clear_exhausted_after_success(&config);
                 return request_id;
             }
             AttemptOutcome::Empty {
@@ -302,7 +306,7 @@ pub(crate) async fn run_request_task(
                     &request_id,
                     &mut request,
                     &mut client,
-                    &config,
+                    &mut config,
                     &cancel_token,
                     &mut completion,
                     &sampling_span,
@@ -379,7 +383,7 @@ pub(crate) async fn run_request_task(
                     &request_id,
                     &mut request,
                     &mut client,
-                    &config,
+                    &mut config,
                     &cancel_token,
                     &mut completion,
                     &sampling_span,
@@ -403,7 +407,7 @@ pub(crate) async fn run_request_task(
                     &request_id,
                     &mut request,
                     &mut client,
-                    &config,
+                    &mut config,
                     &cancel_token,
                     &mut completion,
                     &sampling_span,
@@ -414,6 +418,74 @@ pub(crate) async fn run_request_task(
                 }
             }
         }
+    }
+}
+
+/// If the configured primary credential is already memoized exhausted and a
+/// live failover remains, switch before the first HTTP attempt.
+fn try_skip_memoized_exhausted_primary(
+    config: &mut SamplerConfig,
+    client: &mut SamplingClient,
+) -> Option<String> {
+    if !crate::prefer_live_primary::primary_is_memoized_credit_exhausted(config) {
+        return None;
+    }
+    try_rotate_to_failover_key(
+        config,
+        client,
+        crate::exhausted_identity::HopCause::CreditExhausted,
+    )
+}
+
+fn try_rotate_to_failover_key(
+    config: &mut SamplerConfig,
+    client: &mut SamplingClient,
+    cause: crate::exhausted_identity::HopCause,
+) -> Option<String> {
+    let hop_reason = crate::prefer_live_primary::rotate_identity_config(config, cause)?;
+    match SamplingClient::new(config.clone()) {
+        Ok(fresh) => {
+            *client = fresh;
+            Some(hop_reason)
+        }
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "failed to rebuild sampling client after key failover"
+            );
+            None
+        }
+    }
+}
+
+/// A SuperGrok session 200 paid with dollar credits is not recovery of included period limits.
+/// Only a non-session success clears the exhausted memo.
+fn clear_exhausted_after_success(config: &SamplerConfig) {
+    let Some(key) = config
+        .api_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    else {
+        return;
+    };
+    if crate::prefer_live_primary::is_session_identity(config, key) {
+        return;
+    }
+    crate::exhausted_identity::clear_exhausted(&fingerprint_secret(key));
+}
+
+async fn await_stream_init<T>(
+    cancel_token: &CancellationToken,
+    fut: impl std::future::Future<Output = Result<T, SamplingError>>,
+) -> Result<T, AttemptOutcome> {
+    tokio::select! {
+        biased;
+        _ = cancel_token.cancelled() => Err(AttemptOutcome::Cancelled),
+        result = fut => match result {
+            Ok(value) => Ok(value),
+            Err(error) => Err(AttemptOutcome::InitFailed { error }),
+        },
     }
 }
 
@@ -429,15 +501,54 @@ async fn apply_retry_decision(
     request_id: &RequestId,
     request: &mut ConversationRequest,
     client: &mut SamplingClient,
-    config: &SamplerConfig,
+    config: &mut SamplerConfig,
     cancel_token: &CancellationToken,
     completion: &mut CompletionState,
     parent: &tracing::Span,
 ) -> bool {
+    // Credit exhaustion is fatal for one account but not for the request when
+    // another key remains. Rotate before classify. Console team prepaid while
+    // SuperGrok is live stays on the session and does not mark SuperGrok used up.
+    if err.is_credit_exhausted() {
+        let active = config.api_key.as_deref().unwrap_or("").trim();
+        let active_is_supergrok = crate::prefer_live_primary::is_session_identity(config, active)
+            || config.bearer_resolver.is_some();
+        let team_prepaid = match err {
+            SamplingError::Api { message, .. }
+            | SamplingError::StreamError { message, .. }
+            | SamplingError::Auth { message, .. } => {
+                xai_grok_sampling_types::is_console_team_prepaid_message(message)
+            }
+            _ => xai_grok_sampling_types::is_console_team_prepaid_message(&err.to_string()),
+        };
+        if !(team_prepaid && active_is_supergrok) {
+            crate::prefer_live_primary::ensure_supergrok_recovery_after_console_credit_exhaust(
+                config,
+            );
+            if let Some(hop_reason) = try_rotate_to_failover_key(
+                config,
+                client,
+                crate::exhausted_identity::HopCause::CreditExhausted,
+            ) {
+                *retry_count += 1;
+                emit_retrying_with_reason(
+                    event_tx,
+                    request_id,
+                    *retry_count,
+                    max_retries,
+                    err,
+                    config,
+                    hop_reason,
+                );
+                return true;
+            }
+        }
+    }
+
     let rate_limit_threshold = config
         .rate_limit_retry_threshold
         .unwrap_or(retry_policy.rate_limit_retry_threshold);
-    let decision = classify_error(err, *retry_count, max_retries, rate_limit_threshold);
+    let decision = retry_mod::classify_error(err, *retry_count, max_retries, rate_limit_threshold);
 
     // Connection-reset / broken-pipe on body upload often means nginx rejected an oversized payload before responding 413
     // Strip images proactively before any retry of those errors so we don't burn budget re-uploading the same large body
@@ -468,7 +579,15 @@ async fn apply_retry_decision(
     match decision {
         RetryDecision::Retry { backoff } => {
             *retry_count += 1;
-            emit_retrying(event_tx, request_id, *retry_count, max_retries, err);
+            emit_retrying(
+                event_tx,
+                request_id,
+                *retry_count,
+                max_retries,
+                err,
+                config,
+                None,
+            );
             if sleep_or_cancel(backoff, cancel_token, *retry_count, parent).await {
                 true
             } else {
@@ -478,7 +597,15 @@ async fn apply_retry_decision(
         }
         RetryDecision::RetryWithBackoff { backoff, .. } => {
             *retry_count += 1;
-            emit_retrying(event_tx, request_id, *retry_count, max_retries, err);
+            emit_retrying(
+                event_tx,
+                request_id,
+                *retry_count,
+                max_retries,
+                err,
+                config,
+                None,
+            );
             if sleep_or_cancel(backoff, cancel_token, *retry_count, parent).await {
                 true
             } else {
@@ -529,7 +656,15 @@ async fn apply_retry_decision(
         }
         RetryDecision::RetryWithClientRebuild { backoff } => {
             *retry_count += 1;
-            emit_retrying(event_tx, request_id, *retry_count, max_retries, err);
+            emit_retrying(
+                event_tx,
+                request_id,
+                *retry_count,
+                max_retries,
+                err,
+                config,
+                None,
+            );
             if !sleep_or_cancel(backoff, cancel_token, *retry_count, parent).await {
                 handle_cancellation(event_tx, request_id, completion);
                 return false;
@@ -1128,8 +1263,8 @@ fn emit_retrying_reason(
         attempt,
         max_retries,
         kind: info.kind,
-        reason: err.detail_with_causes(),
-        doom_loop_triggers: info.doom_loop_triggers,
+        reason,
+        doom_loop_triggers: info.doom_loop_triggers.clone(),
         doom_loop_aborted_at_chunk: info.doom_loop_aborted_at_chunk,
     });
 }
@@ -1158,7 +1293,8 @@ fn strip_reason_for_image_error(err: &SamplingError) -> StripReason {
         | SamplingError::IdleTimeout { .. }
         | SamplingError::EmptyResponse { .. }
         | SamplingError::MaxTokensTruncation
-        | SamplingError::DoomLoopDetected { .. } => StripReason::PayloadHeuristic,
+        | SamplingError::DoomLoopDetected { .. }
+        | SamplingError::RepetitiveGeneration { .. } => StripReason::PayloadHeuristic,
     }
 }
 
@@ -1221,6 +1357,7 @@ fn send_completion(
 mod tests {
     use super::*;
     use futures_util::stream;
+    use grok_rate_limit::RateLimitMeta;
     use reqwest::StatusCode;
     use xai_grok_sampling_types::ApiErrorCode;
 
@@ -1715,14 +1852,22 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn wait_before_attempt_aborts_on_cancel() {
         const DISABLE_ENV: &str = "GROK_DISABLE_SHARED_RATE_LIMIT";
-        let dir = tempfile::TempDir::new().expect("temp rate-limit dir");
+        let dir = std::env::temp_dir().join(format!(
+            "grok-rate-limit-wait-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).expect("temp rate-limit dir");
         // Ensure shared limits are on for this store path (open() still honors DISABLE).
         let prev_disable = std::env::var_os(DISABLE_ENV);
         // SAFETY: test-only env flip; restore below.
         unsafe {
             std::env::remove_var(DISABLE_ENV);
         }
-        let store = SharedRateLimitStore::open(dir.path()).expect("open store");
+        let store = SharedRateLimitStore::open(&dir).expect("open store");
         let key = ProviderKey::new("wait-before-attempt-cancel");
         store
             .observe(
@@ -1749,6 +1894,7 @@ mod tests {
             // SAFETY: restore prior env after test-only flip above.
             unsafe { std::env::set_var(DISABLE_ENV, v) }
         }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -1872,7 +2018,7 @@ mod tests {
         let mut completion = CompletionState::new(Some(completion_tx));
         let mut retry_count = 0;
         let mut request = ConversationRequest::default();
-        let config = SamplerConfig {
+        let mut config = SamplerConfig {
             base_url: "http://localhost".into(),
             model: "test-model".into(),
             ..Default::default()
@@ -1889,7 +2035,7 @@ mod tests {
             &RequestId::from("cancel-backoff"),
             &mut request,
             &mut client,
-            &config,
+            &mut config,
             &cancel_token,
             &mut completion,
             &tracing::Span::none(),
@@ -2518,7 +2664,7 @@ mod tests {
                 let console = "team-403-stay-console-key";
                 let (event_tx, mut event_rx) = mpsc::unbounded_channel();
                 let (completion_tx, _completion_rx) = oneshot::channel();
-                let mut completion_tx = Some(completion_tx);
+                let mut completion = CompletionState::new(Some(completion_tx));
                 let mut retry_count = 0;
                 let mut request = ConversationRequest::default();
                 let mut config = SamplerConfig {
@@ -2560,7 +2706,8 @@ mod tests {
                     &mut client,
                     &mut config,
                     &CancellationToken::new(),
-                    &mut completion_tx,
+                    &mut completion,
+                    &tracing::Span::none(),
                 )
                 .await;
 
@@ -2597,7 +2744,7 @@ mod tests {
                 let console = "this-request-402-console-key";
                 let (event_tx, mut event_rx) = mpsc::unbounded_channel();
                 let (completion_tx, _completion_rx) = oneshot::channel();
-                let mut completion_tx = Some(completion_tx);
+                let mut completion = CompletionState::new(Some(completion_tx));
                 let mut retry_count = 0;
                 let mut request = ConversationRequest::default();
                 let mut config = SamplerConfig {
@@ -2632,7 +2779,8 @@ mod tests {
                     &mut client,
                     &mut config,
                     &CancellationToken::new(),
-                    &mut completion_tx,
+                    &mut completion,
+                    &tracing::Span::none(),
                 )
                 .await;
 

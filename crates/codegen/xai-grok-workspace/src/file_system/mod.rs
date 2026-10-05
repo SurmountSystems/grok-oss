@@ -195,6 +195,35 @@ impl FuzzySearchManager {
         }
     }
 
+    /// The live search id for this root, if `open` already built one.
+    fn search_id_for_root(&self, root: &Path) -> Option<FuzzySearchId> {
+        self.searches
+            .iter()
+            .find(|(_, ctx)| ctx.root.as_path() == root)
+            .map(|(id, _)| id.clone())
+    }
+
+    /// Keep the existing matcher. Update routing and refresh activity so a
+    /// repeated `open` does not look stale and does not start another pool.
+    fn reuse_existing(
+        &mut self,
+        existing_id: &FuzzySearchId,
+        hidden: bool,
+        session_id: Option<String>,
+        target_client_id: TargetClientId,
+    ) {
+        let Some(ctx) = self.searches.get_mut(existing_id) else {
+            return;
+        };
+        ctx.last_activity = Instant::now();
+        ctx.session_id = session_id;
+        ctx.target_client_id = target_client_id;
+        if ctx.hidden != hidden {
+            ctx.hidden = hidden;
+            ctx.daemon.restart_walk(hidden);
+        }
+    }
+
     /// Open a fuzzy search rooted at `root`.
     ///
     /// Repeated opens for the same root reuse the existing matcher and search

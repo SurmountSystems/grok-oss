@@ -221,6 +221,28 @@ pub fn effective_auto_for_launch(
         .is_auto()
 }
 
+/// Whether this launch should start in context-only mode.
+/// CLI `--permission-mode context-only` wins. Yolo wins over context-only.
+/// An unset mode stays Ask. It does not become context-only.
+pub fn effective_context_only_for_launch(
+    cli_always_approve: bool,
+    cli_permission_mode: Option<&str>,
+    remote_permission_mode: Option<&str>,
+) -> bool {
+    let yolo = effective_yolo_for_launch(
+        cli_always_approve,
+        cli_permission_mode,
+        remote_permission_mode,
+    );
+    if yolo.yolo {
+        return false;
+    }
+    if let Some(mode) = cli_permission_mode {
+        return mode == "context-only";
+    }
+    load_selected_permission_mode(remote_permission_mode) == Some(PermissionMode::ContextOnly)
+}
+
 /// Auto can be requested via CLI, config, `default_auto_mode`, or a client's `_meta.autoMode`.
 /// It is pure so both activation call sites (session spawn and runtime `SetAutoMode`) are unit-testable without a live session.
 /// This is the authoritative agent-side gate: when it returns `false`, the permission manager never flips to auto and the classifier never wires.

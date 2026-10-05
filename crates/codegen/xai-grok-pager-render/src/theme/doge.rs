@@ -139,13 +139,13 @@ pub fn floyd_steinberg_quantise(pixels: &mut [(u8, u8, u8)], width: usize) {
     for y in 0..height {
         for x in 0..width {
             let i = y * width + x;
-            let (or, og, ob) = work[i];
+            let (or, og, ob) = work.get(i).copied().expect("index out of bounds");
             let r = or.clamp(0, 255) as u8;
             let g = og.clamp(0, 255) as u8;
             let b = ob.clamp(0, 255) as u8;
             let (nr, ng, nb) = quantise_rgb(r, g, b);
-            work[i] = (nr as i16, ng as i16, nb as i16);
-            pixels[i] = (nr, ng, nb);
+            *work.get_mut(i).expect("index out of bounds") = (nr as i16, ng as i16, nb as i16);
+            *pixels.get_mut(i).expect("index out of bounds") = (nr, ng, nb);
 
             let er = or - nr as i16;
             let eg = og - ng as i16;
@@ -153,8 +153,9 @@ pub fn floyd_steinberg_quantise(pixels: &mut [(u8, u8, u8)], width: usize) {
 
             // Classic FS weights: right 7/16, below-left 3/16, below 5/16, below-right 1/16.
             let distribute = |work: &mut [(i16, i16, i16)], idx: usize, num: i16| {
-                let (wr, wg, wb) = work[idx];
-                work[idx] = (wr + er * num / 16, wg + eg * num / 16, wb + eb * num / 16);
+                let (wr, wg, wb) = work.get(idx).copied().expect("index out of bounds");
+                *work.get_mut(idx).expect("index out of bounds") =
+                    (wr + er * num / 16, wg + eg * num / 16, wb + eb * num / 16);
             };
 
             if x + 1 < width {

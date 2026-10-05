@@ -2,6 +2,7 @@ use crate::agent::auth_method::ModelByok;
 use crate::agent::model_providers::{
     ModelProviderConfig, auth_config_issues, model_provider_auth_name, parse_model_providers,
 };
+use crate::auth::GrokComConfig;
 use crate::remote::DEFAULT_CONTEXT_WINDOW;
 use crate::{config::StorageMode, sampling::ApiBackend, tools::config::ShellToolsetConfig};
 use agent_client_protocol as acp;
@@ -13,7 +14,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use xai_grok_agent::prompt::skills::SkillsConfig;
 use xai_grok_config::{Capability, Distribution};
-use xai_grok_login::{AuthManager, GrokComConfig};
+use xai_grok_login::AuthManager;
 use xai_grok_sampler::{AuthScheme, SamplerConfig};
 use xai_grok_sampling_types::{
     CONTEXT_WINDOWS_META_KEY, CompactionAtTokens, CompactionsRemaining, MODEL_NOTICE_META_KEY,
@@ -914,6 +915,10 @@ pub struct Config {
     pub default_yolo_mode: bool,
     /// Start sessions in auto permission mode (classifier) when no per-session override.
     pub default_auto_mode: bool,
+    /// Start sessions context-only when no per-session override and yolo and auto are off.
+    /// Pager seeds this from the launch permission mode. Not a `[features]` mirror.
+    #[serde(skip)]
+    pub default_context_only_mode: bool,
     /// CLI memory override preserved across config and remote-setting refreshes.
     #[serde(skip)]
     pub memory_enabled_override: Option<bool>,
@@ -1430,7 +1435,7 @@ impl Config {
     pub fn create_auth_manager(&self) -> AuthManager {
         AuthManager::new_with_proxy_base_url(
             &crate::util::grok_home::grok_home(),
-            self.grok_com_config.clone(),
+            to_login_grok_com(&self.grok_com_config),
             self.endpoints.proxy_url(),
         )
     }
@@ -1655,8 +1660,11 @@ impl Config {
             );
         }
         super::config_model_override_parse::log_config_warnings(&config.config_warnings);
-        config.grok_com_config =
-            GrokComConfig::from_effective_config(raw_config).map_err(|error| error.to_string())?;
+        let login_cfg = xai_grok_login::GrokComConfig::from_effective_config(raw_config)
+            .map_err(|error| error.to_string())?;
+        let mut shell_cfg = shell_from_login(login_cfg);
+        overlay_shell_auth_flags(&mut shell_cfg, raw_config);
+        config.grok_com_config = shell_cfg;
         config.login_device_flow = match raw_config
             .get("grok_com_config")
             .and_then(toml::Value::as_table)
@@ -1699,6 +1707,8 @@ impl Config {
         self.subagent_toggle = sa.toggle;
         self.subagent_roles = sa.roles;
         self.subagent_personas = sa.personas;
+        self.subagent_allow_worktree = sa.allow_worktree;
+        self.subagent_parent_follow_up = sa.parent_follow_up;
         let env = std::env::var(crate::config::SubagentsConfig::ENV_MAX_DEPTH).ok();
         let remote = self
             .remote_settings
@@ -1891,7 +1901,16 @@ impl Config {
         if let Some(mode) = env_telemetry_mode("GROK_TELEMETRY_ENABLED") {
             self.features.telemetry = Some(mode);
         }
-        self.grok_com_config.pin_login_team();
+        let auto_use = self.grok_com_config.auto_use_included_limits;
+        let allow_spend = self
+            .grok_com_config
+            .allow_spend_when_free_period_debit_unproven;
+        let mut login_cfg = to_login_grok_com(&self.grok_com_config);
+        login_cfg.pin_login_team();
+        self.grok_com_config = shell_from_login(login_cfg);
+        self.grok_com_config.auto_use_included_limits = auto_use;
+        self.grok_com_config
+            .allow_spend_when_free_period_debit_unproven = allow_spend;
     }
     /// Whether product analytics may run. Every product analytics check calls this.
     pub fn product_analytics_enabled(&self, auth: Option<&xai_grok_login::GrokAuth>) -> bool {
@@ -3396,6 +3415,7 @@ fn openrouter_grok_45_default_entry() -> ModelEntryConfig {
         show_model_fingerprint: false,
         stream_tool_calls: None,
         laziness_detector: LazinessDetectorPerModelConfig::default(),
+        ..ModelEntryConfig::default()
     }
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -4472,11 +4492,218 @@ pub(crate) fn collect_own_credentials(
     }
     keys
 }
+fn split_primary_failover(keys: Vec<String>) -> (Option<String>, Vec<String>) {
+    let mut keys = keys.into_iter();
+    let primary = keys.next();
+    (primary, keys.collect())
+}
+
+fn collect_xai_api_key_env_list() -> Vec<String> {
+    let mut keys = Vec::new();
+    if let Ok(raw) = crate::agent::auth_method::read_xai_api_key_env() {
+        for part in split_api_key_list(&raw) {
+            push_unique_key(&mut keys, part);
+        }
+    }
+    keys
+}
+
+fn collect_xai_console_api_keys() -> Vec<String> {
+    let mut keys = collect_xai_api_key_env_list();
+    let store = crate::auth::credentials_store::CredentialsStore::default_store();
+    if let Ok(stored) = crate::auth::load_stored_console_api_keys(&store) {
+        for key in stored {
+            push_unique_key(&mut keys, key);
+        }
+    }
+    keys
+}
+
+fn console_hop_host(model: &ModelEntry, first_party: bool) -> String {
+    if let Some(url) = model
+        .api_base_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+    {
+        return url.to_owned();
+    }
+    if first_party {
+        return EndpointsConfig::default().xai_api_base_url;
+    }
+    model.info().base_url.clone()
+}
+
+fn login_oidc(oidc: &crate::auth::OidcAuthConfig) -> xai_grok_login::OidcAuthConfig {
+    xai_grok_login::OidcAuthConfig {
+        issuer: oidc.issuer.clone(),
+        client_id: oidc.client_id.clone(),
+        scopes: oidc.scopes.clone(),
+        audience: oidc.audience.clone(),
+    }
+}
+
+fn shell_oidc(oidc: xai_grok_login::OidcAuthConfig) -> crate::auth::OidcAuthConfig {
+    crate::auth::OidcAuthConfig {
+        issuer: oidc.issuer,
+        client_id: oidc.client_id,
+        scopes: oidc.scopes,
+        audience: oidc.audience,
+    }
+}
+
+fn login_oauth2(
+    oauth2: &crate::auth::OAuth2ProviderConfig,
+) -> xai_grok_login::OAuth2ProviderConfig {
+    xai_grok_login::OAuth2ProviderConfig {
+        issuer: oauth2.issuer.clone(),
+        client_id: oauth2.client_id.clone(),
+        scopes: oauth2.scopes.clone(),
+        principal_type: oauth2.principal_type.clone(),
+        principal_id: oauth2.principal_id.clone(),
+        referrer: oauth2.referrer.clone(),
+    }
+}
+
+fn shell_oauth2(oauth2: xai_grok_login::OAuth2ProviderConfig) -> crate::auth::OAuth2ProviderConfig {
+    crate::auth::OAuth2ProviderConfig {
+        issuer: oauth2.issuer,
+        client_id: oauth2.client_id,
+        scopes: oauth2.scopes,
+        principal_type: oauth2.principal_type,
+        principal_id: oauth2.principal_id,
+        referrer: oauth2.referrer,
+    }
+}
+
+fn login_force_team(team: &crate::auth::ForceLoginTeam) -> xai_grok_login::ForceLoginTeam {
+    match team {
+        crate::auth::ForceLoginTeam::Single(id) => {
+            xai_grok_login::ForceLoginTeam::Single(id.clone())
+        }
+        crate::auth::ForceLoginTeam::AnyOf(ids) => {
+            xai_grok_login::ForceLoginTeam::AnyOf(ids.clone())
+        }
+    }
+}
+
+fn shell_force_team(team: xai_grok_login::ForceLoginTeam) -> crate::auth::ForceLoginTeam {
+    match team {
+        xai_grok_login::ForceLoginTeam::Single(id) => crate::auth::ForceLoginTeam::Single(id),
+        xai_grok_login::ForceLoginTeam::AnyOf(ids) => crate::auth::ForceLoginTeam::AnyOf(ids),
+    }
+}
+
+pub(crate) fn login_preferred(
+    method: crate::auth::PreferredAuthMethod,
+) -> xai_grok_login::PreferredAuthMethod {
+    match method {
+        crate::auth::PreferredAuthMethod::ApiKey => xai_grok_login::PreferredAuthMethod::ApiKey,
+        crate::auth::PreferredAuthMethod::Oidc => xai_grok_login::PreferredAuthMethod::Oidc,
+    }
+}
+
+fn shell_preferred(
+    method: xai_grok_login::PreferredAuthMethod,
+) -> crate::auth::PreferredAuthMethod {
+    match method {
+        xai_grok_login::PreferredAuthMethod::ApiKey => crate::auth::PreferredAuthMethod::ApiKey,
+        xai_grok_login::PreferredAuthMethod::Oidc => crate::auth::PreferredAuthMethod::Oidc,
+    }
+}
+
+/// Shell `[auth]` config carries included-limit flags the login struct does not.
+pub(crate) fn to_login_grok_com(cfg: &crate::auth::GrokComConfig) -> xai_grok_login::GrokComConfig {
+    xai_grok_login::GrokComConfig {
+        grok_ws_origin: cfg.grok_ws_origin.clone(),
+        grok_ws_url: cfg.grok_ws_url.clone(),
+        token_header: cfg.token_header.clone(),
+        oidc: cfg.oidc.as_ref().map(login_oidc),
+        oauth2: cfg.oauth2.as_ref().map(login_oauth2),
+        auth_provider_command: cfg.auth_provider_command.clone(),
+        auth_provider_label: cfg.auth_provider_label.clone(),
+        auth_token_ttl: cfg.auth_token_ttl,
+        disable_api_key_auth: cfg.disable_api_key_auth,
+        force_login_team_uuid: cfg.force_login_team_uuid.as_ref().map(login_force_team),
+        preferred_method: cfg.preferred_method.map(login_preferred),
+        auto_use_included_limits: cfg.auto_use_included_limits,
+        allow_spend_when_free_period_debit_unproven: cfg
+            .allow_spend_when_free_period_debit_unproven,
+    }
+}
+
+fn shell_from_login(cfg: xai_grok_login::GrokComConfig) -> crate::auth::GrokComConfig {
+    crate::auth::GrokComConfig {
+        grok_ws_origin: cfg.grok_ws_origin,
+        grok_ws_url: cfg.grok_ws_url,
+        token_header: cfg.token_header,
+        oidc: cfg.oidc.map(shell_oidc),
+        oauth2: cfg.oauth2.map(shell_oauth2),
+        auth_provider_command: cfg.auth_provider_command,
+        auth_provider_label: cfg.auth_provider_label,
+        auth_token_ttl: cfg.auth_token_ttl,
+        disable_api_key_auth: cfg.disable_api_key_auth,
+        force_login_team_uuid: cfg.force_login_team_uuid.map(shell_force_team),
+        preferred_method: cfg.preferred_method.map(shell_preferred),
+        auto_use_included_limits: cfg.auto_use_included_limits,
+        allow_spend_when_free_period_debit_unproven: cfg
+            .allow_spend_when_free_period_debit_unproven,
+    }
+}
+
+fn toml_section_bool(raw: &toml::Value, section: &str, keys: &[&str]) -> Option<bool> {
+    let table = raw.get(section)?.as_table()?;
+    for key in keys {
+        if let Some(toml::Value::Boolean(value)) = table.get(*key) {
+            return Some(*value);
+        }
+    }
+    None
+}
+
+fn overlay_shell_auth_flags(shell: &mut crate::auth::GrokComConfig, raw: &toml::Value) {
+    let auto_keys = ["auto_use_included_limits", "prefer_sooner_reset"];
+    let mut auto_use = toml_section_bool(raw, "grok_com_config", &auto_keys);
+    if let Some(value) = toml_section_bool(raw, "auth", &auto_keys) {
+        auto_use = Some(value);
+    }
+    if let Some(value) = auto_use {
+        shell.auto_use_included_limits = value;
+    }
+    let spend_keys = ["allow_spend_when_free_period_debit_unproven"];
+    let mut allow_spend = toml_section_bool(raw, "grok_com_config", &spend_keys);
+    if let Some(value) = toml_section_bool(raw, "auth", &spend_keys) {
+        allow_spend = Some(value);
+    }
+    if let Some(value) = allow_spend {
+        shell.allow_spend_when_free_period_debit_unproven = value;
+    }
+}
+
 /// Priority: model api_key/env_key/OpenRouter secret store > cached auth-provider token > session token > XAI_API_KEY.
 /// OpenRouter base URLs never fall through to an xAI session or `XAI_API_KEY`.
 pub(crate) fn resolve_credentials(
     model: &ModelEntry,
     session_key: Option<&str>,
+) -> ResolvedCredentials {
+    resolve_credentials_ranked(model, session_key, None, false)
+}
+
+/// Dual-auth rank for `[auth] preferred_method` and `auto_use_included_limits`.
+pub(crate) fn resolve_credentials_preferring_with_rank(
+    model: &ModelEntry,
+    session_key: Option<&str>,
+    preferred: Option<crate::auth::PreferredAuthMethod>,
+    auto_use_included_limits: bool,
+) -> ResolvedCredentials {
+    resolve_credentials_ranked(model, session_key, preferred, auto_use_included_limits)
+}
+
+fn resolve_credentials_ranked(
+    model: &ModelEntry,
+    session_key: Option<&str>,
+    preferred: Option<crate::auth::PreferredAuthMethod>,
+    auto_use_included_limits: bool,
 ) -> ResolvedCredentials {
     let info = model.info();
     let is_openrouter = crate::auth::openrouter::is_openrouter_base_url(&info.base_url);
@@ -4528,13 +4755,16 @@ pub(crate) fn resolve_credentials(
         debug_assert!(model.effective_auth_provider().is_some());
         (
             provider.cached_token(),
+            Vec::new(),
             info.base_url.clone(),
             xai_chat_state::AuthType::ApiKey,
             None,
             None,
             None,
         )
-    } else if let Some(key) = session_key
+    } else if auto_use_included_limits
+        && !prefer_api_key_primary
+        && let Some(key) = session_key
         && xai_grok_login::backend::AuthBackend::may_receive_session(
             &xai_grok_login::backend::ActiveAuthBackend::default(),
             &info.base_url,
@@ -4545,8 +4775,13 @@ pub(crate) fn resolve_credentials(
             Vec::new(),
             info.base_url.clone(),
             xai_chat_state::AuthType::SessionToken,
+            None,
+            None,
+            Some(key.to_owned()),
         )
-    } else if let Ok(key) = crate::agent::auth_method::read_xai_api_key_env() {
+    } else if prefer_api_key_primary
+        && let Ok(key) = crate::agent::auth_method::read_xai_api_key_env()
+    {
         let url = model
             .api_base_url
             .clone()
@@ -4556,8 +4791,23 @@ pub(crate) fn resolve_credentials(
         for part in split_api_key_list(&key) {
             push_unique_key(&mut keys, part);
         }
-        let (primary, failover) = split_primary_failover(keys);
-        (primary, failover, url, xai_chat_state::AuthType::ApiKey)
+        let (primary, mut failover) = split_primary_failover(keys);
+        if let Some(sess) = session_key.map(str::trim).filter(|sess| !sess.is_empty()) {
+            let already =
+                primary.as_deref() == Some(sess) || failover.iter().any(|key| key.trim() == sess);
+            if !already {
+                failover.push(sess.to_owned());
+            }
+        }
+        (
+            primary,
+            failover,
+            url,
+            xai_chat_state::AuthType::ApiKey,
+            None,
+            None,
+            None,
+        )
     } else {
         let session = session_key
             .map(str::trim)
@@ -4578,6 +4828,15 @@ pub(crate) fn resolve_credentials(
         let split_hosts = session_host.trim_end_matches('/') != console_host.trim_end_matches('/');
 
         match (session.as_deref(), !console_keys.is_empty(), first_party) {
+            (Some(sess), _, true) if auto_use_included_limits && !prefer_api_key_primary => (
+                Some(sess.to_owned()),
+                Vec::new(),
+                session_host,
+                xai_chat_state::AuthType::SessionToken,
+                None,
+                None,
+                Some(sess.to_owned()),
+            ),
             (Some(sess), true, true) if prefer_api_key_primary => {
                 let mut keys = console_keys;
                 keys.retain(|k| k.trim() != sess);
@@ -4927,10 +5186,18 @@ pub fn resolve_aux_model_sampling_config_preferring(
     disable_api_key_auth: bool,
     alpha_test_key: Option<String>,
     client_version: Option<String>,
+    preferred_method: Option<crate::auth::PreferredAuthMethod>,
+    auto_use_included_limits: bool,
 ) -> Option<SamplerConfig> {
     let catalog_entry = find_model_by_id(models, model_id).cloned();
     if let Some(entry) = &catalog_entry {
-        let credentials = resolve_credentials_enforced(entry, session_key, disable_api_key_auth);
+        let credentials = resolve_credentials_enforced_preferring(
+            entry,
+            session_key,
+            disable_api_key_auth,
+            preferred_method,
+            auto_use_included_limits,
+        );
         let sampler = sampling_config_for_model(
             entry,
             credentials,
@@ -5172,7 +5439,7 @@ pub(crate) fn sampling_config_for_model(
 /// Fold URL-derived headers into `extra_headers`. The sampler crate is intentionally URL-agnostic: it does not inspect `base_url` to decide which auth or staging headers to add.
 /// Replicate the URL-derived header logic at the shell boundary so callers downstream see a single homogenous header bag. cli-chat-proxy bases get `X-XAI-Token-Auth` and `x-authenticateresponse` headers.
 /// This mirrors the inline match in the legacy `sampling::Client::new` on `is_cli_chat_proxy_url`. Existing entries are never overwritten so callers can pre-set a value.
-pub(crate) fn inject_url_derived_headers(
+pub fn inject_url_derived_headers(
     headers: &mut IndexMap<String, String>,
     alpha_test_key: Option<&str>,
     base_url: &str,
@@ -5264,7 +5531,13 @@ fn resolve_hidden_default_web_search_sampling_config(
         auth_provider: None,
         api_base_url: None,
     };
-    let credentials = resolve_credentials_enforced(&entry, session_key, disable_api_key_auth);
+    let credentials = resolve_credentials_enforced_preferring(
+        &entry,
+        session_key,
+        disable_api_key_auth,
+        preferred_method,
+        auto_use_included_limits,
+    );
     sampling_config_for_model(
         &entry,
         credentials,
@@ -5306,9 +5579,17 @@ pub fn resolve_web_search_sampling_config_preferring(
     alpha_test_key: Option<String>,
     client_version: Option<String>,
     endpoints: &EndpointsConfig,
+    preferred_method: Option<crate::auth::PreferredAuthMethod>,
+    auto_use_included_limits: bool,
 ) -> Option<SamplerConfig> {
     let resolved = if let Some(entry) = find_model_by_id(models, model_id).cloned() {
-        let credentials = resolve_credentials_enforced(&entry, session_key, disable_api_key_auth);
+        let credentials = resolve_credentials_enforced_preferring(
+            &entry,
+            session_key,
+            disable_api_key_auth,
+            preferred_method,
+            auto_use_included_limits,
+        );
         if credentials.api_key.is_none() && entry.effective_auth_provider().is_some() {
             tracing::warn!(
                 web_search_model = %model_id,
@@ -5332,6 +5613,8 @@ pub fn resolve_web_search_sampling_config_preferring(
             alpha_test_key,
             client_version,
             endpoints,
+            preferred_method,
+            auto_use_included_limits,
         ))
     } else {
         None

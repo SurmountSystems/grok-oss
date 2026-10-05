@@ -52,6 +52,19 @@ pub struct BillingPeriodUsage {
     pub total_used: Option<Cent>,
 }
 
+/// Wire product id for Grok Build included usage inside `productUsage`.
+pub const PRODUCT_GROK_BUILD: &str = "PRODUCT_GROK_BUILD";
+
+/// One `productUsage` row from the credits config (camelCase on the wire).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProductUsageEntry {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub product: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage_percent: Option<f64>,
+}
+
 /// Current billing configuration for Grok Build coding credits. Carries the newer credits-config fields (`credit_usage_percent`, `current_period`).
 /// It also carries the deprecated `GrokBuildBillingConfig` fields (`monthly_limit`, `used`, `billing_period_*`). Consumers should prefer the new fields and fall back to the deprecated ones.
 /// The same struct then works against both the new `GetGrokCreditsConfig` and the legacy `GetGrokBuildBillingConfig` responses.
@@ -215,6 +228,31 @@ pub fn included_usage_and_period_end(config: &BillingConfig) -> (Option<f64>, Op
         .and_then(|p| p.end.clone())
         .or_else(|| config.billing_period_end.clone());
     (usage_pct, period_end)
+}
+
+/// Grok Build included usage percent when `productUsage` names [`PRODUCT_GROK_BUILD`].
+pub fn grok_build_usage_percent(config: &BillingConfig) -> Option<f64> {
+    config.product_usage.iter().find_map(|entry| {
+        if entry.product.as_deref() == Some(PRODUCT_GROK_BUILD) {
+            entry.usage_percent
+        } else {
+            None
+        }
+    })
+}
+
+/// Append one included-poll sample from a credits config. Empty identity is a no-op.
+fn record_included_poll_history_from_config(identity_id: &str, config: &BillingConfig) {
+    let (usage_pct, _) = included_usage_and_period_end(config);
+    let Some(credit_usage_percent) = usage_pct else {
+        return;
+    };
+    crate::auth::included_poll_history::record_included_poll_now(
+        identity_id,
+        credit_usage_percent,
+        grok_build_usage_percent(config),
+        config.prepaid_balance.as_ref().map(|cent| cent.val),
+    );
 }
 
 /// Refresh SuperGrok included billing through the flock snapshot hub.
@@ -673,6 +711,109 @@ pub fn billing_log_identity_from_auth(auth: &crate::auth::GrokAuth) -> (String, 
     (identity_id, role)
 }
 
+/// `config.toml` `[auth]` or `[grok_com_config]` `auto_use_included_limits`.
+/// Missing file, unreadable file, or a missing key stays on the default (true).
+fn auto_use_included_limits_from_disk() -> bool {
+    let path = crate::util::grok_home::grok_home().join("config.toml");
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return true;
+    };
+    let Ok(value) = text.parse::<toml::Value>() else {
+        return true;
+    };
+    for table_name in ["auth", "grok_com_config"] {
+        if let Some(flag) = value
+            .get(table_name)
+            .and_then(|table| table.get("auto_use_included_limits"))
+            .and_then(|item| item.as_bool())
+        {
+            return flag;
+        }
+    }
+    true
+}
+
+trait AuthManagerRankAlign {
+    fn align_to_ranked_free_period_primary(&self) -> bool;
+}
+
+impl AuthManagerRankAlign for std::sync::Arc<xai_grok_login::AuthManager> {
+    fn align_to_ranked_free_period_primary(&self) -> bool {
+        let path = self.auth_json_path();
+        let Some(home) = path.parent() else {
+            return false;
+        };
+        let candidates = crate::auth::load_supergrok_session_candidates(home);
+        if candidates.len() < 2 {
+            return false;
+        }
+        let ranked = crate::auth::ranked_free_period_primary_token(&candidates);
+        let current_key = self.current_wire_valid().map(|auth| auth.key);
+        if !crate::auth::session_bearer_should_align_to_ranked_free_period_primary(
+            current_key.as_deref(),
+            ranked.as_deref(),
+        ) {
+            return false;
+        }
+        let Some(ranked_tok) = ranked else {
+            return false;
+        };
+        let Ok(mut map) = crate::auth::read_auth_json(path) else {
+            return false;
+        };
+        let Some(auth) = map
+            .values()
+            .find(|entry| entry.key.trim() == ranked_tok.trim())
+            .cloned()
+        else {
+            return false;
+        };
+        if !crate::auth::is_supergrok_session_mode(auth.auth_mode) {
+            return false;
+        }
+        let scope = self.grok_com_config().auth_scope();
+        crate::auth::upsert_supergrok_session(&mut map, &scope, auth.clone());
+        if let Err(err) = xai_grok_login::storage::write_auth_json(path, &map) {
+            tracing::warn!(
+                error = %err,
+                "auth: included SuperGrok period rank align disk write failed; hot_swap only"
+            );
+            xai_grok_telemetry::unified_log::warn(
+                "auth: included SuperGrok period rank align disk write failed",
+                None,
+                Some(serde_json::json!({ "error": err.to_string() })),
+            );
+        }
+        let from_suffix = current_key
+            .as_deref()
+            .map(|key| xai_grok_auth::bearer_suffix(key).to_owned());
+        let to_suffix = xai_grok_auth::bearer_suffix(auth.key.as_str()).to_owned();
+        let principal_type = auth.principal_type.clone();
+        let team_id = auth.team_id.clone();
+        let principal_id = auth.principal_id.clone();
+        self.hot_swap(auth);
+        tracing::info!(
+            from_key_prefix = ?from_suffix,
+            to_key_prefix = %to_suffix,
+            principal_type = ?principal_type,
+            team_id = ?team_id,
+            "auth: aligned SessionToken bearer to included SuperGrok period ranked primary"
+        );
+        xai_grok_telemetry::unified_log::info(
+            "auth: aligned SessionToken bearer to included SuperGrok period ranked primary",
+            None,
+            Some(serde_json::json!({
+                "from_key_prefix": from_suffix,
+                "to_key_prefix": to_suffix,
+                "principal_type": principal_type,
+                "team_id": team_id,
+                "principal_id": principal_id,
+            })),
+        );
+        true
+    }
+}
+
 async fn handle_get_billing(agent: &MvpAgent, force_refresh: bool) -> ExtResult {
     let auth = super::auth_gate::require_xai_auth(
         &agent.auth_manager,
@@ -789,7 +930,7 @@ async fn handle_get_billing(agent: &MvpAgent, force_refresh: bool) -> ExtResult 
             );
         }
     }
-    if agent.cfg.borrow().grok_com_config.auto_use_included_limits {
+    if auto_use_included_limits_from_disk() {
         let _ = agent.auth_manager.align_to_ranked_free_period_primary();
     }
 
@@ -1406,6 +1547,7 @@ mod tests {
             user_blocked_reason: None,
             team_blocked_reasons: vec![],
             coding_data_retention_opt_out: true,
+            can_administer_team: None,
             has_grok_code_access: None,
             refresh_token: None,
             expires_at: None,

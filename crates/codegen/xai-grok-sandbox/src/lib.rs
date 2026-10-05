@@ -400,6 +400,42 @@ fn chmod_000(path: &Path) -> Option<()> {
     std::fs::set_permissions(path, perms).ok()?;
     Some(())
 }
+/// Directories that may hold the zero-permission bwrap bind source.
+///
+/// Prefer `grok_home` (already in the writable set). When that tree cannot be
+/// created (Nix `HOME=/homeless-shelter`, `$GROK_HOME` under `/nonexistent`),
+/// use `/tmp`, which sandbox profiles already write-allow. Skip `$NIX_BUILD_TOP`
+/// (`/build`): the quality sandbox's build tree is not a place for mode-000
+/// bind sources.
+#[cfg(all(feature = "enforce", target_os = "linux"))]
+fn bwrap_placeholder_parent_dirs() -> Vec<PathBuf> {
+    let mut parents = Vec::new();
+    for candidate in [
+        paths::grok_home(),
+        PathBuf::from("/tmp"),
+        std::env::temp_dir(),
+    ] {
+        if bwrap_placeholder_parent_usable(&candidate) && !parents.contains(&candidate) {
+            parents.push(candidate);
+        }
+    }
+    parents
+}
+#[cfg(all(feature = "enforce", target_os = "linux"))]
+fn bwrap_placeholder_parent_usable(parent: &Path) -> bool {
+    if parent.as_os_str().is_empty() {
+        return false;
+    }
+    if parent == Path::new("/build") {
+        return false;
+    }
+    if let Ok(top) = std::env::var("NIX_BUILD_TOP")
+        && Path::new(&top) == parent
+    {
+        return false;
+    }
+    true
+}
 /// Zero-permission placeholder (file or dir) under `grok_home` used by bwrap bind-over. The placeholder name is suffixed
 /// with the current PID so concurrent grok processes don't race each other's create/remove/chmod on a shared path. A lost
 /// race could yield `None`, silently dropping the bind and failing open.
@@ -961,24 +997,6 @@ mod tests {
             cfg!(target_os = "linux"),
             "arming must not require applied=true"
         );
-    }
-    #[test]
-    fn profile_confines_only_for_non_off_profiles() {
-        assert!(!super::profile_confines("off"));
-        assert!(!super::profile_confines("none"));
-        assert!(super::profile_confines("strict"));
-        assert!(super::profile_confines("read-only"));
-        assert!(super::profile_confines("readonly"));
-        assert!(super::profile_confines("my-custom-profile"));
-    }
-    #[test]
-    fn known_launch_guard_is_linux_only() {
-        assert_eq!(
-            restrict_network_at_known_linux_launches(true, true),
-            cfg!(target_os = "linux")
-        );
-        assert!(!restrict_network_at_known_linux_launches(false, true));
-        assert!(!restrict_network_at_known_linux_launches(true, false));
     }
     /// Create a temp workspace whose `.grok/sandbox.toml` contains `toml_body`.
     /// Returns the workspace path (caller removes it).

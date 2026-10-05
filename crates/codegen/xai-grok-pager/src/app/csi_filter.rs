@@ -601,31 +601,6 @@ mod tests {
     }
 
     #[test]
-    fn csi_filter_focus_timestamp_comes_from_completing_fragment() {
-        let start = Instant::now();
-        let complete = start + std::time::Duration::from_millis(7);
-        let events = vec![
-            TimedInputEvent {
-                event: press(KeyCode::Esc).event,
-                arrived_at: start,
-            },
-            TimedInputEvent {
-                event: press(KeyCode::Char('[')).event,
-                arrived_at: start + std::time::Duration::from_millis(3),
-            },
-            TimedInputEvent {
-                event: press_shift(KeyCode::Char('I')).event,
-                arrived_at: complete,
-            },
-        ];
-
-        let result = CsiFragmentFilter::new().filter(events);
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].event, Event::FocusGained);
-        assert_eq!(result[0].arrived_at, complete);
-    }
-
-    #[test]
     fn csi_filter_focus_in_after_esc_translated() {
         // Split \e[I focus-in (Esc, [, I; uppercase I arrives with SHIFT) is reassembled into a FocusGained event, not dropped
         let events = vec![

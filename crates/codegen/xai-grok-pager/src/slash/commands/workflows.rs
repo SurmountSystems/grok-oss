@@ -2,6 +2,7 @@
 
 use crate::app::actions::Action;
 use crate::slash::command::{CommandExecCtx, CommandResult, SlashCommand, slash_meta};
+use crate::slash::{ModeSupport, Remedy};
 use crate::views::extensions_modal::ExtensionsTab;
 use xai_grok_telemetry::events::ExtensionsModalTrigger;
 

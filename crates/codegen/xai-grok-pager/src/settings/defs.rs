@@ -72,6 +72,55 @@ const THEME_CHOICES: &[EnumChoice] = &[
     },
 ];
 
+const PLAN_APPROVAL_PARK_CHOICES: &[EnumChoice] = &[
+    EnumChoice {
+        canonical: "soft",
+        display: "Side panel",
+        description: "Open plan approval in the side panel.",
+    },
+    EnumChoice {
+        canonical: "modal",
+        display: "Fullscreen",
+        description: "Open plan approval fullscreen.",
+    },
+];
+
+const CANCEL_SUBAGENTS_ON_TURN_CANCEL_CHOICES: &[EnumChoice] = &[
+    EnumChoice {
+        canonical: "ask",
+        display: "Ask",
+        description: "Ask each time a cancelled turn still has running subagents.",
+    },
+    EnumChoice {
+        canonical: "always_stop",
+        display: "Always stop",
+        description: "Stop running subagents when the parent turn is cancelled.",
+    },
+    EnumChoice {
+        canonical: "always_continue",
+        display: "Always leave running",
+        description: "Leave running subagents going when the parent turn is cancelled.",
+    },
+];
+
+const DEFAULT_REASONING_EFFORT_CHOICES: &[EnumChoice] = &[
+    EnumChoice {
+        canonical: "low",
+        display: "Low",
+        description: "Lower reasoning effort.",
+    },
+    EnumChoice {
+        canonical: "medium",
+        display: "Medium",
+        description: "Baked default reasoning effort.",
+    },
+    EnumChoice {
+        canonical: "high",
+        display: "High",
+        description: "Higher reasoning effort.",
+    },
+];
+
 // Permission-mode catalog. Persisted values map onto runtime flags: "always-approve" ↔ yolo_mode = true
 // (auto-approve all). `supports_preview: false` because toggling YOLO drains the permission queue (unsafe for
 // per-keystroke preview).
@@ -1505,7 +1554,9 @@ pub fn default_settings() -> Vec<SettingMeta> {
                           the selection box omits its copy icon.",
             keywords: &["copy", "bubble", "button", "clipboard"],
             kind: SettingKind::Bool {
-                default: crate::appearance::ScrollbackDisplayConfig::default().bubble_copy_buttons,
+                default: crate::appearance::ScrollbackConfig::default()
+                    .display
+                    .bubble_copy_buttons,
             },
             restart_required: false,
             hidden_in_minimal: false,
@@ -1826,7 +1877,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
                 "was",
             ],
             kind: SettingKind::Bool {
-                default: ui_default.notifications.session_recap.unwrap_or(true),
+                default: crate::notifications::NotificationConfig::default().session_recap,
             },
             restart_required: false,
             hidden_in_minimal: false,
@@ -1851,10 +1902,8 @@ pub fn default_settings() -> Vec<SettingMeta> {
                 "session",
             ],
             kind: SettingKind::Int {
-                default: ui_default
-                    .notifications
-                    .session_recap_threshold_secs
-                    .unwrap_or(30) as i64,
+                default: crate::notifications::NotificationConfig::default()
+                    .session_recap_threshold_secs as i64,
                 min: 5,
                 max: 3600,
             },

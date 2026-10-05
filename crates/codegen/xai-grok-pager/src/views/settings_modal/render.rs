@@ -10,9 +10,10 @@ use super::state::{
     TITLE_LEADING_DECORATION_W, effective_enum_choices, group_children, mode_is_consent_chooser,
 };
 use crate::render::line_utils::truncate_str;
+use crate::settings::registry::CodingDataSharingLock;
 use crate::settings::{
-    CodingDataSharingLock, OwnedEnumChoice, SettingKey, SettingKind, SettingMeta, SettingValue,
-    StringValidator, dynamic_enum_choices,
+    OwnedEnumChoice, SettingKey, SettingKind, SettingMeta, SettingValue, StringValidator,
+    dynamic_enum_choices,
 };
 use crate::theme::Theme;
 use crate::views::modal_list::render_section_header;
@@ -543,7 +544,11 @@ pub(super) fn render_rows(
     let mut lines_used = 0usize;
     while end < total_visible {
         let h = row_heights.get(end).copied().unwrap_or(1) as usize;
-        let row_idx = state.filtered_cache[end];
+        let row_idx = state
+            .filtered_cache
+            .get(end)
+            .copied()
+            .expect("index out of bounds");
         let is_header = matches!(state.rows.get(row_idx), Some(RowEntry::Header { .. }));
         let gap = usize::from(is_header && end > state.scroll_offset);
         if lines_used.saturating_add(gap).saturating_add(h) > visible_h {

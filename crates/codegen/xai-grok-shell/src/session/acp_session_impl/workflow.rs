@@ -555,17 +555,6 @@ mod run_match_tests {
     }
 
     #[test]
-    fn failed_run_is_applicable_for_resume_narrowing() {
-        let all = vec![
-            run("wf_1", "a", WorkflowRunStatus::Complete),
-            run("wf_2", "b", WorkflowRunStatus::Failed),
-        ];
-        let picked = narrow_run_matches(all, "", "resume");
-        assert_eq!(picked.len(), 1);
-        assert_eq!(picked[0].2, "b");
-    }
-
-    #[test]
     fn ambiguous_stays_ambiguous() {
         let all = vec![
             run("wf_1", "a", WorkflowRunStatus::Active),

@@ -171,22 +171,7 @@ const RECAP_BUDGET_HEADROOM_TOKENS: u64 = 4_000;
 /// Over budget: strips reasoning (the prefix cache is lost once we trim) and normalizes the trailing boundary ([`pop_trailing_tool_run`]).
 /// `context_window` MUST be the window of the model the request is actually sent to.
 /// Shared by the side calls that replay the full conversation (title refresh, turn summary).
-pub(crate) fn budget_instruction_items(
-    conversation: Vec<ConversationItem>,
-    instruction: String,
-    strip_reasoning: bool,
-    context_window: u64,
-) -> Vec<ConversationItem> {
-    budget_instruction_items(
-        conversation,
-        recap_instruction(tag),
-        strip_reasoning,
-        context_window,
-    )
-}
-
-/// Instruction-generic core of [`budget_recap_items`], shared with the
-/// turn-summary side-call.
+/// Instruction-generic core of [`budget_recap_items`], shared with the turn-summary side-call.
 pub(crate) fn budget_instruction_items(
     conversation: Vec<ConversationItem>,
     instruction: String,

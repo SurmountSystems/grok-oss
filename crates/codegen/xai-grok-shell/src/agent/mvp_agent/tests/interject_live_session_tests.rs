@@ -56,6 +56,8 @@ struct LiveRunner {
 
 impl ChildRunner for LiveRunner {
     type Control = LiveControl;
+    type RootControl =
+        xai_grok_tools::implementations::grok_build::task::root_control::NoRootControl;
     type CompletionData = ();
     type RunFuture = SendBoxFuture<ChildRunOutput<()>>;
     type ValidateFuture = SendBoxFuture<SubagentValidateTypeOutcome>;
@@ -141,7 +143,17 @@ impl ChildRunner for LiveRunner {
         Box::pin(std::future::ready(SubagentDescribeOutcome::Unavailable))
     }
 
-    fn on_completed(&self, _completion: ChildCompletion<Self::CompletionData>) {}
+    fn supports_wake(&self) -> bool {
+        true
+    }
+
+    fn on_completed(
+        &self,
+        _completion: ChildCompletion<Self::CompletionData>,
+        terminal_published: Box<dyn FnOnce() + Send>,
+    ) {
+        terminal_published();
+    }
 }
 
 fn live_request(id: &str) -> SubagentRequest {
@@ -162,6 +174,8 @@ fn live_request(id: &str) -> SubagentRequest {
         owner: SubagentOwner::Task,
         implement_loop_effort: None,
         cancel_token: CancellationToken::new(),
+        spawn_root: Default::default(),
+        tool_call_id: None,
     }
 }
 
@@ -186,7 +200,7 @@ async fn interject_to_a_live_nested_session_is_delivered_and_a_missing_session_s
     let (started_tx, mut started_rx) = mpsc::unbounded_channel();
     let (follow_tx, mut follow_rx) = mpsc::unbounded_channel();
     let actor = tokio::spawn(
-        SubagentCoordinator::new(
+        SubagentCoordinator::from_channel(
             event_rx,
             LiveRunner {
                 finish: finish.clone(),

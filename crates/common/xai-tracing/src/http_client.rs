@@ -102,7 +102,8 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = traced_client(reqwest::Client::new());
+        let client =
+            traced_client(xai_grok_extra_ca::build_reqwest_client(|builder| builder).unwrap());
         let parent = tracing::info_span!("parent_handler");
         let parent_span_id = otel_span_id_hex(&parent);
         let parent_trace_id = otel_trace_id_hex(&parent);

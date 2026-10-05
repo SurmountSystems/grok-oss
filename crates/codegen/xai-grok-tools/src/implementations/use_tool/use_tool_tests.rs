@@ -709,7 +709,6 @@ fn dump_classification_preserves_shape_and_query_steer() {
             "shell_tool",
             QueryTools {
                 jq: Some("jq"),
-                python: Some("python3"),
                 sed: Some("sed"),
                 cut: Some("cut"),
             },
@@ -732,7 +731,6 @@ fn dump_classification_preserves_shape_and_query_steer() {
 fn steer_names_only_installed_tools() {
     let tools = QueryTools {
         jq: None,
-        python: Some("python3"),
         sed: None,
         cut: None,
     };

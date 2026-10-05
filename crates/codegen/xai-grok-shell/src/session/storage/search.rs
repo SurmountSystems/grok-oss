@@ -236,6 +236,32 @@ mod tests {
         assert_eq!(session.updated_at_unix, summary.updated_at.timestamp());
     }
 
+    fn env_disables_session_search(env_value: Option<&str>) -> bool {
+        let Some(value) = env_value else {
+            return false;
+        };
+        let trimmed = value.trim();
+        trimmed == "0" || trimmed.eq_ignore_ascii_case("false")
+    }
+
+    /// Config turns session search off only when `[features] session_search` is the bool `false`.
+    fn config_value_disables_session_search(value: &toml::Value) -> bool {
+        value
+            .get("features")
+            .and_then(|features| features.get("session_search"))
+            .and_then(toml::Value::as_bool)
+            == Some(false)
+    }
+
+    fn empty_session_search_response() -> SessionSearchResponse {
+        SessionSearchResponse {
+            results: Vec::new(),
+            next_offset: None,
+            total_estimate: Some(0),
+            bootstrapping: false,
+        }
+    }
+
     fn enabled(env_value: Option<&str>, config_off: bool) -> bool {
         !env_disables_session_search(env_value) && !config_off
     }

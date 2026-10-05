@@ -22,6 +22,7 @@ tokio = { workspace = true, features = ["fs", "process", "io-util", "macros", "t
 tracing = { workspace = true }
 url = { workspace = true }
 xai-dirs = { workspace = true }
+xai-grok-active-sessions = { workspace = true }
 xai-grok-cloud-config = { workspace = true }
 xai-grok-login = { workspace = true }
 xai-grok-shell = { path = "../xai-grok-shell", default-features = false }

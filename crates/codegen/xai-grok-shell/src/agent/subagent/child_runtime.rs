@@ -93,6 +93,16 @@ impl ChildControl for ShellChildRuntime {
     fn cancel(&self) {
         cancel_shell_child_turn(&self.child_cmd_tx);
     }
+
+    fn follow_up(&self, text: String) {
+        // Same path overlay `x.ai/interject` uses: child session cmd_tx + Interject
+        // text. Not overlay typing (`id: None`). Not cancel. Not a second spawn.
+        let _ = self.child_cmd_tx.send(SessionCommand::Interject {
+            text,
+            id: None,
+            images: Vec::new(),
+        });
+    }
 }
 
 const SESSION_THREAD_EXIT_POLL: std::time::Duration = std::time::Duration::from_millis(10);

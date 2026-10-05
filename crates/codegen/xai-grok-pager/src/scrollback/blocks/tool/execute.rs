@@ -12,6 +12,11 @@ use crate::scrollback::types::{
 use crate::theme::Theme;
 
 const EXECUTE_STDOUT_RANGE_BASE: u16 = 1;
+/// Head rows kept when a wrapped shell dump would paint hundreds of lines.
+/// Inferred cap: head plus tail stays under `MAX_TERMINAL_PARSE_LINES` (256).
+const EXECUTE_PAINT_HEAD_LINES: usize = 24;
+/// Tail rows kept with [`EXECUTE_PAINT_HEAD_LINES`].
+const EXECUTE_PAINT_TAIL_LINES: usize = 24;
 
 /// Execute tool call: runs a shell command.
 #[derive(Debug, Clone)]

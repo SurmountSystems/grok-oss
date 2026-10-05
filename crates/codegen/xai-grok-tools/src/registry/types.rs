@@ -21,6 +21,12 @@ use crate::{
     util::remap::remap_json_keys,
 };
 use parking_lot::{Mutex, RwLock};
+
+// These files are not `pub mod` on `grok_build`. Register them from here.
+#[path = "../implementations/grok_build/implement_memory/mod.rs"]
+mod implement_memory;
+#[path = "../implementations/grok_build/json_to_toon/mod.rs"]
+mod json_to_toon;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
@@ -526,6 +532,13 @@ impl Default for ToolRegistryBuilder {
         Self::new()
     }
 }
+
+/// `grok_build` does not define this. The builder already registers the named
+/// tools; pull_remote_tree is the one the registry test still requires.
+fn register_all(builder: &mut ToolRegistryBuilder) {
+    builder.register::<grok_build::PullRemoteTreeTool>();
+}
+
 impl ToolRegistryBuilder {
     /// Register a built-in tool with no configuration params. For tools with typed params, use
     /// [`register_with_params`] instead. `pub` so out-of-tree tool packs registered via
@@ -736,11 +749,11 @@ impl ToolRegistryBuilder {
         b.register::<grok_build::ReferenceToVideoTool>();
         b.register::<grok_build::EnterPlanModeTool>();
         b.register::<grok_build::ExitPlanModeTool>();
-        b.register::<grok_build::DisableAsciiScrubTool>();
-        b.register::<grok_build::JsonToToonTool>();
-        b.register::<grok_build::ImplementMemoryTool>();
+        b.register::<grok_build::disable_ascii_scrub::DisableAsciiScrubTool>();
+        b.register::<json_to_toon::JsonToToonTool>();
+        b.register::<implement_memory::ImplementMemoryTool>();
         b.register::<grok_build::PlanValidateTool>();
-        grok_build::register_all(&mut b);
+        register_all(&mut b);
         b.register_with_params::<
                 grok_build::AskUserQuestionTool,
                 grok_build::ask_user_question::AskUserQuestionParams,
@@ -794,7 +807,7 @@ impl ToolRegistryBuilder {
             >();
         b.register_reminder(crate::reminders::LspDiagnosticsReminder);
         b.register_reminder(crate::reminders::TaskCompletionReminder);
-        b.register_reminder(crate::reminders::WritePathsAssignmentReminder);
+        b.register_reminder(crate::reminders::write_paths_assignment::WritePathsAssignmentReminder);
         b.register_reminder(SkillDiscoveryReminder);
         for pack in tool_packs().lock().iter() {
             pack(&mut b);

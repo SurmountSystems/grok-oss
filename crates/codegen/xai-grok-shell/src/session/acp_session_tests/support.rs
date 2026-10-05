@@ -395,6 +395,7 @@ async fn create_test_actor_inner(
             threshold_tokens: std::cell::Cell::new(None),
             force_compact: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             context_window_override: None,
+            context_window_selection: std::sync::atomic::AtomicU64::new(0),
             economic_mode: std::cell::Cell::new(false),
             model_context_window: std::cell::Cell::new(0),
             count: std::sync::atomic::AtomicU64::new(0),
@@ -407,6 +408,11 @@ async fn create_test_actor_inner(
             prefire: crate::session::compaction_config::PrefireState::default(),
             prefix_released: std::sync::atomic::AtomicBool::new(false),
             cancel: Default::default(),
+        },
+        long_reasoning_reminder: crate::session::long_reasoning_reminder::LongReasoningReminder {
+            enabled: false,
+            tokens: crate::session::long_reasoning_reminder::DEFAULT_TOKENS,
+            delay: crate::session::long_reasoning_reminder::DEFAULT_DELAY,
         },
         long_reasoning_turn_state: Default::default(),
         memory: crate::session::memory_state::SessionMemory {
@@ -1144,17 +1150,17 @@ pub(crate) fn spawn_capturing_gateway_loop(
                     }
                     let _ = args.response_tx.send(Ok(()));
                 }
-                xai_acp_lib::AcpClientMessage::ExtNotification(args) => {
-                    if args.request.method.as_ref() == "x.ai/session_notification" {
-                        let params: serde_json::Value =
-                            serde_json::from_str(args.request.params.get()).unwrap_or_default();
-                        xai_captured.lock().unwrap().push(
-                            params
-                                .get("update")
-                                .cloned()
-                                .unwrap_or(serde_json::Value::Null),
-                        );
-                    }
+                xai_acp_lib::AcpClientMessage::ExtNotification(args)
+                    if args.request.method.as_ref() == "x.ai/session_notification" =>
+                {
+                    let params: serde_json::Value =
+                        serde_json::from_str(args.request.params.get()).unwrap_or_default();
+                    xai_captured.lock().unwrap().push(
+                        params
+                            .get("update")
+                            .cloned()
+                            .unwrap_or(serde_json::Value::Null),
+                    );
                 }
                 _ => {}
             }
@@ -1313,8 +1319,12 @@ pub(crate) fn test_compaction_config(
         force_compact: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         context_window_override: None,
         context_window_selection: Default::default(),
+        threshold_tokens: std::cell::Cell::new(None),
+        economic_mode: std::cell::Cell::new(false),
+        model_context_window: std::cell::Cell::new(0),
         count: std::sync::atomic::AtomicU64::new(0),
         auto_compact_suppressed: std::sync::atomic::AtomicU8::new(0),
+        last_auto_compact_saved_too_little: std::sync::atomic::AtomicBool::new(false),
         previous_model: std::cell::Cell::new(None),
         compaction_mode: xai_chat_state::CompactionMode::Transcript,
         verbatim_input: true,

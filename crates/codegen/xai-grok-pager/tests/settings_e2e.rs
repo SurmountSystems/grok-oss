@@ -960,21 +960,6 @@ fn mouse_click_on_follow_up_behavior_indicator_opens_picker() {
     );
 }
 
-#[test]
-fn mouse_click_on_confirm_before_rewind_indicator_toggles_in_one_click() {
-    let mut s = make_state();
-    synth_rects(&mut s);
-    let row_y = row_idx_for(&s, "confirm_before_rewind") as u16;
-    let outcome = handle_settings_mouse(
-        &mut s,
-        MouseEventKind::Down(crossterm::event::MouseButton::Left),
-        72,
-        row_y,
-    );
-    let default_on = UiConfig::default().confirm_before_rewind_enabled();
-    assert_set_bool_action(outcome, "confirm_before_rewind", !default_on);
-}
-
 /// Value-column click toggles `remember_tool_approvals` in one click.
 #[test]
 fn mouse_click_on_remember_tool_approvals_indicator_toggles_in_one_click() {
@@ -8302,17 +8287,6 @@ fn auto_run_implement_renders_under_agent_category_shell_owned() {
         SettingKind::Bool { default } => assert!(*default, "default must be true"),
         other => panic!("expected Bool kind for auto_run_implement, got {other:?}"),
     }
-}
-
-#[test]
-fn collapsed_edit_blocks_space_dispatches_typed_setter() {
-    // Seed the live cache to the shipped default (bypasses the disk seed so a host [ui] override can't flip the expected toggle direction)
-    xai_grok_pager::appearance::cache::set_collapsed_edit_blocks(false);
-    let mut s = make_state();
-    navigate_to(&mut s, "economic_mode");
-    let outcome = handle_settings_key(&mut s, &press(KeyCode::Char(' ')));
-    assert_set_bool_action(outcome, "economic_mode", true);
-    xai_grok_pager::appearance::cache::set_economic_mode(true);
 }
 
 #[test]

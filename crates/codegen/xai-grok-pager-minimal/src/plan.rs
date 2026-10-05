@@ -153,7 +153,7 @@ pub fn render(
         .unwrap_or(false)
         || !agent.prompt.text().trim().is_empty();
     // Tab reopens the preview (including the empty-plan placeholder).
-    let hint = match foc {
+    let _hint = match foc {
         PlanApprovalFocus::Prompt if has_content => {
             "enter request changes \u{00b7} tab plan \u{00b7} esc back"
         }
@@ -161,7 +161,7 @@ pub fn render(
         PlanApprovalFocus::Commenting => "enter save comment \u{00b7} esc cancel",
         PlanApprovalFocus::Preview => "a approve \u{00b7} s revise \u{00b7} q keep planning",
     };
-    let hint_style = theme.dim().bg(Color::Reset);
+    let _hint_style = theme.dim().bg(Color::Reset);
     let controls_rect = Rect {
         x: area.x,
         y: controls_y,

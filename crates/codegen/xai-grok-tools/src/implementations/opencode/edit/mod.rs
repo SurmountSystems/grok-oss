@@ -341,8 +341,8 @@ async fn handle_new_file_creation(
     }
 
     let formatted =
-        crate::util::rust_edit_verify::after_structured_rust_write(path, &write_content);
-    if formatted != write_content
+        crate::util::rust_edit_verify::after_structured_rust_write(path, &input.new_string);
+    if formatted != input.new_string
         && let Err(e) = fs.write_file(path, formatted.as_bytes()).await
     {
         tracing::debug!(

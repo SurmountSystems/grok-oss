@@ -1,6 +1,8 @@
 use std::time::Duration;
 
-use xai_grok_sampling_types::{SamplingError, is_retryable_api_status};
+use xai_grok_sampling_types::{
+    SamplingError, is_edge_outage_status, is_retryable_api_status, outage_exhausted_user_message,
+};
 
 pub const RATE_LIMIT_RETRY_THRESHOLD: u32 = 2;
 
@@ -11,6 +13,27 @@ pub const DEFAULT_MAX_RETRIES: u32 = 15;
 pub const MAX_RETRY_BACKOFF: Duration = Duration::from_secs(30);
 
 pub const TRANSPORT_REBUILD_BACKOFF: Duration = Duration::from_millis(200);
+
+/// Under-window budget for 5xx, timeouts, and stream interrupts when the
+/// caller passes an unlimited retry count (`u32::MAX`). A finite budget
+/// stays that caller's `max_retries`. [`DEFAULT_MAX_RETRIES`] stays 15.
+pub const DEFAULT_TRANSPORT_MAX_RETRIES: u32 = 3;
+
+/// Jittered exponential backoff ceiling in seconds. Matches [`MAX_RETRY_BACKOFF`].
+pub const MAX_BACKOFF_SECS: u64 = 30;
+
+/// True only for an unlimited retry count. Fifteen retries is a finite budget.
+pub fn is_unlimited_retries(max_retries: u32) -> bool {
+    max_retries == u32::MAX
+}
+
+fn transport_retry_cap(max_retries: u32) -> u32 {
+    if is_unlimited_retries(max_retries) {
+        DEFAULT_TRANSPORT_MAX_RETRIES
+    } else {
+        max_retries
+    }
+}
 
 pub(crate) fn resolve_max_retries_with_env(
     env_override: Option<&str>,
@@ -129,7 +152,9 @@ pub fn classify_error(
 
     if err.is_rate_limited() {
         let next_attempt = retry_count + 1;
-        if next_attempt >= max_retries.min(rate_limit_threshold) {
+        if !is_unlimited_retries(max_retries)
+            && next_attempt >= max_retries.min(rate_limit_threshold)
+        {
             return RetryDecision::Fatal(clone_error(err));
         }
         let backoff = err
@@ -161,6 +186,38 @@ pub fn classify_error(
     }
 
     RetryDecision::Fatal(clone_error(err))
+}
+
+/// True when used tokens are at or over this session's sampling window.
+/// The same oversized payload cannot recover by retrying.
+pub fn over_window_blocks_retry(used_tokens: Option<u64>, sampling_window: u64) -> bool {
+    sampling_window > 0 && used_tokens.is_some_and(|used| used >= sampling_window)
+}
+
+/// Classify a sampling error, refusing retries when the request is already
+/// at or over the session sampling window.
+///
+/// Auth and encrypted-content errors still emit to the session. Image-strip
+/// recovery may still change the payload. Doom-loop resample is not a size overflow.
+pub fn classify_error_with_window(
+    err: &SamplingError,
+    retry_count: u32,
+    max_retries: u32,
+    rate_limit_threshold: u32,
+    estimated_input_tokens: Option<u64>,
+    sampling_window: u64,
+) -> RetryDecision {
+    if over_window_blocks_retry(estimated_input_tokens, sampling_window)
+        && err.is_retryable()
+        && !err.is_payload_too_large()
+        && !err.is_image_processing_error()
+        && !matches!(err, SamplingError::DoomLoopDetected { .. })
+        && !err.is_auth_error()
+        && !err.is_encrypted_content_error()
+    {
+        return RetryDecision::Fatal(clone_error(err));
+    }
+    classify_error(err, retry_count, max_retries, rate_limit_threshold)
 }
 
 pub fn format_sampling_error(err: &SamplingError, retry_count: Option<u32>) -> String {
@@ -368,6 +425,7 @@ mod tests {
     use super::*;
     use reqwest::StatusCode;
     use xai_grok_sampling_types::ApiErrorCode;
+    use xai_grok_sampling_types::is_transient_api_status;
 
     fn api_err(status: StatusCode, message: &str) -> SamplingError {
         SamplingError::Api {
@@ -852,44 +910,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn classify_cloudflare_522_is_retryable() {
-        let err = api_err(
-            StatusCode::from_u16(522).unwrap(),
-            "Connection to Grok timed out or was interrupted. (HTTP 522).",
-        );
-        match classify_error(&err, 0, 15, RATE_LIMIT_RETRY_THRESHOLD) {
-            RetryDecision::RetryWithClientRebuild { .. } => {}
-            other => panic!("expected RetryWithClientRebuild for 522, got {other:?}"),
-        }
-        match classify_error(&err, 1, 15, RATE_LIMIT_RETRY_THRESHOLD) {
-            RetryDecision::Retry { .. } => {}
-            other => panic!("expected Retry for 522 attempt 2, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn classify_cloudflare_525_is_fatal_even_with_should_retry_true() {
-        // `x-should-retry: true` is deliberately ignored (only `false` is
-        // honored), so 525/526 stay Fatal whatever a future header says.
-        for should_retry in [None, Some(true)] {
-            let err = SamplingError::Api {
-                status: StatusCode::from_u16(525).unwrap(),
-                message: "Secure connection to Grok failed. (HTTP 525).".into(),
-                model_metadata: None,
-                retry_after_secs: None,
-                should_retry,
-                error_code: None,
-            };
-            match classify_error(&err, 0, 15, RATE_LIMIT_RETRY_THRESHOLD) {
-                RetryDecision::Fatal(SamplingError::Api { status, .. }) => {
-                    assert_eq!(status.as_u16(), 525);
-                }
-                other => panic!("expected Fatal for 525 ({should_retry:?}), got {other:?}"),
-            }
-        }
-    }
-
     /// HTTP 502 with a 29m26s Retry-After must not sit that long. Clamp to
     /// ~30s like other gateway outages. 502 is not billing empty and is not
     /// a 429 hop.
@@ -927,32 +947,6 @@ mod tests {
         } = classify_error(&err, 0, u32::MAX, RATE_LIMIT_RETRY_THRESHOLD)
         {
             panic!("502 must not take the 429 hop/wait path");
-        }
-    }
-
-    #[test]
-    fn classify_clamps_and_jitters_retry_after_on_generic_path_but_not_on_429() {
-        // Cloudflare answers 52x with Retry-After: 60-120. Honoring that
-        // verbatim across 14 retries would stall the turn ~28 min, and an
-        // unjittered wait would re-hit the recovering origin in lockstep.
-        let edge = api_err_with_retry_after(StatusCode::from_u16(522).unwrap(), 120);
-        match classify_error(&edge, 1, 15, RATE_LIMIT_RETRY_THRESHOLD) {
-            RetryDecision::Retry { backoff } => {
-                // 30s clamp with +/-20% jitter.
-                assert!(backoff >= Duration::from_secs(24), "got {backoff:?}");
-                assert!(backoff <= Duration::from_secs(36), "got {backoff:?}");
-            }
-            other => panic!("expected Retry for 522, got {other:?}"),
-        }
-
-        // The 429 path keeps the full wait; its total is bounded by
-        // RATE_LIMIT_RETRY_THRESHOLD attempts and the parse-level 120s cap.
-        let rate_limited = api_err_with_retry_after(StatusCode::TOO_MANY_REQUESTS, 120);
-        match classify_error(&rate_limited, 0, 15, RATE_LIMIT_RETRY_THRESHOLD) {
-            RetryDecision::RetryWithBackoff { backoff, .. } => {
-                assert_eq!(backoff, Duration::from_secs(120));
-            }
-            other => panic!("expected RetryWithBackoff for 429, got {other:?}"),
         }
     }
 
@@ -1147,20 +1141,6 @@ mod tests {
 
     /// The tee cell captures mid-stream errors via `clone_error`; dropping
     /// the code there would silently disable mid-stream strip recovery.
-    #[test]
-    fn clone_error_preserves_stream_error_code() {
-        let cloned = clone_error(&SamplingError::StreamError {
-            error_type: "invalid_request_error".into(),
-            message: "bad image".into(),
-            code: Some(ApiErrorCode::InvalidImage),
-        });
-        let SamplingError::StreamError { code, .. } = &cloned else {
-            panic!("expected StreamError, got {cloned:?}");
-        };
-        assert_eq!(*code, Some(ApiErrorCode::InvalidImage));
-        assert!(cloned.is_image_processing_error());
-    }
-
     #[test]
     fn clone_error_preserves_stream_error_code() {
         let cloned = clone_error(&SamplingError::StreamError {

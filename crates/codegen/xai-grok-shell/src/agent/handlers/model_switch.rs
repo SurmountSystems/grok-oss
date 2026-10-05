@@ -2,13 +2,13 @@
 //! `set_session_model` enforces the `allowed_models` gate before delegating here.
 //! Internal callers (`new_session`, `load_session`) call `apply` directly.
 use crate::agent::config;
-use crate::agent::models::keep_unverified_persisted_model;
 use crate::agent::mvp_agent::{
     MvpAgent, agent_name_after_model_switch, harnesses_are_compatible, resolve_required_agent_type,
 };
+use crate::agent::remote_config::keep_unverified_persisted_model;
 use crate::sampling::EffortTarget;
+use crate::session::SessionCommand;
 pub(crate) use crate::session::SwitchContextWindow;
-use crate::session::{SessionCommand, SessionModelSwitch};
 use agent_client_protocol::{self as acp};
 use std::num::NonZeroU64;
 use tokio::sync::oneshot;
@@ -18,6 +18,25 @@ pub(crate) enum ConfigNotice {
     Send,
     Skip,
 }
+/// Catalog hit, or a seeded non-`grok-*` slug kept on Chat Completions.
+/// A missing `grok-*` slug does not take that seeded fallback.
+pub(crate) fn model_entry_for_apply(
+    agent: &MvpAgent,
+    model_id: &acp::ModelId,
+) -> Result<crate::agent::config::ModelEntry, acp::Error> {
+    if let Ok(entry) = agent.resolve_model_id(model_id) {
+        return Ok(entry);
+    }
+    let raw = model_id.0.as_ref();
+    if raw.starts_with("grok-") {
+        return Err(acp::Error::invalid_params().data("unknown model id"));
+    }
+    Ok(crate::agent::config::ModelEntry::fallback(
+        raw,
+        &crate::agent::config::EndpointsConfig::default(),
+    ))
+}
+
 /// How a model switch resolves the session's reasoning effort.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SwitchEffort {
@@ -169,10 +188,10 @@ pub(crate) async fn apply(
         EffortTarget::ModelSwitch,
     );
     let applied_effort = model_sampling.reasoning_effort;
-    let supported_context_windows = std::iter::once(model.info().context_window)
+    let supported_context_windows: Vec<NonZeroU64> = std::iter::once(model.info().context_window)
         .chain(model.info().context_windows.iter().copied())
         .collect();
-    let (new_threshold, system_prompt_label) = {
+    let (new_threshold, new_threshold_tokens, system_prompt_label) = {
         let cfg = agent.cfg.borrow();
         (
             crate::util::config::resolve_auto_compact_threshold_percent(
@@ -180,6 +199,7 @@ pub(crate) async fn apply(
                 model_sampling.model.as_str(),
                 Some(model.info()),
             ),
+            cfg.session.auto_compact_threshold_tokens,
             crate::util::config::resolve_system_prompt_label(
                 &cfg,
                 model_id.0.as_ref(),
@@ -238,30 +258,20 @@ pub(crate) async fn apply(
         false
     };
     let model_unchanged = previous_model_id == model_id.0;
-
-    let (new_threshold_percent, new_threshold_tokens) = {
-        let cfg = agent.cfg.borrow();
-        let models = agent.models_manager.models();
-        let model = config::find_model_by_id(&models, model_sampling.model.as_str());
-        crate::util::config::resolve_auto_compact_threshold_percent(
-            &cfg,
-            model_sampling.model.as_str(),
-            model.map(|e| &e.info),
-        )
-    };
+    if let SwitchContextWindow::Set(Some(window)) = context_window {
+        if supported_context_windows.contains(&window) {
+            model_sampling.context_window = window.get();
+        }
+    }
+    let _ = is_family_switch;
     let (tx, rx) = oneshot::channel();
     let _ = handle.cmd_tx.send(SessionCommand::SetSessionModel {
-        switch: SessionModelSwitch {
-            sampling_config: model_sampling,
-            use_concise,
-            is_family_switch,
-            apply_prompt_override,
-            skip_prompt_rewrite: did_rebuild || model_unchanged,
-            auto_compact_threshold_percent: new_threshold,
-            system_prompt_label,
-            context_window_selection: context_window,
-            supported_context_windows,
-        },
+        sampling_config: model_sampling,
+        use_concise,
+        apply_prompt_override,
+        skip_prompt_rewrite: did_rebuild || model_unchanged,
+        auto_compact_threshold_percent: new_threshold,
+        auto_compact_threshold_tokens: new_threshold_tokens,
         responds_to: tx,
     });
     let updated_model = rx

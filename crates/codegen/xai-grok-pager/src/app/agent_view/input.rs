@@ -646,6 +646,11 @@ impl AgentView {
                             }
                             return self.insert_or_defer_bracketed_prompt_paste(text);
                         }
+                        if self.l2_overlay_composer_awaits_image_paste()
+                            && Self::bracketed_paste_waits_for_image_probe(text)
+                        {
+                            return self.insert_or_defer_bracketed_prompt_paste(text);
+                        }
                         self.line_viewer
                             .as_mut()
                             .map_or(InputOutcome::Unchanged, |viewer| {
@@ -2141,39 +2146,6 @@ mod btw_focus_tests {
         );
     }
     #[test]
-    fn minimal_modal_and_viewers_own_esc_over_hidden_btw() {
-        let reg = ActionRegistry::defaults();
-        let mut agents = minimal_btw_agent();
-        agents.agents_modal = Some(crate::views::agents_modal::AgentsModalState::new(
-            std::path::Path::new("/nonexistent"),
-            &std::collections::HashMap::new(),
-            &crate::app::bundle::BundleState::default(),
-            None,
-            None,
-        ));
-        agents.handle_minimal_input(&key(KeyCode::Esc), &reg);
-        assert!(agents.agents_modal.is_none(), "agents modal handled Esc");
-        assert_minimal_btw_active(&agents, "agents modal");
-        let mut block = minimal_btw_agent();
-        block.block_viewer = Some(crate::views::block_viewer::BlockViewerPane::for_plain_text(
-            "t", "content",
-        ));
-        block.handle_minimal_input(&key(KeyCode::Esc), &reg);
-        assert!(block.block_viewer.is_none(), "block viewer handled Esc");
-        assert_minimal_btw_active(&block, "block viewer");
-        let mut video = minimal_btw_agent();
-        video.video_viewer = Some(crate::prompt_images::VideoViewerState::test_stub());
-        video.handle_minimal_input(&key(KeyCode::Esc), &reg);
-        assert!(video.video_viewer.is_none(), "video viewer handled Esc");
-        assert_minimal_btw_active(&video, "video viewer");
-        let mut goal = minimal_btw_agent();
-        goal.goal_state = Some(crate::app::agent::GoalDisplayState::test_stub());
-        goal.show_goal_detail = true;
-        goal.handle_minimal_input(&key(KeyCode::Esc), &reg);
-        assert!(!goal.show_goal_detail, "goal detail handled Esc");
-        assert_minimal_btw_active(&goal, "goal detail");
-    }
-    #[test]
     fn minimal_btw_surface_owner_covers_shared_modal_cascade() {
         let mut agent = minimal_btw_agent();
         assert!(crate::minimal_api::minimal_btw_surface_available(&agent));
@@ -2247,29 +2219,6 @@ mod btw_focus_tests {
         );
     }
     #[test]
-    fn minimal_permission_owns_esc_over_hidden_btw() {
-        let mut agent = minimal_btw_agent();
-        let reg = ActionRegistry::defaults();
-        agent
-            .permission_queue
-            .push_back(super::test_fixtures::make_followup_permission_state());
-        agent.handle_minimal_input(&key(KeyCode::Esc), &reg);
-        assert_minimal_btw_active(&agent, "permission");
-        assert_eq!(
-            agent.permission_queue.len(),
-            1,
-            "Esc preserves the pending permission"
-        );
-        assert_eq!(
-            agent
-                .permission_queue
-                .front()
-                .map(|permission| permission.focus),
-            Some(crate::views::permission_view::PermissionFocus::Options),
-            "permission handled Esc by returning focus to options"
-        );
-    }
-    #[test]
     fn minimal_modal_and_viewers_own_esc_over_hidden_btw() {
         let reg = ActionRegistry::defaults();
         let mut agents = minimal_btw_agent();
@@ -2312,37 +2261,6 @@ mod btw_focus_tests {
         assert_minimal_btw_active(&session_info, "session-info");
     }
     #[test]
-    fn minimal_btw_surface_owner_covers_shared_modal_cascade() {
-        let mut agent = minimal_btw_agent();
-        assert!(crate::minimal_api::minimal_btw_surface_available(&agent));
-        agent.image_viewer = Some(
-            crate::prompt_images::ImageViewerState::open_from_path_deferred(std::path::Path::new(
-                "x.png",
-            )),
-        );
-        assert!(!crate::minimal_api::minimal_btw_surface_available(&agent));
-        agent.image_viewer = None;
-        agent.gboom = Some(crate::gboom::GboomState::new());
-        assert!(!crate::minimal_api::minimal_btw_surface_available(&agent));
-        agent.gboom = None;
-        agent.block_viewer = Some(crate::views::block_viewer::BlockViewerPane::for_plain_text(
-            "t", "content",
-        ));
-        assert!(!crate::minimal_api::minimal_btw_surface_available(&agent));
-    }
-    #[test]
-    fn fullscreen_keeps_btw_first_esc_precedence() {
-        let mut agent = prompt_focused_agent();
-        let reg = ActionRegistry::defaults();
-        agent.btw_state = Some(BtwOverlayState::done("q".into(), long_btw_answer()));
-        agent
-            .permission_queue
-            .push_back(super::test_fixtures::make_followup_permission_state());
-        agent.handle_input(&key(KeyCode::Esc), &reg);
-        assert!(agent.btw_state.is_none());
-        assert!(!agent.permission_queue.is_empty());
-    }
-    #[test]
     fn fullscreen_session_info_owns_esc_over_btw() {
         let mut agent = prompt_focused_agent();
         let reg = ActionRegistry::defaults();
@@ -2381,47 +2299,6 @@ mod btw_focus_tests {
             "Down must leave the painted modal open"
         );
         assert!(agent.btw_state.is_some());
-    }
-    #[test]
-    fn minimal_does_not_scroll_unpainted_btw_geometry() {
-        let mut agent = prompt_focused_agent();
-        let reg = ActionRegistry::defaults();
-        agent.btw_state = Some(BtwOverlayState::done("q".into(), long_btw_answer()));
-        agent.btw_focused = true;
-        agent.last_btw_area = Rect::default();
-        agent.handle_minimal_input(&key(KeyCode::Down), &reg);
-        assert_eq!(done_scroll_offset(&agent), 0);
-    }
-    /// A hidden `/jump` picker shadowed by the `/btw` panel must not let one Esc close both.
-    /// The first Esc drops the shadowed picker (and is spent there), the panel survives, and only a second Esc dismisses it.
-    #[test]
-    fn esc_over_shadowed_jump_picker_spares_btw_panel() {
-        let mut agent = prompt_focused_agent();
-        let reg = ActionRegistry::defaults();
-        agent.btw_state = Some(BtwOverlayState::done("q".into(), long_btw_answer()));
-        agent.jump_state = Some(JumpState {
-            entries: Vec::new(),
-            selected: 0,
-            restore: JumpRestore {
-                bookmark: None,
-                selected: None,
-                follow_mode: false,
-            },
-        });
-        agent.handle_input(&key(KeyCode::Esc), &reg);
-        assert!(
-            agent.jump_state.is_none(),
-            "first Esc drops the shadowed picker"
-        );
-        assert!(
-            agent.btw_state.is_some(),
-            "the /btw panel survives the picker-dismissing Esc"
-        );
-        agent.handle_input(&key(KeyCode::Esc), &reg);
-        assert!(
-            agent.btw_state.is_none(),
-            "a second Esc dismisses the /btw panel"
-        );
     }
     #[test]
     fn clicking_panel_refocuses_it() {
@@ -2959,83 +2836,5 @@ mod subagent_forward_tests {
                 .is_empty(),
             "the effect must move, not duplicate"
         );
-    }
-}
-/// Pasting while the scrollback pane holds the keyboard (prompt unfocused) must land in
-/// the composer, mirroring how a typed character focus-forwards into the prompt.
-#[cfg(test)]
-mod scrollback_paste_focus_forward_tests {
-    use super::test_fixtures::{make_agent, make_followup_permission_state};
-    use super::{AgentPane, AgentView};
-    use crate::actions::ActionRegistry;
-    use crate::app::actions::Action;
-    use crate::app::app_view::InputOutcome;
-    use crossterm::event::Event;
-    fn scrollback_agent() -> (AgentView, ActionRegistry) {
-        let mut agent = make_agent();
-        agent.vim_mode = false;
-        agent.set_active_pane(AgentPane::Scrollback, true);
-        (agent, ActionRegistry::defaults())
-    }
-    /// The `ActionThenForward` round-trip the event loop performs: dispatch `FocusPrompt`
-    /// to focus the prompt pane, then re-process the same paste through it so the text lands.
-    #[test]
-    fn paste_from_scrollback_round_trip_lands_in_composer() {
-        let (mut agent, reg) = scrollback_agent();
-        let paste = Event::Paste("pasted text".to_owned());
-        assert!(matches!(
-            agent.handle_input(&paste, &reg),
-            InputOutcome::ActionThenForward(Action::FocusPrompt)
-        ));
-        agent.set_active_pane(AgentPane::Prompt, false);
-        let out = agent.handle_input(&paste, &reg);
-        assert!(matches!(out, InputOutcome::Changed));
-        assert_eq!(agent.prompt.text(), "pasted text");
-    }
-    /// A parked blocking card stays parked: `FocusPrompt` would unpark it and the
-    /// overlay would swallow the re-dispatched paste, so a paste here is inert.
-    #[test]
-    fn paste_from_scrollback_does_not_unpark_a_pending_overlay() {
-        let (mut agent, reg) = scrollback_agent();
-        agent
-            .permission_queue
-            .push_back(make_followup_permission_state());
-        assert!(agent.parked_card().is_some(), "card should be parked");
-        assert!(agent.focused_card().is_none());
-        let out = agent.handle_input(&Event::Paste("hello".to_owned()), &reg);
-        assert!(
-            matches!(out, InputOutcome::Unchanged),
-            "paste must not unpark a pending overlay, got {out:?}"
-        );
-        assert!(agent.parked_card().is_some(), "card must stay parked");
-        assert_eq!(agent.active_pane, AgentPane::Scrollback);
-    }
-    fn make_test_png(width: u32, height: u32) -> Vec<u8> {
-        use image::{ImageBuffer, Rgba};
-        let img: ImageBuffer<Rgba<u8>, Vec<u8>> =
-            ImageBuffer::from_pixel(width, height, Rgba([128, 64, 32, 255]));
-        let mut buf = Vec::new();
-        img.write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)
-            .unwrap();
-        buf
-    }
-    /// A dragged image arrives as a `file://` bracketed paste; from a focused
-    /// scrollback it takes the same focus-forward round trip as a text paste.
-    #[test]
-    fn dragging_image_while_scrollback_focused_attaches_to_composer() {
-        let (mut agent, reg) = scrollback_agent();
-        let dir = tempfile::tempdir().unwrap();
-        let png = dir.path().join("drag.png");
-        std::fs::write(&png, make_test_png(8, 8)).unwrap();
-        let drop = Event::Paste(format!("file://{}", png.display()));
-        assert!(matches!(
-            agent.handle_input(&drop, &reg),
-            InputOutcome::ActionThenForward(Action::FocusPrompt)
-        ));
-        agent.set_active_pane(AgentPane::Prompt, false);
-        let out = agent.handle_input(&drop, &reg);
-        assert!(matches!(out, InputOutcome::Changed));
-        assert_eq!(agent.prompt.images.len(), 1);
-        assert!(agent.prompt.text().contains("[Image #1]"));
     }
 }

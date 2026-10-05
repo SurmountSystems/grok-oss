@@ -83,10 +83,7 @@ fn skip_complete_png_chunks(bytes: &[u8]) -> &[u8] {
         return bytes;
     }
     let mut i = PNG_SIGNATURE.len();
-    loop {
-        let Some(header_end) = i.checked_add(8) else {
-            break;
-        };
+    while let Some(header_end) = i.checked_add(8) {
         let Some(&[l0, l1, l2, l3, t0, t1, t2, t3]) = bytes.get(i..header_end) else {
             break;
         };

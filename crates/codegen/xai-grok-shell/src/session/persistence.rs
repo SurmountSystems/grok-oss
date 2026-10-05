@@ -2734,29 +2734,6 @@ fn backfill_updates_to_sync(
     backfilled
 }
 
-/// Queue a fresh session's local-only ACP history to `remote_sync` (xAI updates
-/// are never synced), returning the count. Resumed sessions are forward-only:
-/// their prior history may already be on the backend (which appends by content,
-/// no per-message id), so re-sending would duplicate.
-fn backfill_updates_to_sync(
-    created_fresh: bool,
-    updates: Vec<SessionUpdate>,
-    remote_sync: &RemoteSync,
-) -> usize {
-    if !created_fresh {
-        return 0;
-    }
-    let mut backfilled = 0usize;
-    for update in updates {
-        if let SessionUpdate::Acp(notification) = update {
-            remote_sync.queue(*notification);
-            backfilled += 1;
-        }
-    }
-    remote_sync.flush();
-    backfilled
-}
-
 fn init_remote_sync(
     summary: &Summary,
     storage_mode: StorageMode,
@@ -3253,8 +3230,9 @@ pub(crate) async fn load_light(
 
 /// List session summaries, optionally filtered by cwd (absolute path string).
 /// Returns summaries sorted by `last_active_at` (else `updated_at`) descending.
-fn recover_session_relocations_in(root: &Path) -> crate::session::storage::relocation::Result<()> {
-    crate::session::storage::relocation::RelocationStorage::new(root.into()).recover_all()
+fn recover_session_relocations_in(_root: &Path) -> crate::session::storage::relocation::Result<()> {
+    // The journaled relocation transaction never ran in production and was deleted.
+    Ok(())
 }
 
 pub async fn list_summaries(cwd: Option<&str>) -> io::Result<Vec<Summary>> {

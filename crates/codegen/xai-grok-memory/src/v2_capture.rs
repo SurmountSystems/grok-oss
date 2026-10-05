@@ -1625,7 +1625,7 @@ fn render_observation(
     let topic = observation
         .topic_hint
         .as_deref()
-        .map(&json)
+        .map(json)
         .transpose()?
         .unwrap_or_else(|| "null".to_owned());
     let keywords = serde_json::to_string(&observation.keywords)

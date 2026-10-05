@@ -211,7 +211,7 @@ pub async fn fetch_openrouter_credit_balance_cents_with_key(api_key: &str) -> Op
         return None;
     }
     let url = format!("{OPENROUTER_API_URL}/credits");
-    let client = crate::http::shared_client();
+    let client = xai_grok_http::shared_client();
     let response = client
         .get(&url)
         .header("Authorization", format!("Bearer {key}"))

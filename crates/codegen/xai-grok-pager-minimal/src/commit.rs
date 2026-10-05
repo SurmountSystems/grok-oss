@@ -212,7 +212,7 @@ pub(crate) fn minimal_renderer<'a>(
     // body to delimit anyway — the folded `Thought for Xs` header cannot be
     // mistaken for the answer. `only_thinking_spends_the_accent_column` pins
     // reserved == painted so the two rules cannot drift apart.
-    let hide_accent = !matches!(entry.block, RenderBlock::Thinking(_))
+    let _hide_accent = !matches!(entry.block, RenderBlock::Thinking(_))
         || entry.display_mode() == DisplayMode::Collapsed;
     EntryRenderer::new(entry, theme)
         .with_appearance(appearance)

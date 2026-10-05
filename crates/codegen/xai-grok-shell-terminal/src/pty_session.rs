@@ -667,22 +667,132 @@ fn reap(entry: &Arc<Mutex<PtySession>>) {
     // Job-control children live in their own groups. Hangup of the shell group
     // does not reach them, and a surviving grandchild keeps the slave open.
     #[cfg(unix)]
-    signal_groups(&extra_groups, nix::sys::signal::Signal::SIGHUP);
+    signal_groups(&extra_groups, libc::SIGHUP);
     if hung_up && wait_for_exit(entry, xai_tty_utils::HANGUP_GRACE) {
         #[cfg(unix)]
-        signal_groups(&extra_groups, nix::sys::signal::Signal::SIGKILL);
+        signal_groups(&extra_groups, libc::SIGKILL);
         return;
     }
     #[cfg(unix)]
-    signal_groups(&extra_groups, nix::sys::signal::Signal::SIGKILL);
+    signal_groups(&extra_groups, libc::SIGKILL);
     entry.blocking_lock().shell.kill();
     wait_for_exit(entry, REAP_GRACE);
 }
 
+/// Process groups of the shell's descendant tree, excluding the shell's own.
+/// Those extra groups are the background jobs `killpg` on the shell misses.
 #[cfg(unix)]
-fn signal_groups(groups: &[xai_tty_utils::ProcessGroupId], sig: nix::sys::signal::Signal) {
+fn descendant_groups_besides_shell(shell: &Shell) -> Vec<xai_tty_utils::ProcessGroupId> {
+    let Some(root) = shell.pid() else {
+        return Vec::new();
+    };
+    // SAFETY: getpgid on a live or zombie pid is a query; ESRCH yields -1.
+    let shell_pgid = unsafe { libc::getpgid(root as i32) };
+    let mut extra = Vec::new();
+    for pgid in descendant_pgids(root) {
+        if i64::from(pgid) == i64::from(shell_pgid) {
+            continue;
+        }
+        if let Ok(id) = xai_tty_utils::ProcessGroupId::new(pgid) {
+            extra.push(id);
+        }
+    }
+    extra
+}
+
+#[cfg(unix)]
+fn descendant_pgids(root: u32) -> Vec<u32> {
+    let mut seen = std::collections::HashSet::from([root]);
+    let mut stack = vec![root];
+    let mut pgids = Vec::new();
+    while let Some(pid) = stack.pop() {
+        // SAFETY: getpgid on a live or zombie pid is a query; ESRCH yields -1.
+        let pgid = unsafe { libc::getpgid(pid as i32) };
+        if pgid > 1 {
+            pgids.push(pgid as u32);
+        }
+        for child in child_pids(pid) {
+            if seen.insert(child) {
+                stack.push(child);
+            }
+        }
+    }
+    pgids.sort_unstable();
+    pgids.dedup();
+    pgids
+}
+
+#[cfg(unix)]
+fn child_pids(parent: u32) -> Vec<u32> {
+    #[cfg(target_os = "linux")]
+    {
+        children_from_proc_tasks(parent).unwrap_or_else(|| children_from_proc_scan(parent))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = parent;
+        Vec::new()
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn children_from_proc_tasks(parent: u32) -> Option<Vec<u32>> {
+    let task_dir = std::fs::read_dir(format!("/proc/{parent}/task")).ok()?;
+    let mut kids = Vec::new();
+    let mut saw_children_file = false;
+    for task in task_dir.flatten() {
+        let path = task.path().join("children");
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        saw_children_file = true;
+        for tok in text.split_whitespace() {
+            if let Ok(pid) = tok.parse() {
+                kids.push(pid);
+            }
+        }
+    }
+    saw_children_file.then_some(kids)
+}
+
+#[cfg(target_os = "linux")]
+fn children_from_proc_scan(parent: u32) -> Vec<u32> {
+    let Ok(proc_dir) = std::fs::read_dir("/proc") else {
+        return Vec::new();
+    };
+    let mut kids = Vec::new();
+    for ent in proc_dir.flatten() {
+        let pid: u32 = match ent.file_name().to_str().and_then(|s| s.parse().ok()) {
+            Some(pid) => pid,
+            None => continue,
+        };
+        let Ok(stat) = std::fs::read_to_string(ent.path().join("stat")) else {
+            continue;
+        };
+        if parse_stat_ppid_pgid(&stat).is_some_and(|(ppid, _)| ppid == parent) {
+            kids.push(pid);
+        }
+    }
+    kids
+}
+
+/// `/proc/pid/stat` after the comm's closing paren: state, ppid, pgrp.
+#[cfg(target_os = "linux")]
+fn parse_stat_ppid_pgid(stat: &str) -> Option<(u32, u32)> {
+    let rest = stat.rsplit_once(')')?.1;
+    let mut fields = rest.split_whitespace();
+    let _state = fields.next()?;
+    let ppid = fields.next()?.parse().ok()?;
+    let pgid = fields.next()?.parse().ok()?;
+    Some((ppid, pgid))
+}
+
+#[cfg(unix)]
+fn signal_groups(groups: &[xai_tty_utils::ProcessGroupId], sig: libc::c_int) {
     for group in groups {
-        let _ = nix::sys::signal::killpg(nix::unistd::Pid::from_raw(group.get() as i32), sig);
+        // SAFETY: `ProcessGroupId` rejects 0, 1, and the caller's own group, so
+        // this `killpg` can only reach a foreign group.
+        let _ = unsafe { libc::killpg(group.get() as libc::pid_t, sig) };
     }
 }
 
@@ -709,6 +819,30 @@ pub async fn close_all() {
     for entry in entries {
         let _ = tokio::task::spawn_blocking(move || reap(&entry)).await;
     }
+}
+
+/// PATH lookup for a basename (`bash`, `sh`) when `/bin/bash` is missing (Nix quality / NixOS).
+fn unix_shell_on_path(name: &str) -> Option<String> {
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path).find_map(|dir| {
+        let candidate = dir.join(name);
+        candidate
+            .is_file()
+            .then(|| candidate.to_string_lossy().into_owned())
+    })
+}
+
+/// If `requested` is not on disk, use PATH `bash`/`sh`. Prefer a real file.
+fn existing_unix_shell(requested: &str) -> String {
+    let path = Path::new(requested);
+    if path.is_file() {
+        return requested.to_string();
+    }
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("bash");
+    unix_shell_on_path(name)
+        .or_else(|| unix_shell_on_path("bash"))
+        .or_else(|| unix_shell_on_path("sh"))
+        .unwrap_or_else(|| requested.to_string())
 }
 
 /// Explicit `shell` param, then `$SHELL`, then the platform default.
@@ -1130,13 +1264,6 @@ mod tests {
                 digits.parse().ok()
             })
             .collect()
-    }
-
-    #[cfg(unix)]
-    async fn pty_output_text(pty_id: &str) -> String {
-        let entry = require_pty(pty_id).await.expect("pty");
-        let out: Vec<u8> = entry.lock().await.output_ring.iter().copied().collect();
-        String::from_utf8_lossy(&out).into_owned()
     }
 
     #[cfg(unix)]

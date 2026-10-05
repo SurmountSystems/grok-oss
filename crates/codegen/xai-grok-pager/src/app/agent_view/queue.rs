@@ -404,7 +404,7 @@ impl AgentView {
             .session
             .pending_prompts
             .iter()
-            .any(|p| p.id == id && p.enter_plan_mode)
+            .any(|p| p.id == id && crate::slash::queue_schedule::is_plan_slash(&p.text))
         {
             self.show_toast(
                 "Can't interject this — it runs as a plan turn when the current work ends",
@@ -418,12 +418,12 @@ impl AgentView {
                 return InputOutcome::Action(Action::SendPromptNow {
                     text: prompt.text,
                     images: prompt.images,
+                    image_notice: None,
                 });
             }
             return InputOutcome::Action(Action::Interject {
                 text: prompt.text,
                 images: prompt.images,
-                image_notice: None,
             });
         }
         InputOutcome::Changed

@@ -35,6 +35,7 @@ fn host_turn_stamps_fresh_turn_start() {
                 None,
                 None,
                 None,
+                /* unstick_retry */ false,
             ))
             .await
             .expect("/session-info ends the turn host-side");

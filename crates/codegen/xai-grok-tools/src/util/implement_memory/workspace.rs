@@ -195,7 +195,7 @@ pub fn memory_paths(
 ) -> Result<MemoryPaths, MemoryError> {
     let home = match home {
         Some(h) => h.to_path_buf(),
-        None => dirs::home_dir().ok_or_else(|| {
+        None => xai_dirs::home_dir().ok_or_else(|| {
             MemoryError::WorkspaceId(
                 "could not determine the user's home directory ($HOME unset and pwd lookup failed)"
                     .into(),

@@ -269,6 +269,15 @@ pub fn kill_process_with_signal(pid: u32, signal: KillSignal) -> std::io::Result
         terminate.map_err(|e| std::io::Error::other(format!("TerminateProcess({pid}): {e}")))
     }
 }
+
+/// Cooperative rebuild relaunch for one PID.
+///
+/// Sends [`KillSignal::User1`] through [`kill_process_with_signal`]: `SIGUSR1`
+/// on Unix, and the existing Windows `TerminateProcess` path. Already-dead is
+/// `Ok`. No second signal implementation.
+pub fn signal_process_rebuild_relaunch(pid: u32) -> std::io::Result<()> {
+    kill_process_with_signal(pid, KillSignal::User1)
+}
 /// Command-line arguments of `pid`. Exact on Linux (/proc); approximate on
 /// macOS/BSD (`ps`, whitespace-split — fine for flag lookups); `None` on
 /// Windows or when the process is gone.

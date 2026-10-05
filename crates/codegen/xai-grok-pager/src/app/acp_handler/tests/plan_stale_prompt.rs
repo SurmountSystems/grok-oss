@@ -25,8 +25,8 @@ use crossterm::event::{
     Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use ratatui::layout::Rect;
-use xai_grok_shell::session::pending_prompts::PersistedQueuedPrompt;
 use xai_grok_shell::session::prompt_wal::PromptWalKind;
+use xai_grok_shell::session::unsent_prompt_draft::pending_prompts::PersistedQueuedPrompt;
 
 /// Operator quote, first tests.
 const OPERATOR_STALE_PROMPT: &str = concat!(
@@ -620,7 +620,7 @@ fn plan_comment_body_already_human_turn_does_not_restore_as_queue_after_present_
         "a truly unsent follow-up must still occupy the queue; queue={queued:?}"
     );
 
-    xai_grok_shell::session::pending_prompts::write_pending_prompts(
+    xai_grok_shell::session::unsent_prompt_draft::pending_prompts::write_pending_prompts(
         &cwd_str,
         sid,
         &[
@@ -1074,6 +1074,7 @@ fn isolated_preview_must_not_close_on_nested_specialist_finish() {
             sid,
             XaiSessionUpdate::SubagentFinished {
                 subagent_id: "nested-69".into(),
+                attempt_id: None,
                 child_session_id: "nested-69".into(),
                 status: "completed".into(),
                 error: None,
@@ -2150,7 +2151,7 @@ fn isolated_preview_must_not_vanish_every_couple_of_minutes_on_nested_occupancy_
         agent
             .subagent_sessions
             .get("occupancy-l2")
-            .is_some_and(|i| !i.finished && !i.pending_kill),
+            .is_some_and(|i| !i.finished && !i.attempt.pending_kill),
         "occupancy nested implementer must stay Working"
     );
 }
@@ -2510,7 +2511,7 @@ fn plan_soft_leftover_isolated_preview_already_open_does_not_dock_leftover_prima
     );
     let nested = &agent.subagent_sessions["nested-soft"];
     assert!(
-        !nested.pending_kill && !nested.finished,
+        !nested.attempt.pending_kill && !nested.finished,
         "nested implementers keep running under `/plan --soft`"
     );
 }

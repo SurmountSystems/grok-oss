@@ -156,15 +156,10 @@ impl AgentView {
             None => (String::new(), raw_description.to_string()),
         };
         let icon = if is_running {
-            let spinner_frames = crate::glyphs::dot_spinner_frames();
-            let tick = self.tasks.tick_count();
-            match spinner_frames.len() {
-                0 => "",
-                n => spinner_frames
-                    .get((tick / 4) as usize % n)
-                    .copied()
-                    .unwrap_or(""),
-            }
+            let elapsed_ms = info
+                .map(|s| u64::try_from(s.display_elapsed().as_millis()).unwrap_or(u64::MAX))
+                .unwrap_or(0);
+            crate::glyphs::sparkler_frame_at_ms(elapsed_ms)
         } else if info.and_then(|s| s.attempt.status.as_deref()) == Some("completed") {
             crate::glyphs::check_mark()
         } else {
@@ -340,6 +335,7 @@ impl AgentView {
                 false,
                 crate::app::agent_view::BannerSlotParams::none(),
                 overlay.is_some(),
+                false,
                 &mut Vec::new(),
                 AppRenderParams {
                     overlay_header: overlay.map(|o| o.header).unwrap_or_default(),
@@ -362,6 +358,12 @@ impl AgentView {
         prompt_paging: bool,
     ) -> Option<InputOutcome> {
         let child_sid = self.active_subagent.clone()?;
+        if let Event::Paste(text) = ev
+            && Self::bracketed_paste_waits_for_image_probe(text)
+            && self.l2_overlay_composer_awaits_image_paste()
+        {
+            return None;
+        }
         let key = match ev {
             Event::Key(key) if key.kind != KeyEventKind::Release => Some(key),
             _ => None,

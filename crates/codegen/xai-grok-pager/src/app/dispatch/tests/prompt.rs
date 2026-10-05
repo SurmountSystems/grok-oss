@@ -20,7 +20,6 @@ fn view_plan_clears_leftover_slash_palette() {
         agent.prompt.set_text("/");
         agent.prompt.refresh_slash(&agent.session.models);
         agent.plan_mode_active = true;
-        agent.latest_inline_plan_content = Some("# Plan GBT3703Repro\n".into());
     }
     let effects = dispatch(Action::ShowPlan, &mut app);
     assert!(
@@ -2822,8 +2821,6 @@ fn view_plan_slash_runs_during_reconnect() {
         );
     }
 
-    app.agents.get_mut(&id).unwrap().latest_inline_plan_content =
-        Some("# After reconnect bind\n".into());
     dispatch(
         Action::TaskComplete(TaskResult::SessionLoaded {
             agent_id: id,
@@ -2834,6 +2831,7 @@ fn view_plan_slash_runs_during_reconnect() {
             restore_degree: None,
             running_prompt_id: None,
             scheduler_background_loops: None,
+            modes: None,
         }),
         &mut app,
     );
@@ -8077,7 +8075,10 @@ fn after_rebuild_or_resume_plus_plan_exit_follow_up_must_not_wait_for_the_model_
         let pav = agent.plan_approval_view.as_ref().unwrap();
         assert_eq!(pav.focus, PlanApprovalFocus::Preview);
         assert_eq!(pav.prompt_intent, PlanPromptIntent::Revise);
-        assert!(pav.response_tx.is_none(), "rebuild idle park has no waiter");
+        assert!(
+            !pav.has_live_ext_waiter(),
+            "rebuild idle park has no waiter"
+        );
     }
     let effects = dispatch(Action::SendPrompt(FOLLOW_UP.into()), &mut app);
     assert!(

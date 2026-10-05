@@ -430,11 +430,21 @@ async fn start_capture_session(
             tokio::select! {
                 msg = finish_rx.recv() => {
                     if msg.is_some() {
+                        // User ended the turn; stop the no-speech watchdog.
+                        awaiting_speech = false;
                         stop_capture(&mut capture);
                         stt.finish_audio();
                     } else {
                         return;
                     }
+                }
+                _ = tokio::time::sleep_until(no_speech_deadline), if awaiting_speech => {
+                    // Tear down rather than streaming a dead mic until the user stops.
+                    stop_capture(&mut capture);
+                    stt.finish_audio();
+                    let (message, hint) = no_speech_error();
+                    let _ = out.send(VoiceEvent::Error { message, hint }).await;
+                    return;
                 }
                 ev = stt.recv() => {
                     match ev {
@@ -443,6 +453,8 @@ async fn start_capture_session(
                             if text.is_empty() {
                                 continue;
                             }
+                            // Real speech arrived: disarm the no-speech watchdog.
+                            awaiting_speech = false;
 
                             let event = if p.speech_final {
                                 locked_prefix.clear();
@@ -473,6 +485,7 @@ async fn start_capture_session(
                         Some(StreamingSttEvent::Done { text }) => {
                             locked_prefix.clear();
                             if !text.trim().is_empty() {
+                                awaiting_speech = false;
                                 let _ = out.send(VoiceEvent::UtteranceFinal { text }).await;
                             }
                         }

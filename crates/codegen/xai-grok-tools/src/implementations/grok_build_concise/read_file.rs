@@ -151,29 +151,6 @@ mod tests {
             .render(ToolMetadata::description_template(&ReadFileConciseTool))
             .unwrap();
         assert!(
-            rendered.contains("start_line") && rendered.contains("num_lines"),
-            "renamed offset/limit must appear:\n{rendered}"
-        );
-    }
-
-    #[test]
-    fn description_template_tracks_renamed_offset_limit() {
-        use crate::types::template_renderer::TemplateRenderer;
-        use crate::types::tool_metadata::ToolMetadata;
-        use std::collections::HashMap;
-
-        let tools = HashMap::from([(ToolKind::Read, "read_file".to_string())]);
-        let params = HashMap::from([(
-            ToolKind::Read,
-            HashMap::from([
-                ("offset".to_string(), "start_line".to_string()),
-                ("limit".to_string(), "num_lines".to_string()),
-            ]),
-        )]);
-        let rendered = TemplateRenderer::new(tools, params)
-            .render(ToolMetadata::description_template(&ReadFileConciseTool))
-            .unwrap();
-        assert!(
             rendered.contains("start_line and num_lines"),
             "renamed offset/limit must appear:\n{rendered}"
         );

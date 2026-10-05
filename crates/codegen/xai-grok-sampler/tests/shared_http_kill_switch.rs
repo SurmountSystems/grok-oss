@@ -1,6 +1,7 @@
 //! Kill-switch test in its own integration binary: a separate test binary is a separate process under cargo test, nextest, and Bazel alike.
 //! So the env write below cannot poison other tests and lands before the crate's once-per-process kill-switch latch first resolves.
 
+#[allow(dead_code)] // shared support module; this binary does not call every helper
 mod support;
 
 use std::sync::atomic::Ordering;

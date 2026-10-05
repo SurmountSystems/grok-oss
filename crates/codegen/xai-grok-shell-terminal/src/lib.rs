@@ -27,7 +27,7 @@ pub use adapter::AcpTerminalAdapter;
 mod exit_watcher;
 mod output_recorder;
 
-pub(crate) mod pty_session;
+pub mod pty_session;
 
 mod streaming_local_terminal;
 pub use streaming_local_terminal::{
@@ -192,7 +192,7 @@ pub struct TerminalRunner {
 }
 
 impl TerminalRunner {
-    pub(crate) fn new(
+    pub fn new(
         notifier: Arc<dyn SessionNotificationSender>,
         session_id: agent_client_protocol::SessionId,
     ) -> Self {

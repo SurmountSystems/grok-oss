@@ -37,9 +37,9 @@ fn command_spawns_python(command: &str, depth: usize) -> bool {
     let tokens = tokenize(command);
     let mut start = 0;
     for i in 0..=tokens.len() {
-        let is_sep = i == tokens.len() || is_separator(&tokens[i]);
+        let is_sep = i == tokens.len() || is_separator(tokens.get(i).expect("index out of bounds"));
         if is_sep {
-            if statement_spawns_python(&tokens[start..i], depth) {
+            if statement_spawns_python(tokens.get(start..i).expect("index out of bounds"), depth) {
                 return true;
             }
             start = i + 1;
@@ -50,16 +50,19 @@ fn command_spawns_python(command: &str, depth: usize) -> bool {
 
 fn statement_spawns_python(stmt: &[String], depth: usize) -> bool {
     let mut i = 0;
-    while i < stmt.len() && is_env_assign(&stmt[i]) {
+    while i < stmt.len() && is_env_assign(stmt.get(i).expect("index out of bounds")) {
         i += 1;
     }
     while i < stmt.len() {
-        let base = file_name(&stmt[i]);
+        let base = file_name(stmt.get(i).expect("index out of bounds"));
         if is_python_interpreter(base) {
             return true;
         }
         if is_shell(base) {
-            return shell_script_spawns_python(&stmt[i + 1..], depth);
+            return shell_script_spawns_python(
+                stmt.get(i + 1..).expect("index out of bounds"),
+                depth,
+            );
         }
         if !is_wrapper(base) {
             return false;
@@ -67,7 +70,7 @@ fn statement_spawns_python(stmt: &[String], depth: usize) -> bool {
         let wrapper = base.to_string();
         i += 1;
         while i < stmt.len() {
-            let tok = &stmt[i];
+            let tok = stmt.get(i).expect("index out of bounds");
             if is_env_assign(tok) {
                 i += 1;
                 continue;
@@ -93,8 +96,8 @@ fn statement_spawns_python(stmt: &[String], depth: usize) -> bool {
 fn shell_script_spawns_python(args: &[String], depth: usize) -> bool {
     let mut i = 0;
     let mut saw_c = false;
-    while i < args.len() && args[i].starts_with('-') {
-        if args[i].contains('c') {
+    while i < args.len() && args.get(i).expect("index out of bounds").starts_with('-') {
+        if args.get(i).expect("index out of bounds").contains('c') {
             saw_c = true;
         }
         i += 1;
@@ -102,7 +105,7 @@ fn shell_script_spawns_python(args: &[String], depth: usize) -> bool {
     if !saw_c {
         return false;
     }
-    let script = args[i..].join(" ");
+    let script = args.get(i..).expect("index out of bounds").join(" ");
     !script.is_empty() && command_spawns_python(&script, depth + 1)
 }
 
@@ -302,7 +305,7 @@ fn live_substitutions(s: &str) -> Vec<String> {
     let mut i = 0;
     let mut quote: Option<char> = None;
     while i < chars.len() {
-        let c = chars[i];
+        let c = chars.get(i).copied().expect("index out of bounds");
         if let Some(q) = quote {
             if c == q {
                 quote = None;
@@ -310,7 +313,10 @@ fn live_substitutions(s: &str) -> Vec<String> {
                 continue;
             }
             if q == '"' {
-                if c == '$' && i + 1 < chars.len() && chars[i + 1] == '(' {
+                if c == '$'
+                    && i + 1 < chars.len()
+                    && chars.get(i + 1).copied().expect("index out of bounds") == '('
+                {
                     let (next, body) = read_paren(&chars, i);
                     out.push(body);
                     i = next;
@@ -331,7 +337,10 @@ fn live_substitutions(s: &str) -> Vec<String> {
             i += 1;
             continue;
         }
-        if c == '$' && i + 1 < chars.len() && chars[i + 1] == '(' {
+        if c == '$'
+            && i + 1 < chars.len()
+            && chars.get(i + 1).copied().expect("index out of bounds") == '('
+        {
             let (next, body) = read_paren(&chars, i);
             out.push(body);
             i = next;
@@ -354,7 +363,7 @@ fn read_paren(chars: &[char], start: usize) -> (usize, String) {
     let mut depth = 1;
     let mut quote: Option<char> = None;
     while i < chars.len() && depth > 0 {
-        let c = chars[i];
+        let c = chars.get(i).copied().expect("index out of bounds");
         if let Some(q) = quote {
             if c == q {
                 quote = None;
@@ -371,17 +380,25 @@ fn read_paren(chars: &[char], start: usize) -> (usize, String) {
         }
         i += 1;
     }
-    let body: String = chars[body_at..i].iter().collect();
+    let body: String = chars
+        .get(body_at..i)
+        .expect("index out of bounds")
+        .iter()
+        .collect();
     (i + 1, body)
 }
 
 fn read_backtick(chars: &[char], start: usize) -> (usize, String) {
     let mut i = start + 1;
     let body_at = i;
-    while i < chars.len() && chars[i] != '`' {
+    while i < chars.len() && chars.get(i).copied().expect("index out of bounds") != '`' {
         i += 1;
     }
-    let body: String = chars[body_at..i].iter().collect();
+    let body: String = chars
+        .get(body_at..i)
+        .expect("index out of bounds")
+        .iter()
+        .collect();
     (i + 1, body)
 }
 

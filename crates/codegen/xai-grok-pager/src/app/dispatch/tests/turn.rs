@@ -3073,7 +3073,11 @@ fn plan_exit_or_cancel_of_dead_park_leaves_idle() {
 
     let mut app = test_app_with_agent();
     install_dead_plan_park(app.agents.get_mut(&id).unwrap(), true);
-    let effects = super::super::turn::do_cancel_turn(&mut app, true);
+    let effects = super::super::turn::do_cancel_turn(
+        &mut app,
+        true,
+        crate::app::cancel_latency::CancelOrigin::UserGesture,
+    );
     assert!(
         !effects
             .iter()
@@ -3084,7 +3088,11 @@ fn plan_exit_or_cancel_of_dead_park_leaves_idle() {
 
     let mut app = test_app_with_agent();
     install_dead_plan_park(app.agents.get_mut(&id).unwrap(), false);
-    let effects = super::super::turn::do_cancel_turn(&mut app, true);
+    let effects = super::super::turn::do_cancel_turn(
+        &mut app,
+        true,
+        crate::app::cancel_latency::CancelOrigin::UserGesture,
+    );
     assert!(
         !effects
             .iter()
@@ -3118,7 +3126,11 @@ fn plan_exit_or_cancel_of_dead_park_leaves_idle() {
             ),
         );
     }
-    let _ = super::super::turn::do_cancel_turn(&mut app, true);
+    let _ = super::super::turn::do_cancel_turn(
+        &mut app,
+        true,
+        crate::app::cancel_latency::CancelOrigin::UserGesture,
+    );
     let agent = app.agents.get(&id).unwrap();
     assert_ne!(
         agent.plan_mode_pending,
@@ -3147,7 +3159,11 @@ fn cancel_dead_park_does_not_queued_after_cancel_rebuild_flush() {
         agent.prompt_wal_append_count.set(0);
     }
 
-    let effects = super::super::turn::do_cancel_turn(&mut app, true);
+    let effects = super::super::turn::do_cancel_turn(
+        &mut app,
+        true,
+        crate::app::cancel_latency::CancelOrigin::UserGesture,
+    );
     assert!(
         !effects
             .iter()
@@ -3208,7 +3224,11 @@ fn cancel_dead_park_does_not_queued_after_cancel_rebuild_flush() {
             ),
         );
     }
-    let effects = super::super::turn::do_cancel_turn(&mut app, true);
+    let effects = super::super::turn::do_cancel_turn(
+        &mut app,
+        true,
+        crate::app::cancel_latency::CancelOrigin::UserGesture,
+    );
     assert!(
         effects
             .iter()
@@ -3246,8 +3266,8 @@ fn first_token_wait_with_old_nested_paints_waiting_for_the_model() {
         old.description = std::sync::Arc::from("historical nested from a previous turn");
         old.finished = true;
         old.status = Some(std::sync::Arc::from("completed"));
-        old.duration_ms = Some(1_500);
-        old.activity_label = None;
+        old.attempt.duration_ms = Some(1_500);
+        old.attempt.activity_label = None;
         agent.subagent_sessions.insert("old-l2".into(), old);
     }
     let agent = app.agents.get(&id).unwrap();
@@ -3263,7 +3283,7 @@ fn first_token_wait_with_old_nested_paints_waiting_for_the_model() {
         Some(TurnActivity::Waiting(WaitingReason::Model)),
         "first-token wait must stay Waiting(Model), got {activity:?}"
     );
-    let label = crate::views::turn_status::leftover_viewport_wait_label(&activity);
+    let label = leftover_viewport_wait_label(&activity);
     assert_eq!(
         label.as_deref(),
         Some("Waiting for the model…"),
@@ -3288,12 +3308,12 @@ fn first_token_wait_after_unwaited_this_turn_nested_finish_paints_waiting_for_th
             crate::app::agent_view::test_fixtures::running_subagent_info("l2-bg-nowait");
         nested.description =
             std::sync::Arc::from("this-turn background nested this turn did not wait on");
-        nested.is_background = true;
+        nested.attempt.is_background = true;
         nested.subagent_id = std::sync::Arc::from("sa-bg-nowait");
         nested.finished = true;
         nested.status = Some(std::sync::Arc::from("completed"));
-        nested.duration_ms = Some(1_500);
-        nested.activity_label = None;
+        nested.attempt.duration_ms = Some(1_500);
+        nested.attempt.activity_label = None;
         agent
             .subagent_sessions
             .insert("l2-bg-nowait".into(), nested);
@@ -3317,10 +3337,23 @@ fn first_token_wait_after_unwaited_this_turn_nested_finish_paints_waiting_for_th
         Some(TurnActivity::Waiting(WaitingReason::Model)),
         "first-token wait must stay Waiting(Model), got {activity:?}"
     );
-    let label = crate::views::turn_status::leftover_viewport_wait_label(&activity);
+    let label = leftover_viewport_wait_label(&activity);
     assert_eq!(
         label.as_deref(),
         Some("Waiting for the model…"),
         "first-token wait must paint Waiting for the model, got {label:?}"
     );
+}
+
+fn leftover_viewport_wait_label(
+    activity: &Option<crate::acp::tracker::TurnActivity>,
+) -> Option<String> {
+    use crate::acp::tracker::{TurnActivity, WaitingReason};
+    match activity {
+        Some(TurnActivity::Waiting(WaitingReason::Model)) => {
+            Some("Waiting for the model…".to_string())
+        }
+        Some(TurnActivity::Retrying { .. }) => Some("Retrying the model request".to_string()),
+        _ => None,
+    }
 }

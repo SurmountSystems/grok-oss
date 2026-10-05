@@ -26,7 +26,10 @@ let
       || base == "clippy.toml"
       || base == "rustfmt.toml"
       || base == "nextest.toml"
-      || base == "protoc";
+      || base == "protoc"
+      # Repo-root justfile. Crane's cargo filter drops it; the embedded
+      # grep test include_str's this file from the crate directory.
+      || base == "justfile";
   };
 
   nativeBuildInputs =

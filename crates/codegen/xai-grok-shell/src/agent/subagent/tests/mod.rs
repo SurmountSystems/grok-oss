@@ -286,6 +286,7 @@ fn wedged_child_handle() -> (
             std::sync::Arc::new(crate::terminal::LocalTerminalRunner),
         ),
         model_id: acp::ModelId::new("test-model"),
+        scheduler_background_loops: false,
         reasoning_effort: None,
         yolo_mode: false,
         origin_client: None,
@@ -1402,7 +1403,7 @@ fn resume_vs_fork_helper_shapes_differ() {
             ConversationItem::assistant("done"),
         ];
     let resumed = resume_initial_context(resume_items.clone(), false);
-    let forked = forked_initial_context(resume_items);
+    let forked = forked_initial_context(resume_items, None);
     assert_eq!(resumed.source, InitialContextSource::Resumed);
     assert_eq!(forked.source, InitialContextSource::Forked);
     assert!(resumed.conversation.len() > forked.conversation.len());
@@ -1651,7 +1652,7 @@ fn verbatim_fork_falls_back_to_summary_when_oversize() {
 fn verbatim_fork_empty_after_filter_fails_open_to_new() {
     use xai_grok_sampling_types::conversation::ConversationItem;
     let items = vec![ConversationItem::user("/goal do the thing")];
-    let ctx = verbatim_or_normalize_fork(items, 256_000);
+    let ctx = verbatim_or_normalize_fork(items, 256_000, None);
     assert_eq!(ctx.source, InitialContextSource::New);
     assert!(!ctx.verbatim_fork);
     assert!(ctx.conversation.is_empty());
@@ -2978,6 +2979,7 @@ fn resolve_model_override_agent_config_auto_use_omits_console() {
     let proxy = crate::env::PROD_CLI_CHAT_PROXY_BASE_URL;
     let mut entry = ModelEntry {
         info: ModelInfo::fallback("override-model"),
+        mtls_cert_dir: None,
         api_key: None,
         env_key: None,
         auth_provider: None,
@@ -3063,6 +3065,7 @@ fn resolve_model_override_config_missing_parent_supergrok_only_omits_console() {
     let proxy = crate::env::PROD_CLI_CHAT_PROXY_BASE_URL;
     let mut entry = ModelEntry {
         info: ModelInfo::fallback("override-model"),
+        mtls_cert_dir: None,
         api_key: None,
         env_key: None,
         auth_provider: None,
@@ -3140,6 +3143,7 @@ fn resolve_model_override_api_key_pin_keeps_console_primary() {
     let proxy = crate::env::PROD_CLI_CHAT_PROXY_BASE_URL;
     let mut entry = ModelEntry {
         info: ModelInfo::fallback("override-model"),
+        mtls_cert_dir: None,
         api_key: None,
         env_key: None,
         auth_provider: None,

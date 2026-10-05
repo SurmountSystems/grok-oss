@@ -225,11 +225,9 @@ impl WorkspaceSandbox {
                 }
                 kept
             };
-            match kept {
-                Ok(evicted) => self.release_ended_holds(evicted),
-                // The command does not run: the credential minted for it goes with the guard
-                Err(refused) => return Err(refused.into()),
-            }
+            // The command does not run: the credential minted for it goes with the guard
+            let evicted = kept?;
+            self.release_ended_holds(evicted);
             // The spawn's record holds the credential now; `finish` or the release revokes it
             if let Some(minted) = minted {
                 minted.keep();

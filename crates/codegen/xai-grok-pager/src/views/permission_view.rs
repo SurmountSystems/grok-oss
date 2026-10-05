@@ -992,7 +992,6 @@ fn display_width_end(s: &str, start: usize, limit: usize, width: usize) -> usize
         if used >= width {
             break;
         }
-        pos = end;
     }
     end
 }
@@ -2987,52 +2986,7 @@ mod tests {
     }
 
     #[test]
-    fn reject_always_command_alone_enables_arrows_but_not_editor() {
-        let mut state = empty_view_state(None);
-        state.bash_command_raw = Some("cargo test --workspace".to_owned());
-        state.bash_highlights = Some(BashCommandHighlights {
-            prefix: vec![],
-            highlighted_words: vec!["cargo".into(), "test".into()],
-            suffix: vec![],
-        });
-        state.bash_selection_count = 2;
-        state.options = vec![acp::PermissionOption::new(
-            acp::PermissionOptionId::new(Arc::from("reject-always-command")),
-            "Never allow: cargo test".to_owned(),
-            acp::PermissionOptionKind::RejectAlways,
-        )];
-        assert!(state.has_adjustable_scope());
-        assert!(
-            !state.has_editable_bash_pattern(),
-            "editor requires the exact allow-always-command row"
-        );
-    }
-
-    #[test]
     fn body_never_dims_any_span() {
-        for raw in [
-            "git status --short && cargo test --workspace",
-            "# comment first\ncargo test",
-            "ps aux | grep pattern",
-        ] {
-            for width in [20usize, 200] {
-                for line in build_permission_bash_lines(Some(raw), width, usize::MAX) {
-                    for span in &line.spans {
-                        assert!(
-                            !span.style.add_modifier.contains(Modifier::DIM),
-                            "body span {:?} must not be DIM ({raw:?} @ {width})",
-                            span.content
-                        );
-                    }
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn body_never_dims_any_span() {
-        // The body carries no selection state: no span may be DIM, whatever
-        // the script shape (single command, list, pipeline, comments).
         for raw in [
             "git status --short && cargo test --workspace",
             "# comment first\ncargo test",

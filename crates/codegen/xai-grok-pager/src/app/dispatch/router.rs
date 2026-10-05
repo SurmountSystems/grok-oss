@@ -31,11 +31,11 @@ use super::import_claude::{
 use super::interject::dispatch_interject;
 use super::jump::{dispatch_jump_dismiss, dispatch_jump_picker_select, dispatch_jump_show_picker};
 use super::modes::{
-    dispatch_cycle_mode, dispatch_dock_isolated_preview, dispatch_enter_plan_mode,
-    dispatch_show_plan, dispatch_toggle_yolo, set_permission_mode, set_plan_mode, set_yolo_mode,
+    dispatch_cycle_mode, dispatch_enter_plan_mode, dispatch_show_plan, dispatch_toggle_yolo,
+    set_permission_mode, set_plan_mode, set_yolo_mode,
 };
 use super::notes::{
-    dispatch_enter_remember_mode, dispatch_open_feedback_modal,
+    dispatch_enter_remember_mode, dispatch_open_feedback_modal, dispatch_open_feedback_pane,
     dispatch_save_remember_note_from_modal, dispatch_send_btw, dispatch_send_feedback,
     dispatch_send_recap, dispatch_send_remember_note, dispatch_submit_feedback_modal,
 };
@@ -75,19 +75,29 @@ use super::session::load::{
 };
 use super::session::modal::{dispatch_rename_session, dispatch_reset_session_title};
 use super::settings::setters::{
-    clear_default_model, clear_fork_secondary_model, preview_auto_dark_theme,
-    preview_auto_light_theme, preview_theme, set_ask_user_question_timeout_enabled,
-    set_auto_compact_threshold, set_auto_dark_theme, set_auto_light_theme, set_auto_run_implement,
-    set_auto_update, set_collapsed_edit_blocks, set_compact_mode, set_contextual_hint_image_input,
+    clear_default_model, clear_fork_secondary_model, clear_subagent_model_inheritance,
+    persist_always_expand_thinking_after_ctrl_t, preview_auto_dark_theme, preview_auto_light_theme,
+    preview_theme, set_allow_session_multiline, set_allow_worktree, set_always_expand_thinking,
+    set_ask_user_question_timeout_enabled, set_auto_compact_threshold, set_auto_dark_theme,
+    set_auto_light_theme, set_auto_run_implement, set_auto_update, set_bubble_copy_buttons,
+    set_cancel_subagents_on_turn_cancel, set_collapsed_edit_blocks, set_combine_queued_prompts,
+    set_compact_mode, set_composer_multiline, set_confirm_before_rewind,
+    set_contextual_hint_export_copy, set_contextual_hint_image_input,
     set_contextual_hint_plan_mode, set_contextual_hint_send_now, set_contextual_hint_small_screen,
     set_contextual_hint_ssh_wrap, set_contextual_hint_undo, set_contextual_hint_word_select,
-    set_default_model, set_default_selected_permission, set_display_refresh_auto_cadence,
-    set_economic_mode, set_fork_secondary_model, set_group_tool_verbs, set_hunk_tracker_mode,
-    set_invert_scroll, set_keep_text_selection, set_max_thoughts_width, set_multiline_mode,
-    set_prompt_suggestions, set_remember_tool_approvals, set_render_mermaid,
-    set_respect_manual_folds, set_screen_mode, set_scroll_lines, set_scroll_mode, set_scroll_speed,
-    set_show_thinking_blocks, set_show_tips, set_simple_mode, set_theme, set_timeline,
-    set_timestamps, set_vim_mode, set_voice_capture_mode, set_voice_stt_language,
+    set_default_model, set_default_reasoning_effort, set_default_selected_permission,
+    set_display_refresh_auto_cadence, set_economic_mode, set_features_session_recap,
+    set_follow_up_behavior, set_fork_secondary_model, set_group_tool_verbs, set_hide_header,
+    set_hunk_tracker_mode, set_invert_scroll, set_keep_text_selection, set_max_thoughts_width,
+    set_multiline_mode, set_notifications_session_recap,
+    set_notifications_session_recap_threshold_secs, set_page_flip_on_send, set_plan_approval_park,
+    set_process_rule_reminders, set_process_rule_reminders_enabled, set_prompt_suggestions,
+    set_remember_tool_approvals, set_render_mermaid, set_respect_manual_folds,
+    set_resume_canceled_turn_on_restart, set_screen_mode, set_scroll_lines, set_scroll_mode,
+    set_scroll_speed, set_scrub_ascii_punct, set_show_thinking_blocks, set_show_tips,
+    set_simple_mode, set_subagent_model_inheritance, set_theme, set_timeline, set_timestamps,
+    set_token_economy_bool, set_token_economy_int, set_turbo_planning, set_ulid_session_ids,
+    set_vim_mode, set_voice_capture_mode, set_voice_keybind_enabled, set_voice_stt_language,
 };
 use super::settings::ui::{
     dispatch_confirm_reset_setting, dispatch_open_command_palette, dispatch_open_howto_guides,
@@ -1131,10 +1141,6 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
                 return vec![];
             };
             if let Some(agent) = app.agents.get_mut(&agent_id) {
-                agent.rebuild_progress = Some(crate::app::agent_view::RebuildUiProgress {
-                    fraction: 0.0,
-                    detail: "Starting rebuild".into(),
-                });
                 agent.show_toast("Starting rebuild");
                 agent
                     .scrollback
@@ -1169,11 +1175,15 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::ToggleSoftStop => super::soft_stop::dispatch_toggle_soft_stop(app),
         Action::ShowPlan => dispatch_show_plan(app),
         Action::DockIsolatedPreview { description } => {
-            dispatch_dock_isolated_preview(app, description)
+            with_active_agent(app, |agent| {
+                agent.dock_isolated_preview_with_feature(description);
+            });
+            vec![]
         }
         Action::EnterPlanMode { description } => dispatch_enter_plan_mode(app, description),
         Action::SetPlanMode(kind) => set_plan_mode(app, kind),
         Action::OpenFeedbackModal(open) => dispatch_open_feedback_modal(app, open),
+        Action::OpenFeedbackPane => dispatch_open_feedback_pane(app),
         Action::SubmitFeedbackModal { modal_id } => dispatch_submit_feedback_modal(app, modal_id),
         Action::RequestFeedbackDraft { request } => {
             let ActiveView::Agent(agent_id) = app.active_view else {
@@ -1224,13 +1234,6 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::SetInvertScroll(v) => set_invert_scroll(app, v),
         Action::SetScrollLines(v) => set_scroll_lines(app, v),
         Action::SetShowThinkingBlocks(v) => set_show_thinking_blocks(app, v),
-        Action::SetAlwaysExpandThinking(v) => set_always_expand_thinking(app, v),
-        Action::SetHideHeader(v) => set_hide_header(app, v),
-        Action::SetPlanApprovalPark(s) => set_plan_approval_park(app, s),
-        Action::SetAllowWorktree(v) => set_allow_worktree(app, v),
-        Action::SetScrubAsciiPunct(v) => set_scrub_ascii_punct(app, v),
-        Action::SetUlidSessionIds(v) => set_ulid_session_ids(app, v),
-        Action::SetBubbleCopyButtons(v) => set_bubble_copy_buttons(app, v),
         Action::SetGroupToolVerbs(v) => set_group_tool_verbs(app, v),
         Action::SetCollapsedEditBlocks(v) => set_collapsed_edit_blocks(app, v),
         Action::SetPromptSuggestions(v) => set_prompt_suggestions(app, v),
@@ -1239,12 +1242,6 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::SetResumeCanceledTurnOnRestart(v) => set_resume_canceled_turn_on_restart(app, v),
         Action::SetTokenEconomyBool { field, value } => set_token_economy_bool(app, field, value),
         Action::SetTokenEconomyInt { field, value } => set_token_economy_int(app, field, value),
-        Action::SetCancelSubagentsOnTurnCancel(s) => set_cancel_subagents_on_turn_cancel(app, s),
-        Action::SetNotificationsSessionRecap(v) => set_notifications_session_recap(app, v),
-        Action::SetNotificationsSessionRecapThresholdSecs(v) => {
-            set_notifications_session_recap_threshold_secs(app, v)
-        }
-        Action::SetFeaturesSessionRecap(v) => set_features_session_recap(app, v),
         Action::SetAutoCompactThreshold(v) => set_auto_compact_threshold(app, v),
         Action::SetRespectManualFolds(v) => set_respect_manual_folds(app, v),
         Action::SetDefaultSelectedPermission(s) => set_default_selected_permission(app, s),
@@ -1258,8 +1255,6 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::SetYoloMode(v) => set_yolo_mode(app, v),
         Action::SetPermissionMode(kind) => set_permission_mode(app, kind),
         Action::SetMultilineMode(v) => set_multiline_mode(app, v),
-        Action::SetComposerMultiline(v) => set_composer_multiline(app, v),
-        Action::SetAllowSessionMultiline(v) => set_allow_session_multiline(app, v),
         Action::SetRenderMermaid(kind) => set_render_mermaid(app, kind),
         Action::SetCompactMode(v) => set_compact_mode(app, v),
         Action::SetTimestamps(v) => set_timestamps(app, v),
@@ -1269,11 +1264,9 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
             crate::app::dispatch::settings::dashboard::set_dashboard_preview(app, enabled)
         }
         Action::SetConfirmBeforeRewind(v) => set_confirm_before_rewind(app, v),
-        Action::SetTurboPlanning(v) => set_turbo_planning(app, v),
-        Action::SetProcessRuleRemindersEnabled(v) => set_process_rule_reminders_enabled(app, v),
-        Action::SetProcessRuleReminders(v) => set_process_rule_reminders(app, v),
         Action::SetCombineQueuedPrompts(v) => set_combine_queued_prompts(app, v),
         Action::SetFollowUpBehavior(v) => set_follow_up_behavior(app, v),
+        Action::SetPlanApprovalPark(mode) => set_plan_approval_park(app, mode),
         Action::SetSimpleMode(v) => set_simple_mode(app, v),
         Action::SetContextualHintUndo(v) => set_contextual_hint_undo(app, v),
         Action::SetContextualHintPlanMode(v) => set_contextual_hint_plan_mode(app, v),
@@ -1293,6 +1286,23 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::SetMaxThoughtsWidth(v) => set_max_thoughts_width(app, v),
         Action::SetShowTips(v) => set_show_tips(app, v),
         Action::SetAutoUpdate(v) => set_auto_update(app, v),
+        Action::SetHideHeader(v) => set_hide_header(app, v),
+        Action::SetComposerMultiline(v) => set_composer_multiline(app, v),
+        Action::SetAllowSessionMultiline(v) => set_allow_session_multiline(app, v),
+        Action::SetAlwaysExpandThinking(v) => set_always_expand_thinking(app, v),
+        Action::SetAllowWorktree(v) => set_allow_worktree(app, v),
+        Action::SetScrubAsciiPunct(v) => set_scrub_ascii_punct(app, v),
+        Action::SetUlidSessionIds(v) => set_ulid_session_ids(app, v),
+        Action::SetBubbleCopyButtons(v) => set_bubble_copy_buttons(app, v),
+        Action::SetTurboPlanning(v) => set_turbo_planning(app, v),
+        Action::SetProcessRuleRemindersEnabled(v) => set_process_rule_reminders_enabled(app, v),
+        Action::SetProcessRuleReminders(v) => set_process_rule_reminders(app, v),
+        Action::SetNotificationsSessionRecap(v) => set_notifications_session_recap(app, v),
+        Action::SetNotificationsSessionRecapThresholdSecs(v) => {
+            set_notifications_session_recap_threshold_secs(app, v)
+        }
+        Action::SetFeaturesSessionRecap(v) => set_features_session_recap(app, v),
+        Action::SetCancelSubagentsOnTurnCancel(v) => set_cancel_subagents_on_turn_cancel(app, v),
         Action::SetDisplayRefreshAutoCadence(v) => set_display_refresh_auto_cadence(app, v),
         Action::PreviewTheme(v) => preview_theme(app, v),
         Action::PreviewAutoDarkTheme(v) => preview_auto_dark_theme(app, v),

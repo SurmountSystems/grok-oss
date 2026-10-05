@@ -408,6 +408,11 @@ impl xai_tool_runtime::Tool for ImageEditTool {
             client.record_401_attribution(ToolConsumer::ImageGen, Some(&sent_bearer));
         }
         if !status.is_success() {
+            let rate_bearer = client.rate_limit_bearer().await;
+            let rate_key = crate::shared_http_rate_limit::imagine_provider_key(
+                client.base_url(),
+                rate_bearer.as_deref(),
+            );
             crate::shared_http_rate_limit::observe_http_rate_limit(
                 &rate_key,
                 status.as_u16(),

@@ -100,6 +100,9 @@ pub struct ScrollbackEntry {
     /// Display width of each source line. Width-independent, so unlike every other cache here it survives a resize.
     /// Re-deriving it per width is what made a resize cost O(total conversation bytes).
     cached_line_widths: RefCell<Option<Vec<u32>>>,
+
+    /// Hooks that ran with this tool row. Absent when the row has none.
+    pub hook_data: Option<crate::scrollback::blocks::tool::ToolCallHookData>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -163,6 +166,7 @@ impl ScrollbackEntry {
             cached_truncated_height: RefCell::new(None),
             cached_estimate_lines: RefCell::new(None),
             cached_line_widths: RefCell::new(None),
+            hook_data: None,
         }
     }
 
@@ -192,6 +196,7 @@ impl ScrollbackEntry {
             cached_truncated_height: RefCell::new(None),
             cached_estimate_lines: RefCell::new(None),
             cached_line_widths: RefCell::new(None),
+            hook_data: None,
         }
     }
 

@@ -37,13 +37,8 @@ impl SessionActor {
     }
 
     pub(super) async fn handle_set_session_model(
-        &self,
-        sampling_config: xai_grok_sampler::SamplerConfig,
-        use_concise: bool,
-        apply_prompt_override: bool,
-        skip_prompt_rewrite: bool,
-        auto_compact_threshold_percent: u8,
-        auto_compact_threshold_tokens: Option<u64>,
+        self: &std::sync::Arc<Self>,
+        switch: crate::session::SessionModelSwitch,
     ) -> Result<acp::ModelId, acp::Error> {
         let crate::session::SessionModelSwitch {
             mut sampling_config,
@@ -56,6 +51,14 @@ impl SessionActor {
             context_window_selection,
             supported_context_windows,
         } = switch;
+        let catalog_context_window = std::num::NonZeroU64::new(sampling_config.context_window)
+            .unwrap_or_else(|| {
+                std::num::NonZeroU64::new(DEFAULT_CONTEXT_WINDOW)
+                    .expect("DEFAULT_CONTEXT_WINDOW is non-zero")
+            });
+        self.compaction
+            .model_context_window
+            .set(catalog_context_window.get());
         if let Some(current) = self.chat_state_handle.get_sampling_config().await
             && let Some(id) = current.conversation_group_id
         {
@@ -82,40 +85,13 @@ impl SessionActor {
             sampling_config.context_window = window.get();
         }
         let new_context_window = self.compaction.context_window_override.unwrap_or_else(|| {
-            std::num::NonZeroU64::new(sampling_config.context_window).unwrap_or_else(|| {
-                std::num::NonZeroU64::new(DEFAULT_CONTEXT_WINDOW)
-                    .expect("DEFAULT_CONTEXT_WINDOW is non-zero")
-            })
-        });
-        self.compaction
-            .model_context_window
-            .set(catalog_context_window.get());
-        let new_context_window = self.compaction.context_window_override.unwrap_or_else(|| {
             let capped = crate::util::config::session_sampling_window(
-                catalog_context_window.get(),
+                sampling_config.context_window,
                 self.startup_hints.is_subagent,
             );
             std::num::NonZeroU64::new(capped).unwrap_or(catalog_context_window)
         });
-        let prev_threshold = self.compaction.threshold_percent.get();
-        let prev_tokens = self.compaction.threshold_tokens.get();
-        if prev_threshold != auto_compact_threshold_percent
-            || prev_tokens != auto_compact_threshold_tokens
-        {
-            tracing::info!(
-                session_id = %self.session_info.id.0,
-                new_model = %sampling_config.model,
-                old_threshold = prev_threshold,
-                new_threshold = auto_compact_threshold_percent,
-                "auto_compact_threshold_percent updated for model switch"
-            );
-        }
-        self.compaction
-            .threshold_percent
-            .set(auto_compact_threshold_percent);
-        self.compaction
-            .threshold_tokens
-            .set(auto_compact_threshold_tokens);
+        self.apply_auto_compact_threshold(auto_compact_threshold_percent, None);
         self.supports_backend_search
             .set(sampling_config.supports_backend_search);
         self.compactions_remaining

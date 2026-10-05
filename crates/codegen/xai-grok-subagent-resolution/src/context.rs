@@ -32,7 +32,20 @@ const FORK_NOISE_TAGS: &[&str] = &[
 /// The System item is kept as-is (replaced later by `spawn_session_actor`). The task prompt is NOT included here: it
 /// arrives via the normal Prompt command and becomes the last user message (position [2]). `inherited_prefix_len` is the
 /// number of items the child should treat as pre-existing context (typically 2 for `[System, BackgroundContext]`).
+///
+/// Saved images named while rendering the background are attached as `file://` parts. Pass
+/// [`normalize_forked_context_for_job`] when a spawn prompt must limit that set.
 pub fn normalize_forked_context(items: Vec<ConversationItem>) -> (Vec<ConversationItem>, usize) {
+    normalize_forked_context_for_job(items, None)
+}
+
+/// Same fork summary as [`normalize_forked_context`]. When `spawn_prompt` is set, only saved
+/// images named in that prompt are attached. When it is `None`, attach saved images the
+/// background text named. Unnamed parent images and `data:image` bytes stay off the child turn.
+pub fn normalize_forked_context_for_job(
+    items: Vec<ConversationItem>,
+    spawn_prompt: Option<&str>,
+) -> (Vec<ConversationItem>, usize) {
     // Extract the system prompt (position 0), kept as a placeholder for spawn_session_actor
     let system = items
         .first()
@@ -50,6 +63,9 @@ pub fn normalize_forked_context(items: Vec<ConversationItem>) -> (Vec<Conversati
     if parent_items.is_empty() {
         return (vec![system], 1);
     }
+
+    let catalog = collect_named_saved_images(parent_items.iter().copied());
+    let mut named_in_background = Vec::new();
 
     // Count complete turns (a User message, then an Assistant message, then any ToolResults)
     let turns = count_complete_turns(&parent_items);
@@ -72,12 +88,21 @@ pub fn normalize_forked_context(items: Vec<ConversationItem>) -> (Vec<Conversati
             .checked_sub(MAX_VERBATIM_TURNS)
             .and_then(|i| turns.get(i))
         else {
-            for item in parent_items {
-                render_item_to_background(&mut background, item);
+            for item in &parent_items {
+                render_item_to_background(
+                    &mut background,
+                    item,
+                    &catalog,
+                    &mut named_in_background,
+                );
             }
-            background.push_str("</background_context>");
-            let conversation = vec![system, ConversationItem::user(&background)];
-            return (conversation, 2);
+            return finish_fork_background(
+                system,
+                background,
+                spawn_prompt,
+                &catalog,
+                &named_in_background,
+            );
         };
         background.push_str("=== Earlier context (summarized) ===\n");
         if let Some(early) = parent_items.get(..early_end) {
@@ -86,15 +111,35 @@ pub fn normalize_forked_context(items: Vec<ConversationItem>) -> (Vec<Conversati
         background.push_str("\n=== Recent turns (verbatim) ===\n");
         if let Some(recent) = parent_items.get(early_end..) {
             for item in recent {
-                render_item_to_background(&mut background, item);
+                render_item_to_background(
+                    &mut background,
+                    item,
+                    &catalog,
+                    &mut named_in_background,
+                );
             }
         }
     }
-    background.push_str("</background_context>");
+    finish_fork_background(
+        system,
+        background,
+        spawn_prompt,
+        &catalog,
+        &named_in_background,
+    )
+}
 
+fn finish_fork_background(
+    system: ConversationItem,
+    mut background: String,
+    spawn_prompt: Option<&str>,
+    catalog: &[crate::nested_images::NamedSavedImage],
+    named_in_background: &[usize],
+) -> (Vec<ConversationItem>, usize) {
+    background.push_str("</background_context>");
     let image_parts = match spawn_prompt {
-        Some(prompt) => image_parts_for_named_spawn_prompt(prompt, &catalog),
-        None => image_parts_from_numbers(&named_in_background, &catalog),
+        Some(prompt) => image_parts_for_named_spawn_prompt(prompt, catalog),
+        None => image_parts_from_numbers(named_in_background, catalog),
     };
     let mut parts = vec![ContentPart::Text {
         text: background.into(),

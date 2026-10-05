@@ -719,6 +719,11 @@ pub struct Terminal(pub Arc<dyn TerminalBackend>);
 /// the subagent's own tasks on a shared terminal backend.
 #[derive(Debug, Clone)]
 pub struct OwnerSessionId(pub String);
+/// Session work id the host minted for this session.
+/// Todo clear joins usage on this id when it is present.
+/// Ephemeral: not serde-registered.
+#[derive(Debug, Clone)]
+pub struct SessionWorkUlid(pub String);
 /// Shared citation counter for `[web:N]` numbering across web tools. Stored as
 /// `State<WebCitationCounter>` in Resources so web tools that emit citations share the same
 /// monotonically increasing counter within a session.

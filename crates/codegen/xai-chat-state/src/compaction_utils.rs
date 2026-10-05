@@ -7,6 +7,9 @@ use crate::compaction_image_context::{
     CompactionImageContext, collect_attached_image_paths, image_context_from_item, last_query_item,
     parse_image_files_paths, render_attached_image_paths_note, tag_block_range,
 };
+use crate::compaction_repetition::{
+    REPETITIVE_ASSISTANT_OMITTED, is_repetitive_generation, strip_repetitive_generation,
+};
 use std::collections::BTreeSet;
 use xai_grok_sampling_types::{ContentPart, ConversationItem, SyntheticReason, ToolResultItem};
 pub const AGENT_MESSAGE_MODEL_LABEL: &str =

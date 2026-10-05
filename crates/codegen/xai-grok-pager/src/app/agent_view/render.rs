@@ -1,4 +1,5 @@
 //! Frame rendering for [`AgentView`]: the `draw` entry point plus shortcut hints.
+use super::interactions::QuestionViewFeedback;
 use super::{
     ActivePane, AgentPane, AgentView, AgentViewLayout, BlockingCard, ComposerRoute, CtaPhase,
     EscStep, InlineMediaHitAreas, KeyOwner, MODE_BANNER_FADE_TICKS, PromptMode, ViewSurface,
@@ -23,6 +24,7 @@ use crate::views::modal;
 use crate::views::plan_approval_view::PlanApprovalFocus;
 use crate::views::prompt_widget::{PromptBg, PromptFlag, PromptInfo, PromptStyle, mode_flags};
 use crate::views::question_view::QUESTION_VIEW_HPAD;
+use crate::views::question_view::feedback_input;
 use crate::views::shortcuts_bar::{HintItem, PendingHint, ShortcutsBar};
 use crate::views::{agent, turn_status};
 use ratatui::buffer::Buffer;
@@ -34,6 +36,89 @@ use std::collections::HashSet;
 use std::time::Instant;
 /// Prompt box height. Focus does not change it. The box grows with the
 /// prompt and stops at the window height.
+/// Model wait and retry chrome for leftover rows under the last prompt.
+/// Thinking and a nested subagent wait stay off this row.
+pub(super) fn leftover_viewport_wait_label(
+    activity: &Option<crate::acp::tracker::TurnActivity>,
+) -> Option<String> {
+    use crate::acp::tracker::{TurnActivity, WaitingReason};
+    match activity {
+        Some(TurnActivity::Waiting(WaitingReason::Model)) => {
+            Some("Waiting for the model…".to_string())
+        }
+        Some(TurnActivity::Retrying { .. }) => Some("Retrying the model request".to_string()),
+        _ => None,
+    }
+}
+
+/// Paint `label` on the first empty row under the last occupied row.
+/// A second call sees the label and does not add another line.
+fn paint_leftover_viewport_wait(buf: &mut Buffer, area: Rect, label: &str, style: Style) {
+    if area.width == 0 || area.height == 0 || label.is_empty() {
+        return;
+    }
+    let mut last_content: Option<u16> = None;
+    for y in area.y..area.bottom() {
+        let mut row = String::new();
+        for x in area.x..area.right() {
+            if let Some(cell) = buf.cell((x, y)) {
+                row.push_str(cell.symbol());
+            }
+        }
+        if row.contains(label) {
+            return;
+        }
+        if row.chars().any(|ch| !ch.is_whitespace()) {
+            last_content = Some(y);
+        }
+    }
+    let y = match last_content {
+        Some(row) => row.saturating_add(1),
+        None => area.y,
+    };
+    if y >= area.bottom() {
+        return;
+    }
+    buf.set_string(area.x, y, label, style);
+}
+
+/// Operator-green composer caret. A mid-buffer space keeps the space and
+/// takes an `accent_user` plate. A block glyph is only for the end of the draft.
+fn paint_composer_box_cursor(
+    buf: &mut Buffer,
+    x: u16,
+    y: u16,
+    theme: &Theme,
+    canvas_bg: ratatui::style::Color,
+    allow_block_glyph: bool,
+) {
+    let Some(cell) = buf.cell_mut((x, y)) else {
+        return;
+    };
+    let accent = theme.accent_user;
+    if !allow_block_glyph && cell.symbol() == " " {
+        cell.set_bg(accent);
+        return;
+    }
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis() as u64)
+        .unwrap_or(0);
+    let filled = crate::glyphs::cursor_box_filled_phase(now_ms);
+    if allow_block_glyph && filled {
+        cell.set_symbol(crate::glyphs::cursor_box_filled());
+        cell.set_fg(accent);
+        cell.set_bg(accent);
+    } else if allow_block_glyph {
+        cell.set_symbol(crate::glyphs::cursor_box_filled());
+        cell.set_fg(accent);
+        cell.set_bg(canvas_bg);
+    } else {
+        cell.set_fg(accent);
+        cell.set_bg(accent);
+    }
+}
+
 pub(crate) fn laid_out_prompt_height(
     focused: bool,
     content_height: u16,
@@ -113,17 +198,14 @@ enum ShortcutsBarContent {
     /// Nothing: the row belongs to a surface that paints it itself.
     Hidden,
 }
-/// What the bottom shortcuts bar renders this frame.
-enum ShortcutsBarContent {
-    /// A blocking surface's own keys, rendered as given.
-    Surface(Vec<HintItem>),
-    /// The focused pane's keys, trimmed to the compact bar with the
-    /// cheatsheet hint appended.
-    Pane(Vec<HintItem>),
-    /// Nothing: the row belongs to a surface that paints it itself.
-    Hidden,
-}
 impl AgentView {
+    /// Child row status is Compacting when that view's turn activity is auto-compact.
+    pub(crate) fn child_is_auto_compacting(&self, child_sid: &str) -> bool {
+        self.subagent_views.get(child_sid).is_some_and(|child| {
+            child.session.turn_activity() == Some(crate::acp::tracker::TurnActivity::AutoCompacting)
+        })
+    }
+
     pub(crate) fn live_standalone_subagent_tokens(&self) -> u64 {
         self.subagent_sessions
             .values()
@@ -530,6 +612,7 @@ impl AgentView {
             self.surface(),
             (self.session.state.is_turn_running() || self.wake_turn_active())
                 && !self.renders_parked(),
+            false,
             !self.visible_queue_is_empty(),
             self.queue.mutation(),
             selected_is_user_prompt,
@@ -1708,7 +1791,7 @@ impl AgentView {
             sticky_gap_row = sb_output.sticky_gap_row;
             if !self.global_work_paused && !in_dashboard_overlay {
                 let activity = self.resolve_turn_activity();
-                if let Some(label) = turn_status::leftover_viewport_wait_label(&activity) {
+                if let Some(label) = leftover_viewport_wait_label(&activity) {
                     let pad = HorizontalLayout::ACCENT.saturating_add(2);
                     let wait_area = Rect {
                         x: layout.scrollback_content.x.saturating_add(pad),
@@ -1716,7 +1799,7 @@ impl AgentView {
                         width: layout.scrollback_content.width.saturating_sub(pad),
                         height: layout.scrollback_content.height,
                     };
-                    turn_status::paint_leftover_viewport_wait(
+                    paint_leftover_viewport_wait(
                         buf,
                         wait_area,
                         &label,
@@ -3671,26 +3754,6 @@ impl AgentView {
                 h.push(HintItem::new(key!('q'), "quit plan"));
                 h.push(HintItem::new(key!(Tab), "prompt"));
                 h
-            } else if in_plan_approval {
-                let mut h = vec![
-                    HintItem::new(key!('c'), "comment"),
-                    HintItem::new(key!('y'), "copy plan"),
-                ];
-                if approval_has_comments {
-                    h.push(HintItem::new(key!('s'), "send"));
-                } else {
-                    h.push(HintItem::new(key!('a'), "approve"));
-                }
-                h.push(HintItem::new(key!('q'), "quit plan"));
-                if self.vim_mode {
-                    h.push(HintItem::paired(key!('j'), key!('k'), "nav"));
-                }
-                h.push(HintItem::new(key!('v'), "select"));
-                h.push(HintItem::new(key!('y'), "copy"));
-                h.push(HintItem::new(key!('Y'), "copy plan"));
-                h.push(HintItem::new(key!(Tab), "prompt"));
-                h.push(HintItem::new(key!(Esc), "close"));
-                h
             } else if is_plan_viewer {
                 let on_casual_comment = viewer
                     .list_state
@@ -3763,7 +3826,7 @@ impl AgentView {
                 });
                 if let Some((cx, cy)) = caret {
                     let allow_block_glyph = self.prompt.cursor() == self.prompt.text().len();
-                    crate::views::prompt_widget::paint_composer_box_cursor(
+                    paint_composer_box_cursor(
                         buf,
                         cx,
                         cy,
@@ -4591,7 +4654,7 @@ impl AgentView {
             let overlay_rect = crate::views::goal_detail::goal_detail_area(area, goal, todos);
             let tick = self.tasks.tick_count() as usize;
             let active_subagent_tokens = self.live_standalone_subagent_tokens();
-            let close_rect = crate::views::goal_detail::render_goal_detail(
+            let hits = crate::views::goal_detail::render_goal_detail(
                 buf,
                 overlay_rect,
                 goal,
@@ -4881,7 +4944,6 @@ mod plan_approval_draw_contract_tests {
             None,
             false,
             crate::app::agent_view::BannerSlotParams::none(),
-            &BundleState::default(),
             false,
             false,
             &mut Vec::new(),
@@ -5010,7 +5072,6 @@ mod plan_approval_draw_contract_tests {
             None,
             false,
             crate::app::agent_view::BannerSlotParams::none(),
-            &BundleState::default(),
             false,
             false,
             &mut Vec::new(),
@@ -5089,7 +5150,6 @@ mod plan_approval_draw_contract_tests {
                 None,
                 false,
                 crate::app::agent_view::BannerSlotParams::none(),
-                &BundleState::default(),
                 false,
                 false,
                 &mut Vec::new(),
@@ -5112,7 +5172,12 @@ mod plan_approval_draw_contract_tests {
                 .collect()
         };
 
-        let human_green = crate::theme::doge::as_doge_human_green(theme.accent_user);
+        let human_green = match theme.accent_user {
+            ratatui::style::Color::Green
+            | ratatui::style::Color::LightGreen
+            | ratatui::style::Color::Indexed(2 | 10 | 46) => ratatui::style::Color::Rgb(0, 255, 0),
+            other => other,
+        };
         let is_human_green = |c: ratatui::style::Color| -> bool {
             c == human_green
                 || matches!(
@@ -5495,7 +5560,6 @@ mod plan_approval_draw_contract_tests {
             None,
             false,
             crate::app::agent_view::BannerSlotParams::none(),
-            &BundleState::default(),
             false,
             false,
             &mut Vec::new(),
@@ -5564,7 +5628,6 @@ mod nested_overlay_wait_extra_contracts {
             None,
             false,
             crate::app::agent_view::BannerSlotParams::none(),
-            &BundleState::default(),
             true,
             false,
             &mut Vec::new(),
@@ -5587,8 +5650,8 @@ mod nested_overlay_wait_extra_contracts {
         l2.session.state = AgentState::TurnRunning;
         let mut specialist = running_subagent_info("l3-cert");
         specialist.description = Arc::from("prove cert DNS-01");
-        specialist.is_background = true;
-        specialist.activity_label = Some("read_file".into());
+        specialist.attempt.is_background = true;
+        specialist.attempt.activity_label = Some("read_file".into());
         l2.subagent_sessions.insert("l3-cert".into(), specialist);
         let meta = NotificationMeta::default();
         l2.session.handle_update(
@@ -5608,7 +5671,7 @@ mod nested_overlay_wait_extra_contracts {
         );
         let mut l2_info = running_subagent_info("l2-coord");
         l2_info.description = Arc::from("General Fix cryptoquick mail cert");
-        l2_info.started_at = Instant::now() - Duration::from_secs(15 * 60 + 9);
+        l2_info.attempt.started_at = Instant::now() - Duration::from_secs(15 * 60 + 9);
         parent.subagent_sessions.insert("l2-coord".into(), l2_info);
         parent
             .subagent_views
@@ -5663,18 +5726,18 @@ mod nested_overlay_wait_extra_contracts {
         );
         let mut l2_info = running_subagent_info("l2-coord");
         l2_info.description = Arc::from("General Fix nested wait overlay");
-        l2_info.started_at = Instant::now() - Duration::from_secs(3 * 60 + 12);
+        l2_info.attempt.started_at = Instant::now() - Duration::from_secs(3 * 60 + 12);
         parent.subagent_sessions.insert("l2-coord".into(), l2_info);
         parent
             .subagent_views
             .insert("l2-coord".into(), Box::new(l2));
         let mut specialist = running_subagent_info("l3-gate");
         specialist.description = Arc::from("Land check-remote full gate");
-        specialist.is_background = true;
-        specialist.depth = Some(2);
-        specialist.parent_session_id = Some(Arc::from("l2-coord"));
-        specialist.tools_used = vec![Arc::from("read_file")];
-        specialist.tool_call_count = Some(4);
+        specialist.attempt.is_background = true;
+        specialist.attempt.depth = Some(2);
+        specialist.attempt.parent_session_id = Some(Arc::from("l2-coord"));
+        specialist.attempt.tools_used = vec![Arc::from("read_file")];
+        specialist.attempt.tool_call_count = Some(4);
         parent
             .subagent_sessions
             .insert("l3-gate".into(), specialist);
@@ -5709,20 +5772,20 @@ mod nested_overlay_wait_extra_contracts {
         l2.session.state = AgentState::TurnRunning;
         let mut l2_info = running_subagent_info("l2-coord");
         l2_info.description = Arc::from("Implementer Grow CheckersLater subset");
-        l2_info.model = Some(Arc::from("grok-4.6"));
-        l2_info.started_at = Instant::now() - Duration::from_secs(37 * 60 + 36);
+        l2_info.attempt.model = Some(Arc::from("grok-4.6"));
+        l2_info.attempt.started_at = Instant::now() - Duration::from_secs(37 * 60 + 36);
         parent.subagent_sessions.insert("l2-coord".into(), l2_info);
         parent
             .subagent_views
             .insert("l2-coord".into(), Box::new(l2));
         let mut specialist = running_subagent_info("l3-impl");
         specialist.description = Arc::from("Land CheckersLater subset");
-        specialist.is_background = true;
-        specialist.depth = Some(2);
-        specialist.parent_session_id = Some(Arc::from("l2-coord"));
-        specialist.tools_used = vec![Arc::from("read_file")];
-        specialist.tool_call_count = Some(6);
-        specialist.started_at = Instant::now() - Duration::from_secs(27 * 60 + 18);
+        specialist.attempt.is_background = true;
+        specialist.attempt.depth = Some(2);
+        specialist.attempt.parent_session_id = Some(Arc::from("l2-coord"));
+        specialist.attempt.tools_used = vec![Arc::from("read_file")];
+        specialist.attempt.tool_call_count = Some(6);
+        specialist.attempt.started_at = Instant::now() - Duration::from_secs(27 * 60 + 18);
         parent
             .subagent_sessions
             .insert("l3-impl".into(), specialist);
@@ -5816,9 +5879,9 @@ mod nested_overlay_wait_extra_contracts {
         l2.tasks.overlay.visible = true;
         let mut l2_info = running_subagent_info("l2-coord");
         l2_info.description = Arc::from("Stop five-minute test restart");
-        l2_info.activity_label = Some("Preparing search_replace…".into());
-        l2_info.tools_used = vec![Arc::from("search_replace")];
-        l2_info.started_at = Instant::now() - Duration::from_secs(13 * 60 + 50);
+        l2_info.attempt.activity_label = Some("Preparing search_replace…".into());
+        l2_info.attempt.tools_used = vec![Arc::from("search_replace")];
+        l2_info.attempt.started_at = Instant::now() - Duration::from_secs(13 * 60 + 50);
         parent.subagent_sessions.insert("l2-coord".into(), l2_info);
         parent
             .subagent_views
@@ -5850,19 +5913,19 @@ mod nested_overlay_wait_extra_contracts {
         l2.tasks.overlay.visible = true;
         let mut l2_info = running_subagent_info("l2-coord");
         l2_info.description = Arc::from("Stop five-minute test restart");
-        l2_info.started_at = Instant::now() - Duration::from_secs(13 * 60 + 50);
+        l2_info.attempt.started_at = Instant::now() - Duration::from_secs(13 * 60 + 50);
         parent.subagent_sessions.insert("l2-coord".into(), l2_info);
         parent
             .subagent_views
             .insert("l2-coord".into(), Box::new(l2));
         let mut specialist = running_subagent_info("l3-impl");
         specialist.description = Arc::from("Keep live remote compile");
-        specialist.is_background = true;
-        specialist.depth = Some(2);
-        specialist.parent_session_id = Some(Arc::from("l2-coord"));
-        specialist.activity_label = Some("Preparing search_replace…".into());
-        specialist.tools_used = vec![Arc::from("read_file")];
-        specialist.started_at = Instant::now() - Duration::from_secs(13 * 60 + 50);
+        specialist.attempt.is_background = true;
+        specialist.attempt.depth = Some(2);
+        specialist.attempt.parent_session_id = Some(Arc::from("l2-coord"));
+        specialist.attempt.activity_label = Some("Preparing search_replace…".into());
+        specialist.attempt.tools_used = vec![Arc::from("read_file")];
+        specialist.attempt.started_at = Instant::now() - Duration::from_secs(13 * 60 + 50);
         parent
             .subagent_sessions
             .insert("l3-impl".into(), specialist);
@@ -5909,18 +5972,18 @@ mod nested_overlay_wait_extra_contracts {
             l2.tasks.overlay.visible = true;
             let mut l2_info = running_subagent_info("l2-coord");
             l2_info.description = Arc::from("Stop five-minute test restart");
-            l2_info.started_at = Instant::now() - elapsed;
+            l2_info.attempt.started_at = Instant::now() - elapsed;
             parent.subagent_sessions.insert("l2-coord".into(), l2_info);
             parent
                 .subagent_views
                 .insert("l2-coord".into(), Box::new(l2));
             let mut specialist = running_subagent_info("l3-impl");
             specialist.description = Arc::from("Keep live remote compile");
-            specialist.is_background = true;
-            specialist.depth = Some(2);
-            specialist.parent_session_id = Some(Arc::from("l2-coord"));
-            specialist.tools_used = vec![Arc::from("read_file")];
-            specialist.started_at = Instant::now() - elapsed;
+            specialist.attempt.is_background = true;
+            specialist.attempt.depth = Some(2);
+            specialist.attempt.parent_session_id = Some(Arc::from("l2-coord"));
+            specialist.attempt.tools_used = vec![Arc::from("read_file")];
+            specialist.attempt.started_at = Instant::now() - elapsed;
             parent
                 .subagent_sessions
                 .insert("l3-impl".into(), specialist);
@@ -5984,7 +6047,7 @@ mod nested_overlay_wait_extra_contracts {
         l2_info.description = Arc::from("Stop five-minute test restart");
         l2_info.finished = true;
         l2_info.status = Some(Arc::from("completed"));
-        l2_info.duration_ms = Some(1_000);
+        l2_info.attempt.duration_ms = Some(1_000);
         parent.subagent_sessions.insert("l2-coord".into(), l2_info);
         parent
             .subagent_views
@@ -6022,8 +6085,8 @@ mod nested_overlay_wait_extra_contracts {
         l2.session.state = AgentState::TurnRunning;
         let mut specialist = running_subagent_info("l3-lake");
         specialist.description = Arc::from("remote Lake");
-        specialist.is_background = true;
-        specialist.activity_label = Some("read_file".into());
+        specialist.attempt.is_background = true;
+        specialist.attempt.activity_label = Some("read_file".into());
         l2.subagent_sessions.insert("l3-lake".into(), specialist);
         let meta = NotificationMeta::default();
         l2.session.handle_update(
@@ -6045,12 +6108,12 @@ mod nested_overlay_wait_extra_contracts {
             let info = l2.subagent_sessions.get_mut("l3-lake").unwrap();
             info.finished = true;
             info.status = Some(Arc::from("completed"));
-            info.duration_ms = Some(4_000);
-            info.activity_label = None;
+            info.attempt.duration_ms = Some(4_000);
+            info.attempt.activity_label = None;
         }
         let mut l2_info = running_subagent_info("l2-coord");
         l2_info.description = Arc::from("General Fix nested overlay stall");
-        l2_info.started_at = Instant::now() - Duration::from_secs(60 * 60);
+        l2_info.attempt.started_at = Instant::now() - Duration::from_secs(60 * 60);
         parent.subagent_sessions.insert("l2-coord".into(), l2_info);
         parent
             .subagent_views
@@ -6118,7 +6181,6 @@ mod status_credits_meter_tests {
             None,
             false,
             crate::app::agent_view::BannerSlotParams::none(),
-            &BundleState::default(),
             false,
             false,
             &mut Vec::new(),
@@ -6446,7 +6508,6 @@ mod header_omits_uptime_and_supergrok_period_chip {
             None,
             false,
             crate::app::agent_view::BannerSlotParams::none(),
-            &BundleState::default(),
             false,
             false,
             &mut Vec::new(),
@@ -6655,7 +6716,6 @@ mod forked_session_status_header_tests {
             None,
             false,
             crate::app::agent_view::BannerSlotParams::none(),
-            &BundleState::default(),
             false,
             false,
             &mut Vec::new(),
@@ -6842,7 +6902,6 @@ mod clear_finished_paint_tests {
             None,
             false,
             crate::app::agent_view::BannerSlotParams::none(),
-            &BundleState::default(),
             false,
             false,
             &mut Vec::new(),
@@ -7000,8 +7059,8 @@ mod clear_finished_paint_tests {
 
         let child_sid = "child-open-1";
         let mut info = running_subagent_info(child_sid);
-        info.model = Some(Arc::from("grok-4.5"));
-        info.is_background = true;
+        info.attempt.model = Some(Arc::from("grok-4.5"));
+        info.attempt.is_background = true;
         agent.subagent_sessions.insert(child_sid.into(), info);
         agent
             .subagent_views
@@ -7069,8 +7128,8 @@ mod clear_finished_paint_tests {
 
         let child_sid = "child-click-open";
         let mut info = running_subagent_info(child_sid);
-        info.model = Some(Arc::from("grok-4.5"));
-        info.is_background = true;
+        info.attempt.model = Some(Arc::from("grok-4.5"));
+        info.attempt.is_background = true;
         agent.subagent_sessions.insert(child_sid.into(), info);
         agent
             .subagent_views
@@ -7123,9 +7182,9 @@ mod clear_finished_paint_tests {
         agent.scrollback.set_appearance(appearance);
 
         let mut info = running_subagent_info(child_sid);
-        info.model = Some(Arc::from("grok-4.5"));
-        info.activity_label = Some("Responding".into());
-        info.is_background = true;
+        info.attempt.model = Some(Arc::from("grok-4.5"));
+        info.attempt.activity_label = Some("Responding".into());
+        info.attempt.is_background = true;
         agent.subagent_sessions.insert(child_sid.into(), info);
         let mut child = make_agent();
         child.session.state = crate::app::agent::AgentState::Idle;
@@ -7188,14 +7247,14 @@ mod clear_finished_paint_tests {
         use std::time::{Duration, Instant};
 
         let mut info = running_subagent_info(child_sid);
-        info.model = Some(Arc::from("grok-4.5"));
-        info.is_background = true;
+        info.attempt.model = Some(Arc::from("grok-4.5"));
+        info.attempt.is_background = true;
         info.description = Arc::from(description);
-        info.depth = Some(1);
-        info.parent_session_id = Some(Arc::from("sess-l1"));
-        info.activity_label = Some("Thinking".into());
+        info.attempt.depth = Some(1);
+        info.attempt.parent_session_id = Some(Arc::from("sess-l1"));
+        info.attempt.activity_label = Some("Thinking".into());
         let now = Instant::now();
-        info.started_at = now
+        info.attempt.started_at = now
             .checked_sub(Duration::from_secs(started_ago_secs))
             .unwrap_or(now);
         agent.subagent_sessions.insert(child_sid.into(), info);
@@ -7215,7 +7274,7 @@ mod clear_finished_paint_tests {
             .session
             .set_compaction_activity(Some(TurnActivity::AutoCompacting));
         if let Some(info) = agent.subagent_sessions.get_mut(child_sid) {
-            info.activity_label = Some("Compacting".into());
+            info.attempt.activity_label = Some("Compacting".into());
         }
         assert!(
             agent.child_is_auto_compacting(child_sid),
@@ -7445,8 +7504,8 @@ mod clear_finished_paint_tests {
 
         let child_sid = "child-clear-no-open";
         let mut info = running_subagent_info(child_sid);
-        info.model = Some(Arc::from("grok-4.5"));
-        info.is_background = true;
+        info.attempt.model = Some(Arc::from("grok-4.5"));
+        info.attempt.is_background = true;
         agent.subagent_sessions.insert(child_sid.into(), info);
         agent
             .subagent_views
@@ -7538,7 +7597,6 @@ mod plan_turn_row_revising_copy_tests {
             None,
             false,
             crate::app::agent_view::BannerSlotParams::none(),
-            &BundleState::default(),
             false,
             false,
             &mut Vec::new(),
@@ -7754,6 +7812,7 @@ mod voice_recording_overlay_tests {
             false,
             crate::app::agent_view::BannerSlotParams::none(),
             false,
+            false,
             &mut Vec::new(),
             super::AppRenderParams {
                 voice_available: listening,
@@ -7837,6 +7896,7 @@ mod overlay_cycle_hint_tests {
             false,
             crate::app::agent_view::BannerSlotParams::none(),
             true,
+            false,
             &mut Vec::new(),
             super::AppRenderParams {
                 workspace_dashboard_enabled,
@@ -7931,6 +7991,7 @@ mod overlay_cycle_hint_tests {
                 false,
                 crate::app::agent_view::BannerSlotParams::none(),
                 true,
+                false,
                 &mut Vec::new(),
                 super::AppRenderParams {
                     workspace_dashboard_enabled: true,
@@ -7981,7 +8042,7 @@ mod nested_l2_overlay_wait_chrome_tests {
     use std::sync::Arc;
     use std::time::{Duration, Instant};
 
-    fn draw_text(agent: &mut super::AgentView) -> String {
+    fn draw(agent: &mut super::AgentView) -> Option<crate::terminal::overlay::PostFlush> {
         let area = Rect::new(0, 0, 120, 30);
         let mut buf = Buffer::empty(area);
         let mut scratch = ScratchBuffer::new();
@@ -7995,10 +8056,38 @@ mod nested_l2_overlay_wait_chrome_tests {
                 false,
                 crate::app::agent_view::BannerSlotParams::none(),
                 false,
+                false,
                 &mut Vec::new(),
                 super::AppRenderParams::default(),
             )
             .1
+    }
+
+    fn draw_text(agent: &mut super::AgentView) -> String {
+        let area = Rect::new(0, 0, 120, 30);
+        let mut buf = Buffer::empty(area);
+        let mut scratch = ScratchBuffer::new();
+        let _ = agent.draw(
+            area,
+            &mut buf,
+            &ActionRegistry::defaults(),
+            &mut scratch,
+            None,
+            false,
+            crate::app::agent_view::BannerSlotParams::none(),
+            false,
+            false,
+            &mut Vec::new(),
+            super::AppRenderParams::default(),
+        );
+        (0..area.height)
+            .map(|y| {
+                (0..area.width)
+                    .filter_map(|x| buf.cell((x, y)).map(|cell| cell.symbol().to_string()))
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
     }
     fn seed_static_owner(owner_id: u64) {
         let _ = crate::terminal::overlay::static_image(&png(), 20, 10, 0, 0, owner_id)
@@ -8146,6 +8235,7 @@ mod status_line_draw_tests {
             None,
             false,
             crate::app::agent_view::BannerSlotParams::none(),
+            false,
             false,
             &mut Vec::new(),
             super::AppRenderParams {

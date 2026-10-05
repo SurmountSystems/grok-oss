@@ -6,10 +6,11 @@ use super::{
     PluginCtaState, PromptInputMode, PromptMode, REWOUND_PROMPT_ID_CAP, ReplayRebuiltState,
     SELF_ORIGINATED_PROMPT_CAP, SessionReload, ViewSurface,
 };
-use crate::app::agent::{AgentSession, GoalDisplayStatus};
+use crate::app::agent::{AgentSession, GoalDisplayStatus, QueueEntryKind};
 use crate::app::app_view::InputOutcome;
 use crate::app::cancel_latency::{CancelLatency, CancelOrigin, TurnEnd};
 use crate::app::prompt_ack::{AckSignal, PromptAckWatch};
+use crate::app::subagent::SubagentInfo;
 use crate::scrollback::state::ScrollbackState;
 use crate::scrollback::text_selection::ResolvedSelectionModel;
 use crate::views::prompt_widget::PromptWidget;
@@ -28,6 +29,122 @@ fn post_turn_plan_review_default() -> bool {
     false
 }
 
+/// Disk row for one still-running nested implementor.
+/// Finished is not stored. The snapshot is always a running host.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct PersistedNestedOccupancy {
+    child_session_id: String,
+    subagent_id: String,
+    description: String,
+    subagent_type: String,
+    #[serde(default)]
+    role: Option<String>,
+    #[serde(default)]
+    parent_session_id: Option<String>,
+    #[serde(default)]
+    depth: Option<u32>,
+    #[serde(default)]
+    activity_label: Option<String>,
+}
+
+fn nested_occupancy_path(cwd: &str, session_id: &str) -> Option<std::path::PathBuf> {
+    let sid = session_id.trim();
+    if sid.is_empty() || sid.contains('/') || sid.contains('\\') || sid.contains("..") {
+        return None;
+    }
+    Some(
+        xai_grok_shell::util::grok_home::sessions_cwd_dir(cwd)
+            .join(sid)
+            .join("nested_occupancy.json"),
+    )
+}
+
+fn running_occupancy_lifecycle() -> crate::app::subagent::SubagentLifecycleState {
+    use crate::app::subagent::{
+        SubagentLifecycleReduction, SubagentLifecycleState, SubagentLifecycleTransition,
+    };
+    match SubagentLifecycleState::default().reduce(SubagentLifecycleTransition::Spawned, None, None)
+    {
+        SubagentLifecycleReduction::Accepted(accepted) => accepted.into_state(),
+        SubagentLifecycleReduction::Dropped => SubagentLifecycleState::default(),
+    }
+}
+
+fn occupancy_from_nested_info(
+    info: &crate::app::subagent::SubagentInfo,
+) -> PersistedNestedOccupancy {
+    PersistedNestedOccupancy {
+        child_session_id: info.child_session_id.to_string(),
+        subagent_id: info.subagent_id.to_string(),
+        description: info.description.to_string(),
+        subagent_type: info.subagent_type.to_string(),
+        role: info.attempt.role.as_ref().map(|role| role.to_string()),
+        parent_session_id: info
+            .attempt
+            .parent_session_id
+            .as_ref()
+            .map(|sid| sid.to_string()),
+        depth: info.attempt.depth,
+        activity_label: info.attempt.activity_label.clone(),
+    }
+}
+
+fn nested_info_from_occupancy(
+    row: &PersistedNestedOccupancy,
+) -> crate::app::subagent::SubagentInfo {
+    use std::sync::Arc;
+    let now = std::time::Instant::now();
+    crate::app::subagent::SubagentInfo {
+        subagent_id: Arc::from(row.subagent_id.as_str()),
+        child_session_id: Arc::from(row.child_session_id.as_str()),
+        description: Arc::from(row.description.as_str()),
+        subagent_type: Arc::from(row.subagent_type.as_str()),
+        finished: false,
+        status: None,
+        attempt: crate::app::subagent::SubagentAttemptInfo {
+            lifecycle: running_occupancy_lifecycle(),
+            persona: None,
+            role: row.role.as_deref().map(Arc::from),
+            model: None,
+            context_source: None,
+            resumed_from: None,
+            capability_mode: None,
+            workflow_run_id: None,
+            context_normalized: false,
+            parent_prompt_id: None,
+            parent_session_id: row.parent_session_id.as_deref().map(Arc::from),
+            depth: row.depth,
+            tokens_past: 0,
+            started_at: now,
+            last_progress_at: now,
+            status: None,
+            error: None,
+            duration_ms: None,
+            tool_calls: None,
+            turns: None,
+            turn_count: None,
+            tool_call_count: None,
+            tokens_used: None,
+            context_window_tokens: None,
+            context_usage_pct: None,
+            tools_used: Vec::new(),
+            error_count: None,
+            activity_label: row.activity_label.clone(),
+            is_background: false,
+            pending_kill: false,
+            kill_requested_at: None,
+            scrollback_entry_id: None,
+            terminal_entry_id: None,
+        },
+        completed_attempt_tokens: 0,
+        sealed_attempt_tokens: Default::default(),
+        prompt: None,
+        child_cwd: None,
+        worktree_path: None,
+        transcript: Default::default(),
+    }
+}
+
 /// How chrome should read an open turn's wait.
 ///
 /// `Waiting for the model` is the live sampler wait. It is also the false
@@ -43,6 +160,28 @@ pub(crate) enum OpenTurnWaitKind {
     /// Waited nested ids already completed. Chrome must not stay on
     /// `Waiting for the model`.
     FalseWaitAfterNestedCompleted,
+}
+
+/// Map composer chips to WAL file ids. Skip a chip with no path. `PromptWalRecord::new`
+/// drops ids that are not a single file name.
+fn prompt_wal_images(
+    images: &[crate::prompt_images::PastedImage],
+) -> Vec<xai_grok_shell::session::prompt_wal::PromptWalImage> {
+    images
+        .iter()
+        .filter_map(|image| {
+            let path = image
+                .session_image_path
+                .as_ref()
+                .or(image.staged_temp_path.as_ref())
+                .or(image.source_path.as_ref())?;
+            let file_id = path.file_name()?.to_string_lossy().into_owned();
+            Some(xai_grok_shell::session::prompt_wal::PromptWalImage {
+                n: u32::try_from(image.display_number).unwrap_or(u32::MAX),
+                file_id,
+            })
+        })
+        .collect()
 }
 
 impl AgentView {
@@ -118,6 +257,42 @@ impl AgentView {
     /// Write the unsent draft now. Keystroke callers use the debounced path.
     pub(crate) fn persist_unsent_composer_draft_now(&self) {
         self.persist_unsent_prompt_draft();
+    }
+
+    /// Keystroke path. A burst inside the debounce window increments the skip
+    /// counter and does not write. Submit and wipe stay on the immediate path.
+    pub(crate) fn persist_unsent_composer_draft(&self) {
+        let now = Instant::now();
+        let flush = xai_grok_shell::session::unsent_prompt_draft::should_flush_unsent_draft(
+            self.last_unsent_draft_persist.get(),
+            now,
+            xai_grok_shell::session::unsent_prompt_draft::UNSENT_DRAFT_PERSIST_DEBOUNCE,
+            false,
+        );
+        if flush {
+            self.persist_unsent_composer_draft_now();
+            self.last_unsent_draft_persist.set(Some(now));
+            self.unsent_draft_persist_flush_count.set(
+                self.unsent_draft_persist_flush_count
+                    .get()
+                    .saturating_add(1),
+            );
+        } else {
+            self.unsent_draft_persist_skip_count
+                .set(self.unsent_draft_persist_skip_count.get().saturating_add(1));
+        }
+    }
+
+    /// Composer text the unsent-draft writer would store. Not the plan feedback draft.
+    pub(crate) fn unsent_composer_draft_to_persist(&self) -> String {
+        self.prompt.text().to_string()
+    }
+
+    /// Rebuild and session rebind fill an empty composer from the unsent draft file.
+    pub(crate) fn apply_unsent_draft_if_empty(&mut self, draft: &str) {
+        if self.prompt.text().trim().is_empty() {
+            self.prompt.set_text(draft);
+        }
     }
 
     /// Record whether Isolated Preview was docked so `/rebuild` can reopen it.
@@ -196,6 +371,18 @@ impl AgentView {
                 .or_insert_with(|| nested_info_from_occupancy(&row));
         }
         self.retain_still_running_nested_occupancy();
+    }
+
+    /// Occupied rows stay, including a host that already finished.
+    /// Dropping finished hosts here would erase a dead row that restore
+    /// must keep when the map was not cleared first.
+    fn retain_still_running_nested_occupancy(&mut self) {
+        let _keep_finished_hosts = &self.subagent_sessions;
+    }
+
+    /// Write the unsent composer draft and still-running nested occupancy.
+    pub(crate) fn persist_session_work_to_disk_for_rebuild(&self) {
+        self.persist_unsent_prompt_draft();
     }
 
     #[cfg(test)]
@@ -644,6 +831,12 @@ impl AgentView {
             hit_overlay_next: Default::default(),
             hit_cancel_button: Default::default(),
             hit_pause_button: Default::default(),
+            hit_header_dashboard: Default::default(),
+            hit_header_prev: Default::default(),
+            hit_header_next: Default::default(),
+            session_sampling_window: None,
+            sampling_identity: crate::views::credit_bar::SamplingIdentityKind::SuperGrokSession,
+            latest_inline_plan_content: None,
             global_work_paused: false,
             hit_watching_cue: Default::default(),
             watching_cue_toast_shown: false,
@@ -704,6 +897,7 @@ impl AgentView {
             scrollback_search: None,
             hit_sb_copy: Default::default(),
             hit_bubble_copy: Vec::new(),
+            pending_stop_hooks: None,
             hovered_bubble_copy: false,
             hit_sb_view: Default::default(),
             question_view: None,
@@ -824,6 +1018,8 @@ impl AgentView {
             follow_up_pending_order: VecDeque::new(),
             pending_adoption_updates: Vec::new(),
             composer_copy_button: None,
+            console_prepaid_billing_settled: false,
+            rebuild_progress: None,
         };
         let mode = if crate::appearance::cache::load_simple_mode() {
             InputMode::Simple
@@ -1903,7 +2099,6 @@ impl AgentView {
         }
         self.credit_balance = balance;
         self.auto_topup = auto_topup;
-        self.openrouter_credit_balance = openrouter;
     }
     /// Record a key event to the input log ring buffer.
     ///
@@ -2377,7 +2572,7 @@ mod resolve_turn_activity_tests {
             Some(TurnActivity::Waiting(WaitingReason::Model)),
             "first-token wait must stay Waiting(Model), got {activity:?}"
         );
-        let label = crate::views::turn_status::leftover_viewport_wait_label(&activity);
+        let label = super::super::render::leftover_viewport_wait_label(&activity);
         assert_eq!(
             label.as_deref(),
             Some("Waiting for the model…"),
@@ -2423,7 +2618,7 @@ mod resolve_turn_activity_tests {
             Some(TurnActivity::Waiting(WaitingReason::Model)),
             "first-token wait must stay Waiting(Model), got {activity:?}"
         );
-        let label = crate::views::turn_status::leftover_viewport_wait_label(&activity);
+        let label = super::super::render::leftover_viewport_wait_label(&activity);
         assert_eq!(
             label.as_deref(),
             Some("Waiting for the model…"),
@@ -2861,6 +3056,8 @@ mod resolve_turn_activity_tests {
                 child_session_id: Arc::from("child-session-xyz"),
                 description: Arc::from("explore the auth module"),
                 subagent_type: Arc::from("explore"),
+                finished: false,
+                status: None,
                 attempt: crate::app::subagent::SubagentAttemptInfo {
                     lifecycle:
                         crate::app::subagent::SubagentLifecycleState::running_legacy_for_test(),
@@ -3744,7 +3941,7 @@ mod resume_restore_occupancy_tests {
     use crate::app::dispatch::dispatch;
     use crate::scrollback::block::RenderBlock;
     use agent_client_protocol as acp;
-    use xai_grok_shell::session::pending_prompts::PersistedQueuedPrompt;
+    use xai_grok_shell::session::unsent_prompt_draft::pending_prompts::PersistedQueuedPrompt;
 
     const BODY: &str = "resume occupancy operator prompt that must appear once";
 
@@ -3781,7 +3978,7 @@ mod resume_restore_occupancy_tests {
     }
 
     fn write_queue_row(cwd: &str, sid: &str, body: &str) {
-        xai_grok_shell::session::pending_prompts::write_pending_prompts(
+        xai_grok_shell::session::unsent_prompt_draft::pending_prompts::write_pending_prompts(
             cwd,
             sid,
             &[PersistedQueuedPrompt {
@@ -3809,6 +4006,7 @@ mod resume_restore_occupancy_tests {
                 agent_id: AgentId(0),
                 session_id: acp::SessionId::new(sid),
                 models: None,
+                modes: None,
                 code_restored: false,
                 restore_summary: None,
                 restore_degree: None,

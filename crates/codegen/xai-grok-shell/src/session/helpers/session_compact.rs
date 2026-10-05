@@ -561,7 +561,7 @@ pub(crate) async fn generate_session_compact(
     // Compact does not go through ChatState `build_conversation_request`,
     // so session `file://` / asset paths would otherwise be sent as
     // `image_url` and 400 (`invalid_image`).
-    let _ = xai_chat_state::repair_conversation_images_for_api(&mut chat_history);
+    let _ = xai_chat_state::image_handles::repair_conversation_images_for_api(&mut chat_history);
     let num_messages = chat_history.len();
     let wire_tool_choice = match tool_choice {
         crate::util::config::CompactionToolChoice::Auto => ToolChoice::auto(),

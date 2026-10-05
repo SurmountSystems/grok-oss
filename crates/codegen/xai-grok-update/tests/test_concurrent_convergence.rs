@@ -87,36 +87,6 @@ fn fake_managed_install(version: &str) {
     .unwrap();
 }
 
-/// Fake `gh` that logs argv to `<dir>/gh-args.log`.
-/// It answers `release list --exclude-pre-releases` from `<dir>/gh-stable-only-stdout`.
-/// For `release download ... --output <path>` it writes an executable `exit 0` script to the output path.
-fn fake_gh_serving_releases(dir: &std::path::Path) -> String {
-    let dq = format!("'{}'", dir.to_string_lossy().replace('\'', "'\\''"));
-    format!(
-        r#"#!/bin/sh
-echo "$@" >> {dq}/gh-args.log
-case "$*" in
-  *"release list"*)
-    if [ -f {dq}/gh-stable-only-stdout ]; then cat {dq}/gh-stable-only-stdout; fi
-    ;;
-  *"release download"*)
-    out=""
-    prev=""
-    for a in "$@"; do
-      if [ "$prev" = "--output" ]; then out="$a"; fi
-      prev="$a"
-    done
-    if [ -n "$out" ]; then
-      printf '#!/bin/sh\nexit 0\n' > "$out"
-      chmod +x "$out"
-    fi
-    ;;
-esac
-exit 0
-"#
-    )
-}
-
 /// Count `release download` invocations in the fake gh's argv log.
 fn gh_download_count(g: &FakeBinGuard) -> usize {
     g.args_log()

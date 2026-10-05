@@ -33,6 +33,8 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 use std::sync::atomic::AtomicUsize;
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+static SAMPLER_PTHREAD: AtomicUsize = AtomicUsize::new(0);
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};

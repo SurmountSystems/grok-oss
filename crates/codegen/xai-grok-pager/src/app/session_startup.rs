@@ -767,6 +767,8 @@ pub struct MaterializeCtx {
     /// Pre-TUI restore progress on stdout (interactive tty).
     /// Headless keeps stdout as JSON or NDJSON and uses stderr instead.
     pub restore_progress_on_stdout: bool,
+    /// Interactive start with no explicit resume opens the last session for this directory.
+    pub open_last_session_on_start: bool,
 }
 impl MaterializeCtx {
     pub const fn default_allow_remote_restore() -> bool {
@@ -785,6 +787,10 @@ impl MaterializeCtx {
             restore_code: args.restore_code,
             recent_session_selection: args.local_resume_selection(),
             restore_progress_on_stdout: false,
+            open_last_session_on_start: args.single.is_none()
+                && args.prompt_json.is_none()
+                && args.prompt_file.is_none()
+                && args.command.is_none(),
         }
     }
 }
@@ -824,13 +830,18 @@ async fn most_recent_session_id(
     let first = summaries
         .iter()
         .find(|summary| selection.admits(summary) && !summary.is_unused_optimistic_husk())
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "No session found for current directory. \
-                 Use 'grok' to start a new session."
-            )
-        })?;
+        .ok_or_else(|| anyhow::anyhow!(no_session_found_for_cwd_message()))?;
     Ok((first.info.id.to_string(), first.display_title_opt()))
+}
+/// Interactive last-session lookup. A miss is `None` so startup can still open a new session.
+async fn try_most_recent_session_id(cwd: &str) -> Option<(String, Option<String>)> {
+    most_recent_session_id(cwd, RecentSessionSelection::Interactive)
+        .await
+        .ok()
+}
+/// Copy for a cwd that has no resumable session. Names `grok-oss`, not bare `grok`.
+pub fn no_session_found_for_cwd_message() -> &'static str {
+    "No session found for current directory. Use 'grok-oss' to start a new session."
 }
 /// `AuthManager` for direct grok.com calls made outside the agent (pre-ACP `--continue` conversation listing, the GCS restore effect).
 /// Wires the auth-provider refresher before the first `auth()`.
@@ -1810,6 +1821,7 @@ mod tests {
             restore_code: false,
             recent_session_selection: RecentSessionSelection::Interactive,
             restore_progress_on_stdout: false,
+            open_last_session_on_start: false,
         }
     }
     #[test]
@@ -2014,17 +2026,6 @@ mod tests {
         assert!(wt.restore_code);
         assert!(wt.has_worktree);
     }
-    fn remote_miss_ctx(restore_code: bool, has_worktree: bool) -> MaterializeCtx {
-        MaterializeCtx {
-            has_worktree,
-            allow_remote_restore: true,
-            chat_mode: false,
-            title_resolution: TitleResolution::Allowed,
-            restore_code,
-            restore_progress_on_stdout: false,
-            open_last_session_on_start: false,
-        }
-    }
     #[test]
     fn in_place_restore_code_allowed_blocks_restored_remote_child() {
         assert!(in_place_restore_code_allowed(
@@ -2163,65 +2164,6 @@ mod tests {
     fn worktree_no_restore_code_notice_mentions_flag() {
         assert!(WORKTREE_NO_RESTORE_CODE_NOTICE.contains("--restore-code"));
     }
-    /// `--restore-code` without `--worktree` must fail before any in-place checkout.
-    #[tokio::test]
-    async fn remote_miss_restore_code_without_worktree_errors() {
-        let err = materialize_startup_for_cwd(
-            remote_miss_ctx(true, false),
-            SessionStartupIntent::Resume {
-                session_id: Some("99999999-9999-4999-8999-999999999999".into()),
-                most_recent_for_cwd: false,
-            },
-            "/nonexistent/cwd/for/remote-miss-code-no-wt",
-        )
-        .await
-        .unwrap_err();
-        assert!(
-            err.to_string().contains("--worktree"),
-            "unexpected error: {err}"
-        );
-        let title_err = materialize_startup_for_cwd(
-            remote_miss_ctx(true, false),
-            SessionStartupIntent::Resume {
-                session_id: Some("no such title".into()),
-                most_recent_for_cwd: false,
-            },
-            "/nonexistent/cwd/for/remote-miss-code-no-wt-title",
-        )
-        .await
-        .unwrap_err()
-        .to_string();
-        assert!(title_err.contains("--worktree"), "{title_err}");
-        assert!(
-            title_err.contains("no session id or title matched"),
-            "{title_err}"
-        );
-    }
-    #[test]
-    fn from_pager_args_does_not_probe_tty_for_progress() {
-        assert!(
-            !MaterializeCtx::from_pager_args(&parse(&["grok"])).restore_progress_on_stdout,
-            "stdout vs stderr is decided at the composition root, not from_pager_args"
-        );
-    }
-    #[test]
-    fn materialize_ctx_restore_code_follows_cli_flag() {
-        assert!(!MaterializeCtx::from_pager_args(&parse(&["grok"])).restore_code);
-        assert!(!MaterializeCtx::from_pager_args(&parse(&["grok", "-r", "abc"])).restore_code);
-        assert!(
-            MaterializeCtx::from_pager_args(&parse(&["grok", "-r", "abc", "--restore-code"]))
-                .restore_code
-        );
-        let wt = MaterializeCtx::from_pager_args(&parse(&[
-            "grok",
-            "-r",
-            "abc",
-            "--restore-code",
-            "--worktree",
-        ]));
-        assert!(wt.restore_code);
-        assert!(wt.has_worktree);
-    }
     fn remote_miss_ctx(restore_code: bool, has_worktree: bool) -> MaterializeCtx {
         MaterializeCtx {
             has_worktree,
@@ -2231,137 +2173,8 @@ mod tests {
             restore_code,
             recent_session_selection: RecentSessionSelection::Interactive,
             restore_progress_on_stdout: false,
+            open_last_session_on_start: false,
         }
-    }
-    #[test]
-    fn in_place_restore_code_allowed_blocks_restored_remote_child() {
-        assert!(in_place_restore_code_allowed(
-            true, false, "local-id", "local-id"
-        ));
-        assert!(!in_place_restore_code_allowed(
-            true,
-            false,
-            "remote-uuid",
-            "restored-child"
-        ));
-        assert!(in_place_restore_code_allowed(
-            true,
-            true,
-            "remote-uuid",
-            "restored-child"
-        ));
-        assert!(in_place_restore_code_allowed(
-            false,
-            false,
-            "remote-uuid",
-            "restored-child"
-        ));
-    }
-    #[test]
-    fn plan_remote_miss_restore_code_false_restores_conversation_only() {
-        assert_eq!(
-            plan_remote_miss(remote_miss_ctx(false, false), true),
-            RemoteMissPlan::RestoreConversation
-        );
-    }
-    #[test]
-    fn plan_remote_miss_restore_code_true_without_worktree_is_rejected() {
-        assert_eq!(
-            plan_remote_miss(remote_miss_ctx(true, false), true),
-            RemoteMissPlan::RejectInPlaceCodeRestore {
-                title_miss_hint: false,
-            }
-        );
-        assert_eq!(
-            plan_remote_miss(remote_miss_ctx(true, false), false),
-            RemoteMissPlan::RejectInPlaceCodeRestore {
-                title_miss_hint: true,
-            }
-        );
-    }
-    #[test]
-    fn plan_remote_miss_worktree_defers_without_restore_code() {
-        assert_eq!(
-            plan_remote_miss(remote_miss_ctx(false, true), true),
-            RemoteMissPlan::DeferToWorktree {
-                deferred_local_miss: false,
-            }
-        );
-        assert_eq!(
-            plan_remote_miss(remote_miss_ctx(false, true), false),
-            RemoteMissPlan::DeferToWorktree {
-                deferred_local_miss: true,
-            }
-        );
-    }
-    #[test]
-    fn plan_remote_miss_restore_code_true_with_worktree_defers() {
-        assert_eq!(
-            plan_remote_miss(remote_miss_ctx(true, true), true),
-            RemoteMissPlan::DeferToWorktree {
-                deferred_local_miss: false,
-            }
-        );
-        assert_eq!(
-            plan_remote_miss(remote_miss_ctx(true, true), false),
-            RemoteMissPlan::DeferToWorktree {
-                deferred_local_miss: true,
-            }
-        );
-    }
-    #[test]
-    fn classify_remote_restore_prefers_returned_local_id() {
-        assert_eq!(
-            classify_remote_restore(false, Some("child"), Some("boom"), Some("other")),
-            RemoteRestoreOutcome::Restored {
-                local_session_id: "child".into(),
-            }
-        );
-    }
-    #[test]
-    fn classify_remote_restore_recovers_disk_child_on_timeout_or_error() {
-        assert_eq!(
-            classify_remote_restore(true, None, None, Some("child")),
-            RemoteRestoreOutcome::RecoveredAfterFailure {
-                local_session_id: "child".into(),
-            }
-        );
-        assert_eq!(
-            classify_remote_restore(false, Some(""), Some("network"), Some("child")),
-            RemoteRestoreOutcome::RecoveredAfterFailure {
-                local_session_id: "child".into(),
-            }
-        );
-    }
-    #[test]
-    fn classify_remote_restore_errors_when_conversation_missing() {
-        match classify_remote_restore(true, None, None, None) {
-            RemoteRestoreOutcome::Failed(msg) => {
-                assert!(msg.contains("Timed out"), "{msg}");
-                assert!(msg.contains("cannot be recovered"), "{msg}");
-            }
-            other => panic!("expected Failed, got {other:?}"),
-        }
-        match classify_remote_restore(false, None, Some("registry 404"), None) {
-            RemoteRestoreOutcome::Failed(msg) => {
-                assert!(msg.contains("Failed to restore"), "{msg}");
-                assert!(msg.contains("registry 404"), "{msg}");
-            }
-            other => panic!("expected Failed, got {other:?}"),
-        }
-        match classify_remote_restore(false, Some(""), None, None) {
-            RemoteRestoreOutcome::Failed(msg) => {
-                assert!(
-                    msg.contains("conversation history was unavailable"),
-                    "{msg}"
-                );
-            }
-            other => panic!("expected Failed, got {other:?}"),
-        }
-    }
-    #[test]
-    fn worktree_no_restore_code_notice_mentions_flag() {
-        assert!(WORKTREE_NO_RESTORE_CODE_NOTICE.contains("--restore-code"));
     }
     /// `--restore-code` without `--worktree` must fail before any in-place checkout.
     #[serial_test::serial(GROK_HOME)]
@@ -2542,6 +2355,7 @@ mod tests {
             restore_code: false,
             recent_session_selection: RecentSessionSelection::Interactive,
             restore_progress_on_stdout: false,
+            open_last_session_on_start: false,
         };
         let err = materialize_startup_for_cwd(
             ctx,
@@ -2634,6 +2448,7 @@ mod tests {
                 chat_mode: false,
                 title_resolution: TitleResolution::Allowed,
                 restore_code: false,
+                recent_session_selection: RecentSessionSelection::Interactive,
                 restore_progress_on_stdout: false,
                 open_last_session_on_start: true,
             }
@@ -2733,6 +2548,7 @@ mod tests {
                 restore_code: false,
                 recent_session_selection: RecentSessionSelection::Interactive,
                 restore_progress_on_stdout: false,
+                open_last_session_on_start: false,
             }
         }
         async fn resume_with(

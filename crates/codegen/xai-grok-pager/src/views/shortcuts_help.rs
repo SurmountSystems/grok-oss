@@ -125,23 +125,6 @@ while the scrollback is focused.\n\
 Type a query, then use n and N (or the arrow keys) to step through matches. \
 Press Enter to jump to a match and Esc to dismiss.";
 
-// Prompt history is not an ActionRegistry entry: Up is an inline key handler and
-// /history is a slash command. Surface both here for discoverability.
-const HISTORY_LONG_HELP: &str = "\
-Recalls previously sent prompts.\n\
-Press Up on an empty prompt to browse earlier prompts, newest first; each move \
-live-populates the composer so you can edit and resend.\n\
-Run /history to open a searchable history panel and filter by text.";
-
-// Scrollback search has no ActionRegistry entry: it's the vim `/` inline handler,
-// or the /find slash command in simple mode. Surface both triggers here.
-const SCROLLBACK_SEARCH_LONG_HELP: &str = "\
-Searches the conversation scrollback for text and jumps between matches.\n\
-In the prompt input, run /find to search. In vim mode, you can also press / \
-while the scrollback is focused.\n\
-Type a query, then use n and N (or the arrow keys) to step through matches. \
-Press Enter to jump to a match and Esc to dismiss.";
-
 /// Build the entries vector for the modal, grouped by category.
 ///
 /// All registered actions are included; those whose `When` context is not in `active_contexts` are dimmed.

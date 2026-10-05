@@ -183,9 +183,10 @@ mod tests {
     use tempfile::TempDir;
     use xai_grok_test_support::EnvGuard;
 
-    fn test_cwd() -> (TempDir, String) {
-        let tmp = TempDir::new().unwrap();
-        let cwd = tmp
+    fn test_cwd() -> (TempDir, EnvGuard, String) {
+        let home = TempDir::new().unwrap();
+        let env = EnvGuard::set("GROK_HOME", home.path());
+        let cwd = home
             .path()
             .join("test_project")
             .to_string_lossy()

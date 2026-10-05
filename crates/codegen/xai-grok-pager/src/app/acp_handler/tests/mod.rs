@@ -49,7 +49,6 @@ pub(super) fn make_session(session_id: Option<&str>) -> AgentSession {
         next_queue_id: 0,
         yolo_mode: false,
         auto_mode: false,
-        context_only_mode: false,
         prompt_history: Vec::new(),
         prompt_history_loading: false,
         loading_replay: false,
@@ -102,6 +101,8 @@ pub(super) fn make_subagent_info(child_sid: &str) -> SubagentInfo {
         child_session_id: Arc::from(child_sid),
         description: Arc::from("test"),
         subagent_type: Arc::from("general-purpose"),
+        finished: false,
+        status: None,
         attempt: crate::app::subagent::SubagentAttemptInfo {
             lifecycle: crate::app::subagent::SubagentLifecycleState::running_legacy_for_test(),
             persona: None,
@@ -377,6 +378,31 @@ pub(super) fn subagent_ext_replay(
             "_meta": { "isReplay": true, "eventId": event_id },
         });
     acp_fixtures::ext_notification("x.ai/session/update", &params)
+}
+pub(super) fn make_exit_plan_ext_for_session(
+    session_id: &str,
+    tool_call_id: &str,
+    plan_content: Option<&str>,
+) -> (
+    xai_acp_lib::AcpArgs<acp::ExtRequest>,
+    tokio::sync::oneshot::Receiver<xai_acp_lib::AcpResult<acp::ExtResponse>>,
+) {
+    let request = acp_fixtures::ext_request(
+        "x.ai/exit_plan_mode",
+        &serde_json::json!({
+            "sessionId": session_id,
+            "toolCallId": tool_call_id,
+            "planContent": plan_content,
+        }),
+    );
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    (
+        xai_acp_lib::AcpArgs {
+            request,
+            response_tx: tx,
+        },
+        rx,
+    )
 }
 pub(super) fn make_exit_plan_ext(
     plan_content: Option<&str>,

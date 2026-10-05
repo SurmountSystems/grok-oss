@@ -10,6 +10,16 @@ use agent_client_protocol as acp;
 use xai_grok_telemetry::session_ctx::log_event;
 use xai_grok_tools::types::SessionMode;
 
+fn stick_view_plan_request(app: &mut AppView) {
+    for agent in app.agents.values_mut() {
+        agent.view_plan_requested = true;
+    }
+}
+
+fn stamp_live_plan_request(agent: &mut AgentView, on: bool) {
+    agent.view_plan_requested = on;
+}
+
 /// Show the current plan: if a plan file exists, open it in the preview overlay popover.
 /// If no plan has been written yet, show a toast.
 /// Delegates to `AgentView::show_plan_preview()`, which reads the session's `plan.md` from its session artifacts directory.
@@ -17,7 +27,6 @@ pub(super) fn dispatch_show_plan(app: &mut AppView) -> Vec<Effect> {
     // `/view-plan` after `--continue` can race SessionLoaded. Flush a restore
     // that arrived before bind so the slash can dock Approve. Idle resume
     // still does not auto-dock; this path is an explicit open.
-    let _ = crate::app::acp_handler::flush_pending_exit_plan_mode(app);
     let id = match app.active_view {
         ActiveView::Agent(id) => id,
         ActiveView::AgentDashboard => match app.dashboard.as_ref().and_then(|d| d.attached_agent) {
@@ -85,35 +94,51 @@ pub(super) fn dispatch_enter_plan_mode(
         };
         agent.plan_mode_pending.unwrap_or(agent.plan_mode_active)
     };
-    let Some(agent) = app.agents.get_mut(&id) else {
+    let prepared = {
+        let Some(agent) = app.agents.get_mut(&id) else {
+            return vec![];
+        };
+        let Some(session_id) = agent.session.session_id.clone() else {
+            agent.show_toast(NO_SESSION_NOTICE);
+            return vec![];
+        };
+
+        // Set optimistic pending state (same pattern as dispatch_cycle_mode).
+        agent.stage_plan_mode(true);
+        tracing::info!("Plan mode entered via /plan slash command");
+
+        let mode_id = acp::SessionModeId::new("plan");
+        (session_id, mode_id)
+    };
+
+    let Some(desc) = description else {
         return vec![];
     };
-    let Some(session_id) = agent.session.session_id.clone() else {
-        agent.show_toast(NO_SESSION_NOTICE);
-        return vec![];
-    };
-
-    // Set optimistic pending state (same pattern as dispatch_cycle_mode).
-    agent.stage_plan_mode(true);
-    tracing::info!("Plan mode entered via /plan slash command");
-
-    let mode_id = acp::SessionModeId::new("plan");
-
-    if let Some(desc) = description {
-        // Enqueue and drain: maybe_drain_queue does all synchronous turn setup (scrollback, start_turn, prompt_id) and returns a SendPrompt
-        // We combine it with the mode switch into a single sequential effect so the mode switch completes before the prompt is sent
-        // The description is a plain prompt: capture composer-recognized tokens like the normal submit path
+    let (session_id, mode_id) = prepared;
+    // Enqueue and drain: maybe_drain_queue does all synchronous turn setup (scrollback, start_turn, prompt_id) and returns a SendPrompt
+    // We combine it with the mode switch into a single sequential effect so the mode switch completes before the prompt is sent
+    // The description is a plain prompt: capture composer-recognized tokens like the normal submit path
+    let (qid, drain_effects, page_flip) = {
+        let Some(agent) = app.agents.get_mut(&id) else {
+            return vec![];
+        };
         let skill_token_ranges = agent
             .prompt
             .slash_controller
             .recognized_token_ranges(&desc, &agent.session.models);
         let qid = agent
             .session
-            .enqueue_prompt_with_skill_tokens(desc, skill_token_ranges);
+            .enqueue_prompt_with_skill_tokens(desc.clone(), skill_token_ranges);
         let drain = maybe_drain_queue(agent, &mut app.pending_image_notices);
-        note_peek_page_flip(app, id, drain.page_flip_entry);
+        (qid, drain.effects, drain.page_flip_entry)
+    };
+    note_peek_page_flip(app, id, page_flip);
+    let Some(agent) = app.agents.get_mut(&id) else {
+        return vec![];
+    };
+    {
         let mut effects = Vec::with_capacity(1);
-        for eff in drain.effects {
+        for eff in drain_effects {
             match eff {
                 Effect::SendPrompt {
                     agent_id,
@@ -163,10 +188,8 @@ pub(super) fn dispatch_enter_plan_mode(
                 });
             }
         }
-        (effects, page_flip_entry)
-    };
-    note_peek_page_flip(app, id, page_flip_entry);
-    effects
+        effects
+    }
 }
 
 /// Set plan mode (on / off).
@@ -355,8 +378,6 @@ pub(super) fn sync_active_auto_flag(app: &mut AppView) {
         && let Some(agent) = app.agents.get_mut(&id)
     {
         agent.session.auto_mode = effective_auto(agent.session.is_yolo(), is_auto);
-        agent.session.context_only_mode =
-            !agent.session.is_yolo() && !agent.session.auto_mode && is_context_only;
     }
     // Keep `/auto` feature-gate visibility in lockstep across slash surfaces.
     app.sync_permission_mode_slash_gate();
@@ -599,6 +620,7 @@ pub(super) fn permission_mode_toast(kind: crate::app::actions::PermissionModeKin
         PermissionModeKind::Auto => "\u{2713} Permission mode: Auto-review".to_string(),
         PermissionModeKind::Ask => "\u{2713} Permission mode: Ask".to_string(),
         PermissionModeKind::Default => "\u{2713} Permission mode: Default".to_string(),
+        PermissionModeKind::ContextOnly => "\u{2713} Permission mode: Context only".to_string(),
     }
 }
 

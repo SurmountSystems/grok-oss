@@ -128,7 +128,7 @@ fn ensure_plan_mode_tools(tool_config: &mut xai_grok_tools::registry::types::Too
     if missing_scrub {
         tool_config
             .tools
-            .push((&grok_build::DisableAsciiScrubTool).into());
+            .push((&grok_build::disable_ascii_scrub::DisableAsciiScrubTool).into());
     }
 }
 fn general_purpose_spawnable(allowed: Option<&[String]>, toggles: &HashMap<String, bool>) -> bool {
@@ -974,6 +974,7 @@ impl AgentBuilder {
                     self.task_model_selection,
                     &self.task_model_slugs,
                 ));
+                description.push_str(&implement_loop_review_spawn_guidance());
                 task_tc.description_override = Some(description);
             }
         }
@@ -1139,13 +1140,7 @@ impl AgentBuilder {
                 let short = short_tool_name(&tc.id);
                 short != "task" && !TASK_LIFECYCLE_TOOLS.contains(&short)
             });
-            for tc in &mut tool_config.tools {
-                if short_tool_name(&tc.id) == "run_terminal_cmd" {
-                    let params = tc.params.get_or_insert_with(Default::default);
-                    params.insert("enabled_background".into(), false.into());
-                    params.insert("auto_background_on_timeout".into(), false.into());
-                }
-            }
+            disable_all_background_bash_modes(&mut tool_config);
         } else if hide_task {
             tool_config
                 .tools
@@ -1441,6 +1436,64 @@ fn task_model_guidance(selection: TaskModelSelection, model_slugs: &[String]) ->
          If the user does NOT _explicitly_ request a model, OMIT the `{TASK_MODEL_PARAM}` field."
     )
 }
+/// Token Economy implement-loop effort is thoroughness, not reviewer count.
+/// One reviewer unless the operator explicitly asked for more.
+pub fn review_row_count_for_implement_effort(
+    effort: u8,
+    operator_asked_for_more_reviewers: bool,
+) -> u8 {
+    xai_grok_tools::implementations::grok_build::task::admission::review_row_count_for_implement_effort(
+        effort,
+        operator_asked_for_more_reviewers,
+    )
+}
+/// Review-row descriptions the implement loop must spawn for this effort.
+pub fn implement_loop_review_rows(
+    effort: u8,
+    operator_asked_for_more_reviewers: bool,
+) -> Vec<String> {
+    let n = review_row_count_for_implement_effort(effort, operator_asked_for_more_reviewers);
+    (1..=n)
+        .map(|i| {
+            if n == 1 {
+                "[reviewer] Review implementation".to_string()
+            } else {
+                format!("[reviewer] Review implementation ({i}/{n})")
+            }
+        })
+        .collect()
+}
+/// Parent Task tool text for the one default Review row.
+fn implement_loop_review_spawn_guidance() -> String {
+    let rows = implement_loop_review_rows(2, false);
+    let list = rows
+        .iter()
+        .map(|row| format!("- {row}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        "\n\nImplement-loop Review rows: Token Economy implement-loop effort is thoroughness, \
+         not how many Review rows to launch. One reviewer unless the operator asked for more. \
+         Default spawn (effort 1 through 5 when the operator did not ask, including effort 3):\n\
+         {list}"
+    )
+}
+/// Parent Task tool description. Agent types stay off this text.
+/// `subagents` remains so callers can pass the discovered list.
+#[cfg(test)]
+pub(crate) fn build_task_description(
+    subagents: &[crate::discovery::SubagentEntry],
+    model_slugs: &[String],
+) -> String {
+    let _discovered = subagents.len();
+    let mut description = xai_tool_types::build_task_description(&TASK_TOOL_NAMING);
+    description.push_str(&task_model_guidance(
+        TaskModelSelection::Selectable,
+        model_slugs,
+    ));
+    description.push_str(&implement_loop_review_spawn_guidance());
+    description
+}
 fn resolve_shell_for_prompt() -> String {
     #[cfg(unix)]
     {
@@ -1456,6 +1509,7 @@ fn resolve_shell_for_prompt() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::discovery::{SubagentEntry, SubagentSource};
     use xai_grok_tools::types::definition::ToolDefinition;
     use xai_grok_tools::types::template_renderer::unresolved_template_markers;
     #[derive(Debug)]
@@ -1771,6 +1825,15 @@ mod tests {
         assert!(rendered.contains("`child_model`"));
         assert!(!rendered.contains("params.task.model"));
     }
+    fn entry(name: &str, description: &str, source: SubagentSource) -> SubagentEntry {
+        SubagentEntry {
+            name: name.to_string(),
+            description: description.to_string(),
+            source,
+            shadows_builtin: None,
+            config_source: xai_grok_tools::types::config_source::ConfigSource::Builtin,
+        }
+    }
     #[test]
     fn implement_loop_effort_two_spawns_one_review_row_unless_operator_asked() {
         let rows = implement_loop_review_rows(2, false);
@@ -1865,64 +1928,9 @@ mod tests {
         assert!(desc.contains("${{ params.task.isolation }}"));
         assert!(!desc.contains("subagent_type"));
     }
-    #[tokio::test]
-    async fn discovery_snapshot_records_gated_and_preloaded_skills() {
-        use xai_grok_tools::computer::local::LocalTerminalBackend;
-        use xai_grok_tools::notification::ToolNotificationHandle;
-        let tmp = tempfile::tempdir().unwrap();
-        let write_skill = |dir: &str, content: &str| {
-            let d = tmp.path().join(".grok/skills").join(dir);
-            std::fs::create_dir_all(&d).unwrap();
-            std::fs::write(d.join("SKILL.md"), content).unwrap();
-        };
-        write_skill(
-            "snapshot-plain-skill",
-            "---\nname: snapshot-plain-skill\ndescription: plain\n---\nbody\n",
-        );
-        write_skill(
-            "snapshot-gated-skill",
-            "---\nname: snapshot-gated-skill\ndescription: gated\npaths: \"src/**\"\n---\nbody\n",
-        );
-        let mut definition = crate::config::AgentDefinition::default_grok_build();
-        definition.skills = vec!["snapshot-plain-skill".to_string()];
-        let agent = AgentBuilder::new(
-            tmp.path().to_path_buf(),
-            Arc::new(LocalTerminalBackend::new()),
-            ToolNotificationHandle::noop(),
-        )
-        .from_definition(definition)
-        .with_project_trusted(true)
-        .build()
-        .await
-        .expect("agent should build with local skill fixtures");
-        let snapshot = agent.tool_bridge().skill_discovery_snapshot_names().await;
-        assert!(
-            snapshot.contains(&"snapshot-plain-skill".to_string()),
-            "preloaded skill missing from snapshot: {snapshot:?}"
-        );
-        assert!(
-            snapshot.contains(&"snapshot-gated-skill".to_string()),
-            "paths:-gated skill missing from snapshot: {snapshot:?}"
-        );
-        let listed: Vec<String> = agent
-            .tool_bridge()
-            .slash_skills()
-            .await
-            .into_iter()
-            .map(|s| s.name)
-            .collect();
-        assert!(
-            !listed.contains(&"snapshot-gated-skill".to_string()),
-            "paths:-gated skill must stay out of the listing baseline: {listed:?}"
-        );
-        assert!(
-            !listed.contains(&"snapshot-plain-skill".to_string()),
-            "preloaded skill must stay out of the listing baseline: {listed:?}"
-        );
-    }
     /// The bridge's full-discovery snapshot must record every discovered
-    /// skill name — including `paths:`-gated and preloaded skills that the
-    /// listing baseline (`slash_skills`) holds back — so session-start
+    /// skill name, including `paths:`-gated and preloaded skills that the
+    /// listing baseline (`slash_skills`) holds back, so session-start
     /// telemetry can reuse it instead of re-walking the disk.
     #[tokio::test]
     async fn discovery_snapshot_records_gated_and_preloaded_skills() {
@@ -1950,6 +1958,7 @@ mod tests {
             ToolNotificationHandle::noop(),
         )
         .from_definition(definition)
+        .with_project_trusted(true)
         .build()
         .await
         .expect("agent should build with local skill fixtures");

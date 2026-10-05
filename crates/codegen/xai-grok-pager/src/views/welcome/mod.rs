@@ -756,6 +756,15 @@ pub struct WelcomeRenderParams<'a> {
     pub workspace_mode_ack_pending: bool,
 }
 
+/// Top bar is one row unless the operator hid the header.
+fn welcome_top_bar_height() -> u16 {
+    if crate::appearance::cache::load_hide_header() {
+        0
+    } else {
+        1
+    }
+}
+
 /// Render the welcome screen.
 pub fn render_welcome(
     area: Rect,
@@ -3164,6 +3173,7 @@ mod tests {
                 area,
                 &mut buf,
                 &theme,
+                SessionPickerRenderMode::Fullscreen,
                 &mut SessionPickerRenderCtx {
                     state: &mut state,
                     sessions: Some(&entries),

@@ -261,7 +261,7 @@ where
     B: Backend,
 {
     /// Creates a new [`Terminal`] with the given [`Backend`] with a full screen viewport.
-    pub fn new(backend: B) -> io::Result<Self> {
+    pub fn new(backend: B) -> Result<Self, B::Error> {
         Self::with_options(
             backend,
             TerminalOptions {
@@ -271,7 +271,7 @@ where
     }
 
     /// Creates a new [`Terminal`] with the given [`Backend`] and [`TerminalOptions`].
-    pub fn with_options(mut backend: B, options: TerminalOptions) -> io::Result<Self> {
+    pub fn with_options(mut backend: B, options: TerminalOptions) -> Result<Self, B::Error> {
         let area = match options.viewport {
             Viewport::Fullscreen | Viewport::Inline(_) => {
                 Rect::from((Position::ORIGIN, backend.size()?))
@@ -334,7 +334,9 @@ where
     /// self-screenshot (`/screenshot`) to capture the live frame without
     /// re-rendering.
     pub fn last_presented_buffer(&self) -> &Buffer {
-        &self.buffers[1 - self.current]
+        self.buffers
+            .get(1 - self.current)
+            .expect("last presented buffer is the other double-buffer slot")
     }
 
     /// Gets the backend
@@ -350,7 +352,7 @@ where
     /// Uses [`diff_large`] instead of ratatui's [`Buffer::diff`] to avoid a `u16` truncation bug: upstream `pos_of()` casts
     /// the flat cell index to `u16` before computing `(x, y)`, which silently wraps around when `width * height > 65 535`. On
     /// extra-large terminals (e.g. 420×160 = 67 200 cells) this causes the entire UI to be rendered into a tiny corner.
-    pub fn flush(&mut self) -> io::Result<bool> {
+    pub fn flush(&mut self) -> Result<bool, B::Error> {
         let (current_buffer, previous_buffer) = front_back(&self.buffers, self.current);
         let updates = diff_large(previous_buffer, current_buffer);
         let has_changes = !updates.is_empty();
@@ -445,7 +447,7 @@ where
 
     /// Updates the Terminal so that internal buffers match the requested area. Requested area will be saved to remain
     /// consistent when rendering. This leads to a full clear of the screen.
-    pub fn resize(&mut self, area: Rect) -> io::Result<()> {
+    pub fn resize(&mut self, area: Rect) -> Result<(), B::Error> {
         let next_area = match self.viewport {
             // This is how the viewport is used when the alternate screen is unavailable (e.g. under Zellij or tmux control mode, or
             // with `--no-alt-screen`): the whole terminal is one inline viewport standing in for a fullscreen app. On resize it must
@@ -488,10 +490,10 @@ where
         Ok(())
     }
 
-    /// Returns a [`CompletedFrame`] if successful, otherwise a [`std::io::Error`]. This method will: This is because each
+    /// Returns a [`CompletedFrame`] if successful, otherwise the backend error. This method will: This is because each
     /// frame is compared to the previous frame to determine what has changed, and only the changes are written to the
     /// terminal. If the render callback does not fully render the frame, the terminal will not be in a consistent state.
-    pub fn draw<F>(&mut self, render_callback: F) -> io::Result<CompletedFrame<'_>>
+    pub fn draw<F>(&mut self, render_callback: F) -> Result<CompletedFrame<'_>, B::Error>
     where
         F: FnOnce(&mut Frame),
     {
@@ -502,9 +504,9 @@ where
     }
 
     /// Tries to draw a single frame to the terminal. Returns [`Result::Ok`] containing a [`CompletedFrame`] if successful,
-    /// otherwise [`Result::Err`] containing the [`std::io::Error`] that caused the failure. This is because each frame is
+    /// otherwise [`Result::Err`] containing the backend error that caused the failure. This is because each frame is
     /// compared to the previous frame to determine what has changed, and only the changes are written to the terminal.
-    pub fn try_draw<F, E>(&mut self, render_callback: F) -> io::Result<CompletedFrame<'_>>
+    pub fn try_draw<F, E>(&mut self, render_callback: F) -> Result<CompletedFrame<'_>, B::Error>
     where
         F: FnOnce(&mut Frame) -> Result<(), E>,
         E: Into<B::Error>,
@@ -651,7 +653,7 @@ where
     /// Insert some content before the current inline viewport. This has no effect when the viewport is not inline. The
     /// content of that `Buffer` will then be inserted before the viewport. If the viewport isn't yet at the bottom of the
     /// screen, inserted lines will push it towards the bottom. Insert a single line before the current viewport
-    pub fn insert_before<F>(&mut self, height: u16, draw_fn: F) -> io::Result<()>
+    pub fn insert_before<F>(&mut self, height: u16, draw_fn: F) -> Result<(), B::Error>
     where
         F: FnOnce(&mut Buffer),
     {
@@ -670,7 +672,7 @@ where
     /// A full-width hard break (fills, does not wrap) disables autowrap so xenl cannot join the next line.
     pub fn insert_before_rows(&mut self, rows: &[(String, bool, bool)]) -> io::Result<()>
     where
-        B: Write,
+        B: Backend<Error = io::Error> + Write,
     {
         match self.viewport {
             Viewport::Inline(_) => {
@@ -699,7 +701,7 @@ where
     /// Sets the height of an inline viewport and resizes it accordingly. This method only works with inline viewports. For
     /// other viewport types, it has no effect. The viewport will be resized to the new height, and the buffers will be
     /// cleared and reallocated to match the new size.
-    pub fn set_viewport_height(&mut self, new_height: u16) -> io::Result<()> {
+    pub fn set_viewport_height(&mut self, new_height: u16) -> Result<(), B::Error> {
         if !matches!(self.viewport, Viewport::Inline(_)) {
             return Ok(());
         }
@@ -817,7 +819,7 @@ where
         height: u16,
     ) -> io::Result<()>
     where
-        B: Write,
+        B: Backend<Error = io::Error> + Write,
     {
         let mut drawn_height: i32 = self.viewport_area.top().into();
         let mut remaining: i32 = i32::from(height);
@@ -878,7 +880,7 @@ where
         more_xenl: bool,
     ) -> io::Result<()>
     where
-        B: Write,
+        B: Backend<Error = io::Error> + Write,
     {
         if rows.is_empty() {
             return Ok(());
@@ -1012,7 +1014,7 @@ where
             let iter = to_draw
                 .iter()
                 .enumerate()
-                .filter(|(_, c)| !c.skip)
+                .filter(|(_, c)| c.diff_option != CellDiffOption::Skip)
                 .map(|(i, c)| ((i % width) as u16, y_offset + (i / width) as u16, c));
             self.backend.draw(iter)?;
             Backend::flush(&mut self.backend)?;
@@ -1138,7 +1140,7 @@ fn diff_large_with_links<'a>(
 /// Emit a frame's cell updates with OSC 8 hyperlinks. Keeping a link open across `draw`'s internal cursor moves is
 /// correct because OSC 8 is a sticky terminal mode — only the written cells inherit it, and unchanged cells in any gap
 /// keep whatever link they already had.
-fn emit_frame_with_links<B: Backend + Write>(
+fn emit_frame_with_links<B: Backend<Error = io::Error> + Write>(
     backend: &mut B,
     updates: &[(u16, u16, &Cell)],
     cur_ids: &[u32],
@@ -1290,7 +1292,7 @@ impl<B: Backend> Terminal<B> {
 
     /// Switch the viewport kind in place, keeping the backend alive. `Viewport::Inline` issues a cursor-position query
     /// (caller must be the only stdin reader), and both buffers reset — follow with a full redraw.
-    pub fn set_viewport(&mut self, viewport: Viewport) -> io::Result<()> {
+    pub fn set_viewport(&mut self, viewport: Viewport) -> Result<(), B::Error> {
         let area = match viewport {
             Viewport::Fullscreen | Viewport::Inline(_) => {
                 Rect::from((Position::ORIGIN, self.backend.size()?))

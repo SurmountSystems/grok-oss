@@ -317,6 +317,7 @@ fn discover_auto_sources(cwd: &str, skills: &[SkillInfo]) -> Vec<(String, usize)
     for subdir in &subdirs {
         try_add_source(grok_home.join(subdir), None);
     }
+    let home = xai_dirs::home_dir();
     if let Some(ref h) = home {
         let home_path = std::path::PathBuf::from(h);
         if !imported {
@@ -502,25 +503,6 @@ pub async fn handle(
             // which misses writes made through another NFS client.
             agent.refresh_skill_baseline_for_all_sessions();
             super::to_ext_response(Ok(SkillsListResponse::from(skills)))
-        }
-
-        "x.ai/workflows/list" => {
-            let req: WorkflowsListRequest = serde_json::from_str(args.params.get())?;
-            let Some(handle) = agent.session_handle_waiting_for_load(&req.session_id).await else {
-                return super::to_ext_response(Err::<serde_json::Value, _>(anyhow::anyhow!(
-                    "unknown session id: {}",
-                    req.session_id.0
-                )));
-            };
-            let (launches_enabled, _management_available) = handle.workflow_catalog_state().await;
-            let workflows = if launches_enabled {
-                crate::session::workflow::registry::list_workflows(Some(
-                    handle.tool_context.cwd.as_path(),
-                ))
-            } else {
-                Vec::new()
-            };
-            super::to_ext_response(Ok(serde_json::json!({ "workflows": workflows })))
         }
 
         "x.ai/workflows/list" => {

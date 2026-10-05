@@ -18,6 +18,22 @@ use crate::views::question_view::QUESTION_VIEW_HPAD;
 use crossterm::event::Event;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use std::time::Instant;
+
+/// Feedback card is the local `/feedback` question, identified by its tool call id.
+pub(crate) trait QuestionViewFeedback {
+    fn is_feedback(&self) -> bool;
+}
+
+impl QuestionViewFeedback for crate::views::question_view::QuestionViewState {
+    fn is_feedback(&self) -> bool {
+        self.tool_call_id == "feedback"
+            || matches!(
+                self.local_kind,
+                Some(crate::views::question_view::LocalQuestionKind::Feedback)
+            )
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum QuestionSwitch {
     Next,
@@ -334,6 +350,13 @@ impl AgentView {
     pub(super) fn handle_question_key(&mut self, key: &KeyEvent) -> InputOutcome {
         use crate::views::question_view::{CursorMotion, QuestionFocus};
         if key.code == KeyCode::Esc {
+            if self
+                .question_view
+                .as_ref()
+                .is_some_and(|qv| qv.is_feedback())
+            {
+                return self.dismiss_question_view();
+            }
             return self.handle_card_esc();
         }
         let Some(ref mut qv) = self.question_view else {
@@ -588,8 +611,26 @@ impl AgentView {
             return self.submit_question_answers(true);
         }
         self.prompt.set_text("");
-        self.commit_question_freeform();
+        if let Some(qv) = self.question_view.as_mut() {
+            let idx = qv.active_tab;
+            if let Some(slot) = qv.per_question_freeform.get_mut(idx) {
+                slot.clear();
+            }
+            qv.focus = crate::views::question_view::QuestionFocus::InputMode;
+        }
         InputOutcome::Changed
+    }
+
+    /// Copy the composer into the feedback pane's report without leaving input mode.
+    fn remember_feedback_report_from_prompt(&mut self) {
+        let text = self.prompt.text().to_string();
+        let Some(qv) = self.question_view.as_mut() else {
+            return;
+        };
+        let idx = qv.active_tab;
+        if let Some(slot) = qv.per_question_freeform.get_mut(idx) {
+            *slot = text;
+        }
     }
     /// Handle mouse events when the question view is active.
     /// Scroll wheel scrolls the options list. Clicks on option rows move the cursor and toggle or select.
@@ -688,6 +729,10 @@ impl AgentView {
                         {
                             self.prompt.refresh_slash(&self.session.models);
                         }
+                        return InputOutcome::Changed;
+                    }
+                    if self.question_view.as_ref().is_some_and(|q| q.is_feedback()) {
+                        self.remember_feedback_report_from_prompt();
                         return InputOutcome::Changed;
                     }
                     self.commit_question_freeform();
@@ -1138,6 +1183,10 @@ impl AgentView {
     pub(crate) fn handle_question_key_for_test(&mut self, key: &KeyEvent) -> InputOutcome {
         self.handle_question_key(key)
     }
+    #[cfg(test)]
+    pub(crate) fn handle_question_mouse_for_test(&mut self, mouse: &MouseEvent) -> InputOutcome {
+        self.handle_question_mouse(mouse)
+    }
     /// Question open: write into its stash, because the question owns the live composer as freeform and its close puts the stash back.
     /// Writing through would first clobber the freeform and then be clobbered by the question's own restore.
     /// Otherwise restore the live composer.
@@ -1162,6 +1211,31 @@ impl AgentView {
         self.record_question_pause(&qv);
         if let Some(kind) = qv.local_kind.take() {
             use crate::views::question_view::LocalQuestionKind;
+            if matches!(kind, LocalQuestionKind::Feedback) {
+                if skipped {
+                    self.restore_card_prompt(qv.stashed_prompt);
+                    self.cleanup_question_state();
+                    return InputOutcome::Changed;
+                }
+                let report = qv
+                    .per_question_freeform
+                    .first()
+                    .map(|text| text.trim().to_string())
+                    .unwrap_or_default();
+                if report.is_empty() {
+                    qv.local_kind = Some(LocalQuestionKind::Feedback);
+                    qv.focus = crate::views::question_view::QuestionFocus::InputMode;
+                    self.question_view = Some(qv);
+                    return InputOutcome::Changed;
+                }
+                self.restore_card_prompt(qv.stashed_prompt);
+                self.cleanup_question_state();
+                return InputOutcome::Action(Action::SendFeedback {
+                    text: report,
+                    images: Default::default(),
+                    trace: None,
+                });
+            }
             let answered_blocked_card = matches!(kind, LocalQuestionKind::PromptBlocked { .. });
             let outcome = match (skipped, kind) {
                 (true, kind @ LocalQuestionKind::PromptBlocked { .. }) => {
@@ -1320,7 +1394,6 @@ mod cancel_turn_mouse_tests {
                 next_queue_id: 0,
                 yolo_mode: false,
                 auto_mode: false,
-                context_only_mode: false,
                 prompt_history: Vec::new(),
                 prompt_history_loading: false,
                 loading_replay: false,

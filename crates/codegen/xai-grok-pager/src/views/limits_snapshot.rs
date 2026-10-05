@@ -20,6 +20,31 @@ use super::credit_bar::{
     AutoTopupInfo, ConsoleTeamPrepaidGap, CreditBalance, SamplingIdentityKind,
 };
 
+#[cfg(feature = "xai-grok-sampling-types")]
+pub use xai_grok_sampling_types::BillingCreditsCard;
+
+/// GetAmountToPay card status. Mirrors `xai-grok-sampling-types` when that
+/// feature is off so `/limits` still type-checks.
+#[cfg(not(feature = "xai-grok-sampling-types"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BillingCreditsCard {
+    Fetched,
+    Error,
+    #[default]
+    NotFetched,
+}
+
+#[cfg(not(feature = "xai-grok-sampling-types"))]
+impl BillingCreditsCard {
+    pub fn as_wire(self) -> &'static str {
+        match self {
+            Self::Fetched => "fetched",
+            Self::Error => "error",
+            Self::NotFetched => "not_fetched",
+        }
+    }
+}
+
 /// Where a SuperGrok free-period included % reading came from.
 ///
 /// Keeps dual unified fill honest: a filled row is not a successful poll of
@@ -289,7 +314,7 @@ pub struct ConsoleMeter {
     pub balance_cents: Option<i64>,
     /// Billing Credits card from GetAmountToPay remaining. Never filled from
     /// [`Self::balance_cents`].
-    pub billing_credits_card: xai_grok_sampling_types::BillingCreditsCard,
+    pub billing_credits_card: BillingCreditsCard,
     /// Remaining USD cents when [`Self::billing_credits_card`] is `fetched`.
     pub billing_credits_cents: Option<i64>,
     /// Why dollars are absent when [`Self::balance_cents`] is `None`.
@@ -588,7 +613,7 @@ impl LimitsSnapshot {
                 // Default gap = missing management key (most common dogfood miss);
                 // wire real gap via [`Self::with_console_prepaid_gap`].
                 balance_cents: None,
-                billing_credits_card: xai_grok_sampling_types::BillingCreditsCard::NotFetched,
+                billing_credits_card: BillingCreditsCard::NotFetched,
                 billing_credits_cents: None,
                 prepaid_gap: ConsoleTeamPrepaidGap::MissingManagementKey,
                 postpaid: None,
@@ -676,14 +701,9 @@ impl LimitsSnapshot {
     }
 
     /// Attach Billing Credits remaining from GetAmountToPay. Not team prepaid.
-    pub fn with_billing_credits(
-        mut self,
-        card: xai_grok_sampling_types::BillingCreditsCard,
-        cents: Option<i64>,
-    ) -> Self {
+    pub fn with_billing_credits(mut self, card: BillingCreditsCard, cents: Option<i64>) -> Self {
         self.console.billing_credits_card = card;
-        self.console.billing_credits_cents =
-            cents.filter(|_| card == xai_grok_sampling_types::BillingCreditsCard::Fetched);
+        self.console.billing_credits_cents = cents.filter(|_| card == BillingCreditsCard::Fetched);
         self
     }
 
@@ -810,7 +830,7 @@ impl LimitsSnapshot {
                 is_live: live_identity.is_console(),
                 key_available: live_identity.is_console(),
                 balance_cents: None,
-                billing_credits_card: xai_grok_sampling_types::BillingCreditsCard::NotFetched,
+                billing_credits_card: BillingCreditsCard::NotFetched,
                 billing_credits_cents: None,
                 prepaid_gap: ConsoleTeamPrepaidGap::MissingManagementKey,
                 postpaid: None,
@@ -1481,12 +1501,12 @@ fn format_console(lines: &mut Vec<String>, c: &ConsoleMeter) {
     lines.push(format!(
         "  Billing Credits card: {}",
         match (c.billing_credits_card, c.billing_credits_cents) {
-            (xai_grok_sampling_types::BillingCreditsCard::Fetched, Some(cents)) => {
+            (BillingCreditsCard::Fetched, Some(cents)) => {
                 fmt_dollars(cents)
             }
-            (xai_grok_sampling_types::BillingCreditsCard::Fetched, None) => "fetched".to_string(),
-            (xai_grok_sampling_types::BillingCreditsCard::Error, _) => "fetch failed".to_string(),
-            (xai_grok_sampling_types::BillingCreditsCard::NotFetched, _) => {
+            (BillingCreditsCard::Fetched, None) => "fetched".to_string(),
+            (BillingCreditsCard::Error, _) => "fetch failed".to_string(),
+            (BillingCreditsCard::NotFetched, _) => {
                 "not fetched".to_string()
             }
         }
@@ -2889,7 +2909,7 @@ mod tests {
                 is_live: false,
                 key_available: false,
                 balance_cents: None,
-                billing_credits_card: xai_grok_sampling_types::BillingCreditsCard::NotFetched,
+                billing_credits_card: BillingCreditsCard::NotFetched,
                 billing_credits_cents: None,
                 prepaid_gap: ConsoleTeamPrepaidGap::MissingManagementKey,
                 postpaid: None,

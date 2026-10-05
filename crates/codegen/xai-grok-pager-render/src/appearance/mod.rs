@@ -22,7 +22,8 @@ pub use config::{
     AnimationConfig, AppearanceConfig, BlockBackground, BlocksConfig, EditBlockConfig,
     ExecuteHeaderStyle, FollowIndicator, LayoutConfig, PromptConfig, PromptViewConfig,
     RawAltScreenMode, RawAppearanceConfig, RawTerminalConfig, ScrollConfig, ScrollbackConfig,
-    ScrollbarConfig, ToolBullet, ToolConfig, persist_respect_manual_folds,
+    ScrollbackDisplayConfig, ScrollbarConfig, ToolBullet, ToolConfig, persist_bubble_copy_buttons,
+    persist_respect_manual_folds,
 };
 pub use follow_up_behavior::FollowUpBehavior;
 pub use render_mermaid::RenderMermaid;

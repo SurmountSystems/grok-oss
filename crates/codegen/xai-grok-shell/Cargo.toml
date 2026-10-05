@@ -9,11 +9,13 @@ default = []
 dhat-heap = ["dep:dhat"]
 # Session synthesis + in-process e2e harness (`session::testkit`) for soak,
 # load, and bench tests. Off by default; the tests/benches that use it declare
-# it via `required-features`. Forwards login, sampler, and workspace
+# it via `required-features`. Forwards config, login, sampler, and workspace
 # `test-support` so downstream test builds see those crates' test seams
-# (`isolated_spawn_e2e` uses `WorkspaceOps::for_test`).
+# (`isolated_spawn_e2e` uses `WorkspaceOps::for_test`; config exposes
+# `signed_policy::test_seam`).
 test-support = [
     "xai-grok-cloud-config/test-support",
+    "xai-grok-config/test-support",
     "xai-grok-login/test-support",
     "xai-grok-sampler/test-support",
     "xai-grok-workspace/test-support",
@@ -148,8 +150,10 @@ xai-grok-compaction = { path = "../../common/xai-grok-compaction" }
 # Leader lock: bounded flock polling behind the machine-local acquire slot.
 xai-grok-file-lock = { workspace = true }
 xai-grok-sampler = { path = "../xai-grok-sampler" }
-# Session FTS search; owns this crate's only rusqlite/bundled-SQLite use.
+# Session FTS search. grok_oss.db and the token-economy ledger also open SQLite.
 xai-grok-session-search = { workspace = true }
+rusqlite = { version = "0.37", features = ["bundled"] }
+xai-sqlite-journal = { workspace = true }
 xai-token-estimation = { workspace = true }
 xai-grok-sampling-types = { path = "../xai-grok-sampling-types" }
 xai-grok-tools = { path = "../xai-grok-tools" }
@@ -237,7 +241,8 @@ xai-grok-bundle = { workspace = true, features = ["test-support"] }
 xai-grok-memory = { workspace = true, features = ["test-support"] }
 # sandbox-enforce: keep tests running against the enforcing sandbox build.
 xai-grok-workspace = { workspace = true, features = ["test-support", "sandbox-enforce"] }
-xai-grok-config = { workspace = true, features = [] }
+# Signed-policy test seam for integration tests such as team_managed_config.
+xai-grok-config = { workspace = true, features = ["test-support"] }
 # Shell tests call the test-only functions in `xai_grok_cloud_config::settings_get`.
 xai-grok-cloud-config = { workspace = true, features = ["test-support"] }
 tar = { workspace = true }

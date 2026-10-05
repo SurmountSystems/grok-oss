@@ -569,26 +569,6 @@ mod tests {
     #[test]
     fn gate_events_are_the_known_set() {
         use crate::event::GateKind;
-        // Canonicalize first to dedup alias spellings into one set entry
-        // (`traits()` itself already canonicalizes, so it's safe on aliases).
-        let gates: std::collections::HashSet<_> = HookEventName::ALL
-            .iter()
-            .map(|e| e.canonical())
-            .filter(|e| e.traits().gate != GateKind::Observe)
-            .collect();
-        let expected: std::collections::HashSet<_> = [
-            HookEventName::PreToolUse,
-            HookEventName::Stop,
-            HookEventName::SubagentStop,
-        ]
-        .into_iter()
-        .collect();
-        assert_eq!(gates, expected, "gate events changed");
-    }
-
-    #[test]
-    fn gate_events_are_the_known_set() {
-        use crate::event::GateKind;
         // Canonicalize first to dedup alias spellings into one set entry (`traits()` itself already canonicalizes, so it's safe on aliases)
         let gates: std::collections::HashSet<_> = HookEventName::ALL
             .iter()
@@ -1154,33 +1134,6 @@ mod tests {
     }
 
     /// A hook registered under both `SubagentStop` and `SubagentEnd` dedups on the canonical event, so it runs once.
-    #[test]
-    fn deduplicates_hooks_across_alias_spellings() {
-        let dir = tempfile::tempdir().unwrap();
-        let settings = dir.path().join("settings.json");
-        std::fs::write(
-            &settings,
-            r#"{"hooks":{
-                "SubagentStop":[{"hooks":[{"type":"command","command":"notify.sh"}]}],
-                "SubagentEnd":[{"hooks":[{"type":"command","command":"notify.sh"}]}]
-            }}"#,
-        )
-        .unwrap();
-
-        let (registry, errors) =
-            load_hooks_from_sources(&[HookSource::SettingsFile(&settings)], &[]);
-        assert!(errors.is_empty());
-        assert_eq!(
-            registry
-                .hooks_for_canonical(HookEventName::SubagentStop)
-                .len(),
-            1,
-            "alias spelling must not double-register the same hook"
-        );
-    }
-
-    /// A hook registered under both `SubagentStop` and `SubagentEnd` dedups on
-    /// the canonical event, so it runs once.
     #[test]
     fn deduplicates_hooks_across_alias_spellings() {
         let dir = tempfile::tempdir().unwrap();

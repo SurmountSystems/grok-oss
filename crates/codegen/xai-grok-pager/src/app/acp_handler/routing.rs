@@ -112,7 +112,7 @@ pub(super) fn resolve_target_view<'a>(
 /// The only agent that could own such a pre-assignment notification is the one the user just created (necessarily active, `session_id == None`).
 /// Returns `None` when the notification cannot be associated with any agent.
 /// All ACP-notification handlers must route through this function rather than gating on `app.active_view` directly.
-pub(super) fn find_session_match(
+pub(super) fn find_bound_session_match(
     app: &AppView,
     session_id: &acp::SessionId,
 ) -> Option<SessionMatch> {

@@ -262,6 +262,12 @@ impl QualifiedMcpToolHandler {
         };
         Some(Self { tool_id, inner })
     }
+
+    /// One unambiguous `server__tool` id. Two `__` boundaries (`foo___bar`) is `None`.
+    pub fn try_new(qualified_name: String, inner: Arc<dyn ToolServerHandler>) -> Option<Self> {
+        let (tool_id, _, _) = parse_mcp_qualified_name(&qualified_name)?;
+        Some(Self { tool_id, inner })
+    }
 }
 
 #[async_trait]
@@ -1829,10 +1835,17 @@ for line in sys.stdin:
 }
 
 #[cfg(test)]
-mod tests {
+mod qualified_handler_tests {
     use super::*;
     use xai_computer_hub_mcp_adapter::{McpBridge, McpError};
     use xai_tool_protocol::SessionId;
+
+    fn make_bridge_config(session_id: SessionId, namespace: &str) -> McpBridgeConfig {
+        McpBridgeConfig {
+            session_id,
+            namespace: Some(namespace.to_owned()),
+        }
+    }
 
     struct TestTransport;
 

@@ -395,7 +395,6 @@ impl FileSearchState {
     /// Test-only: install a fake context and results snapshot so tests can drive acceptance flows without the background fuzzy daemon.
     ///
     /// Bumps `min_generation` past the seeded generation so any in-flight real daemon poll is rejected and cannot clobber the seeded state.
-    #[cfg(test)]
     pub(crate) fn set_test_state(
         &mut self,
         context: AtContext,

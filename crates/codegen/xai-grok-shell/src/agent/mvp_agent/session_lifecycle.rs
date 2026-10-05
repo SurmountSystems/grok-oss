@@ -132,32 +132,6 @@ impl MvpAgent {
             self.drain_old_session_thread_within(id, stage_budget(deadline, DRAIN_OLD_THREAD_WAIT))
                 .await;
         }
-        if !self.hard_stop_resident(id, CancelTrigger::SessionClose) {
-            return CloseOutcome::NotResident;
-        }
-        drop(intake_guard);
-        self.remove_session_terminal(id, SessionLiveState::Completed);
-        self.drain_old_session_thread_within(id, stage_budget(deadline, DRAIN_OLD_THREAD_WAIT))
-            .await;
-        self.finalize_session_replica(id);
-        CloseOutcome::Closed
-    }
-    /// Cancel the running turn and shut the actor down; `false` when not
-    /// resident. Close finalizes the replica afterward, delete must not.
-    fn hard_stop_resident(&self, id: &acp::SessionId, trigger: CancelTrigger) -> bool {
-        let Some(handle) = self.resident_handle(id) else {
-            return false;
-        };
-        let _ = handle.cmd_tx.send(SessionCommand::Cancel(CancelOptions {
-            cancel_subagents: true,
-            kill_background_tasks: true,
-            trigger: Some(trigger),
-            ..Default::default()
-        }));
-        let _ = handle
-            .cmd_tx
-            .send(SessionCommand::Shutdown(ShutdownKind::CancelRunningTurn));
-        true
     }
     /// Move the replica from `active` to `completed`.
     /// A hosting signal, not a conversation ending: only an explicit close sends it.

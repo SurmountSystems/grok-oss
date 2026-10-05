@@ -40,7 +40,7 @@ impl BatchDreamControl {
         #[cfg(test)]
         if let Some(checks) = &self.remaining_checks
             && checks
-                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
+                .try_update(Ordering::AcqRel, Ordering::Acquire, |value| {
                     value.checked_sub(1)
                 })
                 .is_err()

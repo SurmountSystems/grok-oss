@@ -169,6 +169,9 @@ struct BlockingWait {
 /// Deltas stream continuously during a live write; silence this long means the stream is dead.
 pub(crate) const WRITING_DELTA_STALE_AFTER: std::time::Duration =
     std::time::Duration::from_secs(10);
+/// Continuous argument deltas still drop "Preparing write" after this long.
+/// Silence hide stays [`WRITING_DELTA_STALE_AFTER`] (10 seconds).
+pub(crate) const WRITING_STREAM_MAX: std::time::Duration = std::time::Duration::from_secs(60);
 /// The model is streaming tool-call arguments (xAI `tool_call_delta_chunk`), which reach no scrollback until the canonical `ToolCall` lands.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WritingToolCall {
@@ -421,6 +424,8 @@ pub struct AcpUpdateTracker {
     hooks_running: Option<HooksRunning>,
     /// Set per `ToolCallDeltaChunk` (streaming-only, never persisted, cannot replay).
     writing_tool_call: Option<(WritingToolCall, std::time::Instant)>,
+    /// First delta of the current write stream. Not reset by later deltas.
+    writing_stream_started_at: Option<std::time::Instant>,
     /// Per-`tool_index` names so interleaved deltas can restore a call's name when the stream switches back to it.
     /// `None` marks an index observed before its name arrived (it still ranks for ordinals).
     /// Cleared together with `writing_tool_call`.
@@ -449,6 +454,15 @@ struct PendingTool {
     /// `transfer_timing_from` can't cross variant boundaries (Other to Search, etc.), so refining to the real kind would silently drop the timing.
     /// This field preserves the instant so `set_started_at` can apply it to whatever variant the refined block becomes.
     started_at: Option<std::time::Instant>,
+}
+
+/// A short Write row older than [`WRITING_DELTA_STALE_AFTER`] drops Running chrome.
+fn is_stale_short_write(tool: &PendingTool) -> bool {
+    if !tool.base.title.starts_with("Write") {
+        return false;
+    }
+    tool.started_at
+        .is_some_and(|at| at.elapsed() >= WRITING_DELTA_STALE_AFTER)
 }
 /// Streaming UTF-8 decoder for incremental byte deltas. Without buffering, both halves would be replaced with
 /// U+FFFD by `from_utf8_lossy`, permanently corrupting the character. Only genuinely invalid sequences (not just
@@ -831,11 +845,34 @@ impl AcpUpdateTracker {
         self.writing_stream_started_at
             .is_some_and(|at| at.elapsed() >= WRITING_STREAM_MAX)
     }
+    fn clear_writing_tool_call(&mut self) {
+        self.writing_tool_call = None;
+        self.writing_tool_names.clear();
+        self.writing_stream_started_at = None;
+    }
+    /// Backdate a pending tool's start so a short Write can age out of Running chrome.
+    #[cfg(test)]
+    pub(crate) fn backdate_pending_tool_started_at(
+        &mut self,
+        tool_call_id: &str,
+        age: std::time::Duration,
+    ) {
+        if let Some(pending) = self.pending_tools.get_mut(tool_call_id) {
+            pending.started_at = Some(std::time::Instant::now() - age);
+        }
+    }
     /// Backdate the write's delta stamp (staleness tests).
     #[cfg(test)]
     pub(crate) fn backdate_last_tool_call_delta(&mut self, age: std::time::Duration) {
         if let Some((_, at)) = &mut self.writing_tool_call {
             *at = std::time::Instant::now() - age;
+        }
+    }
+    /// Backdate the stream-cap clock without touching the last-delta stamp.
+    #[cfg(test)]
+    pub(crate) fn backdate_writing_stream_start(&mut self, age: std::time::Duration) {
+        if self.writing_stream_started_at.is_some() {
+            self.writing_stream_started_at = Some(std::time::Instant::now() - age);
         }
     }
     /// Backdate the armed hook phase past the reveal delay without touching its batch identity (handler tests).
@@ -1131,7 +1168,7 @@ impl AcpUpdateTracker {
 
     fn close_turn(&mut self, scrollback: &mut ScrollbackState, aborted: bool) {
         self.epoch_at_last_finish = self.agent_output_epoch;
-        self.finish_thinking(scrollback);
+        self.finish_thinking(scrollback, aborted);
         scrollback.note_pin_reserve_turn_finished();
         if let Some(agent_id) = self.current_agent_msg.take() {
             scrollback.finish_running(agent_id);
@@ -1166,7 +1203,17 @@ impl AcpUpdateTracker {
     /// Finish the current thinking block, passing elapsed time to the entry.
     /// Empty thinking blocks (pre-created but never received content) are removed from scrollback; they'd show a misleading "Thought for 0.0s".
     /// Only blocks that received actual thinking tokens are kept.
-    fn finish_thinking(&mut self, scrollback: &mut ScrollbackState) {
+    fn peel_user_facing_draft_from_current_thinking(&mut self, scrollback: &mut ScrollbackState) {
+        let Some(thinking_id) = self.current_thinking else {
+            return;
+        };
+        if let Some(entry) = scrollback.get_by_id_mut(thinking_id)
+            && let RenderBlock::Thinking(thought) = &mut entry.block
+        {
+            thought.strip_trailing_user_facing_draft();
+        }
+    }
+    fn finish_thinking(&mut self, scrollback: &mut ScrollbackState, aborted: bool) {
         if let Some(thinking_id) = self.current_thinking.take() {
             let mut omit = false;
             if let Some(entry) = scrollback.get_by_id_mut(thinking_id)
@@ -1392,7 +1439,11 @@ impl AcpUpdateTracker {
         if let Some(pending) = self.pending_tools.remove(&tc_id) {
             if is_completed {
                 if let Some(entry_id) = pending.entry_id {
-                    let block = tool_call_to_block(&tc, self.session_cwd.as_deref());
+                    let block = tool_call_to_block(
+                        &tc,
+                        self.session_cwd.as_deref(),
+                        &self.subagent_labels.borrow(),
+                    );
                     if scrollback.replace_tool_block(entry_id, block, pending.started_at)
                         && let Some(entry) = scrollback.get_by_id(entry_id)
                     {
@@ -1401,7 +1452,11 @@ impl AcpUpdateTracker {
                     scrollback.finish_running(entry_id);
                     self.try_coalesce_edit(entry_id, scrollback, is_replay);
                 } else {
-                    let block = tool_call_to_block(&tc, self.session_cwd.as_deref());
+                    let block = tool_call_to_block(
+                        &tc,
+                        self.session_cwd.as_deref(),
+                        &self.subagent_labels.borrow(),
+                    );
                     self.finish_completed_tool(block, scrollback, is_replay);
                 }
                 return true;

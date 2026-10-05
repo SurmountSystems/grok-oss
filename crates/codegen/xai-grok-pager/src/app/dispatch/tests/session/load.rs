@@ -1061,7 +1061,6 @@ fn session_loaded_docks_when_composer_holds_view_plan_slash() {
         let agent = app.agents.get_mut(&id).unwrap();
         agent.plan_mode_active = true;
         agent.prompt.set_text("/view-plan");
-        agent.latest_inline_plan_content = Some("# Composer slash at bind\n".into());
     }
     dispatch(
         Action::TaskComplete(TaskResult::SessionLoaded {
@@ -1073,6 +1072,7 @@ fn session_loaded_docks_when_composer_holds_view_plan_slash() {
             restore_degree: None,
             running_prompt_id: None,
             scheduler_background_loops: None,
+            modes: None,
         }),
         &mut app,
     );
@@ -1176,6 +1176,7 @@ fn a_restored_transcript_stays_recallable_after_a_failed_fetch() {
             restore_summary: None,
             restore_degree: None,
             running_prompt_id: None,
+            scheduler_background_loops: None,
         }),
         &mut app,
     );
@@ -1766,6 +1767,7 @@ fn session_loaded_after_timeout_warning_drains_queued_prompt() {
             restore_degree: None,
             running_prompt_id: None,
             scheduler_background_loops: None,
+            modes: None,
         }),
         &mut app,
     );

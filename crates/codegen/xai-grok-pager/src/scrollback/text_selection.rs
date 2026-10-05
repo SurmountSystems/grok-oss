@@ -1254,10 +1254,7 @@ const TRAILING_URL_PUNCT: &[char] = &['.', ',', ':', ';', '!', '?', ')', ']', '}
 fn strip_trailing_url_punctuation(url: &str) -> &str {
     let mut end = url.len();
 
-    loop {
-        let Some(prefix) = url.get(..end) else {
-            break;
-        };
+    while let Some(prefix) = url.get(..end) {
         let last = match prefix.chars().next_back() {
             Some(c) if TRAILING_URL_PUNCT.contains(&c) => c,
             _ => break,

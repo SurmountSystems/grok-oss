@@ -1,4 +1,5 @@
 use super::*;
+use crate::compaction_repetition::{REPETITIVE_ASSISTANT_OMITTED, is_repetitive_generation};
 use xai_grok_sampling_types::SyntheticReason;
 use xai_grok_sampling_types::{BackendToolCallItem, BackendToolKind, rs};
 fn at<T>(xs: &[T], i: usize) -> &T {

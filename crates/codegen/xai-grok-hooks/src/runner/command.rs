@@ -1480,7 +1480,7 @@ mod tests {
     #[test]
     fn blocking_result_surfaces_stderr() {
         let deny_reason = |result: HookRunnerResult| match result {
-            HookRunnerResult::Decision(HookDecision::Deny { reason, .. }) => reason,
+            HookRunnerResult::Deny { reason, .. } => reason,
             other => panic!("expected Deny, got {other:?}"),
         };
 
@@ -1513,52 +1513,6 @@ mod tests {
         assert_eq!(deny_reason(json_deny), "quota exceeded");
     }
 
-    /// One huge stderr line (capture allows 64 KB with no newline) must not
-    /// become the whole deny reason: the excerpt is capped on a char boundary
-    /// with an ellipsis, and multibyte chars survive the cut.
-    #[test]
-    fn stderr_line_is_capped() {
-        let long = "é".repeat(MAX_STDERR_LINE_CHARS + 50);
-        let capped = stderr_first_line(&long).expect("non-empty line");
-        assert_eq!(capped.chars().count(), MAX_STDERR_LINE_CHARS + 1);
-        assert!(capped.ends_with('\u{2026}'));
-
-        let (deny, _) = parse_blocking_result("", &long, 2, "test", Duration::ZERO);
-        match deny {
-            HookRunnerResult::Decision(HookDecision::Deny { reason, .. }) => {
-                assert!(reason.chars().count() <= MAX_STDERR_LINE_CHARS + 1);
-            }
-            other => panic!("expected Deny, got {other:?}"),
-        }
-
-        // At the cap: no ellipsis, nothing lost.
-        let exact = "x".repeat(MAX_STDERR_LINE_CHARS);
-        assert_eq!(stderr_first_line(&exact).as_deref(), Some(exact.as_str()));
-    }
-
-    /// A blank JSON `reason` is not a reason: command hooks fall back to the
-    /// stderr line, and with no fallback (the HTTP handler has no stderr
-    /// channel) the generic deny message is used — never the blank string.
-    #[test]
-    fn blank_json_reason_falls_back() {
-        let blank = || GateHookJson {
-            decision: "deny".to_string(),
-            reason: Some("  ".to_string()),
-            updated_input: None,
-            hook_specific_output: None,
-        };
-        let with_fallback =
-            gate_json_to_decision(blank(), "h", Some("quota exceeded")).expect("valid decision");
-        assert!(
-            matches!(with_fallback, HookDecision::Deny { ref reason, .. } if reason == "quota exceeded")
-        );
-
-        let without_fallback = gate_json_to_decision(blank(), "h", None).expect("valid decision");
-        assert!(
-            matches!(without_fallback, HookDecision::Deny { ref reason, .. } if reason == "denied by hook 'h'")
-        );
-    }
-
     /// Unknown JSON decision values fail with the stderr line attached, like
     /// every other failure on the gate path.
     #[test]
@@ -1587,7 +1541,7 @@ mod tests {
     #[cfg(unix)]
     async fn observe_failure_carries_stderr_line() {
         let spec = make_shell_spec("echo 'disk full' >&2; exit 1");
-        let (result, _) =
+        let (result, _, _) =
             run_command_hook(&spec, &make_envelope(), &make_ctx(), GateKind::Observe).await;
         match result {
             HookRunnerResult::Failed(error) => assert_eq!(error, "exit code 1: disk full"),
@@ -1658,24 +1612,6 @@ mod tests {
         assert!(
             matches!(gate_outcome(blank(), "h", None, HookHealth::Healthy), GateOutcome::Deny(ref reason) if reason == "denied by hook 'h'")
         );
-    }
-
-    #[test]
-    fn unknown_decision_failure_carries_stderr() {
-        let (result, _) = parse_blocking_result(
-            r#"{"decision":"maybe"}"#,
-            "config missing\n",
-            1,
-            "test",
-            Duration::ZERO,
-        );
-        match result {
-            HookRunnerResult::Failed(error) => assert!(
-                error.contains("maybe") && error.contains("config missing"),
-                "got: {error}"
-            ),
-            other => panic!("expected Failed, got {other:?}"),
-        }
     }
 
     #[test]

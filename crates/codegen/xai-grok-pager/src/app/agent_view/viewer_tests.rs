@@ -1239,7 +1239,7 @@ fn focused_plan_comment_box_inserts_y_instead_of_copy() {
         "inserting y must not Approve or Exit"
     );
     let labels: Vec<String> = agent
-        .current_shortcut_hints(&ActionRegistry::defaults(), false)
+        .current_shortcut_hints(&ActionRegistry::defaults())
         .iter()
         .map(|hint| hint.label.to_string())
         .collect();
@@ -2582,7 +2582,7 @@ fn isolated_preview_handle_input_running_turn_draft_ctrl_c_does_not_cancel_turn(
         agent.plan_approval_view.is_some() && agent.line_viewer.is_some(),
         "first Ctrl+C must not Exit Isolated Preview while the turn is running"
     );
-    assert_eq!(agent.session.state, AgentState::TurnRunning);
+    assert!(matches!(agent.session.state, AgentState::TurnRunning));
 }
 
 /// Leftover Isolated Preview after Plan Exit: first Ctrl+C with text
@@ -2633,11 +2633,11 @@ fn isolated_preview_unique_model_tab_switches_now_does_not_rowwalk() {
         &ActionRegistry::defaults(),
     );
     match outcome {
-        InputOutcome::Action(Action::SwitchModel { model_id, effort }) => {
+        InputOutcome::Action(Action::SwitchModel(choice)) => {
             use agent_client_protocol as acp;
             use std::sync::Arc;
-            assert_eq!(model_id, acp::ModelId::new(Arc::from("grok-4.6")));
-            assert_eq!(effort, None);
+            assert_eq!(choice.model_id, acp::ModelId::new(Arc::from("grok-4.6")));
+            assert_eq!(choice.effort, None);
         }
         other => panic!(
             "Operator: Isolated Preview unique /model Tab must SwitchModel now, not {other:?}; prompt={:?}",

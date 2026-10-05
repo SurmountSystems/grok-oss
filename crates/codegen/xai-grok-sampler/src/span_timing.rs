@@ -201,7 +201,6 @@ impl StreamSpanTiming {
         self.open_segment(stream_setup);
     }
 
-    #[must_use]
     pub(crate) fn hold_until_first_content<T>(
         mut self,
         stream: BoxStream<'static, Result<T>>,

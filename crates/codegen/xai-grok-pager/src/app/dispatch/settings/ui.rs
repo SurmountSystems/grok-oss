@@ -1,20 +1,24 @@
 //! Settings UI: command palette, settings modal, toggles, resets, and rollback.
 
 use super::setters::{
-    pr13_effective_default, set_ask_user_question_timeout_enabled_inner,
+    pr13_effective_default, set_allow_session_multiline_inner, set_allow_worktree_inner,
+    set_always_expand_thinking_inner, set_ask_user_question_timeout_enabled_inner,
     set_auto_compact_threshold_percent_inner, set_auto_compact_threshold_tokens_inner,
     set_auto_dark_theme_inner, set_auto_light_theme_inner, set_auto_run_implement_inner,
     set_auto_update_inner, set_bubble_copy_buttons_inner, set_collapsed_edit_blocks_inner,
     set_combine_queued_prompts_inner, set_compact_mode, set_compact_mode_inner,
-    set_contextual_hint_inner, set_default_model_inner, set_default_selected_permission_inner,
+    set_composer_multiline_inner, set_confirm_before_rewind_inner, set_contextual_hint_inner,
+    set_default_model_inner, set_default_selected_permission_inner,
     set_display_refresh_auto_cadence_inner, set_economic_mode_inner,
-    set_features_session_recap_inner, set_fork_secondary_model_inner, set_group_tool_verbs_inner,
-    set_hide_header_inner, set_hunk_tracker_mode_inner, set_invert_scroll_inner,
-    set_keep_text_selection_inner, set_max_thoughts_width_inner, set_multiline_mode,
-    set_notifications_session_recap_inner, set_notifications_session_recap_threshold_secs_inner,
-    set_page_flip_on_send_inner, set_prompt_suggestions_inner, set_remember_tool_approvals_inner,
-    set_render_mermaid_inner, set_respect_manual_folds_inner, set_screen_mode_inner,
-    set_scroll_lines_inner, set_scroll_mode_inner, set_scroll_speed_inner,
+    set_features_session_recap_inner, set_follow_up_behavior_inner, set_fork_secondary_model_inner,
+    set_group_tool_verbs_inner, set_hide_header_inner, set_hunk_tracker_mode_inner,
+    set_invert_scroll_inner, set_keep_text_selection_inner, set_max_thoughts_width_inner,
+    set_multiline_mode, set_notifications_session_recap_inner,
+    set_notifications_session_recap_threshold_secs_inner, set_page_flip_on_send_inner,
+    set_plan_approval_park_inner, set_process_rule_reminders_enabled_inner,
+    set_process_rule_reminders_inner, set_prompt_suggestions_inner,
+    set_remember_tool_approvals_inner, set_render_mermaid_inner, set_respect_manual_folds_inner,
+    set_screen_mode_inner, set_scroll_lines_inner, set_scroll_mode_inner, set_scroll_speed_inner,
     set_scrub_ascii_punct_inner, set_show_thinking_blocks_inner, set_show_tips_inner,
     set_simple_mode_inner, set_theme_inner, set_timeline_inner, set_timestamps,
     set_timestamps_inner, set_turbo_planning_inner, set_ulid_session_ids_inner, set_vim_mode_inner,
@@ -57,6 +61,12 @@ pub(crate) fn refresh_open_settings_modals(app: &mut AppView) {
     let auto_update_from_app = app.auto_update;
     let auto_compact_from_app = app.auto_compact_threshold_percent;
     let auto_compact_tokens_from_app = app.auto_compact_threshold_tokens;
+    let notifications_session_recap_from_app = app.notification_service.config().session_recap;
+    let notifications_session_recap_threshold_from_app = app
+        .notification_service
+        .config()
+        .session_recap_threshold_secs;
+    let features_session_recap_from_app = app.session_recap_available;
     let respect_manual_folds_from_app = app.appearance.scrollback.scroll.respect_manual_folds;
     let auto_mode_gate_from_app = app.auto_mode_gate;
     let ask_user_question_timeout_enabled_from_app = app.ask_user_question_timeout_enabled;
@@ -79,7 +89,6 @@ pub(crate) fn refresh_open_settings_modals(app: &mut AppView) {
                 multiline_mode: agent.multiline_mode,
                 yolo_mode: agent.session.is_yolo(),
                 auto_mode: agent.session.is_auto(),
-                context_only_mode: agent.session.is_context_only(),
                 current_model_name: agent.session.models.current_model_name(),
                 available_models: agent
                     .session
@@ -107,6 +116,14 @@ pub(crate) fn refresh_open_settings_modals(app: &mut AppView) {
                 ask_user_question_timeout_enabled: ask_user_question_timeout_enabled_from_app,
                 voice_stt_language: voice_stt_language_from_app.clone(),
                 subagent_model_inheritance: subagent_model_inheritance_from_app,
+                context_only_mode: !agent.session.is_yolo()
+                    && !agent.session.is_auto()
+                    && matches!(
+                        app.current_ui.permission_mode.as_deref(),
+                        Some("context-only")
+                    ),
+                default_reasoning_effort: app.default_reasoning_effort.clone(),
+                scheduler_background_loops: app.scheduler_background_loops_seed,
             };
             if coding_data_sharing_lock_from_app.is_some()
                 && matches!(
@@ -208,6 +225,12 @@ pub(in crate::app::dispatch) fn dispatch_open_settings(
     let auto_update_from_app = app.auto_update;
     let auto_compact_from_app = app.auto_compact_threshold_percent;
     let auto_compact_tokens_from_app = app.auto_compact_threshold_tokens;
+    let notifications_session_recap_from_app = app.notification_service.config().session_recap;
+    let notifications_session_recap_threshold_from_app = app
+        .notification_service
+        .config()
+        .session_recap_threshold_secs;
+    let features_session_recap_from_app = app.session_recap_available;
     let respect_manual_folds_from_app = app.appearance.scrollback.scroll.respect_manual_folds;
     let auto_mode_gate_from_app = app.auto_mode_gate;
     let ask_user_question_timeout_enabled_from_app = app.ask_user_question_timeout_enabled;
@@ -243,7 +266,6 @@ pub(in crate::app::dispatch) fn dispatch_open_settings(
         multiline_mode: agent.multiline_mode,
         yolo_mode: agent.session.is_yolo(),
         auto_mode: agent.session.is_auto(),
-        context_only_mode: agent.session.is_context_only(),
         current_model_name: agent.session.models.current_model_name(),
         available_models: agent
             .session
@@ -270,6 +292,14 @@ pub(in crate::app::dispatch) fn dispatch_open_settings(
         ask_user_question_timeout_enabled: ask_user_question_timeout_enabled_from_app,
         voice_stt_language: voice_stt_language_from_app,
         subagent_model_inheritance: subagent_model_inheritance_from_app,
+        context_only_mode: !agent.session.is_yolo()
+            && !agent.session.is_auto()
+            && matches!(
+                app.current_ui.permission_mode.as_deref(),
+                Some("context-only")
+            ),
+        default_reasoning_effort: app.default_reasoning_effort.clone(),
+        scheduler_background_loops: app.scheduler_background_loops_seed,
     };
     let mut state = Box::new(SettingsModalState::new_with_row_visibility(
         registry,
@@ -645,7 +675,6 @@ pub(crate) fn build_pager_snapshot(app: &AppView) -> crate::settings::PagerLocal
         multiline_mode: agent_multiline_mode(app),
         yolo_mode: agent_yolo_mode(app),
         auto_mode: agent_auto_mode(app),
-        context_only_mode: agent_context_only_mode(app),
         current_model_name: agent_current_model_name(app),
         available_models: agent_available_models(app),
         coding_data_sharing_opt_out: app.coding_data_retention_opt_out,
@@ -655,6 +684,12 @@ pub(crate) fn build_pager_snapshot(app: &AppView) -> crate::settings::PagerLocal
         auto_update: app.auto_update,
         auto_compact_threshold_percent: app.auto_compact_threshold_percent,
         auto_compact_threshold_tokens: app.auto_compact_threshold_tokens,
+        notifications_session_recap: app.notification_service.config().session_recap,
+        notifications_session_recap_threshold_secs: app
+            .notification_service
+            .config()
+            .session_recap_threshold_secs,
+        features_session_recap: app.session_recap_available,
         vim_mode: crate::appearance::cache::load_vim_mode(),
         scroll_speed: crate::appearance::cache::load_scroll_speed(),
         respect_manual_folds: app.appearance.scrollback.scroll.respect_manual_folds,
@@ -662,6 +697,14 @@ pub(crate) fn build_pager_snapshot(app: &AppView) -> crate::settings::PagerLocal
         ask_user_question_timeout_enabled: app.ask_user_question_timeout_enabled,
         voice_stt_language: app.voice_config.language.clone(),
         subagent_model_inheritance: app.subagent_model_inheritance,
+        context_only_mode: !agent_yolo_mode(app)
+            && !agent_auto_mode(app)
+            && matches!(
+                app.current_ui.permission_mode.as_deref(),
+                Some("context-only")
+            ),
+        default_reasoning_effort: app.default_reasoning_effort.clone(),
+        scheduler_background_loops: app.scheduler_background_loops_seed,
     }
 }
 

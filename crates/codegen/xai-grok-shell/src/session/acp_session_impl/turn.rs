@@ -645,6 +645,7 @@ impl SessionActor {
                     availability,
                     skill_rewrite,
                     &named_workflows,
+                    super::spawn::loop_fire_mode_from_env(),
                 );
                 (resolved, slash_skills, Some(workflow_registry))
             }
@@ -1567,34 +1568,6 @@ impl SessionActor {
                 })
                 .await;
             }
-            Ok(TurnOutcome::StationarityEnded { .. }) => {
-                self.emit_turn_ended(
-                    crate::session::events::TurnOutcomeLabel::Completed,
-                    None,
-                    None,
-                );
-                self.send_after_turn_event(xai_tool_protocol::turn_hook::AfterTurnPayload {
-                    turn_number: current_prompt_index as u64,
-                    outcome: xai_tool_protocol::turn_hook::TurnHookOutcome::Completed,
-                    duration_ms: turn_duration_ms,
-                    tool_call_count: turn_tool_count,
-                    model_id: turn_model_id.clone(),
-                    written_repo_paths: Vec::new(),
-                    cancellation_category: Some("action_stationarity".to_string()),
-                    cancellation_context: None,
-                })
-                .await;
-                xai_grok_telemetry::session_ctx::log_event(
-                    xai_grok_telemetry::events::TurnCompleted {
-                        outcome: xai_grok_telemetry::events::Outcome::Completed,
-                        duration_ms: turn_duration_ms,
-                        tool_call_count: turn_tool_count,
-                        model_id: turn_model_id,
-                        cancellation_category: Some("action_stationarity".to_string()),
-                        error_category: None,
-                    },
-                );
-            }
             Ok(TurnOutcome::Cancelled { category, context }) => {
                 let context_json = context.as_ref().and_then(|c| serde_json::to_value(c).ok());
                 self.emit_turn_ended(
@@ -1633,14 +1606,15 @@ impl SessionActor {
                 self.dispatch_hook(
                     xai_grok_hooks::event::HookEventName::StopCancelled,
                     xai_grok_hooks::event::HookPayload::StopCancelled {
-                        reason: "max_turns".to_string(),
-                        stop_hook_active: false,
+                        reason: xai_grok_hooks::event::StopCancelledReason::MaxTurns,
+                        cancelled_by: xai_grok_hooks::event::StopCancelledReason::MaxTurns
+                            .cancelled_by(),
+                        cancel_trigger: None,
+                        reason_details: None,
                         last_assistant_message: None,
-                        background_tasks: None,
-                        session_crons: None,
+                        subagent_type: None,
                     },
                     Some(prompt_id),
-                    None,
                 )
                 .await;
                 self.send_after_turn_event(xai_tool_protocol::turn_hook::AfterTurnPayload {
@@ -2540,6 +2514,10 @@ impl SessionActor {
             tracing::warn!(?e, "session usage persist failed");
         }
     }
+    fn is_compact_cancelled_error(err: &acp::Error) -> bool {
+        crate::session::helpers::session_compact::compact_error_kind(err)
+            == Some(crate::session::helpers::session_compact::CompactErrorKind::Cancelled)
+    }
     /// Shared round-completion bookkeeping (plan cleanup, cancel-streak reset, token sums, feedback prompt).
     /// Runs identically for the native and StructuredOutput-tool completion paths.
     /// The turn-end snapshot is taken once per turn after the last round (`take_completed_turn_snapshot`), and the analytics delta posts from the turn's terminal.
@@ -2787,6 +2765,7 @@ impl SessionActor {
         let mut turn_span_totals = TurnSpanTotals::default();
         let mut structured_output_retries: u32 = 0;
         let mut media_gen_resamples: u32 = 0;
+        let mut overflow_compacted = false;
         let structured_output_validator = json_schema.as_ref().map(|schema| {
             jsonschema::validator_for(schema).map_err(|e| format!("invalid output schema: {e}"))
         });
@@ -2945,9 +2924,10 @@ impl SessionActor {
                 if Self::is_compact_cancelled_error(&e) {
                     return Ok(TurnOutcome::Cancelled {
                         category: Some(crate::session::events::CancellationCategory::MidTurnAbort),
-                        context: Some(serde_json::json!({
-                            "reason": "auto_compact_cancelled",
-                        })),
+                        context: Some(crate::session::commands::CancellationContext {
+                            reason: Some("auto_compact_cancelled".to_string()),
+                            ..Default::default()
+                        }),
                     });
                 }
                 if Self::is_auth_compact_error(&e) {
@@ -3076,8 +3056,6 @@ impl SessionActor {
                 })),
             );
             let mut request = request;
-            request.estimated_input_tokens =
-                Some(self.chat_state_handle.get_estimated_total_tokens().await);
             request.x_grok_session_id = Some(self.session_info.id.to_string());
             request.x_grok_turn_idx =
                 Some(self.chat_state_handle.get_prompt_index().await.to_string());
@@ -3264,19 +3242,16 @@ impl SessionActor {
                         session_id = %self.session_info.id,
                         "L3 nested window is full after sample; ending child without compact"
                     );
-                    let snapshot = self
-                        .finalize_turn_bookkeeping(
-                            req_id,
-                            conv_turn_start,
-                            &turn_span_totals,
-                            model_fingerprint.clone(),
-                        )
-                        .await;
+                    self.finalize_turn_bookkeeping(
+                        req_id,
+                        std::mem::take(&mut turn_span_totals),
+                        turn_sampling,
+                    )
+                    .await;
                     return Ok(TurnOutcome::Completed {
-                        snapshot: Box::new(snapshot),
                         tools_called: turn_tools_called,
                         structured_output: None,
-                        refusal: None,
+                        stop: CompletedStop::EndTurn,
                     });
                 }
                 Ok(SamplerTurnOutcome::RefreshAuthAndResubmit { credential, store }) => {
@@ -3979,9 +3954,10 @@ impl SessionActor {
                             category: Some(
                                 crate::session::events::CancellationCategory::MidTurnAbort,
                             ),
-                            context: Some(serde_json::json!({
-                                "reason": "auto_compact_cancelled",
-                            })),
+                            context: Some(crate::session::commands::CancellationContext {
+                                reason: Some("auto_compact_cancelled".to_string()),
+                                ..Default::default()
+                            }),
                         });
                     }
                     if Self::is_auth_compact_error(&e) {
@@ -3995,19 +3971,16 @@ impl SessionActor {
                     session_id = %self.session_info.id,
                     "nested window is full after tools; ending child without compact"
                 );
-                let snapshot = self
-                    .finalize_turn_bookkeeping(
-                        req_id,
-                        conv_turn_start,
-                        &turn_span_totals,
-                        model_fingerprint.clone(),
-                    )
-                    .await;
+                self.finalize_turn_bookkeeping(
+                    req_id,
+                    std::mem::take(&mut turn_span_totals),
+                    turn_sampling,
+                )
+                .await;
                 return Ok(TurnOutcome::Completed {
-                    snapshot: Box::new(snapshot),
                     tools_called: turn_tools_called,
                     structured_output: None,
-                    refusal: None,
+                    stop: CompletedStop::EndTurn,
                 });
             }
         }

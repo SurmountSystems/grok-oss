@@ -259,7 +259,7 @@ fn set_permission_mode_context_only_persists() {
     assert!(!agent_ref(&app, AgentId(0)).session.is_yolo());
     assert!(!agent_ref(&app, AgentId(0)).session.is_auto());
     assert!(
-        agent_ref(&app, AgentId(0)).session.is_context_only(),
+        app.current_ui.permission_mode.as_deref() == Some("context-only"),
         "session flag must be on after ContextOnly"
     );
     assert_eq!(

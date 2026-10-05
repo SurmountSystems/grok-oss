@@ -46,6 +46,50 @@ impl DrainedToolSuccess {
     }
 }
 
+/// Write extracted image bytes under `dir`. `None` when the directory or file cannot be created.
+pub(super) fn persist_extracted_tool_image(mime: &str, data: &str, dir: &Path) -> Option<PathBuf> {
+    std::fs::create_dir_all(dir).ok()?;
+    let bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, data)
+        .unwrap_or_else(|_| data.as_bytes().to_vec());
+    let ext = match mime {
+        "image/jpeg" | "image/jpg" => "jpg",
+        "image/gif" => "gif",
+        "image/webp" => "webp",
+        _ => "png",
+    };
+    let path = dir.join(format!("image-{}.{ext}", uuid::Uuid::new_v4()));
+    std::fs::write(&path, bytes).ok()?;
+    Some(path)
+}
+
+/// Parent turns stay text-only. A nested grok-oss turn may attach a `file://` part.
+pub(super) fn parent_or_nested_tool_image_part(saved: &Path, parent: bool) -> Option<ContentPart> {
+    if parent {
+        None
+    } else {
+        let url = format!("file://{}", saved.display());
+        Some(ContentPart::Image {
+            url: std::sync::Arc::<str>::from(url),
+        })
+    }
+}
+
+/// User reminder naming the saved file. Parent items carry no image part and no data URL.
+pub(super) fn extracted_image_followup(
+    saved: &Path,
+    parent: bool,
+) -> xai_grok_sampling_types::ConversationItem {
+    let text = format!(
+        "[Image extracted from tool result above]\nSaved to {}",
+        saved.display()
+    );
+    let mut item = xai_grok_sampling_types::ConversationItem::user(text);
+    if let Some(ContentPart::Image { url }) = parent_or_nested_tool_image_part(saved, parent) {
+        item.add_image(url.to_string());
+    }
+    item
+}
+
 /// On a multimodal harness the tool-layer images join the vision follow-up.
 /// On a text-only harness they are dropped; the output text keeps only the placeholders.
 pub(super) fn split_tool_layer_for_harness(

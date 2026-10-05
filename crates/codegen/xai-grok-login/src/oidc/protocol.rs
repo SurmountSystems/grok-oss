@@ -89,7 +89,7 @@ pub fn with_alpha_test_key(builder: reqwest::RequestBuilder, url: &str) -> reqwe
     let _ = url;
     builder
 }
-pub(crate) fn is_configured(config: &GrokComConfig) -> bool {
+pub fn is_configured(config: &GrokComConfig) -> bool {
     config.oidc.is_some()
 }
 /// Peek at the unverified access token JWT to extract the `principal_type` and `principal_id` chosen during the consent screen.
@@ -456,7 +456,6 @@ pub(super) async fn refresh_tokens(
         principal_id = ?principal_id,
         "OIDC: refreshing token"
     );
-    let probe = super::refresh::SuspendProbe::start();
     (|| {
         refresh_tokens_once(
             token_endpoint,
@@ -471,12 +470,12 @@ pub(super) async fn refresh_tokens(
         if !is_transient_refresh_error(err) {
             return false;
         }
-        if probe.straddled_past_grace() {
+        if exchange_probe.straddled_past_grace() {
             xai_grok_telemetry::unified_log::warn(
                 "auth.refresh.retry_suppressed_suspend",
                 None,
                 Some(serde_json::json!({
-                    "suspended_ms": probe.suspended_ms(),
+                    "suspended_ms": exchange_probe.suspended_ms(),
                     "error": err.to_string(),
                 })),
             );

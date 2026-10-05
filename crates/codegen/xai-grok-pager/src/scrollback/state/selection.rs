@@ -488,6 +488,16 @@ impl ScrollbackState {
         }
     }
 
+    /// True when any foldable thinking block is not expanded, so the next
+    /// toggle opens thoughts. All-expanded (or none) means the next toggle collapses.
+    fn next_thinking_should_expand(&self) -> bool {
+        self.entries.values().any(|entry| {
+            matches!(entry.block, RenderBlock::Thinking(_))
+                && entry.block.is_foldable()
+                && entry.display_mode != DisplayMode::Expanded
+        })
+    }
+
     /// Toggle expand/collapse for all thinking blocks only. Otherwise collapse all thinking blocks. Also sets
     /// `thinking_display_mode` so that future thinking blocks adopt the chosen mode when they finish running.
     pub fn expand_all_thinking(&mut self) {

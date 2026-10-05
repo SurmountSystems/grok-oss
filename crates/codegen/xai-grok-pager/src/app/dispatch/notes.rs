@@ -9,7 +9,7 @@ use crate::app::agent_view::{AgentView, PromptInputMode};
 use crate::app::app_view::{ActiveView, AppView};
 use crate::scrollback::block::RenderBlock;
 use crate::scrollback::blocks::{SessionEvent, ToolCallBlock};
-use crate::views::question_view::{LocalQuestionKind, QuestionViewState};
+use crate::views::question_view::{LocalQuestionKind, Question, QuestionFocus, QuestionViewState};
 use std::sync::atomic::{AtomicU64, Ordering};
 use xai_grok_feedback::{
     FeedbackDraftStore, FeedbackSource, FeedbackTaxonomy, derive_title, structured_feedback,
@@ -27,6 +27,9 @@ fn next_rewrite_nonce() -> u64 {
 pub(crate) const FEEDBACK_THANKS_NOTICE: &str =
     "Thanks for the feedback! The Grok Build team is on it.";
 
+/// Pane label for bare `/feedback`. Guidance stays the composer placeholder.
+pub(crate) const FEEDBACK_QUESTION_LABEL: &str = "Feedback";
+
 /// Minimal mode cannot show a toast, so the notice goes to the transcript instead.
 fn feedback_notice(app: &mut AppView, message: &str) {
     if app.screen_mode.is_minimal() {
@@ -38,6 +41,44 @@ fn feedback_notice(app: &mut AppView, message: &str) {
     } else {
         app.show_toast(message);
     }
+}
+
+/// Bare `/feedback` opens a freeform question pane and parks the composer draft.
+/// A missing session or a surface that already owns the keyboard refuses without opening.
+pub(super) fn dispatch_open_feedback_pane(app: &mut AppView) -> Vec<Effect> {
+    let ActiveView::Agent(id) = app.active_view else {
+        return vec![];
+    };
+    let blocked = {
+        let Some(agent) = app.agents.get(&id) else {
+            return vec![];
+        };
+        if agent.session.session_id.is_none() {
+            Some(NO_SESSION_NOTICE)
+        } else {
+            agent.feedback_modal_open_blocker()
+        }
+    };
+    if let Some(message) = blocked {
+        feedback_notice(app, message);
+        return vec![];
+    }
+    let Some(agent) = app.agents.get_mut(&id) else {
+        return vec![];
+    };
+    let stashed = agent.prompt.stash();
+    agent.prompt.set_text("");
+    let question = Question {
+        question: FEEDBACK_QUESTION_LABEL.to_string(),
+        options: Vec::new(),
+        multi_select: Some(false),
+        id: None,
+    };
+    let mut qv = QuestionViewState::new("feedback".into(), vec![question], stashed)
+        .with_local_kind(LocalQuestionKind::Feedback);
+    qv.focus = QuestionFocus::InputMode;
+    agent.question_view = Some(qv);
+    vec![]
 }
 
 /// Open the feedback modal (every screen mode; minimal hosts it in its live band).
@@ -1250,7 +1291,30 @@ pub(super) fn dispatch_show_notes(app: &mut AppView) -> Vec<Effect> {
         && let Some(agent) = app.agents.get_mut(&id)
     {
         agent.prompt.set_text("");
-        let text = crate::app::status_blocks::notes_block_text(agent);
+        let notes = agent.session.session_notes.list();
+        let text = if notes.is_empty() {
+            "No session notes.".to_string()
+        } else {
+            notes
+                .iter()
+                .map(|note| {
+                    let tags = if note.tags.is_empty() {
+                        String::new()
+                    } else {
+                        format!(
+                            " [{}]",
+                            note.tags
+                                .iter()
+                                .map(|tag| format!("#{tag}"))
+                                .collect::<Vec<_>>()
+                                .join(" ")
+                        )
+                    };
+                    format!("#{} {}{tags}", note.id, note.text)
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
         agent.scrollback.push_block(RenderBlock::system(text));
     }
     vec![]

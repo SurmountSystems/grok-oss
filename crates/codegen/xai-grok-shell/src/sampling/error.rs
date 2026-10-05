@@ -133,16 +133,17 @@ pub(crate) fn map_sampling_err_to_acp(err: SamplingError) -> acp::Error {
             // Examples: content-safety blocks, ZDR-gated operations, remote-settings-blocked users
             // Passing the proxy's message via internal_error keeps the explanation visible without triggering the client's re-auth flow on -32000
             StatusCode::FORBIDDEN => {
-                if xai_grok_sampling_types::is_credentials_rejected_message(&message)
-                    && !xai_grok_sampling_types::is_credit_exhausted_message(&message)
+                if xai_grok_sampling_types::error::is_credentials_rejected_message(&message)
+                    && !xai_grok_sampling_types::error::is_credit_exhausted_message(&message)
                 {
                     return acp::Error::auth_required().data(message);
                 }
                 // Team credits / monthly spending limit: plain English body,
                 // not Internal error JSON envelope. Bare 403 (policy/ZDR) stays
                 // on the internal_error path with the proxy message.
-                if xai_grok_sampling_types::is_credit_exhausted_message(&message) {
-                    let plain = xai_grok_sampling_types::credit_exhausted_user_message(&message);
+                if xai_grok_sampling_types::error::is_credit_exhausted_message(&message) {
+                    let plain =
+                        xai_grok_sampling_types::error::credit_exhausted_user_message(&message);
                     return acp::Error::internal_error().data(plain);
                 }
                 let message = if message.contains("requires a Grok subscription")

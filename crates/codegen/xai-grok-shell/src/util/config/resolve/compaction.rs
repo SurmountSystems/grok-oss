@@ -46,6 +46,20 @@ pub(crate) fn resolve_compaction_tool_choice_from(
 pub(crate) const ENV_AUTO_COMPACT_THRESHOLD_PERCENT: &str = "GROK_AUTO_COMPACT_THRESHOLD_PERCENT";
 
 /// Precedence (highest first): env `GROK_AUTO_COMPACT_THRESHOLD_PERCENT` user TOML `[model.<id>].auto_compact_threshold_percent` (`cfg.config_models`, the merge of user and managed `[model.<id>]` sections) user TOML `[session].auto_compact_threshold_percent` remote settings per-model `ModelInfo.auto_compact_threshold_percent` (kept out of `ConfigModelOverride::apply` so the user and remote per-model tiers stay distinct) remote settings global `RemoteSettings.auto_compact_threshold_percent` default `DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT`
+/// Session token count wins over a session percent. Otherwise the percent
+/// resolver applies, so an unset session stays at
+/// [`DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT`] (95).
+pub(crate) fn resolve_auto_compact_threshold(
+    cfg: &crate::agent::config::Config,
+    model_id: &str,
+    model: Option<&crate::agent::config::ModelInfo>,
+) -> AutoCompactThreshold {
+    if let Some(tokens) = cfg.session.auto_compact_threshold_tokens {
+        return AutoCompactThreshold::Tokens(tokens);
+    }
+    AutoCompactThreshold::Percent(resolve_auto_compact_threshold_percent(cfg, model_id, model))
+}
+
 pub(crate) fn resolve_auto_compact_threshold_percent(
     cfg: &crate::agent::config::Config,
     model_id: &str,

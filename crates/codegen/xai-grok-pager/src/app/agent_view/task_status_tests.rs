@@ -49,6 +49,7 @@ fn draw_frame(agent: &mut AgentView, registry: &ActionRegistry) -> Buffer {
             tip: None,
         },
         false,
+        false,
         &mut Vec::new(),
         AppRenderParams::default(),
     );

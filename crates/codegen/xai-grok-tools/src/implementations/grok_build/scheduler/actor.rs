@@ -757,6 +757,7 @@ impl SchedulerActor {
             await_to_completion: false,
             fork_context: false,
             owner: SubagentOwner::Task,
+            implement_loop_effort: None,
             // A child of the actor's token, so shutdown cancels a fire the
             // coordinator still has queued at the concurrent limit.
             cancel_token: self.cancel_token.child_token(),
@@ -770,6 +771,7 @@ impl SchedulerActor {
                 request: Box::new(request),
                 result_tx,
                 registered_tx: Some(registered_tx),
+                admitted_tx: None,
             }))
             .is_err()
         {

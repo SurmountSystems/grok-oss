@@ -51,8 +51,21 @@ const ALLOW_SESSION_MULTILINE_DEFAULT: bool = UiConfig::ALLOW_SESSION_MULTILINE_
 const AUTO_RUN_IMPLEMENT_DEFAULT: bool = true;
 /// Soft-cap context at the 200K pricing tier; default ON when unset.
 const ECONOMIC_MODE_DEFAULT: bool = true;
+/// Session ids are ULID when unset. Matches [`UiConfig::ULID_SESSION_IDS_DEFAULT`].
+const ULID_SESSION_IDS_DEFAULT: bool = UiConfig::ULID_SESSION_IDS_DEFAULT;
 /// Live exclusive / Isolated Preview plan turns use xhigh. Default ON.
-const TURBO_PLANNING_DEFAULT: bool = UiConfig::TURBO_PLANNING_DEFAULT;
+/// `UiConfig` stores `turbo_planning: Option<bool>` (`None` means on) and does not expose this const.
+const TURBO_PLANNING_DEFAULT: bool = true;
+
+trait TurboPlanningUi {
+    fn turbo_planning_enabled(&self) -> bool;
+}
+
+impl TurboPlanningUi for UiConfig {
+    fn turbo_planning_enabled(&self) -> bool {
+        self.turbo_planning.unwrap_or(TURBO_PLANNING_DEFAULT)
+    }
+}
 const KEEP_TEXT_SELECTION_DEFAULT: TextSelection = TextSelection::Flash;
 /// This matches the legacy `[ui].scroll_speed` default.
 const SCROLL_SPEED_DEFAULT: u8 = 50;
@@ -192,6 +205,33 @@ pub fn load_scrub_ascii_punct() -> bool {
 pub fn set_scrub_ascii_punct(enabled: bool) {
     SCRUB_ASCII_PUNCT_CURRENT.with(|c| c.set(enabled));
     SCRUB_ASCII_PUNCT_LOADED.with(|l| l.set(true));
+}
+
+thread_local! {
+    static ULID_SESSION_IDS_CURRENT: Cell<bool> = const { Cell::new(ULID_SESSION_IDS_DEFAULT) };
+    static ULID_SESSION_IDS_LOADED: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Cached `[ui].ulid_session_ids`. Default on when unset.
+pub fn load_ulid_session_ids() -> bool {
+    ULID_SESSION_IDS_LOADED.with(|loaded| {
+        if !loaded.get() {
+            ULID_SESSION_IDS_CURRENT.with(|c| {
+                c.set(load_bool_from_effective_config(
+                    "ulid_session_ids",
+                    ULID_SESSION_IDS_DEFAULT,
+                ))
+            });
+            loaded.set(true);
+        }
+    });
+    ULID_SESSION_IDS_CURRENT.with(|c| c.get())
+}
+
+/// Replace cached `ulid_session_ids`.
+pub fn set_ulid_session_ids(enabled: bool) {
+    ULID_SESSION_IDS_CURRENT.with(|c| c.set(enabled));
+    ULID_SESSION_IDS_LOADED.with(|l| l.set(true));
 }
 
 thread_local! {
@@ -559,6 +599,62 @@ pub fn set_prompt_suggestions(enabled: bool) {
     PROMPT_SUGGESTIONS_CURRENT.with(|c| c.set(Some(enabled)));
     PROMPT_SUGGESTIONS_LOADED.with(|l| l.set(true));
 }
+
+thread_local! {
+    static COMPOSER_MULTILINE_CURRENT: Cell<bool> = const { Cell::new(COMPOSER_MULTILINE_DEFAULT) };
+    static COMPOSER_MULTILINE_LOADED: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Cached `[ui].composer_multiline`. Default on when unset.
+pub fn load_composer_multiline() -> bool {
+    COMPOSER_MULTILINE_LOADED.with(|loaded| {
+        if !loaded.get() {
+            COMPOSER_MULTILINE_CURRENT.with(|c| {
+                c.set(load_bool_from_effective_config(
+                    "composer_multiline",
+                    COMPOSER_MULTILINE_DEFAULT,
+                ))
+            });
+            loaded.set(true);
+        }
+    });
+    COMPOSER_MULTILINE_CURRENT.with(|c| c.get())
+}
+
+/// Replace cached `composer_multiline`.
+pub fn set_composer_multiline(enabled: bool) {
+    COMPOSER_MULTILINE_CURRENT.with(|c| c.set(enabled));
+    COMPOSER_MULTILINE_LOADED.with(|l| l.set(true));
+}
+
+thread_local! {
+    static ALLOW_SESSION_MULTILINE_CURRENT: Cell<bool> =
+        const { Cell::new(ALLOW_SESSION_MULTILINE_DEFAULT) };
+    static ALLOW_SESSION_MULTILINE_LOADED: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Cached `[ui].allow_session_multiline`. Default on when unset.
+pub fn load_allow_session_multiline() -> bool {
+    ALLOW_SESSION_MULTILINE_LOADED.with(|loaded| {
+        if !loaded.get() {
+            ALLOW_SESSION_MULTILINE_CURRENT.with(|c| {
+                c.set(load_bool_from_effective_config(
+                    "allow_session_multiline",
+                    ALLOW_SESSION_MULTILINE_DEFAULT,
+                ))
+            });
+            loaded.set(true);
+        }
+    });
+    ALLOW_SESSION_MULTILINE_CURRENT.with(|c| c.get())
+}
+
+/// Replace cached `allow_session_multiline`.
+pub fn set_allow_session_multiline(enabled: bool) {
+    ALLOW_SESSION_MULTILINE_CURRENT.with(|c| c.set(enabled));
+    ALLOW_SESSION_MULTILINE_LOADED.with(|l| l.set(true));
+}
+
 // -- Auto-run /implement follow-ups ------------------------------------------
 
 thread_local! {
@@ -890,6 +986,7 @@ pub fn prime(ui: &UiConfig) {
     let _ = load_group_tool_verbs();
     let _ = load_collapsed_edit_blocks();
     let _ = load_prompt_suggestions();
+    set_ulid_session_ids(ui.ulid_session_ids_enabled());
     set_composer_multiline(ui.composer_multiline_enabled());
     set_allow_session_multiline(ui.allow_session_multiline_enabled());
     let _ = load_auto_run_implement();
@@ -902,6 +999,17 @@ pub fn prime(ui: &UiConfig) {
 /// Read a `[ui].<key>` boolean from the shell's layered effective config (managed, then user, then defaults).
 fn load_bool_from_effective_config(key: &str, default: bool) -> bool {
     load_bool_option_from_effective_config(key).unwrap_or(default)
+}
+
+/// Read a `[subagents].<key>` boolean from the layered effective config.
+fn load_subagents_bool_from_effective_config(key: &str, default: bool) -> bool {
+    let Ok(root) = xai_grok_config::load_effective_config_disk_only() else {
+        return default;
+    };
+    root.get("subagents")
+        .and_then(|sa| sa.get(key))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(default)
 }
 
 fn load_bool_option_from_effective_config(key: &str) -> Option<bool> {

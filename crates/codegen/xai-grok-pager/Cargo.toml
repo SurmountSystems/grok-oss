@@ -105,6 +105,7 @@ xai-chat-state = { path = "../xai-chat-state", optional = true }
 xai-file-utils = { path = "../xai-file-utils" }
 # Crash-recovery registry of open TUI sessions.
 xai-grok-active-sessions = { workspace = true }
+surmount-coordinator-gui = { path = "../surmount-coordinator-gui" }
 xai-grok-config = { workspace = true }
 xai-grok-external-agent-migration = { workspace = true }
 xai-grok-feedback = { workspace = true }
@@ -216,6 +217,9 @@ xai-grok-agent = { workspace = true }
 # In-process leader-cluster harness (mock inference server; no cycle:
 # xai-grok-test-support depends on neither the pager nor the shell).
 xai-grok-test-support = { workspace = true, features = [] }
+# PTY integration tests link the shared harness. The harness does not depend
+# on this crate, so this dev-dependency does not cycle.
+xai-grok-pager-pty-harness = { path = "../xai-grok-pager-pty-harness" }
 # Provider install for the in-process leader-cluster tests.
 xai-grok-extra-ca = { workspace = true }
 

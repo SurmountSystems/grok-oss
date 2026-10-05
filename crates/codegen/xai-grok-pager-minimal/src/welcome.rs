@@ -19,6 +19,9 @@ use xai_grok_pager::theme::Theme;
 /// Narrowest viewport the bordered card fits in.
 pub(crate) const MIN_CARD_WIDTH: u16 = 8;
 
+/// Product name on the welcome card. The card test pins this to Grok OSS.
+const WELCOME_CARD_PRODUCT_NAME: &str = "Grok OSS";
+
 /// Commit the welcome card when one is pending (set at session start / `/new`).
 ///
 /// Called at the top of the minimal draw, before `commit_active`, so the card lands above the first conversation block in native scrollback.

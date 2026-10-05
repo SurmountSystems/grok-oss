@@ -64,31 +64,6 @@ impl<'a> EnvOp<'a> {
     }
 }
 
-/// One explicit environment mutation applied after the TestSandbox baseline.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum EnvOp<'a> {
-    Set(&'a OsStr, &'a OsStr),
-    Remove(&'a OsStr),
-}
-
-impl<'a> EnvOp<'a> {
-    pub fn set(key: &'a str, value: &'a str) -> Self {
-        Self::Set(OsStr::new(key), OsStr::new(value))
-    }
-
-    pub const fn set_os(key: &'a OsStr, value: &'a OsStr) -> Self {
-        Self::Set(key, value)
-    }
-
-    pub fn remove(key: &'a str) -> Self {
-        Self::Remove(OsStr::new(key))
-    }
-
-    pub const fn remove_os(key: &'a OsStr) -> Self {
-        Self::Remove(key)
-    }
-}
-
 #[derive(Debug)]
 pub(crate) enum PtyRead {
     Chunk(Vec<u8>),
@@ -195,6 +170,14 @@ impl PtyController {
         #[cfg(windows)]
         let process_pid = child.process_id();
         let process_tree = process_pid.map(|pid| TestProcessTree::attach(pid, "grok PTY child"));
+        // Strong Arc so the scope's Weak stays live while this controller owns the child. Release drops it first.
+        let process_group = process_pid.and_then(|pid| {
+            let mut group = ProcessGroup::new().ok()?;
+            group.attach_pid(pid).ok()?;
+            let group = Arc::new(group);
+            xai_tty_utils::global_process_scope().register(&group);
+            Some(group)
+        });
         // Attachment failures remain recorded by TestProcessTree and show up in process_tree_diagnostics() on every harness timeout
         // Drop the slave so we get EOF when the child exits.
         drop(pair.slave);
@@ -869,6 +852,8 @@ mod tests {
             xai_tty_utils::process_not_running(grandchild_pid),
             "PTY grandchild leaked after controller Drop"
         );
+        let mut cmd = portable_pty::CommandBuilder::new("true");
+        crate::pty_spawn::apply_child_env(&mut cmd, &[EnvOp::set("GROK_OSC52_SINK", "1")]);
         assert_eq!(
             cmd.get_env("GROK_OSC52_SINK").and_then(|v| v.to_str()),
             Some("1"),

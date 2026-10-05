@@ -20,9 +20,10 @@ pub mod defs;
 pub mod registry;
 
 pub use registry::{
-    AutoCompactThresholdChoice, DynamicEnumSource, EnumChoice, OwnedEnumChoice, PagerLocalSnapshot,
-    SettingCategory, SettingKey, SettingKind, SettingMeta, SettingOwner, SettingValue,
-    SettingsRegistry, StringValidator, canonical_auto_compact_threshold,
+    AutoCompactThresholdChoice, CodingDataSharingLock, DynamicEnumSource, EnumChoice,
+    FeatureOverrideState, OwnedEnumChoice, PagerLocalSnapshot, PendingWrite, SettingCategory,
+    SettingKey, SettingKind, SettingMeta, SettingOwner, SettingValue, SettingsRegistry,
+    StringValidator, canonical_auto_compact_threshold,
     canonical_auto_compact_threshold_from_percent, canonical_auto_compact_threshold_percent,
     canonical_auto_compact_threshold_tokens, canonical_hunk_tracker_mode, canonical_screen_mode,
     canonical_voice_capture_mode, canonical_voice_stt_language, current_value_for,

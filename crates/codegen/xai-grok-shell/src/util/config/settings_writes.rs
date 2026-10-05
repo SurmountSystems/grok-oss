@@ -101,6 +101,22 @@ pub async fn set_confirm_before_rewind(value: bool) -> Result<()> {
     update_config(|cfg| cfg.ui.confirm_before_rewind = Some(value)).await
 }
 
+/// Persist `[ui].turbo_planning` and update the live cache in this process.
+pub async fn set_turbo_planning(value: bool) -> Result<()> {
+    super::set_turbo_planning_live(value);
+    update_config(|cfg| cfg.ui.turbo_planning = Some(value)).await
+}
+
+/// Persist `[ui].process_rule_reminders_enabled`.
+pub async fn set_process_rule_reminders_enabled(value: bool) -> Result<()> {
+    update_config(|cfg| cfg.ui.process_rule_reminders_enabled = Some(value)).await
+}
+
+/// Persist `[ui].process_rule_reminders`.
+pub async fn set_process_rule_reminders(value: String) -> Result<()> {
+    update_config(|cfg| cfg.ui.process_rule_reminders = Some(value)).await
+}
+
 pub async fn set_dashboard_preview(value: bool) -> Result<()> {
     rewrite_user_config_locked("dashboard preview", move |path| {
         write_dashboard_preview(
@@ -451,6 +467,11 @@ pub async fn set_allow_session_multiline(value: bool) -> Result<()> {
     update_config(|cfg| cfg.ui.allow_session_multiline = Some(value)).await
 }
 
+/// Persist `[ui].scrub_ascii_punct` via `update_config`.
+pub async fn set_scrub_ascii_punct(value: bool) -> Result<()> {
+    update_config(|cfg| cfg.ui.scrub_ascii_punct = Some(value)).await
+}
+
 /// Persist `[ui].plan_approval_park` (`soft` | `modal`) via `update_config`.
 pub async fn set_plan_approval_park(value: String) -> Result<()> {
     update_config(|cfg| cfg.ui.plan_approval_park = Some(value)).await
@@ -652,14 +673,14 @@ pub async fn set_cancel_subagents_on_turn_cancel(value: String) -> Result<()> {
 /// Persist `[ui.notifications].session_recap` (auto return-from-away recap).
 /// Does not gate manual `/recap` (that is `[features] session_recap`).
 pub async fn set_notifications_session_recap(value: bool) -> Result<()> {
-    update_config(|cfg| cfg.ui.notifications.session_recap = Some(value)).await
+    super::persist::update_ui_notifications_session_recap(value).await
 }
 
 /// Persist `[ui.notifications].session_recap_threshold_secs` (debounce).
 /// Clamped to a sane range at the shell boundary.
 pub async fn set_notifications_session_recap_threshold_secs(value: i64) -> Result<()> {
     let clamped = value.clamp(5, 3600) as u64;
-    update_config(|cfg| cfg.ui.notifications.session_recap_threshold_secs = Some(clamped)).await
+    super::persist::update_ui_notifications_session_recap_threshold_secs(clamped).await
 }
 
 /// Persist `[features].session_recap` (master kill for `/recap` + auto).

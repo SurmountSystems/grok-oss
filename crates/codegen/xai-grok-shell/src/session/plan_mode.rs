@@ -41,6 +41,8 @@ pub struct PlanModeTracker {
     /// `exit_plan_mode` approval UI is outstanding (client has not answered).
     /// Persisted so resume can restore approval chrome.
     awaiting_plan_approval: bool,
+    /// Approve / Quit already decided this plan. Leftover plan.md must not re-present Plan ready.
+    plan_decision_resolved: bool,
     /// Rendered activation reminder buffered by a mid-turn toggle ([`Self::activate_mid_turn`]).
     /// While set, the model has NOT seen plan mode yet.
     /// A toggle-off withdraws it and rolls the activation back instead of deferring an exit the model never knew about.
@@ -123,6 +125,10 @@ impl PlanModeTracker {
     /// Whether approval is outstanding (also true after resume from snapshot).
     pub(crate) fn is_awaiting_plan_approval(&self) -> bool {
         self.awaiting_plan_approval
+    }
+    /// Approve or Quit already decided this plan.
+    pub(crate) fn is_plan_decision_resolved(&self) -> bool {
+        self.plan_decision_resolved
     }
     pub fn snapshot(&self) -> PlanModeSnapshot {
         PlanModeSnapshot {

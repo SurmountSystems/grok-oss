@@ -212,8 +212,9 @@ impl ShellKind {
 
     /// Resolved absolute path to the shell binary. Falls back from `$SHELL` → `which` → common dirs
     /// → `/bin/<name>`. Result is cached process-wide in `xai_grok_config::shell::unix_shell_path`.
-    /// See that function for the full cascade. Returns `&'static str`.
-    pub fn binary_path(&self) -> &'static str {
+    /// See that function for the full cascade. Returns an owned `String`
+    /// because `unix_shell_path` can refresh the cached path.
+    pub fn binary_path(&self) -> String {
         let kind = match self {
             Self::Bash => xai_grok_config::shell::UnixShellKind::Bash,
             Self::Zsh => xai_grok_config::shell::UnixShellKind::Zsh,

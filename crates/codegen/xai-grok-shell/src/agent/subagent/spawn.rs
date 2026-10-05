@@ -377,6 +377,7 @@ pub(crate) fn spawn_subagent_coordinator(
         limit_sink: Some(limit_sink),
         buffer_completions: true,
         buffered_completion_output_cap: None,
+        parent_follow_up: true,
     };
     tokio::task::spawn_local(
         coordinator::SubagentCoordinator::from_channel(rx, runner, config).run(),

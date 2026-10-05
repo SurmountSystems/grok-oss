@@ -1,5 +1,4 @@
 //! Shared fixtures for the sampler wire-test binaries.
-#![allow(dead_code)]
 
 use std::sync::Arc;
 use std::sync::Once;

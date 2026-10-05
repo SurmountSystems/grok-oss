@@ -153,7 +153,9 @@ async fn handle_get_url(agent: &MvpAgent) -> ExtResult {
     to_raw_response(&serde_json::json!({
         "auth_url": auth_url,
         // `external_provider` kept for older clients; `mode` is authoritative.
-        "external_provider": mode.is_some_and(|m| m.is_external_provider()),
+        "external_provider": mode.is_some_and(|m| {
+            matches!(m, xai_grok_login::flow::AuthUrlMode::Command)
+        }),
         "mode": mode.map(|m| m.as_wire_str()),
     }))
 }

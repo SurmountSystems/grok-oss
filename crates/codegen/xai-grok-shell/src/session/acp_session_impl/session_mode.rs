@@ -19,6 +19,10 @@ pub(super) fn session_mode_id_from_prompt_mode(prompt_mode: PromptMode) -> acp::
     };
     acp::SessionModeId::new(mode.as_id())
 }
+fn is_plan_mode_blocked_ask_user_tool_name(name: &str) -> bool {
+    matches!(name, "ask_user_question" | "AskUser" | "AskUserQuestion")
+}
+
 /// Pass-through twin: no toolset in this build carries a plan-gated tool.
 pub(super) fn filter_cursor_tools_by_plan_mode(
     defs: Vec<ToolDefinition>,

@@ -581,6 +581,7 @@ pub mod summary;
 pub(crate) mod telemetry;
 #[cfg(feature = "test-support")]
 pub use telemetry::{complete_projected_call, grep_output, tool_execution_span};
+pub mod prompt_wal_recorded;
 #[cfg(feature = "test-support")]
 pub mod testkit;
 pub mod tool_definitions_artifact;

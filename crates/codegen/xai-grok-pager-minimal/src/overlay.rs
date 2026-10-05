@@ -631,7 +631,7 @@ fn render_question(
         );
     }
 
-    if input_mode && is_feedback_pane(agent) {
+    if input_mode && minimal_api::is_feedback_pane(agent) {
         return render_feedback_editor(buf, area, agent, theme, input_h);
     }
 
@@ -702,6 +702,56 @@ fn render_question(
         return None;
     }
     None
+}
+
+/// Paint the `/feedback` report with the shared feedback editor (`feedback_input` plus `PromptWidget::draw`).
+fn render_feedback_editor(
+    buf: &mut Buffer,
+    area: Rect,
+    agent: &mut AgentView,
+    theme: &Theme,
+    input_h: u16,
+) -> Option<(u16, u16)> {
+    use xai_grok_pager::views::prompt_widget::PromptInfo;
+    use xai_grok_pager::views::question_view::feedback_input;
+
+    let box_h = input_h.min(area.height);
+    if box_h == 0 {
+        return None;
+    }
+    let box_y = area.y + area.height.saturating_sub(box_h);
+    let input_area = Rect {
+        x: area.x.saturating_add(3),
+        y: box_y,
+        width: feedback_input::width(area.width),
+        height: box_h,
+    };
+    buf.set_style(
+        Rect {
+            x: area.x.saturating_add(1),
+            y: box_y,
+            width: area.width.saturating_sub(1),
+            height: box_h,
+        },
+        Style::default().bg(theme.bg_light),
+    );
+    let outlined = box_h >= feedback_input::MIN_HEIGHT;
+    let style = if outlined {
+        feedback_input::style(theme)
+    } else {
+        feedback_input::flat_style(theme)
+    };
+    agent
+        .prompt
+        .draw(
+            buf,
+            input_area,
+            None,
+            &style,
+            outlined.then_some(&PromptInfo::default()),
+            None,
+        )
+        .cursor_pos
 }
 
 /// Height cap for the inline question editor: the full TUI's policy (`agent_view/render.rs`, `inline_prompt_max`).

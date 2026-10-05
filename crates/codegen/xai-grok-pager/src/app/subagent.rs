@@ -141,6 +141,11 @@ pub struct SubagentInfo {
     pub child_session_id: Arc<str>,
     pub description: Arc<str>,
     pub subagent_type: Arc<str>,
+    /// Host already exited. Occupancy restore must not clear this bit.
+    /// Persist skips a finished host so a later load cannot revive it.
+    pub finished: bool,
+    /// Terminal status when the host has exited, for example "completed".
+    pub status: Option<Arc<str>>,
     pub attempt: SubagentAttemptInfo,
     pub(crate) completed_attempt_tokens: u64,
     pub(crate) sealed_attempt_tokens: HashMap<SubagentAttemptKey, u64>,
@@ -282,6 +287,10 @@ impl SubagentInfo {
                 info.child_session_id = Arc::from(child.child_session_id);
                 info.description = Arc::from(child.description);
                 info.subagent_type = Arc::from(child.subagent_type);
+                if is_new_attempt {
+                    info.finished = false;
+                    info.status = None;
+                }
                 info.attempt = attempt;
                 info
             }
@@ -290,6 +299,8 @@ impl SubagentInfo {
                 child_session_id: Arc::from(child.child_session_id),
                 description: Arc::from(child.description),
                 subagent_type: Arc::from(child.subagent_type),
+                finished: false,
+                status: None,
                 attempt,
                 completed_attempt_tokens: 0,
                 sealed_attempt_tokens: HashMap::new(),
@@ -321,7 +332,7 @@ impl SubagentInfo {
     }
 
     pub fn is_running(&self) -> bool {
-        !self.attempt.lifecycle.is_finished()
+        !self.finished && !self.attempt.lifecycle.is_finished()
     }
 
     pub(crate) fn is_finished(&self) -> bool {
@@ -572,6 +583,8 @@ pub(crate) mod test_support {
             child_session_id: "cs-1".into(),
             description: "test task".into(),
             subagent_type: "explore".into(),
+            finished: false,
+            status: None,
             attempt: super::SubagentAttemptInfo {
                 lifecycle: crate::app::subagent::SubagentLifecycleState::running_legacy_for_test(),
                 persona: None,
@@ -1128,6 +1141,12 @@ pub(crate) fn format_subagent_label_among(
     _all: &[&SubagentInfo],
 ) -> (String, String) {
     format_subagent_label(info)
+}
+
+/// Whitespace-collapsed prompt compare. The echoed task may wrap differently
+/// from the `meta.json` text.
+pub(crate) fn subagent_prompt_text_eq(a: &str, b: &str) -> bool {
+    a.split_whitespace().eq(b.split_whitespace())
 }
 
 /// Running, non-workflow L2 rows for the L1 Subagents list.

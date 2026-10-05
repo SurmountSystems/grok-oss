@@ -558,31 +558,6 @@ impl SessionHandle {
     pub(crate) fn request_status_snapshot(&self) {
         let _ = self.cmd_tx.send(SessionCommand::EmitStatusSnapshot);
     }
-    pub(crate) async fn workflow_catalog_state(&self) -> (bool, bool) {
-        let (tx, rx) = oneshot::channel();
-        if self
-            .cmd_tx
-            .send(SessionCommand::GetWorkflowCatalogState { respond_to: tx })
-            .is_err()
-        {
-            return (false, false);
-        }
-        rx.await.unwrap_or((false, false))
-    }
-    pub(crate) async fn list_available_commands(
-        &self,
-    ) -> crate::session::slash_commands::ListCommandsResponse {
-        let (tx, rx) = oneshot::channel();
-        if self
-            .cmd_tx
-            .send(SessionCommand::ListAvailableCommands { respond_to: tx })
-            .is_err()
-        {
-            return crate::session::slash_commands::ListCommandsResponse::default();
-        }
-        rx.await
-            .unwrap_or_else(|_| crate::session::slash_commands::ListCommandsResponse::default())
-    }
     /// Replace the live session's client-registered hooks (see `SessionCommand::SetClientHooks`).
     pub(crate) fn set_client_hooks(&self, hooks: crate::extensions::hooks::ClientHooks) {
         let _ = self.cmd_tx.send(SessionCommand::SetClientHooks { hooks });

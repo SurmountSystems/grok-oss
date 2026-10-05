@@ -3,7 +3,9 @@
 use super::queue::maybe_drain_queue_and_note_peek;
 use crate::app::actions::Effect;
 use crate::app::agent::AgentId;
+use crate::app::agent_view::AgentView;
 use crate::app::app_view::{ActiveView, AppView};
+use crate::scrollback::block::RenderBlock;
 
 const NOTHING_HELD_TOAST: &str = "There is no paused or interrupted work to start in this session.";
 
@@ -56,7 +58,7 @@ fn try_continue_canceled_turn(app: &mut AppView) -> Option<Vec<Effect>> {
     // as well as through operator_prompt_already_issued_as_human_turn.
     // `/goal <rest>` matches `A goal has been set: <rest>` through
     // `operator_text_matches_recorded`, not a second mapper.
-    if agent.operator_prompt_already_issued_as_human_turn(&text)
+    if scrollback_has_user_prompt(agent, &text)
         || disk_chat_history_already_has_prompt(&cwd, &sid, &text)
     {
         // `/start` must not requeue a finished Human turn as continue_prior_work.
@@ -73,7 +75,31 @@ fn try_continue_canceled_turn(app: &mut AppView) -> Option<Vec<Effect>> {
 /// True when `chat_history.jsonl` already has this Operator prompt as a
 /// Human turn. Scrollback is not consulted. `/goal` uses
 /// `operator_text_matches_recorded`.
-fn disk_chat_history_already_has_prompt(cwd: &str, sid: &str, text: &str) -> bool {
+pub(in crate::app::dispatch) fn scrollback_has_user_prompt(agent: &AgentView, text: &str) -> bool {
+    let needle = text.trim();
+    if needle.is_empty() {
+        return false;
+    }
+    for idx in 0..agent.scrollback.len() {
+        let Some(entry) = agent.scrollback.entry(idx) else {
+            continue;
+        };
+        let RenderBlock::UserPrompt(block) = &entry.block else {
+            continue;
+        };
+        if xai_grok_shell::session::prompt_wal::operator_text_matches_recorded(needle, &block.text)
+        {
+            return true;
+        }
+    }
+    false
+}
+
+pub(in crate::app::dispatch) fn disk_chat_history_already_has_prompt(
+    cwd: &str,
+    sid: &str,
+    text: &str,
+) -> bool {
     let Some(blob) = xai_grok_shell::session::prompt_wal::chat_history_path(cwd, sid)
         .and_then(|path| std::fs::read_to_string(path).ok())
     else {

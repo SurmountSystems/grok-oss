@@ -21,6 +21,7 @@ async-trait = { workspace = true }
 axum = { workspace = true }
 backon = { workspace = true }
 base64 = { workspace = true }
+blake3 = { workspace = true }
 chrono = { workspace = true }
 fs2 = { workspace = true }
 jsonwebtoken = { version = "10", features = ["rust_crypto"] }

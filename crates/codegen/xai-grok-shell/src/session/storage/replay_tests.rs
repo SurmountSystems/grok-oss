@@ -4,10 +4,11 @@ use agent_client_protocol as acp;
 
 use super::replay::{
     ReplayLookupFallback, ReplayPathHint, ReplayToolCollapser, ReplayedUpdate,
-    collect_unfinished_subagents, filter_delta_replay_lines, for_each_replay_update_in_file,
-    line_is_available_commands_update, line_is_dropped_on_replay,
-    line_is_in_progress_tool_call_update, prepare_replay_lines, replay_would_emit,
-    resolve_replay_updates_path, stream_replay_updates_at, stream_replay_updates_at_hinted,
+    chat_history_replay_lines, collect_unfinished_subagents, filter_delta_replay_lines,
+    for_each_replay_update_in_file, line_is_available_commands_update, line_is_dropped_on_replay,
+    line_is_in_progress_tool_call_update, plan_replay_file, prepare_replay_lines,
+    replay_would_emit, resolve_replay_updates_path, stream_replay_updates_at,
+    stream_replay_updates_at_hinted,
 };
 use super::{
     PromptExtractEvent, ReplayEmission, SUMMARY_FILE, SessionUpdate, SessionUpdateEnvelope,
@@ -1006,6 +1007,7 @@ fn stream_replay_forwards_xai_updates_in_file_order() {
             tokens_after: 100,
             elapsed_ms: Some(5),
             summary_preview: None,
+            saved_too_little: false,
         },
     );
     let msg = acp_envelope(
@@ -1119,6 +1121,7 @@ fn replay_would_emit_requires_an_emitting_acp_line() {
             tokens_after: 100,
             elapsed_ms: Some(5),
             summary_preview: None,
+            saved_too_little: false,
         },
     );
     assert!(
@@ -1308,7 +1311,7 @@ fn last_session_resume_paints_chat_history_when_updates_lack_user_agent_chunks()
             content: vec![crate::sampling::ContentPart::Text {
                 text: "<system-reminder>skip</system-reminder>".into(),
             }],
-            synthetic_reason: Some(crate::sampling::SyntheticReason::SystemReminder),
+            synthetic_reason: crate::sampling::SyntheticReason::SystemReminder,
             ..Default::default()
         }),
     ];

@@ -835,14 +835,11 @@ impl SessionActor {
             xai_grok_compaction::sampler::SAMPLER_START_FAILED_PREFIX,
         ];
         let mut rest = raw.trim();
-        loop {
-            let Some(prefix) = INTERNAL_PREFIXES.iter().find(|p| {
-                rest.as_bytes()
-                    .get(..p.len())
-                    .is_some_and(|head| head.eq_ignore_ascii_case(p.as_bytes()))
-            }) else {
-                break;
-            };
+        while let Some(prefix) = INTERNAL_PREFIXES.iter().find(|p| {
+            rest.as_bytes()
+                .get(..p.len())
+                .is_some_and(|head| head.eq_ignore_ascii_case(p.as_bytes()))
+        }) {
             let Some(stripped) = rest.get(prefix.len()..) else {
                 break;
             };
@@ -2286,7 +2283,29 @@ impl SessionActor {
             "Context is over this session's sampling window ({used}/{cw} tokens). \
              Not retrying the same oversized model request. Compact once or start a new session."
         );
-        self.log_terminal_failure("context_length", None, &message);
+        let auth = self
+            .auth_manager
+            .as_ref()
+            .and_then(|am| am.current_or_expired());
+        let reauthable = crate::extensions::notification::is_reauthable_failure(
+            Some("context_length"),
+            &message,
+        );
+        xai_grok_telemetry::unified_log::warn(
+            "turn.terminal_failure",
+            Some(self.session_info.id.0.as_ref()),
+            Some(serde_json::json!({
+                "error_type": "context_length",
+                "status_code": None::<u16>,
+                "reauthable": reauthable,
+                "auth_mode": auth.as_ref().map(|a| format!("{:?}", a.auth_mode)),
+                "key_prefix": auth.as_ref().map(|a| xai_grok_auth::bearer_suffix(&a.key).to_owned()),
+                "expires_at": auth
+                    .as_ref()
+                    .and_then(|a| a.expires_at.map(|e| e.to_rfc3339())),
+                "message": crate::util::truncate(&message, 300),
+            })),
+        );
         self.send_xai_notification(crate::extensions::notification::SessionUpdate::RetryState(
             crate::extensions::notification::RetryState::Failed {
                 error_type: "context_length".to_string(),
@@ -2322,6 +2341,7 @@ impl SessionActor {
             tokens_used,
             context_window: cw,
             percentage,
+            reason_override: None,
         })
     }
 
@@ -2561,7 +2581,10 @@ impl SessionActor {
                 span.record("post_tokens", tokens_after as i64);
                 span.record("success", true);
                 let useful =
-                    self.record_auto_compact_savings(trigger_info.tokens_used, tokens_after);
+                    auto_compact_savings_are_useful(trigger_info.tokens_used, tokens_after);
+                self.compaction
+                    .last_auto_compact_saved_too_little
+                    .store(!useful, std::sync::atomic::Ordering::Relaxed);
                 self.send_xai_notification(XaiSessionUpdate::AutoCompactCompleted {
                     tokens_before: Some(trigger_info.tokens_used),
                     tokens_after,

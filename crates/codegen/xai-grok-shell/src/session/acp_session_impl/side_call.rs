@@ -115,9 +115,9 @@ impl SessionActor {
         // Recap / turn-summary replay the parent conversation. Stored
         // handles are `file://` or session asset paths; the API rejects
         // those as `image_url`. Convert or omit on this clone only.
-        let _ = xai_chat_state::repair_conversation_images_for_api(&mut items);
+        let _ = xai_chat_state::image_handles::repair_conversation_images_for_api(&mut items);
         ConversationRequest {
-            items: xai_chat_state::compaction_utils::ModelRequestHistory::from_raw(call.items)
+            items: xai_chat_state::compaction_utils::ModelRequestHistory::from_raw(items)
                 .into_items(),
             tools: call.tools,
             hosted_tools: call.hosted_tools,

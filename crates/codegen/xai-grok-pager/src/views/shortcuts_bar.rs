@@ -131,10 +131,7 @@ fn bar_key_segments(hint: &HintItem) -> Vec<BarKeySeg> {
                 is_join: false,
             });
         }
-        return vec![BarKeySeg {
-            text,
-            is_join: false,
-        }];
+        return segs;
     }
     segs
 }

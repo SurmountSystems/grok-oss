@@ -109,7 +109,8 @@ pub(super) fn transient_retry_eligible(error: &xai_grok_sampler::SamplingErrorIn
         | SamplingErrorKind::RateLimited
         | SamplingErrorKind::EmptyResponse
         | SamplingErrorKind::MaxTokensTruncation
-        | SamplingErrorKind::DoomLoopDetected => false,
+        | SamplingErrorKind::DoomLoopDetected
+        | SamplingErrorKind::RepetitiveGeneration => false,
     }
 }
 
@@ -698,9 +699,6 @@ impl SessionActor {
         // Refresh the session token before the sampler reads it; gated to sessions that use it.
         if use_bearer_resolver && let Some(am) = self.auth_manager.as_ref() {
             let _ = am.auth().await;
-            if am.grok_com_config().auto_use_included_limits {
-                let _ = am.align_to_ranked_free_period_primary();
-            }
         }
         // Session path: only seed a wire-valid AT
         // Hard-expired keys must not land in default headers when the resolver has nothing to stamp
@@ -752,7 +750,7 @@ impl SessionActor {
             &cfg.base_url,
         );
         let request_compression = crate::util::config::request_compression_for_url(&cfg.base_url);
-        SamplingConfig {
+        let mut sampling = SamplingConfig {
             api_key,
             base_url: cfg.base_url,
             mtls_cert_dir: cfg.mtls_cert_dir,
@@ -817,6 +815,8 @@ impl SessionActor {
         if use_bearer_resolver
             && let Some(am) = self.auth_manager.as_ref()
             && am.grok_com_config().auto_use_included_limits
+            && am.grok_com_config().preferred_method
+                != Some(xai_grok_login::PreferredAuthMethod::ApiKey)
             && let Some(home) = am.auth_json_path().parent()
         {
             apply_ranked_auto_turn_credentials(
@@ -1063,11 +1063,6 @@ impl SessionActor {
 
     /// Refresh auth and push a fresh `SamplerConfig` before each turn.
     pub(crate) async fn prepare_sampler_for_turn(&self) {
-        if let Some(am) = self.auth_manager.as_ref()
-            && am.grok_com_config().auto_use_included_limits
-        {
-            let _ = am.align_to_ranked_free_period_primary();
-        }
         self.refresh_token_if_expired().await;
         let mut sampler_config = self.reconstruct_full_config().await;
         if self.tool_context.task_output_token_budget.is_some()
@@ -1723,20 +1718,9 @@ impl SessionActor {
             ),
             _ => (error_type, detailed_message),
         };
-        let (error_type, detailed_message) = match self.auth_manager.as_ref() {
-            Some(auth_manager) if error_type == "auth" => {
-                auth_manager.note_terminal_inference_auth_rejection();
-                self.apply_auth_remedy(
-                    &auth_manager.auth_remedy(),
-                    detailed_message,
-                    error.status_code,
-                )
-            }
-            _ => (error_type, detailed_message),
-        };
         let detailed_message =
             if xai_grok_sampling_types::is_console_team_prepaid_message(&detailed_message) {
-                xai_grok_sampling_types::credit_exhausted_user_message(&detailed_message)
+                xai_grok_sampling_types::error::credit_exhausted_user_message(&detailed_message)
             } else {
                 detailed_message
             };
@@ -1837,6 +1821,7 @@ impl SessionActor {
             return match self.submit_turn_request(request).await {
                 Ok(outcome) => Ok(outcome),
                 Err(info) => {
+                    let info = *info;
                     self.recover_from_sampling_failure(
                         info,
                         budget,
@@ -1856,6 +1841,7 @@ impl SessionActor {
                     return Ok(outcome);
                 }
                 Err(info) => {
+                    let info = *info;
                     let decision = budget.decide(&info);
                     let RateLimitWaitDecision::Wait { attempt, backoff } = decision else {
                         self.log_rate_limit_budget_spent(decision, &info);
@@ -1886,7 +1872,7 @@ impl SessionActor {
     async fn submit_turn_request(
         self: &Arc<Self>,
         mut request: ConversationRequest,
-    ) -> Result<SamplerTurnOutcome, xai_grok_sampler::SamplingErrorInfo> {
+    ) -> Result<SamplerTurnOutcome, Box<xai_grok_sampler::SamplingErrorInfo>> {
         let request_id = xai_grok_sampler::RequestId::random();
         self.turn_phases.record_sampling_request();
         let _sampling_phase = self.turn_phases.begin_sampling();
@@ -1960,10 +1946,10 @@ impl SessionActor {
                         .await
                         == StreamDrainOutcome::Revoked
                     {
-                        return Err(revoked_sampling_info());
+                        return Err(Box::new(revoked_sampling_info()));
                     }
                 } else if !self.turn_stream_drained.lock().contains_key(&request_id) {
-                    return Err(revoked_sampling_info());
+                    return Err(Box::new(revoked_sampling_info()));
                 }
 
                 // The awaited result is authoritative for successful-request accounting once the request survives the turn boundary
@@ -2025,7 +2011,7 @@ impl SessionActor {
                 } else {
                     StreamDrainOutcome::Revoked
                 };
-                Err(error_after_stream_drain(outcome, original))
+                Err(Box::new(error_after_stream_drain(outcome, original)))
             }
         }
     }
@@ -2343,7 +2329,7 @@ impl SessionActor {
             let identity = if self.startup_hints.is_subagent {
                 crate::session::usage_log::UsageIdentity::agent_turn(
                     self.startup_hints.subagent_type.clone().unwrap_or_default(),
-                    self.startup_hints.work_ulid.clone(),
+                    None,
                 )
             } else {
                 crate::session::usage_log::UsageIdentity::main()
@@ -2503,6 +2489,29 @@ mod stream_drain_tests {
             "sampling result revoked by turn cancellation or rewind"
         );
         assert!(!result.is_retryable);
+    }
+}
+
+fn apply_ranked_auto_turn_credentials(
+    home: &std::path::Path,
+    api_key: &mut Option<String>,
+    failover: &mut Vec<String>,
+    session_identity: &mut Option<String>,
+) {
+    let sessions = crate::auth::load_supergrok_session_candidates(home);
+    let console = crate::auth::xai_console::load_stored_console_api_keys(
+        &crate::auth::credentials_store::CredentialsStore::at_grok_home(home),
+    )
+    .unwrap_or_default();
+    let order = crate::auth::supergrok_identity_rank::order_credentials_for_preferred_auto(
+        &sessions, &console,
+    );
+    if let Some(primary) = order.primary {
+        *api_key = Some(primary);
+    }
+    *failover = order.failover;
+    if let Some(identity) = order.session_identity_key {
+        *session_identity = Some(identity);
     }
 }
 

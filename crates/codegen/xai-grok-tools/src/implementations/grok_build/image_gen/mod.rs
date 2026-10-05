@@ -189,11 +189,10 @@ impl ImageGenClient {
     /// Bearer used for shared rate-limit keys: dynamic provider if present,
     /// else the static config key that is still sent as default Authorization.
     pub(crate) async fn rate_limit_bearer(&self) -> Option<String> {
-        match self.current_bearer().await {
-            Some(k) if !k.trim().is_empty() => Some(k),
-            _ if !self.fallback_api_key.trim().is_empty() => Some(self.fallback_api_key.clone()),
-            _ => None,
-        }
+        self.current_bearer()
+            .await
+            .ok()
+            .filter(|k| !k.trim().is_empty())
     }
 
     pub(crate) fn record_401_attribution(&self, consumer: ToolConsumer, sent_bearer: Option<&str>) {
@@ -266,6 +265,11 @@ impl ImageGenClient {
             self.record_401_attribution(ToolConsumer::ImageGen, Some(&sent_bearer));
         }
         if !status.is_success() {
+            let rate_bearer = self.rate_limit_bearer().await;
+            let rate_key = crate::shared_http_rate_limit::imagine_provider_key(
+                &self.base_url,
+                rate_bearer.as_deref(),
+            );
             crate::shared_http_rate_limit::observe_http_rate_limit(
                 &rate_key,
                 status.as_u16(),
@@ -792,7 +796,7 @@ mod tests {
 
         let api_key = "hermetic-imagine-rate-limit-key";
         let cfg = ImageGenConfig::Enabled {
-            api_key: api_key.into(),
+            api_key: Some(api_key.into()),
             base_url: server.uri(),
             extra_headers: indexmap::IndexMap::new(),
             image_gen_enabled: true,

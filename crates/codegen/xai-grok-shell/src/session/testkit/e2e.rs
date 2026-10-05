@@ -42,7 +42,8 @@ pub async fn load_session_via_agent<C: acp::Client + 'static>(
     let auth_manager = Arc::new(agent_config.create_auth_manager());
     let (gw_tx, gw_rx) = tokio::sync::mpsc::unbounded_channel();
     let gateway = GatewaySender::new(gw_tx);
-    let agent = MvpAgent::new(gateway, &agent_config, auth_manager, None).expect("valid config");
+    let agent =
+        MvpAgent::new(gateway, &agent_config, auth_manager, None, None).expect("valid config");
 
     let (c2a_a, c2a_b) = tokio::io::duplex(DUPLEX_BUFFER_BYTES);
     let (a2c_a, a2c_b) = tokio::io::duplex(DUPLEX_BUFFER_BYTES);
@@ -55,7 +56,7 @@ pub async fn load_session_via_agent<C: acp::Client + 'static>(
         });
     tokio::task::spawn_local(
         GatewayReceiver::new(gw_rx, agent_conn)
-            .with_on_meta(xai_file_utils::trace_context::span_from_meta_traceparent)
+            .with_on_meta(xai_grok_otel::span_from_meta_traceparent)
             .run(),
     );
     tokio::task::spawn_local(agent_io);

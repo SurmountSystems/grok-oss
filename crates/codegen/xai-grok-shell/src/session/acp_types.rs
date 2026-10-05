@@ -607,6 +607,10 @@ pub struct StartupHints {
     /// When true, this session is a subagent child and its prompts should not be appended to the per-CWD prompt_history.jsonl file.
     #[serde(default)]
     pub is_subagent: bool,
+    /// Disposable once-run nested role (Goal Plan Writer and similar).
+    /// An L3 does not auto-compact. A once-run nested role does not either.
+    #[serde(default)]
+    pub once_run: bool,
     /// Parent session id when this session is a subagent child.
     /// Emitted as `parent_agent_id` on the turn span for trace attribution.
     #[serde(default)]

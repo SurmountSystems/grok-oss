@@ -304,7 +304,7 @@ impl<'a> EntryRenderer<'a> {
             // It flips `›`/`⌄` with the group's fold state
             let prefix = group_header_chrome_prefix();
             let mut spans = vec![ratatui::text::Span::styled(
-                prefix,
+                &prefix,
                 Style::default().fg(glyph_color),
             )];
             let hook_start = vg
@@ -313,16 +313,33 @@ impl<'a> EntryRenderer<'a> {
                 .iter()
                 .position(|span| span.content.starts_with("  [hooks: "));
             if let Some(hook_start) = hook_start {
-                let suffix_width: usize = vg.line.spans[hook_start..]
+                let suffix_width: usize = vg
+                    .line
+                    .spans
+                    .get(hook_start..)
+                    .expect("index out of bounds")
                     .iter()
                     .map(|span| UnicodeWidthStr::width(span.content.as_ref()))
                     .sum();
                 let label_budget = usize::from(content_area.width)
                     .saturating_sub(UnicodeWidthStr::width(prefix.as_str()))
                     .saturating_sub(suffix_width);
-                let label = ratatui::text::Line::from(vg.line.spans[..hook_start].to_vec());
+                let label = ratatui::text::Line::from(
+                    vg.line
+                        .spans
+                        .get(..hook_start)
+                        .expect("index out of bounds")
+                        .to_vec(),
+                );
                 spans.extend(crate::render::line_utils::truncate_line(label, label_budget).spans);
-                spans.extend(vg.line.spans[hook_start..].iter().cloned());
+                spans.extend(
+                    vg.line
+                        .spans
+                        .get(hook_start..)
+                        .expect("index out of bounds")
+                        .iter()
+                        .cloned(),
+                );
             } else {
                 spans.extend(vg.line.spans.iter().cloned());
             }

@@ -150,8 +150,6 @@ pub fn render_menu(
         if is_selected && theme.is_bandless() {
             buf.set_style(row_rect, Style::default().add_modifier(Modifier::REVERSED));
         }
-
-        y += 1;
     }
 
     rects

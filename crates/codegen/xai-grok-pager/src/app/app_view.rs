@@ -495,6 +495,14 @@ impl AuthIdentity {
         self.email.is_some() && self == other
     }
 }
+/// Pending `/rebuild` re-exec after terminal restore.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RebuildRelaunch {
+    pub session_id: String,
+    pub installed_exe: std::path::PathBuf,
+    pub minimal: bool,
+}
+
 /// Root view component: owns all application state.
 pub struct AppView {
     /// Taken by whichever path reaches a usable session (or interactive idle) first.
@@ -1120,6 +1128,10 @@ pub struct AppView {
     /// When an outstanding clip (stopped or uploading) is given up on if its final never arrives; see
     /// [`AppView::voice_expire_outstanding_clip`].
     pub voice_clip_deadline: Option<Instant>,
+    /// `exit_plan_mode` that arrived before the session was bound.
+    pub pending_exit_plan_mode: Option<xai_acp_lib::AcpArgs<acp::ExtRequest>>,
+    /// Process seed for scheduler fire mode until a session pins its own answer.
+    pub scheduler_background_loops_seed: bool,
 }
 /// Reshow window elapsed? None or 0 means never. Unparseable ack fails open (show).
 fn privacy_banner_reshow_elapsed(acked_at: &str, reshow_days: Option<u64>) -> bool {
@@ -1205,17 +1217,6 @@ impl AppView {
     pub fn coding_data_pending_opted_in(&self) -> Option<bool> {
         self.coding_data_pending_write.map(|w| w.opted_in)
     }
-    /// Why `coding_data_sharing` is locked for this user (`None` = editable).
-    /// Mirrors the dispatch guards in `set_coding_data_sharing`.
-    pub fn coding_data_sharing_lock(&self) -> Option<crate::settings::CodingDataSharingLock> {
-        if self.is_zdr {
-            Some(crate::settings::CodingDataSharingLock::Zdr)
-        } else if self.is_team_non_admin() {
-            Some(crate::settings::CodingDataSharingLock::TeamManaged)
-        } else {
-            None
-        }
-    }
     /// Welcome privacy banner visibility gates.
     pub fn privacy_banner_should_show(&self) -> bool {
         if self.screen_mode.is_minimal() {
@@ -1266,19 +1267,6 @@ impl AppView {
             && !self.is_zdr_blocked()
             && matches!(self.trust_state, TrustState::Done)
             && matches!(self.consent_state, ConsentState::Done)
-    }
-    /// Whether startup type-ahead captured while the app was loading may be
-    /// replayed into the input channel: every startup screen that consumes raw
-    /// keystrokes must be resolved so the composer is the active consumer.
-    /// Mirrors the folder-trust interceptor's gate (auth Done, has access, not
-    /// ZDR-blocked) plus trust Done. When this is false at launch the captured
-    /// prompt is dropped rather than replayed (see `event_loop::run`), so e.g. a
-    /// prompt starting with "n" cannot answer the folder-trust question and quit.
-    pub fn ready_for_startup_typeahead(&self) -> bool {
-        matches!(self.auth_state, AuthState::Done)
-            && self.has_access()
-            && !self.is_zdr_blocked()
-            && matches!(self.trust_state, TrustState::Done)
     }
     /// Extract `GateInfo` from `RemoteSettings`.
     pub fn gate_from_settings(
@@ -1344,36 +1332,6 @@ impl AppView {
         super::dispatch::refresh_open_settings_modals(self);
     }
     /// Mirror the billing and `/usage` gates onto every slash surface (agents, welcome, dashboard dispatch / peek-reply).
-    pub(crate) fn sync_billing_surface_to_agents(&mut self) {
-        let billing = self.usage_visible;
-        let usage_cmd = !self.has_external_auth_provider;
-        for agent in self.agents.values_mut() {
-            agent.set_billing_surface_visible(billing);
-            agent.set_usage_command_visible(usage_cmd);
-        }
-        self.welcome_prompt
-            .slash_controller
-            .set_billing_surface_visible(billing);
-        self.welcome_prompt
-            .slash_controller
-            .set_usage_command_visible(usage_cmd);
-        if let Some(dash) = self.dashboard.as_mut() {
-            dash.dispatch
-                .slash_controller
-                .set_billing_surface_visible(billing);
-            dash.dispatch
-                .slash_controller
-                .set_usage_command_visible(usage_cmd);
-            dash.peek_reply
-                .slash_controller
-                .set_billing_surface_visible(billing);
-            dash.peek_reply
-                .slash_controller
-                .set_usage_command_visible(usage_cmd);
-        }
-    }
-    /// Mirror billing + `/usage` gates onto every slash surface (agents,
-    /// welcome, dashboard dispatch / peek-reply).
     pub(crate) fn sync_billing_surface_to_agents(&mut self) {
         let billing = self.usage_visible;
         let usage_cmd = !self.has_external_auth_provider;
@@ -2328,10 +2286,7 @@ impl AppView {
         let Some(child_sid) = agent.active_subagent.as_ref() else {
             return false;
         };
-        agent
-            .subagent_views
-            .get(child_sid)
-            .is_some_and(|child| child.nested_overlay_esc_dismisses())
+        agent.subagent_views.contains_key(child_sid.as_str())
     }
 
     /// Handle a terminal event. Routes through the input layer stack:
@@ -4840,6 +4795,7 @@ impl AppView {
                                         },
                                     },
                                     overlay_active,
+                                    false,
                                     link_spans,
                                     AppRenderParams {
                                         voice_available,
@@ -4978,6 +4934,7 @@ impl AppView {
                                                         None,
                                                         false,
                                                         crate::app::agent_view::BannerSlotParams::none(),
+                                                        false,
                                                         false,
                                                         link_spans,
                                                         AppRenderParams {
@@ -5794,7 +5751,8 @@ impl AppView {
                         )
                     )
                     || agent.subagent_views.iter().any(|(sid, child)| {
-                        child.has_live_work_animation()
+                        !child.session.state.is_idle()
+                            || child.wake_turn_active()
                             || child.toast.is_some()
                             || child.ephemeral_tip_needs_tick()
                             || child.mode_switch_banner.is_some()

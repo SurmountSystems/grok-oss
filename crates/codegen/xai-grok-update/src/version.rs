@@ -69,7 +69,7 @@ fn is_loopback_base(base: &str) -> bool {
 /// Minimal configuration the update system needs from the environment. Constructed once from `GrokBuildEnvironment` at
 /// startup and threaded through the update call chain. `auto_update` and `version` never need to know about the
 /// `GrokBuildEnvironment` enum directly.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct UpdateConfig {
     /// Chat API proxy base URL (versioned `https://cli-chat-proxy.grok.com/v1` endpoint).
     pub proxy_base_url: String,

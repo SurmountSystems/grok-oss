@@ -869,7 +869,11 @@ async fn refresh_chain_adopts_sibling_pre_lock_without_flock() {
         .expect("uncontended first acquisition");
     let adopted = tokio::time::timeout(
         StdDuration::from_secs(2),
-        mgr.refresh_chain(TokenType::OidcSession, RefreshReason::PreRequest),
+        mgr.refresh_chain(
+            TokenType::OidcSession,
+            RefreshReason::PreRequest,
+            RefreshUrgency::UserFacing,
+        ),
     )
     .await
     .expect("pre-lock adoption must not wait on the held flock")
@@ -907,7 +911,11 @@ async fn refresh_chain_server_rejected_same_key_skips_pre_lock_adopt() {
         delay: StdDuration::ZERO,
     }));
     let minted = mgr
-        .refresh_chain(TokenType::OidcSession, RefreshReason::ServerRejected)
+        .refresh_chain(
+            TokenType::OidcSession,
+            RefreshReason::ServerRejected,
+            RefreshUrgency::UserFacing,
+        )
         .await
         .expect("locked mint");
     assert_eq!(minted.key, "fresh-token");
@@ -948,7 +956,11 @@ async fn refresh_chain_pre_lock_adopt_ignores_expired_disk_token() {
         delay: StdDuration::ZERO,
     }));
     let minted = mgr
-        .refresh_chain(TokenType::OidcSession, RefreshReason::PreRequest)
+        .refresh_chain(
+            TokenType::OidcSession,
+            RefreshReason::PreRequest,
+            RefreshUrgency::UserFacing,
+        )
         .await
         .expect("locked mint");
     assert_eq!(minted.key, "fresh-token");
@@ -991,7 +1003,11 @@ async fn refresh_chain_pre_lock_adopt_skips_disk_token_older_than_memory() {
         delay: StdDuration::ZERO,
     }));
     let auth = mgr
-        .refresh_chain(TokenType::OidcSession, RefreshReason::PreRequest)
+        .refresh_chain(
+            TokenType::OidcSession,
+            RefreshReason::PreRequest,
+            RefreshUrgency::UserFacing,
+        )
         .await
         .expect("in-memory mint is returned");
     assert_eq!(auth.key, "fresh-mint-key");
@@ -1035,7 +1051,11 @@ async fn refresh_chain_server_rejected_skips_lagging_disk_token_pre_lock() {
         delay: StdDuration::ZERO,
     }));
     let minted = mgr
-        .refresh_chain(TokenType::OidcSession, RefreshReason::ServerRejected)
+        .refresh_chain(
+            TokenType::OidcSession,
+            RefreshReason::ServerRejected,
+            RefreshUrgency::UserFacing,
+        )
         .await
         .expect("locked mint");
     assert_eq!(minted.key, "fresh-token");
@@ -1151,7 +1171,11 @@ async fn storm_cap_engages_with_empty_inner_and_dead_disk_refresh_token() {
     }));
     for _ in 0..5 {
         let _ = mgr
-            .refresh_chain(TokenType::OidcSession, RefreshReason::ServerRejected)
+            .refresh_chain(
+                TokenType::OidcSession,
+                RefreshReason::ServerRejected,
+                RefreshUrgency::UserFacing,
+            )
             .await;
     }
     assert_eq!(
@@ -1410,6 +1434,7 @@ async fn refresh_chain_surfaces_transient_failure() {
         async fn refresh(&self, _: RefreshReason) -> crate::refresh::RefreshOutcome {
             crate::refresh::RefreshOutcome::TransientFailure {
                 message: "idp timeout".into(),
+                suspected_consumed_rt: None,
             }
         }
     }
@@ -1828,7 +1853,11 @@ async fn refresh_chain_demotes_when_attributed_tried_rt_differs_from_disk() {
     }
     mgr.set_refresher(Arc::new(AttributedRejection(tried)));
     let err = mgr
-        .refresh_chain(TokenType::OidcSession, RefreshReason::PreRequest)
+        .refresh_chain(
+            TokenType::OidcSession,
+            RefreshReason::PreRequest,
+            RefreshUrgency::UserFacing,
+        )
         .await
         .unwrap_err();
     assert!(
@@ -1883,7 +1912,11 @@ async fn refresh_chain_still_discards_when_attributed_tried_rt_matches_disk() {
     }
     mgr.set_refresher(Arc::new(AttributedRejection(tried)));
     let err = mgr
-        .refresh_chain(TokenType::OidcSession, RefreshReason::PreRequest)
+        .refresh_chain(
+            TokenType::OidcSession,
+            RefreshReason::PreRequest,
+            RefreshUrgency::UserFacing,
+        )
         .await
         .unwrap_err();
     assert!(
@@ -4312,7 +4345,11 @@ async fn dark_wake_defers_refresh_while_a_live_token_can_be_served() {
     }));
     mgr.set_dark_wake_for_test(true);
     let err = mgr
-        .refresh_chain(TokenType::OidcSession, RefreshReason::PreRequest)
+        .refresh_chain(
+            TokenType::OidcSession,
+            RefreshReason::PreRequest,
+            RefreshUrgency::UserFacing,
+        )
         .await
         .unwrap_err();
     assert!(
@@ -4369,10 +4406,14 @@ async fn dark_wake_does_not_defer_server_rejected_recovery() {
     }));
     mgr.set_dark_wake_for_test(true);
     assert_eq!(
-        mgr.refresh_chain(TokenType::OidcSession, RefreshReason::ServerRejected)
-            .await
-            .unwrap()
-            .key,
+        mgr.refresh_chain(
+            TokenType::OidcSession,
+            RefreshReason::ServerRejected,
+            RefreshUrgency::UserFacing
+        )
+        .await
+        .unwrap()
+        .key,
         "fresh-token",
         "ServerRejected recovery must reach the IdP even in dark wake"
     );
@@ -5048,9 +5089,13 @@ async fn refresh_chain_publishes_the_minted_bearer() {
         delay: StdDuration::ZERO,
     }));
     let mut subscriber = Subscriber::new(&mgr);
-    mgr.refresh_chain(TokenType::OidcSession, RefreshReason::PreRequest)
-        .await
-        .expect("the refresher mints a bearer");
+    mgr.refresh_chain(
+        TokenType::OidcSession,
+        RefreshReason::PreRequest,
+        RefreshUrgency::UserFacing,
+    )
+    .await
+    .expect("the refresher mints a bearer");
     subscriber.published("minted bearer", Login::Opaque);
 }
 #[tokio::test]
@@ -5062,7 +5107,11 @@ async fn refresh_chain_publishes_the_sign_out_when_the_refresh_token_is_rejected
     }));
     let mut subscriber = Subscriber::new(&mgr);
     let rejected = mgr
-        .refresh_chain(TokenType::OidcSession, RefreshReason::ServerRejected)
+        .refresh_chain(
+            TokenType::OidcSession,
+            RefreshReason::ServerRejected,
+            RefreshUrgency::UserFacing,
+        )
         .await;
     assert!(
         matches!(

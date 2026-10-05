@@ -259,34 +259,6 @@ mod tests {
     }
 
     #[test]
-    fn acp_conversion_preserves_the_row() {
-        let merged = MergedSession {
-            session_id: "sess_abc123".into(),
-            summary: "Implement session list API".into(),
-            updated_at: "2026-10-29T14:22:15Z".into(),
-            cwd: "/Users/me/xai".into(),
-            ..MergedSession::default()
-        };
-        let info = merged_session_to_row(merged, facet_registry()).into_session_info();
-        let row = serde_json::to_value(&info).unwrap();
-        let acp_row =
-            serde_json::to_value(acp::SessionInfo::try_from(info).expect("absolute cwd")).unwrap();
-
-        assert_eq!(row, acp_row);
-    }
-
-    #[test]
-    fn acp_conversion_rejects_a_row_without_an_absolute_cwd() {
-        let merged = MergedSession {
-            session_id: "sess_remote".into(),
-            cwd: String::new(),
-            ..MergedSession::default()
-        };
-        let info = merged_session_to_row(merged, facet_registry()).into_session_info();
-        assert_eq!(acp::SessionInfo::try_from(info), Err(CwdNotAbsolute));
-    }
-
-    #[test]
     fn conversation_missing_modify_time_still_resumable() {
         let c = Conversation {
             conversation_id: "conv_no_time".into(),

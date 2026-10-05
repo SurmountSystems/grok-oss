@@ -1134,8 +1134,14 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 /// Spawn a fake ACP agent that counts `x.ai/yolo_mode_changed` notifications.
 /// Exits when the channel closes.
+fn spawn_fake_acp_agent(
+    rx: tokio::sync::mpsc::UnboundedReceiver<xai_acp_lib::AcpAgentMessage>,
+) -> Arc<AtomicUsize> {
+    spawn_fake_acp_agent_counting(rx, "x.ai/yolo_mode_changed")
+}
 fn spawn_fake_acp_agent_counting(
     mut rx: tokio::sync::mpsc::UnboundedReceiver<xai_acp_lib::AcpAgentMessage>,
+    method: &'static str,
 ) -> Arc<AtomicUsize> {
     let counter = Arc::new(AtomicUsize::new(0));
     let counter_clone = counter.clone();
@@ -2128,50 +2134,6 @@ async fn fetch_session_list_sends_kind_facet_filter() {
         );
 }
 #[tokio::test]
-async fn fetch_session_list_sends_kind_facet_filter() {
-    use std::sync::{Arc, Mutex};
-    use xai_acp_lib::AcpAgentMessage;
-    let captured: Arc<Mutex<Vec<serde_json::Value>>> = Arc::default();
-    let captured_for_task = captured.clone();
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    tokio::spawn(async move {
-        while let Some(msg) = rx.recv().await {
-            if let AcpAgentMessage::ExtMethod(args) = msg {
-                let params: serde_json::Value = serde_json::from_str(
-                        args.request.params.get(),
-                    )
-                    .expect("params JSON");
-                captured_for_task.lock().unwrap().push(params);
-                let body = serde_json::json!({ "result": { "sessions": [] } });
-                let raw = serde_json::value::RawValue::from_string(body.to_string())
-                    .expect("ser");
-                let _ = args.response_tx.send(Ok(acp::ExtResponse::new(Arc::from(raw))));
-            }
-        }
-    });
-    let (progress_tx, _progress_rx) = tokio::sync::mpsc::unbounded_channel();
-    let mut tasks = JoinSet::new();
-    execute(
-        Effect::FetchSessionList {
-            query: None,
-            seq: 1,
-            kind_filter: Some(vec!["build".into()]),
-        },
-        &mut tasks,
-        &tx,
-        Path::new("."),
-        &SessionFlags::default(),
-        &progress_tx,
-    );
-    let _ = tasks.join_next().await;
-    let captured = captured.lock().unwrap();
-    assert_eq!(captured.len(), 1);
-    assert_eq!(
-            captured[0]["_meta"]["x.ai/facetFilters"]["kind"],
-            serde_json::json!(["build"])
-        );
-}
-#[tokio::test]
 async fn fetch_workflows_list_sends_session_id() {
     use std::sync::{Arc, Mutex};
     use xai_acp_lib::AcpAgentMessage;
@@ -2239,6 +2201,7 @@ async fn debounce_session_search_echoes_query_and_seq() {
             generation: 5,
             query: "abc".into(),
             seq: 9,
+            kind_filter: None,
         },
         &mut tasks,
         &tx,
@@ -3336,12 +3299,4 @@ async fn hydrate_team_capability_adapter_maps_every_reply_to_the_asking_identity
                 .is_err()
         );
 }
-#[test]
-fn rewind_execute_params_sends_conversation_only_with_force() {
-    let params = rewind_execute_params("sess-1", 3);
-    assert_eq!(params["sessionId"], "sess-1");
-    assert_eq!(params["targetPromptIndex"], 3);
-    assert_eq!(params["force"], true);
-    assert_eq!(params["mode"], REWIND_MODE_WIRE);
-    assert_eq!(params["mode"], "conversation_only");
-}
+

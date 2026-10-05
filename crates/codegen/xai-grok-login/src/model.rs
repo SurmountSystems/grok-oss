@@ -9,10 +9,10 @@ pub const TOKEN_TTL: Duration = Duration::days(30);
 const DEFAULT_EARLY_INVALIDATION_SECS: u64 = 300; // 5 minutes
 
 /// Legacy auth.json scope key. Fallback for old devbox auth files.
-pub(super) const LEGACY_SCOPE: &str = "https://accounts.x.ai/sign-in";
+pub const LEGACY_SCOPE: &str = "https://accounts.x.ai/sign-in";
 
 /// auth.json scope key for plain API key auth (desktop login, `grok login --api-key`).
-pub(super) const API_KEY_SCOPE: &str = "xai::api_key";
+pub const API_KEY_SCOPE: &str = "xai::api_key";
 
 const BLOCKED_REASON_NO_LOGS: &str = "BLOCKED_REASON_NO_LOGS";
 const BLOCKED_REASON_NO_LOGS_MODERATED: &str = "BLOCKED_REASON_NO_LOGS_MODERATED";
@@ -24,7 +24,7 @@ pub fn default_coding_data_retention_opt_out() -> bool {
 }
 
 /// Token provenance (debugging/auth.json only; no code branches on this).
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum AuthMode {
     /// Deprecated. Kept for deserializing old auth.json files.
@@ -338,6 +338,113 @@ pub(super) fn early_invalidation() -> Duration {
         .and_then(|v| v.parse::<u64>().ok())
         .map(|s| Duration::seconds(s as i64))
         .unwrap_or_else(|| Duration::seconds(DEFAULT_EARLY_INVALIDATION_SECS as i64))
+}
+
+/// One stored SuperGrok principal, listed without the raw session token.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SupergrokPrincipalListing {
+    pub role_label: &'static str,
+    /// Session mode label (`oidc`, `external`, `web`, `api_key`). Not the role.
+    pub mode_label: &'static str,
+    /// Billing identity: team id, else user id, else the store scope.
+    pub identity_id: String,
+    pub fingerprint: String,
+}
+
+/// Personal multi-slot suffix. A personal session is also stored at `{base}::personal`.
+pub const SUPERGROK_PERSONAL_MULTI_SLOT: &str = "personal";
+
+/// SuperGrok session login (OIDC or the legacy web login). API keys and external providers are not.
+pub fn is_supergrok_session_mode(mode: AuthMode) -> bool {
+    matches!(mode, AuthMode::Oidc | AuthMode::WebLogin)
+}
+
+/// Identity id for billing logs: non-empty team id, else non-empty user id, else the store scope.
+pub fn supergrok_identity_id_from_auth(auth: &GrokAuth, store_scope: &str) -> String {
+    if let Some(team_id) = auth
+        .team_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+    {
+        return team_id.to_owned();
+    }
+    if let Some(user_id) = Some(auth.user_id.trim()).filter(|id| !id.is_empty()) {
+        return user_id.to_owned();
+    }
+    store_scope.trim().to_owned()
+}
+
+/// Store key for the team or personal slot beside `base`.
+pub fn multi_slot_scope_for_auth(base: &str, auth: &GrokAuth) -> String {
+    if auth.is_team_principal()
+        && let Some(team_id) = auth.team_id.as_deref().filter(|id| !id.is_empty())
+    {
+        format!("{base}::team::{team_id}")
+    } else {
+        format!("{base}::{SUPERGROK_PERSONAL_MULTI_SLOT}")
+    }
+}
+
+/// Last write wins at `base`. A personal session is also stored at `{base}::personal`.
+/// A team principal is also stored at `{base}::team::{team_id}` and is left in place by a later personal write.
+pub fn upsert_supergrok_session(map: &mut AuthStore, base: &str, auth: GrokAuth) {
+    if auth.is_team_principal() {
+        if let Some(team_id) = auth.team_id.as_deref() {
+            map.insert(format!("{base}::team::{team_id}"), auth.clone());
+        }
+    } else {
+        map.insert(format!("{base}::personal"), auth.clone());
+    }
+    map.insert(base.to_owned(), auth);
+}
+
+/// Personal and business slots only. The `base` mirror is not a third listing.
+pub fn list_supergrok_principal_listings(map: &AuthStore) -> Vec<SupergrokPrincipalListing> {
+    let mut listings = Vec::new();
+    for (key, auth) in map {
+        let role_label = if key.ends_with("::personal") {
+            "personal"
+        } else if key.contains("::team::") {
+            "business"
+        } else {
+            continue;
+        };
+        let mode_label = match auth.auth_mode {
+            AuthMode::Oidc => "oidc",
+            AuthMode::External => "external",
+            AuthMode::WebLogin => "web",
+            AuthMode::ApiKey => "api_key",
+        };
+        listings.push(SupergrokPrincipalListing {
+            role_label,
+            mode_label,
+            identity_id: supergrok_identity_id_from_auth(auth, key),
+            fingerprint: fingerprint_session_token(&auth.key),
+        });
+    }
+    listings
+}
+
+/// SHA-256 hex of the session token. The digest does not contain the token text.
+pub fn fingerprint_session_token(token: &str) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(token.as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+/// The session at `base`, or a team or personal slot when the base key is absent.
+pub fn lookup_supergrok_session_for_base(map: &AuthStore, base: &str) -> Option<GrokAuth> {
+    if let Some(auth) = map.get(base) {
+        return Some(auth.clone());
+    }
+    let team_prefix = format!("{base}::team::");
+    if let Some((_, auth)) = map.iter().find(|(key, _)| key.starts_with(&team_prefix)) {
+        return Some(auth.clone());
+    }
+    map.get(&format!("{base}::personal")).cloned()
 }
 
 pub fn is_expired(auth: &GrokAuth) -> bool {

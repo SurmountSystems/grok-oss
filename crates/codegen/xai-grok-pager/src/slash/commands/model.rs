@@ -80,13 +80,13 @@ impl ModelCommand {
 
         // Prefer an exact full-string catalog match first. Model display names often contain spaces ("Grok 4.5").
         // If we split on the last token first, a shorter catalog entry ("Grok") would steal the prefix and treat "4.5" as an effort level
-        if let Some(id) = ctx.models.resolve_by_name_or_id(trimmed) {
+        if let Some(id) = models.resolve_by_name_or_id(trimmed) {
             return CommandResult::Action(Action::SetDefaultModel(id));
         }
 
         // A trailing window or effort after the model is a session switch
-        if let Some((id, rest)) = split_model_rest(ctx.models, trimmed) {
-            let windows = ctx.models.context_window_options_for(&id);
+        if let Some((id, rest)) = split_model_rest(models, trimmed) {
+            let windows = models.context_window_options_for(&id);
             let (window, effort_token) = match split_window_effort(rest, &windows) {
                 Ok(split) => split,
                 Err(message) => return CommandResult::Error(message),
@@ -96,17 +96,16 @@ impl ModelCommand {
             if let Some(window) = window
                 && effort_token.is_empty()
             {
-                let effort = ctx
-                    .models
+                let effort = models
                     .reasoning_effort
-                    .filter(|_| ctx.models.current.as_ref() == Some(&id));
+                    .filter(|_| models.current.as_ref() == Some(&id));
                 return CommandResult::Action(Action::SwitchModel(ModelChoice {
                     model_id: id,
                     effort,
                     context_window_selection: Some(window),
                 }));
             }
-            return match ctx.models.resolve_effort_for_model(&id, effort_token) {
+            return match models.resolve_effort_for_model(&id, effort_token) {
                 Ok(effort) => CommandResult::Action(Action::SwitchModel(ModelChoice {
                     model_id: id,
                     effort: Some(effort),

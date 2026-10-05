@@ -1,6 +1,7 @@
 //! Wiring tests for MCP tool-layer images through `handle_bridge_tool_success`.
 use super::support::*;
 use super::*;
+use base64::Engine;
 use xai_grok_sampling_types::{ContentPart, ConversationItem};
 use xai_grok_tools::types::output::{MCPOutput, ToolOutput, ToolRunResult};
 use xai_grok_tools::util::base64_images::{ExtractedImage, IMAGE_CONTENT_PLACEHOLDER};
@@ -44,6 +45,54 @@ fn last_tool_result_text(conv: &[ConversationItem]) -> &str {
         .expect("tool result pushed");
     tool_result_text(tool)
 }
+fn item_contains_data_image_url(item: &ConversationItem) -> bool {
+    match item {
+        ConversationItem::User(u) => u.content.iter().any(|p| match p {
+            ContentPart::Image { url } => url.starts_with("data:"),
+            ContentPart::Text { text } => text.contains("data:image"),
+        }),
+        ConversationItem::ToolResult(tr) => {
+            tr.content.contains("data:image")
+                || tr.images.iter().any(|p| match p {
+                    ContentPart::Image { url } => url.starts_with("data:"),
+                    ContentPart::Text { text } => text.contains("data:image"),
+                })
+        }
+        _ => false,
+    }
+}
+
+fn item_has_image_part(item: &ConversationItem) -> bool {
+    match item {
+        ConversationItem::User(u) => u
+            .content
+            .iter()
+            .any(|p| matches!(p, ContentPart::Image { .. })),
+        ConversationItem::ToolResult(tr) => tr
+            .images
+            .iter()
+            .any(|p| matches!(p, ContentPart::Image { .. })),
+        _ => false,
+    }
+}
+
+fn parent_followup_reminder_text(item: &ConversationItem) -> Option<String> {
+    let ConversationItem::User(user) = item else {
+        return None;
+    };
+    let text = user
+        .content
+        .iter()
+        .filter_map(|part| match part {
+            ContentPart::Text { text } => Some(text.as_ref()),
+            ContentPart::Image { .. } => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    text.contains("Image extracted from tool result")
+        .then_some(text)
+}
+
 fn followup_has_data_image(followups: &[ConversationItem]) -> bool {
     followups.iter().any(|item| match item {
         ConversationItem::User(u) => u

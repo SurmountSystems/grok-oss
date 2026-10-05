@@ -82,6 +82,30 @@ pub fn resolve_refresh_credential(
                 .flatten()
         })
 }
+/// A refresh token that may already have been consumed because the exchange straddled a suspend.
+/// Debug output shows a suffix only, so `{:?}` does not print the token.
+#[derive(Clone)]
+pub struct SuspectConsumedRt {
+    refresh_token: String,
+}
+
+impl SuspectConsumedRt {
+    pub(crate) fn new(refresh_token: String) -> Self {
+        Self { refresh_token }
+    }
+}
+
+impl std::fmt::Debug for SuspectConsumedRt {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SuspectConsumedRt")
+            .field(
+                "refresh_token",
+                &xai_grok_auth::bearer_suffix(&self.refresh_token),
+            )
+            .finish()
+    }
+}
+
 /// Outcome of a refresh attempt. It carries data only: `refresh_chain` handles the mutations.
 #[derive(Debug)]
 #[must_use = "RefreshOutcome encodes a state transition; route it through refresh_chain"]
@@ -102,7 +126,11 @@ pub enum RefreshOutcome {
     },
     /// Transient or unknown failure; the caller may retry later.
     /// The refresher logs the cause structurally and flattens it to a message here; the retry decision needs recoverability, not the source chain.
-    TransientFailure { message: String },
+    /// `suspected_consumed_rt` is set when the refresh token may already have been spent.
+    TransientFailure {
+        message: String,
+        suspected_consumed_rt: Option<SuspectConsumedRt>,
+    },
 }
 impl RefreshOutcome {
     /// A fresh credential from the authority (hides the `Box`).
@@ -136,6 +164,18 @@ impl RefreshOutcome {
     pub fn transient(message: impl Into<String>) -> Self {
         Self::TransientFailure {
             message: message.into(),
+            suspected_consumed_rt: None,
+        }
+    }
+
+    /// Retryable failure that also records a refresh token the exchange may have consumed.
+    pub fn transient_suspect_consumed(
+        message: impl Into<String>,
+        suspect: SuspectConsumedRt,
+    ) -> Self {
+        Self::TransientFailure {
+            message: message.into(),
+            suspected_consumed_rt: Some(suspect),
         }
     }
 }

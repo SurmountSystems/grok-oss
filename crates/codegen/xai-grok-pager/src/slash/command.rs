@@ -61,6 +61,13 @@ pub enum CommandResult {
     /// Command text should be sent as a regular prompt. This variant deliberately covers two different cases. Unknown
     /// commands (pager doesn't know them, shell might).
     PassThrough(String),
+    /// Hold a command or skill row on the composer prompt queue instead of running it now.
+    QueueLater {
+        text: String,
+        as_command: bool,
+        wire_blocks: Option<Vec<agent_client_protocol::ContentBlock>>,
+        display_as_skill: bool,
+    },
 }
 
 /// A suggestion item for command argument completion.

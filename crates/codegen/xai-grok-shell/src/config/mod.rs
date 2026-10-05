@@ -81,29 +81,23 @@ pub struct SubagentsConfig {
     /// Named persona/SOUL definitions.
     #[serde(default)]
     pub personas: std::collections::HashMap<String, SubagentPersona>,
+    /// Worktrees stay off. `[subagents] allow_worktree = true` opts in.
+    #[serde(default)]
+    pub allow_worktree: bool,
+    /// L1 follow-up to a running L2. `[subagents] parent_follow_up`. Default on.
+    #[serde(default = "default_parent_follow_up")]
+    pub parent_follow_up: bool,
 }
-impl Default for SubagentsConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            allow_worktree: false,
-            parent_follow_up: true,
-            max_depth: None,
-            max_concurrent: None,
-            limit_behavior: None,
-            workflow_max_concurrent: None,
-            models: std::collections::HashMap::new(),
-            toggle: std::collections::HashMap::new(),
-            roles: std::collections::HashMap::new(),
-            personas: std::collections::HashMap::new(),
-        }
-    }
+fn default_parent_follow_up() -> bool {
+    true
 }
 use xai_grok_subagent_resolution::config::{SubagentPersona, SubagentRole};
 impl Default for SubagentsConfig {
     fn default() -> Self {
         SubagentsConfig {
             enabled: true,
+            allow_worktree: false,
+            parent_follow_up: default_parent_follow_up(),
             max_depth: None,
             max_concurrent: None,
             sampling_limit: None,

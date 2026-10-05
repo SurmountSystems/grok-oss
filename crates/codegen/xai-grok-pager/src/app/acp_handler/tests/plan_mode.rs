@@ -51,7 +51,7 @@
             .get("child-l2")
             .expect("present-park must keep the nested L2 session");
         assert!(
-            !nested.pending_kill && !nested.finished,
+            !nested.attempt.pending_kill && !nested.finished,
             "nested L2 must stay Working; present-park is not Cancelling"
         );
     }
@@ -104,6 +104,7 @@
                 agent_id: AgentId(0),
                 session_id: acp::SessionId::new("sess-1"),
                 models: None,
+                modes: None,
                 code_restored: false,
                 restore_summary: None,
                 restore_degree: None,
@@ -118,7 +119,7 @@
                 agent
                     .plan_approval_view
                     .as_ref()
-                    .is_some_and(|p| !p.is_local_idle_decision && p.response_tx.is_some()),
+                    .is_some_and(|p| !p.is_local_idle_decision && p.has_live_ext_waiter()),
                 "SessionLoaded flush after bind must park the live waiter"
             );
             assert!(
@@ -185,6 +186,7 @@
                 agent_id: AgentId(0),
                 session_id: acp::SessionId::new(sid),
                 models: None,
+                modes: None,
                 code_restored: false,
                 restore_summary: None,
                 restore_degree: None,
@@ -246,6 +248,7 @@
                 agent_id: AgentId(0),
                 session_id: acp::SessionId::new(sid),
                 models: None,
+                modes: None,
                 code_restored: false,
                 restore_summary: None,
                 restore_degree: None,
@@ -271,7 +274,7 @@
                 agent
                     .plan_approval_view
                     .as_ref()
-                    .is_some_and(|p| !p.is_local_idle_decision && p.response_tx.is_some()),
+                    .is_some_and(|p| !p.is_local_idle_decision && p.has_live_ext_waiter()),
                 "session load after /rebuild must keep the live waiter bind"
             );
             agent.approve_plan();
@@ -310,7 +313,7 @@
                 agent
                     .plan_approval_view
                     .as_ref()
-                    .is_some_and(|p| !p.is_local_idle_decision && p.response_tx.is_some()),
+                    .is_some_and(|p| !p.is_local_idle_decision && p.has_live_ext_waiter()),
                 "restore must park a live waiter"
             );
             assert!(
@@ -342,7 +345,7 @@
                 .as_ref()
                 .expect("/view-plan must reopen the restored waiter");
             assert!(!pav.is_local_idle_decision);
-            assert!(pav.response_tx.is_some());
+            assert!(pav.has_live_ext_waiter());
             assert!(
                 agent
                     .line_viewer
@@ -406,7 +409,7 @@
                 .as_ref()
                 .expect("restore must park the live waiter");
             assert!(!pav.is_local_idle_decision);
-            assert!(pav.response_tx.is_some());
+            assert!(pav.has_live_ext_waiter());
             assert_eq!(
                 pav.focus,
                 PlanApprovalFocus::Preview,
@@ -468,7 +471,7 @@
                 .as_ref()
                 .expect("restore must park the live waiter");
             assert!(!pav.is_local_idle_decision);
-            assert!(pav.response_tx.is_some());
+            assert!(pav.has_live_ext_waiter());
             assert_eq!(pav.focus, PlanApprovalFocus::Preview);
             agent.approve_plan();
             assert_eq!(agent.prompt.text(), "");
@@ -1619,7 +1622,7 @@
                 agent
                     .plan_approval_view
                     .as_ref()
-                    .is_some_and(|p| !p.is_local_idle_decision && p.response_tx.is_some()),
+                    .is_some_and(|p| !p.is_local_idle_decision && p.has_live_ext_waiter()),
                 "fixture: live exit_plan_mode waiter is parked"
             );
             agent.cancel_line_viewer();
@@ -1638,7 +1641,7 @@
             "/view-plan must not replace the live waiter with a local idle park"
         );
         assert!(
-            pav.response_tx.is_some(),
+            pav.has_live_ext_waiter(),
             "/view-plan must keep the live reverse-request channel"
         );
         assert!(
@@ -1676,7 +1679,7 @@
                 .as_ref()
                 .expect("status click must reopen the live waiter");
             assert!(!pav.is_local_idle_decision);
-            assert!(pav.response_tx.is_some());
+            assert!(pav.has_live_ext_waiter());
             assert!(
                 agent
                     .line_viewer
@@ -1730,7 +1733,7 @@
             .as_ref()
             .expect("/view-plan must keep the parent live waiter");
         assert!(!pav.is_local_idle_decision);
-        assert!(pav.response_tx.is_some());
+        assert!(pav.has_live_ext_waiter());
         assert!(
             agent
                 .line_viewer
@@ -1992,7 +1995,6 @@
     }
 
     fn draw_plan_present_frame(agent: &mut crate::app::agent_view::AgentView) {
-        use crate::app::bundle::BundleState;
         use crate::scrollback::render::ScratchBuffer;
         use ratatui::buffer::Buffer;
         use ratatui::layout::Rect;
@@ -2009,7 +2011,6 @@
             None,
             false,
             crate::app::agent_view::BannerSlotParams::none(),
-            &BundleState::default(),
             false,
             false,
             &mut Vec::new(),
@@ -2220,6 +2221,7 @@
             screen_x: sb.x,
             selectable_cols: 0..40,
             text: "selectable scrollback line for plan-present drag".into(),
+            painted_region: None,
             joiner_to_previous: None,
         });
         agent.update_scrollback_selection_state(model, Default::default());

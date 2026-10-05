@@ -528,6 +528,62 @@ impl ScrollbackState {
 
     // Content Management
 
+    /// Keep the viewport pinned to the tail when the operator has not scrolled away.
+    fn follow_tail_if_operator_still_there(&mut self) {
+        if self.follow_mode && !self.follow_preserve_scroll {
+            self.scroll_offset = self.max_scroll_offset();
+        }
+    }
+
+    /// New thinking adopts the sticky Ctrl+T mode. Cache-off starts collapsed,
+    /// not the constructor's truncated default.
+    fn apply_thinking_sticky_display_mode(&self, entry: &mut ScrollbackEntry) {
+        if !matches!(entry.block, RenderBlock::Thinking(_)) {
+            return;
+        }
+        entry.display_mode = if crate::appearance::cache::load_always_expand_thinking()
+            || self.thinking_display_mode == DisplayMode::Expanded
+        {
+            DisplayMode::Expanded
+        } else {
+            DisplayMode::Collapsed
+        };
+    }
+
+    /// Rematerialize stacked thinking when `[ui] always_expand_thinking` flips.
+    /// Aborted thoughts stay collapsed.
+    fn apply_always_expand_thinking_flip(&mut self, enabled: bool) {
+        self.thinking_display_mode = if enabled {
+            DisplayMode::Expanded
+        } else {
+            DisplayMode::Collapsed
+        };
+        let target = self.thinking_display_mode;
+        let mut changed = Vec::new();
+        for (id, entry) in &mut self.entries {
+            if !matches!(entry.block, RenderBlock::Thinking(_)) {
+                continue;
+            }
+            if entry
+                .block
+                .as_thinking_mut()
+                .is_some_and(|thinking| thinking.is_aborted())
+            {
+                continue;
+            }
+            if entry.display_mode != target {
+                entry.display_mode = target;
+                entry.invalidate_cache();
+                changed.push(*id);
+            }
+        }
+        for id in changed {
+            self.dirty_heights.insert(id);
+        }
+        self.gaps_may_be_dirty = true;
+        self.invalidate_layout_cache();
+    }
+
     /// Add an entry, assigning it a unique ID.
     ///
     /// Returns the assigned EntryId which can be used to access this entry later.
@@ -988,6 +1044,23 @@ impl ScrollbackState {
     /// Returns None if the entry doesn't exist (was removed or ID is invalid).
     pub fn get_by_id_mut(&mut self, id: EntryId) -> Option<&mut ScrollbackEntry> {
         self.entries.get_mut(&id)
+    }
+
+    /// Attach a hook batch to an existing tool row.
+    pub fn attach_hooks(
+        &mut self,
+        id: EntryId,
+        phase: crate::scrollback::blocks::tool::HookPhase,
+        runs: Vec<crate::scrollback::blocks::tool::HookRunEntry>,
+    ) {
+        let Some(entry) = self.entries.get_mut(&id) else {
+            return;
+        };
+        let data = entry.hook_data.get_or_insert_with(Default::default);
+        match phase {
+            crate::scrollback::blocks::tool::HookPhase::Pre => data.pre_hooks = runs,
+            crate::scrollback::blocks::tool::HookPhase::Post => data.post_hooks = runs,
+        }
     }
 
     /// The escalation fires only on that rising edge, so a user's collapse of an already-untrusted block sticks. A row

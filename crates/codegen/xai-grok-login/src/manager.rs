@@ -57,6 +57,15 @@ pub enum RefreshReason {
     /// Server returned 401/403. Must obtain a different token.
     ServerRejected,
 }
+/// Who is waiting on the refresh. Orthogonal to [`RefreshReason`].
+/// Background work must not start an IdP exchange during a dark wake.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefreshUrgency {
+    /// A user or a live connection is waiting.
+    UserFacing,
+    /// A background loop. Defer for the whole dark wake.
+    Background,
+}
 /// Why [`AuthManager::try_use_disk_token`] (the single enforcement point for disk-token adoption) declined a disk token.
 /// Naming the decision, instead of collapsing every decline into a bare `None`, lets callers carry it into the structured log.
 /// Tests can assert the exact guard.
@@ -1325,14 +1334,23 @@ impl AuthManager {
     /// Also the team-pin gate: a cached/refreshed wrong-team session is cleared and rejected here, never handed to a consumer.
     #[tracing::instrument(skip(self), fields(token_type = tracing::field::Empty))]
     pub async fn auth(self: &Arc<Self>) -> Result<GrokAuth, AuthError> {
-        let auth = self.auth_dispatch().await?;
+        self.auth_with_urgency(RefreshUrgency::UserFacing).await
+    }
+    async fn auth_with_urgency(
+        self: &Arc<Self>,
+        urgency: RefreshUrgency,
+    ) -> Result<GrokAuth, AuthError> {
+        let auth = self.auth_dispatch(urgency).await?;
         if let Some(e) = self.cached_token_policy_error(&auth) {
             self.reject_and_clear(&e);
             return Err(e);
         }
         Ok(auth)
     }
-    async fn auth_dispatch(self: &Arc<Self>) -> Result<GrokAuth, AuthError> {
+    async fn auth_dispatch(
+        self: &Arc<Self>,
+        urgency: RefreshUrgency,
+    ) -> Result<GrokAuth, AuthError> {
         let snapshot: Option<GrokAuth> = self.owned_inner();
         let token_type = TokenType::from_auth(snapshot.as_ref());
         tracing::Span::current().record("token_type", tracing::field::debug(token_type));
@@ -1371,7 +1389,7 @@ impl AuthManager {
                 }
                 TokenType::OidcSession | TokenType::ExternalBinary => {
                     match self
-                        .refresh_chain(token_type, RefreshReason::PreRequest)
+                        .refresh_chain(token_type, RefreshReason::PreRequest, urgency)
                         .await
                     {
                         Ok(auth) => Ok(auth),
@@ -1403,6 +1421,13 @@ impl AuthManager {
     /// Return the current valid token string, or an error.
     pub async fn get_valid_token(self: &Arc<Self>) -> Result<String, AuthError> {
         self.auth().await.map(|a| a.key)
+    }
+    /// [`Self::get_valid_token`] for a background consumer.
+    /// Dark wake defers the exchange instead of spending the refresh token.
+    pub async fn get_valid_token_background(self: &Arc<Self>) -> Result<String, AuthError> {
+        self.auth_with_urgency(RefreshUrgency::Background)
+            .await
+            .map(|a| a.key)
     }
     /// The only mutation point: persists on success, records the verdict on failure.
     /// `_lock` type-enforces that the persisting `update()` runs under the file lock.
@@ -1537,7 +1562,7 @@ impl AuthManager {
                 }
                 Err(AuthError::permanent(failed_reason))
             }
-            RefreshOutcome::TransientFailure { message } => {
+            RefreshOutcome::TransientFailure { message, .. } => {
                 tracing::warn!(%message, "auth.refresh.transient_failure");
                 xai_grok_telemetry::unified_log::warn(
                     "auth.refresh.transient_failure",

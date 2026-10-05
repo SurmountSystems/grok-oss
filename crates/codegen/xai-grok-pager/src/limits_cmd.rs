@@ -693,7 +693,7 @@ pub fn build_limits_cli_from_parts_with_postpaid(
     let snap = if principals.is_empty() {
         LimitsSnapshot::from_billing(None, None, live)
     } else if principals.len() == 1 {
-        let p = &principals[0];
+        let p = principals.first().expect("index out of bounds");
         let mut s = LimitsSnapshot::from_billing(p.balance.as_ref(), p.autotopup.as_ref(), live);
         if !live.is_console() {
             s.live_principal_label = live_role
@@ -741,6 +741,50 @@ pub fn report_from_snapshot(snap: &LimitsSnapshot, notes: Vec<String>) -> Limits
     report_from_snapshot_with_meter_source(snap, notes, None)
 }
 
+fn current_billing_credits_usd(
+    stored_usd: Option<f64>,
+    newer_live_or_operator_usd: Option<f64>,
+    documented_billing_credits_field_usd: Option<f64>,
+) -> Option<f64> {
+    if let Some(named) = documented_billing_credits_field_usd {
+        return Some(named);
+    }
+    let _ = (stored_usd, newer_live_or_operator_usd);
+    None
+}
+
+fn prefer_live_documented_usd_over_stored(
+    stored_usd: Option<f64>,
+    live_documented_usd: Option<f64>,
+) -> Option<f64> {
+    match (stored_usd, live_documented_usd) {
+        (_, Some(live)) => Some(live),
+        (stored, None) => stored,
+    }
+}
+
+fn billing_credits_cents_from_core_invoice_prepaid_remaining(
+    prepaid_credits_val: &str,
+    prepaid_credits_used_val: &str,
+) -> Option<i64> {
+    fn parse_usd_cents_abs(val: &str) -> Option<i64> {
+        let n: i64 = val.trim().parse().ok()?;
+        Some(n.saturating_abs())
+    }
+    let prepaid = parse_usd_cents_abs(prepaid_credits_val)?;
+    let used = parse_usd_cents_abs(prepaid_credits_used_val)?;
+    Some(prepaid.saturating_sub(used))
+}
+
+fn views_billing_card_from_wire(wire: &str) -> crate::views::limits_snapshot::BillingCreditsCard {
+    use crate::views::limits_snapshot::BillingCreditsCard;
+    match wire {
+        "fetched" => BillingCreditsCard::Fetched,
+        "error" => BillingCreditsCard::Error,
+        _ => BillingCreditsCard::NotFetched,
+    }
+}
+
 /// Drop Billing Credits card notes that do not match the card state on `snap`.
 ///
 /// `collect_limits_report` stores honesty notes before the card is attached.
@@ -748,7 +792,7 @@ pub fn report_from_snapshot(snap: &LimitsSnapshot, notes: Vec<String>) -> Limits
 /// did not parse the Billing Credits card. One card note only.
 fn drop_stale_billing_credits_card_notes(
     notes: &mut Vec<String>,
-    card: xai_grok_sampling_types::BillingCreditsCard,
+    card: crate::views::limits_snapshot::BillingCreditsCard,
 ) {
     use crate::views::limits_honesty::{
         NOTE_BILLING_CREDITS_CARD_FETCH_FAILED, NOTE_BILLING_CREDITS_CARD_FETCHED,
@@ -758,11 +802,11 @@ fn drop_stale_billing_credits_card_notes(
         let kind = if note.as_str() == NOTE_BILLING_CREDITS_CARD_NOT_FETCHED
             || note.contains("grok-oss did not parse the")
         {
-            Some(xai_grok_sampling_types::BillingCreditsCard::NotFetched)
+            Some(crate::views::limits_snapshot::BillingCreditsCard::NotFetched)
         } else if note.as_str() == NOTE_BILLING_CREDITS_CARD_FETCHED {
-            Some(xai_grok_sampling_types::BillingCreditsCard::Fetched)
+            Some(crate::views::limits_snapshot::BillingCreditsCard::Fetched)
         } else if note.as_str() == NOTE_BILLING_CREDITS_CARD_FETCH_FAILED {
-            Some(xai_grok_sampling_types::BillingCreditsCard::Error)
+            Some(crate::views::limits_snapshot::BillingCreditsCard::Error)
         } else {
             None
         };
@@ -839,11 +883,11 @@ pub fn report_from_snapshot_with_meter_source(
             is_live_meaning: crate::views::limits_honesty::CONSOLE_IS_LIVE_MEANING,
             team_prepaid_usd: snap.console.balance_cents.map(|c| c.abs() as f64 / 100.0),
             billing_credits_card: snap.console.billing_credits_card.as_wire(),
-            billing_credits_usd: xai_grok_sampling_types::current_billing_credits_usd(
+            billing_credits_usd: current_billing_credits_usd(
                 None,
                 None,
                 match snap.console.billing_credits_card {
-                    xai_grok_sampling_types::BillingCreditsCard::Fetched => snap
+                    crate::views::limits_snapshot::BillingCreditsCard::Fetched => snap
                         .console
                         .billing_credits_cents
                         .map(|c| c.abs() as f64 / 100.0),
@@ -1532,7 +1576,10 @@ async fn collect_limits_report_at(grok_home: &Path) -> Result<(LimitsCliReport, 
         None => (report, snap),
     };
     let (report, snap) = if let Some(mgmt) = hub_doc.management.as_ref() {
-        let snap = snap.with_billing_credits(mgmt.billing_credits_card, mgmt.billing_credits_cents);
+        let snap = snap.with_billing_credits(
+            views_billing_card_from_wire(mgmt.billing_credits_card.as_wire()),
+            mgmt.billing_credits_cents,
+        );
         let mut notes = report.notes;
         // Notes were stored while the card was still not fetched. Drop that
         // stale did-not-parse sentence when the later card state is fetched
@@ -1869,7 +1916,7 @@ pub fn classify_free_period_series(samples: &[serde_json::Value]) -> FreePeriodS
             continue;
         }
         saw_comparable = true;
-        let first = series[0];
+        let first = series.first().copied().expect("index out of bounds");
         if series.iter().any(|v| *v != first) {
             return FreePeriodSeriesClass::Stepped;
         }
@@ -2813,9 +2860,8 @@ mod tests {
     #[test]
     fn stale_stored_dollars_are_not_reported_as_current_billing_credits_when_live_fetch_disagrees()
     {
-        use xai_grok_sampling_types::{
-            BillingCreditsCard, current_billing_credits_usd, prefer_live_documented_usd_over_stored,
-        };
+        use super::{current_billing_credits_usd, prefer_live_documented_usd_over_stored};
+        use crate::views::limits_snapshot::BillingCreditsCard;
 
         assert_eq!(
             current_billing_credits_usd(Some(89.94), Some(47.03), None),
@@ -2862,7 +2908,7 @@ mod tests {
             "must not fill the Credits card from prepaid, SuperGrok dollars, or the operator-visible $25.32 card: {human}"
         );
         assert_eq!(
-            xai_grok_sampling_types::current_billing_credits_usd(Some(25.32), None, None),
+            current_billing_credits_usd(Some(25.32), None, None),
             None,
             "operator-visible $25.32 is not a grok-oss meter without a named JSON field for that card"
         );
@@ -2883,7 +2929,7 @@ mod tests {
     /// SuperGrok `prepaidBalance.val` $248.24 must not fill the card.
     #[test]
     fn limits_json_billing_credits_card_from_named_remaining_not_total_val() {
-        use xai_grok_sampling_types::BillingCreditsCard;
+        use crate::views::limits_snapshot::BillingCreditsCard;
 
         let mut b = bal(12.0);
         b.prepaid_balance_cents = Some(24_824);
@@ -2992,9 +3038,8 @@ mod tests {
     #[test]
     fn empty_inference_read_plus_management_total_val_sets_team_prepaid_usd_not_credits_remaining()
     {
-        use xai_grok_sampling_types::{
-            BillingCreditsCard, billing_credits_cents_from_core_invoice_prepaid_remaining,
-        };
+        use super::billing_credits_cents_from_core_invoice_prepaid_remaining;
+        use crate::views::limits_snapshot::BillingCreditsCard;
         use xai_grok_shell::auth::{
             ConsoleTeamPrepaidMeter, PrepaidBalanceResponse, UsdCentsVal,
             console_team_prepaid_from_response, select_team_prepaid_meter,
@@ -3218,7 +3263,7 @@ mod tests {
     #[test]
     fn limits_printout_does_not_invent_dashboard_credits_remaining_or_usage() {
         use crate::views::limits_honesty::NOTE_DASHBOARD_THIRTY_DAY_CREDITS_NOT_PARSED;
-        use xai_grok_sampling_types::BillingCreditsCard;
+        use crate::views::limits_snapshot::BillingCreditsCard;
 
         let input = PrincipalLimitsInput {
             label: "SuperGrok".into(),

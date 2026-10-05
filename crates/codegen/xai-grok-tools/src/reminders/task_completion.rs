@@ -1778,6 +1778,7 @@ mod tests {
             await_to_completion: false,
             fork_context: false,
             owner: SubagentOwner::Task,
+            implement_loop_effort: None,
             cancel_token: tokio_util::sync::CancellationToken::new(),
             spawn_root: Default::default(),
             tool_call_id: None,
@@ -1837,7 +1838,7 @@ mod tests {
               === Output ===\n\
               output for sub-1\n\
               \n\
-              <subagent_meta>id=sub-1, tool_calls=3, turns=2, duration_ms=5000</subagent_meta>\n\
+              <subagent_meta>id=sub-1, tool_calls=3, turns=2, duration=5.0s</subagent_meta>\n\
               \n\
               <subagent_result>\n\
               subagent_id: sub-1\n\
@@ -2036,7 +2037,7 @@ mod tests {
              === Output ===\n\
              output for sub-abc\n\
              \n\
-             <subagent_meta>id=sub-abc, tool_calls=3, turns=2, duration_ms=5000</subagent_meta>\n\
+             <subagent_meta>id=sub-abc, tool_calls=3, turns=2, duration=5.0s</subagent_meta>\n\
              \n\
              <subagent_result>\n\
              subagent_id: sub-abc\n\
@@ -2173,7 +2174,7 @@ mod tests {
                  [output truncated: 4000 of 50000 bytes shown]\n\
                  Use get_task_output(\"sub-loop\") to see the full output.\n\
                  \n\
-                 <subagent_meta>id=sub-loop, tool_calls=3, turns=2, duration_ms=5000</subagent_meta>\n\
+                 <subagent_meta>id=sub-loop, tool_calls=3, turns=2, duration=5.0s</subagent_meta>\n\
                  \n\
                  <subagent_result>\n\
                  subagent_id: sub-loop\n\
@@ -2338,7 +2339,7 @@ mod tests {
              === Output ===\n\
              the answer for a\n\
              \n\
-             <subagent_meta>id=a, tool_calls=2, turns=2, duration_ms=1000</subagent_meta>\n\
+             <subagent_meta>id=a, tool_calls=2, turns=2, duration=1.0s</subagent_meta>\n\
              \n\
              <subagent_result>\n\
              subagent_id: a\n\
@@ -2379,7 +2380,7 @@ mod tests {
              === Output ===\n\
              output for sub-loop\n\
              \n\
-             <subagent_meta>id=sub-loop, tool_calls=3, turns=2, duration_ms=5000</subagent_meta>\n\
+             <subagent_meta>id=sub-loop, tool_calls=3, turns=2, duration=5.0s</subagent_meta>\n\
              \n\
              <subagent_result>\n\
              subagent_id: sub-loop\n\

@@ -7,7 +7,6 @@
 //! The struct / trait / constant names keep the `classifier` prefix so the env / remote / config wire contract stays stable.
 
 #![allow(dead_code)]
-#![allow(dead_code)]
 
 pub(crate) mod evidence;
 

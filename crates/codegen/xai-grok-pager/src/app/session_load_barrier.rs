@@ -291,6 +291,7 @@ mod tests {
             session_id: sid(session),
             models: None,
             modes: None,
+            scheduler_background_loops: None,
             code_restored: false,
             restore_summary: None,
             restore_degree: None,

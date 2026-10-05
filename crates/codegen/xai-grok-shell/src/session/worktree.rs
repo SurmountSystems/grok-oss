@@ -953,6 +953,15 @@ mod tests {
             "expected registry-unavailable error, got: {msg}"
         );
     }
+    fn run_git(path: &std::path::Path, args: &[&str]) {
+        let status = std::process::Command::new("git")
+            .arg("-C")
+            .arg(path)
+            .args(args)
+            .status()
+            .unwrap_or_else(|err| panic!("git {} failed to start: {err}", args.join(" ")));
+        assert!(status.success(), "git {} exited {status}", args.join(" "));
+    }
     fn init_git_repo(path: &std::path::Path) {
         if std::env::var_os("GROK_HOME").is_none() {
             let home = std::env::temp_dir().join(format!("grok-home-{}", std::process::id()));

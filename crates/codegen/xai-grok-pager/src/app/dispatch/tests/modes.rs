@@ -474,12 +474,12 @@ fn after_plan_exit_slash_plan_docks_isolated_preview_not_ignored() {
     );
     let nested = &agent.subagent_sessions["child-l2"];
     assert!(
-        nested.pending_kill && !nested.finished,
+        nested.attempt.pending_kill && !nested.finished,
         "live nested implementer must be exclusive-blocked"
     );
     let done = &agent.subagent_sessions["child-done"];
     assert!(
-        done.finished && !done.pending_kill,
+        done.finished && !done.attempt.pending_kill,
         "already-finished nested row must not be exclusive-blocked"
     );
 }
@@ -498,8 +498,6 @@ fn after_plan_exit_slash_plan_with_body_submits_plan_update_not_only_stale_previ
         agent.plan_mode_pending = None;
         agent.plan_decision_resolved = true;
         agent.plan_approval_view = None;
-        agent.latest_inline_plan_content =
-            Some("# Plan: why the agent stopped, and what we do instead\n".to_string());
     }
 
     let effects = dispatch(
@@ -640,7 +638,7 @@ fn plan_soft_docks_isolated_preview_without_entering_plan_mode() {
     );
     let nested = &agent.subagent_sessions["child-l2"];
     assert!(
-        !nested.pending_kill && !nested.finished,
+        !nested.attempt.pending_kill && !nested.finished,
         "nested L2 must stay Working; docking Isolated Preview is not Cancelling"
     );
     assert_eq!(
@@ -691,7 +689,7 @@ fn bare_plan_exclusive_blocks_nested_implementers_plan_soft_keeps_them_working()
         );
         let nested = &agent.subagent_sessions["child-l2"];
         assert!(
-            !nested.pending_kill && !nested.finished,
+            !nested.attempt.pending_kill && !nested.finished,
             "nested implementers stay Working under `/plan --soft`"
         );
         assert_eq!(nested.status.as_deref(), Some("Working"));
@@ -740,12 +738,12 @@ fn bare_plan_exclusive_blocks_nested_implementers_plan_soft_keeps_them_working()
     );
     let nested = &agent.subagent_sessions["child-l2"];
     assert!(
-        nested.pending_kill && !nested.finished,
+        nested.attempt.pending_kill && !nested.finished,
         "live nested implementer must be exclusive-blocked"
     );
     let done = &agent.subagent_sessions["child-done"];
     assert!(
-        done.finished && !done.pending_kill,
+        done.finished && !done.attempt.pending_kill,
         "already-finished nested row must not be exclusive-blocked"
     );
 }
@@ -805,7 +803,6 @@ fn plan_soft_with_feature_seeds_isolated_preview_and_does_not_enqueue_prompt() {
         .line_viewer
         .as_ref()
         .and_then(|v| v.markdown_content_for_test())
-        .or(agent.latest_inline_plan_content.as_deref())
         .or(agent
             .plan_approval_view
             .as_ref()
@@ -818,7 +815,7 @@ fn plan_soft_with_feature_seeds_isolated_preview_and_does_not_enqueue_prompt() {
     assert!(!agent.plan_decision_resolved, "present is not Approve");
     let nested = &agent.subagent_sessions["child-l2"];
     assert!(
-        !nested.pending_kill && !nested.finished,
+        !nested.attempt.pending_kill && !nested.finished,
         "nested L2 must stay Working"
     );
 }

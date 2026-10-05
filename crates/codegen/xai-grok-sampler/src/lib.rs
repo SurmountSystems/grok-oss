@@ -49,6 +49,11 @@ pub use doom_loop::DoomLoopSignalCollector;
 pub use events::{
     SamplingChannel, SamplingErrorInfo, SamplingErrorKind, SamplingEvent, StripReason,
 };
+pub use exhausted_identity::{
+    AllowanceExhaustAction, INCLUDED_ALLOWANCE_EXHAUST_PCT, clear_all_including_durable,
+    clear_exhausted, is_credential_exhausted, is_credential_hop_reason, is_exhausted,
+    mark_exhausted, sync_allowance_exhaust_from_usage,
+};
 pub use handle::{CollectedSamplingResult, DoomLoopRecoveryAttempt, SamplerHandle};
 pub use metrics::{InferenceLatencyStats, compute_percentiles};
 pub use prefer_live_primary::{

@@ -10,6 +10,7 @@ use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 use crate::appearance::AppearanceConfig;
+use crate::render::SafeBuf;
 use crate::render::color::blend_color;
 use crate::theme::Theme;
 
@@ -168,6 +169,8 @@ pub struct BlockLine {
     /// logical pre-wrap content, so hyperlink column mapping must exclude it when rebuilding pre-wrap coordinates from
     /// post-wrap segments.
     pub indent_width: usize,
+    /// Column of the always-on bubble copy glyph, when this line paints one.
+    pub copy_button_col: Option<u16>,
 }
 
 impl Default for BlockLine {
@@ -184,6 +187,7 @@ impl Default for BlockLine {
             joiner: None,
             link_target: None,
             indent_width: 0,
+            copy_button_col: None,
         }
     }
 }
@@ -761,6 +765,7 @@ mod tests {
             joiner: None,
             link_target: None,
             indent_width: 0,
+            copy_button_col: None,
         };
     }
 

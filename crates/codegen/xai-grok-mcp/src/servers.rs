@@ -28,7 +28,7 @@ use rmcp::{
     service::{RxJsonRpcMessage, TxJsonRpcMessage},
     transport::{
         StreamableHttpClientTransport, Transport,
-        streamable_http_client::{StreamableHttpClientTransportConfig, StreamableHttpError},
+        streamable_http_client::StreamableHttpClientTransportConfig,
     },
 };
 
@@ -1958,10 +1958,7 @@ impl McpErasedTool {
                 }
                 Err(xai_tool_runtime::ToolError::custom(
                     "process_manager",
-                    format!(
-                        "MCP tool '{}' timed out after {} seconds",
-                        self.tool.name, tool_timeout
-                    ),
+                    format_mcp_tool_timeout(&self.tool.name, tool_timeout),
                 ))
             }
             Err(service_err)
@@ -2110,6 +2107,31 @@ impl McpErasedTool {
             }
             Err(retry_err) => Err(tool_error_for_service_error(&retry_err)),
         }
+    }
+}
+
+fn format_mcp_tool_timeout(name: &str, timeout_secs: u64) -> String {
+    format!(
+        "MCP tool '{name}' timed out after {}",
+        xai_tty_utils::format_human_duration(std::time::Duration::from_secs(timeout_secs))
+    )
+}
+
+#[cfg(test)]
+mod timeout_copy_tests {
+    use super::format_mcp_tool_timeout;
+
+    #[test]
+    fn mcp_tool_timeout_copy_uses_minutes_not_raw_seconds() {
+        let msg = format_mcp_tool_timeout("search", 90);
+        assert!(
+            msg.contains("timed out after 1m30s"),
+            "minute-plus MCP tool budget must print as minutes, got: {msg}"
+        );
+        assert!(
+            !msg.contains("90 seconds") && !msg.contains("90s"),
+            "raw second budget must not leak: {msg}"
+        );
     }
 }
 

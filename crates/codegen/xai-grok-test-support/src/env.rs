@@ -181,7 +181,10 @@ pub fn ensure_cargo_bin_with_features(
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
     let mut cmd = Command::new(&cargo);
     cmd.current_dir(workspace_root())
-        .args(["build", "-p", "xai-grok-pager-bin", "--bin", GROK_OSS_BIN])
+        .args(["build", "-p", package, "--bin", bin])
+        .args(["--features", &features.join(",")])
+        .args(["--jobs", &build_jobs().to_string()])
+        .env("CARGO_TARGET_DIR", &out_target)
         .stdin(std::process::Stdio::null())
         .envs(xai_tty_utils::pager_env());
     xai_tty_utils::detach_std_command(&mut cmd);

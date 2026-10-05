@@ -426,6 +426,9 @@ pub struct PromptRenderResult {
     /// Hardware terminal cursor. `None` when unfocused, or when the
     /// software box caret is painted so the two do not stack.
     pub cursor_pos: Option<(u16, u16)>,
+    /// Software caret cell. Dashboard peek falls back to this when
+    /// `cursor_pos` is absent.
+    pub caret_cell: Option<(u16, u16)>,
     /// Terminal escape sequences to write after the ratatui cell flush (e.g. Kitty/iTerm2 inline image rendering for the image preview).
     pub post_flush_escapes: Option<crate::terminal::overlay::Escapes>,
 }
@@ -766,6 +769,9 @@ impl PromptWidget {
             undo_tip_fire: false,
             plan_nudge_fire: false,
             completion_accepted: false,
+            voice_recording_grow: false,
+            voice_recording_interim: None,
+            last_paste_chip_click: None,
         };
         // Same fail-closed gate as AgentView: /dashboard is hidden in
         // CommandRegistry::new until dashboard_enabled() reveals it.
@@ -1306,6 +1312,12 @@ impl PromptWidget {
             .set_voice_visible(visible);
     }
 
+    /// While recording, grow the composer with the live interim transcript.
+    pub(crate) fn set_voice_recording_grow(&mut self, grow: bool, interim: Option<&str>) {
+        self.voice_recording_grow = grow;
+        self.voice_recording_interim = interim.map(str::to_string);
+    }
+
     pub(crate) fn set_dashboard_visible(&mut self, visible: bool) {
         self.slash_controller
             .registry_mut()
@@ -1631,7 +1643,7 @@ impl PromptWidget {
         // History browse live-populates the composer per selection move
         // Freeze the box at its pre-open one-row height so stepping through entries of different heights doesn't resize the layout per keypress
         // The first real edit detaches and the box resizes then
-        let text_height = if self.history_search.is_browse() {
+        let mut text_height = if self.history_search.is_browse() {
             1
         } else {
             self.textarea.desired_height(text_width).max(1)
@@ -2211,7 +2223,6 @@ impl PromptWidget {
         // Backslash continuation: if the character before the cursor is `\`, replace it with a newline
         if key.code == KeyCode::Enter
             && key.modifiers.is_empty()
-            && allow_newlines
             && self.apply_backslash_continuation()
         {
             return EnterOutcome::NewlineInserted;
@@ -3104,6 +3115,7 @@ impl PromptWidget {
         let Some(&text_area_rect) = chunks.get(1) else {
             return PromptRenderResult {
                 cursor_pos: None,
+                caret_cell: None,
                 post_flush_escapes: None,
             };
         };
@@ -3172,7 +3184,7 @@ impl PromptWidget {
                     caption_right.saturating_sub(label_w),
                     div_y,
                     &trunc,
-                    Self::chrome_caption_style(bg, &theme, style.focused),
+                    title_style,
                 );
             }
         }
@@ -3357,6 +3369,7 @@ impl PromptWidget {
             if crate::voice::prompt_blank_for_voice(self.textarea.text()) {
                 let lines =
                     wrap_voice_interim(interim, ta_area.width as usize, ta_area.height as usize);
+                let bottom = ta_area.bottom();
                 for (i, line) in lines.iter().enumerate() {
                     let y = ta_area.y.saturating_add(i as u16);
                     if y >= bottom {
@@ -3529,14 +3542,14 @@ impl PromptWidget {
         }
 
         // Finalized draft stays editable during voice; while interim words show, the caret follows their end
+        let layout_cursor_pos = self
+            .textarea
+            .cursor_pos_with_state(ta_area, self.textarea_state);
         let cursor_pos = if !style.focused {
             None
         } else {
             // `interim_caret` is only set while the interim shows
-            interim_caret.or_else(|| {
-                self.textarea
-                    .cursor_pos_with_state(ta_area, self.textarea_state)
-            })
+            interim_caret.or(layout_cursor_pos)
         };
 
         // Ghost suffixes (shell completion / predicted prompt)
@@ -3973,6 +3986,40 @@ fn images_high_water(images: &[PastedImage]) -> usize {
 }
 
 mod image_state;
+mod recording_frame;
 
 #[cfg(test)]
+/// Composer caret with an explicit filled phase, so tests do not sleep on the clock.
+/// A mid-buffer space keeps the space and takes an `accent_user` plate.
+pub(crate) fn paint_composer_box_cursor_phase(
+    buf: &mut Buffer,
+    x: u16,
+    y: u16,
+    theme: &Theme,
+    canvas_bg: ratatui::style::Color,
+    filled_phase: bool,
+    allow_block_glyph: bool,
+) {
+    let Some(cell) = buf.cell_mut((x, y)) else {
+        return;
+    };
+    let accent = theme.accent_user;
+    if !allow_block_glyph && cell.symbol() == " " {
+        cell.set_bg(accent);
+        return;
+    }
+    if allow_block_glyph && filled_phase {
+        cell.set_symbol(crate::glyphs::cursor_box_filled());
+        cell.set_fg(accent);
+        cell.set_bg(accent);
+    } else if allow_block_glyph {
+        cell.set_symbol(crate::glyphs::cursor_box_filled());
+        cell.set_fg(accent);
+        cell.set_bg(canvas_bg);
+    } else {
+        cell.set_fg(accent);
+        cell.set_bg(accent);
+    }
+}
+
 mod tests;

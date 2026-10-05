@@ -68,6 +68,7 @@ impl From<xai_grok_shell::sampling::error::SamplingErrorKind> for WireErrorType 
             K::RateLimited => Self::RateLimited,
             K::EmptyResponse => Self::EmptyResponse,
             K::MaxTokensTruncation => Self::MaxTokensTruncation,
+            K::RepetitiveGeneration => Self::RepetitiveGeneration,
             K::DoomLoopDetected => Self::Other,
         }
     }
@@ -185,6 +186,7 @@ pub(crate) fn format_request_failure(
             headline: "Cold start: response headers timed out".to_string(),
             detail: "The model host may still be starting. Retry is in progress. This is not Thought-only."
                 .to_string(),
+            wire,
         };
     }
     if is_image_transcription_transport_miss(raw)
@@ -197,6 +199,7 @@ pub(crate) fn format_request_failure(
             headline: "Image transcription unavailable".to_string(),
             detail: "Transport miss: error sending request. The Human image line stays. This is not a silent hang. Try sending again."
                 .to_string(),
+            wire,
         };
     }
     if is_transport_send_miss(raw) || extracted.as_deref().is_some_and(is_transport_send_miss) {
@@ -205,19 +208,21 @@ pub(crate) fn format_request_failure(
             headline: "Connection failed".to_string(),
             detail: "Transport miss: error sending request. This is not a silent hang. Check your network and try again."
                 .to_string(),
+            wire,
         };
     }
-    let team_prepaid = xai_grok_sampling_types::is_console_team_prepaid_message(raw)
+    let team_prepaid = xai_grok_shell::sampling::error::is_console_team_prepaid_message(raw)
         || extracted
             .as_deref()
-            .is_some_and(xai_grok_sampling_types::is_console_team_prepaid_message);
+            .is_some_and(xai_grok_shell::sampling::error::is_console_team_prepaid_message);
     if team_prepaid {
         let code = status.unwrap_or(403);
         return FormattedRequestFailure {
             status: Some(code),
             headline: format!("Request denied ({code})"),
-            detail: xai_grok_sampling_types::console_team_prepaid_stay_on_supergrok_user_message()
+            detail: xai_grok_shell::sampling::error::console_team_prepaid_stay_on_supergrok_user_message()
                 .to_string(),
+            wire,
         };
     }
     // Safety refusal bodies (gRPC-style `permission-denied: I can't help with
@@ -229,6 +234,7 @@ pub(crate) fn format_request_failure(
             status: None,
             headline: "Safety refusal".to_string(),
             detail: safety_refusal_detail(extracted.as_deref().unwrap_or(raw)),
+            wire,
         };
     }
     let class = classify(status, wire);
@@ -917,12 +923,16 @@ mod tests {
         for (status, error_type, raw) in [
             (
                 None,
-                Some("api"),
+                Some(WireErrorType::Api),
                 "API error (status 403 Forbidden): permission-denied: I can't help with that request.",
             ),
-            (Some(403), Some("api"), operator_body),
+            (Some(403), Some(WireErrorType::Api), operator_body),
             (None, None, operator_body),
-            (None, Some("api"), "I can't help with that request."),
+            (
+                None,
+                Some(WireErrorType::Api),
+                "I can't help with that request.",
+            ),
         ] {
             let formatted = format_request_failure(status, error_type, raw);
             let msg = formatted.message();
@@ -960,7 +970,7 @@ mod tests {
      {
         let formatted = format_request_failure(
             None,
-            Some("api"),
+            Some(WireErrorType::Api),
             "API error (status 403 Forbidden): Your team 61fab250-b2c1-40cf-b5b8-628e673a2eeb \
              has either used all available credits or reached its monthly spending limit. \
              To continue making API requests, please purchase more credits or raise \
@@ -1129,7 +1139,7 @@ mod tests {
     #[test]
     fn header_timeout_is_named_cold_start_class_with_retry_path() {
         let raw = "Connection failed – request error stream: timed out waiting for response headers after 2m0s";
-        let formatted = format_request_failure(None, Some("http"), raw);
+        let formatted = format_request_failure(None, Some(WireErrorType::Http), raw);
         let msg = formatted.message();
         assert!(
             msg.contains("Cold start") && msg.contains("response headers timed out"),
@@ -1153,6 +1163,7 @@ mod tests {
                 attempt: 2,
                 max_retries: u32::MAX,
                 reason: "cold start: response headers timed out".into(),
+                error_type: None,
             },
         );
         assert!(
@@ -1253,7 +1264,7 @@ mod tests {
         assert!(operator_chrome.contains("Try asking for a shorter answer"));
         let formatted = format_request_failure(
             None,
-            Some("max_tokens_truncation"),
+            Some(WireErrorType::MaxTokensTruncation),
             "response truncated by max_tokens",
         );
         let msg = formatted.message();
@@ -1285,7 +1296,7 @@ mod tests {
         );
         let formatted = format_request_failure(
             None,
-            Some("repetitive_generation"),
+            Some(WireErrorType::RepetitiveGeneration),
             "Stopped: the reply was repeating the same sentence.",
         );
         let msg = formatted.message();

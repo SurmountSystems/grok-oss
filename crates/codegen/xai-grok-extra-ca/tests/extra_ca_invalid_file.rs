@@ -12,11 +12,9 @@ fn missing_bundle_path_builds_clients_without_panic() {
 
     assert!(xai_grok_extra_ca::extra_root_ders().is_empty());
 
-    xai_grok_extra_ca::with_extra_root_certificates(reqwest::Client::builder())
-        .build()
+    xai_grok_extra_ca::build_reqwest_client(|builder| builder)
         .expect("async client builds when bundle is unreadable");
 
-    xai_grok_extra_ca::with_extra_root_certificates_blocking(reqwest::blocking::Client::builder())
-        .build()
+    xai_grok_extra_ca::build_blocking_reqwest_client(|builder| builder)
         .expect("blocking client builds when bundle is unreadable");
 }

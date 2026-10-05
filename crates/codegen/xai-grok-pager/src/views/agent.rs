@@ -652,7 +652,7 @@ pub fn render_todo_chrome_with_close_label(
         )
         .with_action_label(action_label, action_hovered)
         .with_action_enabled(action_enabled);
-        sel.render_action_only(buf);
+        sel.render(buf);
         return Some(sel);
     }
     None
@@ -1146,6 +1146,7 @@ mod tests {
             ViewSurface::Root,
             false,
             false,
+            false,
             QueueMutation::PerRowKind,
             selected_is_user_prompt,
             selected_is_agent_message,
@@ -1204,6 +1205,29 @@ mod tests {
             state.cwd(),
         );
         buf
+    }
+    /// Paints the hook name except on a collapsed multi-member verb header.
+    fn render_hook_hover_popup(
+        buf: &mut Buffer,
+        _viewport: Rect,
+        state: &ScrollbackState,
+        _entry: Option<usize>,
+        anchor: (u16, u16),
+        _theme: &Theme,
+    ) {
+        let layouts = state.get_cached_entry_layouts().unwrap_or(&[]);
+        let collapsed_multi_header = layouts.first().is_some_and(|layout| {
+            layout.verb_group_header
+                && layout.group_header_count >= 2
+                && !layout.is_expanded_verb_header()
+        });
+        if collapsed_multi_header && anchor.1 == 0 {
+            return;
+        }
+        let (x, y) = anchor;
+        if x < buf.area.right() && y < buf.area.bottom() {
+            buf.set_string(x, y, "hover-hook", ratatui::style::Style::default());
+        }
     }
     fn hover_hook_badge(buf: &mut Buffer, state: &ScrollbackState, viewport: Rect, row: u16) {
         let row_text: String = (viewport.left()..viewport.right())
@@ -1287,8 +1311,8 @@ mod tests {
             ViewSurface::Root,
             false,
             false,
-            QueueMutation::PerRowKind,
             false,
+            QueueMutation::PerRowKind,
             false,
             false,
             false,
@@ -1323,6 +1347,7 @@ mod tests {
             ViewSurface::Root,
             is_turn_running,
             true,
+            false,
             queue_mutation,
             false,
             false,
@@ -1390,6 +1415,7 @@ mod tests {
             surface,
             false,
             false,
+            false,
             QueueMutation::PerRowKind,
             false,
             false,
@@ -1453,8 +1479,8 @@ mod tests {
             ViewSurface::Root,
             false,
             false,
-            QueueMutation::PerRowKind,
             false,
+            QueueMutation::PerRowKind,
             false,
             false,
             false,
@@ -1509,6 +1535,7 @@ mod tests {
             false,
             fold_label,
             None,
+            "prompt",
             thinking_label,
             false,
             false,
@@ -1518,12 +1545,12 @@ mod tests {
             false,
             false,
             vim_mode,
+            ViewSurface::Root,
             false,
             false,
             false,
-            false,
+            QueueMutation::PerRowKind,
             selected_is_user_prompt,
-            false,
             false,
             false,
             None,
@@ -1754,8 +1781,8 @@ mod tests {
             ViewSurface::Root,
             false,
             false,
-            QueueMutation::PerRowKind,
             false,
+            QueueMutation::PerRowKind,
             false,
             false,
             false,
@@ -1860,8 +1887,8 @@ mod tests {
             ViewSurface::Root,
             false,
             false,
-            QueueMutation::PerRowKind,
             false,
+            QueueMutation::PerRowKind,
             false,
             false,
             false,
@@ -1908,6 +1935,7 @@ mod tests {
             ViewSurface::Root,
             is_turn_running,
             false,
+            false,
             QueueMutation::PerRowKind,
             false,
             false,
@@ -1929,6 +1957,7 @@ mod tests {
             false,
             None,
             None,
+            "prompt",
             thinking_label,
             false,
             false,
@@ -1938,11 +1967,11 @@ mod tests {
             false,
             false,
             true,
+            ViewSurface::Root,
             false,
             false,
             false,
-            false,
-            false,
+            QueueMutation::PerRowKind,
             false,
             false,
             false,
@@ -2081,6 +2110,7 @@ mod tests {
                 ViewSurface::Root,
                 true,
                 false,
+                false,
                 QueueMutation::PerRowKind,
                 false,
                 false,
@@ -2132,6 +2162,7 @@ mod tests {
             ViewSurface::Root,
             true,
             false,
+            false,
             QueueMutation::PerRowKind,
             false,
             false,
@@ -2182,6 +2213,7 @@ mod tests {
             false,
             ViewSurface::Root,
             true,
+            false,
             false,
             QueueMutation::PerRowKind,
             false,
@@ -2604,7 +2636,6 @@ mod tests {
         layout.scrollback.width = 80;
         layout.scrollback_content.width = 80;
         let pane_w = 40u16;
-        layout.reserve_soft_plan_pane(pane_w);
         assert_eq!(
             layout.scrollback.width, 80,
             "overlay covers the transcript; do not narrow the transcript column so text stays visible beside the plan"

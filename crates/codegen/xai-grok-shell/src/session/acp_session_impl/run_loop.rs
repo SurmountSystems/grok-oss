@@ -732,13 +732,6 @@ pub(super) async fn run_session(
                         SessionCommand::TitleRenamed { manual } => {
                             session.on_title_renamed(manual);
                         }
-                        SessionCommand::RestoreTodoBoard { plan_state } => {
-                            session.restore_todo_board(plan_state).await;
-                        }
-                        SessionCommand::ClearCompletedTodos { respond_to } => {
-                            let n = session.clear_completed_todos().await;
-                            let _ = respond_to.send(n);
-                        }
                         SessionCommand::GetToolOverrides { respond_to } => {
                             let _ = respond_to.send(session.effective_tool_overrides());
                         }
@@ -860,18 +853,37 @@ pub(super) async fn run_session(
                             session.handle_session_mode(session_mode).await;
                             let _ = responds_to.send(());
                         }
-                        SessionCommand::SetSessionModel { switch, responds_to } => {
-                            let updated_model_id = session.handle_set_session_model(switch).await;
-                            let _ = responds_to.send(updated_model_id);
-                        }
-                        SessionCommand::SetAutoCompactThreshold {
+                        SessionCommand::SetSessionModel {
+                            sampling_config,
+                            use_concise,
+                            apply_prompt_override,
+                            skip_prompt_rewrite,
                             auto_compact_threshold_percent,
                             auto_compact_threshold_tokens,
+                            responds_to,
                         } => {
-                            session.apply_auto_compact_threshold(
+                            let switch = crate::session::SessionModelSwitch {
+                                sampling_config,
+                                use_concise,
+                                is_family_switch: false,
+                                apply_prompt_override,
+                                skip_prompt_rewrite,
                                 auto_compact_threshold_percent,
-                                auto_compact_threshold_tokens,
-                            );
+                                system_prompt_label: xai_grok_agent::DEFAULT_SYSTEM_PROMPT_LABEL
+                                    .to_string(),
+                                context_window_selection:
+                                    crate::session::SwitchContextWindow::Preserve,
+                                supported_context_windows: Vec::new(),
+                            };
+                            let updated_model_id =
+                                session.handle_set_session_model(switch).await;
+                            if updated_model_id.is_ok() {
+                                session.apply_auto_compact_threshold(
+                                    auto_compact_threshold_percent,
+                                    auto_compact_threshold_tokens,
+                                );
+                            }
+                            let _ = responds_to.send(updated_model_id);
                         }
                         SessionCommand::SetReasoningEffort { effort, responds_to } => {
                             let updated_model_id = session.handle_set_reasoning_effort(effort).await;

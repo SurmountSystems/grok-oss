@@ -9,6 +9,7 @@ use crate::app::agent::{AgentId, AgentSession};
 use crate::app::agent_view::{ActivePane, AgentView};
 use crate::app::app_view::{ActiveView, AppView};
 use crate::app::cancel_latency::{CancelOrigin, TurnEnd};
+use crate::scrollback::blocks::SessionEvent;
 use crate::scrollback::state::ScrollbackState;
 use std::time::Instant;
 use xai_grok_telemetry::events::CancellationScope;
@@ -72,7 +73,7 @@ fn overlay_live_kill_ids(app: &AppView, id: AgentId) -> Vec<String> {
     }
     let mut ids = Vec::new();
     let mut push = |info: &crate::app::subagent::SubagentInfo| {
-        if info.is_running() && info.workflow_run_id.is_none() {
+        if info.is_running() && info.attempt.workflow_run_id.is_none() {
             let id = info.subagent_id.to_string();
             if !ids.contains(&id) {
                 ids.push(id);
@@ -85,7 +86,7 @@ fn overlay_live_kill_ids(app: &AppView, id: AgentId) -> Vec<String> {
         push(info);
     }
     for info in agent.subagent_sessions.values() {
-        if info.parent_session_id.as_deref() == Some(child_sid) {
+        if info.attempt.parent_session_id.as_deref() == Some(child_sid) {
             push(info);
         }
     }
@@ -293,6 +294,23 @@ pub(super) fn dispatch_cancel_turn_choice(
     effects
 }
 
+pub(super) fn do_cancel_turn_for(
+    app: &mut AppView,
+    id: crate::app::agent::AgentId,
+    cancel_subagents: bool,
+    cancel_rewind_enabled: bool,
+) -> Vec<Effect> {
+    let Some(agent) = app.agents.get_mut(&id) else {
+        return vec![];
+    };
+    cancel_agent_turn(
+        agent,
+        cancel_rewind_enabled,
+        cancel_subagents,
+        CancelOrigin::UserGesture,
+    )
+}
+
 pub(super) fn do_cancel_turn(
     app: &mut AppView,
     cancel_subagents: bool,
@@ -346,14 +364,19 @@ fn cancel_agent_turn(
     // Dead park: shell turn already ended / response_tx gone. Finish Idle.
     // Do not CancelTurn (queued_after_cancel) or rebuild-flush WAL.
     // Live park cancel stays below and stays in plan mode.
-    if agent.plan_park_waiter_gone() {
+    if agent
+        .plan_approval_view
+        .as_ref()
+        .is_some_and(|pav| !pav.has_live_ext_waiter())
+    {
         if let Some(mut pav) = agent.plan_approval_view.take() {
             let _ = pav.send_stale_cancel();
             agent.plan_next_comment_id = pav.next_comment_id;
             agent.prompt.restore(pav.stashed_prompt);
             agent.line_viewer = None;
         }
-        agent.finish_turn_idle_after_plan_park();
+        agent.session.finish_turn(&mut agent.scrollback);
+        agent.mark_turn_finished(TurnEnd::Completed);
         agent.clear_send_now_expectation();
         return vec![];
     }
@@ -614,7 +637,10 @@ fn overdue_cancel_for_agent(agent: &mut AgentView) -> Option<Effect> {
             prompt_id,
             stop_reason: Some("cancelled".into()),
             agent_result: None,
+            cancellation_category: None,
+            cancellation_context: None,
             cancel_trigger: None,
+            error_kind: None,
             received_at: Instant::now() - TURN_END_RECONCILE_GRACE,
         });
         return None;
@@ -651,6 +677,32 @@ pub(crate) const TURN_END_RECONCILE_GRACE: std::time::Duration = std::time::Dura
 /// Finish turns whose end was announced by `x.ai/session/prompt_complete` but whose `session/prompt` RPC response never arrived.
 /// The RPC response is the driver's only turn-state exit, and it can be lost in leader response routing / reconnect races.
 /// The loss left the TUI latched in `TurnCancelling` until a restart (Esc dead, prompts piling into a queue that never drains).
+pub(super) fn finalize_cancel_resume_after_successful_turn(
+    agent: &AgentView,
+    _keep_text: Option<&str>,
+    _keep_pid: Option<&str>,
+) {
+    if agent
+        .subagent_sessions
+        .values()
+        .any(|info| info.is_running())
+    {
+        return;
+    }
+    clear_cancel_resume_marker_for_session(&agent.session);
+}
+
+pub(super) fn clear_cancel_resume_marker_for_session(session: &AgentSession) {
+    let Some(sid) = session.session_id.as_ref() else {
+        return;
+    };
+    let cwd = session.cwd.to_string_lossy();
+    let _ = xai_grok_shell::session::canceled_turn_resume::clear_canceled_turn_resume(
+        cwd.as_ref(),
+        sid.0.as_ref(),
+    );
+}
+
 pub(crate) fn reconcile_overdue_turn_ends(app: &mut AppView) -> Option<Vec<Effect>> {
     let overdue: Vec<AgentId> = app
         .agents
@@ -738,6 +790,12 @@ pub(crate) fn reconcile_overdue_turn_ends(app: &mut AppView) -> Option<Vec<Effec
             pending.cancellation_category.as_deref(),
             pending.cancellation_context.as_ref(),
         );
+        let cancel_resume_keep_text = agent
+            .session
+            .in_flight_prompt
+            .as_ref()
+            .map(|prompt| prompt.text.clone());
+        let cancel_resume_keep_pid = agent.session.current_prompt_id.clone();
         agent.session.finish_turn(&mut agent.scrollback);
         let elapsed_ms = crate::app::turn_completion::duration_to_elapsed_ms(elapsed);
         let stop = if was_cancelling {
@@ -791,7 +849,10 @@ pub(crate) fn reconcile_overdue_turn_ends(app: &mut AppView) -> Option<Vec<Effec
         } else if !was_cancelling
             && matches!(pending.stop_reason.as_deref(), Some("rate_limit"))
             && agent.session.current_prompt_id.is_none()
-            && !agent.has_live_background_subagents()
+            && !agent
+                .subagent_sessions
+                .values()
+                .any(|info| info.is_running())
         {
             // Rate-limit terminal: drop the eager turn-start marker (dedicated
             // paywall / retry UX owns the next step). User cancel leaves the
@@ -878,18 +939,17 @@ pub(crate) fn reconcile_overdue_turn_ends(app: &mut AppView) -> Option<Vec<Effec
         child.complete_live_prompt_task(Some(pending.prompt_id.as_str()), None);
         child.session.finish_turn(&mut child.scrollback);
         let event = if was_cancelling {
-            (!send_now_cancel).then_some(SessionEvent::TurnCancelled { elapsed })
+            (!send_now_cancel).then_some(SessionEvent::TurnCancelled {
+                elapsed: Some(elapsed),
+                cause: crate::scrollback::blocks::CancelledBy::User,
+            })
         } else {
             Some(SessionEvent::TurnCompleted {
                 elapsed: Some(elapsed),
             })
         };
-        crate::app::turn_completion::push_turn_terminal_marker(
-            child,
-            event,
-            Some(pending.prompt_id.as_str()),
-        );
-        child.mark_turn_finished();
+        crate::app::turn_completion::push_turn_terminal_marker(child, event);
+        child.mark_turn_finished(TurnEnd::Completed);
         child.pending_cancel_resend = None;
         child.activity_started_at = None;
         child.last_activity = None;

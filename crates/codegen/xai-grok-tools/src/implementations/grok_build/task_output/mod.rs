@@ -395,12 +395,6 @@ impl TaskOutputTool {
 
 pub(crate) use xai_tool_types::MAX_MULTI_WAIT_IDS;
 
-/// Terminal task statuses as produced by `snapshot_to_result` /
-/// `format_subagent_snapshot`; multi-wait summaries count these as finished.
-pub(crate) fn is_terminal_status(status: &str) -> bool {
-    matches!(status, "completed" | "failed" | "cancelled" | "timed_out")
-}
-
 pub(crate) fn not_found_result(task_id: &str) -> TaskOutputResult {
     TaskOutputResult {
         task_id: task_id.to_string(),
@@ -684,6 +678,8 @@ pub(crate) fn format_subagent_snapshot(
             };
             let tokens_k = tokens_used / 1000;
             let capacity_k = context_window_tokens / 1000;
+            let elapsed =
+                xai_tty_utils::format_human_duration(Duration::from_millis(snap.duration_ms));
             // Measure body only — wait-hint is harness advisory, not task output.
             let body = format!(
                 "Subagent is still running.\n\
@@ -694,9 +690,7 @@ pub(crate) fn format_subagent_snapshot(
                  {tokens_k}K/{capacity_k}K tokens ({context_usage_pct}% context)\n\
                  Tools used: {tools_str}\n\
                  Errors: {error_count}",
-                snap.subagent_type,
-                snap.description,
-                snap.duration_ms as f64 / 1000.0,
+                snap.subagent_type, snap.description,
             );
             let raw_output_bytes = body.len();
             let output = with_still_running_wait_hint(body, wait_hint, WaitSubject::Subagent);
@@ -732,10 +726,12 @@ pub(crate) fn terminal_subagent_result(snap: &SubagentSnapshot) -> TaskOutputRes
             turns,
             worktree_path,
         } => {
+            let duration =
+                xai_tty_utils::format_human_duration(Duration::from_millis(snap.duration_ms));
             let mut output = format!(
                 "{output}\n\n<subagent_meta>id={}, tool_calls={tool_calls}, \
-                 turns={turns}, duration_ms={}</subagent_meta>",
-                snap.subagent_id, snap.duration_ms,
+                 turns={turns}, duration={duration}</subagent_meta>",
+                snap.subagent_id,
             );
             if let Some(wt) = &worktree_path {
                 output.push_str(&format!("\n<worktree_path>{wt}</worktree_path>"));
@@ -2284,7 +2280,7 @@ mod tests {
 
     // raw_output_bytes is body-only so identical Running state is stable across WaitHints.
     #[test]
-    fn format_running_subagent_raw_output_bytes_stable_across_wait_hints() {
+    fn format_running_subagent_raw_output_bytes_stable_across_wait_hints_one_decimal() {
         let snap = SubagentSnapshot {
             subagent_id: "sub-stable".to_string(),
             description: "stable body".to_string(),

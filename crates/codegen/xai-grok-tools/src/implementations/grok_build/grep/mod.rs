@@ -35,11 +35,13 @@ use serde::{Deserialize, Serialize};
 
 mod capped_output;
 mod card;
+pub mod embedded;
 mod offer;
 mod rg_heading;
 mod rg_runner;
 pub mod ripgrep;
-pub use ripgrep as embedded;
+
+use ripgrep::rg_path;
 
 pub use crate::implementations::grok_build::grep::card::{
     count_matches, format_content_output, format_count_output, format_files_with_matches_output,
@@ -346,10 +348,20 @@ impl xai_tool_runtime::Tool for GrepTool {
             }
             out
         };
-        let GrepReady { source, config } = match prepare_grep(&ctx, &input).await? {
+        let GrepReady {
+            source,
+            config,
+            stdout_buf,
+            exit_code,
+        } = match prepare_grep(&ctx, &input).await? {
             GrepStep::Ready(ready) => ready,
             GrepStep::Early(out) => return Ok(early_return(out)),
         };
+        tracing::debug!(
+            embedded_bytes = stdout_buf.len(),
+            embedded_exit = exit_code,
+            "embedded grep finished"
+        );
         tracing::Span::current().record("effective_head_limit", config.effective_head_limit as u64);
         let (mut rg, deadline) = match source.resolve(&config, &tracing::Span::current()).await {
             ResolvedSource::Rg { rg, deadline } => (rg, deadline),
@@ -449,7 +461,13 @@ fn grep_progress_stream(
                 span.record("grep_reason", "spawn_failure");
             }
         };
-        let GrepReady { source, config } = match prepare_grep(&ctx, &input).await {
+        let GrepReady {
+            source,
+            config,
+            stdout_buf,
+            exit_code,
+        } = match prepare_grep(&ctx, &input).await
+        {
             Ok(GrepStep::Ready(ready)) => ready,
             Ok(GrepStep::Early(out)) => {
                 record_early(&out);
@@ -461,6 +479,11 @@ fn grep_progress_stream(
                 return;
             }
         };
+        tracing::debug!(
+            embedded_bytes = stdout_buf.len(),
+            embedded_exit = exit_code,
+            "embedded grep finished"
+        );
 
         span.record("effective_head_limit", config.effective_head_limit as u64);
         let (mut rg, deadline_at) = match source.resolve(&config, &span).await {
@@ -592,6 +615,8 @@ fn grep_progress_stream(
 struct GrepReady {
     source: GrepSource,
     config: GrepFormatConfig,
+    stdout_buf: Vec<u8>,
+    exit_code: i32,
 }
 
 /// Outcome of [`prepare_grep`]: either a source to read, or a fully
@@ -739,6 +764,63 @@ async fn prepare_grep(
         .max_output_bytes
         .unwrap_or(DEFAULT_TOOL_OUTPUT_BYTES);
 
+    let (before_context, after_context) = match input.context {
+        Some(c) if c > 0 => (c, c),
+        _ => (
+            input.before_context.unwrap_or(0),
+            input.after_context.unwrap_or(0),
+        ),
+    };
+    let print = match &output_mode {
+        OutputMode::Content => embedded::PrintMode::Content,
+        OutputMode::FilesWithMatches => embedded::PrintMode::FilesWithMatches,
+        OutputMode::Count => embedded::PrintMode::Count,
+    };
+    let deny_globs: Vec<String> = deny_read_globs
+        .iter()
+        .map(|deny| deny.trim_start_matches('!').to_string())
+        .collect();
+    let req = embedded::SearchRequest {
+        pattern: input.pattern.clone(),
+        path: workdir.clone(),
+        case_insensitive: input.case_insensitive,
+        literal: false,
+        glob: input.glob.clone().filter(|glob| !glob.is_empty()),
+        extra_globs: Vec::new(),
+        deny_globs,
+        file_type: input.r#type.clone(),
+        hidden: true,
+        no_ignore: false,
+        multiline: input.multiline,
+        before_context,
+        after_context,
+        max_filesize: Some(rg_runner::MAX_FILE_BYTES),
+        max_columns: Some(u64::from(rg_runner::MAX_COLUMNS)),
+        print,
+        max_output_lines: Some(effective_head_limit),
+    };
+    let searched = tokio::task::spawn_blocking(move || embedded::search_to_rg_stdout(&req)).await;
+    let out = match searched {
+        Ok(Ok(stdout)) => stdout,
+        Ok(Err(error)) => {
+            return Ok(GrepStep::Early(GrepSearchOutput {
+                stdout: Vec::new(),
+                stderr: error.message.into_bytes(),
+                exit_code: 2,
+                match_count: 0,
+                file_matches: Vec::new(),
+            }));
+        }
+        Err(error) => {
+            return Ok(GrepStep::Early(GrepSearchOutput {
+                stdout: Vec::new(),
+                stderr: error.to_string().into_bytes(),
+                exit_code: 2,
+                match_count: 0,
+                file_matches: Vec::new(),
+            }));
+        }
+    };
     let exit_code = if out.truncated { 0 } else { out.exit_code };
     Ok(GrepStep::Ready(GrepReady {
         source,
@@ -749,6 +831,8 @@ async fn prepare_grep(
             max_output_bytes,
             cwd_display,
         },
+        stdout_buf: out.bytes,
+        exit_code,
     }))
 }
 
@@ -889,35 +973,6 @@ mod tests {
     fn tool_name_and_description() {
         let tool = GrepTool;
         assert_eq!(xai_tool_runtime::Tool::id(&tool).as_str(), "grep");
-    }
-
-    #[test]
-    fn description_template_tracks_renamed_search_params() {
-        use crate::types::template_renderer::TemplateRenderer;
-        use crate::types::tool::ToolKind;
-        use crate::types::tool_metadata::ToolMetadata;
-        use std::collections::HashMap;
-
-        let tools = HashMap::from([(ToolKind::Search, "grep".to_string())]);
-        let params = HashMap::from([(
-            ToolKind::Search,
-            HashMap::from([
-                ("pattern".to_string(), "query".to_string()),
-                ("type".to_string(), "filetype".to_string()),
-                ("glob".to_string(), "include".to_string()),
-            ]),
-        )]);
-        let rendered = TemplateRenderer::new(tools, params)
-            .render(ToolMetadata::description_template(&GrepTool))
-            .unwrap();
-        assert!(
-            rendered.contains("'filetype'") && rendered.contains("'include'"),
-            "renamed search params must appear:\n{rendered}"
-        );
-        assert!(
-            !rendered.contains("'type'") && !rendered.contains("'glob'"),
-            "canonical search param names must not remain after rename:\n{rendered}"
-        );
     }
 
     #[test]

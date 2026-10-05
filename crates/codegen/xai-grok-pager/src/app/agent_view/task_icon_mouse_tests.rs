@@ -40,6 +40,7 @@ fn draw_frame(agent: &mut AgentView, area: Rect) -> Buffer {
         false,
         BannerSlotParams::none(),
         false,
+        false,
         &mut Vec::new(),
         super::AppRenderParams::default(),
     );

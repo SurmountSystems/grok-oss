@@ -190,13 +190,12 @@ fn collect_skill_config_dirs_from_sources(
 
     // Priority 3: Global user dirs. `.grok` comes from `grok_home` (which may be overridden), so it's handled separately.
     // `.agents` is always added, while `.claude`/`.cursor` are gated by the skills compat cells
-    try_add(grok_home);
+    try_add(grok_home.clone());
     if let Some(home) = xai_dirs::home_dir() {
         try_add(home.join(".agents"));
     }
     try_add(grok_home);
-    #[allow(deprecated)]
-    if let Some(home) = std::env::home_dir() {
+    if let Some(home) = xai_dirs::home_dir() {
         if compat.claude.skills {
             try_add(home.join(".claude"));
         }

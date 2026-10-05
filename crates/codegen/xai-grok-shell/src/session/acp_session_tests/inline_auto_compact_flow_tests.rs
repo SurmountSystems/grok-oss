@@ -120,6 +120,7 @@ async fn create_test_actor(
             threshold_tokens: std::cell::Cell::new(None),
             force_compact: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             context_window_override: None,
+            context_window_selection: std::sync::atomic::AtomicU64::new(0),
             economic_mode: std::cell::Cell::new(false),
             model_context_window: std::cell::Cell::new(0),
             count: std::sync::atomic::AtomicU64::new(0),
@@ -132,6 +133,11 @@ async fn create_test_actor(
             prefire: crate::session::compaction_config::PrefireState::default(),
             prefix_released: std::sync::atomic::AtomicBool::new(false),
             cancel: Default::default(),
+        },
+        long_reasoning_reminder: crate::session::long_reasoning_reminder::LongReasoningReminder {
+            enabled: false,
+            tokens: crate::session::long_reasoning_reminder::DEFAULT_TOKENS,
+            delay: crate::session::long_reasoning_reminder::DEFAULT_DELAY,
         },
         long_reasoning_turn_state: Default::default(),
         memory: crate::session::memory_state::SessionMemory {
@@ -294,7 +300,6 @@ async fn create_test_actor(
         trace_config_template: std::cell::RefCell::new(None),
     }
 }
-#[tokio::test(flavor = "current_thread")]
 /// `apply_auto_compact_threshold` flips the gate at the new boundary.
 #[tokio::test(flavor = "current_thread")]
 async fn apply_auto_compact_threshold_updates_gate() {
@@ -745,6 +750,7 @@ async fn create_test_actor_with_memory(
             threshold_tokens: std::cell::Cell::new(None),
             force_compact: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             context_window_override: None,
+            context_window_selection: std::sync::atomic::AtomicU64::new(0),
             economic_mode: std::cell::Cell::new(false),
             model_context_window: std::cell::Cell::new(0),
             count: std::sync::atomic::AtomicU64::new(0),
@@ -757,6 +763,11 @@ async fn create_test_actor_with_memory(
             prefire: crate::session::compaction_config::PrefireState::default(),
             prefix_released: std::sync::atomic::AtomicBool::new(false),
             cancel: Default::default(),
+        },
+        long_reasoning_reminder: crate::session::long_reasoning_reminder::LongReasoningReminder {
+            enabled: false,
+            tokens: crate::session::long_reasoning_reminder::DEFAULT_TOKENS,
+            delay: crate::session::long_reasoning_reminder::DEFAULT_DELAY,
         },
         long_reasoning_turn_state: Default::default(),
         memory: crate::session::memory_state::SessionMemory {

@@ -6,12 +6,13 @@
 
 use std::collections::HashMap;
 
-use crate::implementations::grok_build::grep::embedded::{self, PrintMode, SearchRequest};
+use crate::implementations::grok_build::grep::embedded as embedded_search;
 use crate::types::output::{GrepFileMatch, GrepLineMatch, GrepSearchOutput};
 use crate::types::requirements::{Expr, ToolRequirement};
 #[allow(unused_imports)]
 use crate::types::resources::{Cwd, SharedResources};
 use crate::types::tool::{ToolKind, ToolNamespace};
+use embedded_search::{PrintMode, SearchRequest};
 
 // ───────────────────────────────────────────────────────────────────────────
 // Constants
@@ -179,7 +180,10 @@ impl xai_tool_runtime::Tool for GrepTool {
             print: PrintMode::Content,
             max_output_lines: None,
         };
-        let hits = match tokio::task::spawn_blocking(move || embedded::search_line_hits(&req)).await
+        let hits = match tokio::task::spawn_blocking(move || {
+            embedded_search::search_line_hits(&req)
+        })
+        .await
         {
             Ok(Ok(h)) => h,
             Ok(Err(e)) => {

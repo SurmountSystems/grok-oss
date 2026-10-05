@@ -19,6 +19,19 @@ const EXPAND_HINT: &str = "ctrl+e to expand";
 
 const EXPAND_HINT_GAP: &str = "  ";
 
+/// Elapsed time that `{:.1}s` still prints as `0.0s` (under 50 milliseconds).
+pub(crate) const INSTANT_THOUGHT_MS: i64 = 50;
+
+/// No peel marker in this tree yet: the thought body stays intact.
+fn peel_trailing_user_facing_draft(text: &str) -> String {
+    text.to_string()
+}
+
+/// A whole-body user-facing reply is not recognized until a peel marker exists.
+fn looks_like_user_facing_draft(_text: &str) -> bool {
+    false
+}
+
 /// Append the dim `(ctrl+e to expand)` hint to a collapsed header line. The `Collapsed` guard matters because
 /// `render_empty_placeholder` reuses the collapsed renderer for an empty body in other modes. There the hint would
 /// be a lie.

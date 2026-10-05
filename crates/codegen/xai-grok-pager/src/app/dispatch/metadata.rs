@@ -5,7 +5,9 @@ use xai_grok_shell::grok_oss::try_open_from_token_economy_config;
 use crate::app::actions::Effect;
 use crate::app::app_view::{ActiveView, AppView};
 use crate::scrollback::block::RenderBlock;
-use crate::slash::commands::metadata::{SessionMetadataFields, format_session_metadata};
+#[path = "../../slash/commands/metadata.rs"]
+mod metadata_src;
+use metadata_src::{SessionMetadataFields, format_session_metadata};
 
 /// Commit a refresh-on-open transcript block of live session metadata.
 pub(super) fn dispatch_show_session_metadata(app: &mut AppView) -> Vec<Effect> {

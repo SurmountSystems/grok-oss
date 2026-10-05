@@ -181,36 +181,16 @@ hook_events! {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GateKind {
+    /// Hook output recorded, decisions ignored.
     Observe,
     Tool,
+    /// Stop decision control (`block`, `continue: false`, `additionalContext`).
     Stop,
     PostTool,
     /// Prompt decision control (`decision: "block"` with `reason`, exit 2).
     /// The block reason is user-facing, never model context.
     /// Exit 2 blocks regardless of JSON, and the default timeout is 30s.
     Prompt,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MatcherPolicy {
-    Ignored,
-    Tested,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct EventTraits {
-    pub gate: GateKind,
-    pub matcher: MatcherPolicy,
-    pub hub_forward: bool,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GateKind {
-    /// Hook output recorded, decisions ignored.
-    Observe,
-    Tool,
-    /// Stop decision control (`block`, `continue: false`, `additionalContext`).
-    Stop,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -492,22 +472,6 @@ pub enum HookPayload {
         last_assistant_message: Option<String>,
         #[serde(rename = "subagentType", skip_serializing_if = "Option::is_none")]
         subagent_type: Option<String>,
-    },
-    /// Observe-only turn end for interrupt, permission reject, and max turns.
-    /// Same field renames as `Stop`. It does not replace `Stop` or `StopFailure`.
-    StopCancelled {
-        reason: String,
-        #[serde(rename = "stopHookActive")]
-        stop_hook_active: bool,
-        #[serde(
-            rename = "lastAssistantMessage",
-            skip_serializing_if = "Option::is_none"
-        )]
-        last_assistant_message: Option<String>,
-        #[serde(rename = "backgroundTasks", skip_serializing_if = "Option::is_none")]
-        background_tasks: Option<Vec<StopBackgroundTask>>,
-        #[serde(rename = "sessionCrons", skip_serializing_if = "Option::is_none")]
-        session_crons: Option<Vec<StopSessionCron>>,
     },
     PreToolUse {
         /// For meta-dispatch tools (`use_tool`, the external MCP-call tool) this is the underlying tool (`server__tool`), not the dispatcher.

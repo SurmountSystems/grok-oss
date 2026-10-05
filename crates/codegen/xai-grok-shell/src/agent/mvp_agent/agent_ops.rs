@@ -5,7 +5,7 @@
 use super::*;
 use crate::agent::config::TraceUploadEndpoints;
 use crate::sampling::EffortTarget;
-use xai_grok_login::PreferredAuthMethod;
+use crate::auth::PreferredAuthMethod;
 use crate::upload::trace::PromptMetadataParams;
 use xai_grok_tools::implementations::grok_build::task::backend::SubagentBackend;
 use xai_tty_utils::ProcessScope;
@@ -64,7 +64,7 @@ impl MvpAgent {
         if self.is_resident(session_id) {
             self.gateway
                 .forward_fire_and_forget(
-                    crate::session::summary::session_info_update_manual(
+                    crate::session::summary::session_info_update(
                         session_id.clone(),
                         title,
                     ),
@@ -1477,7 +1477,7 @@ impl MvpAgent {
                 self.models_manager.models().values(),
                 self.auth_manager.first_party_env_api_key_ok(),
             ),
-            preferred,
+            preferred.map(crate::agent::config::login_preferred),
         )?;
         Some(acp::AuthMethodId::new(id))
     }
@@ -1490,7 +1490,7 @@ impl MvpAgent {
         let Some(method_id) = self.cached_token_fallthrough_method_id() else {
             let preferred = self.cfg.borrow().grok_com_config.preferred_method;
             let msg = match preferred {
-                Some(xai_grok_login::PreferredAuthMethod::ApiKey) => {
+                Some(PreferredAuthMethod::ApiKey) => {
                     auth_method::PREFERRED_API_KEY_UNAVAILABLE
                 }
                 _ => auth_method::PREFERRED_OIDC_UNAVAILABLE,
@@ -1626,7 +1626,7 @@ impl MvpAgent {
             crate::agent::remote_config::settings_get::SettingsQuery::from_endpoints(
                 &cfg.endpoints,
                 auth.clone(),
-                cfg.grok_com_config.clone(),
+                crate::agent::config::to_login_grok_com(&cfg.grok_com_config),
             )
         };
         xai_grok_cloud_config::settings_get::fetch_settings_live(
@@ -2088,7 +2088,13 @@ impl MvpAgent {
         model: &ModelEntry,
         origin_client: Option<crate::http::OriginClientInfo>,
     ) -> SamplingConfig {
-        let preferred = self.cfg.borrow().grok_com_config.preferred_method;
+        let (preferred, auto_use_included_limits) = {
+            let cfg = self.cfg.borrow();
+            (
+                cfg.grok_com_config.preferred_method,
+                cfg.grok_com_config.auto_use_included_limits,
+            )
+        };
         let prefers_oidc = preferred == Some(PreferredAuthMethod::Oidc);
         let is_session_based_auth = self.is_session_based_auth();
         let session = match preferred {
@@ -3012,9 +3018,10 @@ impl MvpAgent {
             return None;
         }
         let cfg = self.cfg.borrow();
+        let login_cfg = crate::agent::config::to_login_grok_com(&cfg.grok_com_config);
         let relay_config = crate::agent::relay::RelayConfig::for_session(
             &auth,
-            &cfg.grok_com_config,
+            &login_cfg,
             cfg.endpoints.alpha_test_key.clone(),
             None,
         )?;
@@ -4443,16 +4450,6 @@ impl MvpAgent {
             "startup hints"
         );
 
-        let (auto_compact_threshold_percent, auto_compact_threshold_tokens) = {
-            let cfg = self.cfg.borrow();
-            let models = self.models_manager.models();
-            let model = config::find_model_by_id(&models, &session_model_id.0);
-            crate::util::config::resolve_auto_compact_threshold_percent(
-                &cfg,
-                &session_model_id.0,
-                model.map(|e| &e.info),
-            )
-        };
         let system_prompt_label = {
             let cfg = self.cfg.borrow();
             let models = self.models_manager.models();
@@ -4823,14 +4820,9 @@ impl MvpAgent {
                 session_base_url: sampling_config.session_base_url.clone(),
                 session_identity_key: sampling_config.session_identity_key.clone(),
             };
-            let attribution_callback: Option<
-                xai_grok_sampler::SharedAttributionCallback,
-            > = Some(
-                xai_grok_login::attribution::ShellAttribution::new(
-                    self.auth_manager.clone(),
-                    Some(session_info.id.0.to_string()),
-                ),
-            );
+            // Sampler 401 attribution is constructed inside the session spawn.
+            // `ShellAttribution::new` is crate-private to login.
+            let attribution_callback: Option<xai_grok_sampler::SharedAttributionCallback> = None;
             let agent_hook_registry_override = agent_definition
                 .hooks
                 .as_ref()

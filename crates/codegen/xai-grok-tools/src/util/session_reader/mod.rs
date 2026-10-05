@@ -235,7 +235,7 @@ fn candidate_from_path(tool: SessionTool, raw_path: &str, cwd: &str) -> Option<s
     let path = std::path::PathBuf::from(raw_path);
     let path = if path.starts_with("~") {
         // Expand ~ only; do not shell out.
-        if let Some(home) = dirs::home_dir() {
+        if let Some(home) = xai_dirs::home_dir() {
             let rest = path.strip_prefix("~").ok()?;
             home.join(rest)
         } else {

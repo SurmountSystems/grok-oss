@@ -450,7 +450,8 @@ impl acp::Agent for MvpAgent {
                 "auth: advertising grok.com auth method",
             );
         }
-        let preferred_method = preferred_method_early;
+        let preferred_method =
+            preferred_method_early.map(crate::agent::config::login_preferred);
         let has_external_api_key = match preferred_method {
             Some(xai_grok_login::PreferredAuthMethod::Oidc) => false,
             _ => has_external_api_key,
@@ -651,7 +652,13 @@ impl acp::Agent for MvpAgent {
             None,
             Some(serde_json::json!({"method": arguments.method_id.0.as_ref()})),
         );
-        if let Some(preferred) = self.cfg.borrow().grok_com_config.preferred_method {
+        if let Some(preferred) = self
+            .cfg
+            .borrow()
+            .grok_com_config
+            .preferred_method
+            .map(crate::agent::config::login_preferred)
+        {
             let kind = auth_method::AuthMethodKind::from_id(&arguments.method_id);
             let allowed = match preferred {
                 xai_grok_login::PreferredAuthMethod::ApiKey => kind.is_api_key(),
@@ -2462,10 +2469,24 @@ impl acp::Agent for MvpAgent {
                     "Setting auto permission mode for matching sessions"
                 );
             }
-            if want_context_only || matches!(
-                permission_mode,
-                "always-approve" | "ask" | "default" | "auto"
-            ) {
+            let permission_mode = params
+                .get("permission_mode")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let want_context_only = params
+                .get("context_only")
+                .or_else(|| params.get("contextOnly"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+                || permission_mode == "context-only";
+            let yolo_signal = change.yolo_mode();
+            let enable_auto = change.auto_change() == Some(true);
+            if want_context_only
+                || matches!(
+                    permission_mode,
+                    "always-approve" | "ask" | "default" | "auto" | "context-only"
+                )
+            {
                 let enabled = want_context_only && yolo_signal != Some(true) && !enable_auto;
                 let matches_sender = |h: &crate::session::SessionHandle| -> bool {
                     sender_id.is_none()

@@ -4,8 +4,36 @@ use super::ctx::NO_SESSION_NOTICE;
 use super::voice::voice_stop_on_submit;
 use crate::app::actions::Effect;
 use crate::app::agent::AgentId;
+use crate::app::agent_view::AgentView;
 use crate::app::app_view::{ActiveView, AppView};
 use crate::scrollback::block::RenderBlock;
+use agent_client_protocol as acp;
+
+pub(super) enum OverlayOperatorClarify {
+    /// Fullscreen overlay is an L3. Operator text stays off that view.
+    L3Unbothered,
+    /// Fullscreen overlay is an L2. Route the interject there.
+    L2(acp::SessionId),
+    None,
+}
+
+pub(super) fn overlay_operator_clarify(agent: &AgentView) -> OverlayOperatorClarify {
+    let Some(sid) = agent.visible_nested_overlay_sid() else {
+        return OverlayOperatorClarify::None;
+    };
+    let Some(info) = agent
+        .subagent_sessions
+        .values()
+        .find(|info| info.child_session_id.as_ref() == sid)
+    else {
+        return OverlayOperatorClarify::None;
+    };
+    if info.attempt.depth.is_some_and(|depth| depth >= 2) {
+        OverlayOperatorClarify::L3Unbothered
+    } else {
+        OverlayOperatorClarify::L2(acp::SessionId::new(sid))
+    }
+}
 
 /// Send a mid-turn interjection.
 /// Pushes a standard user prompt block locally for instant feedback, records the text in prompt history, and clears the prompt.
@@ -66,19 +94,16 @@ fn dispatch_interject_on_inner(
         agent.release_hook_block_hold();
     }
 
-    match overlay_operator_clarify(agent) {
-        OverlayOperatorClarify::L3Unbothered => return refuse_l3_overlay_operator_text(agent),
-        OverlayOperatorClarify::L2(session_id) => {
-            return paint_and_send_interject(agent, id, session_id, text, images);
+    let routed_session = match overlay_operator_clarify(agent) {
+        OverlayOperatorClarify::L3Unbothered => {
+            agent.show_toast("This overlay is an L3. Type on the L2 that owns it.");
+            return vec![];
         }
-        OverlayOperatorClarify::None => {
-            if let Some(l2_session_id) = resolve_uniquely_named_live_l2(agent, &text) {
-                return paint_and_send_interject(agent, id, l2_session_id, text, images);
-            }
-        }
-    }
+        OverlayOperatorClarify::L2(session_id) => Some(session_id),
+        OverlayOperatorClarify::None => super::prompt::resolve_uniquely_named_live_l2(agent, &text),
+    };
 
-    let Some(session_id) = agent.session.session_id.clone() else {
+    let Some(session_id) = routed_session.or_else(|| agent.session.session_id.clone()) else {
         agent.show_toast(NO_SESSION_NOTICE);
         return vec![];
     };
@@ -109,21 +134,21 @@ fn dispatch_interject_on_inner(
 
     // Image-bearing interjection: build text and image content blocks via the same helper as the queued-prompt drain path
     // The helper covers orphan-placeholder recovery, the allowlist, and the size cap. Text-only stays on the legacy wire.
-    let blocks = if images.is_empty() {
-        None
+    let (blocks, skipped_notice) = if images.is_empty() {
+        (None, None)
     } else {
         let build = crate::prompt_images::build_content_blocks_with_workspace_report(
             text.clone(),
             images,
             Some(std::path::Path::new(&agent.session.cwd)),
         );
-        app.pending_image_notices
-            .extend(agent.skipped_image_send_notice(&build.skipped_display_numbers));
-        Some(build.blocks)
+        let notice = agent.skipped_image_send_notice(&build.skipped_display_numbers);
+        (Some(build.blocks), notice)
     };
+    app.pending_image_notices.extend(skipped_notice);
 
     vec![Effect::SendInterject {
-        agent_id,
+        agent_id: id,
         session_id,
         text,
         interjection_id,
@@ -879,47 +904,55 @@ mod tests {
         parent_sid: &str,
         depth: u32,
     ) -> crate::app::subagent::SubagentInfo {
+        let now = std::time::Instant::now();
         crate::app::subagent::SubagentInfo {
             subagent_id: child_sid.into(),
             child_session_id: child_sid.into(),
             description: "coordinate the slice".into(),
             subagent_type: "general-purpose".into(),
-            persona: None,
-            role: None,
-            model: None,
-            context_source: None,
-            resumed_from: None,
-            capability_mode: None,
-            workflow_run_id: None,
-            context_normalized: false,
-            parent_prompt_id: None,
-            parent_session_id: Some(parent_sid.into()),
-            depth: Some(depth),
-            started_at: std::time::Instant::now(),
-            last_progress_at: std::time::Instant::now(),
             finished: false,
             status: None,
-            error: None,
-            duration_ms: None,
-            tool_calls: None,
-            turns: None,
-            turn_count: None,
-            tool_call_count: None,
-            tokens_used: None,
-            tokens_past: 0,
-            context_window_tokens: None,
-            context_usage_pct: None,
-            tools_used: Vec::new(),
-            error_count: None,
-            activity_label: None,
-            is_background: false,
-            pending_kill: false,
-            kill_requested_at: None,
-            scrollback_entry_id: None,
+            attempt: crate::app::subagent::SubagentAttemptInfo {
+                lifecycle: crate::app::subagent::SubagentLifecycleState::running_legacy_for_test(),
+                persona: None,
+                role: None,
+                model: None,
+                context_source: None,
+                resumed_from: None,
+                capability_mode: None,
+                workflow_run_id: None,
+                context_normalized: false,
+                parent_prompt_id: None,
+                parent_session_id: Some(parent_sid.into()),
+                depth: Some(depth),
+                started_at: now,
+                last_progress_at: now,
+                status: None,
+                error: None,
+                duration_ms: None,
+                tool_calls: None,
+                turns: None,
+                turn_count: None,
+                tool_call_count: None,
+                tokens_used: None,
+                tokens_past: 0,
+                context_window_tokens: None,
+                context_usage_pct: None,
+                tools_used: Vec::new(),
+                error_count: None,
+                activity_label: None,
+                is_background: false,
+                pending_kill: false,
+                kill_requested_at: None,
+                scrollback_entry_id: None,
+                terminal_entry_id: None,
+            },
+            completed_attempt_tokens: 0,
+            sealed_attempt_tokens: Default::default(),
             prompt: None,
             child_cwd: None,
             worktree_path: None,
-            child_updates_replayed: false,
+            transcript: Default::default(),
         }
     }
 
@@ -953,7 +986,6 @@ mod tests {
             next_queue_id: 0,
             yolo_mode: false,
             auto_mode: false,
-            context_only_mode: false,
             prompt_history: Vec::new(),
             prompt_history_loading: false,
             loading_replay: false,
@@ -976,6 +1008,8 @@ mod tests {
             current_prompt_id: None,
             created_via_new: false,
             session_notes: crate::app::agent::SessionNotes::default(),
+            hook_block_hold: false,
+            blocked_prompt: None,
         };
         let child = crate::app::agent_view::AgentView::new(
             child_session,
@@ -991,7 +1025,7 @@ mod tests {
         agent
             .subagent_sessions
             .insert(child_sid.into(), overlay_info(child_sid, parent_sid, depth));
-        agent.insert_subagent_view(child_sid.to_string(), Box::new(child));
+        agent.insert_test_child(child_sid.to_string(), Box::new(child));
         agent.open_subagent_fullscreen(child_sid.to_string());
         app
     }
@@ -1249,6 +1283,7 @@ mod tests {
                     attempt: 2,
                     max_retries: u32::MAX,
                     reason: "response headers timed out".into(),
+                    error_type: None,
                 }));
             agent.set_active_pane(ActivePane::Prompt, true);
             agent.prompt.set_text(body);
@@ -1409,7 +1444,7 @@ mod tests {
                 attempts: 1,
                 confirmed: false,
                 cancel_subagents: true,
-                trigger: crate::app::actions::CancelTrigger::Esc,
+                trigger: crate::app::actions::CancelTrigger::CtrlC,
             });
         }
         let effects = dispatch(
@@ -1454,7 +1489,7 @@ mod tests {
                 attempts: 1,
                 confirmed: false,
                 cancel_subagents: true,
-                trigger: crate::app::actions::CancelTrigger::Esc,
+                trigger: crate::app::actions::CancelTrigger::CtrlC,
             });
         }
         let effects = dispatch(
@@ -1565,6 +1600,7 @@ mod tests {
             Action::SendPromptNow {
                 text: "steer the coordinator".into(),
                 images: vec![],
+                image_notice: None,
             },
             &mut app,
         );
@@ -1617,7 +1653,6 @@ mod tests {
             next_queue_id: 0,
             yolo_mode: false,
             auto_mode: false,
-            context_only_mode: false,
             prompt_history: Vec::new(),
             prompt_history_loading: false,
             loading_replay: false,
@@ -1640,6 +1675,8 @@ mod tests {
             current_prompt_id: None,
             created_via_new: false,
             session_notes: crate::app::agent::SessionNotes::default(),
+            hook_block_hold: false,
+            blocked_prompt: None,
         };
         let child = crate::app::agent_view::AgentView::new(
             child_session,
@@ -1650,7 +1687,7 @@ mod tests {
         let mut info = overlay_info(child_sid, &l1_sid, 1);
         info.description = description.into();
         agent.subagent_sessions.insert(child_sid.into(), info);
-        agent.insert_subagent_view(child_sid.to_string(), Box::new(child));
+        agent.insert_test_child(child_sid.to_string(), Box::new(child));
         if let Some((l3_sid, l3_desc)) = l3 {
             let mut l3_info = overlay_info(l3_sid, child_sid, 2);
             l3_info.description = l3_desc.into();
@@ -1730,10 +1767,10 @@ mod tests {
             .get("l2-coord-01a08999")
             .expect("l2 still registered");
         assert!(
-            l2.is_running() && !l2.pending_kill && !l2.finished,
+            l2.is_running() && !l2.attempt.pending_kill && !l2.finished,
             "{CONTRACT} — L2 must keep running (no kill, no wait-for-exit); finished={} pending_kill={}",
             l2.finished,
-            l2.pending_kill
+            l2.attempt.pending_kill
         );
         assert!(
             agent.active_subagent.is_none(),
@@ -1809,7 +1846,11 @@ mod tests {
         // L2s. Prefer keep current L1 routing over picking at random.
         let body = "tell the reviewer to stay additive";
         assert!(
-            resolve_uniquely_named_live_l2(app.agents.get(&id).unwrap(), body).is_none(),
+            super::super::prompt::resolve_uniquely_named_live_l2(
+                app.agents.get(&id).unwrap(),
+                body
+            )
+            .is_none(),
             "shared reviewer tag must be ambiguous across two live L2s"
         );
         let effects = dispatch(Action::SendPrompt(body.into()), &mut app);

@@ -11,7 +11,7 @@ use crate::app::actions::Action;
 use crate::app::app_view::InputOutcome;
 use crate::key;
 use crate::scrollback::block::RenderBlock;
-use crate::views::prompt_widget::PromptEvent;
+use crate::views::prompt_widget::{PromptEvent, PromptWidget};
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 /// True when the caret is at the end of the last logical line (buffer end).
@@ -1167,6 +1167,42 @@ impl AgentView {
         self.prompt.history_search.update_query(&query);
         InputOutcome::Changed
     }
+
+    /// Unique `/model` or `/m` row: Tab and Enter switch now. Command-phase
+    /// `/model` and a multi-row list stay on completion.
+    fn try_apply_unique_model_slash_row(&mut self) -> Option<InputOutcome> {
+        if !self.prompt.slash_open() {
+            return None;
+        }
+        let snap = self.prompt.slash_snapshot();
+        if snap.cursor_in_command || snap.matches.len() != 1 {
+            return None;
+        }
+        let typed = self.prompt.text().trim().to_string();
+        let invocation = crate::slash::parse_invocation(&typed)?;
+        if invocation.token != "model" && invocation.token != "m" {
+            return None;
+        }
+        let switched = match crate::slash::commands::model::ModelCommand::action_for_args(
+            &self.session.models,
+            invocation.args,
+        ) {
+            crate::slash::command::CommandResult::Action(Action::SetDefaultModel(model_id)) => {
+                Some(crate::app::actions::ModelChoice {
+                    model_id,
+                    effort: None,
+                    context_window_selection: None,
+                })
+            }
+            crate::slash::command::CommandResult::Action(Action::SwitchModel(choice)) => {
+                Some(choice)
+            }
+            _ => None,
+        }?;
+        self.prompt.set_text("");
+        self.prompt.slash_close();
+        Some(InputOutcome::Action(Action::SwitchModel(switched)))
+    }
 }
 
 #[cfg(test)]
@@ -1798,14 +1834,14 @@ mod slash_menu_enter_tests {
         use agent_client_protocol as acp;
         use std::sync::Arc;
         match outcome {
-            InputOutcome::Action(Action::SwitchModel { model_id, effort }) => {
+            InputOutcome::Action(Action::SwitchModel(choice)) => {
                 assert_eq!(
-                    model_id,
+                    choice.model_id,
                     acp::ModelId::new(Arc::from(expected_id)),
                     "SwitchModel id; prompt={prompt:?}"
                 );
                 assert_eq!(
-                    effort, expected_effort,
+                    choice.effort, expected_effort,
                     "SwitchModel effort; prompt={prompt:?}"
                 );
             }
@@ -1929,7 +1965,7 @@ mod slash_menu_enter_tests {
         assert!(
             !matches!(
                 outcome,
-                InputOutcome::Action(Action::SwitchModel { .. } | Action::SendPrompt(_))
+                InputOutcome::Action(Action::SwitchModel(_) | Action::SendPrompt(_))
             ),
             "command-phase Tab must not SwitchModel or SendPrompt; got {outcome:?}"
         );
@@ -1952,7 +1988,7 @@ mod slash_menu_enter_tests {
             "multi-row Tab must complete/filter, not SwitchModel; got {outcome:?}"
         );
         assert!(
-            !matches!(outcome, InputOutcome::Action(Action::SwitchModel { .. })),
+            !matches!(outcome, InputOutcome::Action(Action::SwitchModel(_))),
             "multi-row Tab must not SwitchModel"
         );
         assert!(

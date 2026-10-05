@@ -15,17 +15,42 @@ pub fn loop_usage_message() -> &'static str {
      Tell me how often it should run (e.g. 30m, 1 hour, every 2 days)."
 }
 
+/// Where a scheduled fire runs, which decides what the stored prompt can rely on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoopFireMode {
+    /// Each fire runs in a detached background subagent that cannot see this conversation.
+    Detached,
+    /// Each fire runs as a turn in this conversation.
+    InSession,
+}
+
 /// Build the model instruction that `/loop` expands into for `args`. The model, not brittle host
 /// parsing, turns the request into the `scheduler_create` interval, accepting every natural
 /// phrasing and erroring on bad input rather than silently defaulting. See [`loop_usage_message`].
-pub fn loop_schedule_instruction(args: &str) -> String {
-    let fire_context = "Each fire runs in a detached background subagent, not in this conversation,\n\
-         so the prompt you store must stand on its own.\n\n\
-         ## Writing a prompt that survives a fresh fire\n\
-         - Inline the state a fire needs: paths, job/PR/branch ids, the command that checks\n\
-           status, and what \"healthy\" looks like. A fire cannot see this conversation, and\n\
-           a long-running task restarts from a short summary every few iterations.\n\
-         - Only a short status comes back here, so say what that status must contain.";
+/// `mode` selects the fire context. Detached and in-session share the stop condition and length
+/// guidance.
+pub fn loop_schedule_instruction(args: &str, mode: LoopFireMode) -> String {
+    let fire_context = match mode {
+        LoopFireMode::Detached => {
+            "Each fire runs in a detached background subagent, not in this conversation,\n\
+             so the prompt you store must stand on its own.\n\n\
+             ## Writing a prompt that survives a fresh fire\n\
+             - Inline the state a fire needs: paths, job/PR/branch ids, the command that checks\n\
+               status, and what \"healthy\" looks like. A fire cannot see this conversation, and\n\
+               a long-running task restarts from a short summary every few iterations.\n\
+             - Only a short status comes back here, so say what that status must contain."
+        }
+        LoopFireMode::InSession => {
+            "Each fire arrives as a new turn in this conversation, and earlier results from\n\
+             the same task may still be above it. The stored prompt is re-sent verbatim every\n\
+             time, so write a standing order rather than a one-off request.\n\n\
+             ## Writing a prompt that reads well on every fire\n\
+             - Name the state that must not be guessed: paths, job/PR/branch ids, the command\n\
+               that checks status, and what \"healthy\" looks like. This conversation is\n\
+               compacted as it grows, so do not rely on details staying visible.\n\
+             - Earlier fires may be above you: continue from them instead of restarting."
+        }
+    };
     format!(
         "# /loop -- schedule a recurring prompt\n\n\
          Turn the input below into a scheduler_create call. {fire_context}\n\
@@ -216,7 +241,7 @@ mod tests {
 
     #[test]
     fn instruction_carries_args_and_contract_tokens() {
-        let text = loop_schedule_instruction("every 30 minutes do x");
+        let text = loop_schedule_instruction("every 30 minutes do x", LoopFireMode::Detached);
         assert!(text.contains("every 30 minutes do x"));
         assert!(text.contains("<number><unit>"));
         assert!(!text.contains("10m"), "no host-side default interval");

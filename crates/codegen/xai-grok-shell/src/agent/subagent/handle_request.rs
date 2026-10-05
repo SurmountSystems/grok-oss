@@ -2039,7 +2039,7 @@ pub(crate) async fn run_shell_child(
     let trace_token_totals = child_actor_query(
         "session_usage",
         child_handle.chat_state_handle.try_get_session_usage(),
-        Err(()),
+        Err(xai_chat_state::ChatStateActorUnreachable),
     )
     .await
     .ok()

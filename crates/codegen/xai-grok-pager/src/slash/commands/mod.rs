@@ -127,14 +127,20 @@ pub mod blacklist {
         };
         match doc.get("permission") {
             None => {
-                doc["permission"] = toml_edit::Item::Table(toml_edit::Table::new());
+                doc.insert(
+                    "permission",
+                    toml_edit::Item::Table(toml_edit::Table::new()),
+                );
             }
             Some(item) if item.as_table().is_some() => {}
             Some(_) => {
                 return Err("[permission] is not a table; refusing to overwrite".to_string());
             }
         }
-        let Some(permission) = doc["permission"].as_table_mut() else {
+        let Some(permission) = doc
+            .get_mut("permission")
+            .and_then(toml_edit::Item::as_table_mut)
+        else {
             return Err("[permission] is not a table; refusing to overwrite".to_string());
         };
         match permission.get("deny") {
@@ -300,7 +306,7 @@ pub mod dashboard;
 pub mod debug;
 pub mod delete;
 pub mod docs;
-
+pub mod doctor;
 pub mod economic_mode;
 pub mod edit_prompt;
 pub mod effort;
@@ -346,6 +352,7 @@ pub mod resume;
 pub mod rewind;
 pub mod running;
 pub mod screen_mode_switch;
+pub mod screenshot;
 pub mod session_info;
 pub mod settings_cmd;
 pub mod share;
@@ -447,7 +454,7 @@ pub fn builtin_commands() -> Vec<Arc<dyn SlashCommand>> {
     ]
 }
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::acp::model_state::ModelState;
     use crate::app::actions::Action;

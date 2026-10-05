@@ -139,11 +139,8 @@ pub(crate) fn spawn_workflow_host_service(
                     // executor drops the channel so in-flight replies still
                     // complete the run outcome. Breaking here immediately
                     // leaves that recv hanging.
-                    loop {
-                        match rx.recv().await {
-                            Some(req) => reply_cancelled(req),
-                            None => break,
-                        }
+                    while let Some(req) = rx.recv().await {
+                        reply_cancelled(req);
                     }
                     break;
                 }

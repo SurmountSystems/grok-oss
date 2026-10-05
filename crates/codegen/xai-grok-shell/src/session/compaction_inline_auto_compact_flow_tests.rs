@@ -306,7 +306,7 @@ async fn suppression_gates_and_reset_is_reason_scoped() {
             assert!(actor.check_auto_compact_needed().await.is_some());
             assert!(actor.should_compact_on_error(&err).await);
             actor
-                .suppress_auto_compaction(SuppressReason::Other, "", 1_000, 200_000)
+                .suppress_auto_compaction(SuppressReason::Other, "", 1_000, 200_000, None)
                 .await;
             assert!(actor.check_auto_compact_needed().await.is_none());
             assert!(!actor.should_compact_on_error(&err).await);
@@ -318,7 +318,7 @@ async fn suppression_gates_and_reset_is_reason_scoped() {
             );
             assert!(actor.check_auto_compact_needed().await.is_some());
             actor
-                .suppress_auto_compaction(SuppressReason::CreditBlock, "", 1_000, 200_000)
+                .suppress_auto_compaction(SuppressReason::CreditBlock, "", 1_000, 200_000, None)
                 .await;
             assert_eq!(
                 actor.compaction.auto_compact_suppressed.load(Relaxed),
@@ -344,7 +344,7 @@ async fn suppression_gates_and_reset_is_reason_scoped() {
             );
             assert!(actor.check_auto_compact_needed().await.is_some());
             actor
-                .suppress_auto_compaction(SuppressReason::Size, "", 1_000, 200_000)
+                .suppress_auto_compaction(SuppressReason::Size, "", 1_000, 200_000, None)
                 .await;
             assert!(actor.check_auto_compact_needed().await.is_none());
             let _ = actor.compaction.auto_compact_suppressed.compare_exchange(
@@ -391,7 +391,7 @@ async fn schema_rejection_suppresses_auto_compaction_on_later_turns() {
                 SuppressReason::Other
             );
             actor
-                .suppress_auto_compaction(SuppressReason::Schema, "", 1_000, 200_000)
+                .suppress_auto_compaction(SuppressReason::Schema, "", 1_000, 200_000, None)
                 .await;
             assert_eq!(
                 actor.compaction.auto_compact_suppressed.load(Relaxed),
@@ -408,7 +408,7 @@ async fn schema_rejection_suppresses_auto_compaction_on_later_turns() {
             );
             actor.compaction.auto_compact_suppressed.store(SUPPRESS_NONE, Relaxed);
             actor
-                .suppress_auto_compaction(SuppressReason::Other, "", 1_000, 200_000)
+                .suppress_auto_compaction(SuppressReason::Other, "", 1_000, 200_000, None)
                 .await;
             let _ = actor
                 .compaction
@@ -435,7 +435,7 @@ async fn suppression_gates_prefire_two_pass() {
             let actor = create_test_actor(214_000, 200_000, 85, gateway_tx, persistence_tx).await;
             assert!(actor.should_prefire_two_pass().await);
             actor
-                .suppress_auto_compaction(SuppressReason::Size, "", 1_000, 200_000)
+                .suppress_auto_compaction(SuppressReason::Size, "", 1_000, 200_000, None)
                 .await;
             assert!(
                 !actor.should_prefire_two_pass().await,
@@ -447,7 +447,7 @@ async fn suppression_gates_prefire_two_pass() {
                 .store(SUPPRESS_NONE, Relaxed);
             assert!(actor.should_prefire_two_pass().await);
             actor
-                .suppress_auto_compaction(SuppressReason::Other, "", 1_000, 200_000)
+                .suppress_auto_compaction(SuppressReason::Other, "", 1_000, 200_000, None)
                 .await;
             assert!(!actor.should_prefire_two_pass().await);
             let _ = actor.compaction.auto_compact_suppressed.compare_exchange(
@@ -474,7 +474,7 @@ async fn model_switch_clears_sticky_suppression() {
                 Arc::new(create_test_actor(50_000, 200_000, 85, gateway_tx, persistence_tx).await);
             for reason in [SuppressReason::Size, SuppressReason::Other] {
                 actor
-                    .suppress_auto_compaction(reason, "", 1_000, 200_000)
+                    .suppress_auto_compaction(reason, "", 1_000, 200_000, None)
                     .await;
                 assert_ne!(
                     actor.compaction.auto_compact_suppressed.load(Relaxed),
@@ -516,7 +516,7 @@ async fn model_switch_keeps_account_state_suppression() {
                 (SuppressReason::Auth, SUPPRESS_AUTH),
             ] {
                 actor
-                    .suppress_auto_compaction(reason, "", 1_000, 200_000)
+                    .suppress_auto_compaction(reason, "", 1_000, 200_000, None)
                     .await;
                 assert_eq!(
                     actor.compaction.auto_compact_suppressed.load(Relaxed),
@@ -555,7 +555,7 @@ async fn auth_suppress_clears_on_credential_recovery() {
             let (persistence_tx, _persistence_rx) = mpsc::unbounded_channel();
             let actor = create_test_actor(180_000, 200_000, 85, gateway_tx, persistence_tx).await;
             actor
-                .suppress_auto_compaction(SuppressReason::Auth, "", 1_000, 200_000)
+                .suppress_auto_compaction(SuppressReason::Auth, "", 1_000, 200_000, None)
                 .await;
             assert_eq!(
                 actor.compaction.auto_compact_suppressed.load(Relaxed),
@@ -582,7 +582,7 @@ async fn clear_auth_suppress_leaves_credit_suppress() {
             let (persistence_tx, _persistence_rx) = mpsc::unbounded_channel();
             let actor = create_test_actor(180_000, 200_000, 85, gateway_tx, persistence_tx).await;
             actor
-                .suppress_auto_compaction(SuppressReason::CreditBlock, "", 1_000, 200_000)
+                .suppress_auto_compaction(SuppressReason::CreditBlock, "", 1_000, 200_000, None)
                 .await;
             actor.clear_auth_compact_suppression();
             assert_eq!(
@@ -605,7 +605,7 @@ async fn clear_auth_suppress_rearms_pre_sampling_compact_gate() {
             let (persistence_tx, _persistence_rx) = mpsc::unbounded_channel();
             let actor = create_test_actor(180_000, 200_000, 85, gateway_tx, persistence_tx).await;
             actor
-                .suppress_auto_compaction(SuppressReason::Auth, "", 1_000, 200_000)
+                .suppress_auto_compaction(SuppressReason::Auth, "", 1_000, 200_000, None)
                 .await;
             assert_eq!(
                 actor.compaction.auto_compact_suppressed.load(Relaxed),
@@ -744,7 +744,7 @@ async fn suppression_emits_composed_notification() {
             };
             let detail = format!("compact failed: {service}: upstream timeout");
             actor
-                .suppress_auto_compaction(SuppressReason::Other, &detail, 1_000, 200_000)
+                .suppress_auto_compaction(SuppressReason::Other, &detail, 1_000, 200_000, None)
                 .await;
             let mut text = None;
             while let Ok(msg) = persistence_rx.try_recv() {
@@ -1245,7 +1245,7 @@ async fn clear_auth_suppress_allows_model_switch_compact_reeval() {
             let actor =
                 Arc::new(create_test_actor(214_000, 200_000, 85, gateway_tx, persistence_tx).await);
             actor
-                .suppress_auto_compaction(SuppressReason::Auth, "", 1_000, 200_000)
+                .suppress_auto_compaction(SuppressReason::Auth, "", 1_000, 200_000, None)
                 .await;
             assert_eq!(
                 actor.compaction.auto_compact_suppressed.load(Relaxed),

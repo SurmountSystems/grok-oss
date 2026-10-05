@@ -53,7 +53,9 @@ pub(crate) fn append_bubble_copy_button(lines: &mut [BlockLine], ctx: &BlockCont
         return;
     }
     let icon_w = crate::glyphs::copy_icon().width();
-    let used: usize = lines[0]
+    let used: usize = lines
+        .first()
+        .expect("index out of bounds")
         .content
         .spans
         .iter()
@@ -67,7 +69,10 @@ pub(crate) fn append_bubble_copy_button(lines: &mut [BlockLine], ctx: &BlockCont
         ctx.content_width()
     };
     if let Ok(col) = u16::try_from(col) {
-        lines[0].copy_button_col = Some(col);
+        lines
+            .first_mut()
+            .expect("index out of bounds")
+            .copy_button_col = Some(col);
     }
 }
 pub use workflow::{WorkflowBlock, WorkflowBlockPhase, WorkflowBlockStatus};

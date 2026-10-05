@@ -367,8 +367,7 @@ fn grok_home_path() -> PathBuf {
     if let Ok(v) = std::env::var("GROK_HOME") {
         return PathBuf::from(v);
     }
-    #[allow(deprecated)]
-    let home = std::env::home_dir().unwrap_or_else(|| PathBuf::from("."));
+    let home = xai_dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
     home.join(".grok")
 }
 

@@ -1477,6 +1477,27 @@ pub(crate) fn load_system_prompt(session_info: &SessionInfo) -> Option<String> {
 fn load_system_prompt_from_dir(session_dir: &std::path::Path) -> Option<String> {
     std::fs::read_to_string(session_dir.join(SYSTEM_PROMPT_FILENAME)).ok()
 }
+impl SessionActor {
+    /// Install a parked plan snapshot so resume re-issues approval from memory.
+    pub(crate) fn adopt_parked_plan_snapshot(
+        &self,
+        snapshot: crate::session::plan_mode::PlanModeSnapshot,
+    ) {
+        let mut tracker = self.plan_mode.lock();
+        let session_dir = tracker
+            .plan_file_path()
+            .parent()
+            .map(std::path::Path::to_path_buf)
+            .unwrap_or_else(|| std::path::PathBuf::from("/tmp"));
+        *tracker = crate::session::plan_mode::PlanModeTracker::from_snapshot(session_dir, snapshot);
+    }
+}
+
+/// Plan mode strips the grok questionnaire. Cursor `AskQuestion` is a different surface and stays.
+pub(crate) fn is_plan_mode_blocked_ask_user_tool_name(name: &str) -> bool {
+    matches!(name, "ask_user_question" | "AskUserQuestion" | "AskUser")
+}
+
 /// Load the canonical prompt context from `{session_dir}/prompt_context.json`.
 ///
 /// Returns `None` for sessions without a persisted context.

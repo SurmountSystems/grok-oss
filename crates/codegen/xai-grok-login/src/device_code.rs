@@ -107,7 +107,7 @@ struct IdTokenClaims {
 /// Request a device code and user code from the OAuth2 provider.
 /// This is a single HTTP POST.
 /// The caller displays `DeviceCode::verification_uri` and `DeviceCode::user_code` to the user before calling `complete_device_code_login`.
-pub async fn request_device_code(
+pub(crate) async fn request_device_code(
     issuer: &str,
     client_id: &str,
     scopes: &[String],
@@ -176,7 +176,7 @@ pub async fn request_device_code(
 /// Poll the token endpoint until the user approves (or denies, or the code expires).
 /// On success, persists credentials to `~/.grok/auth.json` and returns the authenticated `GrokAuth`.
 /// Callers should have already displayed `device_code.verification_uri` and `device_code.user_code` to the user before calling this.
-pub async fn complete_device_code_login(
+pub(crate) async fn complete_device_code_login(
     issuer: &str,
     client_id: &str,
     device_code: DeviceCode,

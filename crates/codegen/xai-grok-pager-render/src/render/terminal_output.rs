@@ -56,6 +56,113 @@ pub fn render_terminal_plain(raw: &str) -> String {
         .join("\n")
 }
 
+/// Fold a huge PTY dump before VTE parse. Empty input is borrowed.
+/// NUL bytes are stripped. Over-long transcripts keep a head and a tail
+/// and name the omitted lines with U+2026.
+pub fn bound_terminal_raw(raw: &str) -> Cow<'_, str> {
+    if raw.is_empty() {
+        return Cow::Borrowed(raw);
+    }
+    let stripped: Cow<'_, str> = if raw.as_bytes().contains(&0) {
+        Cow::Owned(raw.chars().filter(|&c| c != '\0').collect())
+    } else {
+        Cow::Borrowed(raw)
+    };
+    let src = stripped.as_ref();
+    let newlines = src.bytes().filter(|&b| b == b'\n').count();
+    let line_count = if src.ends_with('\n') {
+        newlines
+    } else {
+        newlines + 1
+    };
+    if src.len() <= MAX_TERMINAL_PARSE_BYTES && line_count <= MAX_TERMINAL_PARSE_LINES {
+        stripped
+    } else {
+        Cow::Owned(fold_head_tail(src, line_count))
+    }
+}
+
+fn fold_head_tail(raw: &str, line_count: usize) -> String {
+    let mut starts = Vec::with_capacity(line_count.min(MAX_TERMINAL_PARSE_LINES + 2));
+    starts.push(0);
+    for (i, b) in raw.bytes().enumerate() {
+        if b == b'\n' && i + 1 < raw.len() {
+            starts.push(i + 1);
+        }
+    }
+    let n = starts.len();
+    let mut out = String::new();
+    if n > PARSE_HEAD_LINES + PARSE_TAIL_LINES {
+        let omitted = n - PARSE_HEAD_LINES - PARSE_TAIL_LINES;
+        let Some(head_end) = starts.get(PARSE_HEAD_LINES).copied() else {
+            return raw.to_string();
+        };
+        let Some(head) = raw.get(..head_end) else {
+            return raw.to_string();
+        };
+        out.push_str(head);
+        if !out.ends_with('\n') {
+            out.push('\n');
+        }
+        out.push_str(&format!("\u{2026} +{omitted} lines\n"));
+        let tail_start_line = n - PARSE_TAIL_LINES;
+        let Some(tail_at) = starts.get(tail_start_line).copied() else {
+            return raw.to_string();
+        };
+        let Some(tail) = raw.get(tail_at..) else {
+            return raw.to_string();
+        };
+        out.push_str(tail);
+    } else {
+        out.push_str(raw);
+    }
+    if out.len() > MAX_TERMINAL_PARSE_BYTES {
+        byte_trim_middle(&mut out);
+    }
+    out
+}
+
+fn byte_trim_middle(s: &mut String) {
+    if s.len() <= MAX_TERMINAL_PARSE_BYTES {
+        return;
+    }
+    let head = floor_char_boundary(s, PARSE_HEAD_BYTES.min(s.len()));
+    let tail_at = s.len().saturating_sub(PARSE_TAIL_BYTES);
+    let tail = ceil_char_boundary(s, tail_at);
+    if head >= tail {
+        return;
+    }
+    let marker = "\n\u{2026} +truncated\n";
+    let (Some(head_str), Some(tail_str)) = (s.get(..head), s.get(tail..)) else {
+        return;
+    };
+    let mut out = String::with_capacity(head + marker.len() + (s.len() - tail));
+    out.push_str(head_str);
+    out.push_str(marker);
+    out.push_str(tail_str);
+    *s = out;
+}
+
+fn floor_char_boundary(s: &str, mut i: usize) -> usize {
+    if i >= s.len() {
+        return s.len();
+    }
+    while i > 0 && !s.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
+}
+
+fn ceil_char_boundary(s: &str, mut i: usize) -> usize {
+    if i >= s.len() {
+        return s.len();
+    }
+    while i < s.len() && !s.is_char_boundary(i) {
+        i += 1;
+    }
+    i
+}
+
 #[derive(Clone, Copy)]
 struct Cell {
     ch: char,

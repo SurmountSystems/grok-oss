@@ -131,7 +131,7 @@ impl SpawnOptions {
 pub struct GrokStdioClient {
     connection: AgentConnection,
     process: TestProcess,
-    sandbox: TestSandbox,
+    sandbox: Option<TestSandbox>,
     turn_budget: Option<Duration>,
     /// Aborted when the client drops, so a FIFO open cannot outlive the turn.
     fifo_release: Mutex<Option<FifoRelease>>,
@@ -402,7 +402,7 @@ impl GrokStdioClient {
         GrokStdioClient {
             connection,
             process,
-            sandbox,
+            sandbox: Some(sandbox),
             turn_budget,
             fifo_release: Mutex::new(None),
         }
@@ -419,6 +419,11 @@ impl GrokStdioClient {
         .await
     }
 
+    /// Same request budget as [`Self::initialize`]. The built-binary tests call this name.
+    pub async fn initialize_with_timeout(&self) -> acp::InitializeResponse {
+        self.initialize().await
+    }
+
     /// [`Self::initialize`] that returns the agent's refusal or a missed budget instead of panicking.
     /// A cold process after logout offers no cached credential, and the caller records that refusal.
     pub async fn try_initialize(&self) -> acp::Result<acp::InitializeResponse> {
@@ -432,6 +437,11 @@ impl GrokStdioClient {
 
     pub async fn create_session(&self, cwd: &Path) -> acp::SessionId {
         self.create_session_response(cwd).await.session_id
+    }
+
+    /// Same request budget as [`Self::create_session`].
+    pub async fn create_session_with_timeout(&self, cwd: &Path) -> acp::SessionId {
+        self.create_session(cwd).await
     }
 
     pub async fn create_session_response(&self, cwd: &Path) -> acp::NewSessionResponse {
@@ -538,6 +548,15 @@ impl GrokStdioClient {
         .await
     }
 
+    /// Same turn budget as [`Self::prompt`].
+    pub async fn prompt_with_timeout(
+        &self,
+        session_id: &acp::SessionId,
+        text: &str,
+    ) -> acp::Result<acp::PromptResponse> {
+        self.prompt(session_id, text).await
+    }
+
     pub async fn prompt_blocks(
         &self,
         session_id: &acp::SessionId,
@@ -582,6 +601,15 @@ impl GrokStdioClient {
             self.connection.load_session(session_id, cwd),
         )
         .await
+    }
+
+    /// Same load budget as [`Self::load_session`].
+    pub async fn load_session_with_timeout(
+        &self,
+        session_id: &acp::SessionId,
+        cwd: &Path,
+    ) -> acp::LoadSessionResponse {
+        self.load_session(session_id, cwd).await
     }
 
     /// [`Self::load_session`] that returns the agent's refusal or a missed budget instead of panicking.
@@ -852,13 +880,19 @@ impl GrokStdioClient {
     }
 
     pub fn sandbox(&self) -> &TestSandbox {
-        &self.sandbox
+        self.sandbox.as_ref().expect("sandbox already taken")
+    }
+
+    /// Moves the sandbox out so [`Self::spawn_with_sandbox`] can reuse it.
+    /// Drop this client before that spawn so the two processes do not overlap.
+    pub fn take_sandbox(&mut self) -> TestSandbox {
+        self.sandbox.take().expect("sandbox already taken")
     }
 
     /// Kills the child and hands its sandbox back, so a restart on the same sandbox never overlaps the old
     /// process.
     pub fn into_sandbox(self) -> TestSandbox {
-        self.sandbox
+        self.sandbox.expect("sandbox already taken")
     }
 }
 

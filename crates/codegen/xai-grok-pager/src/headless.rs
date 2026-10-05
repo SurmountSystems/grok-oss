@@ -198,11 +198,6 @@ impl HeadlessEmitter {
                 self.reduce_and_emit(StreamEvent::Lifecycle(event));
             }
         }
-        Some(
-            self.structured_output
-                .clone()
-                .unwrap_or_else(|| Err("model did not produce structured output".to_string())),
-        )
     }
     /// Fold one event through the reducer and emit its lines; a no-op for `plain`/`json`.
     fn reduce_and_emit(&mut self, event: StreamEvent) {
@@ -803,6 +798,7 @@ fn headless_materialize_ctx(
         restore_code,
         recent_session_selection: crate::app::session_startup::RecentSessionSelection::Any,
         restore_progress_on_stdout: false,
+        open_last_session_on_start: false,
     }
 }
 /// Run a headless single-turn prompt: spawn the agent, drive the ACP lifecycle, stream to stdout.
@@ -1084,12 +1080,12 @@ pub async fn run_single_turn(
     );
     let track_active = std::env::var("GROK_TRACK_HEADLESS").is_ok();
     if track_active {
-        let _ = xai_grok_active_sessions::register(xai_grok_active_sessions::ActiveSession {
-            session_id: session_id.clone(),
-            pid: std::process::id(),
-            cwd: cwd.display().to_string(),
-            opened_at: chrono::Utc::now(),
-        });
+        let _ = xai_grok_active_sessions::register(xai_grok_active_sessions::ActiveSession::new(
+            session_id.clone(),
+            std::process::id(),
+            cwd.display().to_string(),
+            chrono::Utc::now(),
+        ));
     }
     {
         let mcp_servers = if options.output_format == OutputFormat::StreamingMessagesJson {

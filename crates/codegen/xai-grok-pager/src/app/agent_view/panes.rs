@@ -1630,7 +1630,7 @@ mod clear_completed_todos_key_tests {
 
         agent.tasks.overlay.visible = false;
         agent.tasks.overlay.focused = false;
-        agent.set_active_pane(AgentPane::Catalog, true);
+        agent.set_active_pane(AgentPane::Scrollback, true);
         let catalog_out = agent.handle_input(&shift_x(), &registry);
         assert!(
             !matches!(

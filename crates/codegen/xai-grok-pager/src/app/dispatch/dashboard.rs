@@ -1216,9 +1216,6 @@ pub(super) fn dispatch_dashboard_dispatch_slash(app: &mut AppView, text: String)
                 yolo_mode: app.default_yolo,
                 auto_mode: app.current_ui.permission_mode.as_deref() == Some("auto")
                     && !app.default_yolo,
-                context_only_mode: app.current_ui.permission_mode.as_deref()
-                    == Some("context-only")
-                    && !app.default_yolo,
                 current_model_name: app.models.current_model_name(),
                 available_models: app
                     .models
@@ -1233,6 +1230,12 @@ pub(super) fn dispatch_dashboard_dispatch_slash(app: &mut AppView, text: String)
                 auto_update: auto_update_from_app,
                 auto_compact_threshold_percent: app.auto_compact_threshold_percent,
                 auto_compact_threshold_tokens: app.auto_compact_threshold_tokens,
+                notifications_session_recap: app.notification_service.config().session_recap,
+                notifications_session_recap_threshold_secs: app
+                    .notification_service
+                    .config()
+                    .session_recap_threshold_secs,
+                features_session_recap: app.session_recap_available,
                 vim_mode: crate::appearance::cache::load_vim_mode(),
                 scroll_speed: crate::appearance::cache::load_scroll_speed(),
                 respect_manual_folds: respect_manual_folds_from_app,
@@ -1240,6 +1243,13 @@ pub(super) fn dispatch_dashboard_dispatch_slash(app: &mut AppView, text: String)
                 ask_user_question_timeout_enabled: ask_user_question_timeout_enabled_from_app,
                 voice_stt_language: voice_stt_language_from_app,
                 subagent_model_inheritance: subagent_model_inheritance_from_app,
+                context_only_mode: !app.default_yolo
+                    && matches!(
+                        app.current_ui.permission_mode.as_deref(),
+                        Some("context-only")
+                    ),
+                default_reasoning_effort: app.default_reasoning_effort.clone(),
+                scheduler_background_loops: app.scheduler_background_loops_seed,
             },
         };
         command.run(&mut ctx, invocation.args)
@@ -1336,15 +1346,9 @@ pub(super) fn dispatch_dashboard_dispatch_slash(app: &mut AppView, text: String)
             }
             vec![]
         }
-        CommandResult::QueueLater { .. } => {
-            if let Some(d) = app.dashboard.as_mut() {
-                d.dispatch.set_text("");
-                d.set_error_toast("Open a session to queue that command.");
-            }
-            vec![]
-        }
         CommandResult::QueueCommand(_)
         | CommandResult::InjectSkill { .. }
+        | CommandResult::QueueLater { .. }
         | CommandResult::PassThrough(_) => dispatch_dashboard_dispatch(app, text, false),
     }
 }

@@ -5,8 +5,12 @@
 //! modification time (most recent first), capped at 100 results.
 
 use std::path::PathBuf;
+use std::process::Stdio;
 
-use crate::implementations::grok_build::grep::embedded;
+use tokio::io::AsyncReadExt;
+use tokio::process::Command;
+
+use crate::implementations::grok_build::grep::ripgrep::rg_path;
 use crate::types::output::ToolOutput;
 #[allow(unused_imports)]
 use crate::types::resources::{
@@ -18,6 +22,11 @@ use crate::types::tool_io::ToolInput;
 // ─── Constants ──────────────────────────────────────────────────────
 
 const RESULT_LIMIT: usize = 100;
+
+/// Hard cap on bytes read from ripgrep's stdout (5 MB). Same bound as
+/// `grok_build::grep::capped_output::MAX_STDOUT_BYTES`, which is not visible
+/// outside that private module.
+const MAX_STDOUT_BYTES: usize = 5_000_000;
 
 // ─── Description ────────────────────────────────────────────────────
 
@@ -246,7 +255,11 @@ impl xai_tool_runtime::Tool for GlobTool {
         // lines past the cap so the truncation marker can report the real overflow.
         let mut entries: Vec<FileEntry> = Vec::new();
         let mut total_count: usize = 0;
-        for full_path in listed {
+        for line in stdout.lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
             total_count += 1;
 
             if entries.len() >= RESULT_LIMIT {
@@ -254,6 +267,7 @@ impl xai_tool_runtime::Tool for GlobTool {
                 continue;
             }
 
+            let full_path = search_dir.join(line);
             let mtime_ms = std::fs::metadata(&full_path)
                 .ok()
                 .and_then(|m| m.modified().ok())

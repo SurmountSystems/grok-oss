@@ -163,6 +163,9 @@ fn usage_modal_renders_allowance_from_app_balance() {
         prepaid_balance_cents: None,
         period_type: None,
         is_unified_billing_user: None,
+        period_end_at: None,
+        grok_build_usage_pct: None,
+        included_usage_known: true,
     };
 
     let content = render_with_modal(&mut state, area, Some(&balance));

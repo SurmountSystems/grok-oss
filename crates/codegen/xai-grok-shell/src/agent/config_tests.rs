@@ -1189,9 +1189,13 @@ fn sampling_config_uses_fallback_when_no_model_api_key() {
         &model,
         ResolvedCredentials {
             api_key: Some("fallback-key".to_string()),
+            failover_api_keys: Vec::new(),
             base_url: model.info().base_url.clone(),
             auth_type: xai_chat_state::AuthType::ApiKey,
             auth_scheme: AuthScheme::Bearer,
+            failover_base_url: None,
+            session_base_url: None,
+            session_identity_key: None,
         },
         None,
         None,
@@ -1264,12 +1268,16 @@ fn default_models_dual_endpoint_routing() {
         );
         let api_key_creds = ResolvedCredentials {
             api_key: Some("key".into()),
+            failover_api_keys: Vec::new(),
             base_url: entry
                 .api_base_url
                 .clone()
                 .unwrap_or(entry.info().base_url.clone()),
             auth_type: xai_chat_state::AuthType::ApiKey,
             auth_scheme: AuthScheme::Bearer,
+            failover_base_url: None,
+            session_base_url: None,
+            session_identity_key: None,
         };
         assert_eq!(
             api_key_creds.base_url, endpoints.xai_api_base_url,
@@ -1551,9 +1559,13 @@ fn resolve_credentials_no_session_key_returns_api_key() {
 fn api_key_creds(base_url: &str) -> ResolvedCredentials {
     ResolvedCredentials {
         api_key: Some("xai-secret".to_string()),
+        failover_api_keys: Vec::new(),
         base_url: base_url.to_string(),
         auth_type: xai_chat_state::AuthType::ApiKey,
         auth_scheme: Default::default(),
+        failover_base_url: None,
+        session_base_url: None,
+        session_identity_key: None,
     }
 }
 /// `disable_api_key_auth` kill switch (Claude `forceLoginMethod` parity).
@@ -3180,7 +3192,7 @@ fn login_device_flow_reads_from_config() {
 /// `force_login_team_uuid` parses a string (pin), array (any-of), or `[]` (fail closed); absent means None.
 #[test]
 fn force_login_team_uuid_parses_string_and_array() {
-    use xai_grok_login::ForceLoginTeam;
+    use crate::auth::ForceLoginTeam;
     let _g = crate::env::EnvVarGuard::remove("GROK_FORCE_LOGIN_TEAM_ID");
     assert!(
         xai_grok_login::force_login_team_from_requirements().is_none(),
@@ -3232,7 +3244,7 @@ fn force_login_team_uuid_parses_string_and_array() {
 /// Requirements clamping is covered in `auth::config`.
 #[test]
 fn force_login_team_id_env_overrides_user_config() {
-    use xai_grok_login::ForceLoginTeam;
+    use crate::auth::ForceLoginTeam;
     let _guard = crate::env::EnvVarGuard::set("GROK_FORCE_LOGIN_TEAM_ID", "env-team");
     assert!(
         xai_grok_login::force_login_team_from_requirements().is_none(),
@@ -3259,7 +3271,7 @@ fn force_login_team_id_env_overrides_user_config() {
 /// Env unset: `force_login_team_uuid` is taken from `config.toml` unchanged (the env override tier never clobbers the merged config value).
 #[test]
 fn force_login_team_id_env_unset_keeps_config_value() {
-    use xai_grok_login::ForceLoginTeam;
+    use crate::auth::ForceLoginTeam;
     let _guard = crate::env::EnvVarGuard::remove("GROK_FORCE_LOGIN_TEAM_ID");
     assert!(
         xai_grok_login::force_login_team_from_requirements().is_none(),

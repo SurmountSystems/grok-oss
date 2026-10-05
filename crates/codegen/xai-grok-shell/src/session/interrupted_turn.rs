@@ -115,10 +115,8 @@ fn read_events_tail(path: &Path) -> Option<String> {
     let mut text = String::from_utf8_lossy(&bytes).into_owned();
     if start > 0 {
         // The first line is cut mid-way; drop it.
-        match text.find('\n') {
-            Some(idx) => text.drain(..=idx),
-            None => return None,
-        };
+        let idx = text.find('\n')?;
+        text.drain(..=idx);
     }
     Some(text)
 }

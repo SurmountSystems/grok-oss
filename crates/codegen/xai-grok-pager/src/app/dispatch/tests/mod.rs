@@ -320,7 +320,6 @@ fn test_app() -> AppView {
         pending_pager_ansi: false,
         minimal_state: crate::minimal_api::MinimalState::default(),
         reconnect_pending: false,
-        pending_exit_plan_mode: None,
         show_resolved_model: true,
         sharing_enabled: false,
         plugin_cta_enabled: false,
@@ -342,7 +341,6 @@ fn test_app() -> AppView {
         optimistic_prompt_echoes: std::collections::HashMap::new(),
         pending_running_adoptions: std::collections::HashMap::new(),
         session_picker_grouped: false,
-        scheduler_background_loops_seed: true,
         cancel_rewind_enabled: true,
         session_recap_available: false,
         shell_feedback_trace_offer: false,
@@ -363,6 +361,8 @@ fn test_app() -> AppView {
         voice_clip_deadline: None,
         voice_cmd_tx: None,
         voice_state: VoiceState::Idle,
+        pending_exit_plan_mode: None,
+        scheduler_background_loops_seed: true,
     }
 }
 /// Build a default `AgentSession` for tests.
@@ -383,7 +383,6 @@ fn make_test_agent_session(app: &AppView, id: AgentId, sid: &str) -> AgentSessio
         next_queue_id: 0,
         yolo_mode: false,
         auto_mode: false,
-        context_only_mode: false,
         prompt_history: Vec::new(),
         prompt_history_loading: false,
         loading_replay: false,
@@ -458,6 +457,8 @@ fn make_test_subagent(child_sid: &str, sa_id: &str) -> crate::app::subagent::Sub
         child_session_id: Arc::from(child_sid),
         description: Arc::from("test subagent"),
         subagent_type: Arc::from("general-purpose"),
+        finished: false,
+        status: None,
         attempt: crate::app::subagent::SubagentAttemptInfo {
             lifecycle: crate::app::subagent::SubagentLifecycleState::running_legacy_for_test(),
             persona: None,
@@ -671,7 +672,6 @@ fn insert_placeholder_agent(app: &mut AppView, id: AgentId) {
             next_queue_id: 0,
             yolo_mode: false,
             auto_mode: false,
-            context_only_mode: false,
             prompt_history: Vec::new(),
             prompt_history_loading: false,
             loading_replay: false,
@@ -836,7 +836,6 @@ fn two_agent_app_with_bg_task() -> AppView {
             next_queue_id: 0,
             yolo_mode: false,
             auto_mode: false,
-            context_only_mode: false,
             prompt_history: Vec::new(),
             prompt_history_loading: false,
             loading_replay: false,

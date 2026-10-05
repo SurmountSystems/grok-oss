@@ -1877,13 +1877,6 @@ impl TextArea {
             Movement::LogicalLineStart => self.set_cursor(self.beginning_of_current_line()),
             Movement::LogicalLineEnd => self.set_cursor(self.end_of_current_line()),
         }
-        let mutation_kind = match command.category() {
-            EditCommandCategory::Insert => unreachable!("insert commands return above"),
-            EditCommandCategory::Navigation => None,
-            EditCommandCategory::Delete => Some(MutationKind::Delete),
-            EditCommandCategory::Kill => Some(MutationKind::Kill),
-        };
-        self.apply_edit_command(command, mutation_kind);
     }
 
     pub fn input(&mut self, event: KeyEvent) {

@@ -6805,6 +6805,9 @@ fn max_thoughts_width_preview_title_styling_distinguishes_from_content() {
         // assertion below does not apply — the preview reads via the
         // underline cue instead.
         crate::theme::ThemeKind::Terminal => return,
+        // DOGE backgrounds are both black, so the two-tone assertion below
+        // does not apply. The preview reads via the underline cue instead.
+        crate::theme::ThemeKind::Doge => return,
         crate::theme::ThemeKind::Auto => crate::theme::Theme::groknight(),
     };
     assert_ne!(

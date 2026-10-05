@@ -21,10 +21,12 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
             mut request,
             result_tx,
             mut registered_tx,
+            admitted_tx,
         } = command;
         // Registration is a side channel: a background caller still gets its terminal result on
         // `result_tx`. The scheduler actor needs the signal to tell "admitted" from a pre-start
-        // reject before it deletes a one-shot.
+        // reject before it deletes a one-shot. `admitted_tx` is the same moment for
+        // `spawn_registered`, including a pre-start reject.
         let start_ack = if request.run_in_background {
             BackgroundStartAck::OnRegister
         } else {
@@ -37,6 +39,7 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
             Ok(spawner) => spawner,
             Err(rejection) => {
                 self.reject_queries_waiting_for_spawn(&request.id);
+                reply_admitted_err(admitted_tx, &rejection);
                 let _ = result_tx.send(rejection);
                 return;
             }
@@ -48,11 +51,11 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                 .contains(&request.parent_session_id)
         {
             self.reject_queries_waiting_for_spawn(&request.id);
-            let _ = result_tx.send(rejected_spawn_result(
-                &request.id,
-                "parent session is stopped",
-                true,
-            ));
+            reply_rejected(
+                admitted_tx,
+                result_tx,
+                rejected_spawn_result(&request.id, "parent session is stopped", true),
+            );
             return;
         }
         let id = request.id.clone();
@@ -63,10 +66,8 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
         {
             // The live child, not this duplicate request, owns parked waits.
             self.attach_queries_waiting_for_spawn(&id, &request);
-            // Current `SubagentSpawnRequest` has `registered_tx`, not
-            // `admitted_tx`. `None` signals only `result_tx`.
             reply_rejected(
-                None,
+                admitted_tx,
                 result_tx,
                 rejected_spawn_result(&id, &format!("Subagent id '{id}' already exists"), false),
             );
@@ -86,13 +87,17 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
             ) == ImplementLoopReviewAdmit::Reject
         {
             self.reject_queries_waiting_for_spawn(&request.id);
-            let _ = result_tx.send(rejected_spawn_result(
-                &id,
-                &format!(
-                    "Implement-loop effort {implement_loop_effort} admits one Review description unless the operator asked for more"
+            reply_rejected(
+                admitted_tx,
+                result_tx,
+                rejected_spawn_result(
+                    &id,
+                    &format!(
+                        "Implement-loop effort {implement_loop_effort} admits one Review description unless the operator asked for more"
+                    ),
+                    false,
                 ),
-                false,
-            ));
+            );
             return;
         }
         // Capture before `insert_nested` moves `spawner`.
@@ -107,11 +112,15 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                     .is_err()
                 {
                     self.reject_queries_waiting_for_spawn(&id);
-                    let _ = result_tx.send(rejected_spawn_result(
-                        &id,
-                        "parent subagent lineage is unknown; refusing to spawn",
-                        true,
-                    ));
+                    reply_rejected(
+                        admitted_tx,
+                        result_tx,
+                        rejected_spawn_result(
+                            &id,
+                            "parent subagent lineage is unknown; refusing to spawn",
+                            true,
+                        ),
+                    );
                     return;
                 }
             }
@@ -123,16 +132,19 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
         self.inherit_resume_subagent_type(request.as_mut());
         let running = self.session_running_count(&request.parent_session_id);
         match self.admission.admit(&request, running) {
-            AdmissionDecision::Start => self.start_child(
-                *request,
-                Some(result_tx),
-                registered_tx,
-                StartOrigin::Direct,
-                None,
-                spawner_session_id,
-                None,
-                None,
-            ),
+            AdmissionDecision::Start => {
+                self.start_child(
+                    *request,
+                    Some(result_tx),
+                    registered_tx,
+                    StartOrigin::Direct,
+                    None,
+                    spawner_session_id,
+                    None,
+                    None,
+                );
+                reply_admitted(admitted_tx);
+            }
             AdmissionDecision::Enqueue => {
                 debug_assert!(
                     !request.owner.is_workflow(),
@@ -176,6 +188,7 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                 if let Some(tx) = registered_tx {
                     let _ = tx.send(());
                 }
+                reply_admitted(admitted_tx);
             }
             AdmissionDecision::Reject(error) => {
                 self.notify_limit(
@@ -187,6 +200,7 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                     },
                 );
                 let result = SubagentResult::failed(id.clone(), id, error.message());
+                reply_admitted_err(admitted_tx, &result);
                 self.finish_never_started(
                     *request,
                     Some(result_tx),

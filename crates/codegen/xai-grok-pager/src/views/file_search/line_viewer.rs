@@ -769,6 +769,13 @@ pub struct LineViewerState {
     /// The last `max_table_width` used to build markdown lines.
     /// Compared against the current content width in `prepare_layout` to trigger a rebuild when the viewer is resized.
     last_table_width: Option<usize>,
+    /// Last popup width passed to `rebuild_markdown_for_width`.
+    /// Same-width paints must not walk the plan body again.
+    last_rebuild_width: Option<u16>,
+    /// How many times a new width was offered to the markdown rebuild.
+    markdown_width_probes: u32,
+    /// How many times the markdown body was actually re-parsed.
+    markdown_rebuilds: u32,
     /// Copy of comments last applied via `rebuild_with_comments`, so that a width-triggered rebuild can re-interleave them automatically.
     last_comments: Vec<crate::views::plan_approval_view::PlanComment>,
     /// `(source_lines index to follow, diagram source)` for affordance rows.
@@ -1504,6 +1511,7 @@ fn commenting_band(theme: &Theme) -> (Color, Option<Color>) {
 
 /// Build a single review-footer shortcut button styled to match the shortcut hints in `modal_window::render_modal_shortcuts`.
 /// The style is a bold key in the primary text color and a dim label, with a hover-highlighted background.
+#[cfg(test)]
 fn build_shortcut_button<'a>(
     key: char,
     rest: &str,
@@ -1717,6 +1725,68 @@ pub fn render_line_viewer(
         viewer.fullscreen_button_area = None;
     }
 
+    // Plan preview: copy glyph in the fullscreen label's leading pad, glass
+    // one cell to its left. Both sit on the title bar, not the CTA row.
+    if viewer.kind == LineViewerKind::PlanPreview
+        && let Some(fs) = viewer.fullscreen_button_area
+    {
+        let copy_x = fs.x;
+        if copy_x > popup_area.x {
+            let copy_hovered = viewer.plan_ref().is_some_and(|p| p.copy_hovered);
+            let copy_style = if copy_hovered {
+                Style::default()
+                    .fg(theme.text_primary)
+                    .bg(theme.bg_base)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(theme.gray).bg(theme.bg_base)
+            };
+            buf.set_span(
+                copy_x,
+                popup_area.y,
+                &Span::styled(crate::glyphs::copy_icon(), copy_style),
+                1,
+            );
+            let search_x = copy_x.saturating_sub(1);
+            let search_inside = search_x > popup_area.x;
+            if search_inside {
+                let search_hovered = viewer.plan_ref().is_some_and(|p| p.search_hovered);
+                let search_style = if search_hovered {
+                    Style::default()
+                        .fg(theme.text_primary)
+                        .bg(theme.bg_base)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(theme.gray).bg(theme.bg_base)
+                };
+                let search_glyph = if crate::glyphs::is_legacy_windows_console() {
+                    "s"
+                } else {
+                    "\u{2315}"
+                };
+                buf.set_span(
+                    search_x,
+                    popup_area.y,
+                    &Span::styled(search_glyph, search_style),
+                    1,
+                );
+            }
+            let plan = viewer.plan_mut();
+            plan.copy_button_area = Some(Rect::new(copy_x, popup_area.y, 1, 1));
+            plan.search_button_area = if search_inside {
+                Some(Rect::new(search_x, popup_area.y, 1, 1))
+            } else {
+                None
+            };
+            viewer.fullscreen_button_area = Some(Rect::new(
+                copy_x.saturating_add(1),
+                fs.y,
+                fs.width.saturating_sub(1),
+                fs.height,
+            ));
+        }
+    }
+
     // The legacy top-border "send" button is gone; both plan-approval and casual modes now render the send action in the modal footer
     // Clear stale hit-rects so mouse handlers don't act on positions from a previous render
     if let Some(plan) = viewer.plan.as_mut() {
@@ -1786,269 +1856,147 @@ pub fn render_line_viewer(
 
         let bottom_y = inner.y + inner.height - 1;
 
-        let abandon_hovered = viewer.plan_ref().is_some_and(|p| p.abandon_hovered);
-        let comment_hovered = viewer.plan_ref().is_some_and(|p| p.comment_hovered);
-        let approve_hovered = viewer.plan_ref().is_some_and(|p| p.approve_hovered);
-        let copy_hovered = viewer.plan_ref().is_some_and(|p| p.copy_hovered);
         let is_plan_preview = viewer.kind == LineViewerKind::PlanPreview;
-
-        let comment_spans = build_shortcut_button('c', "comment", comment_hovered, theme);
-        let comment_w: u16 = comment_spans.iter().map(|s| s.width() as u16).sum();
-
-        let copy_spans = build_shortcut_button('y', "copy plan", copy_hovered, theme);
-        let copy_w: u16 = copy_spans.iter().map(|s| s.width() as u16).sum();
-
-        // In approval mode, show `a approve` (or `a approve w/ comments` when inline comments are pending)
-        // In casual mode, show `s send` only when comments exist
-        let (_action_label, action_w, action_spans): (&str, u16, Option<Vec<Span>>) = if is_approval
-        {
-            let label = if comment_count > 0 {
-                "approve w/ comments"
-            } else {
-                "approve"
-            };
-            let spans = build_shortcut_button('a', label, approve_hovered, theme);
-            let w: u16 = spans.iter().map(|s| s.width() as u16).sum();
-            (label, w, Some(spans))
-        } else if comment_count > 0 {
-            let spans = build_shortcut_button('s', "send", approve_hovered, theme);
-            let w: u16 = spans.iter().map(|s| s.width() as u16).sum();
-            ("send", w, Some(spans))
-        } else {
-            ("", 0, None)
-        };
-
-        // `s revise` button, always visible in approval mode so the user can request changes (switches to prompt for revision notes)
-        let (revise_w, revise_spans): (u16, Option<Vec<Span>>) = if is_approval {
-            let send_hovered = viewer.plan_ref().is_some_and(|p| p.send_hovered);
-            let spans = build_shortcut_button('s', "request changes", send_hovered, theme);
-            let w: u16 = spans.iter().map(|s| s.width() as u16).sum();
-            (w, Some(spans))
-        } else {
-            (0, None)
-        };
-
-        // Quit button only renders in approval mode (casual closes via X).
-        let quit_spans = if is_approval {
-            let s = build_shortcut_button('q', "quit plan", abandon_hovered, theme);
-            let w: u16 = s.iter().map(|s| s.width() as u16).sum();
-            Some((s, w))
-        } else {
-            None
-        };
-
-        // Pending-comment badge rendered after the `c comment` button as ` N ●` in `accent_plan`
-        // Shown whenever comments exist
-        use unicode_width::UnicodeWidthStr;
-        let badge_text: String = if comment_count > 0 {
-            format!(" {comment_count} {}", crate::glyphs::filled_dot())
-        } else {
-            String::new()
-        };
-        let badge_w: u16 = badge_text.width() as u16;
-        let badge_style = Style::default().fg(theme.accent_plan).bg(theme.bg_base);
-        let selected = viewer.plan_ref().and_then(|p| p.selected_cta);
-        let choice_dot = format!(" {}", crate::glyphs::filled_dot());
-        let choice_dot_w: u16 = choice_dot.width() as u16;
-        let choice_dot_style = Style::default().fg(theme.text_primary).bg(theme.bg_base);
-
         if is_plan_preview {
-            // Clickable CTAs. Letter keys type, so labels have no a/A/s/q
+            // Clickable CTAs. Letter keys type, so labels have no a/c/s/q
             // prefixes. Narrow docks drop separators, then drop the badge.
-            // Idle: Comment is the notes entry. After Comment / prompt
-            // focus, Clarify replaces it so the typed comment can ride.
-            // Copy is the title-bar glyph, not a fifth idle CTA.
+            // Idle: Comment. After Comment, Clarify. Copy stays on the title bar.
+            use unicode_width::UnicodeWidthStr;
             let comment_flow = viewer.plan_ref().is_some_and(|p| p.comment_flow_active);
-            let questions_hovered = viewer.plan_ref().is_some_and(|p| p.questions_hovered);
-            let send_hovered = viewer.plan_ref().is_some_and(|p| p.send_hovered);
-
-            let mut base_w: u16 = 0;
-            if action_w > 0 {
-                base_w = base_w.saturating_add(action_w).saturating_add(sep_w);
-            }
-            if revise_w > 0 {
-                base_w = base_w.saturating_add(revise_w).saturating_add(sep_w);
-            }
-            base_w = base_w.saturating_add(comment_w).saturating_add(badge_w);
-            if let Some((_, w)) = &quit_spans {
-                base_w = base_w.saturating_add(sep_w).saturating_add(*w);
-            }
-            let with_copy_w = base_w.saturating_add(sep_w).saturating_add(copy_w);
-            let show_copy = with_copy_w <= inner.width;
-            let total_w = if show_copy { with_copy_w } else { base_w };
-
-            {
-                let mut x = inner.x + (inner.width - total_w) / 2;
-                let mut areas: [Option<Rect>; 4] = [None; 4];
-                for i in 0..4 {
-                    let start = x;
-                    let marked = selected_cta_marks_index(selected, i, comment_flow);
-                    let style = if hovers[i] || marked {
-                        Style::default()
-                            .fg(theme.text_primary)
-                            .bg(theme.bg_base)
-                            .add_modifier(Modifier::BOLD)
-                    } else {
-                        Style::default().fg(theme.text_primary).bg(theme.bg_base)
-                    };
-                    if pad_w > 0 {
-                        buf.set_string(x, bottom_y, pad, style);
-                        x += pad_w;
-                    }
-                    buf.set_string(x, bottom_y, labels[i], style);
-                    x += word_widths[i];
-                    if marked {
-                        buf.set_string(x, bottom_y, &choice_dot, choice_dot_style);
-                        x += choice_dot_w;
-                    }
-                    if i == 1 && with_badge && badge_w > 0 {
-                        buf.set_string(x, bottom_y, &badge_text, badge_style);
-                        x += badge_w;
-                    }
-                    if pad_w > 0 {
-                        buf.set_string(x, bottom_y, pad, style);
-                        x += pad_w;
-                    }
-                    areas[i] = Some(Rect::new(start, bottom_y, x.saturating_sub(start), 1));
-                    if i < 3 {
-                        buf.set_string(x, bottom_y, between, sep_style);
-                        x += between_w;
-                    }
-                }
-
-                let plan = viewer.plan_mut();
-                plan.approve_button_area = areas[0];
-                if comment_flow {
-                    plan.questions_button_area = areas[1];
-                    plan.comment_button_area = None;
-                } else {
-                    plan.comment_button_area = areas[1];
-                    plan.questions_button_area = None;
-                }
-                plan.send_button_area = areas[2];
-                plan.abandon_button_area = areas[3];
-                plan.approve_notes_button_area = None;
-                painted = true;
-                break;
-            }
-
-            // Action button (approve / send), left-most
-            if let Some(spans) = &action_spans {
-                let approve_x = x;
-                for span in spans {
-                    let w = span.width() as u16;
-                    buf.set_span(x, bottom_y, span, w);
-                    x += w;
-                }
-                let plan = viewer.plan_mut();
-                plan.approve_button_area = None;
-                plan.approve_notes_button_area = None;
-                plan.questions_button_area = None;
-                plan.send_button_area = None;
-                plan.abandon_button_area = None;
-                plan.comment_button_area = None;
-            }
-        } else {
-            let comment_spans = build_shortcut_button('c', "comment", comment_hovered, theme);
-            let comment_w: u16 = comment_spans.iter().map(|s| s.width() as u16).sum();
-            let copy_spans = build_shortcut_button('y', "copy plan", copy_hovered, theme);
-            let copy_w: u16 = copy_spans.iter().map(|s| s.width() as u16).sum();
-            let (send_w, send_spans): (u16, Option<Vec<Span>>) = if comment_count > 0 {
-                let spans = build_shortcut_button('s', "send", approve_hovered, theme);
-                let w: u16 = spans.iter().map(|s| s.width() as u16).sum();
-                (w, Some(spans))
+            let labels: [&str; 4] = if comment_flow {
+                ["approve", "clarify", "revise", "exit"]
             } else {
-                (0, None)
+                ["approve", "comment", "revise", "exit"]
             };
-
-            let mut total_w = comment_w.saturating_add(badge_w);
-            total_w = total_w.saturating_add(sep_w).saturating_add(copy_w);
-            if send_w > 0 {
-                total_w = total_w.saturating_add(sep_w).saturating_add(send_w);
-            }
-
-            if total_w <= inner.width {
-                // Revise button, approval mode with comments
-                if let Some(spans) = &revise_spans {
-                    let revise_x = x;
-                    for span in spans {
-                        let w = span.width() as u16;
-                        buf.set_span(x, bottom_y, span, w);
-                        x += w;
-                    }
-                    viewer.plan_mut().send_button_area =
-                        Some(Rect::new(revise_x, bottom_y, revise_w, 1));
-
-                    buf.set_string(x, bottom_y, separator, sep_style);
-                    x += sep_w;
+            let hovers = [
+                viewer.plan_ref().is_some_and(|p| p.approve_hovered),
+                if comment_flow {
+                    viewer.plan_ref().is_some_and(|p| p.questions_hovered)
                 } else {
-                    viewer.plan_mut().send_button_area = None;
-                }
-
-                // Comment button, always present in both modes
-                let comment_x = x;
-                for span in &comment_spans {
-                    let w = span.width() as u16;
-                    buf.set_span(x, bottom_y, span, w);
-                    x += w;
-                }
-                viewer.plan_mut().comment_button_area =
-                    Some(Rect::new(comment_x, bottom_y, comment_w, 1));
-
-                if badge_w > 0 {
-                    buf.set_string(x, bottom_y, &badge_text, badge_style);
-                    x += badge_w;
-                }
-
-                if show_copy {
-                    buf.set_string(x, bottom_y, separator, sep_style);
-                    x += sep_w;
-                    let copy_x = x;
-                    for span in &copy_spans {
-                        let w = span.width() as u16;
-                        buf.set_span(x, bottom_y, span, w);
-                        x += w;
-                    }
-                    viewer.plan_mut().copy_button_area =
-                        Some(Rect::new(copy_x, bottom_y, copy_w, 1));
-                } else {
-                    viewer.plan_mut().copy_button_area = None;
-                }
-
-                // Quit button, approval mode only
-                if let Some((spans, w)) = quit_spans {
-                    buf.set_string(x, bottom_y, separator, sep_style);
-                    x += sep_w;
-                    let quit_x = x;
-                    for span in &spans {
-                        let sw = span.width() as u16;
-                        buf.set_span(x, bottom_y, span, sw);
-                        x += sw;
-                    }
-
-                    let plan = viewer.plan_mut();
-                    plan.approve_notes_button_area = None;
-                    plan.questions_button_area = None;
-                    plan.send_button_area = None;
-                    plan.abandon_button_area = None;
-                } else {
-                    let plan = viewer.plan_mut();
-                    plan.approve_button_area = None;
-                    plan.approve_notes_button_area = None;
-                    plan.questions_button_area = None;
-                    plan.send_button_area = None;
-                    plan.comment_button_area = None;
-                    plan.copy_button_area = None;
-                    plan.abandon_button_area = None;
-                }
+                    viewer.plan_ref().is_some_and(|p| p.comment_hovered)
+                },
+                viewer.plan_ref().is_some_and(|p| p.send_hovered),
+                viewer.plan_ref().is_some_and(|p| p.abandon_hovered),
+            ];
+            let selected = viewer.plan_ref().and_then(|p| p.selected_cta);
+            let pad = PLAN_APPROVAL_ACTION_PAD;
+            let pad_w = pad.width() as u16;
+            let mut between = PLAN_APPROVAL_ACTION_BETWEEN;
+            let mut between_w = between.width() as u16;
+            let word_widths = [
+                labels[0].width() as u16,
+                labels[1].width() as u16,
+                labels[2].width() as u16,
+                labels[3].width() as u16,
+            ];
+            let marked = [
+                selected_cta_marks_index(selected, 0, comment_flow),
+                selected_cta_marks_index(selected, 1, comment_flow),
+                selected_cta_marks_index(selected, 2, comment_flow),
+                selected_cta_marks_index(selected, 3, comment_flow),
+            ];
+            let choice_dot = format!(" {}", crate::glyphs::filled_dot());
+            let choice_dot_w = choice_dot.width() as u16;
+            let mut badge_text = if comment_count > 0 {
+                format!(" {comment_count} {}", crate::glyphs::filled_dot())
             } else {
-                // Footer too narrow: disable hit-tests so stale rects from a previous render don't fire
-                let plan = viewer.plan_mut();
-                plan.approve_button_area = None;
-                plan.comment_button_area = None;
-                plan.copy_button_area = None;
-                plan.abandon_button_area = None;
+                String::new()
+            };
+            let mut badge_w = badge_text.width() as u16;
+            let row_width = |between_w: u16, badge_w: u16| -> u16 {
+                let mut w = 0u16;
+                for i in 0..4 {
+                    w = w
+                        .saturating_add(pad_w)
+                        .saturating_add(word_widths.get(i).copied().expect("index out of bounds"))
+                        .saturating_add(pad_w);
+                    if marked.get(i).copied().expect("index out of bounds") {
+                        w = w.saturating_add(choice_dot_w);
+                    }
+                    if i == 1 {
+                        w = w.saturating_add(badge_w);
+                    }
+                    if i < 3 {
+                        w = w.saturating_add(between_w);
+                    }
+                }
+                w
+            };
+            if row_width(between_w, badge_w) > inner.width {
+                between = "";
+                between_w = 0;
             }
+            if row_width(between_w, badge_w) > inner.width {
+                badge_text.clear();
+                badge_w = 0;
+            }
+            let total_w = row_width(between_w, badge_w);
+            let mut x = inner.x + inner.width.saturating_sub(total_w) / 2;
+            let sep_style = Style::default().fg(theme.gray_dim).bg(theme.bg_base);
+            let badge_style = Style::default().fg(theme.accent_plan).bg(theme.bg_base);
+            let choice_dot_style = Style::default().fg(theme.text_primary).bg(theme.bg_base);
+            let mut areas: [Option<Rect>; 4] = [None; 4];
+            for i in 0..4 {
+                let start = x;
+                let style = if hovers.get(i).copied().expect("index out of bounds")
+                    || marked.get(i).copied().expect("index out of bounds")
+                {
+                    Style::default()
+                        .fg(theme.text_primary)
+                        .bg(theme.bg_base)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(theme.text_primary).bg(theme.bg_base)
+                };
+                if pad_w > 0 {
+                    buf.set_string(x, bottom_y, pad, style);
+                    x = x.saturating_add(pad_w);
+                }
+                buf.set_string(
+                    x,
+                    bottom_y,
+                    labels.get(i).copied().expect("index out of bounds"),
+                    style,
+                );
+                x = x.saturating_add(word_widths.get(i).copied().expect("index out of bounds"));
+                if marked.get(i).copied().expect("index out of bounds") {
+                    buf.set_string(x, bottom_y, &choice_dot, choice_dot_style);
+                    x = x.saturating_add(choice_dot_w);
+                }
+                if i == 1 && badge_w > 0 {
+                    buf.set_string(x, bottom_y, &badge_text, badge_style);
+                    x = x.saturating_add(badge_w);
+                }
+                if pad_w > 0 {
+                    buf.set_string(x, bottom_y, pad, style);
+                    x = x.saturating_add(pad_w);
+                }
+                *areas.get_mut(i).expect("index out of bounds") =
+                    Some(Rect::new(start, bottom_y, x.saturating_sub(start), 1));
+                if i < 3 && between_w > 0 {
+                    buf.set_string(x, bottom_y, between, sep_style);
+                    x = x.saturating_add(between_w);
+                }
+            }
+            let plan = viewer.plan_mut();
+            plan.approve_button_area = areas[0];
+            if comment_flow {
+                plan.questions_button_area = areas[1];
+                plan.comment_button_area = None;
+            } else {
+                plan.comment_button_area = areas[1];
+                plan.questions_button_area = None;
+            }
+            plan.send_button_area = areas[2];
+            plan.abandon_button_area = areas[3];
+            plan.approve_notes_button_area = None;
+        } else if let Some(plan) = viewer.plan.as_mut() {
+            plan.approve_button_area = None;
+            plan.comment_button_area = None;
+            plan.questions_button_area = None;
+            plan.send_button_area = None;
+            plan.abandon_button_area = None;
+            plan.approve_notes_button_area = None;
         }
     }
 }
@@ -2469,7 +2417,7 @@ mod tests {
 
     /// Soft park is a right-docked pane, not the 75% centered dimmed overlay.
     #[test]
-    fn markdown_viewer_comment_range_maps_full_soft_break_paragraph() {
+    fn soft_park_plan_pane_covers_transcript_not_centered_overlay() {
         // Commenting round-trip: selecting all rows of a soft-break paragraph must map back to the full file line range
         // The agent then inspects the correct lines; this used to collapse to a single line number
         let mut viewer = LineViewerState::open_markdown_content(

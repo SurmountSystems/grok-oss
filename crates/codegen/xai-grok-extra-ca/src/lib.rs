@@ -48,6 +48,35 @@ pub fn ensure_default_crypto_provider() {
     });
 }
 
+/// Pins rustls on `builder` and adds the process-wide roots (OS store, Mozilla bundle, and any extra roots).
+/// An oversized, missing, or unreadable extra bundle contributes no extra roots, and later `.build()` still succeeds.
+pub fn with_extra_root_certificates(builder: reqwest::ClientBuilder) -> reqwest::ClientBuilder {
+    ensure_default_crypto_provider();
+    let mut builder = builder
+        .use_rustls_tls()
+        .tls_built_in_native_certs(false)
+        .tls_built_in_webpki_certs(true);
+    for cert in shared_reqwest_roots() {
+        builder = builder.add_root_certificate(cert);
+    }
+    builder
+}
+
+/// [`with_extra_root_certificates`] for the blocking client builder.
+pub fn with_extra_root_certificates_blocking(
+    builder: reqwest::blocking::ClientBuilder,
+) -> reqwest::blocking::ClientBuilder {
+    ensure_default_crypto_provider();
+    let mut builder = builder
+        .use_rustls_tls()
+        .tls_built_in_native_certs(false)
+        .tls_built_in_webpki_certs(true);
+    for cert in shared_reqwest_roots() {
+        builder = builder.add_root_certificate(cert);
+    }
+    builder
+}
+
 /// Builds a reqwest client with the grok TLS policy: the shared roots (OS store, Mozilla bundle, and any extra roots).
 /// The roots are read once per process instead of on each build.
 /// For HTTP/1.1 only, add `http1_only()` in `configure`.
@@ -55,15 +84,7 @@ pub fn ensure_default_crypto_provider() {
 pub fn build_reqwest_client(
     configure: impl Fn(reqwest::ClientBuilder) -> reqwest::ClientBuilder,
 ) -> reqwest::Result<reqwest::Client> {
-    ensure_default_crypto_provider();
-    let mut builder = configure(reqwest::Client::builder())
-        .use_rustls_tls()
-        .tls_built_in_native_certs(false)
-        .tls_built_in_webpki_certs(true);
-    for cert in shared_reqwest_roots() {
-        builder = builder.add_root_certificate(cert);
-    }
-    builder.build()
+    with_extra_root_certificates(configure(reqwest::Client::builder())).build()
 }
 
 /// [`build_reqwest_client`] for the blocking client type.
@@ -71,15 +92,7 @@ pub fn build_reqwest_client(
 pub fn build_blocking_reqwest_client(
     configure: impl Fn(reqwest::blocking::ClientBuilder) -> reqwest::blocking::ClientBuilder,
 ) -> reqwest::Result<reqwest::blocking::Client> {
-    ensure_default_crypto_provider();
-    let mut builder = configure(reqwest::blocking::Client::builder())
-        .use_rustls_tls()
-        .tls_built_in_native_certs(false)
-        .tls_built_in_webpki_certs(true);
-    for cert in shared_reqwest_roots() {
-        builder = builder.add_root_certificate(cert);
-    }
-    builder.build()
+    with_extra_root_certificates_blocking(configure(reqwest::blocking::Client::builder())).build()
 }
 
 #[cfg(test)]

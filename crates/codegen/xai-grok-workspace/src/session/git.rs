@@ -550,9 +550,10 @@ pub fn resolve_persisted_session_git_metadata_sync(cwd: &Path) -> PersistedGitMe
         .as_ref()
         .and_then(|h| h.target())
         .map(|oid| oid.to_string());
-    let head_branch = head_ref
-        .as_ref()
-        .and_then(|h| h.shorthand().filter(|s| *s != "HEAD").map(str::to_owned));
+    let head_branch = head_ref.as_ref().and_then(|h| match h.shorthand() {
+        Ok(name) if name != "HEAD" => Some(name.to_owned()),
+        _ => None,
+    });
     PersistedGitMetadata {
         git_root_dir: Some(git_root.to_string_lossy().to_string()),
         git_remotes: remotes.into_iter().collect(),

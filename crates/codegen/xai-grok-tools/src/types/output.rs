@@ -2039,36 +2039,6 @@ mod tests {
         let prompt = out.to_prompt_format();
         assert!(!prompt.contains("Output File"), "{prompt}");
     }
-    /// The single-task detail view is duration-only: absolute `started` /
-    /// `ended` instants stay on the wire struct but must not reach the prompt.
-    #[test]
-    fn task_output_prompt_is_duration_only() {
-        let out = ToolOutput::TaskOutput(TaskOutputOutput::Result(TaskOutputResult {
-            task_id: "task-1".into(),
-            command: "sleep 10".into(),
-            status: "completed".into(),
-            exit_code: Some(0),
-            started: "2026-03-09T00:00:00Z".into(),
-            ended: Some("2026-03-09T00:00:05Z".into()),
-            duration_secs: 5.0,
-            output: "hello".into(),
-            output_file: "/tmp/task-1.log".into(),
-            truncated: false,
-            truncation_hint: String::new(),
-            raw_output_bytes: 5,
-        }));
-        let prompt = out.to_prompt_format();
-        assert!(prompt.contains("Duration: 5.0s"), "{prompt}");
-        assert!(prompt.contains("Output File: /tmp/task-1.log"), "{prompt}");
-        assert!(
-            !prompt.contains("Started") && !prompt.contains("Ended"),
-            "absolute instants must not be model-visible: {prompt}"
-        );
-        assert!(
-            !prompt.contains("2026-03-09"),
-            "no wall-clock date may survive into the prompt: {prompt}"
-        );
-    }
     /// Model-visible TaskOutput wrapper must use compact minutes at 60s+,
     /// not `Duration: 943.00s`. The inner Elapsed body is already compact;
     /// this is the header `to_prompt_format` always sends as prompt_text.
@@ -2131,25 +2101,6 @@ mod tests {
                 "raw second leak {leak:?} in: {multi_prompt}"
             );
         }
-    }
-    #[test]
-    fn task_output_prompt_omits_empty_output_file() {
-        let out = ToolOutput::TaskOutput(TaskOutputOutput::Result(TaskOutputResult {
-            task_id: "task-2".into(),
-            command: "true".into(),
-            status: "completed".into(),
-            exit_code: Some(0),
-            started: String::new(),
-            ended: None,
-            duration_secs: 0.1,
-            output: "done".into(),
-            output_file: String::new(),
-            truncated: false,
-            truncation_hint: String::new(),
-            raw_output_bytes: 4,
-        }));
-        let prompt = out.to_prompt_format();
-        assert!(!prompt.contains("Output File"), "{prompt}");
     }
     fn make_result(status: &str, raw_output_bytes: usize) -> TaskOutputResult {
         TaskOutputResult {

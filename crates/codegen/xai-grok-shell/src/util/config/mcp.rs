@@ -886,61 +886,6 @@ pub fn load_cli_plugin_registry(cwd: &std::path::Path) -> xai_grok_agent::plugin
     )
 }
 
-/// Names `grok mcp enable`/`disable` may target: user/project TOML (including
-/// setup-required/invalid entries that session merge drops), the user
-/// `disabled_mcp_servers` list, compat JSON (`.mcp.json`, Claude, Cursor), and
-/// **plugin** MCP servers (same discovery as doctor/`/mcps`).
-///
-/// Does **not** include gateway connectors (`managed_gateway:…`); those use
-/// `disabled_mcp_tools.__managed_gateway_connectors` via the `/mcps` Space.
-/// `grok_com_*` is known only when a TOML / disabled / compat / plugin
-/// definition exists — not by prefix.
-pub fn cli_known_mcp_server_names(cwd: &std::path::Path) -> std::collections::HashSet<String> {
-    let mut names = disabled_mcp_server_names(cwd);
-    // Full TOML key set (list parity) — merge drops setup-required/invalid.
-    names.extend(all_toml_mcp_server_names(cwd));
-
-    // Doctor/Space path: resolved TOML + plugins + Claude + Cursor + `.mcp.json`.
-    let registry = load_cli_plugin_registry(cwd);
-    let compat = CompatConfig::default();
-    for (server, _) in crate::session::managed_mcp::merge_managed_mcp_servers_sourced(
-        cwd,
-        Some(&registry),
-        &compat,
-    ) {
-        let name = crate::session::managed_mcp::mcp_server_name(&server);
-        if !name.is_empty() {
-            names.insert(name.to_string());
-        }
-    }
-    names
-}
-
-/// Plugin registry for one-shot CLI discovery (matches mcp doctor gating).
-fn load_cli_plugin_registry(cwd: &std::path::Path) -> xai_grok_agent::plugins::PluginRegistry {
-    let trust_store = xai_grok_agent::plugins::TrustStore::load();
-    let mut plugins_cfg: crate::agent::config::PluginsConfig =
-        crate::config::load_effective_config()
-            .ok()
-            .and_then(|t| t.get("plugins").and_then(|v| v.clone().try_into().ok()))
-            .unwrap_or_default();
-    plugins_cfg.merge_claude_enabled_plugins(Some(cwd));
-    let mut plugin_config = plugins_cfg.to_discovery_config();
-    let project_trusted = crate::agent::folder_trust::resolve_and_record(cwd, None, false);
-    let discovered = xai_grok_agent::plugins::discover_plugins(
-        Some(cwd),
-        &plugin_config,
-        &trust_store,
-        project_trusted,
-    );
-    plugin_config.populate_plugin_lists(&discovered);
-    xai_grok_agent::plugins::PluginRegistry::from_discovered(
-        discovered,
-        &plugin_config.disabled,
-        &plugin_config.enabled,
-    )
-}
-
 fn config_path() -> PathBuf {
     // Live `$GROK_HOME` first: `grok_home()` is OnceLock and misses EnvGuard/tests.
     xai_dirs::resolve_grok_home()

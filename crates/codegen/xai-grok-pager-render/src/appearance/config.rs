@@ -26,6 +26,8 @@ pub struct AppearanceConfig {
     pub show_timestamps: bool,
     /// Timeline sidebar (per-turn tick rail). Toggled via `/timeline`.
     pub show_timeline: bool,
+    /// Hide chrome headers (agent status bar, welcome top bar, dashboard location header). Seeded from `[ui].hide_header`.
+    pub hide_header: bool,
     /// Whether hooks & plugins UI is disabled (hides /hooks, /plugins commands and scrollback annotations). `false` by default (plugins enabled).
     pub disable_plugins: bool,
     /// Always show the "plan" chip in the status bar when plan content is available, even after the user exits plan mode.

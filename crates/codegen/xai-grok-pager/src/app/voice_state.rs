@@ -180,6 +180,31 @@ impl AppView {
         self.voice_state.target()
     }
 
+    /// Directory that holds `prompt_wal.jsonl` for this voice target.
+    /// Audio WAL is a sibling file. A target with no session uses the temp directory.
+    pub(crate) fn audio_wal_session_dir_for(
+        &self,
+        target: VoiceTarget,
+    ) -> Option<std::path::PathBuf> {
+        let agent_id = match target {
+            VoiceTarget::Agent(id) | VoiceTarget::DashboardPeekReply(id) => id,
+            VoiceTarget::DashboardDispatch => return Some(std::env::temp_dir()),
+        };
+        let Some(agent) = self.agents.get(&agent_id) else {
+            return Some(std::env::temp_dir());
+        };
+        let Some(session_id) = agent.session.session_id.as_ref() else {
+            return Some(std::env::temp_dir());
+        };
+        let cwd = agent.session.cwd.to_string_lossy();
+        xai_grok_shell::session::unsent_prompt_draft::prompt_wal_path(
+            cwd.as_ref(),
+            session_id.0.as_ref(),
+        )
+        .and_then(|path| path.parent().map(std::path::Path::to_path_buf))
+        .or_else(|| Some(std::env::temp_dir()))
+    }
+
     pub fn voice_interim(&self) -> Option<&str> {
         self.voice_state.interim()
     }

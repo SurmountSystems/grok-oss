@@ -18,7 +18,9 @@ impl SessionActor {
         &self,
         plan_state: Option<crate::tools::todo::TodoState>,
     ) {
-        use crate::tools::todo::{TodoState, effective_todo_state_on_resume, plan_entry_from_todo};
+        use crate::tools::todo::{
+            TodoState, effective_todo_state_on_resume, plan_entry_from_todo_item,
+        };
         use xai_grok_tools::types::resources::State;
 
         let bridge = self.agent.borrow().tool_bridge().clone();
@@ -44,7 +46,7 @@ impl SessionActor {
 
         let entries: Vec<_> = effective
             .todo_items_with_ids()
-            .map(|(id, item)| plan_entry_from_todo(Some(id.as_str()), item.clone()))
+            .map(|(id, item)| plan_entry_from_todo_item(Some(id.as_str()), item.clone()))
             .collect();
         if entries.is_empty() {
             return;
@@ -61,7 +63,7 @@ impl SessionActor {
     /// Resources + `plan.json`, re-emit ACP `Plan` (including empty board so the
     /// pane drops finished items). Returns how many items were cleared.
     pub(crate) async fn clear_completed_todos(&self) -> usize {
-        use crate::tools::todo::{TodoState, clear_completed_todos, plan_entry_from_todo};
+        use crate::tools::todo::{TodoState, clear_completed_todos, plan_entry_from_todo_item};
         use xai_grok_tools::types::resources::State;
 
         let bridge = self.agent.borrow().tool_bridge().clone();
@@ -81,7 +83,7 @@ impl SessionActor {
         );
         let entries: Vec<_> = state
             .todo_items_with_ids()
-            .map(|(id, item)| plan_entry_from_todo(Some(id.as_str()), item.clone()))
+            .map(|(id, item)| plan_entry_from_todo_item(Some(id.as_str()), item.clone()))
             .collect();
         // Always re-emit Plan so the client drops cleared rows even when the
         // active board is now empty (empty Plan is a valid full replace).
@@ -97,7 +99,7 @@ impl SessionActor {
     /// `resources_state.json` (SoT) and `plan.json` (mirror), and emits Plan so
     /// the board is durable without requiring the agent to call `todo_write`.
     pub(super) async fn maybe_seed_ask_todo(&self, prompt_id: &str, text: &str) {
-        use crate::tools::todo::{TodoState, plan_entry_from_todo, seed_ask_todo};
+        use crate::tools::todo::{TodoState, plan_entry_from_todo_item, seed_ask_todo};
         use xai_grok_tools::types::resources::State;
 
         let bridge = self.agent.borrow().tool_bridge().clone();
@@ -118,7 +120,7 @@ impl SessionActor {
         );
         let entries: Vec<_> = state
             .todo_items_with_ids()
-            .map(|(id, item)| plan_entry_from_todo(Some(id.as_str()), item.clone()))
+            .map(|(id, item)| plan_entry_from_todo_item(Some(id.as_str()), item.clone()))
             .collect();
         if !entries.is_empty() {
             self.send_update(acp::SessionUpdate::Plan(acp::Plan::new(entries)), None)
@@ -130,7 +132,7 @@ impl SessionActor {
     /// When the model ends the turn without a cleanup `todo_write` call, remaining `in_progress` items keep spinning in the UI.
     /// No-op if no `in_progress` items exist.
     pub(super) async fn emit_turn_end_plan_cleanup(&self) {
-        use crate::tools::todo::{TodoState, TodoStatus, plan_entry_from_todo};
+        use crate::tools::todo::{TodoState, TodoStatus, plan_entry_from_todo_item};
         use xai_grok_tools::types::resources::State;
 
         // Read the current TodoState (no mutation).
@@ -160,7 +162,7 @@ impl SessionActor {
                 .0
                 .todo_items_with_ids()
                 .map(|(id, item)| {
-                    let mut entry = plan_entry_from_todo(Some(id.as_str()), item.clone());
+                    let mut entry = plan_entry_from_todo_item(Some(id.as_str()), item.clone());
                     if item.status == TodoStatus::InProgress {
                         entry.status = acp::PlanEntryStatus::Completed;
                     }

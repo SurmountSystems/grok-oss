@@ -69,12 +69,11 @@ pub struct AdditionalContext {
 
 pub struct PreToolUseResult {
     pub decision: HookDecision,
+    /// Last allow that rewrote the tool input. `None` when the chain denied,
+    /// or when every allow left the input unchanged.
     pub updated_input: Option<InputRewrite>,
     pub additional_context: Vec<AdditionalContext>,
     pub results: Vec<HookRunResult>,
-    /// Last allow that rewrote the tool input. `None` when the chain denied,
-    /// or when every allow left the input unchanged.
-    pub updated_input: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -110,7 +109,6 @@ async fn dispatch_sequential_gate(
             updated_input: None,
             additional_context: Vec::new(),
             results: Vec::new(),
-            updated_input: None,
         };
     }
 

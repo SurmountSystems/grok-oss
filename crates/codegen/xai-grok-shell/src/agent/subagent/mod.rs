@@ -11,7 +11,9 @@
 //! - Child sessions share the parent's hunk tracker, filesystem, terminal, and env
 //!   so that edits, bash commands, and file reads go through the same backends.
 #![deny(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
-use crate::agent::config::{resolve_credentials, sampling_config_for_model};
+use crate::agent::config::{
+    resolve_credentials, resolve_credentials_preferring_with_rank, sampling_config_for_model,
+};
 use crate::agent::remote_config::resolve_catalog_key;
 use crate::extensions::notification::{SessionNotification, SessionUpdate};
 use crate::session::{
@@ -54,6 +56,7 @@ pub(crate) use xai_grok_tools::implementations::grok_build::task::coordinator::{
 mod attempt_store;
 mod child_runtime;
 mod handle_request;
+mod nested_spawn_prompt;
 mod prompt_turn_receipt;
 mod prompt_turn_result;
 mod resume_window;
@@ -573,27 +576,6 @@ impl SubagentSpawnContext {
             },
         }
     }
-    fn follow_up(&self, text: String) {
-        // Same path overlay `x.ai/interject` uses: child session cmd_tx + Interject
-        // text. Not overlay typing (`id: None`). Not cancel. Not a second spawn.
-        let _ = self.child_cmd_tx.send(SessionCommand::Interject {
-            text,
-            id: None,
-            images: Vec::new(),
-        });
-    }
-}
-#[cfg(test)]
-impl ShellChildRuntime {
-    /// Channel-only runtime so the named follow-up test can call [`ChildControl::follow_up`].
-    fn for_follow_up_test(cmd_tx: mpsc::UnboundedSender<SessionCommand>) -> Self {
-        let (signals_handle, _actor) = crate::session::signals::SessionSignalsActor::new();
-        Self {
-            child_cmd_tx: cmd_tx,
-            signals_handle,
-            _child_thread: SessionThread::from_handle(std::thread::spawn(|| {})),
-        }
-    }
 }
 #[derive(Default)]
 struct ShellCompletionState {
@@ -968,6 +950,41 @@ fn subagent_auth_type(
         xai_chat_state::AuthType::ApiKey
     }
 }
+fn parent_sampling_is_supergrok_session_only(
+    sampling: &xai_grok_sampler::SamplerConfig,
+    session_key: Option<&str>,
+) -> bool {
+    let Some(session_key) = session_key.map(str::trim).filter(|key| !key.is_empty()) else {
+        return false;
+    };
+    sampling.failover_api_keys.is_empty() && sampling.api_key.as_deref() == Some(session_key)
+}
+
+pub(crate) fn subagent_override_auth_rank_flags(
+    agent_config: Option<&crate::agent::config::Config>,
+    disk_flags: Option<(Option<crate::auth::PreferredAuthMethod>, bool)>,
+    has_session_key: bool,
+    parent_supergrok_session_only: bool,
+) -> (Option<crate::auth::PreferredAuthMethod>, bool) {
+    if let Some(cfg) = agent_config {
+        return (
+            cfg.grok_com_config.preferred_method,
+            cfg.grok_com_config.auto_use_included_limits,
+        );
+    }
+    if parent_supergrok_session_only {
+        let preferred = disk_flags.and_then(|(preferred, _)| preferred);
+        return (preferred, true);
+    }
+    if let Some(flags) = disk_flags {
+        return flags;
+    }
+    if has_session_key {
+        return (None, true);
+    }
+    (None, false)
+}
+
 /// Resolve a model override string (config key or model ID) to a `(SamplerConfig, ModelId)` pair.
 fn resolve_model_override_to_config(
     model_id: &str,
@@ -1397,7 +1414,7 @@ async fn bootstrap_initial_context(
         None => None,
     };
     if let Some(items) = live_items {
-        let ctx_out = verbatim_or_normalize_fork(items, window.context_window);
+        let ctx_out = verbatim_or_normalize_fork(items, window.context_window, None);
         tracing::info!(
             subagent_id = %request.id,
             subagent_type = %request.subagent_type,
@@ -1940,17 +1957,6 @@ fn cancellation_error_message(
             "Subagent turn was cancelled: aborted mid-turn".to_string()
         }
         _ => "Subagent turn was cancelled".to_string(),
-    }
-}
-fn telemetry_owner_kind(
-    request: &SubagentRequest,
-) -> xai_grok_telemetry::events::SubagentOwnerKind {
-    if request.owner.is_workflow() {
-        xai_grok_telemetry::events::SubagentOwnerKind::Workflow
-    } else if request.from_scheduler_loop() {
-        xai_grok_telemetry::events::SubagentOwnerKind::SchedulerLoop
-    } else {
-        xai_grok_telemetry::events::SubagentOwnerKind::Task
     }
 }
 fn telemetry_owner_kind(

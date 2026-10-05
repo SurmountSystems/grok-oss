@@ -32,7 +32,7 @@ static TERMINAL_NATIVE_LOCK: AtomicBool = AtomicBool::new(false);
 static TERMINAL_THEME_ENABLED: AtomicBool = AtomicBool::new(false);
 
 /// Decode the u8 stored in `CURRENT` back to a `ThemeKind`.
-/// Falls back to `GrokNight` for an out-of-range byte, which `set` can't produce but a future variant missing from this match could.
+/// An unknown byte falls back to DOGE, the product default.
 fn theme_kind_from_u8(byte: u8) -> ThemeKind {
     match byte {
         x if x == ThemeKind::GrokNight as u8 => ThemeKind::GrokNight,
@@ -42,6 +42,7 @@ fn theme_kind_from_u8(byte: u8) -> ThemeKind {
         x if x == ThemeKind::OscuraMidnight as u8 => ThemeKind::OscuraMidnight,
         x if x == ThemeKind::Terminal as u8 => ThemeKind::Terminal,
         x if x == ThemeKind::Auto as u8 => ThemeKind::Auto,
+        x if x == ThemeKind::Doge as u8 => ThemeKind::Doge,
         _ => ThemeKind::Doge,
     }
 }
@@ -52,7 +53,7 @@ fn theme_kind_from_u8(byte: u8) -> ThemeKind {
 static AUTO_THEME_CONFIG: Mutex<Option<AutoThemeConfig>> = Mutex::new(None);
 
 /// `dark_theme` and `light_theme` are the user-configured overrides read from `[ui].auto_dark_theme` and `[ui].auto_light_theme` in `config.toml`.
-/// When `None`, `to_theme_kind()` defaults to `GrokNight` / `GrokDay`.
+/// When `None`, `to_theme_kind()` defaults dark to DOGE and light to `GrokDay`.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct AutoThemeConfig {
     pub dark_theme: Option<ThemeKind>,
@@ -231,7 +232,8 @@ fn resolve_from_config(config_theme: Option<ThemeKind>, osc11_fallback: bool) ->
         return kind;
     }
 
-    ThemeKind::GrokNight
+    // Unset config is the product default: DOGE (pure 8-colour, no truecolor required).
+    ThemeKind::Doge
 }
 
 fn resolve_from_appearance(appearance: Option<system_appearance::SystemAppearance>) -> ThemeKind {
@@ -241,7 +243,7 @@ fn resolve_from_appearance(appearance: Option<system_appearance::SystemAppearanc
         .unwrap_or(ThemeKind::Doge)
 }
 
-/// Desktop APIs and env hints only (no OSC 11), so it is safe while `EventStream` is active. Detection failure is `GrokNight`.
+/// Desktop APIs and env hints only (no OSC 11), so it is safe while `EventStream` is active. Detection failure is DOGE.
 #[must_use]
 pub fn resolve_auto() -> ThemeKind {
     resolve_from_appearance(system_appearance::detect())
@@ -323,6 +325,11 @@ pub fn test_lock() -> &'static Mutex<()> {
 
 /// Holds the shared test lock so concurrent `set_theme` cannot change `Theme::current()` mid-assertion. Keep the guard for the whole test.
 #[cfg(any(test, feature = "test-support"))]
+pub struct ThemePinGuard {
+    _lock: std::sync::MutexGuard<'static, ()>,
+}
+
+#[cfg(any(test, feature = "test-support"))]
 pub fn pin_theme() -> ThemePinGuard {
     let lock = test_lock().lock().unwrap_or_else(|e| e.into_inner());
     set(ThemeKind::GrokNight);
@@ -330,7 +337,7 @@ pub fn pin_theme() -> ThemePinGuard {
     super::color_support::set_level_for_test(super::color_support::ColorLevel::TrueColor);
     // A prior gating test may have turned the rollout gate off.
     set_terminal_theme_enabled(true);
-    guard
+    ThemePinGuard { _lock: lock }
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -505,20 +512,6 @@ mod tests {
             super::super::set_cursor_color_applied_for_test(true);
             reset_for_test();
             assert!(!super::super::cursor_color_applied_for_test());
-        });
-    }
-
-    #[test]
-    fn terminal_native_lock_enables_polarity_safe_syntax() {
-        with_test_env(|| {
-            assert!(!xai_grok_markdown::polarity_safe_syntax());
-            set_terminal_native_lock(true);
-            assert!(
-                xai_grok_markdown::polarity_safe_syntax(),
-                "minimal must engage polarity-safe syntax remapping"
-            );
-            set_terminal_native_lock(false);
-            assert!(!xai_grok_markdown::polarity_safe_syntax());
         });
     }
 

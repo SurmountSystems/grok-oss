@@ -1824,6 +1824,16 @@ pub struct WorkflowInfo {
     pub path: Option<String>,
 }
 
+/// Skills-tab group key for the workflows header.
+pub(crate) const SKILLS_WORKFLOWS_GROUP_KEY: &str = "workflows";
+
+impl WorkflowInfo {
+    /// A workflow row needs a non-empty command name.
+    pub fn has_usable_command_name(&self) -> bool {
+        !self.name.trim().is_empty()
+    }
+}
+
 /// State for the hooks/plugins modal popup.
 pub struct ExtensionsModalState {
     /// Shared modal window chrome state (close button, tabs, footer shortcuts, popup area).
@@ -1912,6 +1922,8 @@ pub struct ExtensionsModalState {
     pub skills_collapsed_groups: std::collections::HashSet<String>,
     /// See [`Self::seed_skills_groups_once`].
     pub skills_groups_seeded: bool,
+    /// See [`Self::seed_workflows_group_once`].
+    pub workflows_groups_seeded: bool,
     /// Expanded skill entries (by skill index). Skills start collapsed.
     pub skills_expanded: std::collections::HashSet<usize>,
     /// Status filter for the plugins tab.
@@ -1990,6 +2002,7 @@ impl ExtensionsModalState {
             skills_expanded: std::collections::HashSet::new(),
             skills_collapsed_groups: std::collections::HashSet::new(),
             skills_groups_seeded: false,
+            workflows_groups_seeded: false,
             hooks_collapsed_groups: std::collections::HashSet::new(),
             hooks_groups_seeded: false,
             plugins_collapsed_groups: std::collections::HashSet::new(),
@@ -2149,6 +2162,16 @@ impl ExtensionsModalState {
             skills,
             |s| skill_group(s).label,
         );
+    }
+
+    /// Collapse the skills-tab workflows group once, before the list arrives.
+    pub fn seed_workflows_group_once(&mut self) {
+        if self.workflows_groups_seeded {
+            return;
+        }
+        self.workflows_groups_seeded = true;
+        self.skills_collapsed_groups
+            .insert(SKILLS_WORKFLOWS_GROUP_KEY.to_string());
     }
 
     /// Whether a group header at picker index `sel` with the given `group_key` is currently expanded (children visible).

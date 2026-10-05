@@ -9,6 +9,7 @@
 
 pub mod cache;
 pub mod color_support;
+mod doge;
 pub mod env_appearance;
 mod grokday;
 mod groknight;
@@ -39,6 +40,11 @@ pub enum ThemeKind {
     /// Every bg is `Reset` so the terminal canvas shows through; legible on both polarities without appearance detection.
     /// Hidden and unparseable while `cache::terminal_theme_enabled()` is off.
     Terminal = 6,
+    /// DOGE: pure `#000`/`#fff` + classic 8 pure ANSI primaries
+    /// (OLED-friendly design intent; no power claims).
+    /// Canonical id `"doge"` only. Discriminant 7. Terminal stays 6.
+    /// Auto, Oscura, and Terminal discriminants stay stable.
+    Doge = 7,
     /// Follow system appearance. Disk stores `"auto"`; `cache::CURRENT` holds only the resolved concrete kind. Excluded from [`ALL`].
     Auto = 4,
 }
@@ -51,6 +57,7 @@ impl ThemeKind {
         ThemeKind::TokyoNight,
         ThemeKind::RosePineMoon,
         ThemeKind::OscuraMidnight,
+        ThemeKind::Doge,
         ThemeKind::Terminal,
     ];
 
@@ -106,6 +113,7 @@ impl ThemeKind {
             Self::RosePineMoon => "rosepine-moon",
             Self::OscuraMidnight => "oscura-midnight",
             Self::Terminal => "terminal",
+            Self::Doge => "doge",
             Self::Auto => "auto",
         }
     }
@@ -120,6 +128,8 @@ impl ThemeKind {
             Self::OscuraMidnight => true,
             // Reset plus named ANSI-16 entries only — nothing to quantize.
             Self::Terminal => false,
+            // Pure 8-colour primaries quantize cleanly. No truecolor required.
+            Self::Doge => false,
             // Auto is resolved to a concrete theme before rendering.
             Self::Auto => false,
         }
@@ -140,6 +150,8 @@ impl ThemeKind {
             Self::RosePineMoon => &["rosepine", "rose-pine", "rose-pine-moon"],
             Self::OscuraMidnight => &["oscura"],
             Self::Terminal => &["terminal-default", "transparent", "native"],
+            // Canonical id is display_name `"doge"` only.
+            Self::Doge => &[],
             Self::Auto => &["system"],
         }
     }
@@ -246,6 +258,8 @@ impl Theme {
 
             accent_verify: q(self.accent_verify),
 
+            accent_feedback: q(self.accent_feedback),
+
             accent_remember: q(self.accent_remember),
 
             selection_border: q(self.selection_border),
@@ -311,6 +325,7 @@ impl Theme {
             ThemeKind::GrokDay => Self::grokday(),
             ThemeKind::RosePineMoon => Self::rosepine_moon(),
             ThemeKind::OscuraMidnight => Self::oscura_midnight(),
+            ThemeKind::Doge => Self::doge(),
             // Handled by the early return above.
             ThemeKind::Terminal => Self::terminal(),
             // Auto is resolved to a concrete theme before being stored; if reached, fall back to GrokNight
@@ -571,10 +586,15 @@ impl Theme {
 static CURSOR_COLOR_APPLIED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
+/// OSC 12 RGB for the Operator caret. Named ANSI green maps to DOGE Human green `(0, 255, 0)`. `Reset` yields `None`.
+pub fn osc12_rgb_for_accent(accent_user: ratatui::style::Color) -> Option<(u8, u8, u8)> {
+    crate::render::color::resolve_to_rgb(doge::as_doge_human_green(accent_user))
+}
+
 /// OSC 12 wants RGB even below truecolor, so every variant is resolved back. `Reset` yields `None` so the terminal keeps its profile cursor.
 pub fn cursor_color_escape() -> Option<String> {
     let theme = Theme::current();
-    let (r, g, b) = crate::render::color::resolve_to_rgb(theme.accent_user)?;
+    let (r, g, b) = osc12_rgb_for_accent(theme.accent_user)?;
     Some(format!("\x1b]12;rgb:{r:02x}/{g:02x}/{b:02x}\x07"))
 }
 
@@ -1045,6 +1065,7 @@ mod tests {
                 ThemeKind::TokyoNight => Theme::tokyonight(),
                 ThemeKind::RosePineMoon => Theme::rosepine_moon(),
                 ThemeKind::OscuraMidnight => Theme::oscura_midnight(),
+                ThemeKind::Doge => Theme::doge(),
                 // Reset plus named ANSI entries: the scrollbar rides the
                 // terminal's own fg/bg contrast, so there is no RGB delta.
                 ThemeKind::Terminal => continue,

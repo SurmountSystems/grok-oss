@@ -9,6 +9,9 @@ use agent_client_protocol as acp;
 
 use crate::app::actions::Action;
 use crate::slash::command::{CommandExecCtx, CommandResult, SlashCommand, slash_meta};
+use crate::slash::queue_schedule::{
+    QueueHold, parse_queue_hold_args, queue_later_command, queue_later_skill,
+};
 
 pub struct QueueCommand;
 

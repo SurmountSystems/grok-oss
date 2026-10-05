@@ -105,7 +105,7 @@ fn mock_override() -> Option<Option<SystemAppearance>> {
     *MOCK_APPEARANCE.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// `[ui].auto_dark_theme` / `auto_light_theme`; `None` defaults to `GrokNight` / `GrokDay`.
+/// `[ui].auto_dark_theme` / `auto_light_theme`; `None` defaults dark to DOGE and light to `GrokDay`.
 #[must_use]
 pub fn to_theme_kind(
     appearance: SystemAppearance,

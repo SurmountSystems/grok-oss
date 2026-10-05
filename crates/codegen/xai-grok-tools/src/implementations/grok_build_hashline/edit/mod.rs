@@ -348,23 +348,39 @@ impl xai_tool_runtime::Tool for HashlineEditTool {
                     if input.edits.len() == 1
                         && let Some(HashlineOp::Write { content }) = input.edits.first()
                     {
-                        let is_memory_write = match crate::types::memory_v2::write_memory_v2_file(
-                            &resources,
-                            &policy_path,
-                            content.as_bytes(),
-                        )
-                        .await
-                        {
-                            Ok(crate::types::memory_v2::MemoryV2Write::Written { .. }) => true,
-                            Ok(crate::types::memory_v2::MemoryV2Write::Outside) => false,
-                            Err(error) => {
-                                return Ok(
-                                    crate::types::output::SearchReplaceOutput::InvalidInput(error),
-                                );
+                        let mut r =
+                            apply::apply_edits(content, &input.edits, &joined_path, &*scheme);
+                        if let Some(nc) = r.new_content.as_mut() {
+                            *nc = crate::util::trailing_ws::prepare_for_write(std::mem::take(nc));
+                        }
+                        let is_memory_write = match r.new_content.as_deref() {
+                            Some(new_content) => {
+                                match crate::types::memory_v2::write_memory_v2_file(
+                                    &resources,
+                                    &policy_path,
+                                    new_content.as_bytes(),
+                                )
+                                .await
+                                {
+                                    Ok(crate::types::memory_v2::MemoryV2Write::Written {
+                                        ..
+                                    }) => true,
+                                    Ok(crate::types::memory_v2::MemoryV2Write::Outside) => false,
+                                    Err(error) => {
+                                        return Ok(
+                                            crate::types::output::SearchReplaceOutput::InvalidInput(
+                                                error,
+                                            ),
+                                        );
+                                    }
+                                }
                             }
+                            None => false,
                         };
                         if !is_memory_write
-                            && let Err(e) = fs.write_file(&joined_path, content.as_bytes()).await
+                            && let Some(ref new_content) = r.new_content
+                            && let Err(e) =
+                                fs.write_file(&joined_path, new_content.as_bytes()).await
                         {
                             let display_path = display_dcwd.join(&input.file_path);
                             return Ok(match e.io_error_kind() {

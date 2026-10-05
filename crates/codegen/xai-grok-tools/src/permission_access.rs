@@ -326,10 +326,12 @@ mod tests {
                 capability_mode: None,
                 isolation: None,
                 resume_from: None,
+                follow_up: None,
                 cwd: None,
                 model: None,
                 workspace: None,
                 task_id: None,
+                write_paths: Vec::new(),
             })),
             AccessKind::Tool(name) if name == "task"
         ));
@@ -377,10 +379,12 @@ mod tests {
             capability_mode: None,
             isolation: None,
             resume_from: None,
+            follow_up: None,
             cwd: None,
             model: None,
             workspace: None,
             task_id: None,
+            write_paths: Vec::new(),
         }));
         let deny_edits = CompiledPolicy::new(PermissionConfig::new(vec![
             parse_permission_rule("Edit(*)", RuleAction::Deny).unwrap(),

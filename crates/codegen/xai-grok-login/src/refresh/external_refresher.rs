@@ -402,7 +402,7 @@ mod tests {
         // A burst of pre-flights well past the strike budget, all inside strike 1's cooldown.
         for _ in 0..(MAX_CONSECUTIVE_RUN_FAILURES * 4) {
             match refresher.refresh(RefreshReason::PreRequest).await {
-                RefreshOutcome::TransientFailure { message } => {
+                RefreshOutcome::TransientFailure { message, .. } => {
                     assert!(message.contains("backing off"), "message={message}")
                 }
                 other => panic!("a cooling-down call must be a transient no-op, got {other:?}"),
@@ -458,7 +458,7 @@ mod tests {
         // A burst right after is still folded into that one run …
         assert!(matches!(
             refresher.refresh(RefreshReason::PreRequest).await,
-            RefreshOutcome::TransientFailure { message } if message.contains("backing off")
+            RefreshOutcome::TransientFailure { message, .. } if message.contains("backing off")
         ));
         assert_eq!(runner.calls(), 4);
         // … and the spacing, not the ladder's cooldown, decides when the next one may run.
@@ -498,7 +498,7 @@ mod tests {
         };
         snapshot.set_cached(Some(new_cred.clone()));
         match refresher.refresh(RefreshReason::PreRequest).await {
-            RefreshOutcome::TransientFailure { message } => assert!(
+            RefreshOutcome::TransientFailure { message, .. } => assert!(
                 !message.contains("backing off"),
                 "a new credential must not sit out the old one's cooldown: {message}"
             ),
@@ -546,7 +546,7 @@ mod tests {
         };
         snapshot.set_cached(Some(reissued.clone()));
         match refresher.refresh(RefreshReason::PreRequest).await {
-            RefreshOutcome::TransientFailure { message } => assert!(
+            RefreshOutcome::TransientFailure { message, .. } => assert!(
                 !message.contains("backing off"),
                 "a re-issued credential must not inherit the old cooldown: {message}"
             ),

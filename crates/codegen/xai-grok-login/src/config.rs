@@ -3,6 +3,25 @@ use serde::{Deserialize, Serialize};
 pub use xai_grok_config::CLI_CHAT_PROXY_BASE_URL_DEFAULT;
 use xai_grok_config::{Capability, Distribution};
 use xai_grok_shell_base::env::{PROD_RELAY_WS_URL, PROD_WS_ORIGIN};
+
+/// Default: prefer included SuperGrok period limits before the console API key.
+pub const fn default_auto_use_included_limits() -> bool {
+    true
+}
+
+/// Default: allow sampler turns when included SuperGrok period debit is unproven.
+pub const fn default_allow_spend_when_free_period_debit_unproven() -> bool {
+    true
+}
+
+fn auto_use_included_limits_is_default_true(value: &bool) -> bool {
+    *value
+}
+
+fn allow_spend_when_free_period_debit_unproven_is_default_true(value: &bool) -> bool {
+    *value
+}
+
 fn default_oidc_scopes() -> Vec<String> {
     vec![
         "openid".into(),
@@ -84,6 +103,23 @@ pub struct GrokComConfig {
     /// See [`PreferredAuthMethod`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preferred_method: Option<PreferredAuthMethod>,
+    /// Prefer included SuperGrok period limits before the console API key.
+    /// `[auth] auto_use_included_limits`. Missing key stays true.
+    /// Alias `prefer_sooner_reset` is accepted for one release.
+    #[serde(
+        default = "default_auto_use_included_limits",
+        alias = "prefer_sooner_reset",
+        skip_serializing_if = "auto_use_included_limits_is_default_true"
+    )]
+    pub auto_use_included_limits: bool,
+    /// Allow sampler turns when included SuperGrok period debit is unproven.
+    /// `[auth] allow_spend_when_free_period_debit_unproven`. Missing key stays true.
+    /// Set false only to opt into a hard block.
+    #[serde(
+        default = "default_allow_spend_when_free_period_debit_unproven",
+        skip_serializing_if = "allow_spend_when_free_period_debit_unproven_is_default_true"
+    )]
+    pub allow_spend_when_free_period_debit_unproven: bool,
 }
 /// Team login restriction. TOML string or array; an empty array fails closed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -188,6 +224,10 @@ struct GrokComConfigSection {
     disable_api_key_auth: Option<bool>,
     force_login_team_uuid: Option<ForceLoginTeam>,
     preferred_method: Option<PreferredAuthMethod>,
+    #[serde(default, alias = "prefer_sooner_reset")]
+    auto_use_included_limits: Option<bool>,
+    #[serde(default)]
+    allow_spend_when_free_period_debit_unproven: Option<bool>,
 }
 impl GrokComConfigSection {
     fn merge_over(self, base: GrokComConfig) -> Result<GrokComConfig, toml::de::Error> {
@@ -217,6 +257,12 @@ impl GrokComConfigSection {
             disable_api_key_auth: self.disable_api_key_auth.or(base.disable_api_key_auth),
             force_login_team_uuid: self.force_login_team_uuid.or(base.force_login_team_uuid),
             preferred_method: self.preferred_method.or(base.preferred_method),
+            auto_use_included_limits: self
+                .auto_use_included_limits
+                .unwrap_or(base.auto_use_included_limits),
+            allow_spend_when_free_period_debit_unproven: self
+                .allow_spend_when_free_period_debit_unproven
+                .unwrap_or(base.allow_spend_when_free_period_debit_unproven),
         })
     }
 }
@@ -403,6 +449,9 @@ impl Default for GrokComConfig {
                 .map(|v| env_flag_enabled(&v)),
             force_login_team_uuid: None,
             preferred_method: None,
+            auto_use_included_limits: default_auto_use_included_limits(),
+            allow_spend_when_free_period_debit_unproven:
+                default_allow_spend_when_free_period_debit_unproven(),
         };
         config.withhold_account_login(Distribution::current());
         config

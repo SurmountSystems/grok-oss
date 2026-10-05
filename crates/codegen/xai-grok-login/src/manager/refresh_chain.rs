@@ -10,7 +10,7 @@ use crate::storage::AuthFileLock;
 
 use super::lock::{self, LockAcquire};
 use super::sleep_gate::InFlightGuard;
-use super::{AuthManager, LOCK_TIMEOUT_WAIT, REFRESH_LOCK_TIMEOUT, TokenType};
+use super::{AuthManager, LOCK_TIMEOUT_WAIT, REFRESH_LOCK_TIMEOUT, RefreshUrgency, TokenType};
 
 /// `Held` is the live lock, proven before the irreversible IdP call.
 /// `Adopted` is a sibling's freshly rotated token; return it without refreshing.
@@ -47,19 +47,21 @@ struct ActiveRefresh {
 enum RefreshDeferral {
     /// The sleep gate is raised; an exchange would straddle the suspend.
     SleepImminent { has_live_token: bool },
-    /// A dark wake could re-sleep mid-exchange; this applies only while a wire-valid token makes waiting free.
-    DarkWake,
+    /// A dark wake could re-sleep mid-exchange.
+    /// `background` waits out the whole wake. User-facing deferral still requires a wire-valid token.
+    DarkWake { background: bool },
 }
 
 impl AuthManager {
     /// Runs one refresh attempt; all persistence and verdict recording happen in `apply_refresh_outcome`, the single mutation point.
     /// Callers that can be cancelled mid-exchange must go through `BoundedRefresh`/`SilentRefresh`, which spawn the exchange rather than drop it.
     /// A dropped exchange loses the rotated token.
-    #[tracing::instrument(skip(self), fields(?token_type, ?reason))]
+    #[tracing::instrument(skip(self), fields(?token_type, ?reason, ?urgency))]
     pub async fn refresh_chain(
         self: &Arc<Self>,
         token_type: TokenType,
         reason: RefreshReason,
+        urgency: RefreshUrgency,
     ) -> Result<GrokAuth, AuthError> {
         // Checked before the refresh lock so a backed-off chain doesn't block traffic.
         if let Some(err) = self.permanent_failure() {
@@ -131,7 +133,7 @@ impl AuthManager {
                     }
                 }
                 RefreshStep::DeferForPowerState(active) => {
-                    match self.defer_refresh_for_power_state(reason) {
+                    match self.defer_refresh_for_power_state(reason, urgency) {
                         Ok(()) => RefreshStep::RevalidateLock(active),
                         Err(err) => RefreshStep::Failed(err),
                     }
@@ -150,7 +152,7 @@ impl AuthManager {
                     Err(err) => RefreshStep::Failed(err),
                 },
                 RefreshStep::Exchange(active) => {
-                    match self.exchange_refresh_token(active, reason).await {
+                    match self.exchange_refresh_token(active, reason, urgency).await {
                         Ok(auth) => RefreshStep::Refreshed(Box::new(auth)),
                         Err(err) => RefreshStep::Failed(err),
                     }
@@ -166,6 +168,7 @@ impl AuthManager {
         self: &Arc<Self>,
         active: ActiveRefresh,
         reason: RefreshReason,
+        urgency: RefreshUrgency,
     ) -> Result<GrokAuth, AuthError> {
         let ActiveRefresh {
             file_lock,
@@ -188,6 +191,11 @@ impl AuthManager {
                 );
                 return Err(AuthError::transient(
                     "refresh deferred: system sleep imminent",
+                ));
+            }
+            if urgency == RefreshUrgency::Background && self.is_dark_wake() {
+                return Err(AuthError::transient(
+                    "refresh deferred: dark wake (background consumer; retry at next full wake)",
                 ));
             }
             // A dark wake sends no `WillSleep`, so hold the system awake for the exchange.
@@ -327,24 +335,35 @@ impl AuthManager {
         Err(AuthError::transient(message))
     }
 
-    fn power_state_deferral(&self, reason: RefreshReason) -> Option<RefreshDeferral> {
+    fn power_state_deferral(
+        &self,
+        reason: RefreshReason,
+        urgency: RefreshUrgency,
+    ) -> Option<RefreshDeferral> {
         if self.is_sleep_gated() {
             return Some(RefreshDeferral::SleepImminent {
                 has_live_token: self.current().is_some(),
             });
         }
+        if urgency == RefreshUrgency::Background && self.is_dark_wake() {
+            return Some(RefreshDeferral::DarkWake { background: true });
+        }
         if reason == RefreshReason::PreRequest
             && self.current_wire_valid().is_some()
             && self.should_defer_for_dark_wake()
         {
-            return Some(RefreshDeferral::DarkWake);
+            return Some(RefreshDeferral::DarkWake { background: false });
         }
         None
     }
 
     /// Safe to defer: the refresh token has not been sent yet.
-    fn defer_refresh_for_power_state(&self, reason: RefreshReason) -> Result<(), AuthError> {
-        match self.power_state_deferral(reason) {
+    fn defer_refresh_for_power_state(
+        &self,
+        reason: RefreshReason,
+        urgency: RefreshUrgency,
+    ) -> Result<(), AuthError> {
+        match self.power_state_deferral(reason, urgency) {
             Some(RefreshDeferral::SleepImminent { has_live_token }) => {
                 xai_grok_telemetry::unified_log::warn(
                     "auth.sleep.refresh_deferred",
@@ -358,15 +377,18 @@ impl AuthManager {
                     "refresh deferred: system sleep imminent",
                 ))
             }
-            Some(RefreshDeferral::DarkWake) => {
+            Some(RefreshDeferral::DarkWake { background }) => {
                 xai_grok_telemetry::unified_log::warn(
                     "auth.dark_wake.refresh_deferred",
                     /*sid*/ None,
                     Some(serde_json::json!({ "reason": format!("{reason:?}") })),
                 );
-                Err(AuthError::transient(
-                    "refresh deferred: dark wake (display off; system may re-sleep)",
-                ))
+                let message = if background {
+                    "refresh deferred: dark wake (background consumer; retry at next full wake)"
+                } else {
+                    "refresh deferred: dark wake (display off; system may re-sleep)"
+                };
+                Err(AuthError::transient(message))
             }
             None => {
                 self.end_dark_wake_defer_run();

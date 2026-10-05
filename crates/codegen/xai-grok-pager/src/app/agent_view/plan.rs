@@ -11,7 +11,8 @@ use crate::scrollback::blocks::SessionEvent;
 use crate::views::file_search::line_viewer::LineViewerState;
 use crate::views::list_pane::ListItem;
 use crate::views::plan_approval_view::{
-    PlanApprovalFocus, PlanApprovalViewState, PlanComment, PlanReviewOutcome, PlanReviewSource,
+    PlanApprovalFocus, PlanApprovalViewState, PlanComment, PlanFeedbackInFlight, PlanPromptIntent,
+    PlanReviewOutcome, PlanReviewSource,
 };
 use crate::views::prompt_widget::{EnterOutcome, PromptEvent};
 #[cfg(test)]
@@ -457,11 +458,12 @@ impl AgentView {
     /// session as decided, and do not drop a restore waiter that already
     /// bound.
     pub(crate) fn apply_persisted_plan_decision_on_load(&mut self) {
-        if self
-            .plan_approval_view
-            .as_ref()
-            .is_some_and(|p| p.response_tx.is_some())
-        {
+        if self.plan_approval_view.as_ref().is_some_and(|p| {
+            matches!(
+                p.origin,
+                crate::views::plan_approval_view::ReviewOrigin::InTurn(Some(_))
+            )
+        }) {
             return;
         }
         let Some(sid) = self.session.session_id.as_ref().map(|s| s.0.to_string()) else {
@@ -776,7 +778,7 @@ impl AgentView {
     /// Resolve the plan body for the line-viewer preview.
     /// Prefers content carried on the approval request (inline plan-creation or the shell-read file body), then falls back to the on-disk plan file.
     /// Request body first keeps file-backed previews working when the path resolution fails or the file disappears between intercept and open.
-    pub(super) fn plan_body_for_preview(&self) -> Option<String> {
+    pub(crate) fn plan_body_for_preview(&self) -> Option<String> {
         if let Some(content) = self
             .plan_approval_view
             .as_ref()
@@ -791,6 +793,166 @@ impl AgentView {
         self.plan_file_path()
             .and_then(|p| std::fs::read_to_string(p).ok())
             .filter(|s| !s.trim().is_empty())
+    }
+
+    /// File-backed Isolated Preview re-reads session `plan.md` so a frozen
+    /// snapshot is not painted. Inline source stays as the request body.
+    pub(crate) fn refresh_file_backed_plan_from_live_file(&mut self) {
+        let file_backed = self.plan_approval_view.as_ref().is_some_and(|pav| {
+            pav.source == PlanReviewSource::FileBacked || pav.is_local_idle_decision
+        });
+        if !file_backed {
+            return;
+        }
+        let Some(path) = self.plan_file_path() else {
+            return;
+        };
+        let Ok(disk) = std::fs::read_to_string(path) else {
+            return;
+        };
+        if disk.trim().is_empty() {
+            return;
+        }
+        let Some(pav) = self.plan_approval_view.as_mut() else {
+            return;
+        };
+        if pav.source == PlanReviewSource::Inline && !pav.is_local_idle_decision {
+            return;
+        }
+        if pav.plan_content.as_deref() != Some(disk.as_str()) {
+            pav.plan_content = Some(disk);
+            pav.has_plan = true;
+        }
+    }
+
+    /// Idle plan mode with a body and no live `exit_plan_mode` waiter parks
+    /// a local decision. A resolved decision and an already-open review stay.
+    pub(crate) fn park_local_idle_plan_decision_if_needed(&mut self) {
+        if self.plan_decision_resolved || self.plan_approval_view.is_some() {
+            return;
+        }
+        let mode_on = self.plan_mode_pending.unwrap_or(self.plan_mode_active);
+        if !mode_on && !self.isolated_preview_shows_secondary_plan && !self.is_plan_viewer() {
+            return;
+        }
+        let body = self
+            .latest_inline_plan_content
+            .clone()
+            .or_else(|| self.plan_body_for_preview());
+        self.plan_approval_view = Some(PlanApprovalViewState::for_idle_decision(body));
+    }
+
+    /// Live park arms Plan ready. After Approve or Quit the four idle CTAs
+    /// still paint and this stays false.
+    pub(crate) fn should_arm_plan_decision_chrome(&self) -> bool {
+        !self.plan_decision_resolved && self.plan_approval_view.is_some()
+    }
+
+    /// Plan chrome is on only while plan mode is on and a preview or park is open.
+    /// Closed Isolated Preview after Exit must not stay `plan`.
+    pub(super) fn composer_plan_flag_visible(&self) -> bool {
+        let mode_on = self.plan_mode_pending.unwrap_or(self.plan_mode_active);
+        mode_on && (self.is_plan_viewer() || self.plan_approval_view.is_some())
+    }
+
+    /// Composer flag words. `"plan"` is included only when the caller says the
+    /// plan flag is visible, plus the session permission label.
+    pub(super) fn composer_permission_flag_labels(&self, plan_visible: bool) -> Vec<&'static str> {
+        let mut labels = Vec::new();
+        if plan_visible {
+            labels.push("plan");
+        }
+        labels.push(self.session.permission_label().display_name());
+        labels
+    }
+
+    /// Plan preview owns composer paste. A non-plan line viewer keeps search.
+    pub(super) fn plan_overlay_owns_composer_paste(&self) -> bool {
+        self.is_plan_viewer()
+    }
+
+    /// Arrows and paging scroll the plan while the line-comment draft is empty.
+    /// A non-empty comment draft keeps those keys for the caret.
+    pub(super) fn plan_viewer_owns_scroll_keys(&self, key: &KeyEvent) -> bool {
+        let scrolls = matches!(
+            key.code,
+            KeyCode::Up
+                | KeyCode::Down
+                | KeyCode::Left
+                | KeyCode::Right
+                | KeyCode::PageUp
+                | KeyCode::PageDown
+                | KeyCode::Home
+                | KeyCode::End
+        );
+        scrolls && !self.plan_line_comment_draft_nonempty()
+    }
+
+    fn plan_line_comment_draft_nonempty(&self) -> bool {
+        if self.line_viewer.as_ref().is_some_and(|viewer| {
+            viewer.list_state.input_mode() == Some(crate::views::list_pane::InputBarMode::Comment)
+                && !viewer.list_state.input_text().trim().is_empty()
+        }) {
+            return true;
+        }
+        if self.casual_commenting_range.is_some() && !self.prompt.text().trim().is_empty() {
+            return true;
+        }
+        self.plan_approval_view.as_ref().is_some_and(|pav| {
+            pav.focus == PlanApprovalFocus::Commenting
+                && pav.commenting_range.is_some()
+                && !self.prompt.text().trim().is_empty()
+        })
+    }
+
+    /// Visual line-viewer selection, or empty when the caret has no range.
+    fn plan_selection_for_feedback(&self) -> String {
+        let Some(viewer) = self.line_viewer.as_ref() else {
+            return String::new();
+        };
+        if viewer.list_state.multi_range().is_none() {
+            return String::new();
+        }
+        let Some(range) = viewer.selected_line_range() else {
+            return String::new();
+        };
+        viewer
+            .lines
+            .iter()
+            .filter(|item| item.line_number().is_some_and(|n| range.contains(&n)))
+            .map(|item| {
+                item.content()
+                    .spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// While a turn is owed, do not open the plan pane. Idle, unresolved,
+    /// and not already building may open the post-turn review.
+    pub(crate) fn surface_idle_plan_review_if_needed(&mut self) {
+        if self.session.state.is_turn_running() || self.plan_decision_resolved {
+            return;
+        }
+        if self.execute_plan.is_some() {
+            return;
+        }
+        self.open_post_turn_plan_review();
+    }
+
+    /// After a dropped build id, an after-turn review with no pending commit
+    /// unmounts. It does not send an approved outcome.
+    pub(crate) fn dismiss_plan_approval_after_turn_if_stale(&mut self) {
+        let after_turn = self
+            .plan_approval_view
+            .as_ref()
+            .is_some_and(|pav| pav.is_after_turn());
+        if after_turn && self.execute_plan.is_none() && self.pending_post_turn_commit.is_none() {
+            let _ = self.unmount_plan_review();
+        }
     }
     /// An in-turn review's ext method dies with the turn. A post-turn review stays until the user decides.
     pub(crate) fn dismiss_in_turn_plan_review(&mut self) -> bool {
@@ -1435,7 +1597,7 @@ impl AgentView {
             self.scrollback
                 .push_block(crate::scrollback::RenderBlock::user_prompt(msg.to_string()));
         }
-        pav.send_questions(to_send);
+        let sent_acp = pav.send_questions(to_send.clone());
         if pav.source == PlanReviewSource::Inline {
             self.latest_inline_plan_content = None;
         }
@@ -1454,7 +1616,7 @@ impl AgentView {
             });
         }
 
-        if is_local_idle || !sent_acp {
+        if pav.is_local_idle_decision || !sent_acp {
             let q = to_send
                 .as_deref()
                 .map(str::trim)
@@ -1465,6 +1627,10 @@ impl AgentView {
                  rewrite plan.md unless they ask):\n\n{q}\n\nWhen done answering, call \
                  exit_plan_mode again if the plan is still ready for approval."
             );
+            if !selection.is_empty() {
+                text.push('\n');
+                text.push_str(&selection);
+            }
             if !images.is_empty() {
                 text.push_str("\n\nScreenshot(s) attached for plan feedback.");
             }
@@ -2177,7 +2343,6 @@ mod plan_chip_tests {
                 next_queue_id: 0,
                 yolo_mode: false,
                 auto_mode: false,
-                context_only_mode: false,
                 prompt_history: Vec::new(),
                 prompt_history_loading: false,
                 loading_replay: false,
@@ -2402,7 +2567,6 @@ mod plan_approval_enter_tests {
             agent.toast.as_ref().map(|(msg, _)| msg.as_str()),
             Some("Type revision notes, or press a to approve.")
         );
-        buf
     }
     #[test]
     fn enter_with_revision_text_requests_changes() {
@@ -3122,6 +3286,27 @@ mod plan_approval_enter_tests {
 mod plan_approval_optimistic_mode_tests {
     use super::*;
     use crate::app::actions::PermissionLabel;
+    use crate::views::plan_approval_view::PLAN_READY_STATUS;
+
+    fn draw_agent_hits(agent: &mut AgentView, width: u16, height: u16) -> ratatui::buffer::Buffer {
+        let area = ratatui::layout::Rect::new(0, 0, width, height);
+        let mut buf = ratatui::buffer::Buffer::empty(area);
+        let mut scratch = crate::scrollback::render::ScratchBuffer::new();
+        let _ = agent.draw(
+            area,
+            &mut buf,
+            &crate::actions::ActionRegistry::defaults(),
+            &mut scratch,
+            None,
+            false,
+            crate::app::agent_view::BannerSlotParams::none(),
+            false,
+            false,
+            &mut Vec::new(),
+            crate::app::agent_view::AppRenderParams::default(),
+        );
+        buf
+    }
     use agent_client_protocol as acp;
     fn make_agent() -> AgentView {
         let mut agent = super::test_fixtures::make_agent();
@@ -3461,13 +3646,6 @@ mod plan_approval_optimistic_mode_tests {
             agent.plan_approval_view.is_some(),
             "review stays mounted until ExecutePlan is accepted"
         );
-        // Either Revising label (generic wait overlay) or real activity, plus
-        // cancel affordance when the turn is running.
-        let has_revising = full.contains("Revising") || full.contains("revising");
-        let has_activityish = full.contains("Waiting")
-            || full.contains("Thinking")
-            || full.contains("Running")
-            || has_revising;
         assert!(
             plan_review_closed_rows(&agent).is_empty(),
             "approved row must not land before dispatch accepts"
@@ -3816,6 +3994,24 @@ mod plan_approval_optimistic_mode_tests {
             Some(PLAN_READY_STATUS),
             "shut pane must not paint Plan ready while the composer is send-armed"
         );
+    }
+
+    fn park_exit_plan_mode(agent: &mut AgentView, body: &str) {
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        let request = crate::views::plan_approval_view::ExitPlanModeExtRequest {
+            session_id: "test-session".into(),
+            tool_call_id: "call-1".into(),
+            plan_content: Some(body.into()),
+        };
+        agent.plan_approval_view = Some(
+            crate::views::plan_approval_view::PlanApprovalViewState::new(
+                request,
+                agent.prompt.stash(),
+                tx,
+            ),
+        );
+        agent.plan_mode_active = true;
+        agent.plan_mode_pending = None;
     }
 
     /// `/view-plan` after Approve still paints Approve / Comment / Revise / Exit.

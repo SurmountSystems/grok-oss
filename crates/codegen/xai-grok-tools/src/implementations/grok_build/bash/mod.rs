@@ -191,6 +191,8 @@ struct BashParamsDe {
     foreground_block_budget_ms: Option<u64>,
     #[serde(default)]
     max_block_until_ms: Option<u64>,
+    #[serde(default)]
+    default_block_until_ms: Option<u64>,
     #[serde(default = "default_true")]
     allow_background_operator: bool,
     #[serde(default = "default_true")]
@@ -210,6 +212,7 @@ impl From<BashParamsDe> for BashParams {
                 .unwrap_or(raw.enabled_background),
             foreground_block_budget_ms: raw.foreground_block_budget_ms,
             max_block_until_ms: raw.max_block_until_ms,
+            default_block_until_ms: raw.default_block_until_ms,
             allow_background_operator: raw.allow_background_operator,
             surface_bg_completion_reminders: raw.surface_bg_completion_reminders,
         }
@@ -429,10 +432,50 @@ fn annotations(bash: &BashOutput) -> String {
     s
 }
 
+const NOOP_END_TURN_REMINDER: &str = "<system-reminder>\n\
+    You appear to be running empty commands to stay active while waiting for background work. \
+    End your turn — you will be woken automatically when there is something to do.\n\
+    </system-reminder>";
+
+fn is_noop_command(command: &str) -> bool {
+    let trimmed = command.trim();
+    trimmed.is_empty() || trimmed == "true" || trimmed == ":" || is_pure_status_print(trimmed)
+}
+
+fn is_pure_status_print(trimmed: &str) -> bool {
+    if !(matches!(trimmed, "echo" | "printf")
+        || trimmed.starts_with("echo ")
+        || trimmed.starts_with("printf "))
+    {
+        return false;
+    }
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut chars = trimmed.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' if !in_single => {
+                chars.next();
+            }
+            '\'' if !in_double => in_single = !in_single,
+            '"' if !in_single => in_double = !in_double,
+            '$' | '`' if !in_single => return false,
+            ';' | '&' | '|' | '<' | '>' | '(' | ')' | '\n' if !in_single && !in_double => {
+                return false;
+            }
+            _ => {}
+        }
+    }
+    true
+}
+
 /// Build the full DEFAULT prompt text from a `BashOutput`. Normal: `exit: N [annotations]\n<stripped_output>` Killed by
 /// harness/signal: `exit: killed (reason) [annotations]\n<stripped_output>` Backgrounded: verbose `[Command moved to
 /// background]...` format.
-pub(crate) fn format_default_prompt(bash: &BashOutput) -> String {
+///
+/// `append_noop_reminder` gates the no-op-command end-turn reminder. Callers pass the session's
+/// system-reminders switch.
+pub(crate) fn format_default_prompt(bash: &BashOutput, append_noop_reminder: bool) -> String {
     let output_str = if bash.output_for_prompt.is_empty() {
         let raw = String::from_utf8_lossy(&bash.output);
         strip_ansi_escapes::strip_str(&raw).to_string()
@@ -3374,6 +3417,7 @@ mod tests {
             timeout: Some(200),
             description: "stand-in for a still-running remote compile".to_string(),
             is_background: false,
+            block_until_ms: None,
         };
         let result = xai_tool_runtime::Tool::run(&tool, test_ctx(resources.into_shared()), input)
             .await
@@ -4820,8 +4864,12 @@ mod tests {
         fn schema_property_description_tracks_renamed_timeout() {
             let param_map =
                 std::collections::HashMap::from([("timeout".to_string(), "max_wait".to_string())]);
-            let exported =
-                BashTool::exported_input_schema(&base_schema(), &BashParams::default(), "max_wait");
+            let exported = BashTool::exported_input_schema(
+                &base_schema(),
+                &BashParams::default(),
+                "max_wait",
+                BashVersion::PreBlockUntilMs,
+            );
             let remapped = crate::util::remap::remap_schema_properties(&exported, &param_map);
             let desc = remapped["properties"]["max_wait"]["description"]
                 .as_str()
@@ -4854,7 +4902,7 @@ mod tests {
             );
             let def = ToolMetadata::versioned_definition(
                 &BashTool,
-                None,
+                Some("pre-block-until-ms"),
                 "run_terminal_cmd",
                 None,
                 &renderer,
@@ -5002,85 +5050,6 @@ mod tests {
             assert_eq!(
                 BashTool::resolved_auto_bg_wait_ms(&params, Duration::from_millis(120_000)),
                 15_000
-            );
-        }
-
-        /// Property description must track rename after `remap_schema_properties`
-        /// (regression: stale `` `timeout: 0` `` under `properties.<alias>`).
-        #[test]
-        fn schema_property_description_tracks_renamed_timeout() {
-            let param_map =
-                std::collections::HashMap::from([("timeout".to_string(), "max_wait".to_string())]);
-            let exported = BashTool::exported_input_schema(
-                &base_schema(),
-                &BashParams::default(),
-                "max_wait",
-                BashVersion::PreBlockUntilMs,
-            );
-            let remapped = crate::util::remap::remap_schema_properties(&exported, &param_map);
-            let desc = remapped
-                .get("properties")
-                .and_then(|p| p.get("max_wait"))
-                .and_then(|t| t.get("description"))
-                .and_then(|d| d.as_str())
-                .expect("max_wait description");
-            assert!(
-                desc.contains("max_wait"),
-                "renamed timeout must appear in property description:\n{desc}"
-            );
-            assert!(
-                !desc.contains("`timeout"),
-                "canonical timeout must not remain in property description:\n{desc}"
-            );
-        }
-
-        /// Kind-wide renderer aliases must not rewrite this tool's property
-        /// description when this tool's own param_map did not rename timeout —
-        /// schema keys only follow param_map.
-        #[test]
-        fn schema_property_description_ignores_kind_wide_timeout_alias() {
-            use crate::types::tool_metadata::ToolMetadata;
-
-            let renderer = TemplateRenderer::new(
-                HashMap::from([(ToolKind::Execute, "run_terminal_cmd".to_string())]),
-                HashMap::from([(
-                    ToolKind::Execute,
-                    // Another Execute tool (or identity-seed collision) renamed
-                    // timeout kind-wide; this bash tool's param_map is empty.
-                    HashMap::from([("timeout".to_string(), "max_wait".to_string())]),
-                )]),
-            );
-            let def = ToolMetadata::versioned_definition(
-                &BashTool,
-                Some("pre-block-until-ms"),
-                "run_terminal_cmd",
-                None,
-                &renderer,
-                &HashMap::new(),
-                &base_schema(),
-                &serde_json::json!({}),
-            );
-            let props = def
-                .function
-                .parameters
-                .get("properties")
-                .expect("properties");
-            assert!(
-                props.get("timeout").is_some() && props.get("max_wait").is_none(),
-                "empty param_map must keep schema key timeout, got: {props}"
-            );
-            let desc = props
-                .get("timeout")
-                .and_then(|t| t.get("description"))
-                .and_then(|d| d.as_str())
-                .expect("timeout description");
-            assert!(
-                desc.contains("timeout"),
-                "property description must match schema key, not kind-wide alias:\n{desc}"
-            );
-            assert!(
-                !desc.contains("max_wait"),
-                "kind-wide alias must not leak into property description:\n{desc}"
             );
         }
 

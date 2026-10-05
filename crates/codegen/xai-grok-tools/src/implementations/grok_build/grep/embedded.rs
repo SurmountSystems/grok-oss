@@ -406,7 +406,7 @@ mod tests {
     #[test]
     fn just_install_does_not_cargo_install_ripgrep_and_grok_oss_grep_is_embedded_rust_not_a_sidecar_rg()
      {
-        let just = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../../../justfile"));
+        let just = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../../justfile"));
         let install = just
             .split("\ninstall:\n")
             .nth(1)

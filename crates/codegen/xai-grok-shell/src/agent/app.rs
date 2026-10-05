@@ -288,7 +288,10 @@ pub async fn run_stdio_agent(
                 auth_manager.current(),
             )
             .await?;
-            apply_otel_config(&auth_manager, &agent_config.grok_com_config);
+            apply_otel_config(
+                &auth_manager,
+                &crate::agent::config::to_login_grok_com(&agent_config.grok_com_config),
+            );
             let handle_io = spawn_agent_local(
                 agent_config,
                 auth_manager,
@@ -329,7 +332,8 @@ pub async fn run_headless(
     );
     let mut agent_config = agent_config.clone();
     agent_config.mode = crate::agent::config::AgentMode::Headless;
-    let ctx = &agent_config.grok_com_config;
+    let ctx_login = crate::agent::config::to_login_grok_com(&agent_config.grok_com_config);
+    let ctx = &ctx_login;
     let (mut auth, did_browser_flow) = if reauthenticate {
         let auth_manager = Arc::new(AuthManager::new_with_proxy_base_url(
             &grok_home::grok_home(),
@@ -565,9 +569,10 @@ fn relay_config_for_session(
     if should_seed_shared_session(shared_auth_manager.current_or_expired().as_ref(), session) {
         shared_auth_manager.hot_swap(session.clone());
     }
+    let login_cfg = crate::agent::config::to_login_grok_com(&agent_config.grok_com_config);
     crate::agent::relay::RelayConfig::for_session(
         session,
-        &agent_config.grok_com_config,
+        &login_cfg,
         agent_config.endpoints.alpha_test_key.clone(),
         Some(shared_auth_manager.clone()),
     )
@@ -846,7 +851,8 @@ pub async fn run_leader(
     }
     debug!("IPC socket created");
     let _lock = lock;
-    let ctx = &agent_config.grok_com_config;
+    let ctx_login = crate::agent::config::to_login_grok_com(&agent_config.grok_com_config);
+    let ctx = &ctx_login;
     suppress_otel();
     let auth: Option<GrokAuth> =
         xai_grok_login::try_noninteractive_auth_no_mint(ctx, agent_config.endpoints.proxy_url())
@@ -856,8 +862,10 @@ pub async fn run_leader(
             .create_auth_manager()
             .read_disk_auth()
             .is_some();
-    let session_pending =
-        crate::agent::otel_gate::is_session_pending(has_session, &agent_config.grok_com_config);
+    let session_pending = crate::agent::otel_gate::is_session_pending(
+        has_session,
+        &crate::agent::config::to_login_grok_com(&agent_config.grok_com_config),
+    );
     let policy_channel =
         crate::agent::otel_gate::policy_channel_for(&agent_config.endpoints.proxy_url());
     if crate::agent::otel_gate::should_open_at_startup(crate::agent::otel_gate::StartupGate {
@@ -1095,7 +1103,9 @@ pub async fn run_leader(
                     agent_to_ws_tx: agent_to_ws_tx.clone(),
                     cancel: cancel_clone.clone(),
                     slot: relay_handle_slot.clone(),
-                    grok_com_config: agent_config.grok_com_config.clone(),
+                    grok_com_config: crate::agent::config::to_login_grok_com(
+                        &agent_config.grok_com_config,
+                    ),
                     alpha_test_key: agent_config.endpoints.alpha_test_key.clone(),
                 });
             }

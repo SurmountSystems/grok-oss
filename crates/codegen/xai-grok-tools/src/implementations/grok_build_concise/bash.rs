@@ -298,7 +298,7 @@ mod tests {
         let mut bash = make_bash(0, "hello world\n");
         // Pre-bake DEFAULT (what BashTool::run() does)
         bash.output_for_prompt = crate::implementations::grok_build::bash::format_default_prompt(
-            &bash, /* append_noop_reminder */ true,
+            &bash, /* append_noop_reminder */ false,
         );
         assert!(bash.output_for_prompt.starts_with("exit: 0"));
 

@@ -16,11 +16,12 @@ use super::types::{
     ActiveAgentMessageOutcome, ActiveAgentMessageRequest, ActiveMessageSenderContext,
     HandedOffForegroundSubagent, SpawnedSubagentRef, SubagentActiveMessageRequest,
     SubagentCancelOutcome, SubagentCancelRequest, SubagentCancelTarget, SubagentDescribeOutcome,
-    SubagentDescribeRequest, SubagentEvent, SubagentEventSender, SubagentHandOffForegroundRequest,
-    SubagentInspectRequest, SubagentInspection, SubagentListRunningRequest, SubagentQueryRequest,
-    SubagentRegistryCounts, SubagentRegistryCountsRequest, SubagentRequest, SubagentResult,
-    SubagentSnapshot, SubagentSpawnRequest, SubagentSpawnedRefsRequest,
-    SubagentValidateTypeOutcome, SubagentValidateTypeRequest,
+    SubagentDescribeRequest, SubagentEvent, SubagentEventSender, SubagentFollowUpOutcome,
+    SubagentFollowUpRequest, SubagentHandOffForegroundRequest, SubagentInspectRequest,
+    SubagentInspection, SubagentListRunningRequest, SubagentQueryRequest, SubagentRegistryCounts,
+    SubagentRegistryCountsRequest, SubagentRequest, SubagentResult, SubagentSnapshot,
+    SubagentSpawnRequest, SubagentSpawnedRefsRequest, SubagentValidateTypeOutcome,
+    SubagentValidateTypeRequest,
 };
 use crate::register_resource;
 use xai_tool_runtime::ToolError;
@@ -38,6 +39,13 @@ pub trait SubagentBackend: Send + Sync + 'static {
         request: SubagentRequest,
         registered_tx: Option<oneshot::Sender<()>>,
     ) -> Result<SubagentResult, ToolError>;
+
+    /// Admit a spawn and return once it is pending, queued, or rejected.
+    /// Does not wait for the child to finish. Default forwards to [`Self::spawn`]
+    /// and drops the terminal result.
+    async fn spawn_registered(&self, request: SubagentRequest) -> Result<(), ToolError> {
+        self.spawn(request, None).await.map(|_| ())
+    }
 
     /// Query the current state of a subagent by ID. When `block` is true the backend waits (up to
     /// `timeout_ms`) for the subagent to reach a terminal state before responding.
@@ -502,19 +510,6 @@ impl Drop for CancelResultReceiverOnDrop {
     }
 }
 
-struct CancelResultReceiverOnDrop {
-    cancel_token: tokio_util::sync::CancellationToken,
-    armed: bool,
-}
-
-impl Drop for CancelResultReceiverOnDrop {
-    fn drop(&mut self) {
-        if self.armed {
-            self.cancel_token.cancel();
-        }
-    }
-}
-
 #[async_trait::async_trait]
 impl SubagentBackend for ChannelBackend {
     async fn spawn(
@@ -534,6 +529,7 @@ impl SubagentBackend for ChannelBackend {
                 request: Box::new(request),
                 result_tx: respond_to,
                 registered_tx,
+                admitted_tx: None,
             }))
             .map_err(|_| {
                 ToolError::custom(
@@ -574,6 +570,7 @@ impl SubagentBackend for ChannelBackend {
             .send(SubagentEvent::Spawn(SubagentSpawnRequest {
                 request: Box::new(request),
                 result_tx,
+                registered_tx: None,
                 admitted_tx: Some(admitted_tx),
             }))
             .map_err(|_| {

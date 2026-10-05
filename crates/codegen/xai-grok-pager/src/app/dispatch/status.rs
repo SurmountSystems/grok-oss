@@ -11,7 +11,7 @@ use crate::app::agent_view::AgentView;
 use crate::app::app_view::{ActiveView, AppView, PendingCodingDataWrite};
 use crate::notifications::{NotificationEvent, NotificationEventKind};
 use crate::scrollback::block::RenderBlock;
-use crate::settings::CodingDataSharingLock;
+use crate::settings::registry::CodingDataSharingLock;
 
 /// Temporary kill switch: client share links are disabled.
 pub(super) fn dispatch_share_session(app: &mut AppView) -> Vec<Effect> {
@@ -109,6 +109,7 @@ pub(super) fn open_usage_info_modal(
             agent_id: id,
             silent: true,
             nonce,
+            force_refresh: false,
         });
     }
     agent.active_modal = Some(ActiveModal::UsageInfo {
@@ -438,6 +439,7 @@ pub(super) fn append_consumer_billing_surface(app: &mut AppView, agent_id: Agent
         agent_id,
         silent: false,
         nonce: Default::default(),
+        force_refresh: false,
     }]
 }
 
@@ -489,6 +491,83 @@ pub(super) fn dispatch_show_tasks(app: &mut AppView) -> Vec<Effect> {
         agent.scrollback.push_block(RenderBlock::system(text));
     }
     vec![]
+}
+
+/// `/limits` opens the limits modal from the cached billing snapshot.
+pub(super) fn dispatch_show_limits(app: &mut AppView) -> Vec<Effect> {
+    let ActiveView::Agent(id) = app.active_view else {
+        return vec![];
+    };
+    let balance = app.credit_balance.clone();
+    let autotopup = app.auto_topup.clone();
+    let Some(agent) = app.agents.get_mut(&id) else {
+        return vec![];
+    };
+    let snap = crate::views::limits_snapshot::LimitsSnapshot::from_billing(
+        balance.as_ref(),
+        autotopup.as_ref(),
+        crate::views::credit_bar::SamplingIdentityKind::SuperGrokSession,
+    );
+    agent.active_modal = Some(crate::views::modal::ActiveModal::Limits {
+        state: Box::new(crate::views::limits_modal::LimitsModalState::new(snap)),
+    });
+    vec![]
+}
+
+/// `/limits --json` commits the limits JSON printout into scrollback.
+pub(super) fn dispatch_show_limits_json(app: &mut AppView) -> Vec<Effect> {
+    let ActiveView::Agent(id) = app.active_view else {
+        return vec![];
+    };
+    let (report, _) = crate::limits_cmd::build_limits_cli_from_parts(
+        crate::views::credit_bar::SamplingIdentityKind::SuperGrokSession,
+        None,
+        &[],
+        false,
+        app.console_team_prepaid_cents,
+        crate::views::credit_bar::ConsoleTeamPrepaidGap::MissingManagementKey,
+        Vec::new(),
+    );
+    let text = crate::limits_cmd::format_limits_json_pretty(&report)
+        .unwrap_or_else(|err| format!("limits json failed: {err}"));
+    if let Some(agent) = app.agents.get_mut(&id) {
+        agent.scrollback.push_block(RenderBlock::system(text));
+    }
+    vec![]
+}
+
+/// `/spend` commits the double-entry spend section into scrollback.
+pub(super) fn dispatch_show_spend(app: &mut AppView) -> Vec<Effect> {
+    let ActiveView::Agent(id) = app.active_view else {
+        return vec![];
+    };
+    let cfg = xai_grok_shell::token_economy::token_economy_from_disk();
+    let remote = xai_grok_shell::token_economy::RemoteBookSummary {
+        remote_unavailable: true,
+        ..Default::default()
+    };
+    let supergrok = xai_grok_shell::token_economy::SuperGrokPeriodContext::default();
+    let report = xai_grok_shell::token_economy::build_double_entry_report(&cfg, remote, supergrok);
+    let text = xai_grok_shell::token_economy::format_limits_spend_section(&report);
+    if let Some(agent) = app.agents.get_mut(&id) {
+        agent.scrollback.push_block(RenderBlock::system(text));
+    }
+    vec![]
+}
+
+/// `/clear-completed-todos` asks the shell to archive finished board rows.
+pub(super) fn dispatch_clear_completed_todos(app: &mut AppView) -> Vec<Effect> {
+    let ActiveView::Agent(id) = app.active_view else {
+        return vec![];
+    };
+    let Some(session_id) = app
+        .agents
+        .get(&id)
+        .and_then(|agent| agent.session.session_id.clone())
+    else {
+        return vec![];
+    };
+    vec![Effect::ClearCompletedTodos { session_id }]
 }
 
 /// Open the hidden `/gboom` easter egg as a modal over the active agent view.
@@ -606,8 +685,8 @@ pub(super) fn handle_coding_data_sharing_failed(
         %error,
         "ACP update failed",
     );
-    // Opt-in failure: no ack; clear inflight so the banner stays.
-    app.privacy_banner_opt_in_inflight = false;
+    // Opt-in failure: no ack. The banner stays up because ack is only
+    // written after a successful ACP round trip.
     vec![]
 }
 

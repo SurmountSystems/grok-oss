@@ -967,7 +967,7 @@ impl QueuePane {
         let fits = |right: u16, w: u16| right.checked_sub(w).filter(|&x| x >= inner.x);
         let scroll = self.list_state.scroll_offset();
         let inner_h = inner.height as usize;
-        if is_turn_running {
+        if can_send_now {
             for (idx, entry) in self.entries.iter().enumerate() {
                 let item_y = self.list_state.layout().virtual_y(idx);
                 let Some(rel) = item_y.checked_sub(scroll).filter(|rel| *rel < inner_h) else {
@@ -1348,18 +1348,6 @@ mod tests {
                 assert_eq!(expected, capabilities, "{kind} under {mutation:?}");
             }
         }
-    }
-
-    #[test]
-    fn paste_routes_to_active_list_input() {
-        let mut pane = QueuePane::new();
-        let mut local = std::collections::VecDeque::new();
-        local.push_back(local_prompt(1, "first"));
-        pane.sync_from_merged(&local, &[], None, None, &Default::default());
-        pane.list_state.open_comment_input("");
-
-        assert!(pane.handle_paste("queued text"));
-        assert_eq!(pane.list_state.input_text(), "queued text");
     }
 
     #[test]

@@ -3,8 +3,6 @@
 //! Keyboard navigation, mouse clicks, and action dispatch all open links through these helpers.
 
 use std::collections::HashMap;
-
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::terminal::hyperlinks::SchemeFilter;

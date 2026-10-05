@@ -328,7 +328,7 @@ pub struct LimitsHonestyInput {
     /// SuperGrok period debit (operator has not opted into allow-spend).
     pub turns_blocked_free_period_debit_unproven: bool,
     /// Billing Credits card status (GetAmountToPay remaining).
-    pub billing_credits_card: xai_grok_sampling_types::BillingCreditsCard,
+    pub billing_credits_card: super::limits_snapshot::BillingCreditsCard,
 }
 
 /// True when `text` carries the fail-open printout-vs-Usage contract.
@@ -379,13 +379,13 @@ pub fn honesty_notes_for_limits(input: LimitsHonestyInput) -> Vec<String> {
     // Always: license seat page is not a product meter (plain dogfood honesty).
     notes.push(NOTE_LICENSE_PAGE_IS_NOT_PRODUCT_METER.to_string());
     notes.push(match input.billing_credits_card {
-        xai_grok_sampling_types::BillingCreditsCard::Fetched => {
+        super::limits_snapshot::BillingCreditsCard::Fetched => {
             NOTE_BILLING_CREDITS_CARD_FETCHED.to_string()
         }
-        xai_grok_sampling_types::BillingCreditsCard::Error => {
+        super::limits_snapshot::BillingCreditsCard::Error => {
             NOTE_BILLING_CREDITS_CARD_FETCH_FAILED.to_string()
         }
-        xai_grok_sampling_types::BillingCreditsCard::NotFetched => {
+        super::limits_snapshot::BillingCreditsCard::NotFetched => {
             NOTE_BILLING_CREDITS_CARD_NOT_FETCHED.to_string()
         }
     });
@@ -848,12 +848,17 @@ mod tests {
     /// team prepaid or is not SuperGrok dollar credits.
     #[test]
     fn billing_credits_card_is_not_classified_without_named_json_field() {
-        use xai_grok_sampling_types::{BillingCreditsCard, current_billing_credits_usd};
+        use crate::views::limits_snapshot::BillingCreditsCard;
 
-        assert_eq!(
-            current_billing_credits_usd(Some(89.94), Some(47.03), None),
-            None
-        );
+        #[cfg(feature = "xai-grok-sampling-types")]
+        {
+            use xai_grok_sampling_types::current_billing_credits_usd;
+
+            assert_eq!(
+                current_billing_credits_usd(Some(89.94), Some(47.03), None),
+                None
+            );
+        }
         assert_eq!(BillingCreditsCard::NotFetched.as_wire(), "not_fetched");
 
         let notes = honesty_notes_for_limits(LimitsHonestyInput::default());
@@ -904,7 +909,7 @@ mod tests {
     /// must name prepaidCredits minus prepaidCreditsUsed and must not hop.
     #[test]
     fn billing_credits_card_fetched_note_names_remaining_and_does_not_hop() {
-        use xai_grok_sampling_types::BillingCreditsCard;
+        use crate::views::limits_snapshot::BillingCreditsCard;
 
         let notes = honesty_notes_for_limits(LimitsHonestyInput {
             billing_credits_card: BillingCreditsCard::Fetched,

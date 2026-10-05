@@ -191,7 +191,7 @@ pub fn read_auth_json_or_empty_recovering_corrupt(auth_file: &Path) -> std::io::
 /// Persist `auth.json`, preferring a crash-safe atomic write but falling back to a non-atomic in-place write when the disk is full. The atomic path (a temp file, then a rename) needs free space of at least the file size.
 /// The old file and the full temp copy coexist until the rename. When that happens we retry with an in-place truncate-and-rewrite, which only needs the blocks the old file freed.
 /// The in-place path is non-atomic, with two accepted trade-offs: A failed in-place write restores the prior bytes best-effort, so on-disk state ends up no worse than before the attempt.
-pub(super) fn write_auth_json(auth_file: &Path, auth_store: &AuthStore) -> std::io::Result<()> {
+pub fn write_auth_json(auth_file: &Path, auth_store: &AuthStore) -> std::io::Result<()> {
     write_auth_json_as(Distribution::current(), auth_file, auth_store)
 }
 

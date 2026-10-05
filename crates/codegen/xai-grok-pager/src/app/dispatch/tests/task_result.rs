@@ -1443,9 +1443,13 @@ fn switch_model_complete_same_model_effort_none_keeps_medium() {
     }
     let effects = dispatch(
         Action::TaskComplete(TaskResult::SwitchModelComplete {
+            choice: crate::app::actions::ModelChoice {
+                model_id: model_id.clone(),
+                effort: None,
+                context_window_selection: None,
+            },
+
             agent_id: id,
-            model_id: model_id.clone(),
-            effort: None,
             result: Ok(()),
             prev_model_id: None,
         }),
@@ -1867,6 +1871,7 @@ fn session_success_arms_finish_startup_obligation() {
             restore_summary: None,
             restore_degree: None,
             running_prompt_id: None,
+            scheduler_background_loops: None,
         },
         TaskResult::WorktreeSessionCreated {
             agent_id: id,
@@ -1887,62 +1892,6 @@ fn session_success_arms_finish_startup_obligation() {
             restore_degree: None,
             resume_session_id: None,
             strategy_summary: None,
-        },
-    ];
-
-    for result in results {
-        let mut app = test_app_with_agent();
-        app.agents.get_mut(&id).unwrap().session.session_id = None;
-        app.pending_startup = Some(xai_grok_telemetry::startup::PendingStartup::new());
-        let label = format!("{result:?}");
-
-        dispatch(Action::TaskComplete(result), &mut app);
-
-        assert!(
-            app.pending_startup.is_none(),
-            "a usable session must take the startup obligation: {label}",
-        );
-    }
-}
-
-#[test]
-fn session_success_arms_finish_startup_obligation() {
-    xai_grok_telemetry::unified_log::redirect_to_temp_for_tests();
-    let id = AgentId(0);
-    let results = [
-        TaskResult::SessionCreated {
-            agent_id: id,
-            session_id: "new-session".into(),
-            models: None,
-            scheduler_background_loops: None,
-        },
-        TaskResult::SessionLoaded {
-            agent_id: id,
-            session_id: "resumed-session".into(),
-            models: None,
-            code_restored: false,
-            restore_summary: None,
-            restore_degree: None,
-            running_prompt_id: None,
-            scheduler_background_loops: None,
-        },
-        TaskResult::WorktreeSessionCreated {
-            agent_id: id,
-            session_id: "worktree-session".into(),
-            worktree_path: std::path::PathBuf::from("/tmp/wt"),
-            session_cwd: std::path::PathBuf::from("/tmp/wt"),
-            models: None,
-            scheduler_background_loops: None,
-        },
-        TaskResult::WorktreeForked {
-            agent_id: id,
-            session_id: "forked-session".into(),
-            worktree_path: std::path::PathBuf::from("/tmp/wt"),
-            session_cwd: std::path::PathBuf::from("/tmp/wt"),
-            code_restored: false,
-            restore_summary: None,
-            restore_degree: None,
-            resume_session_id: None,
         },
     ];
 

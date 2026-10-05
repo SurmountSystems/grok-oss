@@ -498,9 +498,12 @@ impl ChatStateHandle {
     }
 
     /// Fail-closed prompt bill read.
-    /// `Ok(None)` means the actor answered "no ledger"; `Err(())` means it did not answer.
+    /// `Ok(None)` means the actor answered "no ledger".
+    /// [`Err`](ChatStateActorUnreachable) means the actor did not answer.
     /// Never collapse `Err` to `None`: an unreadable bill must not be mistaken for a free prompt.
-    pub async fn try_get_prompt_usage(&self) -> Result<Option<crate::usage::UsageLedger>, ()> {
+    pub async fn try_get_prompt_usage(
+        &self,
+    ) -> Result<Option<crate::usage::UsageLedger>, ChatStateActorUnreachable> {
         self.query("GetPromptUsage", |reply| ChatStateCommand::GetPromptUsage {
             reply,
         })

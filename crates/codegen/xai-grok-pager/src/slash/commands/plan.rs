@@ -3,8 +3,10 @@
 //!
 //! Use `/view-plan` to open the current saved plan preview.
 
-use crate::app::actions::{Action, PlanModeKind};
+use crate::app::actions::{Action, Effect, PlanModeKind};
+use crate::app::agent_view::AgentView;
 use crate::slash::command::{CommandExecCtx, CommandResult, SlashCommand, slash_meta};
+use crate::slash::queue_schedule::{plan_command_text, queue_later_command, split_schedule_token};
 
 pub struct PlanCommand;
 
@@ -161,14 +163,19 @@ impl AgentView {
             if info.finished {
                 continue;
             }
-            if info.pending_kill {
+            if info.attempt.pending_kill {
                 continue;
             }
-            info.pending_kill = true;
-            info.kill_requested_at = Some(std::time::Instant::now());
+            info.attempt.pending_kill = true;
+            info.attempt.kill_requested_at = Some(std::time::Instant::now());
             effects.push(Effect::KillSubagent {
                 session_id: session_id.clone(),
                 subagent_id: info.subagent_id.to_string(),
+                attempt_id: info
+                    .attempt
+                    .lifecycle
+                    .current_attempt_id()
+                    .map(str::to_owned),
             });
         }
         effects
@@ -332,6 +339,25 @@ impl AgentView {
             let _ = std::fs::create_dir_all(parent);
         }
         let _ = std::fs::write(path, body);
+    }
+
+    fn session_plan_body_from_identity(&self, plan_identity: &str) -> Option<String> {
+        let sid = self.session.session_id.as_ref().map(|s| s.0.to_string())?;
+        let cfg = xai_grok_shell::token_economy::token_economy_from_disk();
+        let from_store = xai_grok_shell::grok_oss::try_open_from_token_economy_config(&cfg)
+            .and_then(|store| {
+                store
+                    .load_session_plan_body(&sid, plan_identity)
+                    .ok()
+                    .flatten()
+            });
+        if from_store.is_some() {
+            return from_store;
+        }
+        let path = self.session_plan_markdown_path(plan_identity)?;
+        std::fs::read_to_string(path)
+            .ok()
+            .filter(|body| !body.trim().is_empty())
     }
 }
 

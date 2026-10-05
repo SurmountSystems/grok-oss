@@ -332,9 +332,6 @@ impl WriterThread {
             sync,
         }
     }
-    pub fn writer_sync(&self) -> &WriterSync {
-        &self.sync
-    }
 }
 impl Drop for WriterThread {
     fn drop(&mut self) {

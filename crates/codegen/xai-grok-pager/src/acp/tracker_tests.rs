@@ -3161,6 +3161,7 @@ fn activity_known_blocking_wait_outranks_retry() {
         attempt: 1,
         max_retries: 3,
         reason: "reconnecting".into(),
+        error_type: None,
     }));
     assert_eq!(
         tracker.activity(),
@@ -5574,6 +5575,17 @@ fn hook_gate_survives_a_text_chunk_stamped_before_the_batch() {
         tracker.activity(),
         Some(TurnActivity::Waiting(WaitingReason::Hooks { .. }))
     ));
+}
+
+fn thinking_count(sb: &ScrollbackState) -> usize {
+    (0..sb.len())
+        .filter(|&i| {
+            matches!(
+                sb.get(i).map(|entry| &entry.block),
+                Some(RenderBlock::Thinking(_))
+            )
+        })
+        .count()
 }
 
 /// Operator contract: grok-oss stopped responding after a cancelled turn,

@@ -28,6 +28,47 @@ pub(super) fn failed_hook_line(
         format!("{subject} failed, ignored: {error}")
     })
 }
+
+fn stop_hook_runs(
+    runs: &[xai_grok_shell::extensions::notification::HookRunEntryDto],
+) -> Vec<crate::scrollback::blocks::tool::HookRunEntry> {
+    use xai_grok_shell::extensions::notification::HookRunStatusDto;
+    runs.iter()
+        .map(|run| {
+            let status = match &run.status {
+                HookRunStatusDto::Success { elapsed_ms } => {
+                    crate::scrollback::blocks::tool::HookRunStatus::Success {
+                        elapsed: std::time::Duration::from_millis(*elapsed_ms),
+                    }
+                }
+                HookRunStatusDto::Skipped => {
+                    crate::scrollback::blocks::tool::HookRunStatus::Skipped
+                }
+                HookRunStatusDto::Failed {
+                    error,
+                    elapsed_ms,
+                    blocked: true,
+                } => crate::scrollback::blocks::tool::HookRunStatus::Blocked {
+                    detail: error.clone(),
+                    elapsed: std::time::Duration::from_millis(*elapsed_ms),
+                },
+                HookRunStatusDto::Failed {
+                    error,
+                    elapsed_ms,
+                    blocked: false,
+                } => crate::scrollback::blocks::tool::HookRunStatus::Failed {
+                    error: error.clone(),
+                    elapsed: std::time::Duration::from_millis(*elapsed_ms),
+                },
+            };
+            crate::scrollback::blocks::tool::HookRunEntry {
+                name: run.name.clone(),
+                status,
+                output: run.output.clone(),
+            }
+        })
+        .collect()
+}
 /// A batch stamped with another turn's prompt id: a late `stop_cancelled` / `stop_failure` report can land after the next
 /// queued prompt started and must not touch its phase. Unstamped batches always belong to the running turn.
 fn is_foreign_hook_batch(agent: &AgentView, batch_prompt_id: Option<&str>) -> bool {
@@ -244,6 +285,7 @@ pub(super) fn handle_session_notification_with_origin(
                 &child_sid,
                 agent,
                 is_api_key_auth,
+                session_notif.meta.as_ref(),
             );
             (changed, std::mem::take(&mut agent.pending_effects))
         };
@@ -707,6 +749,7 @@ pub(super) fn handle_session_notification_with_origin(
                     compact_held_prompt: None,
                     current_prompt_id: None,
                     created_via_new: false,
+                    session_notes: crate::app::agent::SessionNotes::default(),
                 };
                 let mut child_scrollback = crate::scrollback::state::ScrollbackState::new();
                 child_scrollback.set_appearance(agent.scrollback.appearance().clone());
@@ -968,8 +1011,7 @@ pub(super) fn handle_session_notification_with_origin(
             // finishes and the parent is idle, drop that kept marker so a later
             // idle `/rebuild` / reopen does not re-fire the completed parent
             // prompt.
-            if !resuming && agent.session.state.is_idle() && !agent.has_live_background_subagents()
-            {
+            if !resuming && agent.session.state.is_idle() && !has_live_background_subagents(agent) {
                 if let Some(sid) = agent.session.session_id.as_ref().map(|s| s.0.to_string()) {
                     let cwd = agent.session.cwd.to_string_lossy().into_owned();
                     let _ =
@@ -982,13 +1024,6 @@ pub(super) fn handle_session_notification_with_origin(
                     );
                 }
             }
-            // If anything is still local-pending while idle (e.g. other gates
-            // had blocked drain), try again after the last child finishes.
-            // Background children alone no longer hold the queue.
-            try_drain_after_subagent_finish = !resuming
-                && agent.session.state.is_idle()
-                && !agent.session.pending_prompts.is_empty()
-                && !agent.has_live_background_subagents();
             true
         }
         XaiSessionUpdate::HookAnnotation { message, kind } => {
@@ -1044,6 +1079,17 @@ pub(super) fn handle_session_notification_with_origin(
                 agent.scrollback.push_block(RenderBlock::session_event(
                     SessionEvent::HookOutcome { message: line },
                 ));
+                redraw = true;
+            }
+            if event_name.eq_ignore_ascii_case("stop")
+                && !is_foreign_hook_batch(agent, prompt_id.as_deref())
+            {
+                let pending = agent
+                    .pending_stop_hooks
+                    .get_or_insert_with(crate::app::agent_view::PendingStopHooks::default);
+                pending
+                    .groups
+                    .push((event_name.clone(), stop_hook_runs(&runs)));
                 redraw = true;
             }
             redraw
@@ -1614,15 +1660,19 @@ pub(super) fn handle_child_session_notification(
             if !row_live {
                 return false;
             }
-            if !child_view
+            let label_changed = child_view
                 .session
                 .tracker
-                .note_tool_call_arguments_delta(name.as_deref(), tool_index)
-            {
+                .note_tool_call_arguments_delta(name.as_deref(), tool_index);
+            let capped = child_view.session.tracker.has_capped_tool_call_write();
+            if !label_changed && !capped {
                 return false;
             }
             let activity_label = subagent_activity_label(child_view);
             sync_subagent_activity(agent, child_sid, activity_label);
+            if let Some(effect) = queue_kill_if_nested_write_capped(agent, child_sid) {
+                agent.pending_effects.push(effect);
+            }
             true
         }
         XaiSessionUpdate::TurnCompleted {
@@ -1671,47 +1721,110 @@ pub(super) fn handle_child_session_notification(
             }
             finished
         }
-        XaiSessionUpdate::TurnCompleted { .. } => {
-            crate::app::subagent::finish_nested_child_session_turn(agent, child_sid)
-        }
         XaiSessionUpdate::SubagentSpawned { .. }
         | XaiSessionUpdate::SubagentProgress { .. }
         | XaiSessionUpdate::SubagentFinished { .. } => apply_nested_subagent_update(agent, update),
-        XaiSessionUpdate::ToolCallDeltaChunk {
-            ref name,
-            tool_index,
-            ..
-        } => {
-            let Some(child_view) = agent.subagent_views.get_mut(child_sid) else {
-                return false;
-            };
-            if child_view.session.loading_replay {
-                return false;
-            }
-            let row_live = agent
-                .subagent_sessions
-                .get(child_sid)
-                .is_some_and(|info| info.is_running());
-            if !row_live {
-                return false;
-            }
-            let label_changed = child_view
-                .session
-                .tracker
-                .note_tool_call_arguments_delta(name.as_deref(), tool_index);
-            let capped = child_view.session.tracker.has_capped_tool_call_write();
-            if !label_changed && !capped {
-                return false;
-            }
-            let activity_label = subagent_activity_label(child_view);
-            sync_subagent_activity(agent, child_sid, activity_label);
-            if let Some(effect) = queue_kill_if_nested_write_capped(agent, child_sid) {
-                agent.pending_effects.push(effect);
-            }
-            true
-        }
         _ => false,
     }
+}
+
+fn has_live_background_subagents(agent: &AgentView) -> bool {
+    agent
+        .subagent_sessions
+        .values()
+        .any(|info| info.attempt.is_background && info.is_running())
+}
+
+/// A nested write that has run past the stream cap is killed once.
+fn queue_kill_if_nested_write_capped(
+    agent: &mut AgentView,
+    child_sid: &str,
+) -> Option<crate::app::actions::Effect> {
+    let capped = agent
+        .subagent_views
+        .get(child_sid)
+        .is_some_and(|view| view.session.tracker.has_capped_tool_call_write());
+    if !capped {
+        return None;
+    }
+    let (subagent_id, attempt_id) = {
+        let info = agent.subagent_sessions.get_mut(child_sid)?;
+        if info.attempt.pending_kill || info.is_finished() {
+            return None;
+        }
+        info.attempt.pending_kill = true;
+        info.attempt.kill_requested_at = Some(std::time::Instant::now());
+        (
+            info.subagent_id.to_string(),
+            info.attempt
+                .lifecycle
+                .current_attempt_id()
+                .map(str::to_owned),
+        )
+    };
+    let session_id = agent.session.session_id.clone()?;
+    Some(crate::app::actions::Effect::KillSubagent {
+        session_id,
+        subagent_id,
+        attempt_id,
+    })
+}
+
+/// Open a child view when a nested spawn has a registry row and no view yet.
+fn ensure_subagent_child_view(agent: &mut AgentView, child_sid: &str) {
+    if agent.subagent_views.contains_key(child_sid) {
+        return;
+    }
+    let parent_session_id = agent
+        .session
+        .session_id
+        .clone()
+        .unwrap_or_else(|| acp::SessionId::new(""));
+    let tracker = AcpUpdateTracker::sharing_labels(&agent.session.tracker.subagent_labels);
+    let child_session = AgentSession {
+        id: AgentId(0),
+        acp_tx: agent.session.acp_tx.clone(),
+        session_id: Some(acp::SessionId::new(child_sid.to_string())),
+        models: agent.session.models.clone(),
+        state: AgentState::TurnRunning,
+        tracker,
+        cwd: agent.session.cwd.clone(),
+        is_worktree: agent.session.is_worktree,
+        forked_from: None,
+        pending_prompts: std::collections::VecDeque::new(),
+        next_queue_id: 0,
+        yolo_mode: true,
+        auto_mode: false,
+        prompt_history: Vec::new(),
+        prompt_history_loading: false,
+        loading_replay: false,
+        restore_degree: None,
+        rate_limited: false,
+        model_incompatible: false,
+        credit_limit_blocked: false,
+        free_usage_blocked: false,
+        available_commands: Vec::new(),
+        available_commands_generation: 0,
+        available_tools: None,
+        model_switch_pending: false,
+        hook_block_hold: false,
+        blocked_prompt: None,
+        user_model_preference: None,
+        deferred_model_switch: None,
+        bg_tasks: std::collections::BTreeMap::new(),
+        bg_tool_call_to_task: std::collections::HashMap::new(),
+        scheduled_tasks: std::collections::HashMap::new(),
+        in_flight_prompt: None,
+        compact_held_prompt: None,
+        current_prompt_id: None,
+        created_via_new: false,
+        session_notes: crate::app::agent::SessionNotes::default(),
+    };
+    let mut child_scrollback = crate::scrollback::state::ScrollbackState::new();
+    child_scrollback.set_appearance(agent.scrollback.appearance().clone());
+    let child_view = AgentView::new(child_session, child_scrollback);
+    let link = crate::app::agent_view::ChildLink::unaddressable(parent_session_id);
+    agent.insert_subagent_view(child_sid.to_string(), Box::new(child_view), link);
 }
 
 /// Register L3 spawn/progress/finish on the L1 registry without L1 scrollback.
@@ -1809,7 +1922,7 @@ fn apply_nested_subagent_update(agent: &mut AgentView, update: XaiSessionUpdate)
                 &child_session_id,
                 &description,
             );
-            agent.ensure_subagent_child_view(&child_session_id);
+            ensure_subagent_child_view(agent, &child_session_id);
             true
         }
         XaiSessionUpdate::SubagentProgress {
@@ -1971,13 +2084,13 @@ fn apply_compaction_or_retry_update(
         }
         XaiSessionUpdate::AutoCompactCompleted { .. }
         | XaiSessionUpdate::AutoCompactFailed { .. }
-        | XaiSessionUpdate::AutoCompactCancelled { .. } => {
-            if agent.session.state.is_switch_model_compact() {
-                agent.session.finish_command();
-                agent.mark_turn_finished(TurnEnd::Completed);
-                agent.activity_started_at = None;
-                agent.last_activity = None;
-            }
+        | XaiSessionUpdate::AutoCompactCancelled { .. }
+            if agent.session.state.is_switch_model_compact() =>
+        {
+            agent.session.finish_command();
+            agent.mark_turn_finished(TurnEnd::Completed);
+            agent.activity_started_at = None;
+            agent.last_activity = None;
         }
         _ => {}
     }
@@ -2037,6 +2150,7 @@ pub(super) fn apply_session_event(
             threshold_percent,
             threshold_tokens,
             reason,
+            context_window,
             ..
         } => {
             tracing::info!(
@@ -2053,6 +2167,10 @@ pub(super) fn apply_session_event(
                     threshold_percent: *threshold_percent,
                     threshold_tokens: *threshold_tokens,
                     reason: reason.clone(),
+                    // The shell sends the window the percentage was measured
+                    // against. It does not send a separate catalog window.
+                    sampling_window: (*context_window > 0).then_some(*context_window),
+                    catalog_window: None,
                 },
             ));
             true
@@ -2077,7 +2195,12 @@ pub(super) fn apply_session_event(
                     },
                 ));
             } else if !manual_compact_in_flight(session) {
-                session.defer_compaction(*tokens_before, *tokens_after, *elapsed_ms);
+                session.defer_compaction(
+                    *tokens_before,
+                    *tokens_after,
+                    *elapsed_ms,
+                    *saved_too_little,
+                );
             }
             true
         }
@@ -2258,6 +2381,7 @@ pub(super) fn apply_retry_state_with_nested(
                     attempt,
                     max_retries,
                     reason: "waiting for first token".into(),
+                    error_type: None,
                 }));
             }
             _ => {

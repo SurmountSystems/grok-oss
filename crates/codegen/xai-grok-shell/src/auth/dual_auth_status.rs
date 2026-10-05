@@ -73,7 +73,10 @@ impl DualAuthStatus {
                 (false, _) => out.push_str("  SuperGrok session: no (run `grok login`)\n"),
             }
         } else if self.supergrok_principals.len() == 1 {
-            let p = &self.supergrok_principals[0];
+            let p = self
+                .supergrok_principals
+                .first()
+                .expect("index out of bounds");
             out.push_str(&format!(
                 "  SuperGrok session: yes ({role}, {mode})\n    fingerprint {fp}\n",
                 role = p.role_label,

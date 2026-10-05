@@ -734,10 +734,8 @@ async fn teardown_settlement_during_barrier_skips_persist_and_push() {
                             persisted_flag.store(true, std::sync::atomic::Ordering::SeqCst);
                         }
                     }
-                    PersistenceMsg::Chat(item) => {
-                        if item.text_content() == "parent update" {
-                            persisted_flag.store(true, std::sync::atomic::Ordering::SeqCst);
-                        }
+                    PersistenceMsg::Chat(item) if item.text_content() == "parent update" => {
+                        persisted_flag.store(true, std::sync::atomic::Ordering::SeqCst);
                     }
                     _ => {}
                 }

@@ -51,6 +51,233 @@ fn sanitize_tool_arguments(id: &str, name: &str, arguments: Arc<str>) -> Arc<str
     }
 }
 
+/// Parent-ingest cap for spawn tool-call `prompt` bodies.
+pub const SPAWN_PROMPT_PARENT_INGEST_BYTES: usize = 40_000;
+
+fn is_spawn_tool_name(name: &str) -> bool {
+    matches!(name, "task" | "Task" | "spawn_subagent")
+}
+
+/// Replace a huge spawn `prompt` with a short parent pointer.
+///
+/// Returns `Some` rewritten arguments when the prompt (or unparsed body)
+/// exceeded [`SPAWN_PROMPT_PARENT_INGEST_BYTES`]. The spawned session still
+/// receives the original prompt from the live tool call used to execute spawn.
+pub fn fold_spawn_prompt_arguments(name: &str, arguments: &str) -> Option<String> {
+    if !is_spawn_tool_name(name) {
+        return None;
+    }
+    if arguments.len() <= SPAWN_PROMPT_PARENT_INGEST_BYTES {
+        return None;
+    }
+    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(arguments) else {
+        return Some(pointer_arguments(
+            arguments.len(),
+            "",
+            first_report_path(arguments),
+        ));
+    };
+    let obj = value.as_object_mut()?;
+    let prompt = obj.get("prompt").and_then(|p| p.as_str()).unwrap_or("");
+    if prompt.len() <= SPAWN_PROMPT_PARENT_INGEST_BYTES {
+        return None;
+    }
+    let description = obj
+        .get("description")
+        .and_then(|d| d.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let report = first_report_path(prompt);
+    obj.insert(
+        "prompt".into(),
+        serde_json::Value::String(spawn_prompt_parent_pointer(
+            prompt.len(),
+            &description,
+            report,
+        )),
+    );
+    Some(value.to_string())
+}
+
+/// Estimated tokens (bytes/4) omitted when folding spawn prompts on one item.
+pub fn fold_spawn_prompts_on_conversation_item(item: &mut ConversationItem) -> u64 {
+    let ConversationItem::Assistant(assistant) = item else {
+        return 0;
+    };
+    let mut omitted = 0_u64;
+    for call in &mut assistant.tool_calls {
+        let Some(folded) = fold_spawn_prompt_arguments(&call.name, &call.arguments) else {
+            continue;
+        };
+        omitted += (call.arguments.len().saturating_sub(folded.len()) as u64) / 4;
+        call.arguments = Arc::<str>::from(folded);
+    }
+    omitted
+}
+
+/// Fold spawn prompts on every assistant item. Returns omitted token estimate.
+pub fn fold_spawn_prompts_in_conversation(items: &mut [ConversationItem]) -> u64 {
+    items
+        .iter_mut()
+        .map(fold_spawn_prompts_on_conversation_item)
+        .sum()
+}
+
+/// Parent-ingest cap for ToolResult bodies and auto-wake task-completion user text.
+pub const TOOL_RESULT_PARENT_INGEST_BYTES: usize = 40_000;
+
+/// Replace a huge ToolResult body with a head/tail pointer.
+///
+/// Returns `Some` rewritten text when `content` exceeded
+/// [`TOOL_RESULT_PARENT_INGEST_BYTES`].
+pub fn fold_tool_result_text(content: &str) -> Option<String> {
+    if content.len() <= TOOL_RESULT_PARENT_INGEST_BYTES {
+        return None;
+    }
+    Some(tool_result_ingest_pointer(content))
+}
+
+/// Fold a ToolResult item in place. Returns omitted token estimate (bytes/4).
+pub fn fold_tool_result_on_conversation_item(item: &mut ConversationItem) -> u64 {
+    let ConversationItem::ToolResult(tr) = item else {
+        return 0;
+    };
+    let Some(folded) = fold_tool_result_text(tr.content.as_ref()) else {
+        return 0;
+    };
+    let omitted = (tr.content.len().saturating_sub(folded.len()) as u64) / 4;
+    tr.content = Arc::<str>::from(folded);
+    omitted
+}
+
+/// Fold auto-wake TaskCompleted / SubagentCompleted user text in place.
+pub fn fold_task_completion_user_on_conversation_item(item: &mut ConversationItem) -> u64 {
+    let ConversationItem::User(user) = item else {
+        return 0;
+    };
+    if !matches!(
+        user.synthetic_reason,
+        SyntheticReason::TaskCompleted | SyntheticReason::SubagentCompleted
+    ) {
+        return 0;
+    }
+    let mut omitted = 0_u64;
+    for part in &mut user.content {
+        let ContentPart::Text { text } = part else {
+            continue;
+        };
+        let Some(folded) = fold_tool_result_text(text.as_ref()) else {
+            continue;
+        };
+        omitted += (text.len().saturating_sub(folded.len()) as u64) / 4;
+        *text = Arc::<str>::from(folded);
+    }
+    omitted
+}
+
+/// Fold ToolResult bodies and auto-wake task-completion user text.
+/// Returns omitted token estimate (bytes/4).
+pub fn fold_tool_results_in_conversation(items: &mut [ConversationItem]) -> u64 {
+    items
+        .iter_mut()
+        .map(|item| {
+            fold_tool_result_on_conversation_item(item)
+                + fold_task_completion_user_on_conversation_item(item)
+        })
+        .sum()
+}
+
+fn tool_result_ingest_pointer(content: &str) -> String {
+    const HEAD: usize = 8_000;
+    const TAIL: usize = 8_000;
+    let head = truncate_bytes(content, HEAD);
+    let tail = utf8_suffix(content, TAIL);
+    let mut out = String::with_capacity(head.len() + tail.len() + 320);
+    out.push_str(head);
+    out.push_str("\n\n[truncated: ");
+    out.push_str(&content.len().to_string());
+    out.push_str(" bytes of shell/nix tool output were not ingested into sampling. ");
+    if let Some(path) = tool_result_log_path(content) {
+        out.push_str("Full log path: ");
+        out.push_str(path);
+        out.push_str(". ");
+    }
+    out.push_str("Use read_file on the log path if you need more.]\n\n");
+    out.push_str(tail);
+    out
+}
+
+fn utf8_suffix(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut start = s.len().saturating_sub(max_bytes);
+    while start < s.len() && !s.is_char_boundary(start) {
+        start += 1;
+    }
+    s.get(start..).unwrap_or("")
+}
+
+fn tool_result_log_path(content: &str) -> Option<&str> {
+    for needle in ["full output at: ", "Full log path: ", "output_file: "] {
+        let Some(idx) = content.find(needle) else {
+            continue;
+        };
+        let rest = content
+            .get(idx.saturating_add(needle.len())..)?
+            .trim_start();
+        let end = rest
+            .find(|c: char| c.is_whitespace() || matches!(c, ']' | ')' | '"' | '\''))
+            .unwrap_or(rest.len());
+        let path = rest.get(..end)?.trim_end_matches(['.', ',', ';']);
+        if path.starts_with('/') || path.contains(".log") {
+            return Some(path);
+        }
+    }
+    None
+}
+
+fn spawn_prompt_parent_pointer(
+    prompt_chars: usize,
+    description: &str,
+    report: Option<&str>,
+) -> String {
+    let mut pointer = format!("spawned L2 with {prompt_chars}-char prompt");
+    if !description.is_empty() {
+        pointer.push_str("; description: ");
+        pointer.push_str(description);
+    }
+    pointer.push_str("; report path if any: ");
+    pointer.push_str(report.unwrap_or("none"));
+    pointer
+}
+
+fn pointer_arguments(prompt_chars: usize, description: &str, report: Option<&str>) -> String {
+    serde_json::json!({
+        "prompt": spawn_prompt_parent_pointer(prompt_chars, description, report),
+    })
+    .to_string()
+}
+
+fn first_report_path(text: &str) -> Option<&str> {
+    const NEEDLE: &str = ".agents/reports/";
+    let idx = text.find(NEEDLE)?;
+    let before = text.get(..idx).unwrap_or("");
+    let start = before
+        .rfind(|c: char| c.is_whitespace() || c == '"' || c == '\'' || c == '`')
+        .map(|i| i + 1)
+        .unwrap_or(0);
+    let rest = text.get(start..)?;
+    let end = rest
+        .find(|c: char| {
+            c.is_whitespace() || matches!(c, '"' | '\'' | '`' | ')' | ']' | '>' | ',' | ';')
+        })
+        .unwrap_or(rest.len());
+    let path = rest.get(..end)?.trim_end_matches('.');
+    path.contains(NEEDLE).then_some(path)
+}
+
 use serde::{Deserialize, Serialize};
 
 use crate::rs;

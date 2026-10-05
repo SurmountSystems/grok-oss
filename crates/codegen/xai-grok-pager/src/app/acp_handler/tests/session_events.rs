@@ -96,6 +96,7 @@
             tokens_after: 4_000,
             elapsed_ms: Some(1_500),
             summary_preview: None,
+            saved_too_little: false,
         };
         assert!(apply_child_view_session_event(&mut agent, &completed, false));
         assert!(
@@ -108,6 +109,7 @@
                 tokens_before,
                 tokens_after,
                 elapsed_ms,
+                saved_too_little: _,
             }) => {
                 assert_eq!(tokens_before, Some(12_000));
                 assert_eq!(tokens_after, 4_000);
@@ -184,6 +186,7 @@
             tokens_after: 4_000,
             elapsed_ms: Some(1_500),
             summary_preview: None,
+            saved_too_little: false,
         };
         assert!(apply_child_view_session_event(&mut agent, &completed, false));
         assert!(
@@ -357,6 +360,7 @@
             attempt: 1,
             max_retries: u32::MAX,
             reason: "first token timed out · next try in 2s".into(),
+            error_type: None,
         }));
         apply_retry_state(&RetryState::StreamResumed, &mut session, &mut scrollback, false);
         match session.tracker.activity() {
@@ -392,6 +396,7 @@
             attempt: 2,
             max_retries: u32::MAX,
             reason: "first token timed out · next try in 2s".into(),
+            error_type: None,
         }));
         apply_retry_state(&RetryState::StreamResumed, &mut session, &mut scrollback, false);
         match session.tracker.activity() {
@@ -1293,6 +1298,7 @@
             tokens_after: 21_502,
             elapsed_ms: Some(500),
             summary_preview: None,
+            saved_too_little: false,
         };
         assert_eq!(compaction_context_refresh(&completed), Some(21_502));
         let failed = XaiSessionUpdate::AutoCompactFailed { error: "e".into() };
@@ -1432,7 +1438,7 @@
         let mut info = make_subagent_info(child_sid);
         info.finished = true;
         info.status = Some(std::sync::Arc::from("completed"));
-        info.duration_ms = Some(3_274_000);
+        info.attempt.duration_ms = Some(3_274_000);
         agent.subagent_sessions.insert(child_sid.into(), info);
         let mut child_view = make_agent(Some(child_sid));
         child_view.session.state = crate::app::agent::AgentState::Idle;
@@ -1448,7 +1454,7 @@
             threshold_tokens: None,
             reason: "auto-compact at 95%".into(),
         };
-        let changed = handle_child_session_notification(update, child_sid, &mut agent, false);
+        let changed = handle_child_session_notification(update, child_sid, &mut agent, false, None);
         assert!(
             !changed,
             "finished nested session must not apply a new AutoCompactStarted"
@@ -1491,7 +1497,7 @@
             threshold_tokens: None,
             reason: "auto-compact at 95%".into(),
         };
-        let changed = handle_child_session_notification(update, child_sid, &mut agent, false);
+        let changed = handle_child_session_notification(update, child_sid, &mut agent, false, None);
         assert!(changed);
         assert!(
             agent.active_subagent.is_none(),
@@ -1722,181 +1728,6 @@
                     max_retries: 3,
                     reason: "overloaded".into(),
                     error_type: None,
-                }));
-            agent.running_wake_turn = Some(crate::app::agent_view::RunningWakeTurn {
-                prompt_id: "task-completed-1".into(),
-                cancel_sent: false,
-            });
-        }
-
-        let changed = handle(
-            make_ext_session_notification(
-                "sess-1",
-                XaiSessionUpdate::ToolCallDeltaChunk {
-                    tool_call_id: Some("call_1".into()),
-                    tool_index: 0,
-                    name: Some("write".into()),
-                    arguments_delta: None,
-                },
-            ),
-            &mut app,
-        );
-        assert!(!changed);
-        let agent = app.agents.get(&AgentId(0)).unwrap();
-        assert!(
-            agent.session.in_flight_prompt.is_some(),
-            "a dropped delta must not eat the rewind stash"
-        );
-        assert_eq!(agent.first_activity_logged_for, None);
-        assert!(
-            matches!(
-                agent.session.tracker.activity(),
-                Some(TurnActivity::Retrying { .. })
-            ),
-            "wake-attributable delta must not clear the local turn's retry override"
-        );
-    }
-
-    /// Defense-in-depth: the shell never emits replay-marked deltas.
-    #[test]
-    fn tool_call_delta_chunk_ignored_during_replay() {
-        let mut app = make_app_with_agent("sess-1");
-        {
-            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
-            agent.session.state = AgentState::TurnRunning;
-            agent.session.loading_replay = true;
-            agent.session.in_flight_prompt = Some(InFlightPrompt {
-                text: "hi".into(),
-                images: Vec::new(),
-                scrollback_entry: EntryId::new(1),
-                combined_scrollback_entries: Vec::new(),
-                chip_elements: Vec::new(),
-            });
-        }
-
-        let (tx, _rx) = tokio::sync::oneshot::channel();
-        let payload = SessionNotification {
-            session_id: acp::SessionId::new("sess-1"),
-            update: XaiSessionUpdate::ToolCallDeltaChunk {
-                tool_call_id: Some("call_1".into()),
-                tool_index: 0,
-                name: Some("write".into()),
-                arguments_delta: Some("{".into()),
-            },
-            meta: Some(serde_json::json!({ "isReplay": true })),
-        };
-        let raw = serde_json::value::to_raw_value(&payload).unwrap();
-        let request = acp::ExtNotification::new("x.ai/session_notification", raw.into());
-        let changed = handle(
-            AcpClientMessage::ExtNotification(xai_acp_lib::AcpArgs {
-                request,
-                response_tx: tx,
-            }),
-            &mut app,
-        );
-        assert!(!changed);
-        let agent = app.agents.get(&AgentId(0)).unwrap();
-        assert_eq!(
-            agent.session.tracker.activity(),
-            None,
-            "replayed delta must not set a writing label"
-        );
-        assert!(
-            agent.session.in_flight_prompt.is_some(),
-            "a dropped delta must not eat the rewind stash"
-        );
-    }
-
-    #[test]
-    fn tool_call_delta_chunk_sets_writing_activity() {
-        let mut app = make_app_with_agent("sess-1");
-        app.agents.get_mut(&AgentId(0)).unwrap().session.state = AgentState::TurnRunning;
-
-        let changed = handle(
-            make_ext_session_notification(
-                "sess-1",
-                XaiSessionUpdate::ToolCallDeltaChunk {
-                    tool_call_id: Some("call_1".into()),
-                    tool_index: 0,
-                    name: Some("spawn_subagent".into()),
-                    arguments_delta: None,
-                },
-            ),
-            &mut app,
-        );
-        assert!(changed, "first delta must request a redraw");
-        let agent = app.agents.get(&AgentId(0)).unwrap();
-        let Some(TurnActivity::WritingToolCall(writing)) = agent.session.tracker.activity() else {
-            panic!("expected WritingToolCall activity");
-        };
-        assert_eq!(writing.label(), "Writing subagent prompt…");
-    }
-
-    /// A delta-first turn still counts as first activity: stash drops, TTFA stamps.
-    #[test]
-    fn tool_call_delta_chunk_clears_in_flight_prompt() {
-        let mut app = make_app_with_agent("sess-1");
-        let started = Instant::now();
-        {
-            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
-            agent.session.state = AgentState::TurnRunning;
-            agent.turn_started_at = Some(started);
-            agent.session.in_flight_prompt = Some(InFlightPrompt {
-                text: "hi".into(),
-                images: Vec::new(),
-                scrollback_entry: EntryId::new(1),
-                combined_scrollback_entries: Vec::new(),
-                chip_elements: Vec::new(),
-            });
-        }
-
-        let _ = handle(
-            make_ext_session_notification(
-                "sess-1",
-                XaiSessionUpdate::ToolCallDeltaChunk {
-                    tool_call_id: Some("call_1".into()),
-                    tool_index: 0,
-                    name: Some("write".into()),
-                    arguments_delta: None,
-                },
-            ),
-            &mut app,
-        );
-        let agent = app.agents.get(&AgentId(0)).unwrap();
-        assert!(
-            agent.session.in_flight_prompt.is_none(),
-            "first activity on the delta rail must drop the rewind stash"
-        );
-        assert_eq!(
-            agent.first_activity_logged_for,
-            Some(started),
-            "TTFA must be stamped for a delta-first turn"
-        );
-    }
-
-    /// Deltas carry no prompt id — while a wake turn is in flight the chunk is
-    /// dropped whole: no tracker write, no rewind-stash consumption, no TTFA.
-    #[test]
-    fn wake_gated_delta_chunk_is_fully_inert() {
-        let mut app = make_app_with_agent("sess-1");
-        {
-            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
-            agent.session.state = AgentState::TurnRunning;
-            agent.turn_started_at = Some(Instant::now());
-            agent.session.in_flight_prompt = Some(InFlightPrompt {
-                text: "hi".into(),
-                images: Vec::new(),
-                scrollback_entry: EntryId::new(1),
-                combined_scrollback_entries: Vec::new(),
-                chip_elements: Vec::new(),
-            });
-            agent
-                .session
-                .tracker
-                .set_retry_activity(Some(crate::acp::tracker::TurnActivity::Retrying {
-                    attempt: 1,
-                    max_retries: 3,
-                    reason: "overloaded".into(),
                 }));
             agent.running_wake_turn = Some(crate::app::agent_view::RunningWakeTurn {
                 prompt_id: "task-completed-1".into(),

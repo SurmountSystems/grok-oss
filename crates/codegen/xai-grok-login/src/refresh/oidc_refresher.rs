@@ -143,14 +143,11 @@ impl OidcRefresher {
                 );
                 Some(RefreshOutcome::permanent_for(reason, &disk_now))
             }
-            OidcRefreshResult::Failed { .. } => {
-                Some(RefreshOutcome::transient("OIDC disk-retry refresh failed"))
-            }
             OidcRefreshResult::Failed {
                 suspected_consumed_rt,
                 ..
             } => Some(match suspected_consumed_rt {
-                // The disk RT was on the wire across a straddle too — it must
+                // The disk RT was on the wire across a straddle too. It must
                 // reach the sentinel like the primary exchange's RT would.
                 Some(suspect) => RefreshOutcome::transient_suspect_consumed(
                     "OIDC disk-retry refresh failed",
@@ -250,6 +247,7 @@ impl TokenRefresher for OidcRefresher {
             }
             OidcRefreshResult::Failed {
                 network_unreachable,
+                suspected_consumed_rt,
             } => {
                 tracing::warn!(
                     refresh_reason = ?reason,
@@ -281,11 +279,21 @@ impl TokenRefresher for OidcRefresher {
                         &self.upload_in_flight,
                     );
                 }
-                self.record_transient_failure(
+                let outcome = self.record_transient_failure(
                     "OIDC token refresh failed".into(),
                     Some(auth.key.clone()),
                     network_unreachable,
-                )
+                );
+                match outcome {
+                    RefreshOutcome::TransientFailure { message, .. } => match suspected_consumed_rt
+                    {
+                        Some(suspect) => {
+                            RefreshOutcome::transient_suspect_consumed(message, suspect)
+                        }
+                        None => RefreshOutcome::transient(message),
+                    },
+                    other => other,
+                }
             }
         }
     }

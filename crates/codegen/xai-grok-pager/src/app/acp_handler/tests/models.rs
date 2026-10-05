@@ -529,7 +529,10 @@
             .models
             .set_current(id, Some(ReasoningEffort::Medium));
 
-        let changed = handle_ext_notification(&model_changed_ext("sess-1", "grok-4.6", None), &mut app);
+        let changed = handle_ext_notification(
+            &model_changed_ext("sess-1", "grok-4.6", None, None),
+            &mut app,
+        );
         assert!(
             !changed,
             "omitting effort on the same model must not count as a model change"
@@ -566,7 +569,7 @@
 
             spawn_subagent_with_optional_updates(&mut app, "child-effort", None);
             let changed = handle_ext_notification(
-                &model_changed_ext("child-effort", "grok-4.6", Some("high")),
+                &model_changed_ext("child-effort", "grok-4.6", Some("high"), None),
                 &mut app,
             );
             assert!(

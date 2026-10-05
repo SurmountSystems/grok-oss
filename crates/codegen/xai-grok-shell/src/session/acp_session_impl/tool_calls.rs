@@ -1415,10 +1415,10 @@ impl SessionActor {
             match &tool_loop {
                 ToolLoop::PermissionReject { .. }
                 | ToolLoop::Cancelled
-                | ToolLoop::FollowupMessage(_) => {
-                    if final_result.is_none() {
-                        *final_result = Some(tool_loop);
-                    }
+                | ToolLoop::FollowupMessage(_)
+                    if final_result.is_none() =>
+                {
+                    *final_result = Some(tool_loop);
                 }
                 _ => {}
             }
@@ -2393,6 +2393,23 @@ impl SessionActor {
             ));
         }
     }
+    fn adopt_parked_plan_approval_from_disk(&self) {
+        let sid = self.session_info.id.0.as_ref();
+        if crate::session::plan_mode::load_awaiting_plan_approval(&self.session_info.cwd, sid) {
+            self.plan_mode.lock().set_awaiting_plan_approval(true);
+        }
+    }
+    async fn request_plan_approval_after_resume(
+        &self,
+        tool_call_id: &acp::ToolCallId,
+        plan_content: String,
+    ) -> Result<
+        xai_grok_tools::implementations::grok_build::exit_plan_mode::ExitPlanModeExtResponse,
+        acp::Error,
+    > {
+        self.request_plan_approval(tool_call_id, Some(plan_content))
+            .await
+    }
     /// Resume hook: re-issue the parked `exit_plan_mode` approval after a session restored with `awaiting_plan_approval == true`.
     /// The client then re-shows approval chrome over a real live waiter.
     /// Handles the decision with no in-flight turn.
@@ -3322,12 +3339,33 @@ impl SessionActor {
                 self.send_xai_notification(XaiSessionUpdate::ImageDropped { notes })
                     .await;
             }
+            let parent = !super::prompt_build::nested_grok_oss_inlines_images(
+                self.is_cursor_harness(),
+                self.tool_context.subagent_depth,
+            );
+            let images_dir =
+                xai_grok_shared::session::session_dir(&self.session_info).join("images");
             for norm in norm_result.images {
-                let url = format!("data:{};base64,{}", norm.mime_type, norm.data);
-                let mut image_msg =
-                    ConversationItem::system_reminder("[Image extracted from tool result above]");
-                image_msg.add_image(url);
-                deferred_followups.push(image_msg);
+                if let Some(saved) = super::tool_layer_images::persist_extracted_tool_image(
+                    &norm.mime_type,
+                    &norm.data,
+                    &images_dir,
+                ) {
+                    deferred_followups.push(super::tool_layer_images::extracted_image_followup(
+                        &saved, parent,
+                    ));
+                } else if parent {
+                    deferred_followups.push(ConversationItem::user(
+                        "[Image extracted from tool result above]\nImage was not attached.",
+                    ));
+                } else {
+                    let url = format!("data:{};base64,{}", norm.mime_type, norm.data);
+                    let mut image_msg = ConversationItem::system_reminder(
+                        "[Image extracted from tool result above]",
+                    );
+                    image_msg.add_image(url);
+                    deferred_followups.push(image_msg);
+                }
             }
         }
         Ok(deferred_followups)
@@ -3346,7 +3384,15 @@ impl SessionActor {
         Vec<ContentPart>,
         Vec<xai_grok_tools::util::base64_images::ExtractedImage>,
     ) {
+        use super::tool_layer_images::{
+            parent_or_nested_tool_image_part, persist_extracted_tool_image,
+        };
         use crate::session::acp_conversion::maybe_rewrite;
+        let parent = !super::prompt_build::nested_grok_oss_inlines_images(
+            self.is_cursor_harness(),
+            self.tool_context.subagent_depth,
+        );
+        let images_dir = xai_grok_shared::session::session_dir(&self.session_info).join("images");
         let mut prompt_text = prompt_text;
         let mut inline_images: Vec<ContentPart> = Vec::new();
         let extraction = if !self.is_cursor_harness()
@@ -3689,61 +3735,6 @@ mod exit_plan_tail_predicate_tests {
 }
 #[cfg(test)]
 mod exit_plan_intercept_tests {
-    use super::{
-        is_file_backed_exit_plan_input, is_file_backed_exit_plan_kind, split_exit_plan_tail,
-    };
-    use xai_grok_tools::types::ToolInput;
-    use xai_grok_tools::types::tool::ToolKind;
-    fn call(name: &str, args: &str) -> crate::sampling::types::ToolCallResponse {
-        crate::sampling::types::ToolCallResponse {
-            id: format!("call_{name}"),
-            kind: "function".into(),
-            function: crate::sampling::types::ToolCallFunction::new(name, args),
-        }
-    }
-    /// Wire name does not matter — only [`ToolKind::ExitPlan`].
-    fn kind_of(name: &str) -> Option<ToolKind> {
-        match name {
-            "exit_plan_mode" | "FinishPlan" => Some(ToolKind::ExitPlan),
-            _ => None,
-        }
-    }
-    #[test]
-    fn exit_plan_kind_is_file_backed_exit() {
-        assert!(is_file_backed_exit_plan_kind(Some(ToolKind::ExitPlan)));
-        assert!(!is_file_backed_exit_plan_kind(Some(ToolKind::Edit)));
-        assert!(!is_file_backed_exit_plan_kind(None));
-        assert!(is_file_backed_exit_plan_input(&ToolInput::ExitPlanMode(
-            xai_grok_tools::implementations::grok_build::exit_plan_mode::ExitPlanModeInput {}
-        )));
-    }
-    fn mixed(calls: Vec<crate::sampling::types::ToolCallResponse>) -> bool {
-        let (body, tail) = split_exit_plan_tail(calls, kind_of);
-        !body.is_empty() && !tail.is_empty()
-    }
-    #[test]
-    fn split_puts_exit_plan_in_tail() {
-        let write = call(
-            "search_replace",
-            r#"{"file_path":"/tmp/plan.md","old_string":"a","new_string":"b"}"#,
-        );
-        let exit = call("exit_plan_mode", "{}");
-        let renamed_exit = call("FinishPlan", "{}");
-        let create = call(
-            "CreatePlan",
-            r#"{"name":"p","overview":"o","plan":"plan body","todos":[]}"#,
-        );
-        assert!(mixed(vec![write.clone(), exit.clone()]));
-        assert!(mixed(vec![exit.clone(), write.clone()]));
-        assert!(mixed(vec![write.clone(), renamed_exit.clone()]));
-        assert!(!mixed(vec![exit.clone()]));
-        assert!(!mixed(vec![write.clone()]));
-        assert!(!mixed(vec![write.clone(), create.clone()]));
-        assert!(mixed(vec![write, exit, create]));
-    }
-}
-#[cfg(test)]
-mod exit_plan_intercept_tests {
     use super::{PlanFileRead, classify_plan_file_read, should_intercept_exit_plan_approval};
     #[test]
     fn exit_plan_mode_empty_plan_still_intercepts() {
@@ -3979,6 +3970,8 @@ mod plan_mode_edit_gate_tests {
                     run_in_background: false,
                     capability_mode: None,
                     isolation: None,
+                    follow_up: None,
+                    write_paths: Vec::new(),
                     resume_from: None,
                     cwd: None,
                     model: None,

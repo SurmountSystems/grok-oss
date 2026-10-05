@@ -99,7 +99,11 @@ pub fn parse_note_input(input: &str) -> (String, Vec<String>) {
     let tokens: Vec<&str> = trimmed.split_whitespace().collect();
     let mut tag_start = tokens.len();
     for i in (0..tokens.len()).rev() {
-        if let Some(tag) = tokens[i].strip_prefix('#')
+        if let Some(tag) = tokens
+            .get(i)
+            .copied()
+            .expect("index out of bounds")
+            .strip_prefix('#')
             && !tag.is_empty()
             && tag
                 .chars()
@@ -110,25 +114,19 @@ pub fn parse_note_input(input: &str) -> (String, Vec<String>) {
         }
         break;
     }
-    let body = tokens[..tag_start].join(" ");
-    let tags = tokens[tag_start..]
+    let body = tokens
+        .get(..tag_start)
+        .expect("index out of bounds")
+        .join(" ");
+    let tags = tokens
+        .get(tag_start..)
+        .expect("index out of bounds")
         .iter()
         .filter_map(|t| t.strip_prefix('#').map(str::to_string))
         .collect();
     (body, tags)
 }
 
-impl QueueEntryKind {
-    /// Short, stable label for telemetry / profiling logs.
-    pub fn as_label(&self) -> &'static str {
-        match self {
-            Self::Prompt => "prompt",
-            Self::Command => "command",
-            Self::BashCommand => "bash_command",
-            Self::Cron => "cron",
-        }
-    }
-}
 /// An entry waiting in the queue to be sent to the agent.
 /// Each entry gets a monotonically increasing `id` for stable tracking.
 /// The user-facing display uses the 1-based positional index (`#1`, `#2`, …), never the internal `id`.
@@ -728,6 +726,24 @@ impl AgentState {
         }
     }
 }
+impl PartialEq for AgentState {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Idle, Self::Idle)
+            | (Self::TurnRunning, Self::TurnRunning)
+            | (Self::TurnCancelling, Self::TurnCancelling) => true,
+            (
+                Self::CommandRunning { command: left, .. },
+                Self::CommandRunning { command: right, .. },
+            )
+            | (
+                Self::CommandCancelling { command: left },
+                Self::CommandCancelling { command: right },
+            ) => left == right,
+            _ => false,
+        }
+    }
+}
 /// Context of a hook-blocked prompt requeued at the local queue front; see [`AgentSession::blocked_prompt`].
 #[derive(Debug, Clone)]
 pub struct BlockedPromptContext {
@@ -1234,7 +1250,6 @@ mod tests {
             next_queue_id: 0,
             yolo_mode: false,
             auto_mode: false,
-            context_only_mode: false,
             prompt_history: Vec::new(),
             prompt_history_loading: false,
             loading_replay: false,

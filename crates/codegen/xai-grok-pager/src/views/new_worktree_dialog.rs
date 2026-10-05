@@ -269,7 +269,7 @@ mod tests {
         };
         assert!(
             (0..area.height)
-                .any(|y| { (0..area.width).any(|x| buffer.cell((x, y)).is_some_and(&is_cursor)) }),
+                .any(|y| { (0..area.width).any(|x| buffer.cell((x, y)).is_some_and(is_cursor)) }),
             "live cursor cell must remain visible",
         );
     }

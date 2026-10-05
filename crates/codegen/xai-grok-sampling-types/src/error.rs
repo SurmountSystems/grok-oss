@@ -200,6 +200,10 @@ pub enum SamplingError {
     },
 }
 
+/// Operator-facing stop when the stream was repeating the same sentence.
+pub const REPETITIVE_GENERATION_USER_MESSAGE: &str =
+    "Stopped: the reply was repeating the same sentence.";
+
 /// Semantic `error.code` the server stamps on invalid-image rejections, on both non-stream error bodies and mid-stream SSE error events.
 pub const INVALID_IMAGE_ERROR_CODE: &str = "invalid_image";
 
@@ -290,6 +294,15 @@ impl SamplingError {
         }
     }
 
+    /// Auth error with the wire provenance of the request that was sent.
+    /// Prefer this over [`Self::auth_unknown`] at every site that saw the outbound headers.
+    pub fn auth(message: impl Into<String>, credential: SentCredential) -> Self {
+        Self::Auth {
+            message: message.into(),
+            credential,
+        }
+    }
+
     /// Display plus the hidden source() chain.
     ///
     /// reqwest Error Display hides DNS/connect causes on source().
@@ -325,17 +338,26 @@ impl SamplingError {
     }
 
     pub fn is_auth_error(&self) -> bool {
-        // Only 401 Unauthorized means the credentials themselves were rejected and warrant a token refresh / re-auth 403
-        // Forbidden means the request was authenticated but the action is not permitted. That covers content-safety blocks,
-        // ZDR-blocked operations, and other policy denials unrelated to credentials.
-        matches!(
-            self,
-            SamplingError::Auth { .. }
-                | SamplingError::Api {
-                    status: StatusCode::UNAUTHORIZED,
-                    ..
-                }
-        )
+        // 401 Unauthorized always means credentials were rejected (refresh /
+        // re-auth). Bare 403 Forbidden is usually policy (content-safety,
+        // ZDR, remote settings) and must not trigger OIDC refresh or
+        // auth_required teardown. Exception: some gateways return 403 with a
+        // credentials-rejected body (`unauthenticated:bad-credentials`,
+        // "OAuth2 access token could not be validated"). That is the same
+        // class as 401 and must refresh / re-auth, not Internal error.
+        // Credit-exhausted 403 wording is not auth (failover / plain credits).
+        match self {
+            SamplingError::Auth { .. } => true,
+            SamplingError::Api {
+                status, message, ..
+            } => {
+                *status == StatusCode::UNAUTHORIZED
+                    || (*status == StatusCode::FORBIDDEN
+                        && is_credentials_rejected_message(message)
+                        && !is_credit_exhausted_message(message))
+            }
+            _ => false,
+        }
     }
 
     pub fn is_rate_limited(&self) -> bool {
@@ -368,6 +390,7 @@ impl SamplingError {
             }
             SamplingError::Auth { .. }
             | SamplingError::InvalidConfiguration(_)
+            | SamplingError::MtlsConfiguration(_)
             | SamplingError::Http(_)
             | SamplingError::Serialization(_)
             | SamplingError::EventStreamError(_)
@@ -539,7 +562,8 @@ impl SamplingError {
             | SamplingError::IdleTimeout { .. }
             | SamplingError::EmptyResponse { .. }
             | SamplingError::MaxTokensTruncation
-            | SamplingError::DoomLoopDetected { .. } => false,
+            | SamplingError::DoomLoopDetected { .. }
+            | SamplingError::RepetitiveGeneration { .. } => false,
         }
     }
 
@@ -562,36 +586,43 @@ impl SamplingError {
             | SamplingError::IdleTimeout { .. }
             | SamplingError::EmptyResponse { .. }
             | SamplingError::MaxTokensTruncation
-            | SamplingError::DoomLoopDetected { .. } => false,
+            | SamplingError::DoomLoopDetected { .. }
+            | SamplingError::RepetitiveGeneration { .. } => false,
         }
     }
 
-    /// Capacity / overload: HTTP 529, a 5xx whose message clearly says overloaded, or a stream error whose parsed
-    /// `error_type` is a capacity type. Proxies wrap stream overloads in a 500; the capacity types are `overloaded_error` and
-    /// `service_unavailable_error`. Never reachable from a 4xx or a request-shaped stream error, whatever the message text.
-    pub fn is_overloaded(&self) -> bool {
+    /// Transient xAI 500 while generating tokens. Retry with the transport
+    /// cap. This is not context-length, idle timeout, or serialization.
+    pub fn is_token_generation_internal_error(&self) -> bool {
         match self {
             SamplingError::Api {
                 status, message, ..
-            } => {
-                status.as_u16() == 529
-                    || (status.is_server_error() && message_looks_overloaded(message))
-            }
-            // `error_type` is already parsed from the stream payload, so trust it alone
-            // Matching message text here would let a request-shaped error that merely mentions "overloaded" retry
-            SamplingError::StreamError { error_type, .. } => {
-                error_type.eq_ignore_ascii_case("overloaded_error")
-                    || error_type.eq_ignore_ascii_case("service_unavailable_error")
+            } => status.as_u16() == 500 && is_token_generation_internal_error(message),
+            SamplingError::StreamError { message, .. } => {
+                is_token_generation_internal_error(message)
             }
             _ => false,
         }
     }
 
-    /// Retry vetoes shared by every retry loop: the sampler actor's `classify_error` and one-shot callers like `/btw`.
-    /// `x-should-retry: false`: the server says the request content caused the failure, not something transient;
-    /// Context-length overflow: deterministic; re-sending the same payload always fails.
-    pub fn is_retry_vetoed(&self) -> bool {
-        self.should_retry_header() == Some(false) || self.is_context_length_error()
+    /// True when the provider rejected the request because the account is out
+    /// of credits or over its spending limit (not a transient throttle).
+    ///
+    /// Used by multi-key failover: another credential with remaining balance
+    /// may still succeed. Matches 402 Payment Required and credit-flavored
+    /// 403/429 bodies (OpenRouter and xAI Build wording). HTTP 5xx stays a
+    /// gateway outage. Stream and auth errors have no status, so a named 502
+    /// wrap is not billing-empty and a named 402 still is.
+    pub fn is_credit_exhausted(&self) -> bool {
+        match self {
+            SamplingError::Api {
+                status, message, ..
+            } => is_credit_exhausted_status_and_message(status.as_u16(), message),
+            SamplingError::StreamError { message, .. } | SamplingError::Auth { message, .. } => {
+                is_credit_exhausted_statusless_message_allow_bare_credit_wording(message)
+            }
+            _ => false,
+        }
     }
 }
 
@@ -866,10 +897,14 @@ pub fn try_parse_stream_error(data: &str) -> Option<SamplingError> {
 /// Shared size-overflow text detector: a single definition (in the compaction engine) so the turn path and compaction loops can't drift.
 pub use xai_grok_compaction::is_context_length_error;
 
-/// Whether an HTTP status is worth retrying: the rule CCP publishes in `x-should-retry` (429 and any 5xx), minus Cloudflare's origin-TLS 525/526.
-/// Requests reach CCP through the Cloudflare edge, which answers with its own 52x pages when the origin is unreachable.
-pub fn is_retryable_api_status(status: StatusCode) -> bool {
-    RetryPolicy::edge_client().should_retry(status.as_u16())
+/// xAI body when token generation fails with HTTP 500. Transient; retry with
+/// the transport cap. Operator-visible Display is
+/// `API error (status 500 Internal Server Error): error: Internal error during token generation`.
+pub const TOKEN_GENERATION_INTERNAL_ERROR: &str = "Internal error during token generation";
+
+/// True when the body is a transient token-generation 500, not a size overflow.
+pub fn is_token_generation_internal_error(message: &str) -> bool {
+    message.contains(TOKEN_GENERATION_INTERNAL_ERROR)
 }
 
 /// True when the error body says the **credentials themselves** were rejected
@@ -1156,12 +1191,6 @@ pub fn is_retryable_reqwest(err: &reqwest::Error) -> bool {
     }
 
     false
-}
-
-/// Capacity-style provider text: "Overloaded" / `overloaded_error` (possibly proxy-wrapped) or `service_unavailable_error` (503-shaped capacity).
-fn message_looks_overloaded(message: &str) -> bool {
-    let m = message.to_ascii_lowercase();
-    m.contains("overloaded") || m.contains("service_unavailable_error")
 }
 
 #[cfg(test)]

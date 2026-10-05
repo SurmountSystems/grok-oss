@@ -27,7 +27,7 @@ use ratatui::style::Color;
 use crate::acp::tracker::TurnActivity;
 #[cfg(any(test, feature = "test-support"))]
 use crate::app::agent::AgentSession;
-use crate::app::agent_view::AgentView;
+use crate::app::agent_view::{AgentView, QuestionViewFeedback};
 use crate::app::app_view::{ActiveView, AppView, SessionPickerEntry};
 use crate::appearance::LayoutConfig;
 use crate::scrollback::entry::{EntryId, ScrollbackEntry};
@@ -339,6 +339,17 @@ pub fn elicitation_view_mut(v: &mut AgentView) -> Option<&mut ElicitationViewSta
 /// [`AgentView::is_awaiting_user_answer`].
 pub fn is_awaiting_user_answer(v: &AgentView) -> bool {
     v.is_awaiting_user_answer()
+}
+
+/// Whether this view is a nested subagent, not the root of its session.
+/// `child_link` is the existing distinction; sampling windows must not treat the two as one.
+pub fn is_nested_subagent_view(v: &AgentView) -> bool {
+    v.child_link().is_some()
+}
+
+/// The open question card is the `/feedback` pane (`QuestionViewFeedback::is_feedback`).
+pub fn is_feedback_pane(v: &AgentView) -> bool {
+    v.question_view.as_ref().is_some_and(|qv| qv.is_feedback())
 }
 
 /// `AgentView::hovered_question_item`.

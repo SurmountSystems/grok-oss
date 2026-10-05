@@ -6,10 +6,11 @@ use ratatui::layout::Rect;
 
 use crate::app::actions::Action;
 use crate::input::line_editor::LineEditor;
+use crate::settings::registry::CodingDataSharingLock;
 use crate::settings::{
-    CodingDataSharingLock, EnumChoice, OwnedEnumChoice, PagerLocalSnapshot, SettingCategory,
-    SettingKey, SettingKind, SettingMeta, SettingValue, SettingsRegistry, StringValidator,
-    current_value_for, dynamic_enum_choices,
+    EnumChoice, OwnedEnumChoice, PagerLocalSnapshot, SettingCategory, SettingKey, SettingKind,
+    SettingMeta, SettingValue, SettingsRegistry, StringValidator, current_value_for,
+    dynamic_enum_choices,
 };
 use crate::views::modal_window::ModalWindowState;
 
@@ -55,6 +56,176 @@ pub enum SettingsKeyOutcome {
     Changed,
     /// No-op.
     Unchanged,
+}
+
+impl SettingsKeyOutcome {
+    /// Split a bool or string setter into a typed outcome. Other actions stay wrapped.
+    pub fn from_typed_setter(action: Action) -> Self {
+        match action {
+            Action::SetCompactMode(value) => Self::SetBool {
+                key: "compact_mode",
+                value,
+            },
+            Action::SetTimestamps(value) => Self::SetBool {
+                key: "show_timestamps",
+                value,
+            },
+            Action::SetTimeline(value) => Self::SetBool {
+                key: "show_timeline",
+                value,
+            },
+            Action::SetSimpleMode(value) => Self::SetBool {
+                key: "simple_mode",
+                value,
+            },
+            Action::SetContextualHintUndo(value) => Self::SetBool {
+                key: "contextual_hints.undo",
+                value,
+            },
+            Action::SetContextualHintPlanMode(value) => Self::SetBool {
+                key: "contextual_hints.plan_mode",
+                value,
+            },
+            Action::SetContextualHintImageInput(value) => Self::SetBool {
+                key: "contextual_hints.image_input",
+                value,
+            },
+            Action::SetContextualHintSendNow(value) => Self::SetBool {
+                key: "contextual_hints.send_now",
+                value,
+            },
+            Action::SetContextualHintSmallScreen(value) => Self::SetBool {
+                key: "contextual_hints.small_screen",
+                value,
+            },
+            Action::SetContextualHintWordSelect(value) => Self::SetBool {
+                key: "contextual_hints.word_select",
+                value,
+            },
+            Action::SetContextualHintExportCopy(value) => Self::SetBool {
+                key: "contextual_hints.export_copy",
+                value,
+            },
+            Action::SetContextualHintSshWrap(value) => Self::SetBool {
+                key: "contextual_hints.ssh_wrap",
+                value,
+            },
+            Action::SetMultilineMode(value) => Self::SetBool {
+                key: "multiline_mode",
+                value,
+            },
+            Action::SetVimMode(value) => Self::SetBool {
+                key: "vim_mode",
+                value,
+            },
+            Action::SetVoiceKeybindEnabled(value) => Self::SetBool {
+                key: "voice_keybind_enabled",
+                value,
+            },
+            Action::SetRememberToolApprovals(value) => Self::SetBool {
+                key: "remember_tool_approvals",
+                value,
+            },
+            Action::SetAskUserQuestionTimeoutEnabled(value) => Self::SetBool {
+                key: "toolset.ask_user_question.timeout_enabled",
+                value,
+            },
+            Action::SetSubagentModelInheritance(value) => Self::SetBool {
+                key: "subagent_model_inheritance",
+                value,
+            },
+            Action::SetShowThinkingBlocks(value) => Self::SetBool {
+                key: "show_thinking_blocks",
+                value,
+            },
+            Action::SetGroupToolVerbs(value) => Self::SetBool {
+                key: "group_tool_verbs",
+                value,
+            },
+            Action::SetCollapsedEditBlocks(value) => Self::SetBool {
+                key: "collapsed_edit_blocks",
+                value,
+            },
+            Action::SetPromptSuggestions(value) => Self::SetBool {
+                key: "prompt_suggestions",
+                value,
+            },
+            Action::SetAutoRunImplement(value) => Self::SetBool {
+                key: "auto_run_implement",
+                value,
+            },
+            Action::SetRespectManualFolds(value) => Self::SetBool {
+                key: "respect_manual_folds",
+                value,
+            },
+            Action::SetPageFlipOnSend(value) => Self::SetBool {
+                key: "page_flip_on_send",
+                value,
+            },
+            Action::SetDashboardPreview(value) => Self::SetBool {
+                key: "dashboard_preview",
+                value,
+            },
+            Action::SetConfirmBeforeRewind(value) => Self::SetBool {
+                key: "confirm_before_rewind",
+                value,
+            },
+            Action::SetCombineQueuedPrompts(value) => Self::SetBool {
+                key: "combine_queued_prompts",
+                value,
+            },
+            Action::SetInvertScroll(value) => Self::SetBool {
+                key: "invert_scroll",
+                value,
+            },
+            Action::SetShowTips(value) => Self::SetBool {
+                key: "show_tips",
+                value,
+            },
+            Action::SetAutoUpdate(value) => Self::SetBool {
+                key: "auto_update",
+                value,
+            },
+            Action::SetDisplayRefreshAutoCadence(value) => Self::SetBool {
+                key: "display_refresh_auto_cadence",
+                value,
+            },
+            Action::SetEconomicMode(value) => Self::SetBool {
+                key: "economic_mode",
+                value,
+            },
+            Action::SetResumeCanceledTurnOnRestart(value) => Self::SetBool {
+                key: "resume_canceled_turn_on_restart",
+                value,
+            },
+            Action::SetTokenEconomyBool { field, value } => Self::SetBool {
+                key: match field {
+                    "cap_implement_effort_when_economic" => {
+                        "token_economy.cap_implement_effort_when_economic"
+                    }
+                    "show_period_pacing" => "token_economy.show_period_pacing",
+                    "local_spend_ledger" => "token_economy.local_spend_ledger",
+                    "reconcile_management_usage" => "token_economy.reconcile_management_usage",
+                    _ => return Self::Action(Action::SetTokenEconomyBool { field, value }),
+                },
+                value,
+            },
+            other => Self::Action(other),
+        }
+    }
+
+    /// Rebuild the `Action` a typed setter stands for.
+    pub fn typed_dispatch_action(self) -> Option<Action> {
+        match self {
+            Self::SetBool { key, value } => action_for_bool(key, value),
+            Self::SetString { key, value } => {
+                let _ = (key, value);
+                None
+            }
+            Self::Action(action) | Self::ActionThenClose(action) => Some(action),
+            Self::ActionPair(_, _) | Self::Close | Self::Changed | Self::Unchanged => None,
+        }
+    }
 }
 
 /// One row in the visible flat list: either a category header (non-selectable) or a setting row (selectable, dispatchable).
@@ -496,10 +667,7 @@ impl SettingsModalState {
             // Defensive: resume from bottom if `selected` is hidden.
             None => self.filtered_cache.len() - 1,
         };
-        loop {
-            let Some(&row_idx) = self.filtered_cache.get(prev) else {
-                break;
-            };
+        while let Some(&row_idx) = self.filtered_cache.get(prev) {
             if self
                 .rows
                 .get(row_idx)
@@ -555,59 +723,6 @@ impl SettingsModalState {
         self.breadcrumb_hovered = false;
         self.close_on_picker_exit = false;
         self.picker_last_click = None;
-    }
-
-    pub fn focus_filter(&mut self) {
-        self.state.mode = SettingsMode::FilterFocused;
-    }
-
-    pub(super) fn transition_to_picking_enum(
-        &mut self,
-        key: SettingKey,
-        choices_idx: usize,
-        original_value: SettingValue,
-        supports_preview: bool,
-    ) {
-        self.state.mode = SettingsMode::PickingEnum {
-            key,
-            choices_idx,
-            original_value,
-            supports_preview,
-        };
-    }
-
-    pub(super) fn transition_to_picking_group(&mut self, key: SettingKey, child_idx: usize) {
-        self.state.mode = SettingsMode::PickingGroup { key, child_idx };
-    }
-
-    pub(super) fn transition_to_editing_string(
-        &mut self,
-        key: SettingKey,
-        editor: LineEditor,
-        validator: StringValidator,
-        validation_error: Option<String>,
-    ) {
-        self.state.mode = SettingsMode::EditingString {
-            key,
-            editor,
-            validator,
-            validation_error,
-        };
-    }
-
-    pub(super) fn transition_to_editing_int(
-        &mut self,
-        key: SettingKey,
-        buffer: String,
-        min: i64,
-        max: i64,
-    ) {
-        self.state.mode = SettingsMode::EditingInt {
-            key,
-            buffer,
-            min,
-            max,
-        };
     }
 
     pub fn focus_filter(&mut self) {
@@ -1004,7 +1119,6 @@ pub(super) fn action_for_bool(key: SettingKey, new: bool) -> Option<Action> {
         "auto_update" => Some(Action::SetAutoUpdate(new)),
         "display_refresh_auto_cadence" => Some(Action::SetDisplayRefreshAutoCadence(new)),
 
-        "auto_run_implement" => Some(Action::SetAutoRunImplement(new)),
         "economic_mode" => Some(Action::SetEconomicMode(new)),
         "resume_canceled_turn_on_restart" => Some(Action::SetResumeCanceledTurnOnRestart(new)),
         "token_economy.cap_implement_effort_when_economic" => Some(Action::SetTokenEconomyBool {
@@ -1025,7 +1139,6 @@ pub(super) fn action_for_bool(key: SettingKey, new: bool) -> Option<Action> {
         }),
         "notifications.session_recap" => Some(Action::SetNotificationsSessionRecap(new)),
         "features.session_recap" => Some(Action::SetFeaturesSessionRecap(new)),
-        "respect_manual_folds" => Some(Action::SetRespectManualFolds(new)),
         "hide_header" => Some(Action::SetHideHeader(new)),
         "composer_multiline" => Some(Action::SetComposerMultiline(new)),
         "allow_session_multiline" => Some(Action::SetAllowSessionMultiline(new)),
@@ -1034,15 +1147,8 @@ pub(super) fn action_for_bool(key: SettingKey, new: bool) -> Option<Action> {
         "scrub_ascii_punct" => Some(Action::SetScrubAsciiPunct(new)),
         "ulid_session_ids" => Some(Action::SetUlidSessionIds(new)),
         "bubble_copy_buttons" => Some(Action::SetBubbleCopyButtons(new)),
-        "page_flip_on_send" => Some(Action::SetPageFlipOnSend(new)),
-        "confirm_before_rewind" => Some(Action::SetConfirmBeforeRewind(new)),
         "turbo_planning" => Some(Action::SetTurboPlanning(new)),
         "process_rule_reminders_enabled" => Some(Action::SetProcessRuleRemindersEnabled(new)),
-        "combine_queued_prompts" => Some(Action::SetCombineQueuedPrompts(new)),
-        "invert_scroll" => Some(Action::SetInvertScroll(new)),
-        "show_tips" => Some(Action::SetShowTips(new)),
-        "auto_update" => Some(Action::SetAutoUpdate(new)),
-        "display_refresh_auto_cadence" => Some(Action::SetDisplayRefreshAutoCadence(new)),
         _ => None,
     }
 }
@@ -1108,6 +1214,7 @@ pub(super) fn action_for_enum_commit(key: SettingKey, choice: &'static str) -> O
         },
         "hunk_tracker_mode" => Some(Action::SetHunkTrackerMode(choice.to_string())),
         "screen_mode" => Some(Action::SetScreenMode(choice.to_string())),
+        "plan_approval_park" => Some(Action::SetPlanApprovalPark(choice.to_string())),
         "voice_capture_mode" => Some(Action::SetVoiceCaptureMode(choice.to_string())),
         "voice_stt_language" => Some(Action::SetVoiceSttLanguage(choice.to_string())),
         "default_reasoning_effort" => match choice {

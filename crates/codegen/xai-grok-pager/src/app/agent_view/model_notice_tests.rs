@@ -65,6 +65,7 @@ fn draw(
         false,
         banner,
         false,
+        false,
         &mut Vec::new(),
         AppRenderParams {
             voice_available: listening,

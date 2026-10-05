@@ -11,6 +11,7 @@ use super::app_view::InputOutcome;
 use crate::scrollback::block::BlockContent;
 use crate::views::btw_overlay::BTW_OVERLAY_ENTRY_IDX;
 use crate::views::prompt_widget::PromptEvent;
+use crate::views::tasks_pane::TaskEntryId;
 use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 use std::time::Instant;
 
@@ -129,6 +130,83 @@ impl AgentView {
     pub(crate) fn open_path(&mut self, path: &std::path::Path) {
         spawn_file_manager(path);
         self.show_toast("Opened the session directory.");
+    }
+
+    /// Tasks kill and open chrome, before Clear finished, so a misplaced Clear
+    /// hit cannot steal subagent open or close.
+    fn try_tasks_chrome_click(&mut self, column: u16, row: u16) -> Option<InputOutcome> {
+        let kill = self
+            .tasks
+            .kill_button_rects
+            .iter()
+            .find(|(_, rect)| rect.contains((column, row).into()))
+            .map(|(entry_id, _)| entry_id.clone());
+        if let Some(entry_id) = kill {
+            return Some(match entry_id {
+                TaskEntryId::BgTask(tid) => InputOutcome::Action(Action::KillBgTask(tid)),
+                TaskEntryId::Agent(sid) => InputOutcome::Action(Action::KillSubagent(sid)),
+                TaskEntryId::Scheduled(tid) => {
+                    InputOutcome::Action(Action::CancelScheduledTask(tid))
+                }
+                TaskEntryId::Workflow(name) => InputOutcome::Action(
+                    Action::SendSlashCommandPreservingDraft(format!("/workflow stop {name}")),
+                ),
+            });
+        }
+        let view = self
+            .tasks
+            .view_button_rects
+            .iter()
+            .find(|(_, rect)| rect.contains((column, row).into()))
+            .map(|(entry_id, _)| entry_id.clone());
+        let entry_id = view?;
+        match entry_id {
+            TaskEntryId::BgTask(tid) => {
+                let already_open = self
+                    .block_viewer
+                    .as_ref()
+                    .and_then(|v| v.bg_task_id.as_deref())
+                    == Some(tid.as_str());
+                if already_open {
+                    self.dismiss_block_viewer();
+                    return Some(InputOutcome::Changed);
+                }
+                if self.show_bg_task_viewer(&tid) {
+                    return Some(InputOutcome::Changed);
+                }
+            }
+            TaskEntryId::Agent(sid) => {
+                if let Some(child_sid) = self
+                    .subagent_sessions
+                    .iter()
+                    .find(|(_, info)| info.subagent_id.as_ref() == sid.as_str())
+                    .map(|(k, _)| k.clone())
+                    && self.subagent_views.contains_key(&child_sid)
+                {
+                    self.open_subagent_fullscreen(child_sid);
+                    return Some(InputOutcome::Changed);
+                }
+            }
+            TaskEntryId::Scheduled(tid) => {
+                if let Some(sid) = self
+                    .session
+                    .scheduled_tasks
+                    .get(&tid)
+                    .and_then(|info| info.last_subagent_id.clone())
+                    && let Some(child_sid) = self
+                        .subagent_sessions
+                        .iter()
+                        .find(|(_, info)| info.subagent_id.as_ref() == sid.as_str())
+                        .map(|(k, _)| k.clone())
+                    && self.subagent_views.contains_key(&child_sid)
+                {
+                    self.open_subagent_fullscreen(child_sid);
+                    return Some(InputOutcome::Changed);
+                }
+            }
+            TaskEntryId::Workflow(_) => {}
+        }
+        None
     }
 
     /// Handle mouse events: click-to-focus, forward to prompt textarea.

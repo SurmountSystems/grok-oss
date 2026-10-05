@@ -119,6 +119,8 @@ pub enum LocalQuestionKind {
         plan: Box<crate::diagnostics::FixPlan>,
     },
     DeleteCurrentSession,
+    /// Freeform pane opened by bare `/feedback`. The report lives in the composer.
+    Feedback,
 }
 
 /// Complete state for the question view overlay. Created when an `x.ai/ask_user_question`
@@ -255,6 +257,14 @@ impl QuestionViewState {
     pub fn with_local_kind(mut self, kind: LocalQuestionKind) -> Self {
         self.local_kind = Some(kind);
         self
+    }
+
+    /// Live feedback report copied from the composer. Empty until a key or click syncs it.
+    pub fn feedback_report(&self) -> &str {
+        self.per_question_freeform
+            .first()
+            .map(String::as_str)
+            .unwrap_or("")
     }
 
     /// Builder-style helper to hide the freeform "Other" input row.

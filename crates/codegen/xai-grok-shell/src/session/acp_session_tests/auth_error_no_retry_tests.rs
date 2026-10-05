@@ -42,6 +42,7 @@ impl xai_grok_login::refresh::TokenRefresher for AlwaysTransientFailRefresher {
         self.called.store(true, Ordering::SeqCst);
         xai_grok_login::refresh::RefreshOutcome::TransientFailure {
             message: "refresh deferred: system sleep imminent".to_string(),
+            suspected_consumed_rt: None,
         }
     }
 }

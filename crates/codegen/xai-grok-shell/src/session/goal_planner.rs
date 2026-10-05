@@ -3,7 +3,6 @@
 //! The spawn is hidden behind [`GoalPlannerSpawner`] so tests can inject a deterministic spawner.
 
 #![allow(dead_code)]
-#![allow(dead_code)]
 
 use crate::session::events::{Event, GoalPlannerFailClosedReason, GoalRoleModelFailOpenReason};
 use crate::session::goal_role_tools::RoleToolNames;
@@ -303,6 +302,7 @@ impl ChannelSpawner {
             await_to_completion: true,
             fork_context: true,
             owner: SubagentOwner::Task,
+            implement_loop_effort: None,
             cancel_token: self.cancel_token.clone(),
             spawn_root: Default::default(),
             tool_call_id: None,

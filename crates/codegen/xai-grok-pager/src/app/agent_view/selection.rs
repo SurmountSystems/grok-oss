@@ -40,6 +40,12 @@ fn prewrap_line_index(
 }
 
 impl AgentView {
+    /// Double-click a foldable row: expand a folded row, otherwise toggle.
+    /// `toggle_fold_selected` is that expand-or-toggle.
+    fn expand_or_toggle_selected_fold(&mut self) {
+        self.scrollback.toggle_fold_selected();
+    }
+
     /// Tick the selection highlight timer.
     /// Returns true if the selection was auto-dismissed (needs redraw).
     /// When `keep_text_selection` is on (cache), never timer-dismisses; Esc / click / nav still clear it.

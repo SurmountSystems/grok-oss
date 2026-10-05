@@ -61,6 +61,7 @@ pub fn stream_chat_completions<'a>(
 
         let mut content_acc = String::new();
         let mut reasoning_acc = String::new();
+        let mut repetition = super::StreamRepetitionGuard::default();
         // Tool call deltas keyed by positional index; each entry is (id, name, arguments_buffer)
         // The first chunk for an index carries the id and name and starts the arguments buffer; later chunks append to arguments only
         let mut tool_call_acc: BTreeMap<u32, (String, String, String)> = BTreeMap::new();

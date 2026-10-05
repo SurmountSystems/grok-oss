@@ -1534,8 +1534,8 @@ impl DashboardState {
         {
             self.selected = Some(rebound);
         }
-        self.hovered_row = self.hovered_row.as_ref().and_then(&rebind);
-        self.hovered_delete = self.hovered_delete.as_ref().and_then(&rebind);
+        self.hovered_row = self.hovered_row.as_ref().and_then(rebind);
+        self.hovered_delete = self.hovered_delete.as_ref().and_then(rebind);
         self.last_click = self
             .last_click
             .take()
@@ -3363,8 +3363,6 @@ impl DashboardState {
             }
             InputOutcome::Changed
         } else if event == PromptEvent::Edited || dropped_highlight {
-            InputOutcome::Changed
-        } else if event == crate::views::prompt_widget::PromptEvent::Edited {
             InputOutcome::Changed
         } else {
             InputOutcome::Unchanged

@@ -1708,11 +1708,12 @@ async fn restore_effort_via_load(
     tokio::spawn(async move {
         while let Some(cmd) = cmd_rx.recv().await {
             if let crate::session::SessionCommand::SetSessionModel {
-                switch,
+                sampling_config,
                 responds_to,
+                ..
             } = cmd
             {
-                let _ = responds_to.send(Ok(acp::ModelId::new(switch.sampling_config.model)));
+                let _ = responds_to.send(Ok(acp::ModelId::new(sampling_config.model)));
             }
         }
     });
@@ -1759,17 +1760,21 @@ async fn restore_applies_the_saved_context_window_selection() {
     tokio::spawn(async move {
         while let Some(cmd) = cmd_rx.recv().await {
             if let crate::session::SessionCommand::SetSessionModel {
-                switch,
+                sampling_config,
                 responds_to,
+                ..
             } = cmd
             {
+                let saved = NonZeroU64::new(500_000);
                 let _ = switch_tx.send((
-                    switch.context_window_selection,
-                    switch
-                        .supported_context_windows
-                        .contains(&NonZeroU64::new(500_000).unwrap()),
+                    if NonZeroU64::new(sampling_config.context_window) == saved {
+                        SwitchContextWindow::Set(saved)
+                    } else {
+                        SwitchContextWindow::Preserve
+                    },
+                    NonZeroU64::new(sampling_config.context_window) == saved,
                 ));
-                let _ = responds_to.send(Ok(acp::ModelId::new(switch.sampling_config.model)));
+                let _ = responds_to.send(Ok(acp::ModelId::new(sampling_config.model)));
                 break;
             }
         }
@@ -1805,15 +1810,20 @@ async fn restore_keeps_the_saved_context_window_selection_without_a_catalog() {
     tokio::spawn(async move {
         while let Some(cmd) = cmd_rx.recv().await {
             if let crate::session::SessionCommand::SetSessionModel {
-                switch,
+                sampling_config,
                 responds_to,
+                ..
             } = cmd
             {
                 let _ = switch_tx.send((
-                    switch.context_window_selection,
-                    switch.sampling_config.context_window,
+                    if NonZeroU64::new(sampling_config.context_window) == NonZeroU64::new(500_000) {
+                        SwitchContextWindow::Set(NonZeroU64::new(sampling_config.context_window))
+                    } else {
+                        SwitchContextWindow::Preserve
+                    },
+                    sampling_config.context_window,
                 ));
-                let _ = responds_to.send(Ok(acp::ModelId::new(switch.sampling_config.model)));
+                let _ = responds_to.send(Ok(acp::ModelId::new(sampling_config.model)));
                 break;
             }
         }

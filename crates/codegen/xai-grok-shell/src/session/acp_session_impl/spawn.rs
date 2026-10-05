@@ -45,6 +45,35 @@ static SESSIONS_ACTIVE: xai_grok_telemetry::activity::ActivityGauge =
         xai_grok_telemetry::activity::SESSIONS_ACTIVE_KEY,
     );
 /// Drop catch-all `--allow` rules (the `--yolo` substitute, see `resolution::is_catchall_allow`) when `policy_block` is set.
+/// `[scheduler] background_loops` / `GROK_SCHEDULER_BACKGROUND_LOOPS`.
+/// Unset or empty stays on (detached fires). `0`, `false`, `off`, and `no` turn it off.
+pub(super) fn scheduler_background_loops_from_env() -> bool {
+    match std::env::var("GROK_SCHEDULER_BACKGROUND_LOOPS") {
+        Ok(raw) => {
+            let value = raw.trim();
+            if value.is_empty() {
+                true
+            } else {
+                !matches!(
+                    value.to_ascii_lowercase().as_str(),
+                    "0" | "false" | "off" | "no"
+                )
+            }
+        }
+        Err(_) => true,
+    }
+}
+
+pub(super) fn loop_fire_mode_from_env() -> xai_grok_tools::implementations::grok_build::LoopFireMode
+{
+    use xai_grok_tools::implementations::grok_build::LoopFireMode;
+    if scheduler_background_loops_from_env() {
+        LoopFireMode::Detached
+    } else {
+        LoopFireMode::InSession
+    }
+}
+
 fn drop_cli_catchall_allows(
     rules: Vec<xai_grok_workspace::permission::types::PermissionRule>,
     policy_block: Option<&'static str>,
@@ -652,8 +681,6 @@ pub(crate) async fn spawn_session_actor(
             snap.last_compaction_prompt_index = initial_last_compaction;
             chat_state_handle.restore_snapshot(snap);
         }
-        snap.last_compaction_prompt_index = initial_last_compaction;
-        chat_state_handle.restore_snapshot(snap);
     }
     .instrument(chat_state_span)
     .await;
@@ -1131,11 +1158,7 @@ pub(crate) async fn spawn_session_actor(
     let context_window_tokens = context_window_override
         .map(|c| c.get())
         .unwrap_or(sampling_config.context_window);
-    let scheduler_background_loops = crate::util::config::resolve_scheduler_background_loops(
-        remote_settings
-            .as_ref()
-            .and_then(|r| r.scheduler_background_loops),
-    );
+    let scheduler_background_loops = scheduler_background_loops_from_env();
     let managed_gateway_tool_client = auth_manager.as_ref().map(|am| {
         xai_grok_tools::types::resources::ManagedGatewayToolClient(Arc::new(
             ShellManagedGatewayToolClient {
@@ -1868,8 +1891,9 @@ pub(crate) async fn spawn_session_actor(
             threshold_tokens: std::cell::Cell::new(None),
             force_compact: force_compact.clone(),
             context_window_override,
+            context_window_selection: std::sync::atomic::AtomicU64::new(0),
 
-            economic_mode: std::cell::Cell::new(economic_mode),
+            economic_mode: std::cell::Cell::new(crate::util::config::economic_mode_from_disk()),
             model_context_window: std::cell::Cell::new(baseline_context_window.get()),
             count: std::sync::atomic::AtomicU64::new(0),
             auto_compact_suppressed: std::sync::atomic::AtomicU8::new(0),
@@ -2475,6 +2499,7 @@ pub(crate) async fn spawn_session_actor(
         upload_failures_since_success: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         tool_context: tool_context_for_handle,
         model_id: session_model_id,
+        scheduler_background_loops,
         reasoning_effort: sampling_config.reasoning_effort,
         context_window_selection,
         yolo_mode: session_yolo_mode,
@@ -2497,46 +2522,11 @@ pub(crate) async fn spawn_session_actor(
         scheduler_handle: scheduler_handle_for_handle,
     };
     Ok((
-        SessionHandle {
-            cmd_tx,
-            persistence_tx: persistence.tx.clone(),
-            current_prompt_id,
-            pending_interactions,
-            info: session_info,
-            max_turns,
-            resolved_tool_overrides,
-            hunk_tracker_handle,
-            chat_state_handle: chat_state_handle_for_handle,
-            signals_handle,
-            gateway_enabled,
-            mcp_servers,
-            initial_client_mcp_servers,
-            display_cwd: None,
-            feedback_manager: feedback_manager.clone(),
-            upload_queue: upload_queue.clone(),
-            upload_failures_since_success: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            tool_context: tool_context_for_handle,
-            model_id: session_model_id,
-            scheduler_background_loops,
-            reasoning_effort: sampling_config.reasoning_effort,
-            yolo_mode: session_yolo_mode,
-            origin_client: origin_client.clone(),
-            code_nav_enabled,
-            ask_user_question_enabled,
-            non_interactive: session_non_interactive,
-            plan_mode: plan_mode.clone(),
-            force_compact,
-            permission_handle: permissions_for_handle,
-            attribution_callback: attribution_callback_for_handle,
-            agent_name: agent_name_for_handle,
-            managed_mcp_proxy_base_url,
-            session_default_agent_profile,
-            allowed_subagent_types: allowed_subagent_types_for_handle,
-            hook_registry: hook_registry_for_handle,
-            workspace_ops: workspace_ops_for_handle,
-            terminal_backend: Some(terminal_backend.clone()),
-            tools_notification_handle: Some(tools_notification_handle.clone()),
-            scheduler_handle: scheduler_handle_for_handle,
+        SessionInitResult {
+            handle,
+            permission_events_rx,
+            system_prompt,
+            toolset,
         },
         session_done_rx,
     ))
@@ -2788,7 +2778,7 @@ pub(crate) async fn spawn_session_on_thread(
                         .as_object()
                         .cloned()
                         .unwrap_or_default();
-                    let span = xai_file_utils::trace_context::span_from_meta_traceparent(&meta);
+                    let span = xai_grok_otel::span_from_meta_traceparent(&meta);
                     span.entered()
                 });
                 let session_spawn_span = match spawn_trace {
@@ -2877,6 +2867,7 @@ pub(crate) async fn spawn_session_on_thread(
                     session_model_id,
                     session_yolo_mode,
                     session_auto_mode,
+                    session_context_only,
                     session_client_identifier,
                     inference_idle_timeout_secs,
                     max_retries,
@@ -3031,6 +3022,19 @@ enum MemoryStorageSelection {
     DisabledByConfig,
     UnavailableForEphemeralWorkspace,
 }
+pub(super) fn seed_sampling_context_window(
+    catalog: std::num::NonZeroU64,
+    override_window: Option<std::num::NonZeroU64>,
+    is_nested: bool,
+) -> std::num::NonZeroU64 {
+    let base = override_window.unwrap_or(catalog);
+    std::num::NonZeroU64::new(crate::util::config::session_sampling_window(
+        base.get(),
+        is_nested,
+    ))
+    .unwrap_or(base)
+}
+
 fn select_memory_storage(
     storage: Option<&crate::session::memory::MemoryStorage>,
     memory_config: Option<&crate::config::MemoryConfig>,

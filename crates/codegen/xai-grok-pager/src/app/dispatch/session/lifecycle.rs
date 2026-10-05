@@ -15,7 +15,7 @@ use crate::app::consent::ConsentState;
 use crate::app::dispatch::ctx::{
     SwitchCause, get_active_agent, reseed_tip_for_new_session, show_welcome, switch_to_agent,
 };
-use crate::app::dispatch::modes::{inherit_auto_mode, inherit_context_only_mode};
+use crate::app::dispatch::modes::inherit_auto_mode;
 use crate::app::dispatch::prompt::{consume_chat_kind, dispatch_initial_prompt};
 use crate::app::dispatch::queue::{QueueDrain, maybe_drain_queue, note_peek_page_flip};
 use crate::app::dispatch::router::{confirmed_quit, dispatch};
@@ -399,7 +399,6 @@ pub(in crate::app::dispatch) fn dispatch_new_session_inner_with_id(
             next_queue_id: 0,
             yolo_mode: app.default_yolo,
             auto_mode: inherit_auto_mode(app),
-            context_only_mode: inherit_context_only_mode(app),
             prompt_history: Vec::new(),
             prompt_history_loading: false,
             loading_replay: false,
@@ -423,6 +422,7 @@ pub(in crate::app::dispatch) fn dispatch_new_session_inner_with_id(
             compact_held_prompt: None,
             current_prompt_id: None,
             created_via_new: true,
+            session_notes: crate::app::agent::SessionNotes::default(),
         },
         scrollback,
     );
@@ -1221,7 +1221,6 @@ pub(in crate::app::dispatch) fn dispatch_new_worktree_session(
             next_queue_id: 0,
             yolo_mode: app.default_yolo,
             auto_mode: inherit_auto_mode(app),
-            context_only_mode: inherit_context_only_mode(app),
             prompt_history: Vec::new(),
             prompt_history_loading: false,
             loading_replay: false,
@@ -1245,6 +1244,7 @@ pub(in crate::app::dispatch) fn dispatch_new_worktree_session(
             compact_held_prompt: None,
             current_prompt_id: None,
             created_via_new: false,
+            session_notes: crate::app::agent::SessionNotes::default(),
         },
         scrollback,
     );
@@ -1412,7 +1412,6 @@ pub(in crate::app::dispatch) fn handle_session_created(
             )));
         }
         agent.bind_session_id(session_id);
-        agent.scheduler_background_loops = scheduler_background_loops;
         if let Some(m) = new_models {
             app.models = Some(m).into();
             agent.session.models = app.models.clone();
@@ -1464,6 +1463,7 @@ pub(in crate::app::dispatch) fn handle_session_created(
             agent_id,
             silent: true,
             nonce: Default::default(),
+            force_refresh: false,
         });
         if let Some(switch) = deferred {
             effects.push(Effect::SwitchModel {
@@ -1536,7 +1536,6 @@ pub(in crate::app::dispatch) fn handle_worktree_session_created(
         agent.mark_turn_finished(TurnEnd::Aborted);
         let session_id_clone = session_id.clone();
         agent.bind_session_id(session_id);
-        agent.scheduler_background_loops = scheduler_background_loops;
         agent.session.cwd = session_cwd.clone();
         agent.session.is_worktree = true;
         agent.current_branch = None;
@@ -1602,6 +1601,7 @@ pub(in crate::app::dispatch) fn handle_worktree_session_created(
             agent_id,
             silent: true,
             nonce: Default::default(),
+            force_refresh: false,
         });
         if let Some(switch) = deferred {
             effects.push(Effect::SwitchModel {

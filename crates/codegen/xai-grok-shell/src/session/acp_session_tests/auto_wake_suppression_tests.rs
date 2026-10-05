@@ -66,6 +66,7 @@ async fn run_wake_turn(
             None,
             persist_ack,
             None,
+            /* unstick_retry */ false,
         )
         .await
 }

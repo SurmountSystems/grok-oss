@@ -254,6 +254,7 @@ fn takeover_draw_forwards_pending_hint_and_child_cursor() {
         false,
         crate::app::agent_view::BannerSlotParams::none(),
         false,
+        false,
         &mut Vec::new(),
         crate::app::agent_view::AppRenderParams::default(),
     );
@@ -294,6 +295,7 @@ fn takeover_shows_dashboard_button_only_inside_the_overlay() {
             false,
             crate::app::agent_view::BannerSlotParams::none(),
             in_overlay,
+            false,
             &mut Vec::new(),
             crate::app::agent_view::AppRenderParams::default(),
         );

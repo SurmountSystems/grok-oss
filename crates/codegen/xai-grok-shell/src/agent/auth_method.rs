@@ -783,6 +783,50 @@ mod tests {
         assert!(built.default_auth_method_id.is_none());
     }
 
+    struct IsolatedProcessAuthEnv {
+        saved: Vec<(String, Option<std::ffi::OsString>)>,
+    }
+
+    fn isolate_process_auth_env() -> IsolatedProcessAuthEnv {
+        let mut names = vec![
+            XAI_API_KEY_ENV_VAR.to_owned(),
+            LEGACY_XAI_API_KEY_ENV_VAR.to_owned(),
+        ];
+        let cfg = Config::default();
+        let models = crate::agent::config::resolve_model_list(&cfg, None);
+        for entry in models.values() {
+            if let Some(env) = entry.env_key.as_ref() {
+                for name in env.names() {
+                    names.push(name.to_owned());
+                }
+            }
+        }
+        names.sort();
+        names.dedup();
+        let saved = names
+            .into_iter()
+            .map(|name| {
+                let prior = std::env::var_os(&name);
+                // SAFETY: the calling test is `#[serial]` and this guard restores each var.
+                unsafe { std::env::remove_var(&name) };
+                (name, prior)
+            })
+            .collect();
+        IsolatedProcessAuthEnv { saved }
+    }
+
+    impl Drop for IsolatedProcessAuthEnv {
+        fn drop(&mut self) {
+            for (name, prior) in self.saved.drain(..) {
+                // SAFETY: same serial test restores the previous process environment.
+                match prior {
+                    Some(value) => unsafe { std::env::set_var(name, value) },
+                    None => unsafe { std::env::remove_var(name) },
+                }
+            }
+        }
+    }
+
     #[test]
     #[serial]
     fn env_key_probe_unusable_suppresses_advertise_without_byok() {

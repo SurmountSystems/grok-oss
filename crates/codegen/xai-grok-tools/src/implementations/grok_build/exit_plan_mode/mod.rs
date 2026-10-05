@@ -258,6 +258,7 @@ mod tests {
 
         match result {
             ExitPlanModeOutput::PlanReady {
+                ref message,
                 ref plan_content,
                 ref plan_file_path,
                 ..

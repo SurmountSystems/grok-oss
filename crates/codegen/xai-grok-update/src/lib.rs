@@ -6,6 +6,7 @@
     dead_code
 )]
 #![deny(clippy::indexing_slicing)]
+pub mod artifact_sha256;
 pub mod auto_update;
 mod cleanup_downloads;
 pub mod oss_update;

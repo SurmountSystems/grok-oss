@@ -8,7 +8,7 @@ use syntect::{
     dumps::from_uncompressed_data,
     easy::HighlightLines,
     highlighting::{Theme as SyntectTheme, ThemeSet},
-    parsing::{SyntaxDefinition, SyntaxReference, SyntaxSet, SyntaxSetBuilder},
+    parsing::{SyntaxReference, SyntaxSet},
 };
 
 /// Syntax highlighting configuration.

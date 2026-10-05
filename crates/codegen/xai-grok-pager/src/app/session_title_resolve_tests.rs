@@ -301,6 +301,7 @@ fn pinned_local_ctx() -> crate::app::session_startup::MaterializeCtx {
         restore_code: false,
         recent_session_selection: crate::app::session_startup::RecentSessionSelection::Interactive,
         restore_progress_on_stdout: false,
+        open_last_session_on_start: false,
     }
 }
 

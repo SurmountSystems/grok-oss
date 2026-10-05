@@ -1537,6 +1537,12 @@ mod tests {
             .expect("agent-message permission test timed out")
     }
 
+    /// Point `$GROK_HOME` at `home`, a directory this test owns.
+    /// Call sites do not bind a guard, so the override stays set until a later pin replaces it.
+    fn pin_grok_home_to(home: &std::path::Path) {
+        unsafe { std::env::set_var("GROK_HOME", home) };
+    }
+
     // ── Managed-policy pin: yolo clamp + persisted bash clamp ──
 
     const PIN: &str =

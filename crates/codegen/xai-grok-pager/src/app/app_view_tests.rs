@@ -87,6 +87,11 @@ pub(crate) fn test_app() -> AppView {
         active_view: ActiveView::Welcome,
         auth_return_view: None,
         agents: indexmap::IndexMap::new(),
+        global_work_pause: crate::app::global_work_pause::GlobalWorkPause::default(),
+        soft_stop: crate::app::soft_stop::SoftStop::default(),
+        rebuild_relaunch: None,
+        pending_tui_screenshot: false,
+        console_team_prepaid_cents: None,
         next_agent_id: 0,
         models: ModelState::default(),
         registry: ActionRegistry::defaults(),
@@ -192,6 +197,9 @@ pub(crate) fn test_app() -> AppView {
         coding_data_pending_write: None,
         coding_data_write_seq: 0,
         show_tips: None,
+        auto_compact_threshold_percent: None,
+        auto_compact_threshold_tokens: None,
+        default_reasoning_effort: None,
         auto_update: None,
         ask_user_question_timeout_enabled: None,
         subagent_model_inheritance: crate::settings::FeatureOverrideState::new(
@@ -335,6 +343,7 @@ pub(crate) fn test_app() -> AppView {
         voice_clip_deadline: None,
         voice_cmd_tx: None,
         voice_state: VoiceState::Idle,
+        scheduler_background_loops_seed: true,
     }
 }
 pub(crate) fn test_app_with_agent() -> AppView {
@@ -355,7 +364,6 @@ pub(crate) fn test_app_with_agent() -> AppView {
             next_queue_id: 0,
             yolo_mode: false,
             auto_mode: false,
-            context_only_mode: false,
             prompt_history: Vec::new(),
             prompt_history_loading: false,
             loading_replay: false,
@@ -379,6 +387,7 @@ pub(crate) fn test_app_with_agent() -> AppView {
             compact_held_prompt: None,
             current_prompt_id: None,
             created_via_new: false,
+            session_notes: crate::app::agent::SessionNotes::default(),
         },
         ScrollbackState::new(),
     );
@@ -563,7 +572,6 @@ fn idle_child_view(app: &AppView, id_n: usize, sid: &str) -> Box<AgentView> {
         next_queue_id: 0,
         yolo_mode: false,
         auto_mode: false,
-        context_only_mode: false,
         prompt_history: Vec::new(),
         prompt_history_loading: false,
         loading_replay: false,
@@ -587,6 +595,7 @@ fn idle_child_view(app: &AppView, id_n: usize, sid: &str) -> Box<AgentView> {
         compact_held_prompt: None,
         current_prompt_id: None,
         created_via_new: false,
+        session_notes: crate::app::agent::SessionNotes::default(),
     };
     Box::new(AgentView::new(session, ScrollbackState::new()))
 }
@@ -5445,6 +5454,7 @@ fn moved_after_press_ends_gesture_instead_of_promoting() {
         false,
         crate::app::agent_view::BannerSlotParams::none(),
         false,
+        false,
         &mut Vec::new(),
         crate::app::agent_view::AppRenderParams::default(),
     );
@@ -5490,6 +5500,7 @@ fn moved_without_button_does_not_promote_pending_scrollback_drag() {
         None,
         false,
         crate::app::agent_view::BannerSlotParams::none(),
+        false,
         false,
         &mut Vec::new(),
         crate::app::agent_view::AppRenderParams::default(),
@@ -5539,6 +5550,7 @@ fn scrollback_click_still_selects_entry_on_mouse_up() {
         None,
         false,
         crate::app::agent_view::BannerSlotParams::none(),
+        false,
         false,
         &mut Vec::new(),
         crate::app::agent_view::AppRenderParams::default(),

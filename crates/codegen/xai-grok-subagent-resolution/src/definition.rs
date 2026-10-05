@@ -217,6 +217,69 @@ pub fn apply_definition_runtime_defaults(
         runtime.isolation = SubagentIsolationMode::Worktree;
     }
 }
+/// Layer of an admitted child. L1 is the main session and is never spawned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpawnedLayer {
+    /// Depth-1 coordinator. Only L1 (parent depth 0) creates this layer.
+    L2Coordinator,
+    /// Specialist. An L2 spawn is this layer, and it cannot spawn.
+    L3Specialist,
+}
+
+/// Whether a spawn from this parent depth is admitted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpawnAdmission {
+    /// The child stays within `max_depth`.
+    Allow {
+        layer: SpawnedLayer,
+        /// The child may itself call spawn_subagent.
+        may_spawn: bool,
+    },
+    /// The child would be deeper than `max_depth`.
+    RejectDepthLimit,
+}
+
+/// The agent at `depth` may call spawn_subagent.
+///
+/// Depth 0 is L1 and depth 1 is an L2 coordinator. Both may spawn while
+/// `depth < max_depth`. Depth 2 and beyond is an L3 specialist and must
+/// not spawn, even when a higher numeric ceiling would still have room.
+pub fn nested_spawn_allowed(depth: u32, max_depth: u32) -> bool {
+    depth < max_depth && depth < 2
+}
+
+/// The child may itself spawn only when L1 admits an L2 still under the ceiling.
+///
+/// `parent_depth` is the spawner. `child_depth` is the depth the child will
+/// run at. An L2 spawn is an L3 specialist even when `child_depth` is still
+/// under `max_depth`.
+pub fn spawned_agent_may_spawn(parent_depth: u32, child_depth: u32, max_depth: u32) -> bool {
+    parent_depth == 0 && nested_spawn_allowed(child_depth, max_depth)
+}
+
+/// Admit a spawn from `parent_depth` under `max_depth`.
+///
+/// Only L1 spawns an L2 coordinator. Any deeper spawner admits an L3
+/// specialist that cannot spawn. A child deeper than `max_depth` is rejected.
+pub fn admit_spawn(parent_depth: u32, max_depth: u32) -> SpawnAdmission {
+    let child_depth = parent_depth.saturating_add(1);
+    if child_depth > max_depth {
+        return SpawnAdmission::RejectDepthLimit;
+    }
+    let may_spawn = spawned_agent_may_spawn(parent_depth, child_depth, max_depth);
+    if parent_depth == 0 {
+        SpawnAdmission::Allow {
+            layer: SpawnedLayer::L2Coordinator,
+            may_spawn,
+        }
+    } else {
+        SpawnAdmission::Allow {
+            layer: SpawnedLayer::L3Specialist,
+            may_spawn,
+        }
+    }
+}
+
 /// Apply capability filtering and recursion depth to the exact production definition toolset.
 pub fn apply_child_tool_policy(
     definition: &mut AgentDefinition,

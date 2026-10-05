@@ -106,7 +106,7 @@ pub use acp_policy::{
     ClientHook, ClientHookReply, ClientPolicy, ElicitationDecision, Interactivity,
     PermissionDecision, QuestionDecision, RequestPolicy, TrustDecision,
 };
-pub use acp_test_client::AcpTestClient;
+pub use acp_test_client::{AcpTestClient, RawStdioClient};
 pub use acp_transcript::TranscriptEntry;
 pub use acp_wire::WireLine;
 pub use conversation::ReadConversation;

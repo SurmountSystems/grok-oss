@@ -48,10 +48,16 @@ pub struct MemoryState {
 
 fn drop_trailing_blank(lines: &[String]) -> Vec<String> {
     let mut end = lines.len();
-    while end > 0 && lines[end - 1].trim().is_empty() {
+    while end > 0
+        && lines
+            .get(end - 1)
+            .expect("index out of bounds")
+            .trim()
+            .is_empty()
+    {
         end -= 1;
     }
-    lines[..end].to_vec()
+    lines.get(..end).expect("index out of bounds").to_vec()
 }
 
 pub fn parse_memory_file(content: &str) -> MemoryState {

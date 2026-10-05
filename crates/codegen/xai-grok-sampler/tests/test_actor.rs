@@ -19,7 +19,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use xai_grok_sampler::{
     ApiBackend, RequestId, RetryPolicy, SamplerActor, SamplerConfig, SamplingChannel,
-    SamplingErrorKind, SamplingEvent, StripReason,
+    SamplingErrorKind, SamplingEvent, StripReason, clear_all_including_durable,
 };
 use xai_grok_sampling_types::{
     ConversationItem, ConversationRequest, DoomLoopRecoveryPolicy, INVALID_IMAGE_ERROR_CODE,

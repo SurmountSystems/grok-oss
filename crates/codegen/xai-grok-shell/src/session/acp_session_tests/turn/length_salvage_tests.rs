@@ -176,6 +176,7 @@ async fn run_prompt(actor: &Arc<SessionActor>, prompt_id: &str) -> PromptTurnRes
             None,
             None,
             None,
+            /* unstick_retry */ false,
         ),
     )
     .await

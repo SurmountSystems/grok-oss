@@ -25,6 +25,9 @@ pub struct AcpTestClient {
     _sandbox: TestSandbox,
 }
 
+/// Name the built-binary e2e test uses for [`AcpTestClient`].
+pub type RawStdioClient = AcpTestClient;
+
 impl AcpTestClient {
     pub async fn spawn(server: &MockInferenceServer, cwd: &Path) -> Self {
         let SpawnedAgent {

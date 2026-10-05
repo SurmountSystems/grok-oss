@@ -306,20 +306,4 @@ mod tests {
         assert_eq!(meta.session_id, "abc");
         assert_eq!(meta.model, "grok-3");
     }
-    #[test]
-    fn new_defaults_optional_collection_fields() {
-        let meta = PromptMetadata::new(PromptMetadataParams {
-            schema_version: GCS_SCHEMA_VERSION.into(),
-            session_id: "abc".into(),
-            turn_number: 1,
-            request_id: "req-1".into(),
-            turn_started_at: "2025-01-01T00:00:00Z".into(),
-            model: "grok-3".into(),
-            host_os: "linux".into(),
-            host_arch: "x86_64".into(),
-            ..Default::default()
-        });
-        assert_eq!(meta.session_id, "abc");
-        assert_eq!(meta.model, "grok-3");
-    }
 }

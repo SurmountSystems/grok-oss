@@ -2,6 +2,7 @@
 
 mod announcements;
 mod campaigns;
+mod consent;
 
 mod economic_mode;
 mod hints;
@@ -21,6 +22,7 @@ pub use campaigns::{
     CampaignModelsDefault, campaign_driven_models_default, persist_models_default,
     sync_campaign_fields,
 };
+pub use consent::{ConsentAnswer, set_consent_answer};
 
 pub use economic_mode::{
     ECONOMIC_CONTEXT_CAP, ECONOMIC_MODE_DEFAULT, NESTED_SESSION_CONTEXT_CAP,

@@ -4,7 +4,7 @@ use super::super::ctx::with_scrollback;
 use super::ui::{refresh_open_settings_modals, save_success_toast};
 use crate::app::actions::{Effect, ModelChoice};
 use crate::app::app_view::{ActiveView, AppView};
-use crate::settings::PendingWrite;
+use crate::settings::registry::PendingWrite;
 use agent_client_protocol as acp;
 
 /// Set multiline input mode: swap Enter and Shift+Enter behavior.
@@ -577,15 +577,41 @@ pub(in crate::app::dispatch) fn set_hide_header(app: &mut AppView, new: bool) ->
     }]
 }
 
+fn apply_always_expand_thinking_display(app: &mut AppView, expanded: bool) {
+    let mode = if expanded {
+        crate::scrollback::types::DisplayMode::Expanded
+    } else {
+        crate::scrollback::types::DisplayMode::Collapsed
+    };
+    let ids: Vec<_> = app.agents.keys().copied().collect();
+    for id in ids {
+        let Some(agent) = app.agents.get_mut(&id) else {
+            continue;
+        };
+        for entry in agent.scrollback.entries_mut() {
+            if matches!(
+                entry.block,
+                crate::scrollback::block::RenderBlock::Thinking(_)
+            ) {
+                entry.set_display_mode(mode);
+            }
+        }
+        for child in agent.subagent_views.values_mut() {
+            for entry in child.scrollback.entries_mut() {
+                if matches!(
+                    entry.block,
+                    crate::scrollback::block::RenderBlock::Thinking(_)
+                ) {
+                    entry.set_display_mode(mode);
+                }
+            }
+        }
+    }
+}
+
 pub(super) fn set_always_expand_thinking_inner(app: &mut AppView, new: bool) {
     crate::appearance::cache::set_always_expand_thinking(new);
     app.current_ui.always_expand_thinking = Some(new);
-    for agent in app.agents.values_mut() {
-        agent.scrollback.apply_always_expand_thinking_flip(new);
-        for child in agent.subagent_views.values_mut() {
-            child.scrollback.apply_always_expand_thinking_flip(new);
-        }
-    }
 }
 
 pub(in crate::app::dispatch) fn set_always_expand_thinking(
@@ -597,6 +623,7 @@ pub(in crate::app::dispatch) fn set_always_expand_thinking(
         return vec![];
     }
     set_always_expand_thinking_inner(app, new);
+    apply_always_expand_thinking_display(app, new);
     refresh_open_settings_modals(app);
     app.show_toast(&save_success_toast("Always expand thinking", new));
     vec![Effect::PersistSetting {
@@ -618,13 +645,6 @@ pub(in crate::app::dispatch) fn persist_always_expand_thinking_after_ctrl_t(
         return vec![];
     }
     app.current_ui.always_expand_thinking = Some(new);
-    for agent in app.agents.values_mut() {
-        agent.scrollback.apply_always_expand_thinking_flip(new);
-        for child in agent.subagent_views.values_mut() {
-            child.scrollback.apply_always_expand_thinking_flip(new);
-        }
-    }
-    with_scrollback(app, |s| s.apply_thinking_ctrl_t_groups(new));
     refresh_open_settings_modals(app);
     vec![Effect::PersistSetting {
         key: "always_expand_thinking",
@@ -991,7 +1011,7 @@ pub(in crate::app::dispatch) fn set_invert_scroll(app: &mut AppView, new: bool) 
     );
     app.show_toast(&save_success_toast("Invert scroll", new));
     vec![Effect::PersistSetting {
-        key,
+        key: "invert_scroll",
         value: crate::settings::SettingValue::Bool(new),
         rollback_value: crate::settings::SettingValue::Bool(prev),
     }]
@@ -1016,6 +1036,180 @@ pub(in crate::app::dispatch) fn set_token_economy_int(
         key,
         value: crate::settings::SettingValue::Int(new),
         rollback_value: crate::settings::SettingValue::Int(prev),
+    }]
+}
+
+/// Persist a Token Economy bool; updates the process live cache immediately.
+pub(in crate::app::dispatch) fn set_token_economy_bool(
+    app: &mut AppView,
+    field: &'static str,
+    new: bool,
+) -> Vec<Effect> {
+    let key = token_economy_setting_key(field);
+    let prev = token_economy_bool_current(field);
+    if prev == new {
+        return vec![];
+    }
+    xai_grok_shell::token_economy::set_token_economy_live_bool(field, new);
+    refresh_open_settings_modals(app);
+    app.show_toast(&format!(
+        "\u{2713} {}: {}",
+        token_economy_label(field),
+        if new { "on" } else { "off" }
+    ));
+    vec![Effect::PersistSetting {
+        key,
+        value: crate::settings::SettingValue::Bool(new),
+        rollback_value: crate::settings::SettingValue::Bool(prev),
+    }]
+}
+
+pub(super) fn set_auto_run_implement_inner(app: &mut AppView, new: bool) {
+    crate::appearance::cache::set_auto_run_implement(new);
+    app.current_ui.auto_run_implement = Some(new);
+}
+
+pub(in crate::app::dispatch) fn set_auto_run_implement(
+    app: &mut AppView,
+    new: bool,
+) -> Vec<Effect> {
+    let prev = crate::appearance::cache::load_auto_run_implement();
+    if prev == new {
+        return vec![];
+    }
+    set_auto_run_implement_inner(app, new);
+    refresh_open_settings_modals(app);
+    app.show_toast(&save_success_toast("Auto-run implement", new));
+    vec![Effect::PersistSetting {
+        key: "auto_run_implement",
+        value: crate::settings::SettingValue::Bool(new),
+        rollback_value: crate::settings::SettingValue::Bool(prev),
+    }]
+}
+
+pub(super) fn set_economic_mode_inner(app: &mut AppView, new: bool) {
+    crate::appearance::cache::set_economic_mode(new);
+    app.current_ui.economic_mode = Some(new);
+}
+
+pub(in crate::app::dispatch) fn set_economic_mode(app: &mut AppView, new: bool) -> Vec<Effect> {
+    let prev = crate::appearance::cache::load_economic_mode();
+    if prev == new {
+        return vec![];
+    }
+    set_economic_mode_inner(app, new);
+    refresh_open_settings_modals(app);
+    app.show_toast(&save_success_toast("Economic mode", new));
+    vec![Effect::PersistSetting {
+        key: "economic_mode",
+        value: crate::settings::SettingValue::Bool(new),
+        rollback_value: crate::settings::SettingValue::Bool(prev),
+    }]
+}
+
+pub(super) fn set_resume_canceled_turn_on_restart_inner(app: &mut AppView, new: bool) {
+    app.current_ui.resume_canceled_turn_on_restart = Some(new);
+}
+
+pub(in crate::app::dispatch) fn set_resume_canceled_turn_on_restart(
+    app: &mut AppView,
+    new: bool,
+) -> Vec<Effect> {
+    let prev = app.current_ui.resume_canceled_turn_on_restart_enabled();
+    if prev == new {
+        return vec![];
+    }
+    set_resume_canceled_turn_on_restart_inner(app, new);
+    refresh_open_settings_modals(app);
+    app.show_toast(&save_success_toast("Resume canceled turn on restart", new));
+    vec![Effect::PersistSetting {
+        key: "resume_canceled_turn_on_restart",
+        value: crate::settings::SettingValue::Bool(new),
+        rollback_value: crate::settings::SettingValue::Bool(prev),
+    }]
+}
+
+pub(super) fn set_composer_multiline_inner(app: &mut AppView, new: bool) {
+    crate::appearance::cache::set_composer_multiline(new);
+    app.current_ui.composer_multiline = Some(new);
+}
+
+/// SHELL-owned: cache and `[ui].composer_multiline` via `Effect::PersistSetting`.
+pub(in crate::app::dispatch) fn set_composer_multiline(
+    app: &mut AppView,
+    new: bool,
+) -> Vec<Effect> {
+    let prev = crate::appearance::cache::load_composer_multiline();
+    if prev == new {
+        return vec![];
+    }
+    set_composer_multiline_inner(app, new);
+    refresh_open_settings_modals(app);
+    app.show_toast(&save_success_toast("Composer multiline", new));
+    vec![Effect::PersistSetting {
+        key: "composer_multiline",
+        value: crate::settings::SettingValue::Bool(new),
+        rollback_value: crate::settings::SettingValue::Bool(prev),
+    }]
+}
+
+pub(super) fn set_allow_session_multiline_inner(app: &mut AppView, new: bool) {
+    crate::appearance::cache::set_allow_session_multiline(new);
+    app.current_ui.allow_session_multiline = Some(new);
+}
+
+/// SHELL-owned: cache and `[ui].allow_session_multiline` via `Effect::PersistSetting`.
+pub(in crate::app::dispatch) fn set_allow_session_multiline(
+    app: &mut AppView,
+    new: bool,
+) -> Vec<Effect> {
+    let prev = crate::appearance::cache::load_allow_session_multiline();
+    if prev == new {
+        return vec![];
+    }
+    set_allow_session_multiline_inner(app, new);
+    refresh_open_settings_modals(app);
+    app.show_toast(&save_success_toast("Session multiline", new));
+    vec![Effect::PersistSetting {
+        key: "allow_session_multiline",
+        value: crate::settings::SettingValue::Bool(new),
+        rollback_value: crate::settings::SettingValue::Bool(prev),
+    }]
+}
+
+/// Persist `[models].default_reasoning_effort` (`low` | `medium` | `high`).
+pub(in crate::app::dispatch) fn set_default_reasoning_effort(
+    app: &mut AppView,
+    new: String,
+) -> Vec<Effect> {
+    let canonical = new.to_ascii_lowercase();
+    if !matches!(canonical.as_str(), "low" | "medium" | "high") {
+        return vec![];
+    }
+    let prev = app
+        .default_reasoning_effort
+        .clone()
+        .unwrap_or_else(|| "medium".to_string());
+    if prev == canonical {
+        return vec![];
+    }
+    app.default_reasoning_effort = Some(canonical.clone());
+    refresh_open_settings_modals(app);
+    app.show_toast(&format!("\u{2713} Default reasoning effort: {canonical}"));
+    let canonical_static = match canonical.as_str() {
+        "low" => "low",
+        "high" => "high",
+        _ => "medium",
+    };
+    let prev_static = match prev.as_str() {
+        "low" => "low",
+        "high" => "high",
+        _ => "medium",
+    };
+    vec![Effect::PersistSetting {
+        key: "default_reasoning_effort",
+        value: crate::settings::SettingValue::Enum(canonical_static),
+        rollback_value: crate::settings::SettingValue::Enum(prev_static),
     }]
 }
 
@@ -1069,135 +1263,6 @@ fn token_economy_int_current(field: &str) -> i64 {
         "lock_implement_effort" => i64::from(cfg.lock_implement_effort.unwrap_or(0)),
         _ => 0,
     }
-}
-
-pub(super) fn set_keep_text_selection_inner(kind: crate::appearance::TextSelection) {
-    crate::appearance::cache::set_keep_text_selection(kind);
-}
-
-/// Set the unified scrollback text-selection mode (`flash` | `hold` | `word_select`): highlight lifetime and double-click action, kept in sync.
-///
-/// SHELL-OWNED: persisted to `[ui].keep_text_selection` via `Effect::PersistSetting`.
-pub(in crate::app::dispatch) fn set_keep_text_selection(
-    app: &mut AppView,
-    kind: crate::appearance::TextSelection,
-) -> Vec<Effect> {
-    let prev = crate::appearance::cache::load_keep_text_selection();
-    if prev == kind {
-        return vec![];
-    }
-    set_keep_text_selection_inner(kind);
-    refresh_open_settings_modals(app);
-    tracing::info!(
-        target: "settings",
-        key = "keep_text_selection",
-        value = kind.as_canonical(),
-        "setting changed",
-    );
-    app.show_toast(&format!("\u{2713} Text selection: {}", kind.as_canonical()));
-    vec![Effect::PersistSetting {
-        key: "keep_text_selection",
-        value: crate::settings::SettingValue::Enum(kind.as_canonical()),
-        rollback_value: crate::settings::SettingValue::Enum(prev.as_canonical()),
-    }]
-}
-
-/// State-only mutation for `scroll_speed`.
-/// Updates the process-wide cache and recomputes `app.scroll_config`.
-pub(super) fn set_scroll_speed_inner(app: &mut AppView, clamped: u8) {
-    crate::appearance::cache::set_scroll_speed(clamped);
-    // Full settings-cache rebuild: preserves the other scroll overrides (mode/invert/lines) instead of resetting them to profile defaults
-    app.scroll_config = crate::input::mouse::ScrollConfig::from_settings();
-}
-
-/// Set mouse-wheel scroll speed (registry-driven path).
-/// SHELL-OWNED: persisted to `[ui].scroll_speed` in config.toml via `Effect::PersistSetting`.
-/// Clamps to `[1, 100]` to match the registry's `Int { min: 1, max: 100 }` bounds.
-pub(in crate::app::dispatch) fn set_scroll_speed(app: &mut AppView, raw: i64) -> Vec<Effect> {
-    let clamped = raw.clamp(1, 100) as u8;
-    let prev = crate::appearance::cache::load_scroll_speed();
-    if prev == clamped {
-        return vec![];
-    }
-    set_scroll_speed_inner(app, clamped);
-    refresh_open_settings_modals(app);
-    tracing::info!(
-        target: "settings",
-        key = "scroll_speed",
-        value = clamped,
-        "setting changed",
-    );
-    app.show_toast(&format!("\u{2713} Scroll speed: {clamped}"));
-    vec![Effect::PersistSetting {
-        key: "scroll_speed",
-        value: crate::settings::SettingValue::Int(clamped as i64),
-        rollback_value: crate::settings::SettingValue::Int(prev as i64),
-    }]
-}
-
-/// State-only mutation for `scroll_mode`.
-/// Updates the process-wide cache and recomputes `app.scroll_config`.
-pub(super) fn set_scroll_mode_inner(app: &mut AppView, mode: crate::appearance::ScrollMode) {
-    crate::appearance::cache::set_scroll_mode(mode);
-    app.scroll_config = crate::input::mouse::ScrollConfig::from_settings();
-}
-
-/// Set the scroll input classification (`auto` | `wheel` | `trackpad`).
-///
-/// SHELL-OWNED: persisted to `[ui].scroll_mode` via `Effect::PersistSetting`.
-pub(in crate::app::dispatch) fn set_scroll_mode(
-    app: &mut AppView,
-    mode: crate::appearance::ScrollMode,
-) -> Vec<Effect> {
-    let prev = crate::appearance::cache::load_scroll_mode();
-    if prev == mode {
-        return vec![];
-    }
-    set_scroll_mode_inner(app, mode);
-    refresh_open_settings_modals(app);
-    tracing::info!(
-        target: "settings",
-        key = "scroll_mode",
-        value = mode.as_canonical(),
-        "setting changed",
-    );
-    app.show_toast(&format!("\u{2713} Scroll input: {}", mode.as_canonical()));
-    vec![Effect::PersistSetting {
-        key: "scroll_mode",
-        value: crate::settings::SettingValue::Enum(mode.as_canonical()),
-        rollback_value: crate::settings::SettingValue::Enum(prev.as_canonical()),
-    }]
-}
-
-/// State-only mutation for `invert_scroll`.
-/// Updates the process-wide cache and recomputes `app.scroll_config`.
-pub(super) fn set_invert_scroll_inner(app: &mut AppView, enabled: bool) {
-    crate::appearance::cache::set_invert_scroll(enabled);
-    app.scroll_config = crate::input::mouse::ScrollConfig::from_settings();
-}
-
-/// Set whether vertical scroll direction is inverted ("natural" scrolling).
-///
-/// SHELL-OWNED: persisted to `[ui].invert_scroll` via `Effect::PersistSetting`.
-pub(in crate::app::dispatch) fn set_invert_scroll(app: &mut AppView, new: bool) -> Vec<Effect> {
-    let prev = crate::appearance::cache::load_invert_scroll();
-    if prev == new {
-        return vec![];
-    }
-    set_invert_scroll_inner(app, new);
-    refresh_open_settings_modals(app);
-    tracing::info!(
-        target: "settings",
-        key = "invert_scroll",
-        value = new,
-        "setting changed",
-    );
-    app.show_toast(&save_success_toast("Invert scroll", new));
-    vec![Effect::PersistSetting {
-        key: "invert_scroll",
-        value: crate::settings::SettingValue::Bool(new),
-        rollback_value: crate::settings::SettingValue::Bool(prev),
-    }]
 }
 
 /// State-only mutation for `scroll_lines`.
@@ -1369,7 +1434,6 @@ pub(in crate::app::dispatch) fn set_cancel_subagents_on_turn_cancel(
 
 pub(super) fn set_notifications_session_recap_inner(app: &mut AppView, new: bool) {
     app.notification_service.set_session_recap(new);
-    app.current_ui.notifications.session_recap = Some(new);
 }
 
 /// Auto return-from-away session recap (`[ui.notifications] session_recap`).
@@ -1400,7 +1464,6 @@ pub(in crate::app::dispatch) fn set_notifications_session_recap(
 pub(super) fn set_notifications_session_recap_threshold_secs_inner(app: &mut AppView, secs: u64) {
     app.notification_service
         .set_session_recap_threshold_secs(secs);
-    app.current_ui.notifications.session_recap_threshold_secs = Some(secs);
 }
 
 /// Auto recap debounce (`[ui.notifications] session_recap_threshold_secs`).
@@ -1433,11 +1496,10 @@ pub(in crate::app::dispatch) fn set_notifications_session_recap_threshold_secs(
 }
 
 pub(super) fn set_features_session_recap_inner(app: &mut AppView, new: bool) {
-    app.features_session_recap = new;
-    // Optimistic client gate: off hides /recap UI immediately; on still needs
-    // shell re-advertise (restart) for full ACP availability.
+    // Optimistic client gate: the settings row follows `new` immediately.
+    // Turning on still needs a shell re-advertise (restart) for full ACP.
+    app.session_recap_available = new;
     if !new {
-        app.session_recap_available = false;
         for agent in app.agents.values_mut() {
             agent.set_session_recap_available(false);
         }
@@ -1450,7 +1512,7 @@ pub(in crate::app::dispatch) fn set_features_session_recap(
     app: &mut AppView,
     new: bool,
 ) -> Vec<Effect> {
-    let prev = app.features_session_recap;
+    let prev = app.session_recap_available;
     if prev == new {
         return vec![];
     }
@@ -1470,53 +1532,6 @@ pub(in crate::app::dispatch) fn set_features_session_recap(
         key: "features.session_recap",
         value: crate::settings::SettingValue::Bool(new),
         rollback_value: crate::settings::SettingValue::Bool(prev),
-    }]
-}
-
-/// Set the cursor preselection canonical (registry-driven path).
-/// SHELL-OWNED: persisted to `[ui].default_selected_permission` via `Effect::PersistSetting`.
-/// The `always_allow_all_sessions` canonical is the effective default (the cursor falls to the enable-always-approve row).
-pub(in crate::app::dispatch) fn set_default_selected_permission(
-    app: &mut AppView,
-    new: String,
-) -> Vec<Effect> {
-    use crate::appearance::permission_cursor::DefaultSelectedPermission;
-    // All callers pass a registry canonical; parsing is total (unknown becomes `Default`), so a garbage input degrades to the safe "no preselection" value
-    // `debug_assert` catches a dispatch bug in tests without a parallel validator on the hot path
-    let parsed = DefaultSelectedPermission::from_config_value(&new);
-    debug_assert_eq!(
-        parsed.as_canonical(),
-        new.as_str(),
-        "SetDefaultSelectedPermission expects a registry canonical",
-    );
-    let new_canonical = parsed.as_canonical();
-    let prev_canonical = app
-        .current_ui
-        .default_selected_permission
-        .as_deref()
-        .map_or(DefaultSelectedPermission::AlwaysAllowAllSessions, |s| {
-            DefaultSelectedPermission::from_config_value(s)
-        })
-        .as_canonical();
-    if prev_canonical == new_canonical {
-        return vec![];
-    }
-    set_default_selected_permission_inner(app, parsed);
-    refresh_open_settings_modals(app);
-    tracing::info!(
-        target: "settings",
-        key = "default_selected_permission",
-        value = new_canonical,
-        "setting changed",
-    );
-    app.show_toast(&format!(
-        "\u{2713} Default selected permission: {}",
-        parsed.display(),
-    ));
-    vec![Effect::PersistSetting {
-        key: "default_selected_permission",
-        value: crate::settings::SettingValue::Enum(new_canonical),
-        rollback_value: crate::settings::SettingValue::Enum(prev_canonical),
     }]
 }
 
@@ -1683,8 +1698,13 @@ pub(in crate::app::dispatch) fn set_confirm_before_rewind(
 fn refresh_process_rule_reminders_live(app: &AppView) {
     xai_grok_tools::reminders::ProcessRuleReminders::set_live(
         xai_grok_tools::reminders::ProcessRuleReminders::from_ui(
-            app.current_ui.process_rule_reminders_enabled(),
-            app.current_ui.process_rule_reminders_text(),
+            app.current_ui
+                .process_rule_reminders_enabled
+                .unwrap_or(true),
+            app.current_ui
+                .process_rule_reminders
+                .as_deref()
+                .unwrap_or(""),
         ),
     );
 }
@@ -1725,7 +1745,10 @@ pub(in crate::app::dispatch) fn set_process_rule_reminders_enabled(
     app: &mut AppView,
     new: bool,
 ) -> Vec<Effect> {
-    let prev = app.current_ui.process_rule_reminders_enabled();
+    let prev = app
+        .current_ui
+        .process_rule_reminders_enabled
+        .unwrap_or(true);
     if prev == new {
         return vec![];
     }
@@ -1755,7 +1778,11 @@ pub(in crate::app::dispatch) fn set_process_rule_reminders(
     app: &mut AppView,
     new: String,
 ) -> Vec<Effect> {
-    let prev = app.current_ui.process_rule_reminders_text().to_string();
+    let prev = app
+        .current_ui
+        .process_rule_reminders
+        .clone()
+        .unwrap_or_default();
     if prev == new {
         return vec![];
     }

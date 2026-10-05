@@ -21,6 +21,22 @@ fn bracketed_paste_defers_caption_until_image_probe(text: &str) -> bool {
 }
 
 impl AgentView {
+    /// Empty screenshot paste and the GNOME dialog title wait for the raster probe.
+    pub(super) fn bracketed_paste_waits_for_image_probe(text: &str) -> bool {
+        bracketed_paste_defers_caption_until_image_probe(text)
+    }
+
+    /// Open L2 overlay whose composer is the prompt, with no blocking card.
+    /// Image paste probes on the parent, then the chip lands on this child.
+    pub(super) fn l2_overlay_composer_awaits_image_paste(&self) -> bool {
+        let Some(sid) = self.visible_nested_overlay_sid() else {
+            return false;
+        };
+        self.subagent_views.get(sid).is_some_and(|child| {
+            child.active_pane == super::AgentPane::Prompt && child.focused_card().is_none()
+        })
+    }
+
     /// Insert a plain-text (caption) clipboard paste into the prompt, matching the bracketed arm's whitespace policy and slash/suggestion refresh.
     /// The image/file-url portion of a paste is handled by the deferred probe.
     fn insert_prompt_plain_text(
@@ -625,7 +641,6 @@ pub(super) mod paste_key_tests {
                 next_queue_id: 0,
                 yolo_mode: false,
                 auto_mode: false,
-                context_only_mode: false,
                 prompt_history: Vec::new(),
                 prompt_history_loading: false,
                 loading_replay: false,
@@ -1831,42 +1846,50 @@ pub(super) mod paste_key_tests {
                 child_session_id: child_sid.into(),
                 description: "coordinate the slice".into(),
                 subagent_type: "general-purpose".into(),
-                persona: None,
-                role: None,
-                model: None,
-                context_source: None,
-                resumed_from: None,
-                capability_mode: None,
-                workflow_run_id: None,
-                context_normalized: false,
-                parent_prompt_id: None,
-                parent_session_id: Some("l1-sess".into()),
-                depth: Some(1),
-                started_at: now,
-                last_progress_at: now,
                 finished: false,
                 status: None,
-                error: None,
-                duration_ms: None,
-                tool_calls: None,
-                turns: None,
-                turn_count: None,
-                tool_call_count: None,
-                tokens_used: None,
-                tokens_past: 0,
-                context_window_tokens: None,
-                context_usage_pct: None,
-                tools_used: Vec::new(),
-                error_count: None,
-                activity_label: None,
-                is_background: false,
-                pending_kill: false,
-                kill_requested_at: None,
-                scrollback_entry_id: None,
+                attempt: crate::app::subagent::SubagentAttemptInfo {
+                    lifecycle:
+                        crate::app::subagent::SubagentLifecycleState::running_legacy_for_test(),
+                    persona: None,
+                    role: None,
+                    model: None,
+                    context_source: None,
+                    resumed_from: None,
+                    capability_mode: None,
+                    workflow_run_id: None,
+                    context_normalized: false,
+                    parent_prompt_id: None,
+                    parent_session_id: Some("l1-sess".into()),
+                    depth: Some(1),
+                    tokens_past: 0,
+                    started_at: now,
+                    last_progress_at: now,
+                    status: None,
+                    error: None,
+                    duration_ms: None,
+                    tool_calls: None,
+                    turns: None,
+                    turn_count: None,
+                    tool_call_count: None,
+                    tokens_used: None,
+                    context_window_tokens: None,
+                    context_usage_pct: None,
+                    tools_used: Vec::new(),
+                    error_count: None,
+                    activity_label: None,
+                    is_background: false,
+                    pending_kill: false,
+                    kill_requested_at: None,
+                    scrollback_entry_id: None,
+                    terminal_entry_id: None,
+                },
+                completed_attempt_tokens: 0,
+                sealed_attempt_tokens: Default::default(),
                 prompt: None,
                 child_cwd: None,
                 worktree_path: None,
-                child_updates_replayed: true,
+                transcript: crate::app::subagent::ChildTranscript::DiskBacked,
             },
         );
         parent

@@ -19,6 +19,10 @@ use futures::StreamExt;
 use indicatif::{ProgressBar, ProgressStyle};
 use tokio::io::AsyncWriteExt;
 
+use crate::artifact_sha256::{
+    ChecksumVerifyFailure, artifact_checksum_url, parse_sha256_file_bytes,
+    verify_file_against_digest,
+};
 use crate::cleanup_downloads::cleanup_old_downloads;
 use crate::version::{
     UpdateConfig, fetch_latest_version, get_installed_grok_version, get_latest_version,
@@ -1450,12 +1454,13 @@ async fn download_cli_artifact_from_gcs(
         for (suffix, codec) in [("zst", Codec::Zstd), ("gz", Codec::Gzip)] {
             let url = format!("{base}/{name}.{suffix}");
             match download_and_decode(&url, dest, codec, with_progress).await {
-                Ok(()) => return Ok(()),
+                Ok(()) => return Ok(url),
                 Err(e) => tracing::debug!("compressed {name}.{suffix} unusable, trying next: {e}"),
             }
         }
-        match download_plain(&format!("{base}/{name}"), dest, with_progress).await {
-            Ok(()) => return Ok(()),
+        let plain_url = format!("{base}/{name}");
+        match download_plain(&plain_url, dest, with_progress).await {
+            Ok(()) => return Ok(plain_url),
             Err(e) => last_err = Some(e),
         }
     }
@@ -2330,6 +2335,53 @@ async fn gh_release_download(tag: &str, pattern: &str, dest: &std::path::Path) -
         );
     }
     Ok(())
+}
+
+/// Download the published `${artifact}.sha256` asset and compare it to
+/// `pending`. Fail-closed on a missing file, an unreadable digest, or a
+/// mismatch. SHA-256 only. Does not publish `pending`.
+async fn verify_gh_release_sha256(
+    pending: &std::path::Path,
+    tag: &str,
+    checksum_pattern: &str,
+) -> std::result::Result<(), ChecksumVerifyFailure> {
+    let parent = pending
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."));
+    let checksum_dest = tmp_download_path(&parent.join(checksum_pattern));
+    if let Err(_err) = gh_release_download(tag, checksum_pattern, &checksum_dest).await {
+        let _ = tokio::fs::remove_file(&checksum_dest).await;
+        return Err(ChecksumVerifyFailure::Missing {
+            url: checksum_pattern.to_string(),
+        });
+    }
+
+    let bytes = match tokio::fs::read(&checksum_dest).await {
+        Ok(bytes) => bytes,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return Err(ChecksumVerifyFailure::Missing {
+                url: checksum_pattern.to_string(),
+            });
+        }
+        Err(err) => {
+            let _ = tokio::fs::remove_file(&checksum_dest).await;
+            return Err(ChecksumVerifyFailure::Io(err.to_string()));
+        }
+    };
+    let _ = tokio::fs::remove_file(&checksum_dest).await;
+
+    let Some(expected) = parse_sha256_file_bytes(&bytes) else {
+        return Err(ChecksumVerifyFailure::Unreadable {
+            url: checksum_pattern.to_string(),
+        });
+    };
+
+    let pending = pending.to_path_buf();
+    match tokio::task::spawn_blocking(move || verify_file_against_digest(&pending, &expected)).await
+    {
+        Ok(result) => result,
+        Err(err) => Err(ChecksumVerifyFailure::Io(err.to_string())),
+    }
 }
 
 /// Download and install grok from GitHub Releases (xai-org-shared/grok-build). Uses `gh release download` to fetch the

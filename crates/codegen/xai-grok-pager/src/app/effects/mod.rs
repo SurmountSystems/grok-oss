@@ -582,6 +582,7 @@ pub(crate) fn execute(
                                     restore_summary,
                                     restore_degree,
                                     running_prompt_id,
+                                    scheduler_background_loops: None,
                                 }),
                             }
                         }
@@ -769,9 +770,14 @@ pub(crate) fn execute(
                         }
                     }
                     if let Some(kinds) = &kind_filter {
-                        params["_meta"] = serde_json::json!({
-                        "x.ai/facetFilters": { "kind": kinds },
-                    });
+                        if let Some(obj) = params.as_object_mut() {
+                            obj.insert(
+                                "_meta".into(),
+                                serde_json::json!({
+                                    "x.ai/facetFilters": { "kind": kinds },
+                                }),
+                            );
+                        }
                         tracing::info!(
                         target: "grok.pager.workspace_mode",
                         event = "session_list_fetch",
@@ -845,7 +851,13 @@ pub(crate) fn execute(
                     }
                 });
         }
-        Effect::DebounceSessionSearch { host, generation, query, seq } => {
+        Effect::DebounceSessionSearch {
+            host,
+            generation,
+            query,
+            seq,
+            ..
+        } => {
             tasks
                 .spawn(async move {
                     tokio::time::sleep(
@@ -3154,48 +3166,6 @@ pub(crate) fn execute(
                     }
                 });
         }
-        Effect::FetchWorkflowsList { agent_id, session_id } => {
-            let tx = acp_tx.clone();
-            tasks
-                .spawn(async move {
-                    let params = serde_json::json!({
-                    "sessionId": session_id
-                });
-                    let req = acp::ExtRequest::new(
-                        "x.ai/workflows/list",
-                        serde_json::value::to_raw_value(&params)
-                            .expect("serialize workflows/list params")
-                            .into(),
-                    );
-                    let result = match acp_send(req, &tx).await {
-                        Ok(resp) => {
-                            let wrapper: serde_json::Value = serde_json::from_str(
-                                    resp.0.get(),
-                                )
-                                .unwrap_or_default();
-                            let inner = wrapper.get("result").unwrap_or(&wrapper);
-                            serde_json::from_value::<
-                                Vec<crate::views::extensions_modal::WorkflowInfo>,
-                            >(inner.get("workflows").cloned().unwrap_or_default())
-                                .map_err(|_| "couldn't load workflows".to_string())
-                        }
-                        Err(e) => {
-                            Err(
-                                sanitize_user_error(
-                                    &format!(
-                        "couldn't load workflows: {e}"
-                    ),
-                                ),
-                            )
-                        }
-                    };
-                    TaskResult::WorkflowsListLoaded {
-                        agent_id,
-                        session_id,
-                        result,
-                    }
-                });
-        }
         Effect::ToggleSkill { agent_id, session_id: _, skill_name, enabled } => {
             let tx = acp_tx.clone();
             tasks
@@ -5062,7 +5032,12 @@ pub(crate) fn execute(
                     }
                 });
         }
-        Effect::FetchBilling { agent_id, silent, nonce } => {
+        Effect::FetchBilling {
+            agent_id,
+            silent,
+            nonce,
+            force_refresh,
+        } => {
             let tx = acp_tx.clone();
             tasks
                 .spawn(async move {

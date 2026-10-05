@@ -307,11 +307,10 @@ impl VideoGenClient {
     }
 
     async fn rate_limit_bearer(&self) -> Option<String> {
-        match self.current_bearer().await {
-            Some(k) if !k.trim().is_empty() => Some(k),
-            _ if !self.fallback_api_key.trim().is_empty() => Some(self.fallback_api_key.clone()),
-            _ => None,
-        }
+        self.current_bearer()
+            .await
+            .ok()
+            .filter(|k| !k.trim().is_empty())
     }
 
     fn record_401_attribution(&self, consumer: ToolConsumer, sent_bearer: Option<&str>) {
@@ -385,6 +384,11 @@ impl VideoGenClient {
             self.record_401_attribution(ToolConsumer::VideoGenStart, Some(&sent_bearer));
         }
         if !status.is_success() {
+            let rate_bearer = self.rate_limit_bearer().await;
+            let rate_key = crate::shared_http_rate_limit::video_provider_key(
+                &self.base_url,
+                rate_bearer.as_deref(),
+            );
             crate::shared_http_rate_limit::observe_http_rate_limit(
                 &rate_key,
                 status.as_u16(),
@@ -457,6 +461,11 @@ impl VideoGenClient {
                 self.record_401_attribution(ToolConsumer::VideoGenPoll, Some(&poll_sent_bearer));
             }
             if !poll_status.is_success() && poll_status.as_u16() != 202 {
+                let poll_bearer = self.rate_limit_bearer().await;
+                let poll_rate_key = crate::shared_http_rate_limit::video_provider_key(
+                    &self.base_url,
+                    poll_bearer.as_deref(),
+                );
                 crate::shared_http_rate_limit::observe_http_rate_limit(
                     &poll_rate_key,
                     poll_status.as_u16(),

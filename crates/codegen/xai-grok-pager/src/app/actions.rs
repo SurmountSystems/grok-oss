@@ -570,6 +570,9 @@ pub enum Action {
     /// Mid-turn follow-up routing (`queue` | `steer`).
     /// SHARED-owned: `[ui].follow_up_behavior`.
     SetFollowUpBehavior(crate::appearance::FollowUpBehavior),
+    /// Set `[ui].plan_approval_park` (`soft` | `modal`). SHELL-owned.
+    /// This stores the park mode. Empty Enter still does not Approve a presented plan.
+    SetPlanApprovalPark(String),
     /// Set simple mode (ASCII / minimal glyphs). Persists via `Effect::PersistSetting`.
     SetSimpleMode(bool),
     /// Set the per-tip contextual-hint user config (`[ui.contextual_hints]`).
@@ -612,6 +615,36 @@ pub enum Action {
     /// Commit the `auto_update` preference. Persisted to `[cli].auto_update`.
     /// Restart-required: auto-update check fires once at startup.
     SetAutoUpdate(bool),
+    /// Hide the session header. SHELL-owned: cache and `[ui].hide_header`.
+    SetHideHeader(bool),
+    /// Composer Enter inserts a newline. SHELL-owned: cache and `[ui].composer_multiline`.
+    SetComposerMultiline(bool),
+    /// Allow the per-session multiline toggle. SHELL-owned: cache and `[ui].allow_session_multiline`.
+    SetAllowSessionMultiline(bool),
+    /// Expand thinking blocks. SHELL-owned: cache and `[ui].always_expand_thinking`.
+    SetAlwaysExpandThinking(bool),
+    /// Allow subagent worktrees. SHELL-owned: cache and `[ui].allow_worktree`.
+    SetAllowWorktree(bool),
+    /// ASCII-scrub punctuation. SHELL-owned: cache and `[ui].scrub_ascii_punct`.
+    SetScrubAsciiPunct(bool),
+    /// ULID session ids. SHELL-owned: cache and `[ui].ulid_session_ids`.
+    SetUlidSessionIds(bool),
+    /// Bubble copy buttons on scrollback rows. PAGER-owned appearance cache, persisted.
+    SetBubbleCopyButtons(bool),
+    /// Turbo planning. SHARED: cache and `[ui].turbo_planning`.
+    SetTurboPlanning(bool),
+    /// Process-rule reminders on or off. SHARED: `[ui].process_rule_reminders_enabled`.
+    SetProcessRuleRemindersEnabled(bool),
+    /// Process-rule reminder list. SHARED: `[ui].process_rule_reminders`. Empty clears.
+    SetProcessRuleReminders(String),
+    /// Auto return-from-away session recap. `[ui.notifications].session_recap`.
+    SetNotificationsSessionRecap(bool),
+    /// Auto recap debounce in seconds. `[ui.notifications].session_recap_threshold_secs`.
+    SetNotificationsSessionRecapThresholdSecs(i64),
+    /// Master session recap. `[features].session_recap`. Restart to fully apply when turning on.
+    SetFeaturesSessionRecap(bool),
+    /// Sticky cancel-subagents preference (`ask` | `always_stop` | `always_continue`).
+    SetCancelSubagentsOnTurnCancel(String),
 
     /// Commit auto-compact threshold: percent of window **or** absolute tokens.
     /// Persists `[session].auto_compact_threshold_percent` or
@@ -760,6 +793,12 @@ pub enum Action {
     /// `/view-plan` uses this. Isolated Preview for a new feature is
     /// [`Self::DockIsolatedPreview`], not this variant.
     ShowPlan,
+    /// `/plan --soft` docks Isolated Preview. Not [`Self::EnterPlanMode`] and
+    /// not [`Self::ShowPlan`]. Dispatch must not enter plan mode, park L1, or
+    /// enqueue `description` as a Prompt. Nested work stays Working.
+    DockIsolatedPreview {
+        description: Option<String>,
+    },
     /// Enter plan mode. If a description is provided, also start a turn with that text as the prompt.
     EnterPlanMode {
         description: Option<String>,
@@ -770,6 +809,8 @@ pub enum Action {
     /// Open the feedback modal (every screen mode).
     /// The payload's images were drained at slash-execution time; the modal composer adopts them as chips.
     OpenFeedbackModal(crate::views::feedback_modal::OpenFeedbackModal),
+    /// Bare `/feedback` opens a freeform question pane. Not the feedback modal.
+    OpenFeedbackPane,
     /// Submit the open feedback modal's report.
     /// `modal_id` guards a deferred submit (paste probe in flight) against a modal that closed and reopened in between.
     SubmitFeedbackModal {
@@ -1098,6 +1139,10 @@ impl PermissionModeKind {
     pub fn is_auto(self) -> bool {
         matches!(self, Self::Auto)
     }
+    /// Advertise no tools. Distinct from always-approve, auto, and ask.
+    pub fn is_context_only(self) -> bool {
+        matches!(self, Self::ContextOnly)
+    }
     /// Construct from a canonical string. Returns `None` for unknown strings.
     /// Used by `apply_setting_rollback("permission_mode", _)` to recover the typed kind from the `SettingValue::Enum(canonical)` rollback payload.
     pub fn from_canonical(s: &str) -> Option<Self> {
@@ -1254,6 +1299,8 @@ impl PlanModeKind {
 pub enum CancelTrigger {
     /// `Ctrl+C` pressed (the default cancel keybinding). A bare Esc never cancels; it only hints at this key.
     CtrlC,
+    /// Double-press Esc arm. A single Esc does not cancel.
+    Esc,
     /// The on-screen cancel button was clicked.
     Mouse,
     /// The dashboard's stop key (Ctrl+X), from the overlay or a busy row, downgraded to a turn cancel.
@@ -1264,6 +1311,7 @@ impl CancelTrigger {
     pub fn as_wire_str(self) -> &'static str {
         match self {
             Self::CtrlC => "ctrl_c",
+            Self::Esc => "esc",
             Self::Mouse => "mouse",
             Self::DashboardStop => "dashboard_stop",
         }
@@ -1995,10 +2043,6 @@ pub enum Effect {
         agent_id: AgentId,
         session_id: acp::SessionId,
     },
-    FetchWorkflowsList {
-        agent_id: AgentId,
-        session_id: acp::SessionId,
-    },
     /// Toggle a skill via x.ai/skills/toggle (enable/disable without restart).
     ToggleSkill {
         agent_id: AgentId,
@@ -2313,6 +2357,9 @@ pub enum Effect {
         silent: bool,
         /// Usage-modal fetch generation (`0` means a background refresh; those never touch the modal's loading/error flags).
         nonce: u64,
+        /// True is ForceRefresh. The near-full included SuperGrok period
+        /// background poll is false (HonorTtl).
+        force_refresh: bool,
     },
     /// Fetch billing data at the app level (no agent required).
     /// Used on startup to populate the welcome-screen credit warning, and by the dashboard's `/usage` modal.
@@ -2936,11 +2983,6 @@ pub enum TaskResult {
         session_id: acp::SessionId,
         result: Result<Vec<crate::views::extensions_modal::WorkflowInfo>, String>,
     },
-    WorkflowsListLoaded {
-        agent_id: AgentId,
-        session_id: acp::SessionId,
-        result: Result<Vec<crate::views::extensions_modal::WorkflowInfo>, String>,
-    },
     /// Skill toggle completed (enable/disable).
     SkillsToggleDone {
         agent_id: AgentId,
@@ -3066,20 +3108,6 @@ pub enum TaskResult {
     },
     /// Context info fetch failed. Drop if `session_id` no longer matches.
     ContextInfoFailed {
-        agent_id: AgentId,
-        session_id: acp::SessionId,
-        error: String,
-        nonce: u64,
-    },
-    /// `/usage` session ledger fetched. Drop if `session_id` no longer matches.
-    SessionUsageComplete {
-        agent_id: AgentId,
-        session_id: acp::SessionId,
-        usage: Box<xai_grok_shell::extensions::notification::PromptUsage>,
-        nonce: u64,
-    },
-    /// `/usage` session ledger fetch failed. Drop if `session_id` no longer matches.
-    SessionUsageFailed {
         agent_id: AgentId,
         session_id: acp::SessionId,
         error: String,

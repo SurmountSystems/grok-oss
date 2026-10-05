@@ -59,8 +59,12 @@ fn process_identity(command: Option<&Command>, is_interactive: bool) -> Option<P
         Some(
             Command::Inspect { .. }
             | Command::Doctor(_)
+            | Command::Limits(_)
+            | Command::Running { .. }
+            | Command::Gui { .. }
+            | Command::Rebuild { .. }
             | Command::Leader(_)
-            | Command::Logout
+            | Command::Logout { .. }
             | Command::Mcp(_)
             | Command::Plugin(_)
             | Command::Memory(_)
@@ -99,8 +103,12 @@ fn command_needs_pre_sandbox_policy_heal(command: Option<&Command>) -> bool {
         Some(
             Command::Inspect { .. }
             | Command::Doctor(_)
+            | Command::Limits(_)
+            | Command::Running { .. }
+            | Command::Gui { .. }
+            | Command::Rebuild { .. }
             | Command::Leader(_)
-            | Command::Logout
+            | Command::Logout { .. }
             | Command::Login { .. }
             | Command::Mcp(_)
             | Command::Plugin(_)
@@ -1477,7 +1485,8 @@ async fn run_agent_command(
                             stdin_lines.recv() => { let Some(line) = maybe_line else {
                             break }; let line = String::from_utf8_lossy(& line); let
                             trimmed = line.trim_end_matches(['\r', '\n']).to_string(); if
-                            trimmed.is_empty() { continue; } if trimmed
+                            trimmed.is_empty() { continue; }
+                            if trimmed
                             .contains("\"initialize\"") || trimmed
                             .contains("\"session/load\"") || trimmed
                             .contains("\"session/new\"") { cache_outgoing_acp_state(&
@@ -1916,10 +1925,14 @@ fn purge_jemalloc_retained_pages() {
 fn jemalloc_allocator_stats() -> Option<xai_grok_pager::memory_trace::AllocatorStats> {
     /// SAFETY: callers pass fixed NUL-terminated `stats.*` size_t ctl names.
     unsafe fn gauge(name: &[u8]) -> Option<u64> {
-        unsafe { mallctl_read::<usize>(name).map(|v| v as u64) }
+        unsafe {
+            tikv_jemalloc_ctl::raw::read::<usize>(name)
+                .ok()
+                .map(|v| v as u64)
+        }
     }
     unsafe {
-        if !mallctl_write(b"epoch\0", 1u64) {
+        if tikv_jemalloc_ctl::raw::write(b"epoch\0", 1u64).is_err() {
             return None;
         }
         Some(xai_grok_pager::memory_trace::AllocatorStats {
@@ -1956,11 +1969,11 @@ fn jemalloc_stats_dump() -> String {
 #[cfg(all(feature = "jemalloc", unix))]
 fn jemalloc_heap_stats() -> Option<xai_grok_shell::heap_profile::JemallocStats> {
     unsafe {
-        if !mallctl_write(b"epoch\0", 1u64) {
+        if tikv_jemalloc_ctl::raw::write(b"epoch\0", 1u64).is_err() {
             return None;
         }
-        let allocated = mallctl_read::<usize>(b"stats.allocated\0")? as u64;
-        let resident = mallctl_read::<usize>(b"stats.resident\0")? as u64;
+        let allocated = tikv_jemalloc_ctl::raw::read::<usize>(b"stats.allocated\0").ok()? as u64;
+        let resident = tikv_jemalloc_ctl::raw::read::<usize>(b"stats.resident\0").ok()? as u64;
         Some(xai_grok_shell::heap_profile::JemallocStats {
             allocated,
             resident,
@@ -1969,15 +1982,15 @@ fn jemalloc_heap_stats() -> Option<xai_grok_shell::heap_profile::JemallocStats> 
 }
 #[cfg(all(feature = "jemalloc", unix))]
 fn jemalloc_set_prof_active(active: bool) -> bool {
-    unsafe { mallctl_write(b"prof.active\0", active) }
+    unsafe { tikv_jemalloc_ctl::raw::write(b"prof.active\0", active).is_ok() }
 }
 #[cfg(all(test, feature = "jemalloc", unix))]
 fn jemalloc_read_prof_active() -> Option<bool> {
-    unsafe { mallctl_read::<bool>(b"prof.active\0") }
+    unsafe { tikv_jemalloc_ctl::raw::read::<bool>(b"prof.active\0").ok() }
 }
 #[cfg(all(feature = "jemalloc", unix))]
 fn jemalloc_prof_available() -> bool {
-    unsafe { mallctl_read::<bool>(b"opt.prof\0").unwrap_or(false) }
+    unsafe { tikv_jemalloc_ctl::raw::read::<bool>(b"opt.prof\0").unwrap_or(false) }
 }
 #[cfg(all(feature = "jemalloc", unix))]
 fn jemalloc_dump_to_path(path: &std::path::Path) -> Result<(), String> {
@@ -1986,7 +1999,7 @@ fn jemalloc_dump_to_path(path: &std::path::Path) -> Result<(), String> {
         return Err("opt.prof false".into());
     }
     let c = std::ffi::CString::new(path.as_os_str().as_bytes()).map_err(|e| e.to_string())?;
-    if unsafe { mallctl_write(b"prof.dump\0", c.as_ptr()) } {
+    if unsafe { tikv_jemalloc_ctl::raw::write(b"prof.dump\0", c.as_ptr()).is_ok() } {
         Ok(())
     } else {
         Err("prof.dump mallctl failed".into())
@@ -2020,6 +2033,40 @@ fn print_cli_version(json: bool) -> Result<()> {
         );
     }
     Ok(())
+}
+/// Leader and pager must not share one crash directory. `install()` opens
+/// `last-crash.bin` with `O_TRUNC`, so a shared directory would wipe the other
+/// process's pending crash blob on start.
+fn crash_dir_for(args: &PagerArgs) -> std::path::PathBuf {
+    let base = xai_grok_shell::util::grok_home::grok_home().join("crash");
+    let is_leader = matches!(
+        &args.command,
+        Some(Command::Agent(agent)) if matches!(agent.mode, Some(AgentCmd::Leader(_)))
+    );
+    if is_leader { base.join("leader") } else { base }
+}
+/// `grok-oss --version` / `-v` / `-V` before sandbox, tokio, or the TUI.
+/// The `version` subcommand is handled later and also prints before the TUI.
+fn dispatch_version_if_requested(args: &PagerArgs) -> bool {
+    if !args.version {
+        return false;
+    }
+    if let Err(error) = print_cli_version(false) {
+        eprintln!("Error: {error}");
+        std::process::exit(1);
+    }
+    true
+}
+/// `grok-oss doctor` before sandbox, tokio, or the TUI.
+fn dispatch_doctor_if_requested(args: &PagerArgs) -> bool {
+    let Some(Command::Doctor(doctor_args)) = &args.command else {
+        return false;
+    };
+    if let Err(error) = xai_grok_pager::doctor_cmd::run(doctor_args.clone()) {
+        eprintln!("Error: {error:#}");
+        std::process::exit(1);
+    }
+    true
 }
 fn main() {
     xai_grok_version::set_full_version(env!("VERSION_WITH_COMMIT"));
@@ -2230,6 +2277,7 @@ async fn async_main(mut args: PagerArgs) -> Result<()> {
             }
             Command::DiskUsage(du_args) => {
                 init_tracing_simple("cli");
+                let _otel_guard = xai_grok_telemetry::otel_layer::otel_guard();
                 return xai_grok_pager::disk_usage_cmd::run(du_args);
             }
             Command::Limits(limits_args) => {
@@ -2275,11 +2323,6 @@ async fn async_main(mut args: PagerArgs) -> Result<()> {
                     .map_err(|e| anyhow::anyhow!("Failed to create agent config: {e}"))?;
                 let result = xai_grok_pager::worktree_cmd::run(worktree_args, &agent_config).await;
                 return result;
-            }
-            Command::DiskUsage(disk_usage_args) => {
-                init_tracing_simple("cli");
-                let _otel_guard = xai_grok_telemetry::otel_layer::otel_guard();
-                return xai_grok_pager::disk_usage_cmd::run(disk_usage_args);
             }
             Command::Workspace(workspace_args) => {
                 init_tracing_simple("cli");
@@ -2398,6 +2441,8 @@ async fn async_main(mut args: PagerArgs) -> Result<()> {
                 legacy: _,
                 oauth,
                 device_auth,
+                openrouter,
+                api_key,
                 devbox,
             } => {
                 init_tracing_simple("cli");
@@ -2430,7 +2475,7 @@ async fn async_main(mut args: PagerArgs) -> Result<()> {
                 println!();
                 xai_grok_shell::instrumentation::finalize_and_exit(0);
             }
-            Command::Logout => {
+            Command::Logout { openrouter } => {
                 init_tracing_simple("cli");
                 if openrouter {
                     let grok_home = xai_grok_shell::util::grok_home::grok_home();
@@ -2486,10 +2531,10 @@ async fn async_main(mut args: PagerArgs) -> Result<()> {
             .as_deref()
             .map(xai_grok_pager::headless::parse_json_schema)
             .transpose()?;
-        if json_schema.is_some() {
-            if args.output_format == xai_grok_pager::headless::OutputFormat::Plain {
-                args.output_format = xai_grok_pager::headless::OutputFormat::Json;
-            }
+        if json_schema.is_some()
+            && args.output_format == xai_grok_pager::headless::OutputFormat::Plain
+        {
+            args.output_format = xai_grok_pager::headless::OutputFormat::Json;
         }
         let memory_enabled_override = args.memory_enabled_override();
         let memory_flush = args.memory_flush;
@@ -2614,6 +2659,19 @@ async fn finish_update_on_exit(
         }
         None => run_blocking(None).await,
     }
+}
+/// Ctrl+U quit-for-update. `run_update_if_available` reports its own failures.
+/// Only a hard `Err` means the update did not complete. This is not
+/// `run_update_command`, which is the `grok-oss update` subcommand.
+async fn run_update_blocking(update_config: &UpdateConfig) -> bool {
+    auto_update::run_update_if_available(
+        auto_update::UpdateRunMode::Blocking,
+        false,
+        auto_update::CliUpdateTrigger::UserCommand,
+        update_config,
+    )
+    .await
+    .is_ok()
 }
 /// Build an [`UpdateConfig`] from the current environment and config files.
 fn build_update_config() -> UpdateConfig {
@@ -2801,6 +2859,28 @@ async fn run_update_command(
     println!("{}", xai_grok_update::how_to_update_message());
     Ok(())
 }
+/// CLI `grok-oss rebuild`. Same install and peer `SIGUSR1` path as `/rebuild`.
+/// Not `run_setup_command`.
+async fn run_rebuild_command(source: Option<std::path::PathBuf>) -> Result<()> {
+    let start = source.unwrap_or_else(|| {
+        std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+    });
+    println!("Rebuilding grok-oss from source (this may take several minutes)...");
+    println!("  start dir: {}", start.display());
+    let report = xai_grok_update::rebuild_and_relaunch_with_progress(&start, |ev| {
+        use std::io::Write;
+        let line = xai_grok_update::format_rebuild_cli_progress(ev.fraction, &ev.detail, 24);
+        let mut err = std::io::stderr();
+        let _ = write!(err, "\r\x1b[2K{line}");
+        let _ = err.flush();
+    })
+    .await?;
+    eprintln!();
+    for line in &report.summary_lines {
+        println!("{line}");
+    }
+    Ok(())
+}
 /// After a successful `grok update`, ask any running leader on this machine that is older than `installed_version`
 /// to relaunch onto the new binary. Best-effort and non-fatal: discovery/connect/control failures are logged and
 /// skipped.
@@ -2865,7 +2945,6 @@ async fn signal_leaders_to_relaunch(installed_version: &str) {
         }
         client.cancel();
     }
-    Ok(())
 }
 #[cfg(test)]
 mod tests {

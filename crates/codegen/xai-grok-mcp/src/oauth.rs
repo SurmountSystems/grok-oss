@@ -19,6 +19,13 @@ const CREDENTIAL_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_
 
 const BROWSER_AUTH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
 
+fn format_oauth_consent_timeout(timeout: std::time::Duration) -> String {
+    format!(
+        "OAuth consent timed out after {}; re-run authentication to try again",
+        xai_tty_utils::format_human_duration(timeout)
+    )
+}
+
 #[cfg(unix)]
 const AUTH_LOCK_WAIT: std::time::Duration =
     BROWSER_AUTH_TIMEOUT.saturating_add(std::time::Duration::from_secs(60));
@@ -527,10 +534,7 @@ async fn await_callback_or_disk_token(
                 timeout_secs = BROWSER_AUTH_TIMEOUT.as_secs(),
                 "OAuth consent timed out (browser flow abandoned?)"
             );
-            return Err(format!(
-                "OAuth consent timed out after {}s; re-run authentication to try again",
-                BROWSER_AUTH_TIMEOUT.as_secs()
-            ));
+            return Err(format_oauth_consent_timeout(BROWSER_AUTH_TIMEOUT));
         }
     }
 

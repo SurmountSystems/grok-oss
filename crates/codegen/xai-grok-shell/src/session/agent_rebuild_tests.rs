@@ -86,6 +86,7 @@ async fn mint_test_sender(owner: SubagentOwner) -> Option<AgentMessageSender> {
                     await_to_completion: false,
                     fork_context: false,
                     owner,
+                    implement_loop_effort: None,
                     cancel_token: tokio_util::sync::CancellationToken::new(),
                     spawn_root: Default::default(),
                     tool_call_id: None,

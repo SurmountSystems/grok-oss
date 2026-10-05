@@ -390,7 +390,7 @@ fn aggregate(
     // The STABLE sort is load-bearing: providers pre-rank their items and ship them at one shared priority per response
     // The file provider's fuzzy tier/score/dirs-first order (see its `FILE_CMD_BOOST` doc) relies on equal-priority order surviving to the wire
     // Do not "optimize" into `sort_unstable_by`
-    all.sort_by(|a, b| b.priority.cmp(&a.priority));
+    all.sort_by_key(|a| std::cmp::Reverse(a.priority));
 
     let ghost = all.iter().find(|s| s.is_ghost_candidate).map(|s| {
         let suffix = s.insert_text.strip_prefix(prefix).unwrap_or(&s.insert_text);

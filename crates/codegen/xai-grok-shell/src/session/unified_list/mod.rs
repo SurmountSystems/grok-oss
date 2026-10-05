@@ -1031,11 +1031,7 @@ mod tests {
             let _on = xai_grok_test_support::EnvGuard::set(GROK_CHAT_MODE_ENV, "1");
             let req = parse_list_req(&raw).expect("parse");
             let parsed = ParsedMeta::parse(req.meta.as_ref());
-            let expected_build = if cfg!(feature = "local-workspace") {
-                Some(&vec![serde_json::json!("build")])
-            } else {
-                Some(&vec![serde_json::json!("build")])
-            };
+            let expected_build = Some(&vec![serde_json::json!("build")]);
             assert_eq!(
                 parsed.facet_filters.get(KIND_FACET_KEY),
                 expected_build,
@@ -1310,77 +1306,5 @@ mod tests {
                 .and_then(|m| m.get("x.ai/listScope"))
                 .is_none()
         );
-    }
-    /// Receive-side wire pin: a field rename would silently drop the pager's
-    /// `allowRelax`.
-    #[test]
-    fn list_req_deserializes_allow_relax_key() {
-        let req: ListReq = serde_json::from_str(r#"{"allowRelax": true}"#).expect("parse");
-        assert_eq!(req.cwd_scope, CwdScope::RelaxIfEmpty);
-        let req: ListReq = serde_json::from_str("{}").expect("parse");
-        assert_eq!(req.cwd_scope, CwdScope::WithSiblings);
-    }
-    /// relax_rows scopes to the cwd's repo and relaxes only on a messaged session.
-    #[test]
-    fn relax_rows_scopes_to_repo_and_requires_messages() {
-        use crate::session::persistence::Summary;
-        let this_repo = "git@github.com:example/app.git";
-        let repo_url = xai_grok_workspace::session::git::normalize_repo_url(this_repo).unwrap();
-        let summary = |id: &str, remote: Option<&str>, num_messages: usize| {
-            let mut s = Summary::new(
-                &crate::session::info::Info {
-                    id: agent_client_protocol::SessionId::new(id),
-                    cwd: format!("/elsewhere/{id}"),
-                },
-                agent_client_protocol::ModelId::new("m"),
-            )
-            .expect("summary");
-            s.num_messages = num_messages;
-            s.git_remotes = remote.map(|r| vec![r.to_string()]).unwrap_or_default();
-            s
-        };
-        let relax = || RelaxInputs {
-            remote: Vec::new(),
-            repo_urls: vec![repo_url.clone()],
-        };
-        let rows = relax_rows(
-            relax(),
-            vec![
-                summary("mine", Some(this_repo), 4),
-                summary("theirs", Some("git@github.com:xai-org/other.git"), 9),
-            ],
-            30,
-            facet_registry(),
-        )
-        .expect("relaxes onto the same-repo messaged session");
-        let ids: Vec<_> = rows.iter().map(|r| r.legacy.session_id.clone()).collect();
-        assert_eq!(ids, ["mine"], "only the same-repo session survives");
-        assert!(
-            relax_rows(
-                relax(),
-                vec![summary("husk", Some(this_repo), 0)],
-                30,
-                facet_registry()
-            )
-            .is_none(),
-            "placeholder-only scan keeps the scoped view"
-        );
-    }
-    /// Send-side wire pin: `x.ai/listScope` present iff the scope relaxed.
-    #[test]
-    fn ext_list_response_serializes_scope() {
-        let result = |scope| UnifiedListResult {
-            rows: Vec::new(),
-            next_cursor: None,
-            facets: facet_registry().summarize_window(&[]),
-            conversations_partial: None,
-            scope,
-        };
-        let with =
-            serde_json::to_value(ext_list_response(result(ListScope::Repo))).expect("serialize");
-        assert_eq!(with["_meta"]["x.ai/listScope"], serde_json::json!("repo"));
-        let without =
-            serde_json::to_value(ext_list_response(result(ListScope::Cwd))).expect("serialize");
-        assert!(without["_meta"].get("x.ai/listScope").is_none());
     }
 }

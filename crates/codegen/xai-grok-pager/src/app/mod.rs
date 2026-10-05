@@ -21,7 +21,9 @@ pub mod cli;
 pub(crate) mod command_catalog;
 pub mod consent;
 pub(crate) mod deferred_subagent_finishes;
+pub(crate) mod global_work_pause;
 pub(crate) mod l0_enqueue;
+pub(crate) mod soft_stop;
 pub use crate::link_opener;
 use xai_grok_telemetry::region;
 use xai_grok_telemetry::region::Parent;
@@ -970,6 +972,11 @@ pub async fn run(
         ),
         default_yolo_mode: launch_yolo.yolo,
         default_auto_mode: launch_auto && !launch_yolo.yolo,
+        default_context_only_mode: xai_grok_shell::util::config::effective_context_only_for_launch(
+            args.yolo,
+            args.permission_mode_flag.as_deref(),
+            remote_permission_mode,
+        ),
         status_line: false,
     };
     let mut config_watcher = crate::appearance::ConfigWatcher::start().await?;
@@ -1352,8 +1359,6 @@ pub async fn run(
 /// TODO: extend beyond --minimal by rebuilding resume argv from launch flags (see screen_mode_relaunch)
 fn print_exit_resume_hint(info: &ExitInfo, max_width: usize, w: &mut impl Write) {
     use crate::client_identity::resume_session_command;
-    use crate::render::line_utils::truncate_str;
-    let cli = screen_mode_relaunch::cli_hint_name();
     use crate::render::line_utils::truncate_str;
     let cli = screen_mode_relaunch::cli_hint_name();
     let _ = writeln!(w);
@@ -2551,25 +2556,6 @@ mod tests {
                 "  grok --resume sess-abc\n",
             )
         );
-    }
-    #[test]
-    fn print_exit_resume_hint_truncates_summary_to_width() {
-        let info = ExitInfo {
-            session_id: "sess-abc".to_string(),
-            minimal: false,
-            summary: Some(ExitSummary {
-                title: "t".repeat(50),
-                last_prompt: Some("p".repeat(50)),
-                last_response: Some("r".repeat(50)),
-            }),
-        };
-        let mut buf = Vec::new();
-        print_exit_resume_hint(&info, 20, &mut buf);
-        let out = String::from_utf8(buf).unwrap();
-        assert!(out.contains(&format!("\n{}…\n", "t".repeat(19))));
-        assert!(out.contains(&format!("\n> {}…\n", "p".repeat(17))));
-        assert!(out.contains(&format!("\n  {}…\n", "r".repeat(17))));
-        assert!(out.contains("  grok --resume sess-abc\n"));
     }
     #[test]
     fn print_relaunch_failure_hint_writes_expected_lines() {

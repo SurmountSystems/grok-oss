@@ -140,7 +140,11 @@ impl AuthManager {
         budget: Duration,
     ) -> BoundedRefresh {
         let manager = Arc::clone(self);
-        let attempt = tokio::spawn(async move { manager.refresh_chain(token_type, reason).await });
+        let attempt = tokio::spawn(async move {
+            manager
+                .refresh_chain(token_type, reason, super::RefreshUrgency::UserFacing)
+                .await
+        });
         let (result, outcome) = match tokio::time::timeout(budget, attempt).await {
             Ok(Ok(Ok(auth))) => (BoundedRefresh::Resolved(Box::new(Ok(auth))), "ok"),
             Ok(Ok(Err(err))) => (BoundedRefresh::Resolved(Box::new(Err(err))), "err"),

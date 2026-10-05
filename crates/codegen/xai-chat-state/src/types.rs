@@ -107,7 +107,7 @@ pub enum AuthType {
 
 /// Credential/secret fields that the actor stores opaquely.
 /// Not part of secret-free `SamplingConfig`. The actor stores and returns them — it never interprets them.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 pub struct Credentials {
     /// API key for authentication.
     pub api_key: Option<String>,

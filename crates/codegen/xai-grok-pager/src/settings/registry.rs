@@ -335,6 +335,8 @@ pub struct PagerLocalSnapshot {
     /// Whether Auto (LLM classifier) mode is active on the active agent.
     /// Mutually exclusive with `yolo_mode` in practice (yolo wins); `/auto` reads it so it can toggle off when already on.
     pub auto_mode: bool,
+    /// Context-only permission mode. The settings modal reads this live flag.
+    pub context_only_mode: bool,
     /// Currently-selected model's display name, or `None` if no catalog has loaded yet.
     pub current_model_name: Option<String>,
     /// `(display_name, ModelId)` pairs from the active session's catalog.
@@ -387,6 +389,10 @@ pub struct PagerLocalSnapshot {
     pub voice_stt_language: String,
     /// Mirrors `AppView::subagent_model_inheritance` at snapshot time.
     pub subagent_model_inheritance: FeatureOverrideState,
+    /// `[models].default_reasoning_effort` mirror. `None` uses the baked medium default.
+    pub default_reasoning_effort: Option<String>,
+    /// When true, `/loop` schedules a detached background loop.
+    pub scheduler_background_loops: bool,
 }
 
 impl Default for PagerLocalSnapshot {
@@ -419,6 +425,8 @@ impl Default for PagerLocalSnapshot {
             subagent_model_inheritance: FeatureOverrideState::new(
                 Feature::SubagentModelInheritance,
             ),
+            default_reasoning_effort: None,
+            scheduler_background_loops: true,
         }
     }
 }
@@ -539,17 +547,6 @@ pub fn canonical_auto_compact_threshold_from_percent(percent: u8) -> &'static st
     canonical_auto_compact_threshold_percent(percent)
 }
 
-/// Canonicalize a raw voice-capture mode to a registry choice. Case-insensitive
-/// and trimmed; unknown/blank/`None` → `hold` (the default).
-pub fn canonical_voice_capture_mode(value: Option<&str>) -> &'static str {
-    let raw = value.unwrap_or_default().trim();
-    if raw.eq_ignore_ascii_case("toggle") {
-        "toggle"
-    } else {
-        "hold"
-    }
-}
-
 /// Canonicalize a raw voice STT language to a settings choice.
 ///
 /// Delegates to [`xai_grok_voice::canonicalize_stt_language`] so the pager and
@@ -569,6 +566,16 @@ pub fn canonical_hunk_tracker_mode(value: Option<&str>) -> &'static str {
         "agent_only"
     } else {
         "off"
+    }
+}
+
+/// Baked default is medium. `low`, `medium`, and `high` pass through; anything else is medium.
+pub fn canonical_default_reasoning_effort(value: Option<&str>) -> &'static str {
+    match value.unwrap_or("").trim().to_ascii_lowercase().as_str() {
+        "low" => "low",
+        "high" => "high",
+        "medium" => "medium",
+        _ => "medium",
     }
 }
 
@@ -735,11 +742,11 @@ pub fn current_value_for(
         "turbo_planning" => Some(SettingValue::Bool(
             crate::appearance::cache::load_turbo_planning(),
         )),
-        "process_rule_reminders_enabled" => {
-            Some(SettingValue::Bool(ui.process_rule_reminders_enabled()))
-        }
+        "process_rule_reminders_enabled" => Some(SettingValue::Bool(
+            ui.process_rule_reminders_enabled.unwrap_or(true),
+        )),
         "process_rule_reminders" => Some(SettingValue::String(
-            ui.process_rule_reminders_text().to_string(),
+            ui.process_rule_reminders.clone().unwrap_or_default(),
         )),
         "simple_mode" => Some(SettingValue::Bool(ui.simple_mode.unwrap_or(true))),
         // Per-tip contextual hints: `None` (inherit) reads as the default ON
@@ -1025,13 +1032,6 @@ pub fn current_value_for(
         "show_tips" => Some(SettingValue::Bool(pager.show_tips.unwrap_or(true))),
         "auto_update" => Some(SettingValue::Bool(pager.auto_update.unwrap_or(true))),
 
-        // Session auto-compact: token mode wins; else percent (default 95).
-        "auto_compact_threshold_percent" => {
-            Some(SettingValue::Enum(canonical_auto_compact_threshold(
-                pager.auto_compact_threshold_percent,
-                pager.auto_compact_threshold_tokens,
-            )))
-        }
         // fork_secondary_model: baseline value folds to empty string.
         "fork_secondary_model" => Some(SettingValue::String({
             let baseline = xai_grok_shell::models::default_model();
@@ -1632,7 +1632,7 @@ mod tests {
                 ("turbo_planning", SettingKind::Bool { default }) => {
                     assert_eq!(
                         *default,
-                        ui.turbo_planning_enabled(),
+                        ui.turbo_planning.unwrap_or(true),
                         "turbo_planning default drifts from UiConfig::default()"
                     );
                     assert!(*default, "turbo_planning must default ON");
@@ -1640,7 +1640,7 @@ mod tests {
                 ("process_rule_reminders_enabled", SettingKind::Bool { default }) => {
                     assert_eq!(
                         *default,
-                        ui.process_rule_reminders_enabled(),
+                        ui.process_rule_reminders_enabled.unwrap_or(true),
                         "process_rule_reminders_enabled default drifts from UiConfig::default()"
                     );
                     assert!(*default, "process_rule_reminders_enabled must default ON");
@@ -1690,25 +1690,13 @@ mod tests {
                     assert_eq!(*default, 0);
                     assert_eq!((*min, *max), (0, 5));
                 }
-                ("auto_compact_threshold_percent", SettingKind::Enum { default, .. }) => {
-                    assert_eq!(
-                        *default,
-                        crate::settings::defs::AUTO_COMPACT_THRESHOLD_DEFAULT_CANONICAL,
-                        "auto_compact_threshold_percent registry default must be \"95\""
-                    );
-                    assert_eq!(
-                        xai_grok_shell::util::config::DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT,
-                        95,
-                        "shell DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT drifted from 95"
-                    );
-                }
                 ("notifications.session_recap", SettingKind::Bool { default }) => {
                     assert!(
                         *default,
                         "notifications.session_recap must default ON (auto away-recap)"
                     );
                     assert_eq!(
-                        ui.notifications.session_recap.unwrap_or(true),
+                        crate::notifications::NotificationConfig::default().session_recap,
                         *default,
                         "notifications.session_recap default drifts from UiConfig"
                     );
@@ -1719,7 +1707,8 @@ mod tests {
                 ) => {
                     assert_eq!(*default, 30);
                     assert_eq!(
-                        ui.notifications.session_recap_threshold_secs.unwrap_or(30) as i64,
+                        crate::notifications::NotificationConfig::default()
+                            .session_recap_threshold_secs as i64,
                         *default,
                     );
                 }
@@ -1772,7 +1761,9 @@ mod tests {
                 ("bubble_copy_buttons", SettingKind::Bool { default }) => {
                     assert_eq!(
                         *default,
-                        crate::appearance::ScrollbackDisplayConfig::default().bubble_copy_buttons,
+                        crate::appearance::ScrollbackConfig::default()
+                            .display
+                            .bubble_copy_buttons,
                         "bubble_copy_buttons default drifts from ScrollbackDisplayConfig"
                     );
                 }

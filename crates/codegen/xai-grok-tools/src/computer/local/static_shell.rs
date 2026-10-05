@@ -29,7 +29,7 @@ pub struct StaticShellSnapshot {
     pub shell: UnixShellKind,
 }
 
-fn shell_binary(shell: UnixShellKind) -> &'static str {
+fn shell_binary(shell: UnixShellKind) -> String {
     xai_grok_config::shell::unix_shell_path(shell)
 }
 

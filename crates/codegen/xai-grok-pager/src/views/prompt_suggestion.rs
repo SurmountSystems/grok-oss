@@ -141,7 +141,6 @@ impl PromptSuggestionController {
         self.shown_logged
     }
 
-    #[cfg(test)]
     pub(crate) fn set_suggestion_for_test(&mut self, text: &str) {
         self.enabled = true;
         self.dismissed = false;

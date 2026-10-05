@@ -768,13 +768,6 @@ mod tests {
         assert!(!is_session_update_ext_method("x.ai/task_completed"));
         assert!(!is_session_update_ext_method("session/update"));
     }
-    #[test]
-    fn is_session_update_ext_method_covers_both_carriers() {
-        assert!(is_session_update_ext_method("x.ai/session_notification"));
-        assert!(is_session_update_ext_method("x.ai/session/update"));
-        assert!(!is_session_update_ext_method("x.ai/task_completed"));
-        assert!(!is_session_update_ext_method("session/update"));
-    }
 
     #[test]
     fn parse_available_commands_from_meta() {

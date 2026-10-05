@@ -35,6 +35,59 @@ fn per_model_row_count(models: &[(String, u64)]) -> u16 {
     (shown + overflow) as u16
 }
 
+/// Hover flags for the goal detail close control and footer tokens.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct GoalDetailHovers {
+    pub close: bool,
+    pub esc_close: bool,
+    pub resume: bool,
+    pub pause: bool,
+    pub status: bool,
+    pub clear: bool,
+}
+
+/// Hit targets painted by [`render_goal_detail`].
+#[derive(Debug, Clone, Copy, Default)]
+pub struct GoalDetailHits {
+    pub close: Option<Rect>,
+    pub esc_close: Option<Rect>,
+    pub resume: Option<Rect>,
+    pub pause: Option<Rect>,
+    pub status: Option<Rect>,
+    pub clear: Option<Rect>,
+}
+
+fn close_only_hits(close: Rect) -> GoalDetailHits {
+    GoalDetailHits {
+        close: Some(close),
+        ..GoalDetailHits::default()
+    }
+}
+
+fn paint_footer_token(
+    buf: &mut Buffer,
+    x: u16,
+    y: u16,
+    rem: u16,
+    text: &str,
+    hovered: bool,
+    theme: &Theme,
+) -> (u16, Rect) {
+    let tw = (unicode_width::UnicodeWidthStr::width(text) as u16).min(rem);
+    if tw == 0 {
+        return (0, Rect::default());
+    }
+    let style = if hovered {
+        Style::default()
+            .fg(theme.text_primary)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(theme.gray_dim)
+    };
+    buf.set_span_safe(x, y, &Span::styled(text, style), tw);
+    (tw, Rect::new(x, y, tw, 1))
+}
+
 /// Choose the progress bar fill color based on usage percentage.
 fn budget_color(pct: f32, theme: &Theme) -> Color {
     if pct > 0.80 {
@@ -495,6 +548,10 @@ pub fn render_goal_detail(
         close_w,
     );
     let close_rect = Rect::new(close_x, area.y, close_w, 1);
+    let mut hits = GoalDetailHits {
+        close: Some(close_rect),
+        ..GoalDetailHits::default()
+    };
 
     let mut y = inner.y;
     let x = inner.x + 1;
@@ -1297,7 +1354,16 @@ mod tests {
         let mut buf = ratatui::buffer::Buffer::empty(area);
         let goal = make_goal();
         // Must not panic; it just bails early
-        render_goal_detail(&mut buf, area, &goal, &[], 0, None, 0, false);
+        render_goal_detail(
+            &mut buf,
+            area,
+            &goal,
+            &[],
+            0,
+            None,
+            0,
+            GoalDetailHovers::default(),
+        );
     }
 
     #[test]

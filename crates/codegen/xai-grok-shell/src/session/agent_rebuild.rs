@@ -157,6 +157,7 @@ pub(crate) struct AgentRebuildSpec {
     pub path_not_found_hints: bool,
     /// Fire side of the scheduler mode.
     /// Keep the two on one resolve.
+    pub scheduler_background_loops: bool,
     pub mcp_state: Arc<tokio::sync::Mutex<crate::session::mcp_servers::McpState>>,
     pub managed_gateway_tool_client:
         Option<xai_grok_tools::types::resources::ManagedGatewayToolClient>,
@@ -270,6 +271,7 @@ impl AgentRebuildSpec {
             parent_scheduler_handle,
         } = self.as_ref();
         let _ = mcp_state;
+        let _ = scheduler_background_loops;
         if (*prompt_audience == PromptAudience::Subagent || agent_message_sender.is_some())
             && subagent_coordinator_sender.is_some()
         {

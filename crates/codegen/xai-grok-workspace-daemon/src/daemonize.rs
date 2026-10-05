@@ -892,6 +892,21 @@ mod tests {
         }
     }
 
+    /// Bounded wait until `/proc/<pid>/cmdline` matches `fragment`.
+    #[cfg(target_os = "linux")]
+    fn wait_until_process_name_matches(pid: u32, fragment: &str) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            if process_name_matches(pid, fragment) {
+                return;
+            }
+            if Instant::now() >= deadline {
+                panic!("predecessor pid {pid} never matched {fragment:?} in /proc/pid/cmdline");
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn take_over_declines_non_matching_holder() {

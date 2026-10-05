@@ -241,6 +241,10 @@ mod tests {
     fn run_loop_with_background_loops(args: &str, background_loops: bool) -> CommandResult {
         let models = ModelState::default();
         let bundle = BundleState::default();
+        let pager_state = crate::settings::PagerLocalSnapshot {
+            scheduler_background_loops: background_loops,
+            ..Default::default()
+        };
         let mut ctx = CommandExecCtx {
             models: &models,
             session_id: None,
@@ -248,7 +252,7 @@ mod tests {
             screen_mode: crate::app::ScreenMode::Inline,
             billing_surface_visible: true,
             usage_command_visible: true,
-            pager_state: crate::settings::PagerLocalSnapshot::default(),
+            pager_state,
         };
         LoopCommand.run(&mut ctx, args)
     }
@@ -342,7 +346,34 @@ mod tests {
                 let Some(acp::ContentBlock::Text(text)) = prompt_blocks.first() else {
                     panic!("expected a text prompt block, got {prompt_blocks:?}");
                 };
-                assert_eq!(text.text, loop_schedule_instruction(args));
+                assert_eq!(
+                    text.text,
+                    loop_schedule_instruction(args, LoopFireMode::Detached)
+                );
+            }
+            CommandResult::Handled => {
+                panic!("expected InjectSkill, got Handled");
+            }
+            CommandResult::Doctor(request) => {
+                panic!("expected InjectSkill, got {request:?}");
+            }
+            CommandResult::Error(message) => {
+                panic!("expected InjectSkill, got {message}");
+            }
+            CommandResult::Message(message) => {
+                panic!("expected InjectSkill, got {message}");
+            }
+            CommandResult::Action(action) => {
+                panic!("expected InjectSkill, got {action:?}");
+            }
+            CommandResult::QueueCommand(text) => {
+                panic!("expected InjectSkill, got {text}");
+            }
+            CommandResult::QueueLater { text, .. } => {
+                panic!("expected InjectSkill, got {text}");
+            }
+            CommandResult::PassThrough(text) => {
+                panic!("expected InjectSkill, got {text}");
             }
         }
     }

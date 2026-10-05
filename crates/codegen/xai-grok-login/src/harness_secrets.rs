@@ -118,6 +118,41 @@ pub fn probe_shared_openrouter_key_default() -> Option<(String, SharedKeySource)
     probe_shared_openrouter_key(OPENROUTER_API_URL)
 }
 
+/// `<home>` from `xai_grok_config::default_grok_home` (`<home>/.grok`).
+/// This crate does not depend on the `dirs` crate.
+fn user_home_dir() -> Option<PathBuf> {
+    let grok_home = xai_grok_config::default_grok_home();
+    let home = grok_home.parent()?;
+    if home.as_os_str().is_empty() || home == Path::new(".") {
+        return None;
+    }
+    Some(home.to_path_buf())
+}
+
+/// `$XDG_CONFIG_HOME` or `~/.config` on Unix, `%APPDATA%` on Windows.
+fn user_config_dir() -> Option<PathBuf> {
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(appdata) = std::env::var_os("APPDATA") {
+            let path = PathBuf::from(appdata);
+            if !path.as_os_str().is_empty() {
+                return Some(path);
+            }
+        }
+        return user_home_dir().map(|home| home.join("AppData").join("Roaming"));
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME") {
+            let path = PathBuf::from(xdg);
+            if !path.as_os_str().is_empty() {
+                return Some(path);
+            }
+        }
+        user_home_dir().map(|home| home.join(".config"))
+    }
+}
+
 /// Resolve Zed's config directory the same way Zed's `paths::config_dir` does
 /// (without depending on Zed crates).
 pub fn zed_config_dir() -> Option<PathBuf> {
@@ -130,7 +165,7 @@ pub fn zed_config_dir() -> Option<PathBuf> {
 
     #[cfg(target_os = "windows")]
     {
-        return dirs::config_dir().map(|d| d.join("Zed"));
+        return user_config_dir().map(|d| d.join("Zed"));
     }
 
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
@@ -139,13 +174,12 @@ pub fn zed_config_dir() -> Option<PathBuf> {
             let p = PathBuf::from(flatpak).join("zed");
             return Some(p);
         }
-        dirs::config_dir().map(|d| d.join("zed"))
+        user_config_dir().map(|d| d.join("zed"))
     }
 
     #[cfg(target_os = "macos")]
     {
-        #[allow(deprecated)]
-        let home = std::env::home_dir()?;
+        let home = user_home_dir()?;
         return Some(home.join(".config").join("zed"));
     }
 
@@ -156,7 +190,7 @@ pub fn zed_config_dir() -> Option<PathBuf> {
         target_os = "macos"
     )))]
     {
-        dirs::config_dir().map(|d| d.join("zed"))
+        user_config_dir().map(|d| d.join("zed"))
     }
 }
 
@@ -232,40 +266,24 @@ fn read_zed_os_keychain(url: &str) -> Option<String> {
 
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 fn read_zed_secret_service(url: &str) -> Option<String> {
-    use std::collections::HashMap as Map;
-
-    let ss = dbus_secret_service::SecretService::connect(dbus_secret_service::EncryptionType::Dh)
-        .or_else(|_| {
-            dbus_secret_service::SecretService::connect(dbus_secret_service::EncryptionType::Plain)
-        })
-        .ok()?;
-
-    let attrs: Map<&str, &str> = Map::from([("url", url)]);
-    let search = ss.search_items(attrs).ok()?;
-
-    let mut candidates: Vec<_> = search.unlocked;
-    candidates.extend(search.locked);
-
-    for item in candidates {
-        if item.ensure_unlocked().is_err() {
-            continue;
-        }
-        let label = item.get_label().unwrap_or_default();
-        if label != ZED_SECRET_SERVICE_LABEL {
-            continue;
-        }
-        let secret = match item.get_secret() {
-            Ok(s) if !s.is_empty() => s,
-            _ => continue,
-        };
-        if let Ok(key) = String::from_utf8(secret) {
-            let key = key.trim();
-            if !key.is_empty() {
-                return Some(key.to_owned());
+    fn password(service: &str, account: &str) -> Option<String> {
+        let entry = keyring::Entry::new(service, account).ok()?;
+        match entry.get_password() {
+            Ok(secret) => {
+                let key = secret.trim();
+                if key.is_empty() {
+                    None
+                } else {
+                    Some(key.to_owned())
+                }
             }
+            Err(_) => None,
         }
     }
-    None
+    // Zed's Secret Service item is not this crate's `grok-build` schema.
+    // Read the same label and account names through the keyring entry this crate already uses.
+    password(ZED_SECRET_SERVICE_LABEL, url)
+        .or_else(|| password(ZED_SECRET_SERVICE_LABEL, BEARER_USERNAME))
 }
 
 #[cfg(target_os = "windows")]

@@ -21,6 +21,10 @@ pub struct FocusTracker {
 }
 
 impl FocusTracker {
+    pub fn set_recap_threshold_secs(&mut self, secs: u64) {
+        self.recap_threshold = Duration::from_secs(secs);
+    }
+
     pub fn new(idle_threshold_secs: u64, recap_threshold_secs: u64) -> Self {
         Self {
             focused: Cell::new(true),

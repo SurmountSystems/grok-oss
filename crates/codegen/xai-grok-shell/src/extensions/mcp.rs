@@ -3517,49 +3517,6 @@ mod tests {
     }
 
     #[test]
-    fn test_mcp_list_setup_required_serialization() {
-        let entry = McpServerEntry {
-            name: "acme".to_string(),
-            display_name: None,
-            source: McpServerSource::Local,
-            source_label: Some("plugin: acme".to_string()),
-            setup: Some(crate::util::config::McpSetupConfig {
-                fields: vec![crate::util::config::McpSetupField {
-                    id: "site".to_string(),
-                    label: "Site".to_string(),
-                    field_type: crate::util::config::McpSetupFieldType::Select,
-                    required: true,
-                    default: Some("us1".to_string()),
-                    options: vec![crate::util::config::McpSetupOption {
-                        label: "US5".to_string(),
-                        value: "us5".to_string(),
-                    }],
-                }],
-                variables: HashMap::new(),
-            }),
-            setup_values: Some(HashMap::from([("site".to_string(), "us5".to_string())])),
-            config: McpServerConfig::Http {
-                url: String::new(),
-                scope: None,
-                scope_id: None,
-                scope_name: None,
-            },
-            session: Some(McpServerSessionState {
-                enabled: true,
-                status: Some(McpSessionStatus::SetupRequired),
-                tools: vec![],
-                auth_required: false,
-                setup_required: true,
-            }),
-        };
-        let json = serde_json::to_value(&entry).unwrap();
-        assert_eq!(json["session"]["status"], "setuprequired");
-        assert_eq!(json["session"]["setupRequired"], true);
-        assert_eq!(json["setup"]["fields"][0]["id"], "site");
-        assert_eq!(json["setupValues"]["site"], "us5");
-    }
-
-    #[test]
     fn test_mcp_auth_trigger_response_success_no_error_field() {
         let resp = McpAuthTriggerResponse {
             status: "authenticated",

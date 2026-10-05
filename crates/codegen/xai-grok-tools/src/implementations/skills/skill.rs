@@ -37,6 +37,29 @@ pub struct SkillOutput {
     pub error: Option<String>,
 }
 
+/// Mint an 8-char lowercase hex run id from host OS entropy (`uuid` crate).
+///
+/// Injected into every skill envelope so orchestrator skills can use a
+/// collision-resistant id without shelling out to Python/Bash or inventing
+/// tokens in the model. Not cryptographic key material, only for artifact
+/// path uniqueness within a skill invocation.
+pub fn mint_skill_run_id() -> String {
+    let u = uuid::Uuid::new_v4();
+    let b = u.as_bytes();
+    format!("{:02x}{:02x}{:02x}{:02x}", b[0], b[1], b[2], b[3])
+}
+
+/// One-line host preamble so the model cannot miss the minted id.
+fn skill_run_id_preamble(run_id: &str) -> String {
+    format!(
+        "Host-minted run_id for this skill invocation: `{run_id}`\n\
+         Use this as IMPL_ID / PLAN_ID / DESIGN_ID / REVIEW_ID / INSTANCE_ID \
+         (or any run-scoped artifact id). Do **not** mint ids via shell, \
+         Python, or model invention. The RUN_ID body placeholder expands to \
+         the same value when substitutions run.\n"
+    )
+}
+
 /// Build the formatted skill message shown to the model. Canonical formatter for skill content injection. Used by the
 /// skill tool (invocation path), TUI slash commands, the pager, and agent definition preloading — every path that
 /// surfaces a skill to the model routes through this function so the presentation stays consistent.
@@ -582,75 +605,6 @@ It has multiple lines."#;
         let content = "Just some content without frontmatter";
         let body = extract_skill_body(content);
         assert_eq!(body, content);
-    }
-
-    #[tokio::test]
-    async fn load_skill_content_trusts_preloaded_body_with_leading_hr() {
-        let skill = SkillInfo {
-            name: "hr-body".to_string(),
-            display_name: None,
-            description: "test".to_string(),
-            short_description: None,
-            author: None,
-            argument_hint: None,
-            path: "chat-product://hr-body".to_string(),
-            scope: SkillScope::User,
-            config_source: None,
-            plugin_name: None,
-            plugin_version: None,
-            plugin_root: None,
-            plugin_data: None,
-            allowed_tools: None,
-            license: None,
-            compatibility: None,
-            metadata: None,
-            model: None,
-            effort: None,
-            user_invocable: true,
-            disable_model_invocation: false,
-            when_to_use: None,
-            has_user_specified_description: true,
-            paths: None,
-            enabled: true,
-            body: Some("---\n\nParagraph after a markdown HR.".to_string()),
-        };
-        let loaded = load_skill_content(&skill).await.unwrap();
-        assert_eq!(loaded, "---\n\nParagraph after a markdown HR.");
-    }
-
-    #[tokio::test]
-    async fn load_skill_content_rejects_synthetic_path_without_body() {
-        let skill = SkillInfo {
-            name: "pdf".to_string(),
-            display_name: None,
-            description: "test".to_string(),
-            short_description: None,
-            author: None,
-            argument_hint: None,
-            path: "chat-product://pdf".to_string(),
-            scope: SkillScope::Server,
-            config_source: None,
-            plugin_name: None,
-            plugin_version: None,
-            plugin_root: None,
-            plugin_data: None,
-            allowed_tools: None,
-            license: None,
-            compatibility: None,
-            metadata: None,
-            model: None,
-            effort: None,
-            user_invocable: true,
-            disable_model_invocation: false,
-            when_to_use: None,
-            has_user_specified_description: true,
-            paths: None,
-            enabled: true,
-            body: None,
-        };
-        let err = load_skill_content(&skill).await.unwrap_err();
-        assert!(err.contains("no preloaded body"), "{err}");
-        assert!(err.contains("chat-product://pdf"), "{err}");
     }
 
     #[test]

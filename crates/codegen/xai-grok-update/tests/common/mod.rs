@@ -137,6 +137,22 @@ pub fn small_good_artifact() -> Vec<u8> {
     b"#!/bin/sh\nexit 0\n".to_vec()
 }
 
+/// Previous-good bytes, distinct from [`small_good_artifact`].
+/// Still exits 0. A refused install must not look like the download.
+pub fn previous_good_artifact() -> Vec<u8> {
+    b"#!/bin/sh\nexit 0\n# prev\n".to_vec()
+}
+
+/// SHA-256 of [`small_good_artifact`], lowercase hex. Not SHA-1.
+pub fn small_good_artifact_sha256() -> String {
+    xai_grok_update::artifact_sha256::sha256_hex(&small_good_artifact())
+}
+
+/// GNU `sha256sum` line for [`small_good_artifact`]. Not SHA-1.
+pub fn small_good_artifact_sha256_line() -> String {
+    format!("{}  grok\n", small_good_artifact_sha256())
+}
+
 /// Backdate every file in `GROK_HOME/downloads` by ~2 hours. `cleanup_old_downloads` deliberately never deletes a
 /// freshly-written binary or temp file (it may belong to a concurrent in-flight install). Tests asserting the retention
 /// policy must therefore age their fixtures to look like real leftovers from previous releases.
@@ -211,6 +227,12 @@ impl FakeBinGuard {
         Self::install("gh", fake_gh_script)
     }
 
+    /// Install a fake `gh` that lists releases and serves a binary plus
+    /// the published `${artifact}.sha256` asset. Not SHA-1.
+    pub fn install_gh_serving_releases() -> Self {
+        Self::install("gh", fake_gh_serving_releases)
+    }
+
     /// The tempdir backing this guard (where canned stdout/stderr/exit files can be written by tests, and where `<name>-args.log` is appended).
     pub fn dir(&self) -> PathBuf {
         self.tmp.path().to_path_buf()
@@ -263,6 +285,21 @@ impl FakeBinGuard {
             code.to_string(),
         )
         .unwrap();
+    }
+
+    /// Bytes written for a non-checksum `release download`.
+    pub fn set_gh_artifact(&self, bytes: &[u8]) {
+        std::fs::write(self.dir().join("gh-artifact"), bytes).unwrap();
+    }
+
+    /// Body of the published `${artifact}.sha256` asset. Not SHA-1.
+    pub fn set_gh_sha256_body(&self, body: &str) {
+        std::fs::write(self.dir().join("gh-sha256"), body).unwrap();
+    }
+
+    /// Make checksum downloads exit 1 (published SHA-256 asset missing).
+    pub fn set_gh_sha256_missing(&self) {
+        std::fs::write(self.dir().join("gh-sha256-missing"), b"").unwrap();
     }
 }
 

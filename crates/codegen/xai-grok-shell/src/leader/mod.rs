@@ -100,6 +100,39 @@ const EVICT_WAIT_TIMEOUT: Duration = Duration::from_secs(8);
 /// How long the SAME live grok flock-holder may stay unconnectable before
 /// `connect_or_spawn` treats it as a "zombie leader" and evicts it.
 const ZOMBIE_EVICT_DEADLINE: Duration = Duration::from_secs(30);
+/// Package semver plus an optional parenthetical git sha. A bracket channel is ignored.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BinaryIdentity {
+    pub version: semver::Version,
+    pub git_sha: Option<String>,
+}
+
+/// First token is the package version. `(sha)` is kept when it is 6 to 40 hex digits.
+/// `unknown` and a non-hex parenthetical leave `git_sha` empty. Unparseable text is `None`.
+pub fn parse_binary_identity(raw: &str) -> Option<BinaryIdentity> {
+    let mut tokens = raw.split_whitespace();
+    let version = semver::Version::parse(tokens.next()?).ok()?;
+    let mut git_sha = None;
+    for token in tokens {
+        if token.starts_with('[') && token.ends_with(']') {
+            continue;
+        }
+        let Some(inner) = token
+            .strip_prefix('(')
+            .and_then(|text| text.strip_suffix(')'))
+        else {
+            continue;
+        };
+        if inner != "unknown"
+            && (6..=40).contains(&inner.len())
+            && inner.chars().all(|ch| ch.is_ascii_hexdigit())
+        {
+            git_sha = Some(inner.to_owned());
+        }
+    }
+    Some(BinaryIdentity { version, git_sha })
+}
+
 /// Whether `leader_version` is a strictly-older parseable semver than `baseline`.
 /// Unparseable versions (e.g. dev `"unknown"`) return `false`, so they are left alone.
 pub fn leader_is_older_than(leader_version: &str, baseline: &str) -> bool {

@@ -200,7 +200,7 @@
                 agent_id: AgentId(0),
                 session_id: acp::SessionId::new("sess-loop"),
                 models: None,
-                scheduler_background_loops: Some(false),
+                modes: None,
             }),
             &mut app,
         );
@@ -235,7 +235,7 @@
                 agent_id: AgentId(0),
                 session_id: acp::SessionId::new("sess-loop-load"),
                 models: None,
-                scheduler_background_loops: Some(false),
+                modes: None,
             }),
             &mut app,
         );
@@ -244,6 +244,7 @@
                 agent_id: AgentId(0),
                 session_id: acp::SessionId::new("sess-loop-load"),
                 models: None,
+                modes: None,
                 code_restored: false,
                 restore_summary: None,
                 restore_degree: None,

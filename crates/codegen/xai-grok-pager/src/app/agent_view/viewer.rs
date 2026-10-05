@@ -10,7 +10,7 @@ use crate::views::block_viewer::{BlockViewerPane, format_blockquote};
 use crate::views::btw_overlay::BTW_OVERLAY_ENTRY_IDX;
 use crate::views::file_search::line_viewer::{LineViewerState, PlanViewerItem, SelectedPlanCta};
 use crate::views::list_pane::ListItem;
-use crate::views::plan_approval_view::PlanApprovalFocus;
+use crate::views::plan_approval_view::{PlanApprovalFocus, PlanPromptIntent};
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -913,6 +913,23 @@ impl AgentView {
         self.casual_commenting_range = None;
         self.casual_editing_comment_id = None;
         self.clear_prompt_double_click_pairing();
+    }
+
+    /// Done `/btw` becomes a Human question plus the agent answer in scrollback.
+    fn flush_open_btw_to_scrollback(&mut self) {
+        let flushed = match self.btw_state.as_ref() {
+            Some(crate::views::btw_overlay::BtwOverlayState::Done {
+                question, content, ..
+            }) => Some((question.clone(), content.text())),
+            _ => None,
+        };
+        let Some((question, response)) = flushed else {
+            return;
+        };
+        self.scrollback
+            .push_block(crate::scrollback::RenderBlock::user_prompt(question));
+        self.scrollback
+            .push_block(crate::scrollback::RenderBlock::agent_message(response));
     }
 
     /// Dismiss the /btw panel. If Done, flush response to scrollback first.

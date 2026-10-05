@@ -14,6 +14,17 @@ pub(super) const RESUME_REFUSES_CHAT: &str =
     "session/resume is not supported for chat sessions; use session/load";
 pub(super) const RESUME_REFUSES_EXTRA_DIRS: &str =
     "session/resume does not support additionalDirectories";
+/// Whether a session asks to start context-only: `_meta.contextOnly` (or `context_only`), else the launch default when yolo and auto are off.
+fn resolve_session_context_only(
+    meta: Option<&acp::Meta>,
+    default_context_only_mode: bool,
+    session_yolo_mode: bool,
+    session_auto_mode: bool,
+) -> bool {
+    meta.and_then(|m| m.get("contextOnly").or_else(|| m.get("context_only")))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(default_context_only_mode && !session_yolo_mode && !session_auto_mode)
+}
 const TOOL_OVERRIDES_ECHO_BUDGET: std::time::Duration = std::time::Duration::from_secs(10);
 const BACKGROUND_TASKS_SNAPSHOT_ACK_BUDGET: std::time::Duration = std::time::Duration::from_secs(5);
 async fn read_applied_tool_overrides(
@@ -1004,15 +1015,7 @@ impl MvpAgent {
                 "Reconnect detected: flushing persistence buffer before replay"
             );
             if let Some(handle) = self.resident_handle(&session_id) {
-                let (adopt_tx, adopt_rx) = tokio::sync::oneshot::channel();
-                let _ = handle.cmd_tx.send(SessionCommand::AdoptParkedPlanApprovalFromDisk {
-                    respond_to: adopt_tx,
-                });
-                let _ = tokio::time::timeout(
-                    std::time::Duration::from_millis(500),
-                    adopt_rx,
-                )
-                .await;
+                let _ = handle.cmd_tx.send(SessionCommand::RestorePlanApproval);
             }
             if !no_replay && let Some(handle) = self.resident_handle(&session_id) {
                 handle
@@ -1297,6 +1300,7 @@ impl MvpAgent {
                         initial_reasoning_effort: None,
                         session_yolo_mode,
                         session_auto_mode: session_auto_mode && !session_yolo_mode,
+                        session_context_only,
                         prompt_display_cwd,
                         is_headless: summary.is_headless(),
                         is_chat_kind: false,

@@ -113,14 +113,14 @@ impl FrameBuffer {
             let Some(row) = self.pixels.get_mut(start..end) else {
                 continue;
             };
-            for (x, px) in row.chunks_exact_mut(3).enumerate() {
+            // A short tail is not a full pixel, so it stays untouched.
+            let (chunks, _remainder) = row.as_chunks_mut::<3>();
+            for (x, px) in chunks.iter_mut().enumerate() {
                 let Some(&vx) = self.vig_x.get(x) else {
                     continue;
                 };
                 let f = vx * vy;
-                let [r, g, b] = px else {
-                    continue;
-                };
+                let [r, g, b] = px;
                 *r = (*r as f32 * f) as u8;
                 *g = (*g as f32 * f) as u8;
                 *b = (*b as f32 * f) as u8;
@@ -190,10 +190,9 @@ impl Renderer {
         // It reads clearly even at low resolutions
         if game.player.damage_flash > 0.0 {
             let t = (game.player.damage_flash * 0.45).min(0.45);
-            for px in fb.pixels.chunks_exact_mut(3) {
-                let [r, g, b] = px else {
-                    continue;
-                };
+            let (chunks, _remainder) = fb.pixels.as_chunks_mut::<3>();
+            for px in chunks {
+                let [r, g, b] = px;
                 *r = (*r as f32 + (220.0 - *r as f32) * t) as u8;
                 *g = (*g as f32 * (1.0 - t * 0.8)) as u8;
                 *b = (*b as f32 * (1.0 - t * 0.8)) as u8;
@@ -202,10 +201,9 @@ impl Renderer {
         // Low-health vignette pulse.
         if game.player.hp <= 25 && !game.dead() {
             let pulse = 0.10 + 0.06 * (game.time * 5.0).sin();
-            for px in fb.pixels.chunks_exact_mut(3) {
-                let [r, ..] = px else {
-                    continue;
-                };
+            let (chunks, _remainder) = fb.pixels.as_chunks_mut::<3>();
+            for px in chunks {
+                let [r, ..] = px;
                 *r = (*r as f32 + (160.0 - *r as f32) * pulse) as u8;
             }
         }

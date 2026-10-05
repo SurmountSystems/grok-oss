@@ -298,6 +298,159 @@ pub fn replay_would_emit(
     Ok(false)
 }
 
+/// One rewind-filtered line in `updates.jsonl`, addressed by byte offset so replay can seek instead of holding the file as one string.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ReplayLineLoc {
+    offset: u64,
+    len: u64,
+}
+
+/// Offset plan for a replay file. `has_user_or_agent_chunk` is whether a user or agent chunk survived rewind and the cursor.
+#[derive(Debug)]
+pub(crate) struct ReplayFilePlan {
+    pub lines: Vec<ReplayLineLoc>,
+    pub has_user_or_agent_chunk: bool,
+}
+
+/// Line-at-a-time plan. `slurp_whole_file` reads the file into one string; the resume path passes false.
+pub(crate) fn plan_replay_file(path: &Path, cursor: Option<&str>) -> io::Result<ReplayFilePlan> {
+    plan_replay_file_inner(path, cursor, false)
+}
+
+pub(crate) fn plan_replay_file_inner(
+    path: &Path,
+    cursor: Option<&str>,
+    slurp_whole_file: bool,
+) -> io::Result<ReplayFilePlan> {
+    let stored = if slurp_whole_file {
+        let text = std::fs::read_to_string(path)?;
+        let mut stored = Vec::new();
+        let mut offset = 0u64;
+        for line in text.split_inclusive('\n') {
+            let start = offset;
+            offset += line.len() as u64;
+            let content = line.trim_end_matches(['\n', '\r']);
+            if content.trim().is_empty() {
+                continue;
+            }
+            stored.push((start, content.to_string()));
+        }
+        stored
+    } else {
+        let file = File::open(path)?;
+        let mut reader = BufReader::new(file);
+        let mut stored = Vec::new();
+        let mut offset = 0u64;
+        loop {
+            let mut line = String::new();
+            let n = reader.read_line(&mut line)?;
+            if n == 0 {
+                break;
+            }
+            let start = offset;
+            offset += n as u64;
+            let content = line.trim_end_matches(['\n', '\r']);
+            if content.trim().is_empty() {
+                continue;
+            }
+            stored.push((start, content.to_string()));
+        }
+        stored
+    };
+    let refs: Vec<&str> = stored.iter().map(|(_, text)| text.as_str()).collect();
+    let filtered = filter_rewind_lines(refs);
+    let mut keep_idx = Vec::with_capacity(filtered.len());
+    let mut search_from = 0usize;
+    for slice in filtered {
+        let Some(rel) = stored
+            .get(search_from..)
+            .expect("index out of bounds")
+            .iter()
+            .position(|(_, text)| std::ptr::eq(text.as_str(), slice))
+        else {
+            continue;
+        };
+        let idx = search_from + rel;
+        keep_idx.push(idx);
+        search_from = idx + 1;
+    }
+    let start = cursor
+        .and_then(|id| {
+            keep_idx.iter().rposition(|&i| {
+                line_has_event_id(&stored.get(i).expect("index out of bounds").1, id)
+            })
+        })
+        .map(|pos| pos + 1)
+        .unwrap_or(0);
+    let mut lines = Vec::new();
+    let mut has_user_or_agent_chunk = false;
+    for &idx in keep_idx.iter().skip(start) {
+        let (offset, text) = stored.get(idx).expect("index out of bounds");
+        if text.contains("user_message_chunk") || text.contains("agent_message_chunk") {
+            has_user_or_agent_chunk = true;
+        }
+        lines.push(ReplayLineLoc {
+            offset: *offset,
+            len: text.len() as u64,
+        });
+    }
+    Ok(ReplayFilePlan {
+        lines,
+        has_user_or_agent_chunk,
+    })
+}
+
+pub(crate) fn read_replay_line_at(
+    file: &mut File,
+    loc: ReplayLineLoc,
+    buf: &mut String,
+) -> io::Result<()> {
+    buf.clear();
+    file.seek(SeekFrom::Start(loc.offset))?;
+    let mut chunk = vec![0u8; loc.len as usize];
+    file.read_exact(&mut chunk)?;
+    *buf = String::from_utf8_lossy(&chunk).into_owned();
+    Ok(())
+}
+
+/// Paint Operator and Agent lines from `chat_history` when `updates.jsonl` has no user or agent chunk.
+/// Synthetic non-human user items (system reminders) stay out of the paint.
+pub(crate) fn chat_history_replay_lines(
+    session_id: &str,
+    items: &[crate::sampling::ConversationItem],
+) -> Vec<String> {
+    items
+        .iter()
+        .filter_map(|item| {
+            let (kind, text) = match item {
+                crate::sampling::ConversationItem::User(user)
+                    if user.synthetic_reason.is_human() =>
+                {
+                    ("user_message_chunk", item.text_content())
+                }
+                crate::sampling::ConversationItem::Assistant(_) => {
+                    ("agent_message_chunk", item.text_content())
+                }
+                _ => return None,
+            };
+            Some(
+                serde_json::json!({
+                    "timestamp": 1,
+                    "method": "session/update",
+                    "params": {
+                        "sessionId": session_id,
+                        "update": {
+                            "sessionUpdate": kind,
+                            "content": {"type": "text", "text": text}
+                        }
+                    }
+                })
+                .to_string(),
+            )
+        })
+        .collect()
+}
+
 /// [`stream_replay_updates_at`] with parent/child cwd hints so child hydrate can skip a full sessions-root scan on the common encoded-cwd path.
 /// Persisted xAI child events are forwarded in file order (see [`ReplayedUpdate`]).
 pub fn stream_replay_updates_at_hinted<F: FnMut(ReplayedUpdate)>(

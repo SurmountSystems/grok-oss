@@ -55,7 +55,6 @@ pub(crate) struct ShellCompactionSampler {
     hosted_tools: Vec<HostedTool>,
     compaction_tool_tokens: u64,
     session_id: acp::SessionId,
-    sampling_config: SamplingConfig,
     /// Per-chunk idle timeout forwarded to `generate_session_compact`.
     /// A stalled summarizer stream (no model-output chunk for this long) fails instead of hanging.
     idle_timeout: Duration,
@@ -123,11 +122,12 @@ impl CompactionSampler for ShellCompactionSampler {
     ) -> Result<LlmCompactionOutput, CompactionSampleError> {
         // Append the harness-selected summarization prompt as the final user message (compat short vs structured grok-build)
         // The shared engine's `_prompt` is ignored (see the struct doc)
+        let max_request_bytes = self.sampling_config.lock().unwrap().max_request_bytes;
         let chat_history = build_compaction_chat_history(
             turns.to_vec(),
             self.user_context.as_deref(),
             self.use_short_prompt,
-            self.sampling_config.max_request_bytes,
+            max_request_bytes,
             self.compaction_tool_tokens,
         );
         self.state.lock().unwrap().record_attempt(&chat_history);
@@ -161,6 +161,7 @@ impl CompactionSampler for ShellCompactionSampler {
                             turns.to_vec(),
                             self.user_context.as_deref(),
                             self.use_short_prompt,
+                            cfg.max_request_bytes,
                             self.compaction_tool_tokens,
                         );
                         self.state.lock().unwrap().record_attempt(&retry_history);

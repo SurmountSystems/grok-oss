@@ -37,6 +37,7 @@ fn draw(
         false,
         BannerSlotParams::none(),
         in_overlay,
+        false,
         &mut Vec::new(),
         AppRenderParams {
             overlay_header: header,
