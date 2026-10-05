@@ -380,9 +380,50 @@ impl AgentView {
         let _keep_finished_hosts = &self.subagent_sessions;
     }
 
-    /// Write the unsent composer draft and still-running nested occupancy.
+    /// Write the unsent composer draft, the still-unsent queue, and a
+    /// rebuild-flush line for each unsent row. A queue body that is already
+    /// a Human turn is issued. A second rebuild must not write that body
+    /// into `pending_prompts.json` or the rebuild-flush log.
     pub(crate) fn persist_session_work_to_disk_for_rebuild(&self) {
         self.persist_unsent_prompt_draft();
+        let Some(sid) = self.session.session_id.as_ref() else {
+            return;
+        };
+        let cwd = self.session.cwd.to_string_lossy();
+        let committed = self.committed_human_turn_texts(true, true);
+        let rows: Vec<_> = self
+            .session
+            .pending_prompts
+            .iter()
+            .filter(|prompt| {
+                prompt.continue_prior_work
+                    || prompt.kind != crate::app::agent::QueueEntryKind::Prompt
+                    || !Self::queue_text_matches_committed_human_turn(&prompt.text, &committed)
+            })
+            .map(|prompt| {
+                xai_grok_shell::session::unsent_prompt_draft::pending_prompts::PersistedQueuedPrompt {
+                    id: prompt.id,
+                    text: prompt.text.clone(),
+                    kind: prompt.kind.as_label().to_string(),
+                }
+            })
+            .collect();
+        for row in &rows {
+            if row.text.trim().is_empty() {
+                continue;
+            }
+            self.append_prompt_wal(
+                xai_grok_shell::session::prompt_wal::PromptWalKind::RebuildFlush,
+                &row.text,
+                &[],
+            );
+        }
+        let _ =
+            xai_grok_shell::session::unsent_prompt_draft::pending_prompts::write_pending_prompts(
+                cwd.as_ref(),
+                sid.0.as_ref(),
+                &rows,
+            );
     }
 
     #[cfg(test)]

@@ -818,8 +818,8 @@ pub fn default_settings() -> Vec<SettingMeta> {
                 "light",
             ],
             kind: SettingKind::Enum {
-                // `Option<String>`: `None` resolves to "groknight"
-                default: "groknight",
+                // `Option<String>`: `None` resolves to "doge"
+                default: "doge",
                 choices: THEME_CHOICES,
                 supports_preview: true,
             },
@@ -834,8 +834,8 @@ pub fn default_settings() -> Vec<SettingMeta> {
             description: "Theme to use when the system is in dark mode (only with theme=auto).",
             keywords: &["auto", "dark", "theme", "system", "appearance", "night"],
             kind: SettingKind::Enum {
-                // `Option<String>`: `None` falls back to "groknight"
-                default: "groknight",
+                // `Option<String>`: `None` falls back to "doge"
+                default: "doge",
                 choices: CONCRETE_THEME_CHOICES,
                 supports_preview: true,
             },
@@ -1123,6 +1123,69 @@ pub fn default_settings() -> Vec<SettingMeta> {
             },
             // New sessions pick up the global default; active sessions use
             // `/economic-mode` for an immediate override.
+            restart_required: false,
+            hidden_in_minimal: false,
+        },
+        // SHARED: cache and `[ui].turbo_planning`. `None` means on.
+        SettingMeta {
+            key: "turbo_planning",
+            category: SettingCategory::Agent,
+            owner: SettingOwner::Shared,
+            label: "Turbo planning",
+            description: "While exclusive /plan or Isolated Preview /plan --soft is the live \
+                          plan turn, use xhigh effort. Default on. Off keeps the stored session \
+                          effort. Does not change stored session reasoning effort.",
+            keywords: &["turbo", "planning", "plan", "effort", "xhigh"],
+            kind: SettingKind::Bool {
+                default: ui_default.turbo_planning.unwrap_or(true),
+            },
+            restart_required: false,
+            hidden_in_minimal: false,
+        },
+        // SHARED: `[ui].process_rule_reminders_enabled`. `None` means on.
+        SettingMeta {
+            key: "process_rule_reminders_enabled",
+            category: SettingCategory::Agent,
+            owner: SettingOwner::Shared,
+            label: "Process-rule reminders",
+            description: "Inject soft process-rule reminder text into a nested spawn. Default \
+                          on. Off injects no extra reminder text. Not a deny and not a spawn cap.",
+            keywords: &[
+                "process",
+                "rule",
+                "rules",
+                "reminder",
+                "reminders",
+                "spawn",
+                "nested",
+            ],
+            kind: SettingKind::Bool {
+                default: ui_default.process_rule_reminders_enabled.unwrap_or(true),
+            },
+            restart_required: false,
+            hidden_in_minimal: false,
+        },
+        // SHARED: `[ui].process_rule_reminders`. Empty clears the extra text.
+        SettingMeta {
+            key: "process_rule_reminders",
+            category: SettingCategory::Agent,
+            owner: SettingOwner::Shared,
+            label: "Process-rule reminder text",
+            description: "Newline-separated process-rule reminder strings. Empty means no extra \
+                          text even when reminders are on.",
+            keywords: &[
+                "process",
+                "rule",
+                "rules",
+                "reminder",
+                "reminders",
+                "text",
+                "spawn",
+            ],
+            kind: SettingKind::String {
+                default: "",
+                validator: StringValidator::Any,
+            },
             restart_required: false,
             hidden_in_minimal: false,
         },

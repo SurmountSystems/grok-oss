@@ -350,7 +350,9 @@ impl SubagentInfo {
 
     /// Uses the authoritative `duration_ms` from `SubagentFinished` when available, else the live wall-clock elapsed.
     pub fn display_elapsed(&self) -> std::time::Duration {
-        if self.is_finished() {
+        // `finished` is the host-exit bit. Lifecycle can still look live when
+        // a test or a late stamp sets `finished` and `duration_ms` together.
+        if self.finished || self.is_finished() {
             self.attempt
                 .duration_ms
                 .map(std::time::Duration::from_millis)

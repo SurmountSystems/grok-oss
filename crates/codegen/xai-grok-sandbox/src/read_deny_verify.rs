@@ -54,11 +54,10 @@ struct PathStatus {
 /// Create the sentinel directory on the host before the re-exec, replacing a hostile non-directory or symlink entry.
 /// `create_dir_all` would silently accept a symlink-to-directory, and bwrap would then mount onto its target.
 /// The re-exec must not proceed without it: the inner verification requires the read-only sentinel mount unconditionally.
+/// The parent is [`crate::bwrap_writable_state_parent`]: `grok_home` when that tree can be created, otherwise `/tmp`.
 #[cfg(target_os = "linux")]
 pub(crate) fn ensure_bwrap_sentinel_dir() -> Result<PathBuf, String> {
-    let parent = crate::paths::grok_home();
-    std::fs::create_dir_all(&parent)
-        .map_err(|e| format!("could not create {}: {e}", parent.display()))?;
+    let parent = crate::bwrap_writable_state_parent()?;
     ensure_sentinel_dir_under(&parent)
 }
 
@@ -104,7 +103,7 @@ fn ensure_sentinel_dir_under(parent: &Path) -> Result<PathBuf, String> {
 /// symlink, so this opens the writable parent and the child relative to it with `O_NOFOLLOW`.
 #[cfg(all(feature = "enforce", target_os = "linux"))]
 pub(crate) fn verify_bwrap_sentinel() -> Result<(), String> {
-    verify_sentinel_under(&crate::paths::grok_home())
+    verify_sentinel_under(&crate::bwrap_writable_state_parent()?)
 }
 
 #[cfg(all(feature = "enforce", target_os = "linux"))]

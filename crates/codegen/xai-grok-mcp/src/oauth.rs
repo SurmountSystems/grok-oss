@@ -836,7 +836,7 @@ mod tests {
 
         let server_url = format!("http://{addr}/mcp");
         let mgr = Arc::new(Mutex::new(
-            AuthorizationManager::new(server_url.as_str())
+            crate::mcp_http_client::authorization_manager(server_url.as_str())
                 .await
                 .unwrap(),
         ));

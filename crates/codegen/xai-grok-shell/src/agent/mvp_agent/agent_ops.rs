@@ -4907,7 +4907,7 @@ impl MvpAgent {
                 .session_registry
                 .live_orphan_heal_lock(&session_info.id);
             let _spawn_on_thread_timer = crate::instrumentation_timer!("session.spawn_on_thread");
-            spawn_session_on_thread(
+            Box::pin(spawn_session_on_thread(
                     session_info.clone(),
                     self.gateway.clone(),
                     sampling_config,
@@ -5040,7 +5040,7 @@ impl MvpAgent {
                     None,
                     None,
                     spawn_trace,
-                )
+                ))
                 .await?
         };
         tracing::debug!(session_id = %session_info.id.0, "spawn_session_on_thread complete");

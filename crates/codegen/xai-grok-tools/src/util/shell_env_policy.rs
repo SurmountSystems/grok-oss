@@ -225,7 +225,9 @@ pub(crate) fn install_policy_base_env(
         for name in names {
             cmd.env_remove(name);
         }
-        cmd.envs(create_env(policy));
+        let mut base: Vec<_> = create_env(policy).into_iter().collect();
+        base.sort_by(|left, right| left.0.cmp(&right.0));
+        cmd.envs(base);
     }
 }
 

@@ -128,6 +128,12 @@ impl ScrollbackState {
             return false;
         }
         self.activate_turn(turn_idx);
+        // An explicit jump (next response, previous response, timeline
+        // chevron). A short trailing turn cannot move `scroll_offset` below
+        // the tail, so `scroll_to_entry_top` leaves follow on. This jump
+        // turns follow off. Live rows still re-arm follow when the viewport
+        // is on the real tail and is not parked on a page-flip pin.
+        self.follow_mode = false;
         true
     }
 
@@ -1052,6 +1058,27 @@ impl ScrollbackState {
         }
     }
 
+    /// True when `scroll_offset` is the sticky-adjusted top of a user prompt.
+    fn scroll_is_on_user_prompt_top(&self) -> bool {
+        let Some(cache) = self.layout_cache.as_ref() else {
+            return false;
+        };
+        let range = self.visible_entry_range();
+        let Some(&base) = cache.virtual_y.get(range.start) else {
+            return false;
+        };
+        self.entries.iter().enumerate().any(|(idx, (_, entry))| {
+            if !entry.block.is_user_prompt() || !range.contains(&idx) {
+                return false;
+            }
+            let Some(&y) = cache.virtual_y.get(idx) else {
+                return false;
+            };
+            let entry_y = y.saturating_sub(base);
+            self.sticky_adjusted_entry_top(cache, &range, entry_y) == self.scroll_offset
+        })
+    }
+
     /// Re-pin the viewport to the bottom for follow mode without touching the selection. Auto-selecting the last entry
     /// there would overwrite the selection while folding, etc. Pins unconditionally; callers must only invoke it when
     /// `follow_mode` is set (both current callers gate on it).
@@ -1075,7 +1102,16 @@ impl ScrollbackState {
             };
             let content_changed = self.pin_reserve_active
                 || self.content_generation != self.follow_preserve_content_generation;
-            if content_changed && unpadded_max > live_pin && !self.pin_reserve_after_turn {
+            // scroll_to_entry_top on a prompt, then preserve, with the response
+            // already past the viewport: show the tail. A reading hold that is
+            // not parked on a prompt top still waits for new content.
+            let prompt_restore_hides_tail = !self.pin_reserve_active
+                && unpadded_max > live_pin
+                && self.scroll_is_on_user_prompt_top();
+            if (content_changed || prompt_restore_hides_tail)
+                && unpadded_max > live_pin
+                && !self.pin_reserve_after_turn
+            {
                 self.follow_preserve_scroll = false;
                 self.release_pin_reserve();
                 self.scroll_offset = self.max_scroll_offset();

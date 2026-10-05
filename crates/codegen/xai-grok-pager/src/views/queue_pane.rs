@@ -634,7 +634,9 @@ impl QueuePane {
         // Composer Ctrl+Enter stays newline (`When::PromptFocused`). Bare
         // Enter still opens edit.
         if key.code == KeyCode::Enter && key.modifiers.contains(KeyModifiers::CONTROL) {
-            return Some(QueueEvent::ForceInterject { id });
+            return capabilities
+                .can_send_now()
+                .then_some(QueueEvent::ForceInterject { id });
         }
         match key.code {
             KeyCode::Char('x') | KeyCode::Delete | KeyCode::Backspace => capabilities
@@ -969,6 +971,9 @@ impl QueuePane {
         let inner_h = inner.height as usize;
         if can_send_now {
             for (idx, entry) in self.entries.iter().enumerate() {
+                if !entry.capabilities.can_send_now() {
+                    continue;
+                }
                 let item_y = self.list_state.layout().virtual_y(idx);
                 let Some(rel) = item_y.checked_sub(scroll).filter(|rel| *rel < inner_h) else {
                     continue;

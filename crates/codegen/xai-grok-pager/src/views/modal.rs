@@ -1434,18 +1434,24 @@ mod palette_sharing_tests {
     }
     #[test]
     fn edit_prompt_palette_entry_is_minimal_only() {
-        let minimal = default_palette_entries(true, &slash(crate::app::ScreenMode::Minimal));
-        assert!(
-            minimal
-                .iter()
-                .any(|entry| matches!(entry.command, PaletteCommand::EditPromptExternal))
-        );
-        let fullscreen = default_palette_entries(true, &slash(crate::app::ScreenMode::Fullscreen));
-        assert!(
-            !fullscreen
-                .iter()
-                .any(|entry| matches!(entry.command, PaletteCommand::EditPromptExternal))
-        );
+        let entry = |mode| {
+            default_palette_entries(true, &slash(mode))
+                .into_iter()
+                .find(|entry| matches!(entry.command, PaletteCommand::EditPromptExternal))
+                .expect("palette offers the external editor in every mode")
+        };
+        let minimal = entry(crate::app::ScreenMode::Minimal);
+        assert!(matches!(
+            minimal.command,
+            PaletteCommand::EditPromptExternal
+        ));
+        assert_eq!(minimal.shortcut, "Ctrl+G");
+        let fullscreen = entry(crate::app::ScreenMode::Fullscreen);
+        assert!(matches!(
+            fullscreen.command,
+            PaletteCommand::EditPromptExternal
+        ));
+        assert_eq!(fullscreen.shortcut, "/edit-prompt");
     }
     #[test]
     fn default_palette_omits_share_when_disabled() {

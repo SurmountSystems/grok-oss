@@ -125,8 +125,8 @@ grok-oss mcp enable github
 grok-oss mcp disable github
 
 # Enable or disable a local/TOML (or compat-sourced) server
-grok mcp enable github
-grok mcp disable github
+grok-oss mcp enable github
+grok-oss mcp disable github
 
 # Diagnose a server's configuration and connectivity
 grok-oss mcp doctor               # Check every configured server
@@ -136,13 +136,13 @@ grok-oss mcp doctor --json        # Machine-readable output
 
 The transport defaults to `stdio`; pass `--transport http` or `--transport sse` for remote servers.
 
-By default `grok mcp add` writes to `~/.grok/config.toml` (`--scope user`). Use `--scope project` to write to `.grok/config.toml` in the current directory instead, which can be committed and shared with your team (see [Project-Scoped MCP Servers](#project-scoped-mcp-servers)). Header and environment variable values are stored verbatim, so reference secrets as `${VAR}` instead of pasting them into a committed project config (see [Example Configurations](#example-configurations)). `grok mcp list` shows servers from both scopes, marking project-scoped ones with `(project)` and disabled ones with `(disabled)`.
+By default `grok-oss mcp add` writes to `~/.grok/config.toml` (`--scope user`). Use `--scope project` to write to `.grok/config.toml` in the current directory instead, which can be committed and shared with your team (see [Project-Scoped MCP Servers](#project-scoped-mcp-servers)). Header and environment variable values are stored verbatim, so reference secrets as `${VAR}` instead of pasting them into a committed project config (see [Example Configurations](#example-configurations)). `grok-oss mcp list` shows servers from both scopes, marking project-scoped ones with `(project)` and disabled ones with `(disabled)`.
 
 - **Known names:** user/project Grok TOML, names already on the disabled list, compat sources (`.mcp.json`, Claude, Cursor), and **plugin** MCP servers (same discovery as doctor/`/mcps`).
 - **Enable only:** if the cwd-nearest project definition has sticky `enabled = false`, that single key is cleared (comments preserved); disable never rewrites project configs.
 - **Not full `/mcps` parity:** gateway connectors (`managed_gateway:…`, stored under `disabled_mcp_tools.__managed_gateway_connectors`) stay Space-only in the TUI. Idempotent; unknown names exit 1.
 
-`grok mcp enable` / `disable` persist the personal on/off state to user `~/.grok/config.toml` (`disabled_mcp_servers`, and `[mcp_servers.<name>].enabled` when that entry exists). Scope:
+`grok-oss mcp enable` / `disable` persist the personal on/off state to user `~/.grok/config.toml` (`disabled_mcp_servers`, and `[mcp_servers.<name>].enabled` when that entry exists). Scope:
 
 - **Known names:** user/project Grok TOML, names already on the disabled list, compat sources (`.mcp.json`, Claude, Cursor), and **plugin** MCP servers (same discovery as doctor/`/mcps`).
 - **Enable only:** if the cwd-nearest project definition has sticky `enabled = false`, that single key is cleared (comments preserved); disable never rewrites project configs.
@@ -210,7 +210,7 @@ A rejected tool is skipped. The log line is `Skipping MCP tool` with the reason.
 
 The **64-character** cap is a provider **function-name** budget. It applies to the meta-tools `search_tool` and `use_tool` themselves. It does **not** apply to catalog keys. A `server__tool` name longer than 64 characters stays in the catalog. The model still calls it through `use_tool` with that full name. Grok used to drop those tools at 64 characters. It no longer does.
 
-The server name in `[mcp_servers.<name>]` / `grok mcp add` is the catalog prefix. A name that starts with a digit is a valid TOML key. Catalog admission still rejects it (`InvalidServerName`). Rename the server so it starts with a letter or underscore.
+The server name in `[mcp_servers.<name>]` / `grok-oss mcp add` is the catalog prefix. A name that starts with a digit is a valid TOML key. Catalog admission still rejects it (`InvalidServerName`). Rename the server so it starts with a letter or underscore.
 
 A server name that ends with `_` makes `server__tool` contain `___`. Admission skips that key (`InvalidOrAmbiguousQualifiedName`).
 
@@ -444,7 +444,7 @@ tail -f ~/.grok/logs/mcp/filesystem.stderr.log
 
 ### Blocked by organization policy
 
-If native TOML policy or Claude `managed-settings.json` sets `deniedMcpServers`, a nonempty `allowedMcpServers`, or `allowManagedMcpServersOnly`, Grok drops non-matching servers at merge time and logs `MCP server blocked by managed settings policy`. Native grok layers bind every server; the Claude file binds foreign-defined servers only. `grok inspect` shows the lists, lockdown scope, and each remaining server. Details and examples: [Restrict which MCP servers can run](09-plugins.md#restrict-which-mcp-servers-can-run).
+If native TOML policy or Claude `managed-settings.json` sets `deniedMcpServers`, a nonempty `allowedMcpServers`, or `allowManagedMcpServersOnly`, Grok drops non-matching servers at merge time and logs `MCP server blocked by managed settings policy`. Native grok layers bind every server; the Claude file binds foreign-defined servers only. `grok-oss inspect` shows the lists, lockdown scope, and each remaining server. Details and examples: [Restrict which MCP servers can run](09-plugins.md#restrict-which-mcp-servers-can-run).
 
 ### A listed tool never appears
 
@@ -455,7 +455,7 @@ The server starts and `tools/list` returns the tool, but `/mcps` and `search_too
 3. Confirm the tool name uses only `[A-Za-z0-9_-]`. Dots and colons in the raw MCP name are skipped.
 4. Do not shorten a `server__tool` key to 64 characters. Catalog keys may be up to 256. The 64-character cap is only for `search_tool` / `use_tool` as function names. See [Tool Naming](#tool-naming).
 
-This is separate from a tool that is missing on the **first** prompt because the handshake is still running. Send a second prompt after the server is up, or run `grok mcp doctor`.
+This is separate from a tool that is missing on the **first** prompt because the handshake is still running. Send a second prompt after the server is up, or run `grok-oss mcp doctor`.
 
 ### Viewing Server Status
 

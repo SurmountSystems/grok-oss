@@ -640,6 +640,13 @@ impl GoalDisplayState {
             let parent_delta = context_used
                 .map(|u| (u as i64).saturating_sub(self.token_baseline).max(0))
                 .unwrap_or(self.tokens_used);
+            // The L1 sampling window already includes nested L2 and L3.
+            // When that window is ahead of this goal's own counter, return
+            // the window once. A smaller context still sums finished work
+            // and the live argument for the goal chip.
+            if context_used.is_some_and(|used| (used as i64) > self.tokens_used) {
+                return parent_delta;
+            }
             let candidate = parent_delta
                 .saturating_add(self.finished_subagent_tokens)
                 .saturating_add(live_subagent_tokens as i64);

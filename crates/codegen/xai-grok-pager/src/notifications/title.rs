@@ -643,7 +643,7 @@ mod tests {
         assert_eq!(mgr.last_title, PRODUCT_CLI_NAME);
 
         assert_eq!(mgr.update(&state), None);
-        assert_eq!(mgr.last_title, "grok");
+        assert_eq!(mgr.last_title, PRODUCT_CLI_NAME);
     }
 
     #[test]

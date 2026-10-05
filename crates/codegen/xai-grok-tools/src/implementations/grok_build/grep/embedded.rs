@@ -440,12 +440,16 @@ mod tests {
             env!("CARGO_MANIFEST_DIR"),
             "/src/implementations/grok_build/grep/embedded.rs"
         ));
+        // The assert text itself names the process APIs it forbids. Scan the
+        // product half only, so the contract still rejects a sidecar exec
+        // without matching the test's own needles.
+        let product_src = this_src.split("#[cfg(test)]").next().unwrap_or(this_src);
         assert!(
-            this_src.contains("grep::regex") && this_src.contains("WalkBuilder"),
+            product_src.contains("grep::regex") && product_src.contains("WalkBuilder"),
             "grok-oss grep is embedded Rust, not a sidecar rg"
         );
         assert!(
-            !this_src.contains("Command::new") && !this_src.contains("std::process::Command"),
+            !product_src.contains("Command::new") && !product_src.contains("std::process::Command"),
             "grok-oss grep is embedded Rust, not a sidecar rg: embedded search must not exec rg"
         );
     }

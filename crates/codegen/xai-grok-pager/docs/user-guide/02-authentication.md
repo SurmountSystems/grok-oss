@@ -275,7 +275,7 @@ same JSON fields (such as `issuer`) on every invocation, including refreshes.
   rejected. Nobody is watching. stdin is closed, your stderr is swallowed, and
   the binary is given a few seconds before it is killed. Mint silently or exit
   non-zero — never block.
-- **Unset — a sign-in.** `grok login`, the sign-in screen, or the escalation
+- **Unset — a sign-in.** `grok-oss login`, the sign-in screen, or the escalation
   Grok performs when a headless run couldn't mint. A user is waiting, your
   stderr reaches them, and you have 300 seconds — enough for a browser round
   trip or a device code.
@@ -387,10 +387,10 @@ During a session, the active method handles all mid-session refreshes.
 
 ---
 
-## Grove Git credentials (not this page's `grok login`)
+## Grove Git credentials (not this page's `grok-oss login`)
 
 
-**`~/.grok/auth.json` is never read for Git.** `grok login` does not create a Git credential and `grok logout` does not revoke one; the daemon builds its own credential cell from `auth_mode` in Grove config. Those credentials are managed with `grove status` and `grove reload-credentials` -- see [grok clone](27-grok-clone.md#authentication) for the failure classes and their next steps.
+**`~/.grok/auth.json` is never read for Git.** `grok-oss login` does not create a Git credential and `grok-oss logout` does not revoke one; the daemon builds its own credential cell from `auth_mode` in Grove config. Those credentials are managed with `grove status` and `grove reload-credentials` -- see [grok clone](27-grok-clone.md#authentication) for the failure classes and their next steps.
 
 ---
 

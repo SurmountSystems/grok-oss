@@ -218,14 +218,14 @@ This shows:
 
 - Session title (when set)
 - Shell version
-- Auth method (OAuth vs API key; API-key sessions also suggest `grok login` for SuperGrok)
+- Auth method (OAuth vs API key; API-key sessions also suggest `grok-oss login` for SuperGrok)
 - Session ID
 - Working directory
 - Model (with a model hash for coding models)
 - API backend and sandbox profile (when set)
 - Context window usage (used and total tokens, with the percentage used)
 
-On the Session info tab, click a value to copy it, or drag to select a range (same highlight as the tool viewer). `c` copies the session ID and `y` copies the whole block. Copy uses the same clipboard route as the rest of Grok, including `grok wrap`.
+On the Session info tab, click a value to copy it, or drag to select a range (same highlight as the tool viewer). `c` copies the session ID and `y` copies the whole block. Copy uses the same clipboard route as the rest of Grok, including `grok-oss wrap`.
 
 ---
 
@@ -403,19 +403,19 @@ When the registry is unavailable, every row appears as `untracked` and the repor
 
 To reclaim space, run `grok-oss worktree gc --max-age 7d`, which removes tracked worktrees older than the age you give. Without `--max-age`, gc expires nothing, and it visits only worktrees the registry tracks. Remove an untracked worktree with `grok-oss worktree rm <path>`. Both commands take `--dry-run` and report what they would do: gc counts the worktrees it would remove, and `rm` names the path. Neither inspects the working tree for uncommitted or unpushed work, so read the preview first.
 
-`grok worktree create [NAME]` creates the same worktree `grok -w [NAME]` would, without starting a session. It prints the directory the session would have opened in. That path is the only output on stdout, so `cd "$(grok worktree create my-fix)"` works. By default the worktree starts from HEAD with your uncommitted changes copied over. Pass `--ref <ref>` to start from a clean checkout of a branch, tag, or commit. If the new worktree lacks the directory you ran from, such as a `--ref` checkout that predates it or an ignored directory, the command prints the worktree root.
+`grok-oss worktree create [NAME]` creates the same worktree `grok-oss -w [NAME]` would, without starting a session. It prints the directory the session would have opened in. That path is the only output on stdout, so `cd "$(grok-oss worktree create my-fix)"` works. By default the worktree starts from HEAD with your uncommitted changes copied over. Pass `--ref <ref>` to start from a clean checkout of a branch, tag, or commit. If the new worktree lacks the directory you ran from, such as a `--ref` checkout that predates it or an ignored directory, the command prints the worktree root.
 
 ### Manage Grove redirections
 
 A Grove worktree can redirect ignored artifact directories such as `target` and `node_modules` to storage outside the projected tree. The redirect commands take the mount path as their first argument.
 
 ```bash
-grok worktree redirect list /path/to/worktree
-grok worktree redirect list /path/to/worktree --json
-grok worktree redirect add /path/to/worktree target bind
-grok worktree redirect del /path/to/worktree target
-grok worktree redirect fixup /path/to/worktree
-grok worktree redirect unmount /path/to/worktree target
+grok-oss worktree redirect list /path/to/worktree
+grok-oss worktree redirect list /path/to/worktree --json
+grok-oss worktree redirect add /path/to/worktree target bind
+grok-oss worktree redirect del /path/to/worktree target
+grok-oss worktree redirect fixup /path/to/worktree
+grok-oss worktree redirect unmount /path/to/worktree target
 ```
 
 `list` prints `repo_path`, `type`, `mechanism`, `target`, `source`, and `state`. Run `unmount` without a repo-relative path to take down every redirect on the mount. Use `fixup --force` to replace Grove-owned residue. Use `fixup --strict` to refuse a populated plain directory.
@@ -432,7 +432,7 @@ grok clone https://example.com/org/repo.git --no-redirects
 
 ### Checking Disk Usage
 
-`grok du` (alias: `grok disk-usage`) reports what the grok home (`~/.grok`) uses on disk. It lists each top-level directory, largest first, then each worktree with its size, type, age, label, and path. Worktrees the registry does not track appear as `untracked`. Pass `--json` for the same report as machine-readable output.
+`grok-oss du` (alias: `grok-oss disk-usage`) reports what the grok home (`~/.grok`) uses on disk. It lists each top-level directory, largest first, then each worktree with its size, type, age, label, and path. Worktrees the registry does not track appear as `untracked`. Pass `--json` for the same report as machine-readable output.
 
 ```text
 Disk usage for ~/.grok
@@ -447,27 +447,27 @@ Worktrees
     380.0 GB  session             12d ago    my-fix ~/.grok/worktrees/xai/worktree-abc
      32.3 GB  untracked (session) 40d ago           ~/.grok/worktrees/xai/worktree-old
 
-To reclaim space, run `grok worktree gc --max-age 7d --dry-run`, then the same command without `--dry-run`. Without `--max-age`, gc expires nothing, and it keeps a worktree whose work it cannot find elsewhere, naming each one.
-Untracked rows are not in the registry, so gc never visits them. Remove one with `grok worktree rm --dry-run <path>`, then without `--dry-run`.
+To reclaim space, run `grok-oss worktree gc --max-age 7d --dry-run`, then the same command without `--dry-run`. Without `--max-age`, gc expires nothing, and it keeps a worktree whose work it cannot find elsewhere, naming each one.
+Untracked rows are not in the registry, so gc never visits them. Remove one with `grok-oss worktree rm --dry-run <path>`, then without `--dry-run`.
 ```
 
-After the grok-home table, `grok du` may print **Redirections**, **Orphaned redirections**, and **Unattributed redirect directories**. Those bytes live in Grove escape jails, not in the grok-home total. An empty scan prints nothing. Reclaim a live jail with `grok worktree clean-artifacts`. Purge live jails plus proven orphans with `grok du --clean --yes`. Delete only proven orphans with `grok du --clean-orphaned --yes`.
+After the grok-home table, `grok-oss du` may print **Redirections**, **Orphaned redirections**, and **Unattributed redirect directories**. Those bytes live in Grove escape jails, not in the grok-home total. An empty scan prints nothing. Reclaim a live jail with `grok-oss worktree clean-artifacts`. Purge live jails plus proven orphans with `grok-oss du --clean --yes`. Delete only proven orphans with `grok-oss du --clean-orphaned --yes`.
 
-`AGE` is the value `grok worktree gc` measures: time since the worktree was last accessed, or since it was created when that is more recent. Session and agent activity update it; a shell or editor left open in the directory does not. An untracked worktree has no registry entry, so its age comes from the newest file underneath it.
+`AGE` is the value `grok-oss worktree gc` measures: time since the worktree was last accessed, or since it was created when that is more recent. Session and agent activity update it; a shell or editor left open in the directory does not. An untracked worktree has no registry entry, so its age comes from the newest file underneath it.
 
-Sizes are physical block counts on Unix and logical file sizes elsewhere, matching what `grok worktree show` reports. A worktree clone shares storage with its source and each copy counts in full, so the total can exceed both `du -sh` and the space actually in use. When the total exceeds the used space on the volume, the report says so. `--json` carries the same figures as `volume_capacity_bytes` and `volume_available_bytes`.
+Sizes are physical block counts on Unix and logical file sizes elsewhere, matching what `grok-oss worktree show` reports. A worktree clone shares storage with its source and each copy counts in full, so the total can exceed both `du -sh` and the space actually in use. When the total exceeds the used space on the volume, the report says so. `--json` carries the same figures as `volume_capacity_bytes` and `volume_available_bytes`.
 
-The report measures a single filesystem, the one holding the grok home. A directory on any other filesystem stays out of the total and is counted in `other_filesystem_dirs`, and its worktree rows show `-` for size (`null` in `--json`). A top-level symlink to a directory, such as a relocated `worktrees`, is counted in `unfollowed_dir_symlinks`; its target stays out of the total, though the rows below it are still sized. Directories and entries the report could not read are counted in `unreadable_dirs` and `unstatable_entries`. Run `RUST_LOG=debug grok du` to name each one.
+The report measures a single filesystem, the one holding the grok home. A directory on any other filesystem stays out of the total and is counted in `other_filesystem_dirs`, and its worktree rows show `-` for size (`null` in `--json`). A top-level symlink to a directory, such as a relocated `worktrees`, is counted in `unfollowed_dir_symlinks`; its target stays out of the total, though the rows below it are still sized. Directories and entries the report could not read are counted in `unreadable_dirs` and `unstatable_entries`. Run `RUST_LOG=debug grok-oss du` to name each one.
 
 Every worktree row in `--json` also carries `created_at`, `last_accessed_at`, and `last_modified_at` in unix seconds, plus `repo_name` and `git_ref`. Registry fields are `null` for untracked rows. `git_ref` is the branch recorded when the worktree was registered, not the branch checked out now.
 
-When the registry is unavailable, every row appears as `untracked` and the report names the reason. The `--json` `registry` field carries the same value: `read`, `absent`, `busy`, `unopenable`, or `corrupt`. A `busy` registry is held by another process, so retry. An `unopenable` one has a permission or I/O problem, so check the file. A `corrupt` one is the only case that calls for deletion: remove the file the report names, then run `grok worktree db rebuild`.
+When the registry is unavailable, every row appears as `untracked` and the report names the reason. The `--json` `registry` field carries the same value: `read`, `absent`, `busy`, `unopenable`, or `corrupt`. A `busy` registry is held by another process, so retry. An `unopenable` one has a permission or I/O problem, so check the file. A `corrupt` one is the only case that calls for deletion: remove the file the report names, then run `grok-oss worktree db rebuild`.
 
-To reclaim space, run `grok worktree gc --max-age 7d`, which removes tracked worktrees older than the age you give. Without `--max-age`, gc expires nothing, and it visits only worktrees the registry tracks. Remove an untracked worktree with `grok worktree rm <path>`. Both commands take `--dry-run` and report what they would do: gc counts the worktrees it would remove, and `rm` names the path.
+To reclaim space, run `grok-oss worktree gc --max-age 7d`, which removes tracked worktrees older than the age you give. Without `--max-age`, gc expires nothing, and it visits only worktrees the registry tracks. Remove an untracked worktree with `grok-oss worktree rm <path>`. Both commands take `--dry-run` and report what they would do: gc counts the worktrees it would remove, and `rm` names the path.
 
 Each run judges as many worktrees as it can in about a minute, because the same pass runs on a timer beside your session and reading a whole working tree is not free. Anything it did not reach is counted as `Not judged this pass` and waits for the next run, so on a machine with a lot to reclaim, run gc again until that number is zero.
 
-Before removing an expired worktree, gc checks whether the removal would destroy work: uncommitted, untracked or ignored files, a commit no surviving ref holds, or state kept only in that worktree's git directory. A worktree it cannot check is kept as well. The report counts kept worktrees and names the reason, separately from the ones a live process held back. `--force` does not skip the check, and `grok worktree rm` does not apply it: it removes the path you name.
+Before removing an expired worktree, gc checks whether the removal would destroy work: uncommitted, untracked or ignored files, a commit no surviving ref holds, or state kept only in that worktree's git directory. A worktree it cannot check is kept as well. The report counts kept worktrees and names the reason, separately from the ones a live process held back. `--force` does not skip the check, and `grok-oss worktree rm` does not apply it: it removes the path you name.
 
 Ignored files count as work, with one exception: a directory the repository's own ignore rules exclude and that either carries a tool's cache tag or is named like one of its output directories (`target`, `node_modules`, `.venv`, and the rest). A name alone is never enough, so a hand-written `build/` nobody excluded still keeps the worktree.
 

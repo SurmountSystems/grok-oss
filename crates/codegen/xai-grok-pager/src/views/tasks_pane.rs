@@ -10,7 +10,8 @@ use super::overlay::OverlayState;
 use crate::app::agent::{BgTaskState, BgTaskStatus, ScheduledTaskInfo};
 use crate::app::agent_view::l2_token_tracking::{
     LiveJobRowInput, STANDING_WRAP_ESTIMATE_TOKENS, STANDING_WRAP_ESTIMATE_WALL,
-    display_live_job_row, format_measured_tokens_suffix, shown_nested_count, sum_shown_counts_once,
+    display_live_job_row, format_measured_tokens_suffix, shown_nested_count,
+    spawned_with_no_sample_yet, sum_shown_counts_once,
 };
 use crate::app::subagent::{
     SubagentInfo, format_context_badge, format_live_l3_count, format_subagent_label,
@@ -265,6 +266,57 @@ fn host_tokens_for_painted_row(info: &SubagentInfo, all: &[&SubagentInfo]) -> Op
     sum_shown_counts_once(own, &l3_counts)
 }
 
+/// Drop a trailing ` (106.8k)` when that compact count is painted on its own.
+/// Unrelated parentheses, such as `(review notes)`, stay.
+fn strip_duplicate_compact_tail(description: &str, compact: Option<&str>) -> String {
+    let Some(compact) = compact.filter(|text| !text.is_empty()) else {
+        return description.to_string();
+    };
+    let suffix = format!(" ({compact})");
+    description
+        .strip_suffix(&suffix)
+        .unwrap_or(description)
+        .to_string()
+}
+
+/// Running rows that share a non-empty description collapse to the earliest start.
+fn duplicate_running_description_ids<'a>(
+    listed: &[&'a SubagentInfo],
+) -> std::collections::HashSet<&'a str> {
+    let mut best: HashMap<&str, (Instant, &str)> = HashMap::new();
+    for info in listed {
+        if !info.is_running() {
+            continue;
+        }
+        let desc = info.description.trim();
+        if desc.is_empty() {
+            continue;
+        }
+        let id = info.child_session_id.as_ref();
+        match best.get(desc) {
+            Some((started, _)) if *started <= info.attempt.started_at => {}
+            _ => {
+                best.insert(desc, (info.attempt.started_at, id));
+            }
+        }
+    }
+    let mut skip = std::collections::HashSet::new();
+    for info in listed {
+        if !info.is_running() {
+            continue;
+        }
+        let desc = info.description.trim();
+        if desc.is_empty() {
+            continue;
+        }
+        let id = info.child_session_id.as_ref();
+        if best.get(desc).is_some_and(|(_, winner)| *winner != id) {
+            skip.insert(id);
+        }
+    }
+    skip
+}
+
 impl TaskEntry {
     fn from_bg_task(
         task: &BgTaskState,
@@ -382,23 +434,43 @@ impl TaskEntry {
             Style::default().fg(theme.gray_bright)
         };
         const ACTIVITY_DESC_MAX_WIDTH: usize = 40;
-        let activity = info
+        let raw_activity = info
             .is_running()
             .then_some(info.attempt.activity_label.as_deref())
             .flatten()
             .map(str::trim)
             .filter(|s| !s.is_empty());
-        let shown_desc = match activity {
-            Some(_) => {
-                crate::render::line_utils::truncate_str(&description, ACTIVITY_DESC_MAX_WIDTH)
+        // A stale Preparing label is not the live tool. Use the last tool
+        // once. With no tool, omit the suffix.
+        let activity: Option<&str> = raw_activity.and_then(|label| {
+            if label.to_ascii_lowercase().contains("preparing") {
+                info.attempt
+                    .tools_used
+                    .last()
+                    .map(|tool| tool.as_ref())
+                    .filter(|tool| !tool.is_empty())
+            } else {
+                Some(label)
             }
-            None => description.clone(),
-        };
-        let type_sep = if description.is_empty() { "" } else { " " };
-        let compact = host_tokens_for_painted_row(info, all)
-            .or_else(|| subagent_list_row_usage(info, all))
+        });
+        let host_figure =
+            host_tokens_for_painted_row(info, all).or_else(|| subagent_list_row_usage(info, all));
+        let compact = host_figure
             .map(format_measured_tokens_suffix)
             .filter(|text| !text.is_empty());
+        let display_description = strip_duplicate_compact_tail(&description, compact.as_deref());
+        let shown_desc = match activity {
+            Some(_) => crate::render::line_utils::truncate_str(
+                &display_description,
+                ACTIVITY_DESC_MAX_WIDTH,
+            ),
+            None => display_description.clone(),
+        };
+        let type_sep = if display_description.is_empty() {
+            ""
+        } else {
+            " "
+        };
         let mut spans = vec![
             Span::styled(format!("{type_label}{type_sep}"), type_style),
             Span::styled(shown_desc, desc_style),
@@ -406,31 +478,25 @@ impl TaskEntry {
         if let Some(ref compact) = compact {
             spans.push(Span::styled(format!(" ({compact})"), desc_style));
         }
-        // Live job row. `TasksPane::render` paints this span via `ListItem::content`.
-        // Host figure only. No figure omits the token clause. Do not print a placeholder.
-        // The standing estimate stays labeled as an estimate. This span must not
-        // say tokens: Subagents list chrome omits that word. Do not add the
-        // figure to the L1 total or grok-oss sqlite.
-        if info.is_running() {
+        // A host figure replaces the standing estimate. No host figure keeps
+        // the labeled estimate on a row that was never spawned. A spawned row
+        // with no sample yet omits the figure. This span must not say tokens.
+        // Do not add the figure to the L1 total.
+        let spawned_without_sample = spawned_with_no_sample_yet(info.child_session_id.as_ref());
+        if info.is_running() && compact.is_none() && !spawned_without_sample {
             let elapsed_text = format_duration(info.display_elapsed());
             let shown = display_live_job_row(LiveJobRowInput {
-                job: description.as_str(),
+                job: display_description.as_str(),
                 estimate_wall: STANDING_WRAP_ESTIMATE_WALL,
                 estimate_tokens: STANDING_WRAP_ESTIMATE_TOKENS,
                 elapsed: &elapsed_text,
-                host_tokens: host_tokens_for_painted_row(info, all)
-                    .or_else(|| subagent_list_row_usage(info, all)),
+                host_tokens: None,
             });
             debug_assert_eq!(shown.l1_tokens_added, 0);
             debug_assert!(!shown.wrote_grok_oss_sqlite);
-            let token_clause = if shown.actual_tokens.is_empty() {
-                String::new()
-            } else {
-                format!(" · {}", shown.actual_tokens)
-            };
             let live_text = format!(
-                " {} · {} · {}{}",
-                shown.estimate_wall, shown.estimate_tokens, shown.elapsed, token_clause
+                " {} · {} · {}",
+                shown.estimate_wall, shown.estimate_tokens, shown.elapsed
             );
             spans.push(Span::styled(live_text, desc_style));
         }
@@ -449,11 +515,19 @@ impl TaskEntry {
         let l3_suffix = format_live_l3_count(live_l3)
             .map(|c| format!(" · {c}"))
             .unwrap_or_default();
-        let label = match (description.is_empty(), model_suffix.is_empty()) {
-            (true, true) => format!("{type_label}{l3_suffix}"),
-            (true, false) => format!("{type_label} {model_suffix}{l3_suffix}"),
-            (false, true) => format!("{type_label} {description}{l3_suffix}"),
-            (false, false) => format!("{type_label} {description} {model_suffix}{l3_suffix}"),
+        let compact_suffix = compact
+            .as_ref()
+            .map(|count| format!(" ({count})"))
+            .unwrap_or_default();
+        let label = match (display_description.is_empty(), model_suffix.is_empty()) {
+            (true, true) => format!("{type_label}{compact_suffix}{l3_suffix}"),
+            (true, false) => format!("{type_label} {model_suffix}{compact_suffix}{l3_suffix}"),
+            (false, true) => {
+                format!("{type_label} {display_description}{compact_suffix}{l3_suffix}")
+            }
+            (false, false) => format!(
+                "{type_label} {display_description} {model_suffix}{compact_suffix}{l3_suffix}"
+            ),
         };
         let styled = Line::from(spans);
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -896,8 +970,12 @@ impl TasksPane {
             }
         }
         let listed: Vec<&SubagentInfo> = subagents.values().collect();
+        let skip_duplicate_running = duplicate_running_description_ids(&listed);
         for info in &listed {
             if info.attempt.workflow_run_id.is_some() {
+                continue;
+            }
+            if skip_duplicate_running.contains(info.child_session_id.as_ref()) {
                 continue;
             }
             if self.show_done || info.is_running() {

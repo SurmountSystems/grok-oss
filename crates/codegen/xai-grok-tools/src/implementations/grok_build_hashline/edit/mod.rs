@@ -331,6 +331,14 @@ impl xai_tool_runtime::Tool for HashlineEditTool {
 
         let display_dcwd = display_cwd_or_cwd(&cwd, display_cwd.as_deref());
         let joined_path = resolve_model_path(&cwd, display_cwd.as_deref(), &input.file_path);
+        let _write_lock =
+            crate::implementations::editor_infra::per_path_write_lock::acquire_for_tool(
+                &joined_path,
+                &ctx,
+                &resources,
+                "hashline_edit",
+            )
+            .await?;
         // Memory v2 classifies the logical path (as search_replace does), not
         // the canonicalized one, so aliases resolve inside the policy.
         let policy_path = joined_path.clone();

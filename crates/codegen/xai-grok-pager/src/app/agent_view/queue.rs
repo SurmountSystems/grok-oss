@@ -414,7 +414,11 @@ impl AgentView {
         if let Some(prompt) = self.remove_local_queue_row(id) {
             // Queued `/goal` is GoalSet on the next prompt, not an interject
             // string. Send now cancel-and-sends so handle_prompt can set it.
-            if crate::slash::queue_schedule::is_goal_slash(&prompt.text) {
+            if crate::slash::queue_schedule::is_goal_slash(&prompt.text)
+                || !self.session.state.is_turn_running()
+            {
+                // Idle-looking wake has no running turn to interject into.
+                // Cancel-and-send the queued row. A running turn interjects.
                 return InputOutcome::Action(Action::SendPromptNow {
                     text: prompt.text,
                     images: prompt.images,
@@ -1187,7 +1191,7 @@ mod queue_edit_routing_tests {
         );
         let outcome = agent.handle_queue_key(&force_interject_key(), &registry);
         match outcome {
-            InputOutcome::Action(Action::SendPromptNow { text, images, .. }) => {
+            InputOutcome::Action(Action::Interject { text, images }) => {
                 assert_eq!(text, "local one");
                 assert_eq!(images.len(), 1, "row image must ride the interject");
             }

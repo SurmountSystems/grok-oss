@@ -107,7 +107,6 @@ fn ensure_plan_mode_tools(tool_config: &mut xai_grok_tools::registry::types::Too
     let missing_enter = !existing.contains("GrokBuild:enter_plan_mode");
     let missing_exit = !existing.contains("GrokBuild:exit_plan_mode");
     let missing_ask = !existing.contains("GrokBuild:ask_user_question");
-    let missing_scrub = !existing.contains("GrokBuild:disable_ascii_scrub");
     drop(existing);
     if missing_enter {
         tool_config
@@ -124,12 +123,20 @@ fn ensure_plan_mode_tools(tool_config: &mut xai_grok_tools::registry::types::Too
             .tools
             .push((&grok_build::AskUserQuestionTool).into());
     }
-    // S3: agent can request scrub off only via permission UX (tool path).
-    if missing_scrub {
-        tool_config
-            .tools
-            .push((&grok_build::disable_ascii_scrub::DisableAsciiScrubTool).into());
+}
+/// ASCII scrub is unrelated to plan mode. A child keeps it when the parent has it.
+fn ensure_disable_ascii_scrub(tool_config: &mut xai_grok_tools::registry::types::ToolServerConfig) {
+    if tool_config
+        .tools
+        .iter()
+        .any(|tc| tc.id == "GrokBuild:disable_ascii_scrub")
+    {
+        return;
     }
+    tool_config.tools.push(
+        (&xai_grok_tools::implementations::grok_build::disable_ascii_scrub::DisableAsciiScrubTool)
+            .into(),
+    );
 }
 fn general_purpose_spawnable(allowed: Option<&[String]>, toggles: &HashMap<String, bool>) -> bool {
     if toggles.get("general-purpose").copied() == Some(false) {
@@ -867,6 +874,7 @@ impl AgentBuilder {
                     .tools
                     .push((&xai_grok_tools::implementations::opencode::OpenCodeWriteTool).into());
             }
+            ensure_disable_ascii_scrub(&mut tool_config);
             if self.prompt_audience == PromptAudience::Primary {
                 ensure_plan_mode_tools(&mut tool_config);
             }

@@ -1058,11 +1058,27 @@ impl SamplingClient {
         span_timing: &mut StreamSpanTiming,
     ) -> Result<reqwest::Response> {
         span_timing.record_request_build();
-        let response = self.http.execute(built_request).await.map_err(|e| {
-            tracing::debug!("HTTP request failed: {}", e);
-            span_timing.record_transport_failure(&e.to_string());
-            e
-        })?;
+        // `Client::execute` resolves when response headers arrive, not when
+        // the body ends. The headers budget must bound that wait. A client-wide
+        // reqwest timeout would also cut a long stream after the first byte.
+        let budget = stream_headers_timeout();
+        let response = match tokio::time::timeout(budget, self.http.execute(built_request)).await {
+            Ok(Ok(response)) => response,
+            Ok(Err(e)) => {
+                tracing::debug!("HTTP request failed: {}", e);
+                span_timing.record_transport_failure(&e.to_string());
+                return Err(e.into());
+            }
+            Err(_elapsed) => {
+                let message = format!(
+                    "timed out waiting for response headers after {}s",
+                    budget.as_secs()
+                );
+                tracing::debug!("{message}");
+                span_timing.record_transport_failure(&message);
+                return Err(SamplingError::EventStreamError(message));
+            }
+        };
         span_timing.record_response_headers();
         Ok(response)
     }

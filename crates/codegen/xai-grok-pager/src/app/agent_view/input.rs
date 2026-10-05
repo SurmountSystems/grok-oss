@@ -637,6 +637,12 @@ impl AgentView {
                         {
                             return outcome;
                         }
+                        // Unique `/model` Tab switches now. RowWalk must not
+                        // steal that Tab while Isolated Preview is open.
+                        if let Some(outcome) = self.isolated_preview_slash_tab_enter(key, registry)
+                        {
+                            return outcome;
+                        }
                         self.handle_line_viewer_key(key)
                     }
                     Event::Paste(text) => {
@@ -1088,9 +1094,10 @@ impl AgentView {
                     if let Some((outcome, _)) = self.try_handle_dropped_paths_paste(text) {
                         return outcome;
                     }
-                    self.probe_attachment_around_bracketed_insert(text, |view| {
-                        view.insert_bracketed_prompt_text(text)
-                    })
+                    // Empty screenshot paste and the GNOME All Markup Copy
+                    // title wait for the raster probe on every OS. Inserting
+                    // first drops the probe on Linux.
+                    self.insert_or_defer_bracketed_prompt_paste(text)
                 } else {
                     let consumed = match self.active_pane {
                         AgentPane::Todo => self.todo.handle_paste(text),

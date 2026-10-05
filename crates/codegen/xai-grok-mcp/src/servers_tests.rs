@@ -4340,8 +4340,24 @@ async fn ensure_initialized_inflight_wait_times_out_when_holder_silent() {
 
 #[tokio::test]
 async fn ensure_initialized_drop_guard_restores_state_after_holder_aborted() {
+    // A documentation address is not a hang here: TCP connect fails immediately,
+    // the holder publishes Pending, and this test never observes Initializing.
+    // Accept and never answer so the handshake stays in flight until abort.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind stalling peer");
+    let addr = listener.local_addr().expect("stalling peer addr");
+    tokio::spawn(async move {
+        let mut held = Vec::new();
+        loop {
+            match listener.accept().await {
+                Ok((sock, _)) => held.push(sock),
+                Err(_) => break,
+            }
+        }
+    });
     let config = HttpConfig {
-        url: "http://192.0.2.1:1/unreachable".to_string(),
+        url: format!("http://{addr}/unreachable"),
         headers: vec![],
         local_agent_endpoint: false,
         ..HttpConfig::default()

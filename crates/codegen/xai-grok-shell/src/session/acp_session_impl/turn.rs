@@ -465,7 +465,9 @@ impl SessionActor {
         unstick_retry: bool,
     ) -> PromptTurnResult {
         self.signals_handle().increment_turn();
-        self.handle_turn_input(TurnInputRequest {
+        // Box the turn future. Constructing the nested state machine inline
+        // overflows the default 2 MB test stack before the first poll.
+        Box::pin(self.handle_turn_input(TurnInputRequest {
             prompt_id: prompt_id.to_string(),
             input_origin: InputOrigin::from_prompt_id(prompt_id),
             prompt_blocks,
@@ -482,7 +484,7 @@ impl SessionActor {
             traceparent: None,
             unstick_retry,
             start_gate: None,
-        })
+        }))
         .await
     }
     pub(super) async fn handle_turn_input(
@@ -500,7 +502,7 @@ impl SessionActor {
         if let Some(ref tp) = request.traceparent {
             xai_grok_otel::link_span_to_meta(&span, &serde_json::json!({ "traceparent": tp }));
         }
-        self.handle_turn_input_inner(request).instrument(span).await
+        Box::pin(self.handle_turn_input_inner(request).instrument(span)).await
     }
     async fn handle_turn_input_inner(
         self: &Arc<Self>,
@@ -1347,16 +1349,15 @@ impl SessionActor {
                         == Some(crate::session::goal_tracker::GoalStatus::Active);
                     self.set_goal_loop_active_resource(goal_loop_active).await;
                 }
-                let round = self
-                    .process_conversation_turn_with_recovery(
-                        prompt_id,
-                        round_trace.take(),
-                        round_artifact.take(),
-                        json_schema.clone(),
-                        &mut salvage,
-                        &mut turn_sampling,
-                    )
-                    .await;
+                let round = Box::pin(self.process_conversation_turn_with_recovery(
+                    prompt_id,
+                    round_trace.take(),
+                    round_artifact.take(),
+                    json_schema.clone(),
+                    &mut salvage,
+                    &mut turn_sampling,
+                ))
+                .await;
                 if !matches!(round, Ok(TurnOutcome::Completed { .. })) {
                     break round;
                 }
@@ -2036,45 +2037,42 @@ impl SessionActor {
         let completion_req = match agent_ref.completion_requirement() {
             Some(req) => req,
             None => {
-                return self
-                    .process_conversation_turn(
-                        req_id,
-                        trace_gcs_config,
-                        artifact_tracker.as_ref(),
-                        json_schema,
-                        &mut *salvage,
-                        &mut *turn_sampling,
-                    )
-                    .await;
+                return Box::pin(self.process_conversation_turn(
+                    req_id,
+                    trace_gcs_config,
+                    artifact_tracker.as_ref(),
+                    json_schema,
+                    &mut *salvage,
+                    &mut *turn_sampling,
+                ))
+                .await;
             }
         };
         let recovery = match &completion_req.recovery {
             Some(r) => r.clone(),
             None => {
-                return self
-                    .process_conversation_turn(
-                        req_id,
-                        trace_gcs_config,
-                        artifact_tracker.as_ref(),
-                        json_schema,
-                        &mut *salvage,
-                        &mut *turn_sampling,
-                    )
-                    .await;
+                return Box::pin(self.process_conversation_turn(
+                    req_id,
+                    trace_gcs_config,
+                    artifact_tracker.as_ref(),
+                    json_schema,
+                    &mut *salvage,
+                    &mut *turn_sampling,
+                ))
+                .await;
             }
         };
         let required_tool = completion_req.tool.clone();
         let recovery_prompt = completion_req.reminder.clone();
-        let mut result = self
-            .process_conversation_turn(
-                req_id,
-                trace_gcs_config.clone(),
-                artifact_tracker.as_ref(),
-                json_schema.clone(),
-                &mut *salvage,
-                &mut *turn_sampling,
-            )
-            .await;
+        let mut result = Box::pin(self.process_conversation_turn(
+            req_id,
+            trace_gcs_config.clone(),
+            artifact_tracker.as_ref(),
+            json_schema.clone(),
+            &mut *salvage,
+            &mut *turn_sampling,
+        ))
+        .await;
         if matches!(
             result,
             Ok(TurnOutcome::MaxTurnsReached { .. }) | Ok(TurnOutcome::StationarityEnded)
@@ -2135,16 +2133,15 @@ impl SessionActor {
             salvage.round_boundary();
             let recovery_message = ConversationItem::auto_recovery(recovery_prompt.clone());
             self.chat_state_handle.push_user_message(recovery_message);
-            result = self
-                .process_conversation_turn(
-                    req_id,
-                    trace_gcs_config.clone(),
-                    artifact_tracker.as_ref(),
-                    None,
-                    &mut *salvage,
-                    &mut *turn_sampling,
-                )
-                .await;
+            result = Box::pin(self.process_conversation_turn(
+                req_id,
+                trace_gcs_config.clone(),
+                artifact_tracker.as_ref(),
+                None,
+                &mut *salvage,
+                &mut *turn_sampling,
+            ))
+            .await;
             if matches!(
                 result,
                 Ok(TurnOutcome::MaxTurnsReached { .. }) | Ok(TurnOutcome::StationarityEnded)
@@ -2617,16 +2614,15 @@ impl SessionActor {
         salvage: &mut super::length_salvage::LengthSalvage,
         turn_sampling: &mut TurnSampling,
     ) -> Result<TurnOutcome, acp::Error> {
-        let result = self
-            .process_conversation_turn_inner(
-                req_id,
-                trace_gcs_config,
-                artifact_tracker,
-                json_schema,
-                salvage,
-                turn_sampling,
-            )
-            .await;
+        let result = Box::pin(self.process_conversation_turn_inner(
+            req_id,
+            trace_gcs_config,
+            artifact_tracker,
+            json_schema,
+            salvage,
+            turn_sampling,
+        ))
+        .await;
         self.turn_phases.emit_pending_latency();
         result
     }
@@ -3108,20 +3104,19 @@ impl SessionActor {
             let requested_model =
                 crate::session::telemetry::requested_model_snapshot(request.model.as_deref());
             let model_timer = std::time::Instant::now();
-            let model_sampler_outcome = self
-                .run_turn_via_sampler(
-                    request.clone(),
-                    &mut rate_limit_waits,
-                    TransientRetryState {
-                        step_attempts: transient_retry_attempts,
-                        prompt_attempts: self.transient_retries_prompt_total.get(),
-                        episode_start: self.transient_episode_start.get(),
-                        enabled: transient_retry_enabled,
-                    },
-                    salvage.awaiting_continuation(),
-                    turn_parked,
-                )
-                .await;
+            let model_sampler_outcome = Box::pin(self.run_turn_via_sampler(
+                request.clone(),
+                &mut rate_limit_waits,
+                TransientRetryState {
+                    step_attempts: transient_retry_attempts,
+                    prompt_attempts: self.transient_retries_prompt_total.get(),
+                    episode_start: self.transient_episode_start.get(),
+                    enabled: transient_retry_enabled,
+                },
+                salvage.awaiting_continuation(),
+                turn_parked,
+            ))
+            .await;
             let (response, latency) = match model_sampler_outcome {
                 Ok(SamplerTurnOutcome::Response(r, latency)) => {
                     salvage.response_arrived();
@@ -3899,8 +3894,7 @@ impl SessionActor {
                 .await;
             let execute_tool_calls_result = {
                 let _tool_phase = turn_phases.begin_tool_blocking();
-                self.execute_tool_calls(tool_call_responses, requested_model)
-                    .await
+                Box::pin(self.execute_tool_calls(tool_call_responses, requested_model)).await
             };
             match execute_tool_calls_result {
                 Ok(ToolLoop::PermissionReject { tool_name, reason }) => {

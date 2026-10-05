@@ -868,7 +868,11 @@ pub fn load_supergrok_session_candidates(
         if scope == LEGACY_SCOPE {
             continue;
         }
-        if !is_supergrok_session_mode(auth.auth_mode) {
+        // OIDC and WebLogin are SuperGrok session mode. External on the OAuth
+        // base is the same ranking peer. The legacy sign-in scope is already skipped.
+        let session_candidate = is_supergrok_session_mode(auth.auth_mode)
+            || matches!(auth.auth_mode, AuthMode::External);
+        if !session_candidate {
             continue;
         }
         let token = auth.key.trim();

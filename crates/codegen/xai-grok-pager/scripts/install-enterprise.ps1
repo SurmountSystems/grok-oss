@@ -113,6 +113,42 @@ function Download-File([string]$Url, [string]$OutFile) {
     }
 }
 
+function Get-FileSha256([string]$Path) {
+    return (Get-FileHash -Algorithm SHA256 -Path $Path).Hash.ToLowerInvariant()
+}
+
+function Parse-Sha256File([string]$Path) {
+    if (-not (Test-Path -LiteralPath $Path)) { return $null }
+    $raw = [System.IO.File]::ReadAllText($Path)
+    $line = ($raw -split "`n", 2)[0]
+    if ($line.EndsWith("`r")) { $line = $line.Substring(0, $line.Length - 1) }
+    $parts = @($line -split '\s+' | Where-Object { $_ -ne '' })
+    if ($parts.Count -lt 1) { return $null }
+    $hex = $parts[0].ToLowerInvariant()
+    if ($hex.StartsWith('*')) { $hex = $hex.Substring(1) }
+    if ($hex -cmatch '^[0-9a-f]{64}$') { return $hex }
+    return $null
+}
+
+function Verify-DownloadedSha256([string]$Artifact, [string]$ChecksumUrl) {
+    $sumTmp = "$Artifact.sha256.tmp.$PID"
+    try {
+        Download-File $ChecksumUrl $sumTmp
+    } catch {
+        if (Test-Path -LiteralPath $sumTmp) { Remove-Item -LiteralPath $sumTmp -Force -ErrorAction SilentlyContinue }
+        throw "SHA-256 checksum file missing ($ChecksumUrl). Refusing the download."
+    }
+    $expected = Parse-Sha256File $sumTmp
+    if (Test-Path -LiteralPath $sumTmp) { Remove-Item -LiteralPath $sumTmp -Force -ErrorAction SilentlyContinue }
+    if (-not $expected) {
+        throw "checksum file is not a SHA-256 hex digest ($ChecksumUrl)."
+    }
+    $actual = Get-FileSha256 $Artifact
+    if ($actual -ne $expected) {
+        throw "SHA-256 mismatch for downloaded grok. Keeping the existing install."
+    }
+}
+
 function Test-MinGitUsable([string]$VersionDir) {
     # Same predicate as xai_tty_utils::bundled_git's is_usable(): the launcher plus the
     # first platform tree holding git-upload-pack.exe and the bin\ with its DLLs.
@@ -385,11 +421,16 @@ Move-Item -LiteralPath $binaryTmp -Destination $binaryPath -Force
 # --- Install binary (locked-file safe) ---
 
 foreach ($binName in @('grok.exe', 'agent.exe')) {
+    $dest = Join-Path $BinDir $binName
     try {
-        Install-Exe $binaryPath (Join-Path $BinDir $binName)
+        Copy-Item -Path $binaryPath -Destination $dest -Force
     } catch {
-        Write-Error "Failed to install $binName"
-        exit 1
+        try {
+            Install-Exe $binaryPath $dest
+        } catch {
+            Write-Error "Failed to install $binName"
+            exit 1
+        }
     }
 }
 

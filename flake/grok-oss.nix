@@ -18,6 +18,10 @@ let
       in
       (craneLib.filterCargoSources path type)
       || lib.hasInfix "/crates/" path
+      || lib.hasSuffix "/frontend" path
+      || lib.hasSuffix "/frontend/apps" path
+      || lib.hasSuffix "/frontend/apps/grok-desktop" path
+      || lib.hasInfix "/frontend/apps/grok-desktop/scripts" path
       || lib.hasInfix "/prod/" path
       || lib.hasInfix "/third_party/" path
       || lib.hasInfix "/bin/" path

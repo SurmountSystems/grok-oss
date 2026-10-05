@@ -1818,24 +1818,24 @@ impl SessionActor {
 
         if !budget.can_wait() {
             // Nothing will send this request a second time, so move it into the sampler instead of deep-cloning the whole message history on every main-session turn
-            return match self.submit_turn_request(request).await {
+            return match Box::pin(self.submit_turn_request(request)).await {
                 Ok(outcome) => Ok(outcome),
                 Err(info) => {
                     let info = *info;
-                    self.recover_from_sampling_failure(
+                    Box::pin(self.recover_from_sampling_failure(
                         info,
                         budget,
                         transient,
                         mid_salvage_continuation,
                         park,
-                    )
+                    ))
                     .await
                 }
             };
         }
 
         loop {
-            match self.submit_turn_request(request.clone()).await {
+            match Box::pin(self.submit_turn_request(request.clone())).await {
                 Ok(outcome) => {
                     budget.record_submission_accepted();
                     return Ok(outcome);
@@ -1845,15 +1845,14 @@ impl SessionActor {
                     let decision = budget.decide(&info);
                     let RateLimitWaitDecision::Wait { attempt, backoff } = decision else {
                         self.log_rate_limit_budget_spent(decision, &info);
-                        return self
-                            .recover_from_sampling_failure(
-                                info,
-                                budget,
-                                transient,
-                                mid_salvage_continuation,
-                                park,
-                            )
-                            .await;
+                        return Box::pin(self.recover_from_sampling_failure(
+                            info,
+                            budget,
+                            transient,
+                            mid_salvage_continuation,
+                            park,
+                        ))
+                        .await;
                     };
                     self.notify_rate_limit_wait(attempt, budget, backoff).await;
                     // Esc cancels a turn by aborting its task, so this await point is itself the cancellation point; no select needed
@@ -2026,15 +2025,14 @@ impl SessionActor {
     ) -> Result<SamplerTurnOutcome, acp::Error> {
         // Single funnel for every sampler-call failure.
         super::turn::record_failed_sample_on_turn_span(&tracing::Span::current(), info.kind);
-        match self
-            .handle_sampling_failure(
-                info,
-                budget.attempts_used(),
-                transient,
-                mid_salvage_continuation,
-                park,
-            )
-            .await?
+        match Box::pin(self.handle_sampling_failure(
+            info,
+            budget.attempts_used(),
+            transient,
+            mid_salvage_continuation,
+            park,
+        ))
+        .await?
         {
             SamplerFailureRecovery::CompactAndResubmit => {
                 Ok(SamplerTurnOutcome::CompactAndResubmit)

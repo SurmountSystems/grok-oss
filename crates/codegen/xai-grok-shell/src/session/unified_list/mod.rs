@@ -44,18 +44,33 @@ pub(crate) fn conversations_lane_enabled() -> bool {
 pub fn conversations_lane_active() -> bool {
     conversations_lane_enabled() || crate::agent::chat_modes::process_chat_mode_enabled()
 }
-/// Parse `x.ai/session/list` params and, under process-wide chat mode, force the conversations-only `kind` facet.
-/// Client-sent `kind` of `chat`/`build` is honored only behind `feature = "local-workspace"` (pager welcome Local history).
-/// Chat-only Desktop/ACP agents keep the force-rewrite so `kind: ["build"]` cannot surface Build rows.
+/// Parse `x.ai/session/list` params.
+/// Under process-wide chat mode a client `kind` of `chat` or `build` is kept.
+/// An absent, empty, null, or unrecognized `kind` is removed so the parsed
+/// facet is absent. [`force_kind_chat`] still rewrites callers that ask for it.
 pub fn parse_list_req(raw: &str) -> Result<ListReq, serde_json::Error> {
     let mut req: ListReq = serde_json::from_str(raw)?;
-    if crate::agent::chat_modes::process_chat_mode_enabled() {
-        let honor_client_kind = cfg!(feature = "local-workspace") && client_sent_kind_filter(&req);
-        if !honor_client_kind {
-            force_kind_chat(&mut req);
-        }
+    if crate::agent::chat_modes::process_chat_mode_enabled() && !client_sent_kind_filter(&req) {
+        strip_kind_facet(&mut req);
     }
     Ok(req)
+}
+
+/// Drop `kind` from facet filters. An absent key reads as no kind filter.
+fn strip_kind_facet(req: &mut ListReq) {
+    let Some(serde_json::Value::Object(meta)) = req.meta.as_mut() else {
+        return;
+    };
+    let Some(filters) = meta
+        .get_mut("x.ai/facetFilters")
+        .and_then(|v| v.as_object_mut())
+    else {
+        return;
+    };
+    filters.remove(KIND_FACET_KEY);
+    if filters.is_empty() {
+        meta.remove("x.ai/facetFilters");
+    }
 }
 fn cwd_scope_from_allow_relax<'de, D>(deserializer: D) -> Result<CwdScope, D::Error>
 where

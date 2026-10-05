@@ -808,8 +808,10 @@ pub fn status_user_message(status: StatusCode) -> String {
         code @ 529 => {
             format!("Grok is temporarily overloaded. Please try again in a moment. (HTTP {code}).")
         }
-        // Cloudflare edge: origin unreachable or timed out (520-524), or an edge-side 1xxx failure (530)
-        code @ 520..=524 | code @ 530 => {
+        // Cloudflare 521: the origin refused the connection (Web Server Is Down).
+        521 => format!("Connection to Grok failed: origin down. Please try again. (HTTP 521)."),
+        // Cloudflare edge: origin unreachable or timed out (520, 522-524), or an edge-side 1xxx failure (530).
+        code @ 520 | code @ 522..=524 | code @ 530 => {
             format!(
                 "Connection to Grok timed out or was interrupted. Please try again. (HTTP {code})."
             )

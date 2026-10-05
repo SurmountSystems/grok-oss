@@ -344,6 +344,7 @@ pub(crate) fn test_app() -> AppView {
         voice_cmd_tx: None,
         voice_state: VoiceState::Idle,
         scheduler_background_loops_seed: true,
+        session_loop_fire_detached: std::collections::HashMap::new(),
     }
 }
 pub(crate) fn test_app_with_agent() -> AppView {

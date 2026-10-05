@@ -285,11 +285,17 @@ pub(super) fn set_coding_data_sharing(
     );
 
     let seq = next_coding_data_write_seq(app);
-    vec![Effect::SetCodingDataSharing {
+    let mut effects = vec![Effect::SetCodingDataSharing {
         agent_id,
         opted_in,
         seq,
-    }]
+    }];
+    // Opt-out from in acks now and still writes. Rollout-off is a no-op
+    // inside `ack_privacy_banner`, so a write-only test stays write-only.
+    if !opted_in && prev {
+        effects.extend(ack_privacy_banner(app));
+    }
+    effects
 }
 
 /// The toast for a setting that could not be written to `config.toml`.
@@ -338,11 +344,17 @@ pub(super) fn dispatch_show_context_info(app: &mut AppView) -> Vec<Effect> {
     }]
 }
 
-/// `/usage` opens the usage window on Context usage. Minimal mode
-/// keeps the scrollback flow: session token/cost, then consumer credits.
+/// `/usage` on an agent opens the usage window on Context usage.
+/// On the dashboard it opens on Usage limit (account allowance, no session).
+/// Minimal mode keeps the scrollback flow: session token/cost, then consumer credits.
 pub(super) fn dispatch_show_usage(app: &mut AppView) -> Vec<Effect> {
     if !app.screen_mode.is_minimal() {
-        return open_usage_info_modal(app, crate::views::usage_modal::UsageInfoTab::ContextUsage);
+        let tab = if matches!(app.active_view, ActiveView::AgentDashboard) {
+            crate::views::usage_modal::UsageInfoTab::UsageLimit
+        } else {
+            crate::views::usage_modal::UsageInfoTab::ContextUsage
+        };
+        return open_usage_info_modal(app, tab);
     }
     let ActiveView::Agent(id) = app.active_view else {
         return vec![];

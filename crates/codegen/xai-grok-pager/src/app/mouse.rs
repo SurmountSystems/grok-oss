@@ -422,6 +422,15 @@ impl AgentView {
                         xai_grok_telemetry::events::AnnouncementCtaSurface::Header,
                     ));
                 }
+                if self.hit_header_dashboard.contains(mouse.column, mouse.row) {
+                    return InputOutcome::Action(Action::OpenDashboard);
+                }
+                if self.hit_header_prev.contains(mouse.column, mouse.row) {
+                    return InputOutcome::Action(Action::DashboardOverlayPrev);
+                }
+                if self.hit_header_next.contains(mouse.column, mouse.row) {
+                    return InputOutcome::Action(Action::DashboardOverlayNext);
+                }
                 if self.hit_dashboard.contains(mouse.column, mouse.row) {
                     return InputOutcome::Action(if self.in_dashboard_overlay {
                         Action::DashboardOverlayExit
@@ -1633,9 +1642,9 @@ mod tests {
         let ids = agent.queue.entry_ids();
         let outcome = click_send_now(&mut agent, *nth(&ids, 1));
         match outcome {
-            InputOutcome::Action(Action::SendPromptNow { text, images, .. }) => {
+            InputOutcome::Action(Action::Interject { text, images }) => {
                 assert_eq!(text, "local one");
-                assert_eq!(images.len(), 1, "row image must ride the send-now");
+                assert_eq!(images.len(), 1, "row image must ride the interject");
             }
             other => panic!("expected Interject action, got {other:?}"),
         }

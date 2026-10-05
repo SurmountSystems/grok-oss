@@ -6,6 +6,7 @@
 //! step 0 of `handle_input_inner`, before any parent routing, and the child's `pending_effects` are hoisted because
 //! `AppView` drains only the top-level view's queue. Ctrl+Q is never consumed here; it always bubbles to the global quit.
 use crate::actions::ActionRegistry;
+use crate::app::actions::Action;
 use crate::app::agent_view::child_action_filter::filter_child_outcome;
 use crate::app::agent_view::viewer::IdleEnterQuote;
 use crate::app::agent_view::{AgentView, AppRenderParams, OverlayHeader};
@@ -155,19 +156,23 @@ impl AgentView {
             Some(s) => format_subagent_label(s),
             None => (String::new(), raw_description.to_string()),
         };
+        let completed = info.is_some_and(|s| {
+            s.status.as_deref() == Some("completed")
+                || s.attempt.status.as_deref() == Some("completed")
+        });
         let icon = if is_running {
             let elapsed_ms = info
                 .map(|s| u64::try_from(s.display_elapsed().as_millis()).unwrap_or(u64::MAX))
                 .unwrap_or(0);
             crate::glyphs::sparkler_frame_at_ms(elapsed_ms)
-        } else if info.and_then(|s| s.attempt.status.as_deref()) == Some("completed") {
+        } else if completed {
             crate::glyphs::check_mark()
         } else {
             crate::glyphs::ballot_x()
         };
         let icon_color = if is_running {
             theme.accent_running
-        } else if info.and_then(|s| s.attempt.status.as_deref()) == Some("completed") {
+        } else if completed {
             theme.accent_success
         } else {
             theme.accent_error
@@ -176,7 +181,7 @@ impl AgentView {
             theme.accent_error
         } else if is_running {
             theme.accent_running
-        } else if info.and_then(|s| s.attempt.status.as_deref()) == Some("completed") {
+        } else if completed {
             theme.accent_success
         } else {
             theme.accent_error
@@ -188,12 +193,23 @@ impl AgentView {
             .unwrap_or("")
             .to_string();
         let badge = info.map(format_context_badge).unwrap_or("");
+        let borrowed_specialists = self.mirror_parented_specialists_for_overlay(child_sid);
         let activity_label: Option<String> = if is_running {
-            self.subagent_views.get(child_sid).and_then(|cv| {
-                cv.resolve_turn_activity()
-                    .map(|a| crate::app::subagent::format_activity_label(&a))
-                    .or_else(|| cv.session.state.is_busy().then(|| "Waiting".to_string()))
-            })
+            self.subagent_views
+                .get(child_sid)
+                .and_then(|cv| match cv.resolve_turn_activity() {
+                    Some(crate::acp::tracker::TurnActivity::WritingToolCall(writing)) => writing
+                        .tool_name
+                        .clone()
+                        .filter(|name| !name.is_empty())
+                        .or_else(|| {
+                            Some(crate::app::subagent::format_activity_label(
+                                &crate::acp::tracker::TurnActivity::WritingToolCall(writing),
+                            ))
+                        }),
+                    Some(activity) => Some(crate::app::subagent::format_activity_label(&activity)),
+                    None => cv.session.state.is_busy().then(|| "Waiting".to_string()),
+                })
         } else {
             None
         };
@@ -346,7 +362,61 @@ impl AgentView {
             child_cursor = cursor;
             child_post_flush = post_flush;
         }
+        self.drop_mirrored_overlay_specialists(child_sid, &borrowed_specialists);
         (child_cursor, child_post_flush)
+    }
+
+    /// Parent-registry L3 rows are invisible to the L2 view's wait chrome.
+    /// Mirror them for this draw so the overlay names the live specialist.
+    fn mirror_parented_specialists_for_overlay(&mut self, child_sid: &str) -> Vec<String> {
+        let borrowed: Vec<(String, crate::app::subagent::SubagentInfo)> = self
+            .subagent_sessions
+            .iter()
+            .filter(|(id, info)| {
+                info.is_running()
+                    && info.attempt.parent_session_id.as_deref() == Some(child_sid)
+                    && self
+                        .subagent_views
+                        .get(child_sid)
+                        .is_some_and(|child| !child.subagent_sessions.contains_key(id.as_str()))
+            })
+            .map(|(id, info)| (id.clone(), info.clone()))
+            .collect();
+        let Some(child) = self.subagent_views.get_mut(child_sid) else {
+            return Vec::new();
+        };
+        let mut keys = Vec::new();
+        for (id, info) in borrowed {
+            child.subagent_sessions.insert(id.clone(), info);
+            keys.push(id);
+        }
+        keys
+    }
+
+    fn drop_mirrored_overlay_specialists(&mut self, child_sid: &str, keys: &[String]) {
+        let Some(child) = self.subagent_views.get_mut(child_sid) else {
+            return;
+        };
+        for key in keys {
+            child.subagent_sessions.remove(key);
+        }
+    }
+
+    /// Idle child still listed as running: frame close cancels that row.
+    fn completed_listed_overlay_kill_id(&self) -> Option<String> {
+        let sid = self.active_subagent.as_deref()?;
+        let child_idle = self
+            .subagent_views
+            .get(sid)
+            .is_some_and(|view| !view.session.state.is_turn_running());
+        if !child_idle {
+            return None;
+        }
+        let info = self.subagent_sessions.get(sid)?;
+        if !info.is_running() {
+            return None;
+        }
+        Some(info.subagent_id.to_string())
     }
     /// `None` when no takeover is open, so the caller continues its normal routing. Otherwise all input goes to the
     /// child view; `q`/`Esc` from bare scrollback closes the view and Ctrl+Q always bubbles to the global quit.
@@ -377,7 +447,11 @@ impl AgentView {
                 .hit_subagent_frame_close
                 .contains(mouse.column, mouse.row)
         {
+            let kill_id = self.completed_listed_overlay_kill_id();
             self.close_subagent_fullscreen();
+            if let Some(id) = kill_id {
+                return Some(InputOutcome::Action(Action::KillSubagent(id)));
+            }
             return Some(InputOutcome::Changed);
         }
         if let Event::Mouse(mouse) = ev

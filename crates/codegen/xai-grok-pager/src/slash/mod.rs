@@ -1438,7 +1438,7 @@ pub fn parse_invocation(line: &str) -> Option<SlashInvocation<'_>> {
             break;
         }
     }
-    let token = remainder.get(..command_end)?.trim();
+    let token = remainder.get(..command_end)?.trim().trim_end_matches('/');
     if token.is_empty() {
         return None;
     }

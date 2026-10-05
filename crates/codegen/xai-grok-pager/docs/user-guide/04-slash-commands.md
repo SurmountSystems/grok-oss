@@ -18,6 +18,10 @@ Start a fresh session and clear the current conversation. Alias: `/clear`.
 
 Open the session picker to reload a previous session from disk.
 
+### `/unstick`
+
+`/unstick` is not `/resume`. It does not paint a second Operator line. It orphans that hung prompt. The leader drops the hung session with `leader.response.orphaned`, the same way it drops a disconnected client, while the pager stays connected. Prompt write-ahead log images resend as resource links and the pager never re-inlines data URLs.
+
 ### `/dashboard`
 
 Open the [Agent Dashboard](23-dashboard.md): live roster of top-level sessions in this pager (peek, reply, dispatch, pin, rename, stop, attach). Aliases: `/agents-dashboard`, `/sessions`.
@@ -327,6 +331,8 @@ Exclusive `/plan` (bare `/plan` without `--soft`) enters plan mode. Exclusive `/
 
 `/plan --soft` docks Isolated Preview on the right for a new feature. It does not enter plan mode. It does not park L1. Nested implementers stay Working. Soft planning does not reset the primary plan. It makes a secondary plan. Isolated Preview does not immediately pull up leftover current `plan.md`. Isolated Preview does not dock leftover primary `plan.md`. Isolated Preview does not close when nested implementers continue. Isolated Preview stays until Esc, Exit, or Approve. Isolated Preview is not a Plan Exit timer. Present is not Approve. Empty Enter never Approves. Clickable Approve only ([GitHub #122](https://github.com/SurmountSystems/grok-oss/issues/122)). Comment then Approve still works on a real present of that secondary plan after `exit_plan_mode` writes it. The Isolated Preview composer is an Operator box unless you click Comment. Isolated Preview idle after present, a non-empty Operator box (including a paste chip), plus Enter Approves with those notes. It does not Plan-Exit and leave the paste. `--soft` is not the queue hold token. `/plan --soft add feature` seeds Isolated Preview with that description and does not enqueue it as a Prompt. Exclusive `/plan` without `--soft` enters plan mode and exclusive-blocks nested implementers. Approve still files a GitHub issue with the plan text as documented in GitHub tracking. Comment then Approve carries notes.
 
+After Plan Exit, `/start` leaves parked Isolated Preview and continues paused or interrupted work in this process. `/start` is not `/resume`. With Isolated Preview closed, chrome must not stay plan. Compact completion must not swallow `/plan`. Exclusive `/plan` still exclusive-blocks nested implementers.
+
 To schedule plan mode on the existing composer prompt queue without entering it this turn, use first-arg `queue` or `later`, or `/queue /plan`. That is the same prompt queue as ordinary follow-ups, not a second queue.
 
 ```
@@ -626,6 +632,18 @@ Create, edit, and delete personas. A subagent can apply a persona to shape how i
 ---
 
 ## Account and Billing
+
+### `/limits`
+
+Grok OSS will spend included SuperGrok period limits on a stored personal SuperGrok login first. A Team / Business SuperGrok JWT is not the paying source while that personal login exists. Then SuperGrok dollar credits that never expire, then console team prepaid / console API credits. Remaining included SuperGrok period limits across distinct stored plans are added together. That sum is the real remaining included quota. A unified pool counts once. Only one `grok-oss` process fetches billing and limits. Other live TUIs read a snapshot under `$GROK_HOME` (`limits_snapshot.json`). Automatic HonorTtl is at most once an hour. When personal included SuperGrok period limits have room again, grok-oss uses personal SuperGrok, not leftover business credits, unless the Operator pinned console or pinned business. There is no extra daemon. Rebuild SIGUSR1 is not this.
+
+While included SuperGrok period limits still have room, stay on the SuperGrok session. After those included SuperGrok period limits are full, sampling uses SuperGrok dollar credits and then console team prepaid / console API credits. SuperGrok is a paid product.
+
+grok-oss limits is a client printout, not xAI billing truth. A client 100% / remaining 0 / SuperGrok dollar credits $0 printout must not mark SuperGrok used up.
+
+Named commands, same words on TUI `/limits` and CLI `grok-oss limits`: `stay-supergrok`, `use-console`, `use-personal`, `use-business`, meter included, dollar-credits, console, combined, refresh, `--help`, and `--use-credits`. `use-personal` and `use-business` persist the sidecar `$GROK_HOME/limits_pins.json` field `supergrok_identity`. Stock `preferred_method = "api_key"` still pins console. `stay-supergrok` hop-back does not require console credits.
+
+A second SuperGrok plan is visible only after a second `grok-oss login` that stores the Team principal. grok.com's account switcher is a different product.
 
 ### `/login`
 

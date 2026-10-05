@@ -461,7 +461,7 @@ pub struct LeaderArgs {
 #[command(
     name = "grok-oss",
     version = xai_grok_version::full_version(),
-    about = "Grok OSS TUI (unofficial Surmount fork of Grok Build)",
+    about = "Grok OSS TUI",
     disable_version_flag = true,
     next_display_order = None,
     help_template = "\

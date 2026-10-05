@@ -300,6 +300,7 @@ pub mod compact;
 pub mod compact_mode;
 pub mod config_agents;
 pub mod context;
+pub mod context_only;
 pub mod context_window;
 pub mod copy;
 pub mod dashboard;
@@ -333,6 +334,7 @@ pub mod loop_cmd;
 pub mod mcps;
 pub mod memory;
 pub mod memory_ops;
+pub mod metadata;
 pub mod model;
 pub mod multiline;
 pub mod new;
@@ -402,8 +404,6 @@ pub fn builtin_commands() -> Vec<Arc<dyn SlashCommand>> {
         Arc::new(history::HistoryCommand),
         Arc::new(transcript::TranscriptCommand),
         Arc::new(export::ExportCommand),
-        Arc::new(copy::CopyCommand),
-        Arc::new(find::FindCommand),
         Arc::new(usage::UsageCommand),
         Arc::new(uptime::UptimeCommand),
         Arc::new(tasks::TasksCommand),
@@ -447,6 +447,34 @@ pub fn builtin_commands() -> Vec<Arc<dyn SlashCommand>> {
         Arc::new(delete::DeleteCommand),
         Arc::new(help::HelpCommand),
         Arc::new(exit::ExitCommand),
+        // Commands the curated prefix dropped. Rank stays after that prefix.
+        // Hidden until revealed: `/recap`. Hidden until scheduler tools exist: `/loop`.
+        Arc::new(plan::PlanCommand),
+        Arc::new(view_plan::ViewPlanCommand),
+        Arc::new(edit_prompt::EditPromptCommand),
+        Arc::new(metadata::MetadataCommand),
+        Arc::new(remember::RememberCommand),
+        Arc::new(resume::ResumeCommand),
+        Arc::new(start::StartCommand),
+        Arc::new(fork::ForkCommand),
+        Arc::new(rewind::RewindCommand),
+        Arc::new(expand::ExpandCommand),
+        Arc::new(jump::JumpCommand),
+        Arc::new(share::ShareCommand),
+        Arc::new(rename::RenameCommand),
+        Arc::new(session_info::SessionInfoCommand),
+        Arc::new(unstick::UnstickCommand),
+        Arc::new(queue::QueueCommand),
+        Arc::new(running::RunningCommand),
+        Arc::new(recap::RecapCommand),
+        Arc::new(finish::FinishCommand),
+        Arc::new(reports::ReportsCommand),
+        Arc::new(what::WhatCommand),
+        Arc::new(limits::LimitsCommand),
+        Arc::new(spend::SpendCommand),
+        Arc::new(rebuild::RebuildCommand),
+        Arc::new(loop_cmd::LoopCommand),
+        Arc::new(context_only::ContextOnlyCommand),
         // Hidden easter egg: never listed, runs on bare `/gboom`.
         Arc::new(gboom::GboomCommand),
         // Debug toggles: always registered, listed only on debug binaries.

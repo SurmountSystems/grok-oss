@@ -453,6 +453,9 @@ pub(super) fn maybe_drain_queue(agent: &mut AgentView, notices: &mut Vec<String>
     // Record it as self-originated so the ACP gate treats this turn's deltas as ours rather than adopting them as another client's turn
     // Ours means drive it, and drop a stale post-rewind chunk on a mismatch
     agent.note_self_originated_prompt(&prompt_id);
+    // Bind the live prompt_task to this prompt id at send time. The
+    // turn-start shim also binds, and that second call is a no-op.
+    agent.bind_or_start_live_prompt_task(&prompt_id, &queued.text);
 
     let drain = match queued.kind {
         QueueEntryKind::Prompt => {

@@ -124,7 +124,7 @@ impl WaitingReason {
     /// User-facing spinner label.
     pub fn label(&self) -> String {
         match self {
-            Self::Model => "Waiting for response…".to_string(),
+            Self::Model => "Waiting for the model…".to_string(),
             Self::Subagent { display } => {
                 let subject = display
                     .as_deref()

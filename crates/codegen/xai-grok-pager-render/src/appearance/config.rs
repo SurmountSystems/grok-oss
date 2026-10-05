@@ -481,7 +481,7 @@ pub struct ThinkingConfig {
     /// Render the reasoning body de-emphasized (SGR dim and italic) on top of the `bg_blend` fade.
     /// **Not a TOML key**: minimal mode sets it because there the fade alone cannot separate reasoning from the answer.
     pub body_dim_italic: bool,
-    /// Append a dim "(ctrl+e to expand)" hint to the *collapsed* header when it fits on the same row (never adds a row).
+    /// Append a dim "(ctrl+t to expand)" hint to the *collapsed* header when it fits on the same row (never adds a row).
     /// **Not a TOML key**: minimal mode sets it, the only mode where a folded block cannot be unfolded in place.
     pub collapsed_expand_hint: bool,
     /// Draw the reasoning rail inside the body lines (a `┃ ` prefix directly below the header's bullet) instead of painting the reserved accent column.

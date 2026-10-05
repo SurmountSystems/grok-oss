@@ -448,119 +448,79 @@ pub(crate) async fn run_read_file(
             return Ok(ReadFileOutput::FileReadError(error));
         }
     }
-    let mut file_bytes = match fs.read_file(&path).await {
-        Ok(bytes) => {
-            observed.note_source_bytes(bytes.len());
-            bytes
-        }
-        Err(e) => {
-            tracing::debug!(?e, "Failed to read file");
-            if is_legacy {
-                observed.note_untyped_failure();
-                return Ok(ReadFileOutput::FileReadError(
-                    versions::legacy_0_4_10::render_read_error(&path),
-                ));
+    let published =
+        crate::implementations::editor_infra::per_path_write_lock::published_cow_snapshot(&path);
+    let mut file_bytes = if let Some(snapshot) = published {
+        observed.note_source_bytes(snapshot.len());
+        snapshot.to_vec()
+    } else {
+        match fs.read_file(&path).await {
+            Ok(bytes) => {
+                observed.note_source_bytes(bytes.len());
+                bytes
             }
-            let display_dcwd = display_cwd_or_cwd(&cwd, display_cwd.as_deref());
-            let display_path = display_dcwd.join(&input.path);
-            return Ok(match e.io_error_kind() {
-                Some(std::io::ErrorKind::NotFound) => {
-                    observed.note_not_found();
-                    let skill_suggestion = {
-                        let res = resources.lock().await;
-                        res.get::<SkillManager>()
-                            .and_then(|manager| manager.suggest_skill_path(&path))
-                    };
-                    let verified_skill_suggestion = if let Some(suggestion) = skill_suggestion
-                        && fs.file_exists(&suggestion.path).await.unwrap_or(false)
-                    {
-                        Some(suggestion)
-                    } else {
-                        None
-                    };
-                    let mut msg = crate::util::format_not_found_error(
-                        &display_path,
-                        &path,
-                        &cwd,
-                        &display_dcwd,
-                        hints_enabled && verified_skill_suggestion.is_none(),
-                    )
-                    .await;
-                    if let Some(suggestion) = verified_skill_suggestion {
-                        msg.push_str("\nThe skill you are looking for is registered at:\n");
-                        msg.push_str(&suggestion.display_path.to_string_lossy());
+            Err(e) => {
+                tracing::debug!(?e, "Failed to read file");
+                if is_legacy {
+                    observed.note_untyped_failure();
+                    return Ok(ReadFileOutput::FileReadError(
+                        versions::legacy_0_4_10::render_read_error(&path),
+                    ));
+                }
+                let display_dcwd = display_cwd_or_cwd(&cwd, display_cwd.as_deref());
+                let display_path = display_dcwd.join(&input.path);
+                return Ok(match e.io_error_kind() {
+                    Some(std::io::ErrorKind::NotFound) => {
+                        observed.note_not_found();
+                        let skill_suggestion = {
+                            let res = resources.lock().await;
+                            res.get::<SkillManager>()
+                                .and_then(|manager| manager.suggest_skill_path(&path))
+                        };
+                        let verified_skill_suggestion = if let Some(suggestion) = skill_suggestion
+                            && fs.file_exists(&suggestion.path).await.unwrap_or(false)
+                        {
+                            Some(suggestion)
+                        } else {
+                            None
+                        };
+                        let mut msg = crate::util::format_not_found_error(
+                            &display_path,
+                            &path,
+                            &cwd,
+                            &display_dcwd,
+                            hints_enabled && verified_skill_suggestion.is_none(),
+                        )
+                        .await;
+                        if let Some(suggestion) = verified_skill_suggestion {
+                            msg.push_str("\nThe skill you are looking for is registered at:\n");
+                            msg.push_str(&suggestion.display_path.to_string_lossy());
+                        }
+                        ReadFileOutput::FileNotFound(msg)
                     }
-                    let display_dcwd = display_cwd_or_cwd(&cwd, display_cwd.as_deref());
-                    let display_path = display_dcwd.join(&input.path);
-                    return Ok(match e.io_error_kind() {
-                        Some(std::io::ErrorKind::NotFound) => {
-                            let skill_suggestion = {
-                                let res = resources.lock().await;
-                                res.get::<SkillManager>()
-                                    .and_then(|manager| manager.suggest_skill_path(&path))
-                            };
-                            let verified_skill_suggestion = if let Some(suggestion) =
-                                skill_suggestion
-                                && fs.file_exists(&suggestion.path).await.unwrap_or(false)
-                            {
-                                Some(suggestion)
-                            } else {
-                                None
-                            };
-                            let mut msg = crate::util::format_not_found_error(
-                                &display_path,
-                                &path,
-                                &cwd,
-                                &display_dcwd,
-                                hints_enabled && verified_skill_suggestion.is_none(),
-                            )
-                            .await;
-                            if let Some(suggestion) = verified_skill_suggestion {
-                                msg.push_str("\nThe skill you are looking for is registered at:\n");
-                                msg.push_str(&suggestion.display_path.to_string_lossy());
-                            }
-                            ReadFileOutput::FileNotFound(msg)
-                        }
-                        Some(std::io::ErrorKind::IsADirectory) => {
-                            ReadFileOutput::IsADirectory(format!(
-                                "Error: {} is a directory, not a file.",
-                                display_path.display()
-                            ))
-                        }
-                        Some(std::io::ErrorKind::PermissionDenied) => {
-                            ReadFileOutput::PermissionDenied(format!(
-                                "Permission denied: {}",
-                                display_path.display()
-                            ))
-                        }
-                        _ => ReadFileOutput::FileReadError(format!(
+                    Some(std::io::ErrorKind::IsADirectory) => {
+                        observed.note_directory();
+                        ReadFileOutput::IsADirectory(format!(
+                            "Error: {} is a directory, not a file.",
+                            display_path.display()
+                        ))
+                    }
+                    Some(std::io::ErrorKind::PermissionDenied) => {
+                        observed.note_denied();
+                        ReadFileOutput::PermissionDenied(format!(
+                            "Permission denied: {}",
+                            display_path.display()
+                        ))
+                    }
+                    _ => {
+                        observed.note_io();
+                        ReadFileOutput::FileReadError(format!(
                             "Failed to read file: {}, {e}",
                             display_path.display()
-                        )),
-                    });
-                }
-                Some(std::io::ErrorKind::IsADirectory) => {
-                    observed.note_directory();
-                    ReadFileOutput::IsADirectory(format!(
-                        "Error: {} is a directory, not a file.",
-                        display_path.display()
-                    ))
-                }
-                Some(std::io::ErrorKind::PermissionDenied) => {
-                    observed.note_denied();
-                    ReadFileOutput::PermissionDenied(format!(
-                        "Permission denied: {}",
-                        display_path.display()
-                    ))
-                }
-                _ => {
-                    observed.note_io();
-                    ReadFileOutput::FileReadError(format!(
-                        "Failed to read file: {}, {e}",
-                        display_path.display()
-                    ))
-                }
-            });
+                        ))
+                    }
+                });
+            }
         }
     };
     if let Err(error) =

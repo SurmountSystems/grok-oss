@@ -21,7 +21,7 @@ grok-oss models
 ### CLI Flag
 
 ```bash
-grok -p "Hello" -m grok-4.6
+grok-oss -p "Hello" -m grok-4.6
 ```
 
 ### Slash Command
@@ -378,7 +378,7 @@ When you use `[endpoints]` with partial model overrides, Grok inherits the `base
 
 ### Auth Behavior
 
-When you set `models_base_url`, Grok authenticates the model-list request with `XAI_API_KEY` only (`Authorization: Bearer`). That request never uses your `grok login` session. With an external auth provider (`auth_provider_command`) and no `XAI_API_KEY`, it sends the provider's token instead. Otherwise, if `XAI_API_KEY` is unset, the fetch fails with an error asking you to set it. Inference requests to the custom host authenticate separately. An `api_key` or `env_key` on each model makes those requests use an API key too.
+When you set `models_base_url`, Grok authenticates the model-list request with `XAI_API_KEY` only (`Authorization: Bearer`). That request never uses your `grok-oss login` session. With an external auth provider (`auth_provider_command`) and no `XAI_API_KEY`, it sends the provider's token instead. Otherwise, if `XAI_API_KEY` is unset, the fetch fails with an error asking you to set it. Inference requests to the custom host authenticate separately. An `api_key` or `env_key` on each model makes those requests use an API key too.
 
 ---
 

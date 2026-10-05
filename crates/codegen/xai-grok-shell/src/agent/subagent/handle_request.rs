@@ -1493,7 +1493,7 @@ pub(crate) async fn run_shell_child(
     let spawn_phase_parent = session_bootstrap_span.span().clone();
     let bootstrap_started_at = std::time::Instant::now();
     let pins = ctx.compaction_pins_for_child(&definition.user_message_template);
-    let spawn_result = session::spawn_session_on_thread(
+    let spawn_result = Box::pin(session::spawn_session_on_thread(
         child_session_info,
         gateway.clone(),
         effective_sampling_config,
@@ -1664,7 +1664,7 @@ pub(crate) async fn run_shell_child(
         }),
         Some(ctx.subagent_sampling_semaphore.clone()),
         None,
-    )
+    ))
     .await;
     crate::waterfall::mark(&request.id, crate::waterfall::stage::SESSION_UP);
     spawn_timer.record(

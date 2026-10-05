@@ -488,14 +488,25 @@ impl ScrollbackState {
         }
     }
 
-    /// True when any foldable thinking block is not expanded, so the next
-    /// toggle opens thoughts. All-expanded (or none) means the next toggle collapses.
+    /// True when the next Ctrl+T should open thoughts. Any foldable thinking
+    /// block that is not expanded counts. With no thoughts, the sticky mode
+    /// decides: collapsed means the next thought starts open.
     fn next_thinking_should_expand(&self) -> bool {
-        self.entries.values().any(|entry| {
-            matches!(entry.block, RenderBlock::Thinking(_))
-                && entry.block.is_foldable()
-                && entry.display_mode != DisplayMode::Expanded
-        })
+        let mut saw_thinking = false;
+        for entry in self.entries.values() {
+            if !matches!(entry.block, RenderBlock::Thinking(_)) || !entry.block.is_foldable() {
+                continue;
+            }
+            saw_thinking = true;
+            if entry.display_mode != DisplayMode::Expanded {
+                return true;
+            }
+        }
+        if saw_thinking {
+            false
+        } else {
+            self.thinking_display_mode != DisplayMode::Expanded
+        }
     }
 
     /// Toggle expand/collapse for all thinking blocks only. Otherwise collapse all thinking blocks. Also sets
@@ -513,13 +524,11 @@ impl ScrollbackState {
 
         let mut changed_ids = Vec::new();
         for (id, entry) in &mut self.entries {
-            // Only expand/collapse thinking blocks; tool calls stay collapsed as one-liners
-            // Group truncation is handled separately below (all hidden entries become visible)
-            if matches!(entry.block, RenderBlock::Thinking(_)) && entry.block.is_foldable() {
-                entry.display_mode = target_mode;
-                entry.display_mode_pinned = false;
-                entry.invalidate_cache();
-                changed_ids.push(*id);
+            // Only expand/collapse thinking blocks; tool calls keep their mode and pins.
+            // Group truncation is handled separately below (all hidden entries become visible).
+            let is_thinking = matches!(entry.block, RenderBlock::Thinking(_));
+            if !is_thinking {
+                continue;
             }
             if matches!(&entry.block, RenderBlock::Thinking(t) if t.is_aborted()) {
                 if entry.display_mode != DisplayMode::Collapsed {
@@ -530,10 +539,12 @@ impl ScrollbackState {
                 }
                 continue;
             }
-            entry.display_mode = target_mode;
-            entry.display_mode_pinned = false;
-            entry.invalidate_cache();
-            changed_ids.push(*id);
+            if entry.block.is_foldable() {
+                entry.display_mode = target_mode;
+                entry.display_mode_pinned = false;
+                entry.invalidate_cache();
+                changed_ids.push(*id);
+            }
         }
         for &id in &changed_ids {
             self.dirty_heights.insert(id);

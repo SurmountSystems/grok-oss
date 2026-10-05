@@ -2,7 +2,6 @@
 
 use crate::app::actions::Action;
 use crate::slash::command::{CommandExecCtx, CommandResult, SlashCommand, slash_meta};
-use crate::slash::{ModeSupport, Remedy};
 use crate::views::extensions_modal::ExtensionsTab;
 use xai_grok_telemetry::events::ExtensionsModalTrigger;
 
@@ -14,15 +13,6 @@ impl SlashCommand for WorkflowsCommand {
         name: "workflows",
         description: "Browse installed workflows",
         usage: "/workflows",
-    }
-
-    /// The run pane is drawn from `AgentView::show_workflows` on the full-TUI
-    /// path only; minimal never reads it, so the toggle would flip a flag
-    /// nothing renders.
-    fn mode_support(&self) -> ModeSupport {
-        ModeSupport::FullscreenOnly(Remedy::SwitchMode {
-            why: "the workflow run pane needs fullscreen",
-        })
     }
 
     fn run(&self, _ctx: &mut CommandExecCtx, _args: &str) -> CommandResult {

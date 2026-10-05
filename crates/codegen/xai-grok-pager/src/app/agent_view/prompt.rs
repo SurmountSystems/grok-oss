@@ -47,6 +47,31 @@ impl AgentView {
         true
     }
 
+    /// Retry chrome is up on the running turn. Send-now then steers with
+    /// [`Action::Interject`] and still clears the composer. A quiet running
+    /// turn uses cancel-and-send ([`Action::SendPromptNow`]).
+    fn retry_chrome_is_up(&self) -> bool {
+        matches!(
+            self.session.turn_activity(),
+            Some(crate::acp::tracker::TurnActivity::Retrying { .. })
+        )
+    }
+
+    /// Cancel-and-send from the composer. The unbound-placeholder notice
+    /// rides the action. This handler has no `AppView` to toast from.
+    fn send_now_action_from_composer(&mut self) -> Action {
+        let image_notice = self.unbound_image_placeholder_notice();
+        let text = self.prompt.text().trim().to_string();
+        let images = self.prompt.drain_images();
+        self.prompt.set_text("");
+        self.note_draft_consumed();
+        Action::SendPromptNow {
+            text,
+            images,
+            image_notice,
+        }
+    }
+
     pub fn prompt_history_loading(&self) -> bool {
         self.session.prompt_history_loading && self.prompt.text().is_empty()
     }
@@ -599,14 +624,13 @@ impl AgentView {
                 if let Some(outcome) = self.interject_editing_queued_intercept() {
                     return outcome;
                 }
-                let text = self.prompt.text().trim().to_string();
                 if self.paste_probe_in_flight > 0 {
                     self.deferred_send = Some(AgentDeferredSend::Interject);
                     return InputOutcome::Changed;
                 }
-                let images = self.prompt.drain_images();
-                self.prompt.set_text("");
-                return InputOutcome::Action(Action::Interject { text, images });
+                // Cancel-and-send. The notice rides the action. A paste
+                // probe still stashes `Interject` and re-issues as send-now.
+                return InputOutcome::Action(self.send_now_action_from_composer());
             }
             self.prompt.textarea.insert_str("\n");
             return InputOutcome::Changed;
@@ -661,8 +685,15 @@ impl AgentView {
                         {
                             return outcome;
                         }
-                        self.prompt.insert_replacing_selection("\n");
-                        return InputOutcome::Changed;
+                        // Bare Enter at the end of the last line submits.
+                        // Mid-line Enter still inserts a newline. Shift+Enter
+                        // already returned above.
+                        let submit_at_end = composer_cursor_at_end_of_last_line(&self.prompt)
+                            && !self.prompt.text().trim().is_empty();
+                        if !submit_at_end {
+                            self.prompt.insert_replacing_selection("\n");
+                            return InputOutcome::Changed;
+                        }
                     }
                     if let Some(text) = self.prompt.try_send() {
                         // Remember mode with slash_accepted_send: treat as normal SendPrompt (the slash path accepted a no-arg command)
@@ -712,16 +743,18 @@ impl AgentView {
                                 self.deferred_send = Some(AgentDeferredSend::Interject);
                                 return InputOutcome::Changed;
                             }
-                            // Drain images BEFORE set_text("") wipes the chip elements.
-                            let image_notice = self.unbound_image_placeholder_notice();
-                            let images = self.prompt.drain_images();
-                            self.prompt.set_text("");
-                            self.note_draft_consumed();
-                            return InputOutcome::Action(Action::SendPromptNow {
-                                text,
-                                images,
-                                image_notice,
-                            });
+                            // Retry chrome steers the live turn and still
+                            // clears the composer. Otherwise this chord is
+                            // cancel-and-send. Drain images before set_text
+                            // wipes the chip elements. An empty composer
+                            // still send-nows the queued row.
+                            if self.retry_chrome_is_up() {
+                                let images = self.prompt.drain_images();
+                                self.prompt.set_text("");
+                                self.note_draft_consumed();
+                                return InputOutcome::Action(Action::Interject { text, images });
+                            }
+                            return InputOutcome::Action(self.send_now_action_from_composer());
                         }
                     } else if let Some(outcome) = self.try_send_now_queued_from_prompt() {
                         return outcome;
@@ -766,6 +799,19 @@ impl AgentView {
                 || clipboard_text
                     .as_deref()
                     .is_none_or(|text| text.trim().is_empty())
+            {
+                return self.handle_paste_key_deferred(clipboard_text);
+            }
+        }
+        // Ctrl+Shift+V with real text stays an inline paste. Image-only
+        // (empty clipboard text) must take the same deferred probe as Ctrl+V.
+        if crate::input::key::is_inline_paste_key(key) {
+            let clipboard_text = crate::app::actions::ClipboardTextRead::from_result(
+                crate::clipboard::system_clipboard_read_text(),
+            );
+            if clipboard_text
+                .as_deref()
+                .is_none_or(|text| text.trim().is_empty())
             {
                 return self.handle_paste_key_deferred(clipboard_text);
             }
@@ -917,23 +963,29 @@ impl AgentView {
             return Some(InputOutcome::Changed);
         }
 
-        // Mid-turn (running or already cancelling), every mode: Esc never cancels; point at the registry cancel binding instead
-        // A streaming wake turn follows the same policy as a running turn (the pane state is Idle only because wake turns are not adopted)
-        // Push the grace deadline out so an Esc mash past the turn's end cannot silently arm the rewind picker below
-        if self.stoppable_activity_running() || self.any_cancel_pending() {
-            if self.stoppable_activity_running()
-                && let Some(cancel_key) = registry.key_for(ActionId::CancelTurn)
-            {
+        // Already cancelling: swallow. Do not re-hint Ctrl+C and do not arm.
+        if self.any_cancel_pending() {
+            self.suppress_rewind_arm(std::time::Instant::now());
+            return Some(InputOutcome::Changed);
+        }
+        // Full-screen local turn and `/compact`: hint immediately. Do not arm.
+        // A dashboard overlay non-vim prompt arms in AppView before this policy.
+        if self.session.state.is_turn_running() || self.session.state.is_compact_running() {
+            if let Some(cancel_key) = registry.key_for(ActionId::CancelTurn) {
                 let cancel_key = cancel_key.display();
                 self.show_cancel_key_hint(&format!("Press {cancel_key} to cancel the turn"));
             }
             self.suppress_rewind_arm(std::time::Instant::now());
             return Some(InputOutcome::Changed);
         }
-        // Busy primary (minimal / non-vim): first Esc arms confirm. Second
-        // Esc within the double-press window fires CancelTurn via
-        // PendingAction. First Esc must not start Cancelling.
-        if self.session.state.is_turn_running() || self.wake_turn_active() {
+        // Idle streaming wake: first Esc hints and arms CancelTurn. The second
+        // Esc returns that action without stamping a cancel trigger and without
+        // marking the wake cancel sent.
+        if self.wake_turn_active() && !self.wake_turn_cancelling() {
+            if let Some(cancel_key) = registry.key_for(ActionId::CancelTurn) {
+                let cancel_key = cancel_key.display();
+                self.show_cancel_key_hint(&format!("Press {cancel_key} to cancel the turn"));
+            }
             self.suppress_rewind_arm(std::time::Instant::now());
             return Some(InputOutcome::ArmPending {
                 action: Action::CancelTurn,

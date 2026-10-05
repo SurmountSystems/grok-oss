@@ -179,6 +179,37 @@ pub fn reqwest_client() -> reqwest::Result<reqwest::Client> {
     with_mcp_root_certificates(reqwest::Client::builder()).build()
 }
 
+/// Same trust store as [`reqwest_client`]. A loopback authorization server is an
+/// in-process fake: a process `HTTP_PROXY` must not sit in front of it, and a
+/// redirect must not leave the machine.
+fn oauth_reqwest_client(base_url: &str) -> reqwest::Result<reqwest::Client> {
+    // reqwest 0.13; the policy chokepoint is typed for 0.12 and cannot wrap this builder.
+    #[allow(clippy::disallowed_methods)]
+    let builder = with_mcp_root_certificates(reqwest::Client::builder());
+    let builder = if oauth_base_is_loopback(base_url) {
+        builder
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+    } else {
+        builder
+    };
+    builder.build()
+}
+
+fn oauth_base_is_loopback(url: &str) -> bool {
+    let Ok(parsed) = url::Url::parse(url) else {
+        return false;
+    };
+    let Some(host) = parsed.host_str() else {
+        return false;
+    };
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    host.parse::<std::net::IpAddr>()
+        .is_ok_and(|ip| ip.is_loopback())
+}
+
 /// Mozilla roots plus any `GROK_EXTRA_CA_BUNDLE` certs, and nothing from the OS store.
 /// `tls_certs_only` skips `rustls-platform-verifier`, which fails `Client::build`
 /// when that store is empty and blocks plain `http://` requests the same way.
@@ -212,11 +243,11 @@ fn mozilla_root_certificates() -> &'static [reqwest::Certificate] {
 }
 
 /// rmcp `AuthorizationManager::new` builds its own reqwest client and hits the empty OS trust store.
-/// This injects [`reqwest_client`] instead.
+/// This injects a Mozilla-root client instead. Construction does not discover metadata.
 pub async fn authorization_manager(
     base_url: &str,
 ) -> Result<rmcp::transport::auth::AuthorizationManager, rmcp::transport::auth::AuthError> {
-    let client = reqwest_client()
+    let client = oauth_reqwest_client(base_url)
         .map_err(|e| rmcp::transport::auth::AuthError::InternalError(e.to_string()))?;
     let mut manager = rmcp::transport::auth::AuthorizationManager::new_with_oauth_http_client(
         base_url,
@@ -228,7 +259,7 @@ pub async fn authorization_manager(
 }
 
 /// Placeholder so `new_with_oauth_http_client` does not build rmcp's default client.
-/// [`authorization_manager`] replaces it with [`reqwest_client`] before any request.
+/// [`authorization_manager`] replaces it with [`oauth_reqwest_client`] before any request.
 struct ReplacedOAuthHttp;
 
 impl rmcp::transport::auth::OAuthHttpClient for ReplacedOAuthHttp {

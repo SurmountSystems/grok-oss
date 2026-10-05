@@ -24,7 +24,9 @@ use crate::permission::hub_permission::{
     prompt_outcome_allows, request_permission_via_hub,
 };
 use crate::permission::prompter::PromptOutcome;
-use crate::permission::state::{CachedStateStore, PermissionState, StateFileAccess};
+use crate::permission::state::{
+    CachedStateStore, PermissionState, StateFileAccess, permission_store_home,
+};
 use crate::permission::types::{AccessKind, Decision};
 use crate::session::WorkspaceSession;
 
@@ -291,7 +293,7 @@ pub(crate) async fn approve_hub_call(
 pub(crate) fn grant_store_access(workspace: &WorkspaceHandle) -> StateFileAccess {
     match workspace.shared.sandbox() {
         Some(sandbox) if sandbox.mode() != SandboxMode::Off => StateFileAccess::DaemonOwned {
-            grok_home: xai_grok_config::grok_home(),
+            grok_home: permission_store_home(),
         },
         _ => StateFileAccess::Plain,
     }

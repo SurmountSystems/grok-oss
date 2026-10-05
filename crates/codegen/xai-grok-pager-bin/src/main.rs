@@ -2772,6 +2772,10 @@ fn resolve_update_trigger(flag: Option<&str>, auto: bool) -> auto_update::CliUpd
         auto_update::CliUpdateTrigger::UserCommand
     }
 }
+/// `grok-oss update` without `--check`.
+///
+/// A WinGet package hands off to WinGet before the rebuild note and writes
+/// no update files. That handoff does not require `GROK_OSS_ENABLE_XAI_UPDATER`.
 async fn run_update_command(
     check: bool,
     json: bool,
@@ -2836,6 +2840,20 @@ async fn run_update_command(
         xai_grok_telemetry::session_ctx::drain_pending(xai_grok_telemetry::session_ctx::CLI_DRAIN)
             .await;
         result?;
+        return Ok(());
+    }
+
+    // WinGet owns the package directory. Hand off before the rebuild note.
+    // `run_update` prints the command and returns without writing update files.
+    if auto_update::get_installer().await == Some("winget") {
+        auto_update::run_update(
+            force_reinstall,
+            version.as_deref(),
+            channel_switch,
+            &mut update_config,
+            trigger,
+        )
+        .await?;
         return Ok(());
     }
 

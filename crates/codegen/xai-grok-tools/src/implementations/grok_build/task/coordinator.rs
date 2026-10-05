@@ -1139,7 +1139,10 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
     fn finish_child(&mut self, id: &str, mut output: ChildRunOutput<R::CompletionData>) {
         // Child is leaving the registry: human parked sends must not retry.
         self.reject_spawn_ready_ids(&[id.to_owned()]);
-        let mut record = if let Some(child) = self.active.remove(id) {
+        let mut record = if let Some(mut child) = self.active.remove(id) {
+            // A finished child must not keep sampling. The runner's token is
+            // this same cancellation token.
+            child.cancellation.cancel();
             ChildRecord::Active(child)
         } else if let Some(child) = self.pending.remove(id) {
             child.cancellation.cancel();

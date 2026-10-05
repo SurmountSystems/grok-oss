@@ -370,16 +370,15 @@ impl AgentView {
                 (!text.trim().is_empty()).then_some(Action::SendPrompt(text))
             }
             AgentDeferredSend::Interject => {
-                let text = self.prompt.text().trim().to_string();
-                if !ActionRegistry::interjection_possible(self.can_send_now(), !text.is_empty()) {
+                // The stash kind stays Interject. The re-issue is send-now
+                // so a chip that landed during the probe rides the prompt.
+                if !ActionRegistry::interjection_possible(
+                    self.can_send_now(),
+                    !self.prompt.text().trim().is_empty() || !self.prompt.images.is_empty(),
+                ) {
                     return None;
                 }
-                // Rebind and log orphan placeholders. Interject has no image_notice field.
-                let _image_notice = self.unbound_image_placeholder_notice();
-                let images = self.prompt.drain_images();
-                self.prompt.set_text("");
-                self.note_draft_consumed();
-                Some(Action::Interject { text, images })
+                Some(self.send_now_action_from_composer())
             }
             AgentDeferredSend::Stash => {
                 self.handle_stash_prompt_key();

@@ -109,6 +109,28 @@ fn dispatch_interject_on_inner(
     };
 
     if user_submit {
+        let child_key = session_id.0.to_string();
+        let child_key = agent
+            .subagent_views
+            .contains_key(&child_key)
+            .then_some(child_key);
+        if let Some(key) = child_key {
+            if let Some(child) = agent.subagent_views.get_mut(&key) {
+                child.abort_cancellable_cancel();
+                child.append_prompt_wal(
+                    xai_grok_shell::session::prompt_wal::PromptWalKind::Interject,
+                    &text,
+                    &images,
+                );
+            }
+        } else {
+            agent.abort_cancellable_cancel();
+            agent.append_prompt_wal(
+                xai_grok_shell::session::prompt_wal::PromptWalKind::Interject,
+                &text,
+                &images,
+            );
+        }
         agent.record_prompt_in_history(&text);
     }
 
@@ -171,6 +193,14 @@ pub(super) fn dispatch_send_prompt_now(
     let ActiveView::Agent(id) = app.active_view else {
         return vec![];
     };
+    if let Some(agent) = app.agents.get(&id)
+        && matches!(
+            overlay_operator_clarify(agent),
+            OverlayOperatorClarify::L2(_)
+        )
+    {
+        return dispatch_interject_on(app, id, text, images);
+    }
     let reconnect_pending = app.reconnect_pending;
     let Some(agent) = app.agents.get_mut(&id) else {
         return vec![];

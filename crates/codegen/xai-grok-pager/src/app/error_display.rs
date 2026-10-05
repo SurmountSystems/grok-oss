@@ -134,6 +134,10 @@ pub(crate) fn retry_clause(attempt: u32, max_retries: u32, style: RetryLabelStyl
     // Longer headline plus U+2026 wraps this status row into the prompt.
     match style {
         RetryLabelStyle::Status => format!("Retrying (attempt {attempt})..."),
+        // u32::MAX is an unknown budget, not a real attempt cap. Finite caps stay N/M.
+        RetryLabelStyle::Compact if max_retries == u32::MAX => {
+            format!("Retrying ({attempt})")
+        }
         RetryLabelStyle::Compact => format!("Retrying ({attempt}/{max_retries})"),
     }
 }
@@ -1187,8 +1191,8 @@ mod tests {
         );
         assert_eq!(
             formatted.message(),
-            "Connection failed: error sending request. \
-             Check your network and try again."
+            "Connection failed: Transport miss: error sending request. \
+             This is not a silent hang. Check your network and try again."
         );
     }
 
@@ -1384,7 +1388,7 @@ mod tests {
                 "error sending request for url (https://api.x.ai)"
             )
             .headline,
-            "Request failed"
+            "Connection failed"
         );
     }
 }

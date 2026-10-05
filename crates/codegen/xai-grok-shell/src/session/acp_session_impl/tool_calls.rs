@@ -467,6 +467,16 @@ impl SessionActor {
         if let Some(model) = requested_model.as_deref() {
             tracing::Span::current().record("model_id", model);
         }
+        if self.context_only.load(std::sync::atomic::Ordering::Relaxed) {
+            for call in &tool_calls {
+                let tool_call_id = acp::ToolCallId::new(std::sync::Arc::from(call.id.clone()));
+                let message =
+                    "Rejected: context-only mode advertises no tools and refuses this call.";
+                self.handle_tool_not_executed(&call.id, &tool_call_id, message.to_string())
+                    .await?;
+            }
+            return Ok(ToolLoop::Continue);
+        }
         let mut final_result: Option<ToolLoop> = None;
         let mut deferred_followups: Vec<ConversationItem> = Vec::new();
         let tool_calls = self.reject_excess_media_gen_calls(tool_calls).await?;
@@ -475,30 +485,30 @@ impl SessionActor {
                 let kind_of = |name: &str| self.agent.borrow().tool_bridge().tool_kind(name);
                 let (body, tail) = split_exit_plan_tail(tool_calls, kind_of);
                 if !body.is_empty() {
-                    self.execute_tool_calls_batch(
+                    Box::pin(self.execute_tool_calls_batch(
                         body,
                         &mut deferred_followups,
                         &mut final_result,
                         requested_model.as_deref(),
-                    )
+                    ))
                     .await?;
                 }
                 if !tail.is_empty() {
-                    self.execute_tool_calls_batch(
+                    Box::pin(self.execute_tool_calls_batch(
                         tail,
                         &mut deferred_followups,
                         &mut final_result,
                         requested_model.as_deref(),
-                    )
+                    ))
                     .await?;
                 }
             } else {
-                self.execute_tool_calls_batch(
+                Box::pin(self.execute_tool_calls_batch(
                     tool_calls,
                     &mut deferred_followups,
                     &mut final_result,
                     requested_model.as_deref(),
-                )
+                ))
                 .await?;
             }
         }
@@ -670,8 +680,7 @@ impl SessionActor {
                 )
                 .await;
             let call_name = call.function.name.clone();
-            match self
-                .prepare_tool_call(call, deferred_followups, requested_model)
+            match Box::pin(self.prepare_tool_call(call, deferred_followups, requested_model))
                 .await?
             {
                 Ok(prepared) => {

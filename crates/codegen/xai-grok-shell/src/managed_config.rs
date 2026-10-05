@@ -172,7 +172,8 @@ pub fn clear_orphan() {
 /// files (TUI tick vs `grok login` vs prefetch). `None` on contention — the
 /// caller skips and retries next cycle.
 fn try_lock_managed_config(home: &std::path::Path) -> Option<std::fs::File> {
-    use fs2::FileExt;
+    // Same advisory lock as `std::fs::File::lock` (the gate-purge contract holds
+    // that method). A different lock family would not see the holder's lock.
     let file = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -180,7 +181,7 @@ fn try_lock_managed_config(home: &std::path::Path) -> Option<std::fs::File> {
         .truncate(false)
         .open(home.join("managed_config.lock"))
         .ok()?;
-    file.try_lock_exclusive().ok()?;
+    file.try_lock().ok()?;
     Some(file)
 }
 
@@ -277,6 +278,7 @@ fn apply_managed_config(
         ),
     ];
 
+    let serves_any = body.has_managed_config() || body.has_requirements();
     let mut changed = false;
     let mut first_err: Option<std::io::Error> = None;
     for (name, content) in artifacts {
@@ -294,13 +296,28 @@ fn apply_managed_config(
             None => match remove_managed_path(&path) {
                 Ok(true) => {
                     tracing::info!("removed managed config artifact the server no longer serves");
-                    changed = true;
+                    // A row that still serves another artifact records the removal.
+                    // A row that serves nothing wrote no file.
+                    if serves_any {
+                        changed = true;
+                    }
                 }
                 Ok(false) => {}
                 Err(e) => {
                     first_err.get_or_insert(e);
                 }
             },
+        }
+    }
+    // An empty serve must not leave the prior tenant's signature sidecars.
+    if !serves_any {
+        for name in [
+            xai_grok_config::signed_policy::SIGNATURE_SIDECAR_FILE,
+            xai_grok_config::signed_policy::MANAGED_IDENTITY_SIDECAR_FILE,
+        ] {
+            if let Err(e) = remove_managed_path(&home.join(name)) {
+                first_err.get_or_insert(e);
+            }
         }
     }
 

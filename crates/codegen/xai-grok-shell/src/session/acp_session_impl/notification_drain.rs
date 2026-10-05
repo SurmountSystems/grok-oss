@@ -655,6 +655,8 @@ impl SessionActor {
         };
         // Reconciliation writes subagent records, so it stays behind the suppression check
         // It also runs in a child session, which the notification below does not
+        // Reconciliation writes subagent records. A suppressed session must
+        // not cancel a live orphan just because the host went idle.
         if !suppressed {
             self.reconcile_live_orphaned_subagents().await;
         }
@@ -663,7 +665,6 @@ impl SessionActor {
         if self.startup_hints.is_subagent {
             return;
         }
-        self.reconcile_live_orphaned_subagents().await;
         for contributor in self.extension_registry.session_lifecycle_contributors() {
             contributor
                 .on_session_idle(&xai_agent_lifecycle::SessionIdleInput)

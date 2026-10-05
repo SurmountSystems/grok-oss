@@ -265,7 +265,7 @@ impl SessionActor {
         (instruction, tool_specs, self.hosted_tools_for_turn())
     }
 
-    /// Sends a compact transcript of recent user messages and agent replies in one small tool-free model call.
+    /// Replays the parent conversation with the main turn's tools so the prompt-cache prefix matches, then appends the recap instruction.
     /// Emits the cleaned one-line summary for display only.
     /// A missing recap must never disrupt the session.
     pub(super) async fn handle_recap(&self, auto: bool) {
@@ -324,7 +324,7 @@ impl SessionActor {
         let clear_in_flight = || self.recap_in_flight.set(false);
 
         let settings = crate::util::config::resolve_session_recap_settings_from_disk();
-        let Some(transcript) = session_recap::recap_transcript(
+        let Some(_transcript) = session_recap::recap_transcript(
             &conversation,
             settings.user_message_max_chars,
             settings.agent_reply_max_chars,
@@ -352,20 +352,32 @@ impl SessionActor {
         let started_at = chrono::Utc::now().to_rfc3339();
         let x_grok_conv_id = format!("recap-{}", uuid::Uuid::new_v4());
         let x_grok_req_id = format!("xai-recap-{}", uuid::Uuid::new_v4());
-        let request = ConversationRequest {
-            items: vec![
-                ConversationItem::system(session_recap::RECAP_SYSTEM),
-                ConversationItem::user(transcript),
-            ],
-            model: Some(model.clone()),
+        // Ride the parent prefix: the conversation, the main turn's tools,
+        // and the session id as `prompt_cache_key`. The transcript above only
+        // decides whether there is anything to recap.
+        let mut items = conversation;
+        if super::side_call::should_strip_side_call_reasoning(
+            client.api_backend(),
             reasoning_effort,
-            x_grok_conv_id: Some(x_grok_conv_id.clone()),
-            x_grok_req_id: Some(x_grok_req_id.clone()),
-            x_grok_session_id: Some(self.session_info.id.to_string()),
-            x_grok_agent_id: Some(xai_grok_telemetry::id::agent_id()),
-            length_policy: xai_grok_sampling_types::LengthPolicy::Fail,
-            ..Default::default()
-        };
+        ) {
+            items = xai_chat_state::compaction_utils::strip_reasoning_blocks(items);
+        }
+        let tag = self.reminder_wrapper_tag();
+        items.push(ConversationItem::user(session_recap::recap_instruction(
+            &tag,
+        )));
+        let tool_specs = self.turn_base_tool_specs(&self.prepare_tool_definitions().await);
+        let hosted_tools = self.hosted_tools_for_turn();
+        let request = self.parent_cached_request(super::side_call::AuxCall {
+            items,
+            tools: tool_specs,
+            hosted_tools,
+            model: model.clone(),
+            reasoning_effort,
+            backend: client.api_backend(),
+            conv_id: x_grok_conv_id.clone(),
+            req_id: x_grok_req_id.clone(),
+        });
         // The artifact records the exact model-facing items after trust projection; the canonical conversation state remains raw
         let chat_history_for_artifact = request.items.clone();
 

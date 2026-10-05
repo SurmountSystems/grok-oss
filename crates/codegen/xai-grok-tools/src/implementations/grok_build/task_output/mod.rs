@@ -639,6 +639,7 @@ pub(crate) fn format_subagent_snapshot(
             // Measure body only — wait-hint is harness advisory, not task output.
             let body = format!(
                 "Subagent is initializing (creating worktree, resolving config).\n\
+                 Snapshot only. Do not start a blocking wait.\n\
                  Type: {}\n\
                  Description: {}\n\
                  Elapsed: {duration_secs:.1}s",
@@ -717,6 +718,30 @@ pub(crate) fn format_subagent_snapshot(
     }
 }
 
+/// Parent poll cap. Short answers stay intact. A last answer over this size
+/// is stored as a preview plus a report pointer, never the full string.
+const PARENT_TASK_OUTPUT_CAP_BYTES: usize = 40_000;
+const PARENT_TASK_OUTPUT_PREVIEW_BYTES: usize = 2_000;
+
+fn cap_parent_task_output(output: String) -> (String, bool, String, usize) {
+    let raw = output.len();
+    if raw <= PARENT_TASK_OUTPUT_CAP_BYTES {
+        return (output, false, String::new(), raw);
+    }
+    let mut end = PARENT_TASK_OUTPUT_PREVIEW_BYTES.min(raw);
+    while end > 0 && !output.is_char_boundary(end) {
+        end -= 1;
+    }
+    let capped = format!(
+        "{}\n\n[Output truncated: {end} of {raw} bytes shown. \
+         Full last answer is not stored on the parent ToolResult. \
+         Use read_file on the on-disk report if one exists.]",
+        &output[..end]
+    );
+    let hint = "Output truncated. Full last answer is not stored on the parent ToolResult. Use read_file on the on-disk report if one exists.".to_string();
+    (capped, true, hint, raw)
+}
+
 /// Terminal statuses only; reminders render the same value, so notice and poll cannot drift.
 pub(crate) fn terminal_subagent_result(snap: &SubagentSnapshot) -> TaskOutputResult {
     let (status, exit_code, output) = match &snap.status {
@@ -756,6 +781,7 @@ pub(crate) fn terminal_subagent_result(snap: &SubagentSnapshot) -> TaskOutputRes
         }
     };
     let ended_at_epoch_ms = snap.started_at_epoch_ms + snap.duration_ms;
+    let (output, truncated, truncation_hint, raw_output_bytes) = cap_parent_task_output(output);
     TaskOutputResult {
         task_id: snap.subagent_id.clone(),
         command: format!("[subagent:{}] {}", snap.subagent_type, snap.description),
@@ -764,11 +790,11 @@ pub(crate) fn terminal_subagent_result(snap: &SubagentSnapshot) -> TaskOutputRes
         started: format_epoch_ms_as_rfc3339(snap.started_at_epoch_ms),
         ended: Some(format_epoch_ms_as_rfc3339(ended_at_epoch_ms)),
         duration_secs: snap.duration_ms as f64 / 1000.0,
-        raw_output_bytes: output.len(),
+        raw_output_bytes,
         output,
         output_file: String::new(),
-        truncated: false,
-        truncation_hint: String::new(),
+        truncated,
+        truncation_hint,
     }
 }
 

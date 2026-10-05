@@ -604,9 +604,13 @@ mod tests {
             serde_json::from_str(raw.0.get()).expect("should be valid JSON");
         assert_eq!(
             parsed.get("outcome").and_then(|v| v.as_str()),
-            Some("cancelled")
+            Some("questions"),
+            "clarifying questions send the questions outcome"
         );
-        assert!(parsed.get("feedback").is_none());
+        assert_eq!(
+            parsed.get("feedback").and_then(|v| v.as_str()),
+            Some("Why Redis?")
+        );
     }
 
     #[test]

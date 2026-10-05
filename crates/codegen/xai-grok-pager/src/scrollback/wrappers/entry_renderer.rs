@@ -28,9 +28,12 @@ pub(crate) const TIMESTAMP_SHORT_RESERVE: u16 = 10;
 pub(crate) const BUBBLE_COPY_TRAILING_INSET: u16 = 2;
 
 /// Trailing inset when always-on bubble copy is on for a timestamped
-/// message block (user, assistant, /btw).
+/// message block (user, assistant, /btw). The clock and the copy glyph
+/// share this inset. Messages with the clock hidden do not reserve it,
+/// so a char-ceil height estimate still undershoots word wrap.
 pub(crate) fn bubble_copy_trailing_inset(appearance: &AppearanceConfig, is_message: bool) -> u16 {
-    if is_message && appearance.scrollback.display.bubble_copy_buttons {
+    if is_message && appearance.show_timestamps && appearance.scrollback.display.bubble_copy_buttons
+    {
         BUBBLE_COPY_TRAILING_INSET
     } else {
         0
@@ -895,7 +898,33 @@ impl Renderable for EntryRenderer<'_> {
                 }
             }
 
-            buf.set_line_safe_bidi(content_area.x, row, &line.content, content_area.width);
+            // Expanded verb members paint their own hook badge. The collapsed header already carries the group total, and this row is the member the hover test reads.
+            let mut hooked = None;
+            if content_skip == 0
+                && row == content_area.y + u16::from(vpad_top_visible)
+                && let Some(data) = &self.entry.hook_data
+            {
+                let already = line
+                    .content
+                    .spans
+                    .iter()
+                    .any(|span| span.content.contains("[hooks:"));
+                if !already {
+                    let mut counts = crate::scrollback::blocks::tool::HookRunCounts::default();
+                    counts.add_data(data);
+                    let suffix =
+                        crate::scrollback::blocks::tool::render_group_hook_counts_inline_suffix(
+                            &counts, self.theme,
+                        );
+                    if !suffix.is_empty() {
+                        let mut owned = line.content.clone();
+                        owned.spans.extend(suffix);
+                        hooked = Some(owned);
+                    }
+                }
+            }
+            let painted = hooked.as_ref().unwrap_or(&line.content);
+            buf.set_line_safe_bidi(content_area.x, row, painted, content_area.width);
 
             if own_gutter {
                 let gutter = Rect::new(content_area.x + text_width, row, ts_reserved, 1);
@@ -906,30 +935,60 @@ impl Renderable for EntryRenderer<'_> {
         }
 
         // Overlay timestamp on the first content line for message blocks.
-        // Short format (h:mm AM/PM) by default; expands to full format (HH:mm:ss | MMM DD) when the mouse hovers over the timestamp area
-        // Gated on appearance.show_timestamps (toggled via /timestamps).
+        // Short format (h:mm AM/PM) by default; expands to full format (HH:mm:ss | MMM DD)
+        // while the pointer is on that clock. Gated on appearance.show_timestamps.
+        let first_content_y = content_area.y + if vpad_top_visible { 1 } else { 0 };
+        let copy_inset =
+            bubble_copy_trailing_inset(self.appearance(), self.should_show_timestamp());
         if self.appearance().show_timestamps
             && !output.is_empty()
             && self.should_show_timestamp()
             && let Some(ts) = self.entry.created_at
+            && first_content_y < max_row
         {
-            let first_content_y = content_area.y + if vpad_top_visible { 1 } else { 0 };
-            // Check if mouse is hovering the timestamp zone (rightmost 10 cols of the first content row)
-            let ts_hovered = self.mouse_pos.is_some_and(|(mx, my)| {
-                my == first_content_y
-                    && mx >= content_area.x + content_area.width.saturating_sub(10)
-                    && mx < content_area.x + content_area.width
-            });
-            let ts_str = if ts_hovered {
-                ts.format("  %H:%M:%S | %b %d").to_string()
-            } else {
-                ts.format("  %-I:%M %p").to_string()
+            let short = ts.format("  %-I:%M %p").to_string();
+            let expanded = ts.format("  %H:%M:%S | %b %d").to_string();
+            let short_x = timestamp_overlay_x(
+                content_area.x,
+                content_area.width,
+                short.len() as u16,
+                copy_inset,
+            );
+            let expanded_x = timestamp_overlay_x(
+                content_area.x,
+                content_area.width,
+                expanded.len() as u16,
+                copy_inset,
+            );
+            let on_span = |origin: Option<u16>, width: u16, mx: u16, my: u16| {
+                origin.is_some_and(|x| {
+                    my == first_content_y && mx >= x && mx < x.saturating_add(width)
+                })
             };
-            let ts_width = ts_str.len() as u16;
-            if content_area.width > ts_width + 1 && first_content_y < max_row {
-                let ts_x = content_area.x + content_area.width - ts_width;
+            let ts_hovered = self.mouse_pos.is_some_and(|(mx, my)| {
+                on_span(short_x, short.len() as u16, mx, my)
+                    || on_span(expanded_x, expanded.len() as u16, mx, my)
+            });
+            let (ts_str, ts_x) = if ts_hovered {
+                (expanded, expanded_x)
+            } else {
+                (short, short_x)
+            };
+            if let Some(ts_x) = ts_x {
                 let ts_style = Style::default().fg(self.theme.gray);
                 buf.set_string_safe(ts_x, first_content_y, &ts_str, ts_style);
+            }
+        }
+        if copy_inset > 0 && first_content_y < max_row && content_skip == 0 {
+            if let Some(line) = output.lines.first() {
+                let copy_style = Style::default().fg(self.theme.gray);
+                line.paint_bubble_copy_button(
+                    buf,
+                    content_area.x,
+                    content_area.width,
+                    first_content_y,
+                    copy_style,
+                );
             }
         }
 
@@ -1471,10 +1530,9 @@ mod tests {
         let entry = ScrollbackEntry::new(RenderBlock::agent_message("hello"));
         let width: u16 = 80;
 
-        // AgentMessage has no vpad, so the first content row is y=0
-        // Hover the rightmost 10 cols of that row to trigger expansion.
-        let hover_x = width - 2 - 5; // inside the timestamp zone
-        let renderer = EntryRenderer::new(&entry, &theme).with_mouse_pos(Some((hover_x, 0)));
+        // AgentMessage has no vpad, so the first content row is y=0.
+        // Locate the short clock with the pointer off the glyph, then hover that column.
+        let renderer = EntryRenderer::new(&entry, &theme).with_mouse_pos(Some((5, 0)));
 
         let height = renderer.desired_height(width);
         let area = Rect::new(0, 0, width, height);
@@ -1510,9 +1568,8 @@ mod tests {
         let entry = ScrollbackEntry::new(RenderBlock::agent_message("hello"));
         let width: u16 = 80;
 
-        // Render with the mouse hovering the timestamp: expanded format
-        let hover_x = width - 2 - 3;
-        let renderer = EntryRenderer::new(&entry, &theme).with_mouse_pos(Some((hover_x, 0)));
+        // Locate the short clock with the pointer off the glyph, then hover that column.
+        let renderer = EntryRenderer::new(&entry, &theme).with_mouse_pos(Some((5, 0)));
         let height = renderer.desired_height(width);
         let area = Rect::new(0, 0, width, height);
         let mut buf_short = Buffer::empty(area);

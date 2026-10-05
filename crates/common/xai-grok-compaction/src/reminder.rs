@@ -247,6 +247,17 @@ pub fn section_running_subagents(
     ))
 }
 
+fn format_subagent_elapsed(elapsed_secs: u64) -> String {
+    // Under a minute stays a raw second count (`5s`, `42s`) so short reminders
+    // match the existing lines. At 60 seconds and above, compact minutes
+    // (`15m43s` for 943). Workflow lines keep raw seconds on purpose.
+    if elapsed_secs < 60 {
+        format!("{elapsed_secs}s")
+    } else {
+        xai_tty_utils::format_human_duration(std::time::Duration::from_secs(elapsed_secs))
+    }
+}
+
 fn format_subagent_line(s: &RunningSubagent<'_>) -> String {
     // Same shape as bash/monitor/loops: `- "id": `text` (status, kind)`.
     let command = collapsed_ws(
@@ -255,8 +266,11 @@ fn format_subagent_line(s: &RunningSubagent<'_>) -> String {
     );
     let kind = s.subagent_type.unwrap_or("subagent");
     format!(
-        "- \"{}\": `{}` (running for {}s, {})",
-        s.subagent_id, command, s.elapsed_secs, kind
+        "- \"{}\": `{}` (running for {}, {})",
+        s.subagent_id,
+        command,
+        format_subagent_elapsed(s.elapsed_secs),
+        kind
     )
 }
 

@@ -146,10 +146,13 @@ impl AgentMessageBlock {
 impl BlockContent for AgentMessageBlock {
     fn output(&self, ctx: &BlockContext) -> BlockOutput {
         // Common path: no diagrams (or raw mode) renders plain markdown, with no affordance machinery and no extra output rebuild
-        if ctx.raw || self.mermaid.is_empty() {
-            return self.content.output(ctx.width as usize);
-        }
-        self.rendered_output(ctx).0
+        let mut out = if ctx.raw || self.mermaid.is_empty() {
+            self.content.output(ctx.width as usize)
+        } else {
+            self.rendered_output(ctx).0
+        };
+        super::append_bubble_copy_button(&mut out.lines, ctx);
+        out
     }
 
     fn diagram_affordances(&self, ctx: &BlockContext) -> Vec<mermaid_content::DiagramAffordance> {

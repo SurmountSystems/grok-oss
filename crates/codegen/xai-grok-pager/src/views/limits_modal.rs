@@ -488,15 +488,17 @@ pub fn render_limits_modal(
         }
         if text.as_str() == REMAINING_BAR_SENTINEL {
             if let Some((rem, tone)) = primary_bar {
-                // Tracked bar: brackets + ░ empty so remaining extent is obvious.
-                let bar_w = content.width.saturating_sub(2);
-                if bar_w >= 4 {
+                // Indent, brackets, and the tracked cells share the content width.
+                // Inner width is not capped at 34.
+                let inner = content.width.saturating_sub(4);
+                if inner >= 4 {
                     let fg = tone_color(tone, theme);
                     let spans =
-                        progress_bar_tracked_spans(bar_w, rem, fg, theme.gray_dim, theme.bg_dark);
+                        progress_bar_tracked_spans(inner, rem, fg, theme.gray_dim, theme.bg_dark);
                     let mut bar_line =
-                        vec![Span::styled("  ", Style::default().fg(theme.text_primary))];
+                        vec![Span::styled("  [", Style::default().fg(theme.text_primary))];
                     bar_line.extend(spans);
+                    bar_line.push(Span::styled("]", Style::default().fg(theme.text_primary)));
                     buf.set_line(content.x, y, &Line::from(bar_line), content.width);
                 }
             }

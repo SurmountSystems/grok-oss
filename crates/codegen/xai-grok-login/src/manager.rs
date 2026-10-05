@@ -26,7 +26,8 @@ use super::model::LEGACY_SCOPE;
 #[cfg(test)]
 use super::model::UserInfo;
 use super::model::{
-    AuthMode, GrokAuth, early_invalidation, is_expired, is_expired_with_buffer, lookup_auth,
+    AuthMode, GrokAuth, early_invalidation, is_expired, is_expired_with_buffer,
+    is_supergrok_session_mode, lookup_auth, upsert_supergrok_session,
 };
 use super::refresh::{RefreshOutcome, TokenRefresher, resolve_refresh_credential};
 #[cfg(test)]
@@ -866,6 +867,18 @@ impl AuthManager {
         }
         is_expired_with_buffer(auth, buffer)
     }
+    /// Persist `auth` into the store.
+    /// A SuperGrok session (OIDC or web login) is written at the active base and also at a multi-slot: `{base}::personal`, or `{base}::team::{team_id}` for a team principal.
+    /// A later personal login leaves an existing team multi-slot in place.
+    /// `clear` removes only the active base, so those multi-slots survive reauth.
+    /// Console API keys and other modes stay on the base key only.
+    fn persist_auth_into_store(&self, map: &mut AuthStore, auth: GrokAuth) {
+        if is_supergrok_session_mode(auth.auth_mode) {
+            upsert_supergrok_session(map, &self.scope, auth);
+        } else {
+            map.insert(self.scope.clone(), auth);
+        }
+    }
     /// Persist rotated tokens to disk and cache, then spawn `/user` enrichment. Invariants: **Disk write before any network I/O** (else a sibling process can reuse the not-yet-rotated RT and the IdP returns `invalid_grant`).
     /// **Caller holds the `auth.json` file lock** (production callers: `refresh_chain` Success arm, `flow::run_auth_flow`).
     /// Returns the input `GrokAuth` BEFORE enrichment lands; callers needing the post-enrichment view re-read `current()`.
@@ -887,7 +900,7 @@ impl AuthManager {
         };
         let mut map = map;
         tracing::debug!(scope = %self.scope, "auth: storing token");
-        map.insert(self.scope.clone(), auth.clone());
+        self.persist_auth_into_store(&mut map, auth.clone());
         let write_result = write_auth_json(&self.path, &map);
         let elapsed_ms = update_started.elapsed().as_millis() as u64;
         match &write_result {
@@ -933,7 +946,7 @@ impl AuthManager {
         };
         let mut map = map;
         tracing::debug!(scope = %self.scope, "auth: storing token (no enrichment)");
-        map.insert(self.scope.clone(), auth.clone());
+        self.persist_auth_into_store(&mut map, auth.clone());
         let write_result = write_auth_json(&self.path, &map);
         let elapsed_ms = started.elapsed().as_millis() as u64;
         match &write_result {
@@ -1143,7 +1156,7 @@ impl AuthManager {
                 return Some(auth);
             }
         };
-        map.insert(self.scope.clone(), auth.clone());
+        self.persist_auth_into_store(&mut map, auth.clone());
         if let Err(e) = write_auth_json(&self.path, &map) {
             tracing::warn!(error = %e, "auth: failed to persist refreshed token to disk");
         }

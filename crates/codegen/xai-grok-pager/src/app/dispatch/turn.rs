@@ -93,6 +93,15 @@ fn overlay_live_kill_ids(app: &AppView, id: AgentId) -> Vec<String> {
     ids
 }
 
+/// Second `[stop]` while already Cancelling re-sends `CancelTurn` and
+/// finishes the local spinner so the Operator box accepts typing.
+/// The first stop stays in `TurnCancelling` so resend grace can run.
+fn finish_user_cancel_retry(agent: &mut crate::app::agent_view::AgentView) {
+    agent.session.state = crate::app::agent::AgentState::Idle;
+    agent.pending_cancel_resend = None;
+    agent.cancel_trigger_hint = None;
+}
+
 pub(super) fn dispatch_cancel_turn(app: &mut AppView) -> Vec<Effect> {
     let ActiveView::Agent(id) = app.active_view else {
         return vec![];
@@ -117,10 +126,12 @@ pub(super) fn dispatch_cancel_turn(app: &mut AppView) -> Vec<Effect> {
         );
         if retrying {
             agent.clear_send_now_expectation();
-            return vec![emit_cancel_turn(
+            let effect = emit_cancel_turn(
                 agent, session_id, /* cancel_subagents */ true,
                 /* rewind_prompt_id */ None,
-            )];
+            );
+            finish_user_cancel_retry(agent);
+            return vec![effect];
         }
         return cancel_agent_turn(
             agent,
@@ -177,12 +188,14 @@ pub(super) fn dispatch_cancel_turn(app: &mut AppView) -> Vec<Effect> {
             // Explicit user cancel supersedes any pending send-now expectation (its marker renders).
             agent.clear_send_now_expectation();
             let cancel_subagents = resolve_cancel_subagents(agent);
-            return vec![emit_cancel_turn(
+            let effect = emit_cancel_turn(
                 agent,
                 session_id,
                 cancel_subagents,
                 /* rewind_prompt_id */ None,
-            )];
+            );
+            finish_user_cancel_retry(agent);
+            return vec![effect];
         }
         // Compact owns the pane (`CommandRunning`) even if a leftover wake marker is still set; `/compact` can drain while that marker is live
         // This branch must beat the wake early-return or Esc never calls cancel_compact
@@ -205,18 +218,23 @@ pub(super) fn dispatch_cancel_turn(app: &mut AppView) -> Vec<Effect> {
             )];
         } else if !agent.session.state.is_turn_running() {
             return vec![];
-        } else if let Some(stop) = resolved_pref {
-            Some(stop)
         } else {
             // Check all running subagents, not just those from the current turn.
-            // This is broader than the old TUI (which filtered by parent_prompt_id), but intentional
-            // Subagents kept alive from a previous cancel should still prompt the user on the next cancel
+            // A dangling `active_subagent` is not an overlay. The parent ask
+            // panel still opens, even when always-continue would skip it.
+            let dangling_overlay = agent
+                .active_subagent
+                .as_ref()
+                .is_some_and(|sid| !agent.subagent_views.contains_key(sid.as_str()));
             let running_count = agent
                 .subagent_sessions
                 .values()
                 .filter(|s| s.is_running() && s.attempt.workflow_run_id.is_none())
                 .count();
-            if running_count > 0 && agent.cancel_turn_view.is_none() {
+            if (dangling_overlay || resolved_pref.is_none())
+                && running_count > 0
+                && agent.cancel_turn_view.is_none()
+            {
                 // Mandatory ingress wins: evict an open feedback modal before the cancel prompt takes input.
                 agent.displace_feedback_modal(
                     crate::views::feedback_modal::FeedbackModalDisplacement::CancelTurn,
@@ -233,7 +251,7 @@ pub(super) fn dispatch_cancel_turn(app: &mut AppView) -> Vec<Effect> {
                 }
                 return vec![];
             }
-            None
+            resolved_pref
         }
     };
 
@@ -361,14 +379,13 @@ fn cancel_agent_turn(
             /* rewind_prompt_id */ None,
         )];
     }
-    // Dead park: shell turn already ended / response_tx gone. Finish Idle.
-    // Do not CancelTurn (queued_after_cancel) or rebuild-flush WAL.
-    // Live park cancel stays below and stays in plan mode.
-    if agent
-        .plan_approval_view
-        .as_ref()
-        .is_some_and(|pav| !pav.has_live_ext_waiter())
-    {
+    // Dead park: a local idle decision, or an in-turn park whose waiter is
+    // gone. Finish Idle. Do not CancelTurn or write a rebuild-flush WAL.
+    // A post-turn review is not that park. Cancel of a later turn must
+    // keep it, comments included. A live waiter stays below, in plan mode.
+    if agent.plan_approval_view.as_ref().is_some_and(|pav| {
+        pav.is_local_idle_decision || (pav.is_in_turn() && !pav.has_live_ext_waiter())
+    }) {
         if let Some(mut pav) = agent.plan_approval_view.take() {
             let _ = pav.send_stale_cancel();
             agent.plan_next_comment_id = pav.next_comment_id;

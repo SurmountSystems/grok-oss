@@ -30,6 +30,7 @@ use xai_grok_workspace::permission::bash_command_splitting::BashCommandHighlight
 mod background;
 mod follow_ups;
 mod interactions;
+pub(crate) use interactions::flush_pending_exit_plan_mode;
 mod mcp;
 mod permissions;
 mod prompt_origin;
@@ -745,6 +746,10 @@ fn handle_interjection(notif: &acp::ExtNotification, app: &mut AppView) -> bool 
             }
             return false;
         }
+    } else if last_scrollback_prompt_matches(&agent.scrollback, text) {
+        // Optimistic paint plus a leftover echo (no interjection id) must
+        // not leave a second Human line with the same text.
+        return false;
     }
     agent
         .scrollback

@@ -91,36 +91,35 @@ fn parse_aws_credentials(content: &str) -> anyhow::Result<aws_sdk_s3::config::Cr
     }
 }
 
-/// TLS context that does not consult the OS native CA store.
+/// Mozilla roots as one PEM bundle, with the OS trust store left off.
 ///
 /// aws-smithy-http-client's rustls provider `debug_assert`s that native roots
-/// parsed at least one cert. Nix quality (and other hosts with an empty OS
-/// store) parse none, so `Client` construction panics even for HTTP mocks:
+/// parsed at least one cert. Nix quality parses none, so `Client` construction
+/// panics even for `http://` mocks:
 /// `TrustStore configured to enable native roots but no valid root certificates parsed!`
-/// Disable native roots and load the same embedded Mozilla bundle the rest of
-/// the CLI uses (reqwest `rustls-tls`).
-fn s3_tls_context() -> aws_smithy_http_client::tls::TlsContext {
+fn mozilla_trust_store() -> aws_smithy_http_client::tls::TrustStore {
+    use aws_smithy_http_client::tls::TrustStore;
     use base64::Engine as _;
-    static CTX: std::sync::OnceLock<aws_smithy_http_client::tls::TlsContext> =
-        std::sync::OnceLock::new();
-    CTX.get_or_init(|| {
-        let mut pem = Vec::new();
-        for cert in webpki_root_certs::TLS_SERVER_ROOT_CERTS {
-            pem.extend_from_slice(b"-----BEGIN CERTIFICATE-----\n");
-            pem.extend_from_slice(
-                base64::engine::general_purpose::STANDARD
-                    .encode(cert.as_ref())
-                    .as_bytes(),
-            );
-            pem.extend_from_slice(b"\n-----END CERTIFICATE-----\n");
-        }
-        let trust = aws_smithy_http_client::tls::TrustStore::empty().with_pem_certificate(pem);
-        aws_smithy_http_client::tls::TlsContext::builder()
-            .with_trust_store(trust)
-            .build()
-            .expect("S3 TLS context with embedded webpki roots")
-    })
-    .clone()
+    static STORE: std::sync::OnceLock<TrustStore> = std::sync::OnceLock::new();
+    STORE
+        .get_or_init(|| {
+            let mut pem = Vec::new();
+            for cert in webpki_root_certs::TLS_SERVER_ROOT_CERTS {
+                pem.extend_from_slice(b"-----BEGIN CERTIFICATE-----\n");
+                let encoded = base64::engine::general_purpose::STANDARD.encode(cert.as_ref());
+                let bytes = encoded.as_bytes();
+                let mut offset = 0;
+                while offset < bytes.len() {
+                    let end = (offset + 64).min(bytes.len());
+                    pem.extend_from_slice(&bytes[offset..end]);
+                    pem.push(b'\n');
+                    offset = end;
+                }
+                pem.extend_from_slice(b"-----END CERTIFICATE-----\n");
+            }
+            TrustStore::empty().with_pem_certificate(pem)
+        })
+        .clone()
 }
 
 /// Build an S3 client. Uses path-style addressing when `endpoint_url` is set.
@@ -185,15 +184,17 @@ pub(crate) async fn build_s3_client(
 }
 
 fn extra_ca_tls_context() -> anyhow::Result<aws_smithy_http_client::tls::TlsContext> {
-    use aws_smithy_http_client::tls::{TlsContext, TrustStore};
-    let mut trust_store = TrustStore::default();
+    use aws_smithy_http_client::tls::TlsContext;
+    // `TrustStore::default()` enables native roots. That debug_asserts in Nix
+    // quality when the OS store is empty, before any HeadObject or PutObject.
+    let mut trust_store = mozilla_trust_store();
     for pem in xai_grok_extra_ca::extra_root_pems() {
         trust_store = trust_store.with_pem_certificate(pem.clone());
     }
     TlsContext::builder()
         .with_trust_store(trust_store)
         .build()
-        .context("build S3 TLS context with extra CA roots")
+        .context("build S3 TLS context with embedded webpki roots")
 }
 
 /// Static access-key credentials for presigning S3 URLs.

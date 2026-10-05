@@ -377,11 +377,9 @@ pub(super) fn handle_session_notification_with_origin(
         | XaiSessionUpdate::MemoryCaptureActivity { .. }
         | XaiSessionUpdate::MemoryDreamCompleted { .. }
         | XaiSessionUpdate::MemorySessionSaved { .. }) => {
-            let changed = apply_compaction_or_retry_update(agent, update, is_api_key_auth);
-            if let XaiSessionUpdate::AutoCompactCompleted { .. } = update {
-                agent.todo.update_todos(Vec::new());
-            }
-            changed
+            // Auto-compact refreshes the context bar. It must not wipe the
+            // painted todo board. A later Plan / todo_write still replaces it.
+            apply_compaction_or_retry_update(agent, update, is_api_key_auth)
         }
         XaiSessionUpdate::RetryState(retry) => {
             apply_sampling_identity_from_retry(&retry, &mut agent.sampling_identity);
@@ -1081,6 +1079,8 @@ pub(super) fn handle_session_notification_with_origin(
                 ));
                 redraw = true;
             }
+            // Stash stop runs for the turn marker. Success and skip leave no
+            // scrollback line, so they must not force a redraw by themselves.
             if event_name.eq_ignore_ascii_case("stop")
                 && !is_foreign_hook_batch(agent, prompt_id.as_deref())
             {
@@ -1090,7 +1090,6 @@ pub(super) fn handle_session_notification_with_origin(
                 pending
                     .groups
                     .push((event_name.clone(), stop_hook_runs(&runs)));
-                redraw = true;
             }
             redraw
         }
@@ -1619,6 +1618,16 @@ pub(super) fn handle_child_session_notification(
 ) -> bool {
     match update {
         XaiSessionUpdate::AutoCompactStarted { .. }
+            if agent
+                .subagent_sessions
+                .get(child_sid)
+                .is_some_and(|info| info.finished) =>
+        {
+            // A late compact on a finished nested session must not mark the
+            // child AutoCompacting or busy.
+            false
+        }
+        XaiSessionUpdate::AutoCompactStarted { .. }
         | XaiSessionUpdate::AutoCompactCompleted { .. }
         | XaiSessionUpdate::AutoCompactFailed { .. }
         | XaiSessionUpdate::AutoCompactCancelled { .. }
@@ -1627,6 +1636,12 @@ pub(super) fn handle_child_session_notification(
         | XaiSessionUpdate::MemoryDreamCompleted { .. }
         | XaiSessionUpdate::MemorySessionSaved { .. }
         | XaiSessionUpdate::HookAnnotation { .. } => {
+            // Nested compact chrome must not keep the parent fullscreen overlay.
+            if matches!(update, XaiSessionUpdate::AutoCompactStarted { .. })
+                && agent.active_subagent.as_deref() == Some(child_sid)
+            {
+                agent.close_subagent_fullscreen();
+            }
             let mut changed = false;
             if let Some(child_view) = agent.child_view_for_live_update_mut(child_sid) {
                 changed = apply_child_view_session_event(child_view, &update, is_api_key_auth);
@@ -1981,6 +1996,10 @@ fn apply_nested_subagent_update(agent: &mut AgentView, update: XaiSessionUpdate)
             ) {
                 accepted.commit(&mut info.attempt.lifecycle);
             }
+            let mill_success = !matches!(
+                status.to_ascii_lowercase().as_str(),
+                "failed" | "error" | "cancelled" | "canceled"
+            );
             info.attempt.status = Some(Arc::from(status));
             info.attempt.error = error.map(Arc::from);
             info.attempt.tool_calls = Some(tool_calls);
@@ -2011,6 +2030,15 @@ fn apply_nested_subagent_update(agent: &mut AgentView, update: XaiSessionUpdate)
             agent.note_finished_nested_wait_ids(&child_session_id, &subagent_id);
             agent.complete_satisfied_task_output_wait_tools();
             agent.drop_satisfied_task_output_waits();
+            // A finished mill L2 never gets a prompt response. A trailing
+            // Next implement prompt on that child is the next parent turn.
+            // A failed finish does not auto-run. This does not Approve.
+            if mill_success {
+                let _ = crate::app::auto_implement::enqueue_nested_l2_next_implement(
+                    agent,
+                    &child_session_id,
+                );
+            }
             true
         }
         _ => false,

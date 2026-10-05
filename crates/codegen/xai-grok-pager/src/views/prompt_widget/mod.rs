@@ -1922,6 +1922,22 @@ impl PromptWidget {
             return PromptEvent::Edited;
         }
 
+        // Buffer jumps. Bare Home and End stay line-local inside the textarea.
+        if key.modifiers == KeyModifiers::CONTROL {
+            match key.code {
+                KeyCode::Home | KeyCode::PageUp => {
+                    self.textarea.set_cursor(0);
+                    return PromptEvent::Edited;
+                }
+                KeyCode::End | KeyCode::PageDown => {
+                    let end = self.textarea.text().len();
+                    self.textarea.set_cursor(end);
+                    return PromptEvent::Edited;
+                }
+                _ => {}
+            }
+        }
+
         // Everything else: delegate to textarea.
         // Selection is rendered state: selection-only changes must report Edited or no frame is drawn.
         let old_text = self.textarea.text().to_owned();
@@ -3006,7 +3022,12 @@ impl PromptWidget {
             return None;
         }
         match elem.kind {
-            k if k == KIND_PASTE => None,
+            // None tells the caller to submit. The chip is already plain text, so the send carries the paste body.
+            k if k == KIND_PASTE => {
+                let id = elem.id;
+                self.expand_element(id);
+                None
+            }
             k if k == KIND_FILE_REF => {
                 let id = elem.id;
                 self.expand_element(id);
@@ -3173,19 +3194,30 @@ impl PromptWidget {
                 .map(str::trim)
                 .filter(|t| !t.is_empty());
             let caption_right = content_area.x + content_area.width;
-            let max_w = caption_right.saturating_sub(area.x + 3);
-            if let Some(caption) = caption
-                && max_w >= 6
-            {
+            // Room from the second dash through the column before the corner.
+            let max_fit = caption_right.saturating_sub(area.x + 3);
+            if let Some(caption) = caption {
                 let label = format!(" {caption} ");
-                let trunc = crate::render::line_utils::truncate_str(&label, max_w as usize);
-                let label_w = unicode_width::UnicodeWidthStr::width(trunc.as_str()) as u16;
-                buf.set_string(
-                    caption_right.saturating_sub(label_w),
-                    div_y,
-                    &trunc,
-                    title_style,
-                );
+                let label_cols = unicode_width::UnicodeWidthStr::width(label.as_str()) as u16;
+                // A title that fits keeps the info-line column (one cell before the corner).
+                // A title that does not fit stops two cells earlier so both ends of the rule stay dashes.
+                let (paint, end_col) = if label_cols <= max_fit && max_fit >= 6 {
+                    (label, caption_right)
+                } else {
+                    let trunc_max = max_fit.saturating_sub(2);
+                    if trunc_max < 6 {
+                        (String::new(), 0)
+                    } else {
+                        (
+                            crate::render::line_utils::truncate_str(&label, trunc_max as usize),
+                            caption_right.saturating_sub(2),
+                        )
+                    }
+                };
+                if !paint.is_empty() {
+                    let label_w = unicode_width::UnicodeWidthStr::width(paint.as_str()) as u16;
+                    buf.set_string(end_col.saturating_sub(label_w), div_y, &paint, title_style);
+                }
             }
         }
 
@@ -3545,16 +3577,12 @@ impl PromptWidget {
         let layout_cursor_pos = self
             .textarea
             .cursor_pos_with_state(ta_area, self.textarea_state);
-        let cursor_pos = if !style.focused {
-            None
-        } else {
-            // `interim_caret` is only set while the interim shows
-            interim_caret.or(layout_cursor_pos)
-        };
+        // The software box caret is the insertion point. The hardware cursor stays hidden.
+        let caret_cell = interim_caret.or(layout_cursor_pos);
 
         // Ghost suffixes (shell completion / predicted prompt)
-        // Voice interim owns the end-of-text cells when shown, so skip both ghosts then
-        if !voice_interim_shown {
+        // Unfocused composers skip ghosts. Voice interim owns the end-of-text cells when shown.
+        if style.focused && !voice_interim_shown {
             if let Some(ghost) = self.suggestions.ghost_text()
                 && self.textarea.cursor() == self.textarea.text().len()
                 && !slash_active
@@ -3602,8 +3630,8 @@ impl PromptWidget {
         if let Some(image) = preview_image {
             let Some(overlay) = overlay_area else {
                 return PromptRenderResult {
-                    cursor_pos,
-                    caret_cell: layout_cursor_pos,
+                    cursor_pos: None,
+                    caret_cell,
                     post_flush_escapes: None,
                 };
             };
@@ -3623,8 +3651,8 @@ impl PromptWidget {
         }
 
         PromptRenderResult {
-            cursor_pos,
-            caret_cell: layout_cursor_pos,
+            cursor_pos: None,
+            caret_cell,
             post_flush_escapes,
         }
     }
@@ -3663,13 +3691,20 @@ impl PromptWidget {
         let sep_opacity = if focused { 1.0 } else { 0.6 };
         let flag_opacity = if focused { 0.75 } else { 0.5 };
 
-        let model_fg = if focused {
-            theme.accent_model
+        // Bandless terminal chrome stores gray as Reset. The model name then stays
+        // default-fg plus DIM so a plan-colored border underneath does not recolor it.
+        let model_style = if theme.gray == ratatui::style::Color::Reset {
+            Style::default()
+                .fg(ratatui::style::Color::Reset)
+                .bg(bg)
+                .add_modifier(Modifier::DIM)
+        } else if focused {
+            Style::default().fg(theme.accent_model).bg(bg)
         } else {
-            crate::render::color::blend_color(bg, theme.accent_model, 0.75)
-                .unwrap_or(theme.accent_model)
+            let model_fg = crate::render::color::blend_color(bg, theme.accent_model, 0.75)
+                .unwrap_or(theme.accent_model);
+            Style::default().fg(model_fg).bg(bg)
         };
-        let model_style = Style::default().fg(model_fg).bg(bg);
         let sep_fg = if focused {
             theme.gray_dim
         } else {

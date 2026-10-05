@@ -253,6 +253,16 @@ pub(super) fn handle_exit_plan_mode(
         drop(ext.response_tx);
         return false;
     };
+    // A restore that arrives before bind has no session to park on.
+    // Hold the reverse-request until SessionLoaded binds, then flush.
+    if app
+        .agents
+        .get(&id)
+        .is_some_and(|agent| agent.session.session_id.is_none())
+    {
+        app.pending_exit_plan_mode = Some(ext);
+        return false;
+    }
     let is_active = is_matched_agent_active(app, id);
     let Some(agent) = app.agents.get_mut(&id) else {
         // `interaction_target_agent` only returns ids that exist; this arm is defensive
@@ -261,6 +271,14 @@ pub(super) fn handle_exit_plan_mode(
         return false;
     };
 
+    // Approve or Quit already decided this plan. A later resume must not
+    // re-park, must not dock, and must leave the mid-type draft alone.
+    // A new live present still re-arms the decision.
+    if agent.plan_decision_resolved && params.tool_call_id.starts_with("exit-plan-mode-resume") {
+        drop(ext.response_tx);
+        return is_active;
+    }
+
     // Mandatory ingress wins: evict an open feedback modal before the approval captures the session draft.
     agent.displace_feedback_modal(
         crate::views::feedback_modal::FeedbackModalDisplacement::PlanApproval,
@@ -268,9 +286,18 @@ pub(super) fn handle_exit_plan_mode(
 
     // Replay of a stored present keeps comments. A live present starts clean.
     let is_restore = agent.session.loading_replay;
+    let resume_park = params.tool_call_id.starts_with("exit-plan-mode-resume");
     let mut carried_comments = Vec::new();
     let mut carried_next_comment_id = 0u64;
     let mut carried_feedback_draft: Option<String> = None;
+    // `unmount_plan_review` restores the previous session stash and would
+    // wipe Revise-box text typed after that park. A resume replace keeps it.
+    let composer_before_replace = (resume_park || is_restore)
+        .then(|| agent.prompt.text().to_string())
+        .filter(|text| {
+            let trimmed = text.trim();
+            !trimmed.is_empty() && !trimmed.starts_with('/')
+        });
 
     if let Some(mut old) = agent.unmount_plan_review() {
         tracing::warn!(
@@ -281,9 +308,14 @@ pub(super) fn handle_exit_plan_mode(
         if is_restore {
             carried_comments = std::mem::take(&mut old.comments);
             carried_next_comment_id = old.next_comment_id;
+        }
+        if is_restore || resume_park {
             carried_feedback_draft = old.feedback_draft.take();
         }
         old.send_stale_cancel();
+    }
+    if let Some(text) = composer_before_replace {
+        agent.prompt.set_text(&text);
     }
 
     // Dismiss competing overlays so plan approval owns the screen.
@@ -365,11 +397,20 @@ pub(super) fn handle_exit_plan_mode(
         agent.clear_plan_loop_flags_for_new_present();
     }
     agent.plan_approval_view = Some(state);
+    if let Some(draft) = carried_feedback_draft.clone() {
+        if let Some(ref mut pav) = agent.plan_approval_view {
+            pav.feedback_draft = Some(draft.clone());
+            if agent.prompt.text().trim() == draft.trim() && !draft.trim().is_empty() {
+                // Carried Revise-box text is the next Operator turn. Approve
+                // must not wrap it as review comments.
+                pav.keep_draft_is_next_operator_turn = true;
+            }
+        }
+    }
     if is_restore {
         if let Some(ref mut pav) = agent.plan_approval_view {
             pav.comments = carried_comments;
             pav.next_comment_id = carried_next_comment_id;
-            pav.feedback_draft = carried_feedback_draft;
         }
         agent.plan_next_comment_id = carried_next_comment_id;
         agent.restore_plan_feedback_draft_if_composer_lost();
@@ -379,7 +420,8 @@ pub(super) fn handle_exit_plan_mode(
     }
     // Keep a mid-compose draft visible. stash() copies text and does not
     // clear it; only wipe when the composer was already empty so empty-prompt
-    // `a` / `s` / `q` stay accelerators.
+    // `a` / `s` / `q` stay accelerators. Focus stays Preview. Comment and
+    // Revise clicks are what move focus to Prompt.
     let keep_draft =
         !agent.prompt.text().trim().is_empty() && !agent.composer_holds_view_plan_slash();
     let live_cursor = agent.prompt.cursor();
@@ -398,27 +440,16 @@ pub(super) fn handle_exit_plan_mode(
     crate::appearance::cache::set_plan_approval_force_modal(
         app.current_ui.plan_approval_force_modal(),
     );
-    agent.show_plan_preview_if_available();
-
-    if agent.line_viewer.is_some() {
-        if let Some(ref mut viewer) = agent.line_viewer {
-            viewer.plan_mut().feedback_active = true;
-        }
-        if keep_draft && let Some(ref mut pav) = agent.plan_approval_view {
-            pav.focus = crate::views::plan_approval_view::PlanApprovalFocus::Prompt;
-        }
+    // A resume park keeps the waiter and leaves the pane shut unless the
+    // pane was already open or `/view-plan` already asked for it. A live
+    // present still docks Isolated Preview. Focus stays Preview.
+    let pane_already_open = agent.line_viewer.is_some();
+    let dock = !resume_park || pane_already_open || agent.view_plan_requested;
+    if dock {
         agent.show_plan_preview_if_available();
         if let Some(ref mut viewer) = agent.line_viewer {
             viewer.plan_mut().feedback_active = true;
         }
-        if had_session_draft
-            && !permission_still_open
-            && let Some(ref mut pav) = agent.plan_approval_view
-        {
-            pav.focus = crate::views::plan_approval_view::PlanApprovalFocus::Prompt;
-        }
-    } else if !permission_still_open && let Some(ref mut pav) = agent.plan_approval_view {
-        pav.focus = crate::views::plan_approval_view::PlanApprovalFocus::Prompt;
     }
     agent.restore_plan_feedback_draft_if_composer_lost();
     agent.persist_unsent_composer_draft_now();

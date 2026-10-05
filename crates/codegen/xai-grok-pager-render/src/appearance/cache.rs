@@ -983,6 +983,8 @@ pub fn prime(ui: &UiConfig) {
         ui.always_expand_thinking
             .unwrap_or(ALWAYS_EXPAND_THINKING_DEFAULT),
     );
+    // Unset stays on (`scrub_ascii_punct_enabled`). A configured false must win over the thread-local default.
+    set_scrub_ascii_punct(ui.scrub_ascii_punct_enabled());
     let _ = load_group_tool_verbs();
     let _ = load_collapsed_edit_blocks();
     let _ = load_prompt_suggestions();

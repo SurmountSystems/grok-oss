@@ -296,12 +296,15 @@ pub fn apply_child_tool_policy(
             .retain(|tool| tool.kind != Some(ToolKind::Task));
         prune_orphaned_background_task_tools(&mut definition.tool_config);
     } else if capability_mode.is_none()
+        && definition.is_builtin_grok_build()
         && definition
             .tool_config
             .tools
             .iter()
             .any(|tool| tool.kind == Some(ToolKind::Edit))
     {
+        // Only the stock Grok Build parent, when it may still spawn, drops
+        // read, search, and edit. general-purpose keeps those tools and only loses workflow.
         definition.tool_config.tools.retain(|tool| {
             !matches!(
                 tool.kind,

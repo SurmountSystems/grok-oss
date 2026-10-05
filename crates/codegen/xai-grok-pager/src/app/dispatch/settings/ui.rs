@@ -217,7 +217,23 @@ pub(in crate::app::dispatch) fn dispatch_open_settings(
     };
     // Snapshot the registry, UiConfig, and pager-local state before the mutable borrow on `agent` so the borrow checker is happy
     let registry = app.settings_registry.clone();
-    let ui_snapshot = app.current_ui.clone();
+    let mut ui_snapshot = app.current_ui.clone();
+    // Unset `[ui].theme` still catalogs as doge. A theme deep-link's Esc
+    // revert is the process paint initial (Grok Night), not that default.
+    // An explicit theme on the app is left alone. The catalog default stays doge.
+    if focus_key == Some("theme")
+        && ui_snapshot
+            .theme
+            .as_deref()
+            .and_then(crate::theme::canonical_name)
+            .is_none()
+    {
+        ui_snapshot.theme = Some(
+            crate::theme::ThemeKind::GrokNight
+                .display_name()
+                .to_string(),
+        );
+    }
     // Capture app-level fields before the mut-borrow on the agent.
     let coding_data_sharing_opt_out_from_app = app.coding_data_retention_opt_out;
     let coding_data_sharing_lock_from_app = app.coding_data_sharing_lock();
@@ -902,6 +918,12 @@ pub(in crate::app::dispatch) fn action_for_reset(
         ("permission_mode", SettingValue::Enum("default")) => Some(Action::SetPermissionMode(
             crate::app::actions::PermissionModeKind::Default,
         )),
+        ("permission_mode", SettingValue::Enum("context-only")) => Some(Action::SetPermissionMode(
+            crate::app::actions::PermissionModeKind::ContextOnly,
+        )),
+        ("default_reasoning_effort", SettingValue::Enum(s)) => {
+            Some(Action::SetDefaultReasoningEffort((*s).to_owned()))
+        }
         // default_model: an empty string becomes ClearDefaultModel; non-empty is a registry/dispatch skew guard
         ("default_model", SettingValue::String(s)) => {
             if s.is_empty() {

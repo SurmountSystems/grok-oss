@@ -22,11 +22,13 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Span;
 
 use xai_grok_pager::app::agent_view::AgentView;
+use xai_grok_pager::app::app_view::SessionPickerEntry;
 use xai_grok_pager::minimal_api;
 use xai_grok_pager::theme::Theme;
 use xai_grok_pager::views::extensions_modal::{ExtensionsTab, TabDataState};
 use xai_grok_pager::views::modal::ActiveModal;
 use xai_grok_pager::views::picker::{self, PickerEntry, PickerField, PickerHitAreas, PickerRow};
+use xai_grok_pager::views::session_picker::SourceFilter;
 
 /// Rows of chrome around the scrolling list: title + subtitle/search + divider + footer.
 const CHROME_ROWS: u16 = 4;
@@ -141,6 +143,32 @@ fn render_divider(buf: &mut Buffer, row: Rect, theme: &Theme) {
     picker::render_divider(buf, row.x, row.y, row.width, theme, None);
 }
 
+/// Hint pinned above the resume list.
+///
+/// The shared helper speaks only on the Headless page. The default Grok page
+/// also hides foreign rows, and this panel still has to explain that.
+fn pinned_hidden_external_hint(
+    entries: Option<&[SessionPickerEntry]>,
+    source_filter: SourceFilter,
+) -> Option<String> {
+    if let Some(hint) = minimal_api::hidden_external_hint(entries, source_filter) {
+        return Some(hint);
+    }
+    if source_filter != SourceFilter::Grok {
+        return None;
+    }
+    let hidden = entries?
+        .iter()
+        .filter(|entry| {
+            SourceFilter::External.matches(&entry.source, entry.session_kind.as_deref())
+        })
+        .count();
+    (hidden > 0).then(|| {
+        let plural = if hidden == 1 { "" } else { "s" };
+        format!("{hidden} external session{plural} hidden \u{b7} f to show")
+    })
+}
+
 /// Exact body height (display rows) for the session-picker list.
 fn resume_body_rows(agent: &AgentView, width: u16) -> u16 {
     let Some(ActiveModal::SessionPicker {
@@ -179,7 +207,7 @@ fn resume_body_rows(agent: &AgentView, width: u16) -> u16 {
     // Reserve a row for the pinned hidden-external hint when shown.
     let hint_row = u16::from(
         !agent.app_chat_mode
-            && minimal_api::hidden_external_hint(entries.as_deref(), *source_filter).is_some(),
+            && pinned_hidden_external_hint(entries.as_deref(), *source_filter).is_some(),
     );
     measure_entries(&picker_entries).saturating_add(hint_row)
 }
@@ -228,7 +256,7 @@ fn render_resume(
         Some(current_repo.as_str()),
     );
     let hidden_hint = (!chat_mode)
-        .then(|| minimal_api::hidden_external_hint(entries.as_deref(), *source_filter))
+        .then(|| pinned_hidden_external_hint(entries.as_deref(), *source_filter))
         .flatten();
 
     render_title(buf, title_row, theme, "Resume session");

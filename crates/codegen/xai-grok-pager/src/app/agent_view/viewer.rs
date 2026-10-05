@@ -558,6 +558,23 @@ impl AgentView {
 
     /// Handle a key event while the line viewer is open.
     pub(super) fn handle_line_viewer_key(&mut self, key: &KeyEvent) -> InputOutcome {
+        // Isolated Preview and an L2 overlay composer own screenshot paste.
+        // The line viewer must not swallow Ctrl+V into search.
+        if (self.plan_overlay_owns_composer_paste()
+            || self.l2_overlay_composer_awaits_image_paste())
+            && (crate::input::key::is_paste_key(key) || crate::input::key::is_inline_paste_key(key))
+        {
+            let clipboard_text = crate::app::actions::ClipboardTextRead::from_result(
+                crate::clipboard::system_clipboard_read_text(),
+            );
+            if crate::input::key::is_paste_key(key)
+                || clipboard_text
+                    .as_deref()
+                    .is_none_or(|text| text.trim().is_empty())
+            {
+                return self.handle_paste_key_deferred(clipboard_text);
+            }
+        }
         let in_plan_approval = self.plan_approval_view.is_some();
         let plan_present = in_plan_approval || self.is_plan_viewer();
 
@@ -581,6 +598,20 @@ impl AgentView {
                 }
             }
             if let Some(ref mut viewer) = self.line_viewer {
+                viewer.list_state.handle_key_event(key, &viewer.lines);
+            }
+            return InputOutcome::Changed;
+        }
+
+        // Accepted plan search: n/N jump hits. They must not type into the
+        // Operator box and must not RowWalk focus.
+        if matches!(key.code, KeyCode::Char('n' | 'N'))
+            && (key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT)
+            && self.line_viewer.as_ref().is_some_and(|viewer| {
+                viewer.list_state.input_mode().is_none() && viewer.list_state.matcher().is_some()
+            })
+        {
+            if let Some(viewer) = self.line_viewer.as_mut() {
                 viewer.list_state.handle_key_event(key, &viewer.lines);
             }
             return InputOutcome::Changed;
@@ -654,17 +685,10 @@ impl AgentView {
             return self.handle_plan_feedback_key(key);
         }
 
-        // s: switch to prompt so the user can type an overall revision message before submitting
-        // Enter from Prompt does the actual send
-        if in_plan_approval && key!('s').matches(key) {
-            if let Some(ref mut pav) = self.plan_approval_view {
-                pav.focus = PlanApprovalFocus::Prompt;
-            }
-        }
-        // Printable / edit keys while plan approval is open: move to Prompt
-        // and type. Viewer navigation (j/k/arrows/…) and select-to-copy (y/Y)
-        // stay below. Enter still opens line notes (secondary path) when it
-        // falls through.
+        // Printable / edit keys while plan approval is open type in the
+        // Human box. Preview stays Preview so Enter is a human turn, not
+        // Revise. Comment / Revise clicks are what focus Prompt. Viewer
+        // navigation (j/k/arrows/…) and select-to-copy (y/Y) stay below.
         if in_plan_approval {
             let is_composer_key = match key.code {
                 // y/Y: line / whole-plan copy on plan surfaces (handlers below).
@@ -678,9 +702,6 @@ impl AgentView {
                 _ => false,
             };
             if is_composer_key {
-                if let Some(ref mut pav) = self.plan_approval_view {
-                    pav.focus = PlanApprovalFocus::Prompt;
-                }
                 return self.handle_plan_feedback_key(key);
             }
         }
@@ -710,6 +731,17 @@ impl AgentView {
                 }
                 if self.isolated_preview_typed_open_enter_is_human_turn() {
                     return self.record_open_preview_typed_enter_human_turn();
+                }
+                // Marked Exit plus empty Enter leaves the pane. A paste or
+                // typed sentence already returned above. Empty Enter never
+                // Approves.
+                if self.prompt.text().trim().is_empty()
+                    && self.selected_plan_cta()
+                        == Some(crate::views::file_search::line_viewer::SelectedPlanCta::Exit)
+                {
+                    return self.activate_selected_plan_cta(
+                        crate::views::file_search::line_viewer::SelectedPlanCta::Exit,
+                    );
                 }
                 if self.hold_parked_plan_review_comments_from_enter() {
                     return InputOutcome::Changed;
@@ -926,10 +958,11 @@ impl AgentView {
         let Some((question, response)) = flushed else {
             return;
         };
+        // Esc on a finished side question persists one collapsed Btw block.
         self.scrollback
-            .push_block(crate::scrollback::RenderBlock::user_prompt(question));
-        self.scrollback
-            .push_block(crate::scrollback::RenderBlock::agent_message(response));
+            .push_block(crate::scrollback::RenderBlock::Btw(
+                crate::scrollback::blocks::BtwBlock::new(question, response),
+            ));
     }
 
     /// Dismiss the /btw panel. If Done, flush response to scrollback first.
@@ -1372,9 +1405,15 @@ impl AgentView {
 
         // Forward to ListPaneState if inside the popup area.
         let mut should_enter_commenting = false;
+        let mut enter_commenting_after_lost_scrollbar_up = false;
         if let Some(area) = popup_area
             && area.contains((mouse.column, mouse.row).into())
         {
+            // A content press after a dropped track Up is not a thumb drag.
+            // Remember the latch before list-pane dispatch clears it.
+            let lost_scrollbar_up = matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+                && viewer.list_state.is_scrollbar_dragging()
+                && !viewer.list_state.scrollbar_hit(mouse.column, mouse.row);
             viewer.list_state.handle_mouse_event(
                 mouse.kind,
                 mouse.column,
@@ -1429,11 +1468,25 @@ impl AgentView {
                     && self.plan_approval_view.is_none()
                 {
                     should_enter_commenting = true;
+                } else if lost_scrollbar_up
+                    && on_list_row
+                    && is_plan_preview
+                    && viewer.list_state.input_mode().is_none()
+                    && !in_pav_commenting
+                    && self.plan_approval_view.is_some()
+                {
+                    // A plain plan-row click stays on Preview. This click is
+                    // the one that follows a lost scrollbar Up, so click-to-
+                    // comment still has to anchor.
+                    enter_commenting_after_lost_scrollbar_up = true;
                 }
             }
         }
         if should_enter_commenting {
             return self.enter_casual_plan_commenting();
+        }
+        if enter_commenting_after_lost_scrollbar_up {
+            return self.enter_plan_commenting();
         }
         if restore_stashed_on_leave_commenting {
             self.discard_in_progress_comment();

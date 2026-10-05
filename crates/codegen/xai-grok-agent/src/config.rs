@@ -1349,6 +1349,11 @@ impl AgentDefinition {
     ) -> bool {
         false
     }
+    /// True only for the stock Grok Build parent profile.
+    /// A file-defined agent cannot opt in by using the same name.
+    pub fn is_builtin_grok_build(&self) -> bool {
+        self.builtin_name == Some(BuiltinAgentName::GrokBuild)
+    }
     /// True for a client-supplied inline profile: no built-in, plugin, or on-disk provenance.
     pub fn is_inline_profile(&self) -> bool {
         self.builtin_name.is_none()

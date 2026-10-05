@@ -786,7 +786,7 @@ fn headless_materialize_ctx(
     has_worktree: bool,
 ) -> crate::app::session_startup::MaterializeCtx {
     crate::app::session_startup::MaterializeCtx {
-        has_worktree: false,
+        has_worktree,
         allow_remote_restore:
             crate::app::session_startup::MaterializeCtx::default_allow_remote_restore(),
         chat_mode: false,

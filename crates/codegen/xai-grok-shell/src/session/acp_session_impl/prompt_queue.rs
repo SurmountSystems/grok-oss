@@ -858,6 +858,21 @@ impl SessionActor {
                     queued_id = %id,
                     "send-now: queued row will steer the active goal turn"
                 );
+            } else if turn_running
+                && cancel_decision
+                && item
+                    .prompt_blocks
+                    .iter()
+                    .any(|block| matches!(block, acp::ContentBlock::Image(_)))
+            {
+                // An image-bearing row behind a committed running turn leaves
+                // the queue. The image rides on the interjection, and the
+                // running turn is cancelled so the drain can land.
+                self.enqueue_prompt_as_interjection(
+                    item,
+                    crate::session::events::InterjectionSource::Queue,
+                );
+                cancel_running_turn = true;
             } else {
                 item.send_now = true;
                 let insert_at = Self::send_now_insert_index(&state, running_front_id.as_deref());

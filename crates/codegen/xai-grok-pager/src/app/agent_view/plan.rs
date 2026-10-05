@@ -100,6 +100,20 @@ impl AgentView {
             return;
         }
         self.cancel_line_viewer();
+        self.clear_isolated_preview_open_marker();
+    }
+
+    /// Plan Exit and Esc:close must clear the rebuild dock marker.
+    /// A leftover marker re-wedges Isolated Preview after `/rebuild`.
+    fn clear_isolated_preview_open_marker(&self) {
+        let Some(sid) = self.session.session_id.as_ref() else {
+            return;
+        };
+        crate::slash::commands::plan::persist_isolated_preview_open(
+            &self.session.cwd.to_string_lossy(),
+            sid.0.as_ref(),
+            false,
+        );
     }
 
     /// Isolated Preview stays after present so Comment then Approve can run.
@@ -776,8 +790,10 @@ impl AgentView {
             .filter(|s| !s.trim().is_empty())
     }
     /// Resolve the plan body for the line-viewer preview.
-    /// Prefers content carried on the approval request (inline plan-creation or the shell-read file body), then falls back to the on-disk plan file.
-    /// Request body first keeps file-backed previews working when the path resolution fails or the file disappears between intercept and open.
+    /// A mounted approval snapshot wins. With no snapshot, SQL wins over an
+    /// older leftover `plan.md`, and a `plan.md` rewritten after that SQL row
+    /// wins. `latest_inline_plan_content` covers `/view-plan` after Approve
+    /// when this session has no file.
     pub(crate) fn plan_body_for_preview(&self) -> Option<String> {
         if let Some(content) = self
             .plan_approval_view
@@ -787,12 +803,35 @@ impl AgentView {
         {
             return Some(content.to_owned());
         }
+        if let Some(content) = self.sql_then_disk_plan_body() {
+            return Some(content);
+        }
         if let Some(content) = self.kept_plan.review_content(read_kept_plan_file) {
             return Some(content);
+        }
+        if let Some(content) = self
+            .latest_inline_plan_content
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+        {
+            return Some(content.to_owned());
         }
         self.plan_file_path()
             .and_then(|p| std::fs::read_to_string(p).ok())
             .filter(|s| !s.trim().is_empty())
+    }
+
+    /// SQL session plan, then disk `plan.md` when the file is newer than the row.
+    fn sql_then_disk_plan_body(&self) -> Option<String> {
+        let sid = self.session.session_id.as_ref().map(|s| s.0.to_string())?;
+        let disk = self.plan_file_path();
+        let cfg = xai_grok_shell::token_economy::token_economy_from_disk();
+        let store = xai_grok_shell::grok_oss::try_open_from_token_economy_config(&cfg)?;
+        store.plan_body_sql_then_disk(
+            &sid,
+            xai_grok_shell::grok_oss::SESSION_PLAN_IDENTITY,
+            disk.as_deref(),
+        )
     }
 
     /// File-backed Isolated Preview re-reads session `plan.md` so a frozen
@@ -807,20 +846,23 @@ impl AgentView {
         let Some(path) = self.plan_file_path() else {
             return;
         };
-        let Ok(disk) = std::fs::read_to_string(path) else {
+        let Ok(disk) = std::fs::read_to_string(&path) else {
             return;
         };
         if disk.trim().is_empty() {
             return;
         }
+        // Older leftover disk must not replace a newer SQL body. A file
+        // rewritten after the SQL row is the live plan.
+        let live = self.sql_then_disk_plan_body().unwrap_or(disk);
         let Some(pav) = self.plan_approval_view.as_mut() else {
             return;
         };
         if pav.source == PlanReviewSource::Inline && !pav.is_local_idle_decision {
             return;
         }
-        if pav.plan_content.as_deref() != Some(disk.as_str()) {
-            pav.plan_content = Some(disk);
+        if pav.plan_content.as_deref() != Some(live.as_str()) {
+            pav.plan_content = Some(live);
             pav.has_plan = true;
         }
     }
@@ -1221,7 +1263,7 @@ impl AgentView {
         let Some(pav) = self.plan_approval_view.as_ref() else {
             return InputOutcome::Changed;
         };
-        let freeform = {
+        let typed = {
             let t = self.prompt.text_without_image_chips();
             let trimmed = t.trim();
             if trimmed.is_empty() {
@@ -1230,6 +1272,16 @@ impl AgentView {
                 Some(trimmed.to_owned())
             }
         };
+        // A resume that carried the Revise box must not wrap that text as
+        // Approve review comments. Click Approve of notes typed on this
+        // present still wraps them.
+        let carried_revise = pav.keep_draft_is_next_operator_turn
+            && typed.as_deref().is_some_and(|text| {
+                pav.feedback_draft
+                    .as_deref()
+                    .is_some_and(|draft| draft.trim() == text.trim())
+            });
+        let freeform = if carried_revise { None } else { typed.clone() };
         let review_comments = {
             let formatted = pav.format_feedback(freeform.as_deref());
             if formatted.trim().is_empty() {
@@ -1242,7 +1294,13 @@ impl AgentView {
                 ))
             }
         };
-        if pav.is_after_turn() {
+        let prompt_focus = pav.focus == PlanApprovalFocus::Prompt;
+        let held_comment = pav.comment_held_from_enter;
+        let keep_next_turn = pav.keep_draft_is_next_operator_turn && !carried_revise;
+        // Local idle decision is not a post-turn ExecutePlan. It has no
+        // waiter, so Approve starts the implement turn (SendPromptNow when
+        // the composer holds a chip).
+        if pav.is_after_turn() && !pav.is_local_idle_decision {
             let snapshot = pav.plan_content.clone().unwrap_or_default();
             if let Some(disk) = live_keep
                 && disk != snapshot
@@ -1276,14 +1334,56 @@ impl AgentView {
         // approval tool result. Idle has no waiter, so start the implement turn.
         let sent = pav.send_approved(review_comments.clone());
         self.close_plan_review_and_forget(PlanReviewOutcome::Approved);
+        self.plan_decision_resolved = true;
+        self.persist_plan_decision_resolved_flag(true);
         if sent {
-            return InputOutcome::Changed;
+            // Click Approve with notes stays on the approval. It is not an
+            // interject and not a queued prompt. The review lead comes
+            // before the critique. A pane that was closed, then typed, is
+            // the next Operator turn: that path still interjects, and the
+            // session draft comes back into the composer.
+            // Preview line comments with an empty composer stay Changed.
+            let notes_on_approval =
+                review_comments.is_some() && (prompt_focus || freeform.is_some());
+            if notes_on_approval && keep_next_turn && !held_comment {
+                return InputOutcome::Action(Action::Interject {
+                    text: review_comments.unwrap_or_default(),
+                    images: Vec::new(),
+                });
+            }
+            if notes_on_approval {
+                if let Some(notes) = review_comments {
+                    self.scrollback.push_block(RenderBlock::user_prompt(notes));
+                }
+                if let Some(text) = freeform.as_deref()
+                    && self.prompt.text().trim() == text.trim()
+                {
+                    self.prompt.set_text("");
+                    self.clear_unsent_prompt_draft();
+                }
+                return InputOutcome::Changed;
+            }
+            // Line comments with an empty composer stay on the approval.
+            // A bare Approve still starts the implement turn. The shell
+            // tool result is not a substitute for that sentence.
+            if review_comments.is_some() {
+                return InputOutcome::Changed;
+            }
         }
         let implement = crate::views::plan_approval_view::PLAN_APPROVED_IMPLEMENT_MESSAGE;
         let start_text = match review_comments.as_deref() {
             Some(notes) => format!("{implement}\n\n{notes}"),
             None => implement.to_string(),
         };
+        if !self.prompt.images.is_empty() {
+            let image_notice = self.unbound_image_placeholder_notice();
+            let images = self.prompt.drain_images();
+            return InputOutcome::Action(Action::SendPromptNow {
+                text: start_text,
+                images,
+                image_notice,
+            });
+        }
         InputOutcome::Action(Action::SendPrompt(start_text))
     }
     /// Fold freeform-only images into the session draft.
@@ -1370,13 +1470,20 @@ impl AgentView {
 
     pub(crate) fn abandon_plan(&mut self) -> InputOutcome {
         let Some(pav) = self.plan_approval_view.as_ref() else {
+            // Exit after a dead park: the pane can still be covering with no
+            // waiter. Leave it. Empty Enter never Approves.
+            if self.is_plan_viewer() {
+                self.leave_parked_isolated_preview();
+            }
             return InputOutcome::Changed;
         };
         if self.is_post_turn_build_starting() {
             self.show_toast("Wait for the current turn to end before abandoning the plan.");
             return InputOutcome::Changed;
         }
-        if pav.is_after_turn() {
+        // A real post-turn review waits for SetPlanMode(Off). A local idle
+        // decision is AfterTurn with no waiter, and Exit must unmount.
+        if pav.is_after_turn() && !pav.is_local_idle_decision {
             return InputOutcome::Action(Action::SetPlanMode(
                 crate::app::actions::PlanModeKind::Off,
             ));
@@ -1389,6 +1496,20 @@ impl AgentView {
         );
         pav.send_abandoned();
         self.close_plan_review_and_forget(PlanReviewOutcome::Abandoned);
+        // Exit decides the present. Post-turn SetPlanMode stays mounted
+        // above and does not take this path. Revise does not call abandon.
+        self.plan_decision_resolved = true;
+        self.persist_plan_decision_resolved_flag(true);
+        self.clear_isolated_preview_open_marker();
+        // A local idle park can still look like a running turn. Exit finishes
+        // that turn so the pager is Idle: no timer and no Waiting chrome.
+        let dead_park =
+            pav.is_local_idle_decision || (pav.is_in_turn() && !pav.has_live_ext_waiter());
+        if dead_park {
+            self.session.finish_turn(&mut self.scrollback);
+            self.mark_turn_finished(crate::app::cancel_latency::TurnEnd::Completed);
+            self.last_activity = None;
+        }
         InputOutcome::Changed
     }
     /// The shell leaves plan mode, but its confirming `CurrentModeUpdate("default")` is fire-and-forget and only arrives after the exit tool runs.
@@ -1519,7 +1640,7 @@ impl AgentView {
         } else {
             Some(formatted)
         };
-        let post_turn = pav.is_after_turn();
+        let post_turn = pav.is_after_turn() && !pav.is_local_idle_decision;
         if !post_turn
             && self.is_minimal_mode()
             && let Some(msg) = to_send.as_deref().map(str::trim).filter(|s| !s.is_empty())
@@ -1532,7 +1653,9 @@ impl AgentView {
             self.show_toast("Type revision notes, or press a to approve.");
             return InputOutcome::Changed;
         }
-        if self.is_post_turn_build_starting() {
+        // The view was taken above, so is_post_turn_build_starting() is false
+        // until it is put back. Refuse while ExecutePlan is already in flight.
+        if self.execute_plan.is_some() && post_turn {
             self.plan_approval_view = Some(pav);
             self.show_toast(BUILD_IN_FLIGHT_REVISE_NOTICE);
             return InputOutcome::Changed;
@@ -1607,6 +1730,8 @@ impl AgentView {
         self.clear_unsent_prompt_draft();
         self.line_viewer = None;
         self.prompt.textarea.cancel_undo_group();
+        // Idle turn row paints Waiting for updated plan... after Clarify.
+        self.plan_feedback_in_flight = Some(PlanFeedbackInFlight::Clarifying);
         self.show_toast("Clarifying question sent.");
         {
             use xai_grok_telemetry::events::PlanSubmit;
@@ -1683,9 +1808,14 @@ impl AgentView {
             pav.focus = PlanApprovalFocus::Preview;
             if keep_draft {
                 // Typed while the pane was shut: keep as the next prompt.
-                // Copy text only; stash() drains image chips.
-                pav.stashed_prompt.text = self.prompt.text().to_string();
-                pav.stashed_prompt.cursor = live_cursor;
+                // A real session stash must survive reopen. Copy text only
+                // when the stash is empty; stash() drains image chips.
+                let stash_real = !pav.stashed_prompt.text.trim().is_empty()
+                    || !pav.stashed_prompt.images.is_empty();
+                if !stash_real {
+                    pav.stashed_prompt.text = self.prompt.text().to_string();
+                    pav.stashed_prompt.cursor = live_cursor;
+                }
                 pav.keep_draft_is_next_operator_turn = true;
             }
         }
@@ -1976,8 +2106,13 @@ impl AgentView {
                     // still reach send_plan_questions when the pane is shut.
                     // Comment Enter still sends or holds. Empty Enter never
                     // Approves. A typed comment stays Changed, not Interject.
+                    // An unknown slash is still a revision. A builtin slash
+                    // already returned SendPrompt. Ordinary prose with the
+                    // pane shut is a normal prompt.
+                    let unknown_slash = freeform_text.trim().starts_with('/');
                     if !panel_open
                         && !freeform_text.trim().is_empty()
+                        && !unknown_slash
                         && !matches!(
                             intent,
                             PlanPromptIntent::Comment | PlanPromptIntent::Questions

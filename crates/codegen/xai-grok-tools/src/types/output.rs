@@ -652,9 +652,16 @@ impl ToolOutput {
         }
     }
     fn format_task_duration_secs(duration_secs: f64) -> String {
-        xai_tty_utils::format_human_duration(std::time::Duration::from_secs_f64(
-            duration_secs.max(0.0),
-        ))
+        // Under 60 seconds the single-task prompt is two decimal places
+        // (`Duration: 5.00s`). At 60 seconds and above the same helper prints
+        // compact minutes (`Duration: 15m43s` for 943), never a raw second count.
+        if duration_secs < 60.0 {
+            format!("{duration_secs:.2}s")
+        } else {
+            xai_tty_utils::format_human_duration(std::time::Duration::from_secs_f64(
+                duration_secs.max(0.0),
+            ))
+        }
     }
     /// Render tool output for inclusion in the model prompt with specified format.
     pub fn to_prompt_format(&self) -> String {
@@ -784,7 +791,10 @@ impl ToolOutput {
                         format!("=== Task {} ===", r.task_id),
                         format!("Command: {}", r.command),
                         format!("Status: {}", r.status),
-                        format!("Duration: {:.2}s", r.duration_secs),
+                        format!(
+                            "Duration: {}",
+                            Self::format_task_duration_secs(r.duration_secs)
+                        ),
                     ];
                     if let Some(code) = r.exit_code {
                         lines.push(format!("Exit Code: {}", code));

@@ -674,12 +674,17 @@ pub fn format_usage_summary_with_live(
     live: SamplingIdentityKind,
     now: chrono::DateTime<chrono::Utc>,
 ) -> String {
-    // Floor to match the backend SpendingLimiter's `as u8` truncation (99.994% renders as 99%, never 100% until truly exhausted)
-    let mut lines = vec![format!(
-        "{}: {}%",
-        balance.usage_label(),
-        balance.usage_pct.floor() as i64
-    )];
+    // Floor to match the backend SpendingLimiter's `as u8` truncation (99.994% renders as 99%, never 100% until truly exhausted).
+    // An unknown included SuperGrok period reading must not paint a silent 0%.
+    let mut lines = if balance.included_usage_known {
+        vec![format!(
+            "{}: {}%",
+            balance.usage_label(),
+            balance.usage_pct.floor() as i64
+        )]
+    } else {
+        vec![format!("{}: not yet available", balance.usage_label())]
+    };
     if let Some(reset) = &balance.period_end_display {
         lines.push(format!("Next reset: {reset}"));
     }
@@ -1426,19 +1431,12 @@ pub fn credit_bar_line_for_session_emphasizing_meter_source(
         ),
     );
 
-    // Included SuperGrok period limits % path may append linear-burn pacing.
-    // SuperGrok dollar credits $ path does not (period is full; pacing is about
-    // included burn).
+    // Header chrome names the meter only. It does not append a burn line,
+    // the 15 minute window, or the 24 hour window. `/usage` still prints the
+    // full pacing sentence. SuperGrok dollar credits and console stay distinct.
     let on_dollar_credits = meter.contains("SuperGrok dollar credits");
     let on_console = meter.starts_with("console");
-    let text = if on_dollar_credits || on_console {
-        meter
-    } else {
-        match balance.pacing_chip(SamplingIdentityKind::SuperGrokSession, chrono::Utc::now()) {
-            Some(chip) if chip.len() <= 28 => format!("{meter} · {chip}"),
-            _ => meter,
-        }
-    };
+    let text = meter;
 
     // Combined remaining is for multi-pool chrome (stay on included while
     // a sibling pool still has room). Color thresholds are on the live
@@ -2404,8 +2402,12 @@ mod tests {
         let theme = Theme::default();
         let line = credit_bar_line(&bal(24.0), false, &theme);
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-        // Compact status: free SuperGrok period used % (no "Credits used").
-        assert_eq!(text, "free SuperGrok period · 24%");
+        // Compact status names included SuperGrok period limits as SuperGrok period.
+        assert_eq!(text, "SuperGrok period · 24%");
+        assert!(
+            !text.to_ascii_lowercase().contains("free"),
+            "included SuperGrok period limits must not be called free: {text}"
+        );
         assert!(!text.contains("Credits"));
         assert!(
             !text.contains("intent ·") && !text.split_whitespace().any(|w| w == "intent"),
@@ -2413,8 +2415,8 @@ mod tests {
         );
     }
 
-    /// Named contract (2026-08-09): status compact meter names the real meter
-    /// (free SuperGrok period), never the bare abstraction word "intent".
+    /// Named contract: compact status names included SuperGrok period limits.
+    /// SuperGrok is paid. The word free is rejected. Bare "intent" stays rejected.
     #[test]
     fn compact_status_names_free_supergrok_period_not_bare_intent() {
         let warm = compact_meter_text_for_live_identity(
@@ -2425,7 +2427,14 @@ mod tests {
             ConsoleTeamPrepaidGap::MissingManagementKey,
             None,
         );
-        assert_eq!(warm, "free SuperGrok period · 24%");
+        assert_eq!(
+            warm, "SuperGrok period · 24%",
+            "included SuperGrok period limits compact chrome is SuperGrok period, got {warm}"
+        );
+        assert!(
+            !warm.to_ascii_lowercase().contains("free"),
+            "included SuperGrok period limits must not be called free: {warm}"
+        );
         assert!(
             !warm.contains("intent ·") && !warm.split_whitespace().any(|w| w == "intent"),
             "paying-path label must not be bare intent: {warm}"
@@ -2439,16 +2448,27 @@ mod tests {
             ConsoleTeamPrepaidGap::MissingManagementKey,
             None,
         );
-        assert_eq!(cold, "free SuperGrok period · ...%");
+        assert_eq!(
+            cold, "SuperGrok period · ...%",
+            "included SuperGrok period limits cold chrome is SuperGrok period, got {cold}"
+        );
+        assert!(
+            !cold.to_ascii_lowercase().contains("free"),
+            "included SuperGrok period limits must not be called free: {cold}"
+        );
         assert!(
             !cold.contains("intent ·") && !cold.split_whitespace().any(|w| w == "intent"),
             "cold chrome must not use bare intent: {cold}"
         );
 
+        let human = ActiveSpendDriver::SuperGrokFreePeriod.as_human();
         assert_eq!(
-            ActiveSpendDriver::SuperGrokFreePeriod.as_human(),
-            "free SuperGrok period",
-            "compact prefix must stay aligned with ActiveSpendDriver human label"
+            human, "SuperGrok period",
+            "included SuperGrok period limits compact prefix must stay aligned with ActiveSpendDriver human label, got {human}"
+        );
+        assert!(
+            !human.to_ascii_lowercase().contains("free"),
+            "included SuperGrok period limits must not be called free: {human}"
         );
     }
 
@@ -2480,7 +2500,11 @@ mod tests {
         let theme = Theme::default();
         let line = credit_bar_line(&bal(0.0), false, &theme);
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-        assert_eq!(text, "Credits used: 0%");
+        assert_eq!(text, "SuperGrok period · 0%");
+        assert!(
+            !text.to_ascii_lowercase().contains("free"),
+            "included SuperGrok period limits must not be called free: {text}"
+        );
         assert_eq!(
             line.spans.first().and_then(|s| s.style.fg),
             Some(theme.accent_success)

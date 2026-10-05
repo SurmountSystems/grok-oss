@@ -456,6 +456,20 @@ impl AgentView {
             };
         }
 
+        // Limits: Esc/q close, j/k scroll. Route before the generic char take()
+        // so a character key does not move the modal into unreachable!().
+        if let ActiveModal::Limits { state } = modal {
+            use crate::views::limits_modal::LimitsModalOutcome;
+            return match crate::views::limits_modal::handle_limits_key(state, key) {
+                LimitsModalOutcome::Close => {
+                    self.active_modal = None;
+                    InputOutcome::Changed
+                }
+                LimitsModalOutcome::Changed => InputOutcome::Changed,
+                LimitsModalOutcome::Unchanged => InputOutcome::Unchanged,
+            };
+        }
+
         // EditConfirm: single char matching.
         let ch = match key.code {
             KeyCode::Char(c) => c,

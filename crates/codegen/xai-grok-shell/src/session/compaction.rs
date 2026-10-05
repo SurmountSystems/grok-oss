@@ -2215,7 +2215,10 @@ impl SessionActor {
     }
     /// Returns true when an ordinary session should compact after this sampling error.
     /// An L3 or a once-run nested role returns false and must not CompactAndResubmit.
-    /// Otherwise this is [`Self::estimate_exceeds_error_context_window`] unless compaction is suppressed.
+    /// A sampling error with no model metadata is not a context-window signal, so this
+    /// stays false until that field arrives. Otherwise this is
+    /// [`Self::estimate_exceeds_error_context_window`] unless compaction is suppressed.
+    /// The shared overflow estimate still uses the session window for mid-salvage.
     /// Called from `handle_sampling_failure` with the `SamplingErrorInfo` the sampler hands back.
     pub(crate) async fn should_compact_on_error(
         &self,
@@ -2226,6 +2229,12 @@ impl SessionActor {
             return false;
         }
         if self.compaction.is_suppressed() {
+            return false;
+        }
+        // A proxy that has not reported model metadata is not a context-window
+        // signal. Compact-and-resubmit stays a no-op until that field arrives.
+        // The shared overflow estimate still uses the session window for salvage.
+        if err.model_metadata.is_none() {
             return false;
         }
         self.estimate_exceeds_error_context_window(err).await

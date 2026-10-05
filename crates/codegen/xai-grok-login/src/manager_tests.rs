@@ -352,8 +352,7 @@ async fn update_preserves_team_fields_when_proxy_omits_them() {
     assert_eq!(on_disk.principal_type.as_deref(), Some("Team"));
     assert_eq!(on_disk.team_id.as_deref(), Some("team-xyz"));
 }
-/// Team tokens are stored under the base scope key (same as personal).
-/// There is at most one OAuth entry per issuer/client pair.
+/// A team token is stored under the base scope and under `{base}::team::{team_id}`.
 #[tokio::test]
 async fn update_stores_team_token_under_base_and_multi_slot() {
     let dir = tempfile::tempdir().unwrap();
@@ -438,7 +437,8 @@ async fn reauth_clear_keeps_supergrok_multi_slots() {
         "Business multi-slot must survive reauth clear"
     );
 }
-/// Logging in as personal must evict any existing team token (at most one OAuth session per issuer/client pair).
+/// A later personal SuperGrok login replaces the active base and writes `{base}::personal`.
+/// The earlier team multi-slot stays, so both principals remain.
 #[tokio::test]
 async fn team_login_then_personal_keeps_both_principals() {
     let dir = tempfile::tempdir().unwrap();

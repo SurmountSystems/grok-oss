@@ -1198,13 +1198,17 @@ impl AgentView {
         } else {
             display_state.clone()
         };
-        let turn_status_height = if turn_status::should_show(
-            &status_state,
-            turn_status_drain_blocked,
-            self.session_starting_since,
-            turn_status_watchers,
-            turn_status_parked,
-        ) {
+        // Idle Revise / Clarify still owns the turn row after the session
+        // goes idle. `should_show` hides that row when nothing else is busy.
+        let plan_loop_row = self.plan_loop_status_label().is_some();
+        let turn_status_height = if plan_loop_row
+            || turn_status::should_show(
+                &status_state,
+                turn_status_drain_blocked,
+                self.session_starting_since,
+                turn_status_watchers,
+                turn_status_parked,
+            ) {
             1
         } else {
             0
@@ -1468,6 +1472,18 @@ impl AgentView {
         ) {
             // Context figure only. The 15-minute and 24-hour windows stay on `/uptime`.
             status.push("context", ctx_line);
+        }
+        let todo_counts = self.todo.counts();
+        let todo_total = todo_counts.total();
+        if todo_total > 0 {
+            let label = format!("tasks {}/{}", todo_counts.completed, todo_total);
+            status.push(
+                "tasks",
+                Line::from(Span::styled(
+                    label,
+                    Style::default().fg(theme.gray).bg(theme.bg_base),
+                )),
+            );
         }
         // No SuperGrok period chip on this header. `/limits` still names that meter.
         // The short `limits N%` chip below is not that verbose period helper.
@@ -3750,8 +3766,6 @@ impl AgentView {
                 if self.vim_mode {
                     h.push(HintItem::paired(key!('j'), key!('k'), "nav"));
                 }
-                h.push(HintItem::new(key!('y'), "copy plan"));
-                h.push(HintItem::new(key!('q'), "quit plan"));
                 h.push(HintItem::new(key!(Tab), "prompt"));
                 h
             } else if is_plan_viewer {

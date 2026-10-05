@@ -98,16 +98,23 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
             return;
         }
         let can_wake = self.completed.get(&subagent_id).is_some_and(|child| {
-            !child.request.owner.is_workflow()
-                && (authorization == WakeAuthorization::ResolvedTarget
-                    || matches!(
-                        &ingress.request.sender_context,
-                        ActiveMessageSenderContext::GrantedChild { .. }
-                    )
-                    || self.graph.is_reachable_from(
-                        &subagent_id,
-                        Self::message_sender_session(&ingress.request.sender_context),
-                    ))
+            if child.request.owner.is_workflow() {
+                return false;
+            }
+            if authorization == WakeAuthorization::ResolvedTarget {
+                return true;
+            }
+            let sender_session = Self::message_sender_session(&ingress.request.sender_context);
+            let root_owns_parent = matches!(
+                &ingress.request.sender_context,
+                ActiveMessageSenderContext::RootSession { session_id }
+                    if session_id.as_ref() == child.request.parent_session_id
+            );
+            matches!(
+                &ingress.request.sender_context,
+                ActiveMessageSenderContext::GrantedChild { .. }
+            ) || root_owns_parent
+                || self.graph.is_reachable_from(&subagent_id, sender_session)
         });
         if !can_wake {
             let _ = ingress

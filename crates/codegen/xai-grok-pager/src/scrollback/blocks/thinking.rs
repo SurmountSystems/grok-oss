@@ -15,7 +15,7 @@ use crate::appearance::AppearanceConfig;
 
 /// TODO: hard-coded because `AppView::minimal_key_intercept` matches this chord literally instead of going through the keybinding registry.
 /// Resolve the label from the registry once it does, so a remap is advertised correctly.
-const EXPAND_HINT: &str = "ctrl+e to expand";
+const EXPAND_HINT: &str = "ctrl+t to expand";
 
 const EXPAND_HINT_GAP: &str = "  ";
 
@@ -32,7 +32,7 @@ fn looks_like_user_facing_draft(_text: &str) -> bool {
     false
 }
 
-/// Append the dim `(ctrl+e to expand)` hint to a collapsed header line. The `Collapsed` guard matters because
+/// Append the dim `(ctrl+t to expand)` hint to a collapsed header line. The `Collapsed` guard matters because
 /// `render_empty_placeholder` reuses the collapsed renderer for an empty body in other modes. There the hint would
 /// be a lie.
 fn append_expand_hint(line: Line<'static>, ctx: &BlockContext) -> Line<'static> {

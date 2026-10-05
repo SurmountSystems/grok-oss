@@ -5353,7 +5353,10 @@ pub(crate) fn response_include_extensions(
     api_backend: &ApiBackend,
     base_url: &str,
 ) -> Vec<String> {
-    let is_trusted_route = crate::util::is_trusted_cli_chat_proxy_url(base_url)
+    // Loopback is a trusted proxy for local mocks, and a local Responses
+    // server rejects `no_inline_citations`. Keep the include on the production
+    // proxy and on https first-party x.ai hosts only.
+    let is_trusted_route = crate::util::is_prod_cli_chat_proxy_url(base_url)
         || crate::util::is_trusted_xai_https_url(base_url);
     if supports_backend_search && api_backend == &ApiBackend::Responses && is_trusted_route {
         vec![NO_INLINE_CITATIONS_RESPONSE_INCLUDE.to_owned()]

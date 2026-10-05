@@ -309,12 +309,29 @@ pub fn render_turn_status(
             Some(d) if d.as_secs() >= 60 => format!(" {}", format_turn_timer(d)),
             _ => String::new(),
         };
+        let queued_sendable = held_queue > 0 && held_queue_top_sendable;
+        let queued_phase = if queued_sendable {
+            activity_started_at
+                .map(|started| format!(" {}", format_turn_timer(started.elapsed())))
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
+        let parked_name = if queued_sendable {
+            match activity {
+                Some(TurnActivity::Waiting(reason)) => reason.label(),
+                _ => parked_wait_name(activity),
+            }
+        } else {
+            parked_wait_name(activity)
+        };
         let cue = match (still_running_label(watchers), parked) {
-            (Some(label), true) => Some(format!("{label}{parked_elapsed}{parked_suffix}")),
+            (Some(label), true) => Some(format!(
+                "{label}{queued_phase}{parked_elapsed}{parked_suffix}"
+            )),
             (Some(label), false) => Some(label),
             (None, true) => Some(format!(
-                "{}{parked_elapsed}{parked_suffix}",
-                parked_wait_name(activity)
+                "{parked_name}{queued_phase}{parked_elapsed}{parked_suffix}"
             )),
             (None, false) => None,
         };
@@ -336,9 +353,59 @@ pub fn render_turn_status(
                 Span::styled(cue, Style::default().fg(label_fg)),
             ];
             buf.set_line(area.x, area.y, &Line::from(spans), area.width);
+            let turn_running = !state.is_idle();
+            let chrome = work_control_chrome(
+                show_buttons,
+                turn_running,
+                watchers.subagents,
+                global_paused,
+            );
+            let pause_str = if chrome.show_pause {
+                pause_button_str(chrome.pause_is_resume, true)
+            } else {
+                ""
+            };
+            let stop_str = if chrome.show_stop {
+                stop_button_str(true)
+            } else {
+                ""
+            };
+            let pause_width = pause_str.width();
+            let stop_width = stop_str.width();
+            let mut button_x =
+                area.x + area.width.saturating_sub((pause_width + stop_width) as u16);
+            let pause_button = if chrome.show_pause && pause_width > 0 {
+                let pause_x = button_x;
+                let pause_fg = if pause_hovered {
+                    theme.text_primary
+                } else {
+                    theme.gray
+                };
+                let span = Span::styled(pause_str, right_style(pause_fg));
+                buf.set_span(button_x, area.y, &span, pause_width as u16);
+                button_x += pause_width as u16;
+                Some(Rect::new(pause_x, area.y, pause_width as u16, 1))
+            } else {
+                None
+            };
+            let cancel_button = if chrome.show_stop && stop_width > 0 {
+                let cancel_x = button_x;
+                let cancel_fg = if cancel_hovered {
+                    theme.accent_error
+                } else {
+                    theme.gray
+                };
+                let span = Span::styled(stop_str, right_style(cancel_fg));
+                buf.set_span(button_x, area.y, &span, stop_width as u16);
+                Some(Rect::new(cancel_x, area.y, stop_width as u16, 1))
+            } else {
+                None
+            };
             return TurnStatusOutput {
                 watching_cue: (show_buttons && watchers.total() > 0)
                     .then(|| Rect::new(area.x, area.y, cue_width, 1)),
+                pause_button,
+                cancel_button,
                 ..TurnStatusOutput::default()
             };
         }
@@ -484,13 +551,14 @@ pub fn render_turn_status(
             Some(TurnActivity::ToolRunning { title, .. })
                 if title.starts_with("Ask: ") || title.starts_with("Ask ")
         );
-    let phase_timer_str = if is_asking || area.width < PHASE_TIMER_MIN_WIDTH {
-        String::new()
-    } else {
-        activity_started_at
-            .map(|t| format!(" {}", format_turn_timer(t.elapsed())))
-            .unwrap_or_default()
-    };
+    let phase_timer_str =
+        if is_asking || area.width < PHASE_TIMER_MIN_WIDTH || label.contains("next try in") {
+            String::new()
+        } else {
+            activity_started_at
+                .map(|t| format!(" {}", format_turn_timer(t.elapsed())))
+                .unwrap_or_default()
+        };
     let phase_timer_width = phase_timer_str.width();
     let timer_style = Style::default()
         .fg(theme.gray)
@@ -689,20 +757,11 @@ fn compute_activity(
         (
             AgentState::TurnRunning,
             Some(TurnActivity::Retrying {
-                attempt,
-                max_retries,
-                reason,
-                error_type,
+                attempt, reason, ..
             }),
         ) => (
             Style::default().fg(theme.warning),
-            crate::app::error_display::format_retry_activity_label(
-                *attempt,
-                *max_retries,
-                reason,
-                error_type.as_deref(),
-                crate::app::error_display::RetryLabelStyle::Status,
-            ),
+            format!("Retrying the model request (attempt {attempt}): {reason}"),
             false,
         ),
         (AgentState::TurnRunning, Some(TurnActivity::WritingToolCall(writing))) => (
@@ -1260,7 +1319,7 @@ mod tests {
         use crate::acp::tracker::WaitingReason;
         let theme = Theme::current();
         let cases = [
-            (WaitingReason::Model, "Waiting for response…"),
+            (WaitingReason::Model, "Waiting for the model…"),
             (WaitingReason::subagent(), "Waiting for subagent…"),
             (
                 WaitingReason::Subagent {
@@ -1432,13 +1491,16 @@ mod tests {
         ] {
             assert!(should_show(&AgentState::Idle, false, None, watchers, false));
         }
-        assert!(!should_show(
-            &AgentState::TurnRunning,
-            false,
-            None,
-            Watchers::default(),
-            false
-        ));
+        assert!(
+            should_show(
+                &AgentState::TurnRunning,
+                false,
+                None,
+                Watchers::default(),
+                false
+            ),
+            "a running turn still shows the status row"
+        );
     }
     #[test]
     fn should_show_parked_always() {
@@ -1998,6 +2060,7 @@ mod tests {
         args.parked = true;
         args.held_queue = 1;
         args.held_queue_top_sendable = true;
+        args.activity_started_at = Some(Instant::now() - Duration::from_secs(5 * 60 + 59));
         let text = render_row_text(args, 80);
         assert!(
             text.contains("Waiting for subagent… 5m59s · 1 queued, Enter to send now"),
@@ -2017,12 +2080,12 @@ mod tests {
         };
         let wide = render(PHASE_TIMER_MIN_WIDTH);
         assert!(
-            wide.contains("Waiting for response… 4m0s") && wide.contains("11s"),
+            wide.contains("Waiting for the model… 4m0s") && wide.contains("11s"),
             "a wide row keeps both timers, got: {wide:?}"
         );
         let narrow = render(PHASE_TIMER_MIN_WIDTH - 1);
         assert!(
-            narrow.contains("Waiting for response…") && narrow.contains("11s"),
+            narrow.contains("Waiting for the model…") && narrow.contains("11s"),
             "the narrow row keeps the label and turn timer, got: {narrow:?}"
         );
         assert!(

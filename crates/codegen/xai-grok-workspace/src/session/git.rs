@@ -3175,28 +3175,18 @@ fn ensure_ref_arg_safe(value: &str, what: &str) -> Result<()> {
     );
     Ok(())
 }
-/// Seed a committed `.gitignore` (secrets never enter git) when a fresh conversation branch is created and the repo has none.
-/// Distinct from [`seed_default_excludes`], which seeds the *local-only* `info/exclude` as a `stage_all` backstop.
-/// Never overwrites an existing `.gitignore`.
+/// Write the default `.gitignore` when a fresh conversation branch has none.
+/// The file stays untracked so the fork point remains the base commit. The
+/// next commit on the branch can include it. An existing `.gitignore` is left
+/// as it is. Distinct from [`seed_default_excludes`], which seeds the
+/// local-only `info/exclude` as a `stage_all` backstop.
 async fn seed_default_gitignore(git_root: &Path) -> Result<()> {
     let path = git_root.join(".gitignore");
     if tokio::fs::metadata(&path).await.is_ok() {
         return Ok(());
     }
     tokio::fs::write(&path, xai_grok_workspace_types::binding::DEFAULT_GITIGNORE).await?;
-    git_cli(git_root, &["add", "--end-of-options", ".gitignore"]).await?;
-    git_cli(
-        git_root,
-        &[
-            "commit",
-            "-m",
-            "Seed default .gitignore",
-            "--end-of-options",
-            ".gitignore",
-        ],
-    )
-    .await?;
-    tracing::debug!(path = %path.display(), "seeded and committed default .gitignore");
+    tracing::debug!(path = %path.display(), "wrote default .gitignore on the new conversation branch");
     Ok(())
 }
 /// `EnsureBinding` (`workspace.git_ensure_binding`): make the conversation branch exist and be checked out. A remote `conv/<id>` hit is a resume in a fresh sandbox: check it out, do not re-fork.

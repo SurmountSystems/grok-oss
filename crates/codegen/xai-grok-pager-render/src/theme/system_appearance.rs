@@ -310,7 +310,11 @@ mod tests {
     #[test]
     fn to_theme_kind_dark_ignores_light_override() {
         let result = to_theme_kind(SystemAppearance::Dark, None, Some(ThemeKind::TokyoNight));
-        assert_eq!(result, ThemeKind::GrokNight);
+        assert_eq!(
+            result,
+            ThemeKind::Doge,
+            "a light override must not replace the dark DOGE default"
+        );
     }
 
     #[test]

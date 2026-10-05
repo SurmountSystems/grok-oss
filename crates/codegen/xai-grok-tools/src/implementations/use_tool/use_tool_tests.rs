@@ -735,11 +735,15 @@ fn steer_names_only_installed_tools() {
         cut: None,
     };
     let steer = McpDumpKind::LongLineJson.steer("bash", tools);
-    assert!(
-        steer.contains("python3"),
-        "names the present python: {steer}"
+    // No query tool is installed, so the example clause is empty.
+    assert_eq!(
+        steer,
+        " The full output is valid JSON with a very long line, so grep/read_file are ineffective on it \u{2014} use `bash` to query the saved file."
     );
+    assert!(!steer.contains("python"), "must not name python: {steer}");
     assert!(!steer.contains("jq"), "must not name absent jq: {steer}");
+    assert!(!steer.contains("sed"), "must not name absent sed: {steer}");
+    assert!(!steer.contains("cut"), "must not name absent cut: {steer}");
     assert!(
         !steer.contains("if available"),
         "no hedge once presence is known: {steer}"

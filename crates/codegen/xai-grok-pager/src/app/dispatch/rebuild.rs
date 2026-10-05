@@ -52,6 +52,24 @@ fn running_binary_identity() -> String {
     )
 }
 
+/// `oldsha` / `newsha` are not hex, so `leader_is_older_than` treats them as
+/// the same semver. A distinct parenthetical at that semver still arms.
+/// A newer self semver does not downgrade onto an older install.
+fn same_semver_distinct_nonhex_identity(self_identity: &str, installed: &str) -> bool {
+    if self_identity == installed {
+        return false;
+    }
+    let Some(self_id) = xai_grok_shell::leader::parse_binary_identity(self_identity) else {
+        return false;
+    };
+    let Some(installed_id) = xai_grok_shell::leader::parse_binary_identity(installed) else {
+        return false;
+    };
+    self_id.version == installed_id.version
+        && self_id.git_sha.is_none()
+        && installed_id.git_sha.is_none()
+}
+
 /// Pure decision + path check for peer re-exec (unit-tested).
 ///
 /// Returns the `RebuildRelaunch` to arm when the request is fresh, the installed
@@ -79,7 +97,10 @@ pub(crate) fn peer_rebuild_relaunch_if_applicable(
         request,
         now_secs,
         current_exe,
-    ) {
+    ) && !same_semver_distinct_nonhex_identity(self_identity, &request.installed_identity)
+    {
+        return None;
+    } else if !xai_grok_update::peer_rebuild_request_is_actionable(request, now_secs) {
         return None;
     }
     if !request.installed_exe.is_file() {
@@ -119,15 +140,51 @@ pub(crate) fn take_peer_rebuild_relaunch() -> bool {
 /// restore reads. Plan notes stay on the composer draft path.
 fn persist_session_work_for_rebuild(app: &AppView) {
     for agent in app.agents.values() {
-        agent.persist_unsent_composer_draft_now();
         let Some(sid) = agent.session.session_id.as_ref() else {
+            agent.persist_unsent_composer_draft_now();
             continue;
         };
         let cwd = agent.session.cwd.to_string_lossy();
+        let plan_notes = agent
+            .plan_approval_view
+            .as_ref()
+            .and_then(|view| view.feedback_draft.clone())
+            .filter(|notes| !notes.trim().is_empty());
+        if let Some(notes) = plan_notes.as_deref() {
+            let _ = xai_grok_shell::session::unsent_prompt_draft::write_unsent_prompt_draft(
+                cwd.as_ref(),
+                sid.0.as_ref(),
+                notes,
+            );
+            agent.append_prompt_wal(
+                xai_grok_shell::session::prompt_wal::PromptWalKind::RebuildFlush,
+                notes,
+                &[],
+            );
+        } else {
+            let draft = agent.prompt.text().to_string();
+            agent.persist_unsent_composer_draft_now();
+            if !draft.trim().is_empty() {
+                agent.append_prompt_wal(
+                    xai_grok_shell::session::prompt_wal::PromptWalKind::RebuildFlush,
+                    &draft,
+                    &agent.prompt.images,
+                );
+            }
+        }
+        let committed = agent.committed_human_turn_texts(true, true);
         let rows: Vec<_> = agent
             .session
             .pending_prompts
             .iter()
+            .filter(|prompt| {
+                prompt.continue_prior_work
+                    || prompt.kind != crate::app::agent::QueueEntryKind::Prompt
+                    || !crate::app::agent_view::AgentView::queue_text_matches_committed_human_turn(
+                        &prompt.text,
+                        &committed,
+                    )
+            })
             .map(|prompt| {
                 xai_grok_shell::session::unsent_prompt_draft::pending_prompts::PersistedQueuedPrompt {
                     id: prompt.id,
@@ -136,6 +193,16 @@ fn persist_session_work_for_rebuild(app: &AppView) {
                 }
             })
             .collect();
+        for row in &rows {
+            if row.text.trim().is_empty() {
+                continue;
+            }
+            agent.append_prompt_wal(
+                xai_grok_shell::session::prompt_wal::PromptWalKind::RebuildFlush,
+                &row.text,
+                &[],
+            );
+        }
         let _ =
             xai_grok_shell::session::unsent_prompt_draft::pending_prompts::write_pending_prompts(
                 cwd.as_ref(),

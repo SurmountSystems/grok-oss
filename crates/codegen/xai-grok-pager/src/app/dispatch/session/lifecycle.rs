@@ -1381,6 +1381,24 @@ pub(in crate::app::dispatch) fn refuse_chat_mode_build_agent(app: &mut AppView, 
         }
     }
 }
+/// SessionCreated and SessionLoaded replace the catalog from shell meta.
+/// Catalog `reasoningEffort: high` must not replace an effort the operator
+/// already chose on that same model id.
+pub(in crate::app::dispatch) fn models_keeping_chosen_effort(
+    chosen: &crate::acp::model_state::ModelState,
+    fallback: &crate::acp::model_state::ModelState,
+    incoming: acp::SessionModelState,
+) -> crate::acp::model_state::ModelState {
+    let previous_id = chosen.current.clone();
+    let previous_effort = chosen.reasoning_effort.or_else(|| {
+        (fallback.current.as_ref() == previous_id.as_ref())
+            .then_some(fallback.reasoning_effort)
+            .flatten()
+    });
+    let mut next = crate::acp::model_state::ModelState::from(Some(incoming));
+    next.restore_chosen_effort_if_same_model(previous_id.as_ref(), previous_effort);
+    next
+}
 pub(in crate::app::dispatch) fn handle_session_created(
     app: &mut AppView,
     agent_id: AgentId,
@@ -1390,6 +1408,11 @@ pub(in crate::app::dispatch) fn handle_session_created(
 ) -> Vec<Effect> {
     let identity_rebind = super::super::dashboard::WorkspaceIdentityRebind::capture(app);
     crate::app::workspace_sync::allow_loaded_session(app, session_id.0.as_ref());
+    let loop_seed = app.scheduler_background_loops_seed;
+    let pin_loop_on_first_bind = app
+        .agents
+        .get(&agent_id)
+        .is_some_and(|agent| agent.session.session_id.is_none());
     let agent_count = app.agents.len();
     let switch_hint =
         crate::views::dashboard::session_switch_hint_command(app.screen_mode.is_minimal());
@@ -1413,7 +1436,8 @@ pub(in crate::app::dispatch) fn handle_session_created(
         }
         agent.bind_session_id(session_id);
         if let Some(m) = new_models {
-            app.models = Some(m).into();
+            let next = models_keeping_chosen_effort(&agent.session.models, &app.models, m);
+            app.models = next;
             agent.session.models = app.models.clone();
         }
         agent.apply_session_modes(modes);
@@ -1491,6 +1515,10 @@ pub(in crate::app::dispatch) fn handle_session_created(
         notify_session_ready(&app.notification_service, agent);
         note_peek_page_flip(app, agent_id, drain.page_flip_entry);
         identity_rebind.apply(app);
+        // Already-bound sessions keep their pin. A missing pin reads as in-session.
+        if pin_loop_on_first_bind {
+            app.session_loop_fire_detached.insert(agent_id, loop_seed);
+        }
         return effects;
     }
     abandoned_husk_cleanup_effects(app, session_id)
@@ -1543,7 +1571,8 @@ pub(in crate::app::dispatch) fn handle_worktree_session_created(
         agent.is_worktree = true;
         crate::git_info::populate_from_cwd_async(session_cwd.clone());
         if let Some(m) = new_models {
-            app.models = Some(m).into();
+            let next = models_keeping_chosen_effort(&agent.session.models, &app.models, m);
+            app.models = next;
             agent.session.models = app.models.clone();
         }
         agent.apply_session_modes(modes);

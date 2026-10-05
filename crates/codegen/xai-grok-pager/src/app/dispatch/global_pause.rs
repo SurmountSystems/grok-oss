@@ -213,6 +213,9 @@ fn compact_fail_followed_by_http_502(agent: &AgentView) -> bool {
             } if saw_fail && (headline.contains("502") || detail.contains("502")) => {
                 return true;
             }
+            SessionEvent::RetryFailed { error, .. } if saw_fail && error.contains("502") => {
+                return true;
+            }
             _ => {}
         }
     }

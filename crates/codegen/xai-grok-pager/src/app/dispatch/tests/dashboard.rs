@@ -2178,10 +2178,6 @@ fn workspace_dashboard_open_loads_one_snapshot_and_skips_rosters() {
     ));
     assert!(app.dashboard_sessions_loading);
     assert!(
-        effects.iter().any(|e| matches!(e, Effect::FetchRoster)),
-        "leader dashboard open must fetch the live roster immediately",
-    );
-    assert!(
         !effects
             .iter()
             .any(|effect| matches!(effect, Effect::FetchRoster | Effect::FetchDashboardSessions))

@@ -155,6 +155,21 @@ pub fn collect_skill_config_dirs(
     )
 }
 
+/// Put `.agents` ahead of `.grok` without reordering vendor dirs.
+/// Same-scope dedupe is first-seen, so this is what makes an agents pack win.
+fn agents_before_grok<'a>(names: &'a [&'a str]) -> Vec<&'a str> {
+    let mut ordered = Vec::with_capacity(names.len());
+    if names.iter().any(|name| *name == ".agents") {
+        ordered.push(".agents");
+    }
+    for name in names {
+        if *name != ".agents" {
+            ordered.push(*name);
+        }
+    }
+    ordered
+}
+
 fn collect_skill_config_dirs_from_sources(
     project_sources: Option<&crate::repo::StartupProjectSources>,
     global_dir: &Path,
@@ -176,9 +191,10 @@ fn collect_skill_config_dirs_from_sources(
         }
     };
 
-    // Vendor dirs (`.claude`/`.cursor`) are gated by the resolved compat config; `.grok` and `.agents` are always present
-    // When all cells are on, this list equals the historical `[".grok", ".agents", ".claude", ".cursor"]`
+    // Vendor dirs (`.claude`/`.cursor`) are gated by the resolved compat config; `.grok` and `.agents` are always present.
+    // `skill_config_dirs` may list `.grok` first. Scan `.agents` first so first-seen dedupe keeps the operator pack.
     let config_dir_names = compat.skill_config_dirs();
+    let config_dir_names = agents_before_grok(&config_dir_names);
 
     if let Some(project_sources) = project_sources {
         for dir in project_sources.skill_dirs() {
@@ -188,12 +204,12 @@ fn collect_skill_config_dirs_from_sources(
         }
     }
 
-    // Priority 3: Global user dirs. `.grok` comes from `grok_home` (which may be overridden), so it's handled separately.
-    // `.agents` is always added, while `.claude`/`.cursor` are gated by the skills compat cells
-    try_add(grok_home.clone());
+    // User tier: `~/.agents` before `grok_home` (`~/.grok` unless overridden).
+    // `.claude`/`.cursor` stay gated by the skills compat cells and stay after `.grok`.
     if let Some(home) = xai_dirs::home_dir() {
         try_add(home.join(".agents"));
     }
+    try_add(grok_home.clone());
     try_add(grok_home);
     if let Some(home) = xai_dirs::home_dir() {
         if compat.claude.skills {

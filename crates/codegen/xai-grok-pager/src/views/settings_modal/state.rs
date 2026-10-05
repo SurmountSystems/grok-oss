@@ -59,155 +59,17 @@ pub enum SettingsKeyOutcome {
 }
 
 impl SettingsKeyOutcome {
-    /// Split a bool or string setter into a typed outcome. Other actions stay wrapped.
+    /// Space, Enter, and mouse toggles must dispatch the typed `Action::Set*`
+    /// variant. `settings_value_payload_matches_kind` is the exception: turbo
+    /// planning and process-rule reminders are named as `SetBool`.
     pub fn from_typed_setter(action: Action) -> Self {
         match action {
-            Action::SetCompactMode(value) => Self::SetBool {
-                key: "compact_mode",
+            Action::SetTurboPlanning(value) => Self::SetBool {
+                key: "turbo_planning",
                 value,
             },
-            Action::SetTimestamps(value) => Self::SetBool {
-                key: "show_timestamps",
-                value,
-            },
-            Action::SetTimeline(value) => Self::SetBool {
-                key: "show_timeline",
-                value,
-            },
-            Action::SetSimpleMode(value) => Self::SetBool {
-                key: "simple_mode",
-                value,
-            },
-            Action::SetContextualHintUndo(value) => Self::SetBool {
-                key: "contextual_hints.undo",
-                value,
-            },
-            Action::SetContextualHintPlanMode(value) => Self::SetBool {
-                key: "contextual_hints.plan_mode",
-                value,
-            },
-            Action::SetContextualHintImageInput(value) => Self::SetBool {
-                key: "contextual_hints.image_input",
-                value,
-            },
-            Action::SetContextualHintSendNow(value) => Self::SetBool {
-                key: "contextual_hints.send_now",
-                value,
-            },
-            Action::SetContextualHintSmallScreen(value) => Self::SetBool {
-                key: "contextual_hints.small_screen",
-                value,
-            },
-            Action::SetContextualHintWordSelect(value) => Self::SetBool {
-                key: "contextual_hints.word_select",
-                value,
-            },
-            Action::SetContextualHintExportCopy(value) => Self::SetBool {
-                key: "contextual_hints.export_copy",
-                value,
-            },
-            Action::SetContextualHintSshWrap(value) => Self::SetBool {
-                key: "contextual_hints.ssh_wrap",
-                value,
-            },
-            Action::SetMultilineMode(value) => Self::SetBool {
-                key: "multiline_mode",
-                value,
-            },
-            Action::SetVimMode(value) => Self::SetBool {
-                key: "vim_mode",
-                value,
-            },
-            Action::SetVoiceKeybindEnabled(value) => Self::SetBool {
-                key: "voice_keybind_enabled",
-                value,
-            },
-            Action::SetRememberToolApprovals(value) => Self::SetBool {
-                key: "remember_tool_approvals",
-                value,
-            },
-            Action::SetAskUserQuestionTimeoutEnabled(value) => Self::SetBool {
-                key: "toolset.ask_user_question.timeout_enabled",
-                value,
-            },
-            Action::SetSubagentModelInheritance(value) => Self::SetBool {
-                key: "subagent_model_inheritance",
-                value,
-            },
-            Action::SetShowThinkingBlocks(value) => Self::SetBool {
-                key: "show_thinking_blocks",
-                value,
-            },
-            Action::SetGroupToolVerbs(value) => Self::SetBool {
-                key: "group_tool_verbs",
-                value,
-            },
-            Action::SetCollapsedEditBlocks(value) => Self::SetBool {
-                key: "collapsed_edit_blocks",
-                value,
-            },
-            Action::SetPromptSuggestions(value) => Self::SetBool {
-                key: "prompt_suggestions",
-                value,
-            },
-            Action::SetAutoRunImplement(value) => Self::SetBool {
-                key: "auto_run_implement",
-                value,
-            },
-            Action::SetRespectManualFolds(value) => Self::SetBool {
-                key: "respect_manual_folds",
-                value,
-            },
-            Action::SetPageFlipOnSend(value) => Self::SetBool {
-                key: "page_flip_on_send",
-                value,
-            },
-            Action::SetDashboardPreview(value) => Self::SetBool {
-                key: "dashboard_preview",
-                value,
-            },
-            Action::SetConfirmBeforeRewind(value) => Self::SetBool {
-                key: "confirm_before_rewind",
-                value,
-            },
-            Action::SetCombineQueuedPrompts(value) => Self::SetBool {
-                key: "combine_queued_prompts",
-                value,
-            },
-            Action::SetInvertScroll(value) => Self::SetBool {
-                key: "invert_scroll",
-                value,
-            },
-            Action::SetShowTips(value) => Self::SetBool {
-                key: "show_tips",
-                value,
-            },
-            Action::SetAutoUpdate(value) => Self::SetBool {
-                key: "auto_update",
-                value,
-            },
-            Action::SetDisplayRefreshAutoCadence(value) => Self::SetBool {
-                key: "display_refresh_auto_cadence",
-                value,
-            },
-            Action::SetEconomicMode(value) => Self::SetBool {
-                key: "economic_mode",
-                value,
-            },
-            Action::SetResumeCanceledTurnOnRestart(value) => Self::SetBool {
-                key: "resume_canceled_turn_on_restart",
-                value,
-            },
-            Action::SetTokenEconomyBool { field, value } => Self::SetBool {
-                key: match field {
-                    "cap_implement_effort_when_economic" => {
-                        "token_economy.cap_implement_effort_when_economic"
-                    }
-                    "show_period_pacing" => "token_economy.show_period_pacing",
-                    "local_spend_ledger" => "token_economy.local_spend_ledger",
-                    "reconcile_management_usage" => "token_economy.reconcile_management_usage",
-                    _ => return Self::Action(Action::SetTokenEconomyBool { field, value }),
-                },
+            Action::SetProcessRuleRemindersEnabled(value) => Self::SetBool {
+                key: "process_rule_reminders_enabled",
                 value,
             },
             other => Self::Action(other),

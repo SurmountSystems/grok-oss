@@ -4131,10 +4131,11 @@ impl McpClient {
         )
         .build()
         .map_err(|e| McpError::ClientError(format!("Failed to build HTTP client: {e}")))?;
-        // `AuthClient::new` wants an owned manager, but ours is shared (`Arc`) with the OAuth flow
-        // The struct is non_exhaustive, so build with a throwaway manager and swap in the shared one
+        // `AuthClient::new` wants an owned manager, but ours is shared (`Arc`) with the OAuth flow.
+        // The struct is non_exhaustive, so build a throwaway manager and swap in the shared one.
+        // rmcp's `AuthorizationManager::new` fails `Client::build` when the OS trust store is empty.
         let placeholder_manager =
-            rmcp::transport::auth::AuthorizationManager::new(config.url.as_str())
+            crate::mcp_http_client::authorization_manager(config.url.as_str())
                 .await
                 .map_err(|e| McpError::ClientError(format!("Failed to build OAuth client: {e}")))?;
         let mut auth_client =

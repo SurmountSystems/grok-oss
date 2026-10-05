@@ -581,14 +581,17 @@ fn confirmed_stop_retry_does_not_rearm_auto_resend() {
         });
     }
     assert!(reconcile_overdue_cancels(&mut app).is_none());
+    // Survive moment: the first confirmed stop, before the force-finish retry.
     assert!(
         get_agent(&app, id)
             .pending_cancel_resend
             .as_ref()
-            .is_some_and(|p| p.confirmed)
+            .expect("resend record must survive")
+            .confirmed,
+        "a confirmed stop keeps the resend record before the force-finish retry"
     );
 
-    // Gesture retry (hint set, as `[stop]` / Esc do).
+    // Gesture retry (hint set, as `[stop]` / Esc do). This force-finish drops the record.
     app.agents.get_mut(&id).unwrap().cancel_trigger_hint = Some(CancelTrigger::Mouse);
     let effects = dispatch(Action::CancelTurn, &mut app);
     assert!(
@@ -601,10 +604,6 @@ fn confirmed_stop_retry_does_not_rearm_auto_resend() {
         ),
         "a manual retry still re-sends, got {effects:?}"
     );
-    let pending = get_agent(&app, id)
-        .pending_cancel_resend
-        .as_ref()
-        .expect("resend record must survive");
     assert!(
         app.agents[&id].session.state.is_idle(),
         "[stop] during Cancelling must finish, got {:?}",

@@ -1132,6 +1132,11 @@ pub struct AppView {
     pub pending_exit_plan_mode: Option<xai_acp_lib::AcpArgs<acp::ExtRequest>>,
     /// Process seed for scheduler fire mode until a session pins its own answer.
     pub scheduler_background_loops_seed: bool,
+    /// Fire mode pinned for each session. True means detached fires.
+    /// A missing pin reads as in-session. Session create writes the process
+    /// seed when that agent binds for the first time. Session load writes
+    /// the loaded value. A later settings push leaves this pin as it is.
+    pub session_loop_fire_detached: std::collections::HashMap<AgentId, bool>,
 }
 /// Reshow window elapsed? None or 0 means never. Unparseable ack fails open (show).
 fn privacy_banner_reshow_elapsed(acked_at: &str, reshow_days: Option<u64>) -> bool {
@@ -1627,6 +1632,7 @@ impl AppView {
             pending_running_adoptions: std::collections::HashMap::new(),
             session_picker_grouped: false,
             scheduler_background_loops_seed: true,
+            session_loop_fire_detached: std::collections::HashMap::new(),
             cancel_rewind_enabled: true,
             session_recap_available: false,
             shell_feedback_trace_offer: false,
@@ -2275,6 +2281,34 @@ impl AppView {
         agent.cancel_trigger_hint = Some(crate::app::actions::CancelTrigger::Esc);
     }
 
+    /// Dashboard overlay, non-vim, prompt pane, local turn still running.
+    /// The second Esc stays a hint. It does not fire CancelTurn.
+    fn dashboard_overlay_running_turn_esc_hint_only(&self) -> bool {
+        let ActiveView::Agent(id) = self.active_view else {
+            return false;
+        };
+        let overlay = self
+            .dashboard
+            .as_ref()
+            .is_some_and(|dashboard| dashboard.attached_agent == Some(id));
+        overlay
+            && self.agents.get(&id).is_some_and(|agent| {
+                !agent.vim_mode
+                    && agent.active_pane == super::agent_view::AgentPane::Prompt
+                    && agent.session.state.is_turn_running()
+            })
+    }
+
+    /// Idle streaming wake confirm returns CancelTurn without an Esc stamp.
+    fn wake_streaming_esc_skips_cancel_stamp(&self) -> bool {
+        let ActiveView::Agent(id) = self.active_view else {
+            return false;
+        };
+        self.agents
+            .get(&id)
+            .is_some_and(|agent| agent.wake_turn_active() && !agent.session.state.is_turn_running())
+    }
+
     /// Nested L2/L3 overlay Esc closes the view. It is not cancel confirm.
     fn nested_overlay_esc_would_dismiss(&self) -> bool {
         let ActiveView::Agent(id) = self.active_view else {
@@ -2340,9 +2374,16 @@ impl AppView {
                     && self.nested_overlay_esc_would_dismiss()
                 {
                     self.pending_action = None;
+                } else if matches!(pending.action, Action::CancelTurn)
+                    && self.dashboard_overlay_running_turn_esc_hint_only()
+                {
+                    self.pending_action = None;
+                    return InputOutcome::Changed;
                 } else {
                     let action = self.pending_action.take().unwrap().action;
-                    if matches!(action, Action::CancelTurn) {
+                    if matches!(action, Action::CancelTurn)
+                        && !self.wake_streaming_esc_skips_cancel_stamp()
+                    {
                         self.stamp_esc_cancel_trigger_hint();
                     }
                     return InputOutcome::Action(action);
@@ -2628,6 +2669,33 @@ impl AppView {
                         })
                     {
                         return InputOutcome::Action(Action::DashboardOverlayExit);
+                    }
+                    if key.code == KeyCode::Esc
+                        && key.modifiers.is_empty()
+                        && self.agents.get(&id).is_some_and(|agent| {
+                            !agent.vim_mode
+                                && agent.active_pane == super::agent_view::AgentPane::Prompt
+                                && agent.session.state.is_turn_running()
+                        })
+                    {
+                        let hint = self
+                            .registry
+                            .key_for(crate::actions::ActionId::CancelTurn)
+                            .map(|binding| {
+                                format!("Press {} to cancel the turn", binding.display())
+                            })
+                            .unwrap_or_else(|| "Press Ctrl+c to cancel the turn".to_string());
+                        if let Some(agent) = self.agents.get_mut(&id) {
+                            agent.show_toast(&hint);
+                            agent.suppress_rewind_arm(std::time::Instant::now());
+                        }
+                        self.pending_action = Some(PendingAction::with_ttl(
+                            Action::CancelTurn,
+                            KeyShortcut::from(*key),
+                            Some("cancel"),
+                            esc_double_press_ttl(),
+                        ));
+                        return InputOutcome::Changed;
                     }
                 }
                 if let Some(modal) = self.import_claude_modal.as_mut() {
@@ -5751,7 +5819,9 @@ impl AppView {
                         )
                     )
                     || agent.subagent_views.iter().any(|(sid, child)| {
-                        !child.session.state.is_idle()
+                        // A running overlay on an idle parent parks. Cancelling
+                        // still needs fast ticks so resend grace can run.
+                        child.session.state.is_cancelling()
                             || child.wake_turn_active()
                             || child.toast.is_some()
                             || child.ephemeral_tip_needs_tick()

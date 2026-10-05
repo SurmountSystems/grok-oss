@@ -3310,6 +3310,16 @@ fn layer_login_path(
     }
 }
 
+#[cfg(unix)]
+fn apply_envs_in_key_order(
+    cmd: &mut tokio::process::Command,
+    pairs: std::collections::HashMap<String, String>,
+) {
+    let mut pairs: Vec<_> = pairs.into_iter().collect();
+    pairs.sort_by(|left, right| left.0.cmp(&right.0));
+    cmd.envs(pairs);
+}
+
 /// Fixed layer order: policy base, login capture (filtered), grok control vars, request env (filtered), pager vars,
 /// login `PATH`, agent marker last. Applied incrementally, not via `env_clear`: the no-op-policy path must inherit
 /// grok's environment untouched (non-UTF-8 vars included).
@@ -3323,9 +3333,11 @@ fn apply_child_env(
     let active_policy = policy.filter(|p| !p.is_noop());
     crate::util::shell_env_policy::install_policy_base_env(cmd, active_policy);
     layer_login_env_vars(cmd, login_env, active_policy);
-    cmd.envs(shell_state::shell_env_overrides());
+    // HashMap iteration order is per-map. The CLI pin compares two spawns
+    // byte for byte, so each freshly built map is applied in key order.
+    apply_envs_in_key_order(cmd, shell_state::shell_env_overrides());
     layer_request_env(cmd, request_env, active_policy);
-    cmd.envs(crate::util::pager_env());
+    apply_envs_in_key_order(cmd, crate::util::pager_env());
     layer_login_path(cmd, login_env, active_policy);
     crate::util::apply_grok_agent_marker(cmd);
 }

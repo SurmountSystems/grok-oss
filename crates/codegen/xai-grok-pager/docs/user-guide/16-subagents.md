@@ -27,10 +27,10 @@ Manage both in the agents modal. Open it with `/config-agents` (alias `/agents`)
 
 ## Disabling Subagents
 
-Disable subagents with a CLI flag, an environment variable, or the config file (highest priority first). The same rules apply to the interactive `grok` TUI, `grok agent stdio`, and headless runs.
+Disable subagents with a CLI flag, an environment variable, or the config file (highest priority first). The same rules apply to the interactive `grok` TUI, `grok-oss agent stdio`, and headless runs.
 
 ```bash
-grok --no-subagents                  # This session only
+grok-oss --no-subagents                  # This session only
 export GROK_SUBAGENTS=0              # Environment variable
 ```
 

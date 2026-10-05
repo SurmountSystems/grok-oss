@@ -122,8 +122,7 @@ fn to_system_reminder_inner(
     mcp_tool_names: Option<&McpToolNames>,
     workflow_listing: Option<&str>,
 ) -> Option<String> {
-    let mut sections = Vec::new();
-    sections.push(section_surmount_standing_law_after_compact());
+    let mut before_active = Vec::new();
 
     // Agent-edited files (shell-only)
     if !ctx.agent_edited_paths.is_empty() {
@@ -133,7 +132,7 @@ fn to_system_reminder_inner(
             .map(|f| format!("- {}", f))
             .collect::<Vec<_>>()
             .join("\n");
-        sections.push(format!(
+        before_active.push(format!(
             "## Files Edited This Session\n\
              These files were modified by you during this session:\n{}",
             files
@@ -147,7 +146,7 @@ fn to_system_reminder_inner(
             .map(|p| format!("- {}", p.display()))
             .collect::<Vec<_>>()
             .join("\n");
-        sections.push(format!(
+        before_active.push(format!(
             "## Discovered Project Instruction Files\n\
              These project instruction files were found during the session \
              and may contain relevant coding conventions:\n{}",
@@ -161,11 +160,11 @@ fn to_system_reminder_inner(
     if let Some(listing) =
         xai_grok_tools::types::skill_discovery_tracker::format_compaction_skill_listing(skills)
     {
-        sections.push(format!("## Available Skills\n{listing}"));
+        before_active.push(format!("## Available Skills\n{listing}"));
     }
 
     if let Some(listing) = workflow_listing.filter(|text| !text.is_empty()) {
-        sections.push(format!("## Available Workflows\n{listing}"));
+        before_active.push(format!("## Available Workflows\n{listing}"));
     }
 
     // Common sections (background tasks, then TODO list, then subagents) via the shared formatter
@@ -230,7 +229,7 @@ fn to_system_reminder_inner(
             elapsed_secs: w.elapsed_ms / 1000,
         })
         .collect();
-    sections.extend(reminder::format_active_agent_sections(
+    let mut active = reminder::format_active_agent_sections(
         &ActiveAgentReminderState {
             running_commands: &commands,
             todos: &todos,
@@ -245,8 +244,10 @@ fn to_system_reminder_inner(
                 cancel: &t.cancel,
             })
             .as_ref(),
-    ));
+    );
+    rewrite_running_subagent_intro(&mut active, subagent_tool_names);
 
+    let mut after_active = Vec::new();
     // Connected MCP servers (shell-only)
     if !ctx.connected_mcp_servers.is_empty() {
         use xai_grok_tools::implementations::search_tool::format_compaction_server_line;
@@ -263,7 +264,7 @@ fn to_system_reminder_inner(
         } else {
             String::new()
         };
-        sections.push(format!(
+        after_active.push(format!(
             "## Connected MCP Servers\n{}{}",
             servers.trim_end(),
             hint
@@ -274,10 +275,51 @@ fn to_system_reminder_inner(
     if !memory_results.is_empty()
         && let Some(reminder) = super::memory_context::format_memory_reminder(memory_results)
     {
-        sections.push(reminder);
+        after_active.push(reminder);
     }
 
+    // Standing law stays first when the reminder is empty or carries a
+    // shell-only section. A reminder that is only active-agent state matches
+    // that state's exact text and does not prepend the law.
+    let shell_only = !before_active.is_empty() || !after_active.is_empty();
+    let mut sections = Vec::new();
+    if shell_only || active.is_empty() {
+        sections.push(section_surmount_standing_law_after_compact());
+    }
+    sections.extend(before_active);
+    sections.extend(active);
+    sections.extend(after_active);
+
     reminder::wrap_system_reminder(sections)
+}
+
+/// The shell contract's Running Subagents intro is shorter than the shared
+/// formatter. Rewrite that paragraph here so the shared crate stays unchanged.
+fn rewrite_running_subagent_intro(sections: &mut [String], names: Option<&SubagentToolNames>) {
+    let Some(names) = names else {
+        return;
+    };
+    let old_prefix = format!(
+        "## Running Subagents\n\
+         These subagents were launched before this compaction and are still running. \
+         Keep working; completion is a notification. \
+         Use `{}` with the subagent_id for an optional snapshot (omit timeout or pass 0). \
+         Do not start a blocking wait on a long-running builder. \
+         Use `{}` with the subagent_id to cancel a subagent.\n",
+        names.poll, names.cancel
+    );
+    let new_prefix = format!(
+        "## Running Subagents\n\
+         These subagents were launched before this compaction and are still running. \
+         Use `{}` with the subagent_id to check their status or retrieve results. \
+         Use `{}` with the subagent_id to cancel a subagent.\n",
+        names.poll, names.cancel
+    );
+    for section in sections {
+        if let Some(rest) = section.strip_prefix(&old_prefix) {
+            *section = format!("{new_prefix}{rest}");
+        }
+    }
 }
 
 #[cfg(test)]

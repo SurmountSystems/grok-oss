@@ -976,7 +976,22 @@ impl crate::app::agent_view::AgentView {
     }
 
     pub(crate) fn restore_unsent_composer_draft_from_disk(&mut self) {
+        let before = self.prompt.text().to_string();
         self.maybe_restore_unsent_prompt_draft();
+        let restored = self.prompt.text().to_string();
+        if before.trim().is_empty()
+            && !restored.trim().is_empty()
+            && self.plan_mode_active
+            && let Some(view) = self.plan_approval_view.as_mut()
+        {
+            let feedback_empty = view
+                .feedback_draft
+                .as_ref()
+                .is_none_or(|draft| draft.trim().is_empty());
+            if feedback_empty {
+                view.feedback_draft = Some(restored);
+            }
+        }
     }
 
     pub(crate) fn committed_human_turn_texts(
@@ -1031,7 +1046,22 @@ pub(super) fn dispatch_send_prompt_inner(
     literal: bool,
     is_follow_up: bool,
 ) -> Vec<Effect> {
+    let text = rewrite_submitted_implement_effort(app, text);
     dispatch_send_prompt_submission(app, text, None, consume_input, literal, is_follow_up)
+}
+
+/// Token Economy on a submitted `/implement` line. Thoroughness only.
+/// Compact completion must not call this.
+fn rewrite_submitted_implement_effort(app: &mut AppView, text: String) -> String {
+    if !text.trim().starts_with("/implement") {
+        return text;
+    }
+    let economic = crate::appearance::cache::load_economic_mode();
+    let rewrite = crate::app::auto_implement::apply_implement_effort_for_product(&text, economic);
+    if let Some(toast) = rewrite.toast.as_deref().filter(|toast| !toast.is_empty()) {
+        app.show_toast(toast);
+    }
+    rewrite.command
 }
 
 pub(super) fn dispatch_send_prompt_submission(
@@ -1046,6 +1076,23 @@ pub(super) fn dispatch_send_prompt_submission(
     // The AppView pending-action check only resets on KEY events
     // A submit with no intervening key (mouse send, `SubmitFollowUp`, `RevisePlan`, `SendSlashCommandPreservingDraft`) would otherwise leave a stale pending action
     app.pending_action = None;
+
+    // `/view-plan` is local. Reconnect must not toast it away, and Welcome
+    // must stick the request instead of deferring the slash as a prompt.
+    // The pane opens on SessionLoaded, not on this key.
+    if is_view_plan_slash(&text) {
+        if app.reconnect_pending {
+            if let ActiveView::Agent(id) = app.active_view
+                && let Some(agent) = app.agents.get_mut(&id)
+            {
+                agent.view_plan_requested = true;
+            }
+            return vec![];
+        }
+        if matches!(app.active_view, ActiveView::Welcome) {
+            return super::modes::dispatch_show_plan(app);
+        }
+    }
 
     if app.reconnect_pending {
         app.show_toast(RECONNECTING_NOTICE);
@@ -1063,6 +1110,11 @@ pub(super) fn dispatch_send_prompt_submission(
         }
         return prelude;
     };
+    // A leftover slash-palette `/` is not a prompt and not mill continue.
+    // Keep Isolated Preview and the parked waiter. Do not Approve.
+    if text.trim() == "/" {
+        return prelude;
+    }
     // A slash command is refused below only if it would queue, so `/new`, `/resume`, and `exit` still run
     let runs_locally = !literal
         && (text.trim().starts_with('/')
@@ -1140,6 +1192,11 @@ pub(super) fn dispatch_send_prompt_submission(
         .session_recap_threshold_secs;
     let features_session_recap_from_app = app.session_recap_available;
     let login_method_id_from_app = app.login_method_id.as_ref().map(|id| id.0.to_string());
+    let scheduler_background_loops_for_prompt = app
+        .session_loop_fire_detached
+        .get(&id)
+        .copied()
+        .unwrap_or(false);
     let leader_mode = app.leader_mode;
     let screen_mode_is_minimal = app.screen_mode.is_minimal();
     let Some(agent) = app.agents.get_mut(&id) else {
@@ -1325,7 +1382,7 @@ pub(super) fn dispatch_send_prompt_submission(
                             Some("context-only")
                         ),
                     default_reasoning_effort: app.default_reasoning_effort.clone(),
-                    scheduler_background_loops: app.scheduler_background_loops_seed,
+                    scheduler_background_loops: scheduler_background_loops_for_prompt,
                 },
             };
 
@@ -1524,7 +1581,12 @@ pub(super) fn dispatch_send_prompt_submission(
                 if consume_input {
                     agent.prompt.set_text("");
                 }
+                let plan_desc = crate::slash::queue_schedule::plan_description_from_command(&text)
+                    .filter(|_| crate::slash::queue_schedule::plan_slash_is_update_turn(&text));
                 effects.extend(dispatch(action, app));
+                if let Some(desc) = plan_desc.as_deref() {
+                    note_isolated_preview_plan_update(app, id, desc);
+                }
                 return effects;
             }
             CommandResult::QueueCommand(cmd_text) => {
@@ -1536,10 +1598,14 @@ pub(super) fn dispatch_send_prompt_submission(
                 wire_blocks,
                 display_as_skill,
             } => {
+                // Named hold (`/queue /plan`, `/queue /finish`, `/plan queue`).
+                // Do not drain or interject on this dispatch. A running turn
+                // tells the operator the row waits.
+                let turn_running = agent.session.state.is_turn_running();
                 if as_command {
                     agent.session.enqueue_command(text);
                 } else {
-                    let id = agent.session.next_queue_id;
+                    let qid = agent.session.next_queue_id;
                     agent.session.next_queue_id += 1;
                     if display_as_skill {
                         agent.start_pending_live_prompt_task(&text);
@@ -1551,12 +1617,20 @@ pub(super) fn dispatch_send_prompt_submission(
                             wire_blocks,
                             display_as_skill,
                             ..crate::app::agent::QueuedPrompt::plain(
-                                id,
+                                qid,
                                 text,
                                 crate::app::agent::QueueEntryKind::Prompt,
                             )
                         });
                 }
+                if turn_running {
+                    agent.show_toast("Queued on the prompt queue. It will not run this turn.");
+                }
+                if consume_input {
+                    agent.prompt.set_text("");
+                    agent.note_draft_consumed();
+                }
+                return effects;
             }
             CommandResult::InjectSkill {
                 display_text,
@@ -1665,6 +1739,17 @@ pub(super) fn dispatch_send_prompt_submission(
         effects.extend(dispatch(Action::Quit, app));
         return effects;
     } else {
+        // Comment, and Revise with the plan pane shut, stay parked.
+        // Isolated Preview (pane open) and Revise Prompt focus still send.
+        if !literal && hold_parked_plan_follow_up(agent, &text) {
+            return effects;
+        }
+        // Idle Human SendPrompt re-reads disk plan.md here. The running-turn
+        // interject return and the immediate SendPrompt return leave before
+        // the shared mill call at the end of this function.
+        if agent.session.state.is_idle() && mill_work_continues_after_isolated_preview(&text) {
+            agent.leave_or_reread_isolated_preview_after_mill_continues();
+        }
         // Server-authoritative immediate send (plain prompt only)
         // The agent appends it to its authoritative `pending_inputs` (turn starts never overlap) and drives the drain via `x.ai/queue/changed`
         // So the chips are cleared ONLY when the suggestion actually sends or enqueues
@@ -1692,20 +1777,35 @@ pub(super) fn dispatch_send_prompt_submission(
             ) && resolve_uniquely_named_live_l2(agent, &text).is_some();
             // Eligible parked send-now stays below. Images ride
             // SendPromptNow. Plain text rides immediate SendPrompt.
-            // Those named tests stay. Every other mid-turn Enter with
-            // text is a soft interject, including a parked wait that
-            // cannot send-now. That fallthrough used to write a local
-            // queue row and paint "1 queued". Named `/queue` hold is
-            // QueueLater above and still waits.
+            // Leader mode soft-interjects only when the Operator box still
+            // holds that body. An empty box is SendPrompt, or no effects
+            // when a local row is already queued. A non-leader Queue or
+            // Steer session falls through: Queue stays on the local
+            // drip-feed, Steer with an empty local queue is SendPrompt,
+            // and a parked Steer wait flushes through maybe_release.
+            // Named `/queue` hold is QueueLater above and still waits.
             let parked = agent.is_parked_on_sendable_wait();
             let hold_behind = parked && agent.has_held_user_queue();
             let defer_to_send_now = parked
                 && !named_live_l2
                 && immediate_server_send_eligible(agent, leader_mode)
                 && (agent.prompt.images.is_empty() || !hold_behind);
-            if !defer_to_send_now {
-                let images = agent.prompt.drain_images();
-                return enqueue_if_interject_dropped(app, id, text, images);
+            if leader_mode && !defer_to_send_now {
+                // Composer Enter still holds the body, so this is soft
+                // interject. A leader SendPrompt with an empty Operator box
+                // is the server queue: SendPrompt when nothing is waiting
+                // locally, and no effects when a local row is already queued.
+                let composer_trim = agent.prompt.text().trim().to_string();
+                let submitted = text.trim();
+                let typed_enter = !composer_trim.is_empty()
+                    && (composer_trim == submitted || composer_trim.contains(submitted));
+                if typed_enter {
+                    let images = agent.prompt.drain_images();
+                    return enqueue_if_interject_dropped(app, id, text, images);
+                }
+                if !agent.session.pending_prompts.is_empty() {
+                    return effects;
+                }
             }
         }
 
@@ -1776,6 +1876,7 @@ pub(super) fn dispatch_send_prompt_submission(
             // Self-originated: when this prompt becomes the running turn, the ACP gate must treat its deltas as ours, not another client's
             // Adoption happens via the `running_prompt_id` broadcast and the turn-start shim
             agent.note_self_originated_prompt(&prompt_id);
+            agent.start_and_bind_live_prompt_task(&prompt_id, &text);
             // Plain image-free sends set no send-now cancel expectation: shell queue state and cancelTrigger decide the outcome
 
             if consume_input {
@@ -1944,7 +2045,52 @@ pub(super) fn dispatch_send_prompt_submission(
             }
         }
     }
+    if mill_work_continues_after_isolated_preview(&text)
+        && let Some(agent) = app.agents.get_mut(&id)
+    {
+        agent.leave_or_reread_isolated_preview_after_mill_continues();
+    }
     effects
+}
+
+fn is_view_plan_slash(text: &str) -> bool {
+    matches!(text.trim(), "/view-plan" | "/show-plan" | "/plan-view")
+}
+
+/// Park a follow-up that must not start a sampler turn.
+///
+/// Comment intent keeps the critique in the composer and in
+/// `feedback_draft` so Approve can wrap it. Revise with the pane shut
+/// (rebuild restore, live park, Preview focus) is the same hold. An open
+/// Isolated Preview pane is a Human turn. Revise on the Prompt focus
+/// still asks the model.
+fn hold_parked_plan_follow_up(agent: &mut AgentView, text: &str) -> bool {
+    let trimmed = text.trim();
+    if trimmed.is_empty() || trimmed.starts_with('/') {
+        return false;
+    }
+    let Some(pav) = agent.plan_approval_view.as_ref() else {
+        return false;
+    };
+    let comment = matches!(
+        pav.prompt_intent,
+        crate::views::plan_approval_view::PlanPromptIntent::Comment
+    );
+    let shut_preview_revise = agent.line_viewer.is_none()
+        && matches!(
+            pav.prompt_intent,
+            crate::views::plan_approval_view::PlanPromptIntent::Revise
+        )
+        && pav.focus != crate::views::plan_approval_view::PlanApprovalFocus::Prompt;
+    if !comment && !shut_preview_revise {
+        return false;
+    }
+    if let Some(pav) = agent.plan_approval_view.as_mut() {
+        pav.feedback_draft = Some(text.to_string());
+        pav.comment_held_from_enter = true;
+    }
+    agent.prompt.set_text(text);
+    true
 }
 
 /// Whether consume-input dispatch already asked the model (or compact/bash).
@@ -1964,6 +2110,26 @@ fn consume_input_model_ask_landed(effects: &[Effect], text: &str) -> bool {
         | Effect::SendBashCommand { .. } => true,
         _ => false,
     })
+}
+
+/// `/plan` plus a body, while Isolated Preview is docked, is a plan-update
+/// turn. Quote that prompt as rewriting-wait. Do not Approve. Do not paint
+/// leftover `plan.md` as a live present.
+fn note_isolated_preview_plan_update(app: &mut AppView, id: AgentId, desc: &str) {
+    let Some(agent) = app.agents.get_mut(&id) else {
+        return;
+    };
+    if !agent.is_plan_viewer() {
+        return;
+    }
+    agent.append_prompt_wal(
+        xai_grok_shell::session::prompt_wal::PromptWalKind::Send,
+        desc,
+        &[],
+    );
+    agent.enter_isolated_preview_rewrite_wait_quoted(PlanFeedbackInFlight::Updating, desc);
+    agent.prompt.set_text("");
+    agent.clear_sent_human_from_plan_feedback_draft(desc);
 }
 
 /// Wipe the Operator box only after a `/plan` extra-text send or enqueue
@@ -2134,6 +2300,22 @@ pub(super) fn handle_prompt_response(
                 .map(str::to_string),
             Err(_) => prompt_id.clone(),
         };
+        // Success, error, and cancel all write prompt_exec_metrics. A
+        // response that never became the running turn still closes its
+        // own live task. Missing grok_oss.db stays fail-open.
+        let usage_map = match &result {
+            Ok(pr) => pr.meta.as_ref().and_then(|meta| {
+                meta.get("usage").map(|usage| {
+                    let mut map = serde_json::Map::new();
+                    map.insert("usage".to_string(), usage.clone());
+                    map
+                })
+            }),
+            Err(_) => None,
+        };
+        if let Some(pid) = response_pid.as_deref() {
+            agent.complete_live_prompt_task(Some(pid), usage_map.as_ref());
+        }
         // The turn-end RPC for this prompt arrived: clear the lost-response reconcile that `handle_prompt_complete` set for it
         // The broadcast is emitted before the RPC response, so in the healthy path the marker lives only a few ms
         if let Some(pending) = agent.pending_turn_end_reconcile.as_ref()

@@ -472,6 +472,7 @@ pub const PAGER_COMMAND_KEYS: &[&str] = &[
     "config",
     "config-agents",
     "context",
+    "context-only",
     "context-window",
     "copy",
     "cost",
@@ -480,7 +481,11 @@ pub const PAGER_COMMAND_KEYS: &[&str] = &[
     "delete",
     "docs",
     "doctor",
+    "double-entry",
     "dream",
+    "econ",
+    "economic",
+    "economic-mode",
     "edit-prompt",
     "effort",
     "exit",
@@ -488,6 +493,7 @@ pub const PAGER_COMMAND_KEYS: &[&str] = &[
     "export",
     "feedback",
     "find",
+    "finish",
     "flush",
     "fork",
     "full",
@@ -508,6 +514,8 @@ pub const PAGER_COMMAND_KEYS: &[&str] = &[
     "imagine-video",
     "import-claude",
     "jump",
+    "ledger",
+    "limits",
     "login",
     "logout",
     "log",
@@ -535,6 +543,7 @@ pub const PAGER_COMMAND_KEYS: &[&str] = &[
     "queue",
     "quit",
     "recap",
+    "rebuild",
     "release-notes",
     "reload-plugins",
     "remember",
@@ -542,12 +551,16 @@ pub const PAGER_COMMAND_KEYS: &[&str] = &[
     "reports",
     "resume",
     "rewind",
+    "running",
+    "screenshot",
     "session-info",
     "sessions",
     "settings",
     "share",
     "show-plan",
     "skills",
+    "start",
+    "spend",
     "summarize",
     "tasks",
     "terminal-check",
@@ -570,6 +583,8 @@ pub const PAGER_COMMAND_KEYS: &[&str] = &[
     "vim-mode",
     "voice",
     "welcome",
+    "what",
+    "windows",
     "workflow",
     "workflows",
     "yolo",
@@ -1474,8 +1489,8 @@ pub(super) async fn build_skill_information_for_refs(
     session_id: &str,
 ) -> Option<String> {
     use xai_grok_tools::implementations::skills::skill::{
-        SkillRef, SubstitutionContext, apply_substitutions, build_skill_block,
-        build_skill_information, cap_skill_body, load_skill_content,
+        SkillRef, SubstitutionContext, apply_substitutions, build_skill_information,
+        cap_skill_body, load_skill_content,
     };
     let mut skill_blocks: Vec<String> = Vec::new();
     for sk in parsed_skills {
@@ -1510,7 +1525,17 @@ pub(super) async fn build_skill_information_for_refs(
                         plugin_data: info.plugin_data.as_deref(),
                     },
                 );
-                skill_blocks.push(build_skill_block(&sk.name, &sk.args, &content));
+                // The shell envelope closes the args attribute. A run id in
+                // that tag would break the `args="...">` contract.
+                let block = if sk.args.is_empty() {
+                    format!("<skill name=\"{}\">\n{content}\n</skill>", sk.name)
+                } else {
+                    format!(
+                        "<skill name=\"{}\" args=\"{}\">\n{content}\n</skill>",
+                        sk.name, sk.args
+                    )
+                };
+                skill_blocks.push(block);
             }
             Err(e) => {
                 let body_less_product =

@@ -59,6 +59,25 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
             return;
         }
         let id = request.id.clone();
+        if !request.owner.is_workflow()
+            && request.description != "goal achievement skeptic"
+            && self.live_same_description(&request)
+        {
+            self.reject_queries_waiting_for_spawn(&id);
+            reply_rejected(
+                admitted_tx,
+                result_tx,
+                rejected_spawn_result(
+                    &id,
+                    &format!(
+                        "A live subagent already has description '{}'. Wait for it to finish, or use a distinct description.",
+                        request.description
+                    ),
+                    false,
+                ),
+            );
+            return;
+        }
         if self.pending.contains_key(&id)
             || self.active.contains_key(&id)
             || self.completed.contains_key(&id)
@@ -232,6 +251,20 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                 );
             }
         }
+    }
+
+    /// Another live task-owned child on this parent already has this description.
+    /// The reserved panel description is exempt at the call site.
+    fn live_same_description(&self, request: &SubagentRequest) -> bool {
+        let matches = |other: &SubagentRequest| {
+            !other.owner.is_workflow()
+                && other.id != request.id
+                && other.parent_session_id == request.parent_session_id
+                && other.description == request.description
+        };
+        self.pending.values().any(|child| matches(&child.request))
+            || self.active.values().any(|child| matches(&child.request))
+            || self.queued.iter().any(|queued| matches(&queued.request))
     }
 
     /// Live Task-owned Review-row descriptions on this parent.

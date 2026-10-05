@@ -86,9 +86,11 @@ pub fn jitter_backoff(base: Duration) -> Duration {
     Duration::from_millis(base_ms - jitter_range + jitter)
 }
 
+/// A present `Retry-After` is that many seconds, capped at [`MAX_RETRY_BACKOFF`].
+/// No jitter: HTTP 521 must honor 12 seconds exactly. Zero or absent uses the ladder.
 pub fn retry_after_or_backoff(attempt: u32, retry_after_secs: Option<u64>) -> Duration {
     match retry_after_secs.filter(|secs| *secs > 0) {
-        Some(secs) => jitter_backoff(Duration::from_secs(secs).min(MAX_RETRY_BACKOFF)),
+        Some(secs) => Duration::from_secs(secs).min(MAX_RETRY_BACKOFF),
         None => retry_backoff_with_jitter(attempt),
     }
 }
@@ -519,11 +521,18 @@ mod tests {
         }
     }
 
+    /// Default ladder is 15, not the unlimited sentinel. `15 * (1 + 3) = 60`
+    /// matches the shell rung test. `u32::MAX` stays unlimited and is not this default.
     #[test]
     fn default_max_retries_is_unlimited() {
-        assert_eq!(DEFAULT_MAX_RETRIES, u32::MAX);
-        assert!(is_unlimited_retries(DEFAULT_MAX_RETRIES));
-        assert_eq!(resolve_max_retries_with_env(None, None), u32::MAX);
+        assert_eq!(DEFAULT_MAX_RETRIES, 15);
+        assert!(!is_unlimited_retries(DEFAULT_MAX_RETRIES));
+        assert!(is_unlimited_retries(u32::MAX));
+        assert_eq!(
+            resolve_max_retries_with_env(None, None),
+            DEFAULT_MAX_RETRIES
+        );
+        assert_eq!(DEFAULT_MAX_RETRIES * (1 + 3), 60);
     }
 
     #[test]
