@@ -4209,6 +4209,33 @@ fn configured_test_mcp(name: &str, url: String) -> agent_client_protocol::McpSer
         agent_client_protocol::McpServerHttp::new(name, url).headers(vec![]),
     )
 }
+/// A missing `tools/list` fails here. This is not the discovery deadline.
+const TOOLS_LIST_GATE_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+/// Poll once so the waiter is registered before the drive can `notify_one`.
+/// Ready means the gate was already reached. Do not wait for a second permit.
+fn subscribe_tools_list_gate(
+    gate: std::pin::Pin<&mut impl std::future::Future<Output = ()>>,
+) -> bool {
+    std::future::Future::poll(
+        gate,
+        &mut std::task::Context::from_waker(std::task::Waker::noop()),
+    )
+    .is_ready()
+}
+/// Fail within a few seconds when `tools/list` never enters the fixture.
+async fn fail_unless_tools_list_gate_reached(
+    already_reached: bool,
+    gate: std::pin::Pin<&mut impl std::future::Future<Output = ()>>,
+) {
+    let reached_gate = already_reached
+        || tokio::time::timeout(TOOLS_LIST_GATE_WAIT, gate)
+            .await
+            .is_ok();
+    assert!(
+        reached_gate,
+        "tools/list gate reached: {reached_gate}; tools/list never entered the fixture"
+    );
+}
 #[tokio::test]
 async fn bind_advertises_configured_mcp_per_session() {
     let state = BindMcpTestState::default();
@@ -4450,6 +4477,9 @@ async fn a_stop_during_a_bind_start_ends_the_client_the_start_opened() {
         .expect("bind must succeed");
     let session = handle.session(session_id).expect("session exists");
     let hub = Arc::new(FakeHubRegistry::default());
+    let tools_list_gate = reached.notified();
+    tokio::pin!(tools_list_gate);
+    let tools_list_reached = subscribe_tools_list_gate(tools_list_gate.as_mut());
     let converge = {
         let session = Arc::clone(&session);
         let hub = Arc::clone(&hub);
@@ -4467,7 +4497,7 @@ async fn a_stop_during_a_bind_start_ends_the_client_the_start_opened() {
             .await
         })
     };
-    reached.notified().await;
+    fail_unless_tools_list_gate_reached(tools_list_reached, tools_list_gate).await;
     assert!(
         !handle
             .stop_session_mcp_server(session_id, "helper", Some(&*hub))
@@ -5446,6 +5476,9 @@ async fn a_teardown_mid_connect_drops_the_finished_client() {
     let handle = WorkspaceHandle::new(config).unwrap();
     handle.create_session("main").unwrap();
     let session = handle.session("main").unwrap();
+    let tools_list_gate = reached.notified();
+    tokio::pin!(tools_list_gate);
+    let tools_list_reached = subscribe_tools_list_gate(tools_list_gate.as_mut());
     let connect = {
         let session = Arc::clone(&session);
         let server = configured_test_mcp("gated", url);
@@ -5462,7 +5495,7 @@ async fn a_teardown_mid_connect_drops_the_finished_client() {
             .map(|(started, _life)| started)
         })
     };
-    reached.notified().await;
+    fail_unless_tools_list_gate_reached(tools_list_reached, tools_list_gate).await;
     handle.teardown_session_mcp("main").await;
     release.notify_one();
     let result = connect.await.unwrap();
@@ -6000,6 +6033,9 @@ async fn a_stale_drive_commit_cannot_enter_a_revived_life() {
     }
     reopen_and_enrol(&session).await;
     let (tx, mut rx) = tokio::sync::mpsc::channel(crate::config::BindMcpConfig::MAX_SERVERS);
+    let tools_list_gate = reached.notified();
+    tokio::pin!(tools_list_gate);
+    let tools_list_reached = subscribe_tools_list_gate(tools_list_gate.as_mut());
     let drive = {
         let session = Arc::clone(&session);
         let server = configured_test_mcp("gated", url);
@@ -6019,7 +6055,7 @@ async fn a_stale_drive_commit_cannot_enter_a_revived_life() {
             .await
         })
     };
-    reached.notified().await;
+    fail_unless_tools_list_gate_reached(tools_list_reached, tools_list_gate).await;
     let gate = session.mcp_binding.lock().await;
     let teardown = {
         let handle = handle.clone();
@@ -6083,6 +6119,9 @@ async fn a_stale_install_cannot_cross_into_a_revived_life() {
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     }
     reopen_and_enrol(&session).await;
+    let tools_list_gate = reached.notified();
+    tokio::pin!(tools_list_gate);
+    let tools_list_reached = subscribe_tools_list_gate(tools_list_gate.as_mut());
     let converge = {
         let session = Arc::clone(&session);
         let hub = FakeHubRegistry::default();
@@ -6099,7 +6138,7 @@ async fn a_stale_install_cannot_cross_into_a_revived_life() {
             .await
         })
     };
-    reached.notified().await;
+    fail_unless_tools_list_gate_reached(tools_list_reached, tools_list_gate).await;
     let gate = session.mcp_binding.lock().await;
     release.notify_one();
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
@@ -7121,6 +7160,9 @@ async fn a_drives_token_belongs_to_the_life_it_checked() {
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     }
     let (tx, mut rx) = tokio::sync::mpsc::channel(crate::config::BindMcpConfig::MAX_SERVERS);
+    let tools_list_gate = reached.notified();
+    tokio::pin!(tools_list_gate);
+    let tools_list_reached = subscribe_tools_list_gate(tools_list_gate.as_mut());
     let drive = {
         let session = Arc::clone(&session);
         let server = configured_test_mcp("gated", url);
@@ -7140,7 +7182,7 @@ async fn a_drives_token_belongs_to_the_life_it_checked() {
             .await
         })
     };
-    reached.notified().await;
+    fail_unless_tools_list_gate_reached(tools_list_reached, tools_list_gate).await;
     handle.teardown_session_mcp("main").await;
     {
         let mut binding = session.mcp_binding.lock().await;

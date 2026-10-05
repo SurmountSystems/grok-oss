@@ -179,7 +179,12 @@ pub fn reqwest_client() -> reqwest::Result<reqwest::Client> {
     with_mcp_root_certificates(reqwest::Client::builder()).build()
 }
 
-fn with_mcp_root_certificates(builder: reqwest::ClientBuilder) -> reqwest::ClientBuilder {
+/// Mozilla roots plus any `GROK_EXTRA_CA_BUNDLE` certs, and nothing from the OS store.
+/// `tls_certs_only` skips `rustls-platform-verifier`, which fails `Client::build`
+/// when that store is empty and blocks plain `http://` requests the same way.
+pub(crate) fn with_mcp_root_certificates(
+    builder: reqwest::ClientBuilder,
+) -> reqwest::ClientBuilder {
     xai_grok_extra_ca::ensure_default_crypto_provider();
     let mut certs = mozilla_root_certificates().to_vec();
     for der in xai_grok_extra_ca::extra_root_ders() {

@@ -62,19 +62,44 @@ pub use xai_grok_workspace_types::MCP_TOOL_NAME_DELIMITER;
 pub const GROK_AGENT_ID_HEADER: &str = "X-Grok-Agent-ID";
 
 /// Reqwest 0.13 twin of the 0.12 adapters in `xai_grok_extra_ca`.
-fn with_extra_root_certificates(mut builder: reqwest::ClientBuilder) -> reqwest::ClientBuilder {
-    xai_grok_extra_ca::ensure_default_crypto_provider();
-    builder = builder.tls_backend_rustls();
-    for der in xai_grok_extra_ca::extra_root_ders() {
-        match reqwest::Certificate::from_der(der) {
-            Ok(cert) => builder = builder.add_root_certificate(cert),
-            Err(e) => tracing::warn!(
-                error = %e,
-                "extra CA bundle: validated DER rejected by reqwest 0.13; skipping cert"
-            ),
-        }
+/// Same trust store as [`crate::mcp_http_client::reqwest_client`]: Mozilla roots,
+/// plus extra bundle certs. `add_root_certificate` alone still constructs the
+/// platform verifier, and that constructor errors when the OS store is empty,
+/// before a loopback `http://` handshake can send `server/discover`.
+fn with_extra_root_certificates(builder: reqwest::ClientBuilder) -> reqwest::ClientBuilder {
+    crate::mcp_http_client::with_mcp_root_certificates(builder)
+}
+
+/// `true` when `url` is a loopback host (`127.0.0.1`, `::1`, `localhost`).
+/// Those peers are the in-process fake servers and local MCP endpoints. A process `HTTP_PROXY` must not sit in front of them.
+fn http_url_is_loopback(url: &str) -> bool {
+    let Ok(parsed) = url::Url::parse(url) else {
+        return false;
+    };
+    let Some(host) = parsed.host_str() else {
+        return false;
+    };
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
     }
-    builder
+    host.parse::<std::net::IpAddr>()
+        .is_ok_and(|ip| ip.is_loopback())
+}
+
+/// Idle pooling is off, matching rmcp's default streamable HTTP client: reusing a connection whose body is still open stalls the next POST.
+/// A local app endpoint, and any loopback URL, skips the process HTTP proxy and does not follow a redirect off the machine.
+fn finish_mcp_reqwest_builder(
+    builder: reqwest::ClientBuilder,
+    config: &HttpConfig,
+) -> reqwest::ClientBuilder {
+    let builder = builder.pool_max_idle_per_host(0);
+    if config.local_agent_endpoint || http_url_is_loopback(&config.url) {
+        builder
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+    } else {
+        builder
+    }
 }
 
 /// Max protocol icons kept per server/tool at ingest.
@@ -3670,6 +3695,8 @@ impl McpClient {
             // `tokio::sync::Notify` only delivers a permit to notify-futures that exist at the time of `notify_waiters`
             let notified = self.init_done.notified();
             tokio::pin!(notified);
+            // `notified()` only snapshots `notify_waiters`. `notify_one` is delivered to a waiter that has been polled. Register before the state check.
+            let _ = notified.as_mut().enable();
 
             let mut guard = self.state.lock().await;
             // Swap the current state for `Initializing` up front and match on the OWNED previous value
@@ -3859,12 +3886,21 @@ impl McpClient {
             // Modern-only stdio servers stay unsupported until rmcp tolerates late responses to abandoned requests.
             PendingTransport::Stdio(process) => self.serve_legacy(*process).await,
             PendingTransport::Http(config) => {
-                // One reqwest client for both phases: the probe and the legacy transports stay separate rmcp sessions, but share the connection pool, so a responsive legacy server doesn't pay a second TCP+TLS setup.
-                let http_client =
+                // Separate clients: a clone shares the pool, so a probe connection that is still open can sit in front of the one `initialize` POST. Each phase gets its own client.
+                let probe_http =
                     Self::build_http_client(&config, &self.server_name, self.warn_budget.clone())?;
+                let legacy_http =
+                    Self::build_http_client(&config, &self.server_name, self.warn_budget.clone())?;
+                let mut legacy_phase = false;
                 self.probe_then_legacy(|| {
+                    let http_client = if legacy_phase {
+                        legacy_http.clone()
+                    } else {
+                        legacy_phase = true;
+                        probe_http.clone()
+                    };
                     StreamableHttpClientTransport::with_client(
-                        http_client.clone(),
+                        http_client,
                         StreamableHttpClientTransportConfig::with_uri(config.url.as_str()),
                     )
                 })
@@ -4070,7 +4106,7 @@ impl McpClient {
         McpError,
     > {
         let name = &self.server_name;
-        // Local app endpoints skip OAuth outright (`start_mcp_server` routes them to `NoOauthSupport`), so this transport must never see one — its client is built without the local no-proxy/no-redirect hardening.
+        // Local app endpoints skip OAuth outright (`start_mcp_server` routes them to `NoOauthSupport`), so this transport must never see one. Loopback URLs still skip the process HTTP proxy.
         debug_assert!(
             !config.local_agent_endpoint,
             "a local agent endpoint must not reach the OAuth transport"
@@ -4085,10 +4121,13 @@ impl McpClient {
         apply_user_agent_policy(&mut headers, name, &config.url);
         // reqwest 0.13; the policy chokepoint is typed for 0.12 and cannot wrap this builder.
         #[allow(clippy::disallowed_methods)]
-        let http_client = with_extra_root_certificates(
-            reqwest::Client::builder()
-                .default_headers(headers)
-                .connect_timeout(HTTP_CONNECT_TIMEOUT),
+        let http_client = finish_mcp_reqwest_builder(
+            with_extra_root_certificates(
+                reqwest::Client::builder()
+                    .default_headers(headers)
+                    .connect_timeout(HTTP_CONNECT_TIMEOUT),
+            ),
+            config,
         )
         .build()
         .map_err(|e| McpError::ClientError(format!("Failed to build HTTP client: {e}")))?;
@@ -4237,7 +4276,7 @@ impl McpClient {
         true
     }
 
-    /// One shared, cloneable HTTP client for a server's handshake: the probe and the legacy transports are separate rmcp sessions built from clones of this client, so they share its connection pool instead of paying a second TCP+TLS setup.
+    /// HTTP client for one handshake phase. The probe and the legacy `initialize` each build their own, so a probe connection cannot occupy the pool the `initialize` POST needs.
     fn build_http_client(
         config: &HttpConfig,
         server_name: &str,
@@ -4262,18 +4301,14 @@ impl McpClient {
         apply_user_agent_policy(&mut headers, server_name, &config.url);
         // reqwest 0.13; the policy chokepoint is typed for 0.12 and cannot wrap this builder.
         #[allow(clippy::disallowed_methods)]
-        let mut builder = with_extra_root_certificates(
-            reqwest::Client::builder()
-                .default_headers(headers)
-                .connect_timeout(HTTP_CONNECT_TIMEOUT),
+        let builder = finish_mcp_reqwest_builder(
+            with_extra_root_certificates(
+                reqwest::Client::builder()
+                    .default_headers(headers)
+                    .connect_timeout(HTTP_CONNECT_TIMEOUT),
+            ),
+            config,
         );
-        if config.local_agent_endpoint {
-            // A local app endpoint must never see its agent-id header travel
-            // through a proxy or follow a redirect off the machine.
-            builder = builder
-                .no_proxy()
-                .redirect(reqwest::redirect::Policy::none());
-        }
         // rmcp requires reqwest 0.13; the approved xai helper is typed for 0.12.
         #[allow(clippy::disallowed_methods)]
         let client = builder

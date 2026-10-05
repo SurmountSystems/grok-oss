@@ -73,6 +73,29 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
             );
             return;
         }
+        // `spawn()` waits on the child result. Reject a live source here so
+        // that wait is not the source's exit (or the shared finish signal).
+        if let Some(resume_id) = request
+            .resume_from
+            .as_deref()
+            .filter(|id| xai_tool_types::is_not_sentinel(id))
+            && self.resume_target_is_still_running(resume_id, &request.parent_session_id)
+        {
+            self.reject_queries_waiting_for_spawn(&id);
+            reply_rejected(
+                admitted_tx,
+                result_tx,
+                rejected_spawn_result(
+                    &id,
+                    &format!(
+                        "Cannot resume from subagent '{resume_id}': it is still running. \
+                         Wait for it to complete before resuming."
+                    ),
+                    false,
+                ),
+            );
+            return;
+        }
         // Token Economy implement-loop effort is thoroughness. Distinct
         // Review descriptions still count as extra Review rows. Live
         // `/implement --effort` is on the request. No operator-ask bit:

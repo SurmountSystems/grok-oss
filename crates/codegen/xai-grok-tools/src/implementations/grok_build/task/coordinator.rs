@@ -855,29 +855,12 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                 parent_session_id,
                 respond_to,
             } => {
-                let visible = |request: &SubagentRequest| {
-                    belongs_to_session(request, Some(parent_session_id.as_str()))
-                };
-                let source_is_active = self
-                    .pending
-                    .get(&source_id)
-                    .is_some_and(|child| visible(&child.request))
-                    || self
-                        .active
-                        .get(&source_id)
-                        .is_some_and(|child| visible(&child.request))
-                    // Queued spawns resolve as "still running", matching
-                    // the query path's Initializing, not as missing.
-                    || self.queued.iter().any(|queued| {
-                        queued.request.id == source_id && visible(&queued.request)
-                    });
-                let lookup = if source_is_active {
-                    SubagentResumeLookup::Active
-                } else if let Some(child) = self
-                    .completed
-                    .get(&source_id)
-                    .filter(|child| visible(&child.request))
+                let lookup = if self.resume_target_is_still_running(&source_id, &parent_session_id)
                 {
+                    SubagentResumeLookup::Active
+                } else if let Some(child) = self.completed.get(&source_id).filter(|child| {
+                    belongs_to_session(&child.request, Some(parent_session_id.as_str()))
+                }) {
                     SubagentResumeLookup::Completed(Box::new(SubagentResumeSource {
                         subagent_id: child.request.id.clone(),
                         child_session_id: child.child_session_id.clone(),
@@ -1805,6 +1788,25 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
     /// `None` (an unbound backend) matches every child.
     fn is_reachable_from_session(&self, child_id: &str, session_id: Option<&str>) -> bool {
         session_id.is_none_or(|id| self.graph.is_reachable_from(child_id, id))
+    }
+
+    /// Pending, active, and queued sources are still running. Queued matches
+    /// the query path's Initializing, not a missing id. A different parent
+    /// session does not count: that id is not this caller's live child.
+    fn resume_target_is_still_running(&self, source_id: &str, parent_session_id: &str) -> bool {
+        let visible =
+            |request: &SubagentRequest| belongs_to_session(request, Some(parent_session_id));
+        self.pending
+            .get(source_id)
+            .is_some_and(|child| visible(&child.request))
+            || self
+                .active
+                .get(source_id)
+                .is_some_and(|child| visible(&child.request))
+            || self
+                .queued
+                .iter()
+                .any(|queued| queued.request.id == source_id && visible(&queued.request))
     }
 
     pub(super) fn active_child_for_session(
