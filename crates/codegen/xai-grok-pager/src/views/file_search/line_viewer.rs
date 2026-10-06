@@ -1071,6 +1071,10 @@ impl LineViewerState {
         half.max(min).min(full_width.saturating_sub(leave_left))
     }
 
+    /// Columns of soft-plan title and body kept inside the frame.
+    /// The left border was covering the heading, so `Proposed plan.` painted as `sed plan.`
+    const SOFT_PLAN_TEXT_INSET: u16 = 5;
+
     /// Whether the plan modal should render the action-button footer.
     /// True for plan-approval and casual plan preview (not plain file preview).
     pub fn show_footer(&self) -> bool {
@@ -1611,15 +1615,28 @@ pub fn render_line_viewer(
     // Plan modes reserve 2 rows at the bottom of `inner` for the divider and action-button row
     // (rendered in step 8 below).
     let footer_rows: u16 = if viewer.show_footer() { 2 } else { 0 };
-    let content_area = Rect {
+    let mut content_area = Rect {
         x: inner.x,
         y: inner.y,
         width: inner.width,
         height: inner.height.saturating_sub(footer_rows),
     };
+    // Soft plan text sits inside the frame so the left border cannot cover
+    // the first characters, and the body wraps in the width that remains.
+    if viewer.is_soft_plan_side_pane() {
+        let inset = LineViewerState::SOFT_PLAN_TEXT_INSET.min(content_area.width.saturating_sub(8));
+        content_area.x = content_area.x.saturating_add(inset);
+        content_area.width = content_area.width.saturating_sub(inset);
+    }
 
     // 4. Prepare layout (resolves selection index for title + rendering).
-    viewer.prepare_layout(content_area.width, content_area.height);
+    // Subtract the scrollbar before measuring so a long plan line wraps and
+    // scrolls instead of being clipped on one row.
+    let layout_width = content_area
+        .width
+        .saturating_sub(SCROLLBAR_TOTAL_COLS)
+        .max(1);
+    viewer.prepare_layout(layout_width, content_area.height);
 
     // 5. Title bar: styled file path and line range.
     //    Only show the line range when visual selection is active
@@ -1657,8 +1674,16 @@ pub fn render_line_viewer(
         title.spans.push(Span::styled(" \u{2500}", deco));
 
         let title_width = title.width() as u16;
-        let title_x = popup_area.x + 1;
-        let max_title_width = popup_area.width.saturating_sub(2);
+        let title_inset = if viewer.is_soft_plan_side_pane() {
+            LineViewerState::SOFT_PLAN_TEXT_INSET
+        } else {
+            0
+        };
+        let title_x = popup_area.x.saturating_add(1).saturating_add(title_inset);
+        let max_title_width = popup_area
+            .width
+            .saturating_sub(2)
+            .saturating_sub(title_inset);
         buf.set_line(
             title_x,
             popup_area.y,

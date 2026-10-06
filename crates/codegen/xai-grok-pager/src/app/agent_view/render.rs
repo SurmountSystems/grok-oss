@@ -119,6 +119,37 @@ fn paint_composer_box_cursor(
     }
 }
 
+/// Empty composer under plan Preview paints a placeholder, then one caret cell.
+/// Clear the rest of that row so a clipped tail such as `ed in.` does not stay.
+fn clear_clipped_composer_tail(
+    buf: &mut Buffer,
+    caret_x: u16,
+    caret_y: u16,
+    prompt: Rect,
+    bg: ratatui::style::Color,
+) {
+    if prompt.width <= 2 {
+        return;
+    }
+    let right = prompt.x.saturating_add(prompt.width).saturating_sub(1);
+    let mut x = caret_x.saturating_add(1);
+    while x < right {
+        if let Some(cell) = buf.cell_mut((x, caret_y)) {
+            let border = matches!(
+                cell.symbol(),
+                "│" | "╭" | "╮" | "╰" | "╯" | "─" | "┌" | "┐" | "└" | "┘"
+            );
+            if !border {
+                cell.set_symbol(" ");
+                cell.set_fg(bg);
+                cell.set_bg(bg);
+                cell.modifier = ratatui::style::Modifier::empty();
+            }
+        }
+        x = x.saturating_add(1);
+    }
+}
+
 pub(crate) fn laid_out_prompt_height(
     focused: bool,
     content_height: u16,
@@ -3849,6 +3880,15 @@ impl AgentView {
                 });
                 if let Some((cx, cy)) = caret {
                     let allow_block_glyph = self.prompt.cursor() == self.prompt.text().len();
+                    if self.prompt.text().is_empty() {
+                        clear_clipped_composer_tail(
+                            buf,
+                            cx,
+                            cy,
+                            self.pane_areas.prompt,
+                            theme.bg_base,
+                        );
+                    }
                     paint_composer_box_cursor(
                         buf,
                         cx,
@@ -7749,6 +7789,18 @@ mod plan_turn_row_revising_copy_tests {
         agent.session.state = AgentState::Idle;
 
         let text = draw_screen(&mut agent);
+        assert!(
+            agent.line_viewer.is_none(),
+            "Approve must close the plan side panel:\n{text}"
+        );
+        assert!(
+            !text.contains("Plan ready. Side panel open"),
+            "Approve must drop Plan ready. Side panel open:\n{text}"
+        );
+        assert!(
+            !text.contains("approve | comment | revise | exit"),
+            "Approve must drop the plan footer CTAs:\n{text}"
+        );
         assert!(
             !text.contains(PLAN_IDLE_REVIEW_STATUS),
             "must not re-arm idle Plan written after Approve:\n{text}"

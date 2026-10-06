@@ -252,8 +252,12 @@ impl AgentView {
                 self.plan_approval_view = Some(pav);
             }
             self.show_plan_preview();
+            // Exit and abandon record a decision without starting implement.
+            // A later dock still needs a viewer when there is no plan body.
+            // Approve stays shut: do not invent that placeholder.
             if self.line_viewer.is_none()
                 && self.plan_decision_resolved
+                && !self.plan_approved_implement
                 && let Some(mut viewer) =
                     crate::views::file_search::line_viewer::LineViewerState::open_markdown_content(
                         "plan.md",
@@ -266,6 +270,7 @@ impl AgentView {
                 let plan = viewer.plan_mut();
                 plan.show_action_buttons = true;
                 plan.feedback_active = false;
+                plan.selected_cta = None;
                 self.line_viewer = Some(viewer);
             }
         }

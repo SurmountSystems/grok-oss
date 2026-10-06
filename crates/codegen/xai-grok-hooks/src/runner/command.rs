@@ -704,6 +704,8 @@ fn parse_blocking_result(
     if let Some(json) = gate_document {
         let health = HookHealth::from_success(exit_code == 0);
         match gate_outcome(json, hook_name, stderr_first_line(stderr), health) {
+            // A JSON deny is honored on any exit code (fail-safe).
+            // `updatedInput` is ignored on deny.
             GateOutcome::Deny(reason) => {
                 if exit_code != GATE_EXIT_CODE && exit_code != 0 {
                     tracing::warn!(
@@ -721,6 +723,8 @@ fn parse_blocking_result(
                 );
             }
             GateOutcome::Allow { .. } | GateOutcome::Ask { .. } if exit_code == GATE_EXIT_CODE => {
+                // Exit 2 wins over a JSON allow or ask. A rewrite on that
+                // allow is ignored.
                 tracing::warn!(
                     hook_name,
                     "JSON decision is 'allow' or 'ask' but exit code is 2 — denying (stdout is ignored on exit 2)"

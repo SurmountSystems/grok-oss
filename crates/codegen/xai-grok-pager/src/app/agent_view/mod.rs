@@ -1408,6 +1408,11 @@ pub struct AgentView {
     /// active and turn-end re-arms Approve for a plan the operator already
     /// decided.
     pub(crate) plan_decision_resolved: bool,
+    /// True only after Approve starts implement. That path keeps the side
+    /// panel shut. Plan Exit and abandon leave this false so a leftover
+    /// covering can reopen view-only and `/plan` can dock covering exclusive
+    /// present.
+    pub(crate) plan_approved_implement: bool,
     /// Paste-chip Approve returns `Action::Interject` and must not emit
     /// `SendInterject`. Dispatch clears this. Typed notes leave it false.
     pub(crate) paste_chip_approval_not_wire_interject: bool,

@@ -2624,6 +2624,7 @@ pub(super) fn handle_prompt_response(
                 }
             } else {
                 agent.pending_post_turn_commit = None;
+                agent.show_plan_preview_if_available();
             }
         } else if !dismissed_in_turn_review {
             // EndTurn, cancel, and fail all open review when a keep exists.

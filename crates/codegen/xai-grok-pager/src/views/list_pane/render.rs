@@ -389,7 +389,11 @@ impl<T: ListItem> ListPane<'_, T> {
 
             // This only triggers in NoWrap mode (where item_h == 1 regardless of content length). Viewport
             // clipping does not trigger this; only true text truncation does.
-            if item.desired_height(area.width) > item_h && rows_to_render > 0 {
+            // Wrap mode keeps the rest of the line on later rows and must not ellipsize it away.
+            if wrap_mode == WrapMode::NoWrap
+                && item.desired_height(area.width) > item_h
+                && rows_to_render > 0
+            {
                 let last_y = cursor_y + rows_to_render - 1;
                 render_truncation_ellipsis(buf, last_y, area.x, area.width);
             }

@@ -461,6 +461,7 @@ impl AgentView {
     /// and after Revise/Clarify in-flight.
     pub(crate) fn clear_plan_loop_flags_for_new_present(&mut self) {
         self.plan_decision_resolved = false;
+        self.plan_approved_implement = false;
         self.plan_feedback_in_flight = None;
         self.isolated_preview_rewrite_wait_prompt = None;
         self.persist_plan_decision_resolved_flag(false);
@@ -601,7 +602,7 @@ impl AgentView {
             self.reopen_plan_approval();
             return;
         }
-        self.show_plan_preview();
+        self.show_plan_preview_after_decision(true);
         self.restore_plan_feedback_draft_if_composer_lost();
         self.clear_view_plan_request_if_waiter_bound();
     }
@@ -772,6 +773,9 @@ impl AgentView {
                 return None;
             }
             return Some(in_flight.status_label());
+        }
+        if self.plan_decision_resolved {
+            return None;
         }
         if let Some(ref pav) = self.plan_approval_view {
             if self.line_viewer.is_some() {
@@ -1080,6 +1084,22 @@ impl AgentView {
     /// When plan approval is parked without a body, opens a placeholder preview.
     /// The user then always sees a decision surface (a/s/q) instead of a dead "Waiting on plan approval" line with a no-op Tab:plan.
     pub fn show_plan_preview(&mut self) {
+        self.show_plan_preview_after_decision(false);
+    }
+
+    /// `reopen_after_decision` is `/view-plan` after Approve or Exit.
+    /// Any other open stays shut only after Approve starts implement, and
+    /// while a post-turn build is still waiting on the worker, so the side
+    /// panel, `approve | comment | revise | exit`, and `Plan ready. Side
+    /// panel open` do not stay up after Approve. Plan Exit and abandon still
+    /// reopen: view-only for a leftover covering, covering exclusive for
+    /// bare `/plan`.
+    pub(crate) fn show_plan_preview_after_decision(&mut self, reopen_after_decision: bool) {
+        if !reopen_after_decision
+            && (self.plan_approved_implement || self.is_post_turn_build_starting())
+        {
+            return;
+        }
         if matches!(
             self.plan_feedback_in_flight,
             Some(PlanFeedbackInFlight::Revising)
@@ -1340,6 +1360,10 @@ impl AgentView {
                 return InputOutcome::Changed;
             }
             let notes = review_comments.as_deref();
+            // Close the side panel now. The review stays mounted until the
+            // worker accepts, so a refuse can still restore approve/build.
+            self.line_viewer = None;
+            self.casual_commenting_range = None;
             return InputOutcome::Action(Action::ExecutePlan {
                 plan_file_content: Self::plan_content_with_review(snapshot, notes),
                 plan_file_uri: notes
@@ -1379,6 +1403,7 @@ impl AgentView {
         let sent = pav.send_approved(review_comments.clone());
         self.close_plan_review_and_forget(PlanReviewOutcome::Approved);
         self.plan_decision_resolved = true;
+        self.plan_approved_implement = true;
         self.persist_plan_decision_resolved_flag(true);
         if sent {
             // Notes ride the approval as a UserPrompt row. Interject is a
@@ -1563,6 +1588,7 @@ impl AgentView {
         // Exit decides the present. Post-turn SetPlanMode stays mounted
         // above and does not take this path. Revise does not call abandon.
         self.plan_decision_resolved = true;
+        self.plan_approved_implement = false;
         self.persist_plan_decision_resolved_flag(true);
         self.clear_isolated_preview_open_marker();
         // A local idle park can still look like a running turn. Exit finishes
@@ -1630,10 +1656,15 @@ impl AgentView {
             PostTurnPlanCommit::Approved => {
                 pav.send_approved(None);
                 self.finish_plan_review_ui(PlanReviewOutcome::Approved);
+                self.plan_decision_resolved = true;
+                self.plan_approved_implement = true;
+                self.persist_plan_decision_resolved_flag(true);
+                self.line_viewer = None;
                 self.leave_plan_after_approved_build();
             }
             PostTurnPlanCommit::Abandoned => {
                 pav.send_abandoned();
+                self.plan_approved_implement = false;
                 self.close_plan_review_and_forget(PlanReviewOutcome::Abandoned);
             }
             PostTurnPlanCommit::Revised => {
