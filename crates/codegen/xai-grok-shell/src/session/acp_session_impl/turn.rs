@@ -522,17 +522,18 @@ impl SessionActor {
             verbatim,
             send_now,
             json_schema,
-            mut persist_ack,
+            persist_ack,
             parsed_prompt_tx,
             traceparent: _,
             unstick_retry,
             start_gate: _,
         } = request;
-        let prompt_id = prompt_id.as_str();
+        let prompt_id_owned = prompt_id;
+        let prompt_id = prompt_id_owned.as_str();
         let handle_prompt_start = std::time::Instant::now();
         self.chat_state_handle
             .record_turn_start(chrono::Utc::now().timestamp_millis());
-        self.apply_supported_context_window_selection().await;
+        Box::pin(self.apply_supported_context_window_selection()).await;
         *self.active_skill.lock() = None;
         xai_grok_telemetry::unified_log::info(
             "shell.handle_prompt.start",
@@ -555,7 +556,7 @@ impl SessionActor {
         self.ensure_session_disk_writable().await?;
         let wake_message = match input_origin.as_prompt_origin() {
             super::super::PromptOrigin::SubagentCompleted { subagent_id } => {
-                Some(self.build_wake_turn_message(subagent_id).await)
+                Some(Box::pin(self.build_wake_turn_message(subagent_id)).await)
             }
             _ => None,
         };
@@ -716,7 +717,7 @@ impl SessionActor {
                         token_budget,
                     } => {
                         xai_grok_telemetry::session_ctx::log_event(slash_used);
-                        match self.setup_goal(&objective, token_budget).await {
+                        match Box::pin(self.setup_goal(&objective, token_budget)).await {
                             GoalSetupOutcome::Inference { reminder } => {
                                 vec![text_block(reminder)]
                             }
@@ -730,7 +731,7 @@ impl SessionActor {
                     }
                     BuiltinAction::GoalResume => {
                         xai_grok_telemetry::session_ctx::log_event(slash_used);
-                        match self.resume_goal().await {
+                        match Box::pin(self.resume_goal()).await {
                             GoalResumeOutcome::Inference { reminder, user_msg } => {
                                 self.send_slash_command_output(&user_msg).await;
                                 vec![text_block(reminder)]
@@ -749,9 +750,9 @@ impl SessionActor {
                         };
                         self.persist_host_turn_user_echo(&original_prompt_text, prompt_id);
                         self.mark_front_message_committed().await;
-                        let msg = self
-                            .launch_named_workflow(workflow_registry, &name, &input)
-                            .await;
+                        let msg =
+                            Box::pin(self.launch_named_workflow(workflow_registry, &name, &input))
+                                .await;
                         self.send_host_turn_slash_command_output(&msg).await;
                         return ok_end_turn(0, None);
                     }
@@ -759,7 +760,9 @@ impl SessionActor {
                         if policy.authority.is_human_intent() {
                             self.persist_host_turn_user_echo(&original_prompt_text, prompt_id);
                         }
-                        return self.execute_builtin_slash_command(action).await;
+                        // Heap-build the slash future. Inlining it pulls the compact
+                        // state machine onto the default 2 MB test stack.
+                        return Box::pin(self.execute_builtin_slash_command(action)).await;
                     }
                 }
             }
@@ -833,6 +836,54 @@ impl SessionActor {
                 original_blocks
             }
         };
+        // The accepted-turn state machine is larger than the default 2 MB
+        // test stack. Slash returns above never construct it.
+        Box::pin(self.finish_accepted_turn_input(
+            prompt_id_owned,
+            input_origin,
+            prompt_blocks,
+            trace_gcs_config,
+            artifact_tracker,
+            prompt_client_identifier,
+            prompt_screen_mode,
+            verbatim,
+            send_now,
+            json_schema,
+            persist_ack,
+            parsed_prompt_tx,
+            unstick_retry,
+            commit_ids,
+            pending_skill_information,
+            original_prompt_text,
+            otel_command_name,
+            handle_prompt_start,
+        ))
+        .await
+    }
+
+    async fn finish_accepted_turn_input(
+        self: &Arc<Self>,
+        prompt_id: String,
+        input_origin: InputOrigin,
+        prompt_blocks: Vec<acp::ContentBlock>,
+        trace_gcs_config: Option<crate::session::repo_changes::TraceExportConfig>,
+        artifact_tracker: Option<crate::upload::manifest::ArtifactTracker>,
+        prompt_client_identifier: Option<String>,
+        prompt_screen_mode: Option<String>,
+        verbatim: bool,
+        send_now: bool,
+        json_schema: Option<serde_json::Value>,
+        mut persist_ack: Option<oneshot::Sender<()>>,
+        parsed_prompt_tx: Option<oneshot::Sender<ParsedPromptInfo>>,
+        unstick_retry: bool,
+        commit_ids: Vec<String>,
+        mut pending_skill_information: Option<String>,
+        original_prompt_text: String,
+        otel_command_name: Option<String>,
+        handle_prompt_start: std::time::Instant,
+    ) -> PromptTurnResult {
+        let prompt_id = prompt_id.as_str();
+        let policy = input_origin.policy();
         *self.doom_loop_turn_tally.lock() = Default::default();
         self.retain_timed_out_image_strips_for_new_turn();
         self.turn_stream_drained.lock().clear();
@@ -913,15 +964,14 @@ impl SessionActor {
             acc
         });
         let prompt_block = if policy.authority != InputAuthority::ModelAuthoredUntrusted {
-            let prompt_gate_verdict = self
-                .dispatch_prompt_submit_hook(
-                    xai_grok_hooks::event::HookPayload::UserPromptSubmit {
-                        prompt: Some(text.clone()),
-                        subagent_type: self.subagent_type_label(),
-                    },
-                    Some(prompt_id),
-                )
-                .await;
+            let prompt_gate_verdict = Box::pin(self.dispatch_prompt_submit_hook(
+                xai_grok_hooks::event::HookPayload::UserPromptSubmit {
+                    prompt: Some(text.clone()),
+                    subagent_type: self.subagent_type_label(),
+                },
+                Some(prompt_id),
+            ))
+            .await;
             match (
                 self.should_enforce_prompt_block(&policy),
                 prompt_gate_verdict,
@@ -996,7 +1046,7 @@ impl SessionActor {
                 skill_information: skill_info,
                 images: mut raw_images,
                 is_cursor,
-            } = match parse_prompt_with_skills(
+            } = match Box::pin(parse_prompt_with_skills(
                 &prompt_blocks,
                 self.tool_context.cwd.to_path_buf(),
                 &self.session_info,
@@ -1004,7 +1054,7 @@ impl SessionActor {
                 verbatim,
                 self.is_cursor_harness(),
                 pending_skill_information.take().unwrap_or_default(),
-            )
+            ))
             .await
             {
                 Ok(v) => v,
@@ -1086,13 +1136,13 @@ impl SessionActor {
             let (user_message, truncated_local_path) = if verbatim {
                 (assembled, None)
             } else {
-                self.maybe_truncate_large_prompt_with_skills(
+                Box::pin(self.maybe_truncate_large_prompt_with_skills(
                     context,
                     query,
                     skill_info,
                     is_cursor,
                     current_prompt_index,
-                )
+                ))
                 .await
             };
             let was_truncated = truncated_local_path.is_some();
@@ -1397,9 +1447,9 @@ impl SessionActor {
                         || !self.has_pending_goal_continuation().await
                     {
                         let decision = if self.goal_runs_on_workflow_engine() {
-                            self.run_goal_round_end().await
+                            Box::pin(self.run_goal_round_end()).await
                         } else {
-                            self.run_goal_round_end_legacy().await
+                            Box::pin(self.run_goal_round_end_legacy()).await
                         };
                         if let GoalRoundDecision::Continue(directive) = decision {
                             salvage.round_boundary();
@@ -1413,10 +1463,7 @@ impl SessionActor {
                         );
                     }
                 }
-                match self
-                    .run_stop_gate(prompt_id, stop_continuations_this_turn)
-                    .await
-                {
+                match Box::pin(self.run_stop_gate(prompt_id, stop_continuations_this_turn)).await {
                     StopGateDecision::AllowStop => break round,
                     StopGateDecision::KeepWorking { feedback } => {
                         stop_continuations_this_turn += 1;
@@ -2676,8 +2723,8 @@ impl SessionActor {
         let conv_turn_clock = DualClock::now();
         let turn_phases = self.turn_phases.clone();
         turn_phases.start();
-        self.maybe_refresh_model_metadata_on_resume().await;
-        self.maybe_compact_on_model_switch().await?;
+        Box::pin(self.maybe_refresh_model_metadata_on_resume()).await;
+        Box::pin(self.maybe_compact_on_model_switch()).await?;
         self.chat_state_handle
             .record_turn_start(chrono::Utc::now().timestamp_millis());
         {
@@ -2710,7 +2757,7 @@ impl SessionActor {
         }
         let mut prompt_timing = Some(crate::session::prompt_timing::PromptTiming::start());
         let tool_prep_start = std::time::Instant::now();
-        let (tool_definitions, mcp_wait_ms) = self.prepare_tool_definitions_timed().await;
+        let (tool_definitions, mcp_wait_ms) = Box::pin(self.prepare_tool_definitions_timed()).await;
         let total_prep_ms = tool_prep_start.elapsed().as_millis() as u64;
         self.maybe_inject_mcp_connecting_reminder().await;
         self.maybe_inject_mcp_reminder().await;
@@ -2875,7 +2922,7 @@ impl SessionActor {
                 self.flush_pending_skill_reminders().await;
                 self.inject_pending_monitor_events().await;
             }
-            let memory_reminder = self.first_turn_memory_reminder().await;
+            let memory_reminder = Box::pin(self.first_turn_memory_reminder()).await;
             if memory_reminder.is_some() {
                 self.memory
                     .injection_count
@@ -2903,7 +2950,7 @@ impl SessionActor {
             {
                 let actor = std::sync::Arc::clone(self);
                 let handle = tokio::task::spawn_local(async move {
-                    actor.run_prefire_pass1().await;
+                    Box::pin(actor.run_prefire_pass1()).await;
                 });
                 self.compaction.prefire.set_handle(handle);
             }
@@ -2914,7 +2961,7 @@ impl SessionActor {
                 && !turn_parked.is_parked()
                 && !salvage.awaiting_continuation()
                 && let Some(trigger_info) = self.check_auto_compact_needed().await
-                && let Err(e) = self.run_compact_only(trigger_info, false).await
+                && let Err(e) = Box::pin(self.run_compact_only(trigger_info, false)).await
             {
                 tracing::error!(error = %e, "Pre-sampling auto-compaction failed");
                 if Self::is_compact_cancelled_error(&e) {
@@ -3941,7 +3988,7 @@ impl SessionActor {
             if self.tool_context.task_output_token_budget.is_none()
                 && let Some(trigger_info) = self.check_preflight_overflow().await
             {
-                if let Err(e) = self.run_compact_only(trigger_info, false).await {
+                if let Err(e) = Box::pin(self.run_compact_only(trigger_info, false)).await {
                     tracing::error!(error = %e, "Preflight overflow compaction failed");
                     if Self::is_compact_cancelled_error(&e) {
                         return Ok(TurnOutcome::Cancelled {

@@ -96,10 +96,22 @@ fn overlay_live_kill_ids(app: &AppView, id: AgentId) -> Vec<String> {
 /// Second `[stop]` while already Cancelling re-sends `CancelTurn` and
 /// finishes the local spinner so the Operator box accepts typing.
 /// The first stop stays in `TurnCancelling` so resend grace can run.
+/// Mouse `[stop]` and the dashboard stop key are that force-finish.
+/// A hint-less retry keeps `pending_cancel_resend` and stays Cancelling.
+fn cancel_retry_is_force_finish(agent: &crate::app::agent_view::AgentView) -> bool {
+    matches!(
+        agent.cancel_trigger_hint,
+        Some(crate::app::actions::CancelTrigger::Mouse)
+            | Some(crate::app::actions::CancelTrigger::DashboardStop)
+    )
+}
+
 fn finish_user_cancel_retry(agent: &mut crate::app::agent_view::AgentView) {
     agent.session.state = crate::app::agent::AgentState::Idle;
     agent.pending_cancel_resend = None;
     agent.cancel_trigger_hint = None;
+    // Scrollback binds bare `h` to fold. After cancel the Operator box must take that key.
+    let _ = agent.set_active_pane(ActivePane::Prompt, true);
 }
 
 pub(super) fn dispatch_cancel_turn(app: &mut AppView) -> Vec<Effect> {
@@ -130,6 +142,9 @@ pub(super) fn dispatch_cancel_turn(app: &mut AppView) -> Vec<Effect> {
                 agent, session_id, /* cancel_subagents */ true,
                 /* rewind_prompt_id */ None,
             );
+            // Overlay [stop] while the child is already Cancelling re-sends
+            // and finishes. The parent pane keeps the mouse / dashboard
+            // split: a hint-less retry stays Cancelling.
             finish_user_cancel_retry(agent);
             return vec![effect];
         }
@@ -187,6 +202,7 @@ pub(super) fn dispatch_cancel_turn(app: &mut AppView) -> Vec<Effect> {
             );
             // Explicit user cancel supersedes any pending send-now expectation (its marker renders).
             agent.clear_send_now_expectation();
+            let force_finish = cancel_retry_is_force_finish(agent);
             let cancel_subagents = resolve_cancel_subagents(agent);
             let effect = emit_cancel_turn(
                 agent,
@@ -194,7 +210,12 @@ pub(super) fn dispatch_cancel_turn(app: &mut AppView) -> Vec<Effect> {
                 cancel_subagents,
                 /* rewind_prompt_id */ None,
             );
-            finish_user_cancel_retry(agent);
+            // Mouse [stop] and the dashboard stop key finish the spinner.
+            // A hint-less retry (Esc / palette) re-sends and stays Cancelling
+            // so the recorded subagent choice survives reconcile.
+            if force_finish {
+                finish_user_cancel_retry(agent);
+            }
             return vec![effect];
         }
         // Compact owns the pane (`CommandRunning`) even if a leftover wake marker is still set; `/compact` can drain while that marker is live

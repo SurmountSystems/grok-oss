@@ -259,19 +259,26 @@ fn format_subagent_elapsed(elapsed_secs: u64) -> String {
 }
 
 fn format_subagent_line(s: &RunningSubagent<'_>) -> String {
-    // Same shape as bash/monitor/loops: `- "id": `text` (status, kind)`.
+    // Under a minute the role stays inside the parentheses, matching
+    // `(running for 42s, subagent)`. At 60 seconds and above the role sits
+    // outside, so `(running for 15m43s)` is a closed duration.
     let command = collapsed_ws(
         s.description
             .unwrap_or(s.subagent_type.unwrap_or("subagent")),
     );
     let kind = s.subagent_type.unwrap_or("subagent");
-    format!(
-        "- \"{}\": `{}` (running for {}, {})",
-        s.subagent_id,
-        command,
-        format_subagent_elapsed(s.elapsed_secs),
-        kind
-    )
+    let elapsed = format_subagent_elapsed(s.elapsed_secs);
+    if s.elapsed_secs < 60 {
+        format!(
+            "- \"{}\": `{}` (running for {}, {})",
+            s.subagent_id, command, elapsed, kind
+        )
+    } else {
+        format!(
+            "- \"{}\": `{}` (running for {}) {}",
+            s.subagent_id, command, elapsed, kind
+        )
+    }
 }
 
 /// `## Scheduled Loops` is no longer a standalone section; loops render under

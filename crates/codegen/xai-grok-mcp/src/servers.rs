@@ -61,15 +61,6 @@ pub use xai_grok_workspace_types::MCP_TOOL_NAME_DELIMITER;
 /// Caller-supplied configs cannot smuggle it: the header is stripped from every HTTP/SSE config and re-added only when the spawn context asks for it (mirroring the `GROK_SESSION_ID` env protection on stdio servers).
 pub const GROK_AGENT_ID_HEADER: &str = "X-Grok-Agent-ID";
 
-/// Reqwest 0.13 twin of the 0.12 adapters in `xai_grok_extra_ca`.
-/// Same trust store as [`crate::mcp_http_client::reqwest_client`]: Mozilla roots,
-/// plus extra bundle certs. `add_root_certificate` alone still constructs the
-/// platform verifier, and that constructor errors when the OS store is empty,
-/// before a loopback `http://` handshake can send `server/discover`.
-fn with_extra_root_certificates(builder: reqwest::ClientBuilder) -> reqwest::ClientBuilder {
-    crate::mcp_http_client::with_mcp_root_certificates(builder)
-}
-
 /// `true` when `url` is a loopback host (`127.0.0.1`, `::1`, `localhost`).
 /// Those peers are the in-process fake servers and local MCP endpoints. A process `HTTP_PROXY` must not sit in front of them.
 fn http_url_is_loopback(url: &str) -> bool {
@@ -2400,13 +2391,11 @@ async fn probe_anonymous_access(
     headers: &[(String, String)],
 ) -> AnonymousAccess {
     // Redirects are not followed: a gateway that redirects an anonymous POST to a login page is challenging, not accepting
-    // reqwest 0.13; the policy chokepoint is typed for 0.12 and cannot wrap this builder.
-    #[allow(clippy::disallowed_methods)]
-    let client = match with_extra_root_certificates(reqwest::Client::builder())
-        .timeout(ANONYMOUS_ACCESS_PROBE_TIMEOUT)
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-    {
+    let client = match crate::mcp_http_client::build_reqwest_client(|builder| {
+        builder
+            .timeout(ANONYMOUS_ACCESS_PROBE_TIMEOUT)
+            .redirect(reqwest::redirect::Policy::none())
+    }) {
         Ok(client) => client,
         Err(e) => {
             tracing::warn!(server = server_name, error = %e, "anonymous-access probe: building HTTP client failed");
@@ -4119,17 +4108,14 @@ impl McpClient {
             config.headers_except_authorization(),
         );
         apply_user_agent_policy(&mut headers, name, &config.url);
-        // reqwest 0.13; the policy chokepoint is typed for 0.12 and cannot wrap this builder.
-        #[allow(clippy::disallowed_methods)]
-        let http_client = finish_mcp_reqwest_builder(
-            with_extra_root_certificates(
-                reqwest::Client::builder()
+        let http_client = crate::mcp_http_client::build_reqwest_client(|builder| {
+            finish_mcp_reqwest_builder(
+                builder
                     .default_headers(headers)
                     .connect_timeout(HTTP_CONNECT_TIMEOUT),
-            ),
-            config,
-        )
-        .build()
+                config,
+            )
+        })
         .map_err(|e| McpError::ClientError(format!("Failed to build HTTP client: {e}")))?;
         // `AuthClient::new` wants an owned manager, but ours is shared (`Arc`) with the OAuth flow.
         // The struct is non_exhaustive, so build a throwaway manager and swap in the shared one.
@@ -4300,21 +4286,15 @@ impl McpClient {
             )
         };
         apply_user_agent_policy(&mut headers, server_name, &config.url);
-        // reqwest 0.13; the policy chokepoint is typed for 0.12 and cannot wrap this builder.
-        #[allow(clippy::disallowed_methods)]
-        let builder = finish_mcp_reqwest_builder(
-            with_extra_root_certificates(
-                reqwest::Client::builder()
+        let client = crate::mcp_http_client::build_reqwest_client(|builder| {
+            finish_mcp_reqwest_builder(
+                builder
                     .default_headers(headers)
                     .connect_timeout(HTTP_CONNECT_TIMEOUT),
-            ),
-            config,
-        );
-        // rmcp requires reqwest 0.13; the approved xai helper is typed for 0.12.
-        #[allow(clippy::disallowed_methods)]
-        let client = builder
-            .build()
-            .map_err(|e| McpError::ClientError(format!("Failed to build HTTP client: {e}")))?;
+                config,
+            )
+        })
+        .map_err(|e| McpError::ClientError(format!("Failed to build HTTP client: {e}")))?;
         Ok(
             crate::mcp_http_client::McpHttpClient::new(client, server_name, warn_budget)
                 .with_bearer_token_file(config.bearer_token_file.clone()),

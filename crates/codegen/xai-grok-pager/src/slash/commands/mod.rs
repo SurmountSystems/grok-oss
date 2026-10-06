@@ -373,6 +373,7 @@ pub mod usage;
 pub mod view_plan;
 pub mod vim_mode;
 pub mod voice;
+pub mod what;
 pub mod workflow;
 pub mod workflows;
 use super::command::SlashCommand;

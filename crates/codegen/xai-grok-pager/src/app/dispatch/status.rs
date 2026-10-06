@@ -285,17 +285,18 @@ pub(super) fn set_coding_data_sharing(
     );
 
     let seq = next_coding_data_write_seq(app);
-    let mut effects = vec![Effect::SetCodingDataSharing {
+    // The click writes only. A duplicate opt-out rides that pending write.
+    // `PersistPrivacyBannerAcked` is the server-accept path, not this click.
+    // A Settings opt-in drops a stamped ack until that write is accepted,
+    // so a failed opt-in does not keep an earlier opt-out ack.
+    if source == xai_grok_telemetry::events::CodingDataConsentSource::Settings && opted_in {
+        app.privacy_banner_acked = None;
+    }
+    vec![Effect::SetCodingDataSharing {
         agent_id,
         opted_in,
         seq,
-    }];
-    // Opt-out from in acks now and still writes. Rollout-off is a no-op
-    // inside `ack_privacy_banner`, so a write-only test stays write-only.
-    if !opted_in && prev {
-        effects.extend(ack_privacy_banner(app));
-    }
-    effects
+    }]
 }
 
 /// The toast for a setting that could not be written to `config.toml`.
@@ -636,7 +637,8 @@ pub(super) fn handle_coding_data_sharing_updated(
     seq: u64,
 ) -> Vec<Effect> {
     if !is_current_coding_data_write(app, seq, agent_id) {
-        // The server accepted this older write, so the newer one falls back to it. Arrival order is not commit order: a delayed reply can overwrite a newer value here
+        // A superseded success is the rollback the newer write uses if that
+        // newer write fails. Do not move the mirror and do not ack again.
         if let Some(pending) = app.coding_data_pending_write.as_mut() {
             pending.rollback_to_opted_in = opted_in;
         }

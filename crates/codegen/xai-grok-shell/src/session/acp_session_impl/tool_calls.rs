@@ -2474,14 +2474,39 @@ impl SessionActor {
             tool_call_id = %tool_call_id,
             "[exit_plan_mode] re-parking approval after resume"
         );
-        let parsed = match self
-            .request_plan_approval_after_resume(&tool_call_id, plan_content)
-            .await
-        {
-            Ok(parsed) => parsed,
-            Err(err) => {
-                tracing::debug!(%err, "resume exit_plan_mode reverse-request failed");
-                return;
+        // The load response may still be in flight, so the client is not
+        // listening yet. One failed reverse-request used to drop the park.
+        // Retry until the pager can show approval chrome.
+        let parsed = {
+            let mut parsed = None;
+            let mut last_err = None;
+            for attempt in 0..40 {
+                if attempt > 0 {
+                    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                    if !self.plan_mode.lock().is_awaiting_plan_approval() {
+                        return;
+                    }
+                }
+                match self
+                    .request_plan_approval_after_resume(&tool_call_id, plan_content.clone())
+                    .await
+                {
+                    Ok(ok) => {
+                        parsed = Some(ok);
+                        break;
+                    }
+                    Err(err) => last_err = Some(err),
+                }
+            }
+            match parsed {
+                Some(parsed) => parsed,
+                None => {
+                    tracing::debug!(
+                        err = ?last_err,
+                        "resume exit_plan_mode reverse-request failed"
+                    );
+                    return;
+                }
             }
         };
         match resume_action_for(PlanApprovalOutcome::from_response(&parsed), parsed.feedback) {

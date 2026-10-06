@@ -167,33 +167,35 @@ impl<C> McpHttpClient<C> {
     }
 }
 
+/// Reqwest 0.13 stand-in for [`xai_grok_extra_ca::build_reqwest_client`].
+/// That helper returns a reqwest 0.12 client, and rmcp's `StreamableHttpClient` impl is for 0.13.
+/// `configure` keeps timeouts, headers, and proxy settings; Mozilla roots are applied here
+/// so an empty OS trust store still builds. `GROK_EXTRA_CA_BUNDLE` roots stay additive.
+#[allow(clippy::disallowed_methods)] // approved reqwest 0.13 build path; the 0.12 helper cannot wrap this builder
+pub(crate) fn build_reqwest_client(
+    configure: impl FnOnce(reqwest::ClientBuilder) -> reqwest::ClientBuilder,
+) -> reqwest::Result<reqwest::Client> {
+    with_mcp_root_certificates(configure(reqwest::Client::builder())).build()
+}
+
 /// Reqwest 0.13 client for rmcp.
-/// `xai_grok_extra_ca::build_reqwest_client` returns reqwest 0.12, and rmcp's
-/// `StreamableHttpClient` impl is for 0.13, so this builder cannot call that helper.
-/// Mozilla roots are the trust store: reqwest 0.13's rustls backend uses
-/// rustls-platform-verifier, which fails `Client::build` when the OS store is empty.
-/// `GROK_EXTRA_CA_BUNDLE` roots stay additive.
 pub fn reqwest_client() -> reqwest::Result<reqwest::Client> {
-    // reqwest 0.13; the policy chokepoint is typed for 0.12 and cannot wrap this builder.
-    #[allow(clippy::disallowed_methods)]
-    with_mcp_root_certificates(reqwest::Client::builder()).build()
+    build_reqwest_client(|builder| builder)
 }
 
 /// Same trust store as [`reqwest_client`]. A loopback authorization server is an
 /// in-process fake: a process `HTTP_PROXY` must not sit in front of it, and a
 /// redirect must not leave the machine.
 fn oauth_reqwest_client(base_url: &str) -> reqwest::Result<reqwest::Client> {
-    // reqwest 0.13; the policy chokepoint is typed for 0.12 and cannot wrap this builder.
-    #[allow(clippy::disallowed_methods)]
-    let builder = with_mcp_root_certificates(reqwest::Client::builder());
-    let builder = if oauth_base_is_loopback(base_url) {
-        builder
-            .no_proxy()
-            .redirect(reqwest::redirect::Policy::none())
-    } else {
-        builder
-    };
-    builder.build()
+    build_reqwest_client(|builder| {
+        if oauth_base_is_loopback(base_url) {
+            builder
+                .no_proxy()
+                .redirect(reqwest::redirect::Policy::none())
+        } else {
+            builder
+        }
+    })
 }
 
 fn oauth_base_is_loopback(url: &str) -> bool {

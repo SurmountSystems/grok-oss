@@ -279,11 +279,13 @@ fn strip_duplicate_compact_tail(description: &str, compact: Option<&str>) -> Str
         .to_string()
 }
 
-/// Running rows that share a non-empty description collapse to the earliest start.
+/// Running rows that share a non-empty description and the same type label
+/// collapse to the earliest start. A reviewer and a nameless subagent stay
+/// distinct even when the description text matches.
 fn duplicate_running_description_ids<'a>(
     listed: &[&'a SubagentInfo],
 ) -> std::collections::HashSet<&'a str> {
-    let mut best: HashMap<&str, (Instant, &str)> = HashMap::new();
+    let mut best: HashMap<String, (Instant, &str)> = HashMap::new();
     for info in listed {
         if !info.is_running() {
             continue;
@@ -292,11 +294,13 @@ fn duplicate_running_description_ids<'a>(
         if desc.is_empty() {
             continue;
         }
+        let (label, _) = format_subagent_label(info);
+        let key = format!("{label}\n{desc}");
         let id = info.child_session_id.as_ref();
-        match best.get(desc) {
+        match best.get(&key) {
             Some((started, _)) if *started <= info.attempt.started_at => {}
             _ => {
-                best.insert(desc, (info.attempt.started_at, id));
+                best.insert(key, (info.attempt.started_at, id));
             }
         }
     }
@@ -309,8 +313,10 @@ fn duplicate_running_description_ids<'a>(
         if desc.is_empty() {
             continue;
         }
+        let (label, _) = format_subagent_label(info);
+        let key = format!("{label}\n{desc}");
         let id = info.child_session_id.as_ref();
-        if best.get(desc).is_some_and(|(_, winner)| *winner != id) {
+        if best.get(&key).is_some_and(|(_, winner)| *winner != id) {
             skip.insert(id);
         }
     }
@@ -490,13 +496,19 @@ impl TaskEntry {
                 estimate_wall: STANDING_WRAP_ESTIMATE_WALL,
                 estimate_tokens: STANDING_WRAP_ESTIMATE_TOKENS,
                 elapsed: &elapsed_text,
-                host_tokens: None,
+                host_tokens: host_figure,
             });
             debug_assert_eq!(shown.l1_tokens_added, 0);
             debug_assert!(!shown.wrote_grok_oss_sqlite);
+            // Empty host text omits the token clause. The labeled estimate stays.
+            let actual_clause = if shown.actual_tokens.is_empty() {
+                ""
+            } else {
+                " · "
+            };
             let live_text = format!(
-                " {} · {} · {}",
-                shown.estimate_wall, shown.estimate_tokens, shown.elapsed
+                " {} · {}{actual_clause}{} · {}",
+                shown.estimate_wall, shown.estimate_tokens, shown.actual_tokens, shown.elapsed
             );
             spans.push(Span::styled(live_text, desc_style));
         }

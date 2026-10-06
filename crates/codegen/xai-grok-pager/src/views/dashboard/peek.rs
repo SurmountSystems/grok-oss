@@ -639,16 +639,20 @@ pub fn render_peek_panel(
             color: theme.accent_running,
         },
     );
-    let caret = reply
-        .draw(
-            buf,
-            text_area,
-            overlay_area,
-            &widget_style,
-            None,
-            voice_overlay,
-        )
-        .cursor_pos;
+    let drawn = reply.draw(
+        buf,
+        text_area,
+        overlay_area,
+        &widget_style,
+        None,
+        voice_overlay,
+    );
+    // Focused reply reports the insertion cell. Unfocused stays None.
+    let caret = if panel.focused {
+        drawn.cursor_pos.or(drawn.caret_cell)
+    } else {
+        None
+    };
     // The clickable reply rect spans all reply rows and includes the `❯ ` prefix column for a fatter mouse target
     // The widget maps clicks left of its text area to position 0
     let reply_rect = Some(Rect {

@@ -994,6 +994,16 @@ pub(super) fn handle_session_notification_with_origin(
             if let Some(child_view) = agent.subagent_views.get_mut(&child_session_id) {
                 child_view.session.state = AgentState::Idle;
             }
+            // Read the child scrollback before eviction. A finished mill L2
+            // never gets PromptResponse. A trailing Next implement prompt is
+            // the next parent turn. A failed finish does not auto-run, and
+            // this enqueue does not Approve Isolated Preview.
+            if mill_completed && !resuming {
+                let _ = crate::app::auto_implement::enqueue_nested_l2_next_implement(
+                    agent,
+                    &child_session_id,
+                );
+            }
             if !resuming {
                 let outcome =
                     crate::app::subagent::evict_finished_child_view(agent, &child_session_id);

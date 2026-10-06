@@ -3342,6 +3342,86 @@ fn apply_child_env(
     crate::util::apply_grok_agent_marker(cmd);
 }
 
+/// Prefix `find`/`grep` shadows, then the user command. When an explicit `PATH`
+/// would hide the `cat` and `readlink` the process itself resolved, define
+/// functions that call those absolute binaries. `$$` stays the shell, and the
+/// explicit `PATH` value is left as layered.
+#[cfg(unix)]
+fn wrapped_shell_command(
+    command: &str,
+    search_shadows: SearchShadowConfig,
+    login_env: Option<&HashMap<String, String>>,
+    request_env: &HashMap<String, String>,
+    shell_env_policy: Option<&crate::util::ShellEnvironmentPolicy>,
+) -> String {
+    let inject = super::embedded_search_tools::search_injection(search_shadows);
+    let shims = posix_tool_shims(explicit_shell_path(
+        login_env,
+        request_env,
+        shell_env_policy,
+    ));
+    if inject.is_empty() {
+        format!("{shims}{command}")
+    } else {
+        format!("{shims}{inject}{command}")
+    }
+}
+
+/// Login `PATH` wins over the inherited one. `None` means the child inherits.
+#[cfg(unix)]
+fn explicit_shell_path<'a>(
+    login_env: Option<&'a HashMap<String, String>>,
+    request_env: &'a HashMap<String, String>,
+    shell_env_policy: Option<&crate::util::ShellEnvironmentPolicy>,
+) -> Option<&'a str> {
+    let active = shell_env_policy.filter(|policy| !policy.is_noop());
+    if let Some(path) = login_env.and_then(|login| login.get("PATH").map(String::as_str))
+        && active.is_none_or(|policy| policy.allows_with_inherit("PATH"))
+    {
+        return Some(path);
+    }
+    if let Some(path) = request_env.get("PATH").map(String::as_str)
+        && active.is_none_or(|policy| policy.allows("PATH"))
+    {
+        return Some(path);
+    }
+    None
+}
+
+/// Functions for `cat` and `readlink` when the child `PATH` does not already
+/// list the directory the process resolved. An inherited `PATH` still gets
+/// the functions: a Nix child can lose that `PATH` and the probe names stay.
+#[cfg(unix)]
+fn posix_tool_shims(explicit_path: Option<&str>) -> String {
+    let mut out = String::new();
+    for name in ["cat", "readlink"] {
+        let Ok(path) = which::which(name) else {
+            continue;
+        };
+        let Some(dir) = path.parent() else {
+            continue;
+        };
+        if explicit_path.is_some_and(|entries| {
+            entries
+                .split(':')
+                .any(|entry| std::path::Path::new(entry) == dir)
+        }) {
+            continue;
+        }
+        let raw = path.to_string_lossy();
+        let quoted = if raw
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '/' | '-' | '+'))
+        {
+            raw.into_owned()
+        } else {
+            format!("'{}'", raw.replace('\'', "'\\''"))
+        };
+        out.push_str(&format!("{name}() {{ {quoted} \"$@\"; }}; "));
+    }
+    out
+}
+
 /// The sandbox side of one shell spawn: the hook that may wrap the command (`None` runs it as
 /// is) and the tool call the spawn belongs to.
 #[derive(Clone, Copy)]
@@ -3366,14 +3446,8 @@ fn spawn_shell_command(
     #[cfg(unix)]
     let mut cmd = {
         let shell = shell_state::ShellKind::detect();
-        let wrapped_command = {
-            let inject = super::embedded_search_tools::search_injection(search_shadows);
-            if inject.is_empty() {
-                command.to_string()
-            } else {
-                format!("{inject}{command}")
-            }
-        };
+        let wrapped_command =
+            wrapped_shell_command(command, search_shadows, login_env, env, shell_env_policy);
         let mut cmd = tokio::process::Command::new(shell.binary_path());
         // Non-interactive zsh still defaults to NOMATCH; pass via argv like init's -o extendedglob.
         if matches!(shell, shell_state::ShellKind::Zsh) {

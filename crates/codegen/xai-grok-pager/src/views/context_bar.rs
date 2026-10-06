@@ -302,7 +302,14 @@ pub fn context_bar_line_with_windows(
         ));
         Some(Line::from(spans))
     } else {
-        Some(Line::from(Span::styled(named, mark)))
+        // Resting chip uses the named windows string, then the same minimum
+        // width as the hover percent so `0 / 9` does not sit one column short.
+        let mut shown = named;
+        let shown_width = shown.chars().count();
+        if shown_width < total_width as usize {
+            shown.push_str(&" ".repeat(total_width as usize - shown_width));
+        }
+        Some(Line::from(Span::styled(shown, mark)))
     }
 }
 

@@ -1371,6 +1371,14 @@ pub(in crate::app::dispatch) fn apply_setting_rollback(
             };
             set_fork_secondary_model_inner(app, restored);
         }
+        // `[models].default_reasoning_effort` lives on the app, not the cache helpers.
+        ("default_reasoning_effort", SettingValue::Enum(s)) => {
+            let canonical = match *s {
+                "low" | "high" | "medium" => *s,
+                _ => "medium",
+            };
+            app.default_reasoning_effort = Some(canonical.to_string());
+        }
 
         _ => {
             tracing::error!(

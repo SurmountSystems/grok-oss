@@ -265,9 +265,10 @@ impl SessionActor {
         (instruction, tool_specs, self.hosted_tools_for_turn())
     }
 
-    /// Replays the parent conversation with the main turn's tools so the prompt-cache prefix matches, then appends the recap instruction.
-    /// Emits the cleaned one-line summary for display only.
-    /// A missing recap must never disrupt the session.
+    /// Asks for a one-line recap and emits it for display only.
+    /// The session model replays the parent conversation plus one instruction.
+    /// The configured recap model gets the capped transcript and no tools.
+    /// The persisted artifact stays that two-item snapshot, and the conversation is not mutated.
     pub(super) async fn handle_recap(&self, auto: bool) {
         use crate::session::helpers::session_recap;
 
@@ -324,7 +325,7 @@ impl SessionActor {
         let clear_in_flight = || self.recap_in_flight.set(false);
 
         let settings = crate::util::config::resolve_session_recap_settings_from_disk();
-        let Some(_transcript) = session_recap::recap_transcript(
+        let Some(transcript) = session_recap::recap_transcript(
             &conversation,
             settings.user_message_max_chars,
             settings.agent_reply_max_chars,
@@ -337,37 +338,44 @@ impl SessionActor {
             }
             return;
         };
-        let (client, model, reasoning_effort) = match self.recap_sampling_client(&settings).await {
-            Ok(c) => c,
-            Err(e) => {
-                tracing::warn!(error = %e, "recap: failed to prepare sampling client");
-                clear_in_flight();
-                // A manual `/recap` shows a loading spinner; clear it on failure.
-                if !auto {
-                    self.emit_recap_unavailable().await;
+        let (client, model, reasoning_effort, uses_configured_recap_model) =
+            match self.recap_sampling_client(&settings).await {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::warn!(error = %e, "recap: failed to prepare sampling client");
+                    clear_in_flight();
+                    // A manual `/recap` shows a loading spinner; clear it on failure.
+                    if !auto {
+                        self.emit_recap_unavailable().await;
+                    }
+                    return;
                 }
-                return;
-            }
-        };
+            };
         let started_at = chrono::Utc::now().to_rfc3339();
         let x_grok_conv_id = format!("recap-{}", uuid::Uuid::new_v4());
         let x_grok_req_id = format!("xai-recap-{}", uuid::Uuid::new_v4());
-        // Ride the parent prefix: the conversation, the main turn's tools,
-        // and the session id as `prompt_cache_key`. The transcript above only
-        // decides whether there is anything to recap.
-        let mut items = conversation;
-        if super::side_call::should_strip_side_call_reasoning(
-            client.api_backend(),
-            reasoning_effort,
-        ) {
-            items = xai_chat_state::compaction_utils::strip_reasoning_blocks(items);
-        }
-        let tag = self.reminder_wrapper_tag();
-        items.push(ConversationItem::user(session_recap::recap_instruction(
-            &tag,
-        )));
-        let tool_specs = self.turn_base_tool_specs(&self.prepare_tool_definitions().await);
-        let hosted_tools = self.hosted_tools_for_turn();
+        // The artifact is the two-item display snapshot. It is not the parent replay.
+        // The session-model request replays that parent and appends one instruction,
+        // so the wire prefix matches the main turn. The configured recap model still
+        // sends the snapshot and no tools. Neither list is written back.
+        let instruction = session_recap::recap_instruction(self.reminder_wrapper_tag());
+        let chat_history_for_artifact = vec![
+            ConversationItem::system(instruction.clone()),
+            ConversationItem::user(transcript.clone()),
+        ];
+        let (items, tool_specs, hosted_tools) = if uses_configured_recap_model {
+            (chat_history_for_artifact.clone(), Vec::new(), Vec::new())
+        } else {
+            let strip_reasoning = super::side_call::should_strip_side_call_reasoning(
+                client.api_backend(),
+                reasoning_effort,
+            );
+            (
+                session_recap::build_instruction_items(conversation, instruction, strip_reasoning),
+                self.turn_base_tool_specs(&self.prepare_tool_definitions().await),
+                self.hosted_tools_for_turn(),
+            )
+        };
         let request = self.parent_cached_request(super::side_call::AuxCall {
             items,
             tools: tool_specs,
@@ -378,8 +386,6 @@ impl SessionActor {
             conv_id: x_grok_conv_id.clone(),
             req_id: x_grok_req_id.clone(),
         });
-        // The artifact records the exact model-facing items after trust projection; the canonical conversation state remains raw
-        let chat_history_for_artifact = request.items.clone();
 
         let response = match tokio::time::timeout(
             settings.timeout,
@@ -531,16 +537,18 @@ impl SessionActor {
             xai_grok_sampler::SamplingClient,
             String,
             Option<xai_grok_sampling_types::ReasoningEffort>,
+            bool,
         ),
         acp::Error,
     > {
         self.refresh_token_if_expired().await;
         let mut config = self.reconstruct_full_config().await;
-        if self.models_manager.model_shares_route(
+        let uses_configured_recap_model = self.models_manager.model_shares_route(
             &settings.model,
             &config.base_url,
             &config.api_backend,
-        ) {
+        );
+        if uses_configured_recap_model {
             config.model = settings.model.clone();
         }
         if self
@@ -558,7 +566,7 @@ impl SessionActor {
         let reasoning_effort = config.reasoning_effort;
         let client =
             xai_grok_sampler::SamplingClient::new(config).map_err(|e| self.to_acp_error(e))?;
-        Ok((client, model, reasoning_effort))
+        Ok((client, model, reasoning_effort, uses_configured_recap_model))
     }
 
     pub(crate) fn recap_was_cancelled(&self, epoch: u64) -> bool {
@@ -591,7 +599,7 @@ impl SessionActor {
     }
 
     /// Persist a recap request artifact for offline prompt and garble analysis.
-    /// Writes `{session_dir}/recap_requests/{request_id}.json` containing the exact `ConversationItem` list sent to the model.
+    /// Writes `{session_dir}/recap_requests/{request_id}.json`. `chat_history` is the two-item display snapshot, not the parent replay sent on the session-model path.
     /// Best-effort: send-failures are logged at `warn` and never surfaced; a missing artifact must never disrupt recap display.
     #[allow(clippy::too_many_arguments)]
     fn persist_recap_request_artifact(

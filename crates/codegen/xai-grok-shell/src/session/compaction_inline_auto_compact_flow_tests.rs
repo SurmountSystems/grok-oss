@@ -2047,8 +2047,8 @@ fn api_error_with_context_window(context_window: u64) -> xai_grok_sampler::Sampl
         credential: xai_grok_sampling_types::SentCredential::Unknown,
     }
 }
-/// If the proxy hasn't been updated yet, model_metadata is None — must be
-/// a no-op for backwards compatibility.
+/// Inside the session window, missing model metadata does not compact.
+/// Over-window usage still compacts without metadata. That case is the other test.
 #[tokio::test(flavor = "current_thread")]
 async fn test_compact_on_error_noop_without_model_metadata() {
     let local = tokio::task::LocalSet::new();
@@ -2056,7 +2056,7 @@ async fn test_compact_on_error_noop_without_model_metadata() {
         .run_until(async {
             let (gateway_tx, _) = mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
             let (persistence_tx, _) = mpsc::unbounded_channel::<PersistenceMsg>();
-            let actor = create_test_actor(500_000, 200_000, 85, gateway_tx, persistence_tx).await;
+            let actor = create_test_actor(100_000, 200_000, 85, gateway_tx, persistence_tx).await;
             let err = xai_grok_sampler::SamplingErrorInfo {
                 kind: xai_grok_sampler::SamplingErrorKind::Api,
                 status_code: Some(400),

@@ -273,7 +273,7 @@ impl SessionActor {
             }
         }
         let _guard = InFlightGuard(&self.compaction.prefire);
-        let run = self.run_prefire_pass1_inner().await;
+        let run = Box::pin(self.run_prefire_pass1_inner()).await;
         let span = tracing::Span::current();
         span.record("compaction_prefire_outcome", run.outcome.as_ref());
         if let Some(v) = run.prefix_len {
@@ -687,13 +687,14 @@ impl SessionActor {
             .unwrap_or(DEFAULT_CONTEXT_WINDOW);
         self.maybe_pre_compaction_flush(total_tokens, context_window, "pre_compaction")
             .await;
-        if let Err(e) = self
-            .run_compact_inner(
-                None,
-                xai_grok_telemetry::events::CompactionTrigger::Manual,
-                false,
-            )
-            .await
+        // Heap-build this future. The compact state machine is larger than the
+        // default 2 MB test stack, so constructing it inline aborts the turn.
+        if let Err(e) = Box::pin(self.run_compact_inner(
+            None,
+            xai_grok_telemetry::events::CompactionTrigger::Manual,
+            false,
+        ))
+        .await
         {
             let span = tracing::Span::current();
             span.record("success", false);
@@ -2215,10 +2216,9 @@ impl SessionActor {
     }
     /// Returns true when an ordinary session should compact after this sampling error.
     /// An L3 or a once-run nested role returns false and must not CompactAndResubmit.
-    /// A sampling error with no model metadata is not a context-window signal, so this
-    /// stays false until that field arrives. Otherwise this is
+    /// Missing model metadata is not a reason to skip: the overflow estimate uses
+    /// the session sampling window. This is
     /// [`Self::estimate_exceeds_error_context_window`] unless compaction is suppressed.
-    /// The shared overflow estimate still uses the session window for mid-salvage.
     /// Called from `handle_sampling_failure` with the `SamplingErrorInfo` the sampler hands back.
     pub(crate) async fn should_compact_on_error(
         &self,
@@ -2231,12 +2231,9 @@ impl SessionActor {
         if self.compaction.is_suppressed() {
             return false;
         }
-        // A proxy that has not reported model metadata is not a context-window
-        // signal. Compact-and-resubmit stays a no-op until that field arrives.
-        // The shared overflow estimate still uses the session window for salvage.
-        if err.model_metadata.is_none() {
-            return false;
-        }
+        // No model metadata: still compact when tracked tokens are over the
+        // session sampling window. `estimate_exceeds_error_context_window`
+        // uses that window and does not treat missing metadata as false.
         self.estimate_exceeds_error_context_window(err).await
     }
     /// The request's token estimate is at or over the tighter of the session
@@ -2491,7 +2488,7 @@ impl SessionActor {
             cfg.context_window.get(),
             trigger_info.percentage,
         );
-        if let Err(e) = self.run_compact_only(trigger_info, false).await {
+        if let Err(e) = Box::pin(self.run_compact_only(trigger_info, false)).await {
             tracing::error!(error = %e, "Model-switch compaction failed");
             if Self::is_auth_compact_error(&e) {
                 return Err(self.surface_compact_auth_failure(e).await);
@@ -2575,13 +2572,13 @@ impl SessionActor {
         )
         .await;
         let compact_start = std::time::Instant::now();
-        let result = self
-            .run_compact_inner(
-                None,
-                xai_grok_telemetry::events::CompactionTrigger::Auto,
-                lossy_input,
-            )
-            .await;
+        // Same heap build as manual compact: do not construct this future inline.
+        let result = Box::pin(self.run_compact_inner(
+            None,
+            xai_grok_telemetry::events::CompactionTrigger::Auto,
+            lossy_input,
+        ))
+        .await;
         let elapsed_ms = compact_start.elapsed().as_millis() as i64;
         match result {
             Ok(()) => {

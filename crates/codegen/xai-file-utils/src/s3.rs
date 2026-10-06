@@ -97,29 +97,37 @@ fn parse_aws_credentials(content: &str) -> anyhow::Result<aws_sdk_s3::config::Cr
 /// parsed at least one cert. Nix quality parses none, so `Client` construction
 /// panics even for `http://` mocks:
 /// `TrustStore configured to enable native roots but no valid root certificates parsed!`
-fn mozilla_trust_store() -> aws_smithy_http_client::tls::TrustStore {
+fn mozilla_trust_store() -> anyhow::Result<aws_smithy_http_client::tls::TrustStore> {
     use aws_smithy_http_client::tls::TrustStore;
     use base64::Engine as _;
     static STORE: std::sync::OnceLock<TrustStore> = std::sync::OnceLock::new();
-    STORE
-        .get_or_init(|| {
-            let mut pem = Vec::new();
-            for cert in webpki_root_certs::TLS_SERVER_ROOT_CERTS {
-                pem.extend_from_slice(b"-----BEGIN CERTIFICATE-----\n");
-                let encoded = base64::engine::general_purpose::STANDARD.encode(cert.as_ref());
-                let bytes = encoded.as_bytes();
-                let mut offset = 0;
-                while offset < bytes.len() {
-                    let end = (offset + 64).min(bytes.len());
-                    pem.extend_from_slice(&bytes[offset..end]);
-                    pem.push(b'\n');
-                    offset = end;
-                }
-                pem.extend_from_slice(b"-----END CERTIFICATE-----\n");
-            }
-            TrustStore::empty().with_pem_certificate(pem)
-        })
-        .clone()
+    if let Some(cached) = STORE.get() {
+        return Ok(cached.clone());
+    }
+    let mut pem = Vec::new();
+    for cert in webpki_root_certs::TLS_SERVER_ROOT_CERTS {
+        pem.extend_from_slice(b"-----BEGIN CERTIFICATE-----\n");
+        let encoded = base64::engine::general_purpose::STANDARD.encode(cert.as_ref());
+        let bytes = encoded.as_bytes();
+        let mut offset = 0;
+        while offset < bytes.len() {
+            let end = (offset + 64).min(bytes.len());
+            let Some(line) = bytes.get(offset..end) else {
+                anyhow::bail!(
+                    "mozilla root certificate PEM line is out of range \
+                     (offset {offset}, end {end}, length {})",
+                    bytes.len()
+                );
+            };
+            pem.extend_from_slice(line);
+            pem.push(b'\n');
+            offset = end;
+        }
+        pem.extend_from_slice(b"-----END CERTIFICATE-----\n");
+    }
+    let store = TrustStore::empty().with_pem_certificate(pem);
+    let cached = STORE.get_or_init(|| store);
+    Ok(cached.clone())
 }
 
 /// Build an S3 client. Uses path-style addressing when `endpoint_url` is set.
@@ -187,7 +195,7 @@ fn extra_ca_tls_context() -> anyhow::Result<aws_smithy_http_client::tls::TlsCont
     use aws_smithy_http_client::tls::TlsContext;
     // `TrustStore::default()` enables native roots. That debug_asserts in Nix
     // quality when the OS store is empty, before any HeadObject or PutObject.
-    let mut trust_store = mozilla_trust_store();
+    let mut trust_store = mozilla_trust_store()?;
     for pem in xai_grok_extra_ca::extra_root_pems() {
         trust_store = trust_store.with_pem_certificate(pem.clone());
     }

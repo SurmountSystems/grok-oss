@@ -47,19 +47,9 @@ impl AgentView {
         true
     }
 
-    /// Retry chrome is up on the running turn. Send-now then steers with
-    /// [`Action::Interject`] and still clears the composer. A quiet running
-    /// turn uses cancel-and-send ([`Action::SendPromptNow`]).
-    fn retry_chrome_is_up(&self) -> bool {
-        matches!(
-            self.session.turn_activity(),
-            Some(crate::acp::tracker::TurnActivity::Retrying { .. })
-        )
-    }
-
     /// Cancel-and-send from the composer. The unbound-placeholder notice
     /// rides the action. This handler has no `AppView` to toast from.
-    fn send_now_action_from_composer(&mut self) -> Action {
+    pub(crate) fn send_now_action_from_composer(&mut self) -> Action {
         let image_notice = self.unbound_image_placeholder_notice();
         let text = self.prompt.text().trim().to_string();
         let images = self.prompt.drain_images();
@@ -563,10 +553,16 @@ impl AgentView {
             return InputOutcome::Changed;
         }
 
-        // 1. Element interaction: Enter on a paste/file-ref chip inlines (expands) it.
-        //    Enter on an image chip opens the preview (handled by caller)
-        //    Must check before registry lookup since Enter is also SendPrompt.
-        if let Some(interaction) = self.prompt.try_element_interaction(key) {
+        // 1. Element interaction: Enter on a file-ref chip inlines it.
+        //    Plain Enter on a paste chip falls through to send. Calling
+        //    try_element_interaction here would clear the chip before
+        //    dispatch proves the send landed. Enter on an image chip opens
+        //    the preview (handled by caller). Must check before registry
+        //    lookup since Enter is also SendPrompt.
+        let paste_chip_enter = key.code == KeyCode::Enter
+            && key.modifiers.is_empty()
+            && self.prompt.paste_element_at_cursor().is_some();
+        if !paste_chip_enter && let Some(interaction) = self.prompt.try_element_interaction(key) {
             use crate::views::prompt_widget::ElementInteraction;
             match interaction {
                 ElementInteraction::Inlined => {
@@ -628,9 +624,22 @@ impl AgentView {
                     self.deferred_send = Some(AgentDeferredSend::Interject);
                     return InputOutcome::Changed;
                 }
-                // Cancel-and-send. The notice rides the action. A paste
-                // probe still stashes `Interject` and re-issues as send-now.
-                return InputOutcome::Action(self.send_now_action_from_composer());
+                // Unbound `[Image #N]` placeholders ride Send now so the
+                // notice is on the action and dispatch can join a read
+                // failure into the same toast. A body with no unbound
+                // placeholder still interjects.
+                self.prompt.rebind_image_placeholders();
+                if !self.prompt.unbound_image_placeholders().is_empty() {
+                    return InputOutcome::Action(self.send_now_action_from_composer());
+                }
+                // A running turn with a body in the Operator box interjects.
+                // Do not cancel-and-send that body. Empty stays a newline
+                // above, because interjection_is_appropriate is false then.
+                let text = self.prompt.text().trim().to_string();
+                let images = self.prompt.drain_images();
+                self.prompt.set_text("");
+                self.note_draft_consumed();
+                return InputOutcome::Action(Action::Interject { text, images });
             }
             self.prompt.textarea.insert_str("\n");
             return InputOutcome::Changed;
@@ -743,18 +752,14 @@ impl AgentView {
                                 self.deferred_send = Some(AgentDeferredSend::Interject);
                                 return InputOutcome::Changed;
                             }
-                            // Retry chrome steers the live turn and still
-                            // clears the composer. Otherwise this chord is
-                            // cancel-and-send. Drain images before set_text
-                            // wipes the chip elements. An empty composer
-                            // still send-nows the queued row.
-                            if self.retry_chrome_is_up() {
-                                let images = self.prompt.drain_images();
-                                self.prompt.set_text("");
-                                self.note_draft_consumed();
-                                return InputOutcome::Action(Action::Interject { text, images });
-                            }
-                            return InputOutcome::Action(self.send_now_action_from_composer());
+                            // The Operator box still holds this body, so the
+                            // running turn interjects. Drain images before
+                            // set_text wipes the chip elements. An empty
+                            // composer still send-nows the queued row below.
+                            let images = self.prompt.drain_images();
+                            self.prompt.set_text("");
+                            self.note_draft_consumed();
+                            return InputOutcome::Action(Action::Interject { text, images });
                         }
                     } else if let Some(outcome) = self.try_send_now_queued_from_prompt() {
                         return outcome;
@@ -978,15 +983,22 @@ impl AgentView {
             self.suppress_rewind_arm(std::time::Instant::now());
             return Some(InputOutcome::Changed);
         }
-        // Idle streaming wake: first Esc hints and arms CancelTurn. The second
-        // Esc returns that action without stamping a cancel trigger and without
-        // marking the wake cancel sent.
+        // Idle streaming wake: an empty composer hints and arms CancelTurn.
+        // The second Esc returns that action without stamping a cancel
+        // trigger and without marking the wake cancel sent. A composer that
+        // still holds a draft swallows this Esc. AppView drops a ClearPrompt
+        // arm from before the wake and then continues into this policy, so
+        // arming CancelTurn here would replace the arm the caller just dropped.
         if self.wake_turn_active() && !self.wake_turn_cancelling() {
             if let Some(cancel_key) = registry.key_for(ActionId::CancelTurn) {
                 let cancel_key = cancel_key.display();
                 self.show_cancel_key_hint(&format!("Press {cancel_key} to cancel the turn"));
             }
             self.suppress_rewind_arm(std::time::Instant::now());
+            let has_draft = !self.prompt.text().is_empty() || !self.prompt.images.is_empty();
+            if has_draft {
+                return Some(InputOutcome::Changed);
+            }
             return Some(InputOutcome::ArmPending {
                 action: Action::CancelTurn,
                 shortcut: crate::input::key::KeyShortcut::from(*key),
@@ -2865,7 +2877,7 @@ mod apple_terminal_ctrl_o_upgrade_cta_tests {
         assert!(
             matches!(
                 outcome,
-                InputOutcome::Action(Action::SendPromptNow { ref text, .. })
+                InputOutcome::Action(Action::Interject { ref text, .. })
                     if text == "steer mid-turn"
             ),
             "running + payload: interject must win over CTA, got {outcome:?}"

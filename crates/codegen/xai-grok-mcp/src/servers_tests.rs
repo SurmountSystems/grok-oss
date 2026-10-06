@@ -4349,11 +4349,8 @@ async fn ensure_initialized_drop_guard_restores_state_after_holder_aborted() {
     let addr = listener.local_addr().expect("stalling peer addr");
     tokio::spawn(async move {
         let mut held = Vec::new();
-        loop {
-            match listener.accept().await {
-                Ok((sock, _)) => held.push(sock),
-                Err(_) => break,
-            }
+        while let Ok((sock, _)) = listener.accept().await {
+            held.push(sock);
         }
     });
     let config = HttpConfig {

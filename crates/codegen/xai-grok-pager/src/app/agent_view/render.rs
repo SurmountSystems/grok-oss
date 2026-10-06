@@ -2395,12 +2395,16 @@ impl AgentView {
                         activity_started_at: self.activity_started_at,
                         tick,
                         drain_blocked: turn_status_drain_blocked,
-                        buttons: Some(turn_status::MouseButtons {
-                            cancel_hovered: self.hit_cancel_button.hovered,
-                            pause_hovered: self.hit_pause_button.hovered,
-                            bg_hovered: self.hit_bg_button.hovered,
-                            watching_hovered: self.hit_watching_cue.hovered,
-                        }),
+                        buttons: if self.is_minimal_mode() {
+                            None
+                        } else {
+                            Some(turn_status::MouseButtons {
+                                cancel_hovered: self.hit_cancel_button.hovered,
+                                pause_hovered: self.hit_pause_button.hovered,
+                                bg_hovered: self.hit_bg_button.hovered,
+                                watching_hovered: self.hit_watching_cue.hovered,
+                            })
+                        },
                         has_running_execute,
                         total_tokens: self.context_state.as_ref().map(|c| c.used),
                         session_starting_since: self.session_starting_since,
@@ -4769,6 +4773,21 @@ impl AgentView {
                     std::mem::take(&mut status_line_link_spans),
                 );
             }
+        }
+        // Nested L2 overlay must return the Kitty clear. Do not commit it
+        // here. `write_to` is what drops the previous owner so the next
+        // static image transmits (`a=T`). A prompt flush that already
+        // carries `a=d` is that clear.
+        if self
+            .active_subagent
+            .as_deref()
+            .is_some_and(|sid| self.subagent_views.contains_key(sid))
+            && prompt_post_flush
+                .as_ref()
+                .is_none_or(|flush| !flush.as_str().contains("a=d"))
+            && let Some(clear) = crate::terminal::overlay::clear()
+        {
+            prompt_post_flush = Some(clear.into());
         }
         let on_link = self.hovered_link_idx.is_some() || self.hovered_bubble_copy;
         if supports_osc22() && on_link != self.last_pointer_on_link {
@@ -8114,6 +8133,11 @@ mod nested_l2_overlay_wait_chrome_tests {
 
     #[test]
     fn nested_l2_overlay_wait_names_specialist_elapsed_and_progress() {
+        let _guard = crate::terminal::image::set_protocol_for_test(
+            crate::terminal::image::GraphicsProtocol::Kitty,
+        );
+        crate::terminal::overlay::reset_owner();
+        seed_static_owner(41);
         let mut parent = make_agent();
         parent.insert_test_child("child".into(), Box::new(make_agent()));
         parent.active_subagent = Some("child".into());

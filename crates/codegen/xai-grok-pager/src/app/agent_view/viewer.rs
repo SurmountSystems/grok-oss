@@ -653,18 +653,10 @@ impl AgentView {
             return InputOutcome::Changed;
         }
 
-        // Empty-prompt `c` opens a line comment. A live draft types `c`.
-        if in_plan_approval && key!('c').matches(key) {
-            let already_commenting = self
-                .plan_approval_view
-                .as_ref()
-                .is_some_and(|pav| pav.focus == PlanApprovalFocus::Commenting);
-            if !already_commenting && self.prompt.text().trim().is_empty() {
-                return self.enter_plan_commenting();
-            }
-            if plan_preview_key_is_composer_text(key) {
-                return self.handle_plan_feedback_key(key);
-            }
+        // Empty-prompt `c` types in the Human box. Comment is the CTA.
+        // A line-comment overlay that is already open still takes `c` as text.
+        if in_plan_approval && key!('c').matches(key) && plan_preview_key_is_composer_text(key) {
+            return self.handle_plan_feedback_key(key);
         }
 
         // Casual mode: same `c` / `s` shortcuts as plan approval so the footer hints actually work

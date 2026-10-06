@@ -1139,22 +1139,27 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
     fn finish_child(&mut self, id: &str, mut output: ChildRunOutput<R::CompletionData>) {
         // Child is leaving the registry: human parked sends must not retry.
         self.reject_spawn_ready_ids(&[id.to_owned()]);
-        let mut record = if let Some(mut child) = self.active.remove(id) {
-            // A finished child must not keep sampling. The runner's token is
-            // this same cancellation token.
-            child.cancellation.cancel();
+        let mut record = if let Some(child) = self.active.remove(id) {
             ChildRecord::Active(child)
         } else if let Some(child) = self.pending.remove(id) {
-            child.cancellation.cancel();
             ChildRecord::Pending(child)
         } else {
             return;
         };
 
         let explicitly_killed = record.explicitly_killed();
+        // Read the token before cancelling it. Cancelling first makes every
+        // finish look user-cancelled, so wake_eligible stays false and a
+        // later send cannot park.
         let (was_cancelled, disposition) = match &record {
             ChildRecord::Pending(child) => (child.cancellation.is_cancelled(), child.disposition),
             ChildRecord::Active(child) => (child.cancellation.is_cancelled(), child.disposition),
+        };
+        // A finished child must not keep sampling. The runner's token is
+        // this same cancellation token.
+        match &record {
+            ChildRecord::Pending(child) => child.cancellation.cancel(),
+            ChildRecord::Active(child) => child.cancellation.cancel(),
         };
         if let Some(mut displaced) = record.take_failed_pre_start_wake(output.result.success) {
             tracing::warn!(

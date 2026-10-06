@@ -2372,15 +2372,12 @@ fn specialist_wait_subject_from(
             const PREFIX: &str = "Subagent (";
             const SUFFIX_HEAD: &str = "): ";
             const SUBAGENT_AFFIX_CHARS: usize = PREFIX.len() + SUFFIX_HEAD.len();
-            const ACTIVITY_FLOOR: usize = 8;
-            let desc_claim = description
-                .chars()
-                .count()
-                .min(MAX_ACTIVITY_SUBJECT_CHARS - SUBAGENT_AFFIX_CHARS - ACTIVITY_FLOOR);
-            let activity: String = activity
-                .chars()
-                .take(MAX_ACTIVITY_SUBJECT_CHARS - SUBAGENT_AFFIX_CHARS - desc_claim)
-                .collect();
+            // Keep a short tool name whole. A floor of 8 cuts "read_file"
+            // to "read_fil", and the wait label's trailing ellipsis does
+            // not put the last letter back.
+            let activity_budget = MAX_ACTIVITY_SUBJECT_CHARS
+                .saturating_sub(SUBAGENT_AFFIX_CHARS + SUBJECT_DESC_FLOOR);
+            let activity: String = activity.chars().take(activity_budget).collect();
             Some(budgeted_subject(
                 PREFIX,
                 &description,

@@ -1431,12 +1431,23 @@ pub fn credit_bar_line_for_session_emphasizing_meter_source(
         ),
     );
 
-    // Header chrome names the meter only. It does not append a burn line,
-    // the 15 minute window, or the 24 hour window. `/usage` still prints the
-    // full pacing sentence. SuperGrok dollar credits and console stay distinct.
+    // This helper is the chip the header would otherwise read. It keeps
+    // linear-burn pacing when period bounds are known. Header paint does
+    // not call it, so the status row does not show SuperGrok period, the
+    // workspace word, or behind linear burn. `/usage` still prints the full
+    // pacing sentence. SuperGrok dollar credits and console stay distinct.
+    // SuperGrok is paid. Do not add the word free.
     let on_dollar_credits = meter.contains("SuperGrok dollar credits");
     let on_console = meter.starts_with("console");
-    let text = meter;
+    let text = if on_dollar_credits || on_console {
+        meter
+    } else if let Some(pacing) =
+        balance.pacing_chip(SamplingIdentityKind::SuperGrokSession, chrono::Utc::now())
+    {
+        format!("{meter} · {pacing}")
+    } else {
+        meter
+    };
 
     // Combined remaining is for multi-pool chrome (stay on included while
     // a sibling pool still has room). Color thresholds are on the live
@@ -1603,22 +1614,58 @@ pub fn active_supergrok_poll_auth_failed_from_process() -> bool {
 
 /// Live SuperGrok principal role for compact chrome (`personal` / `business`).
 ///
-/// Reads the stored session listing for [`active_supergrok_identity_id`]. Does
-/// not invent a workspace when the listing is missing. SuperGrok Heavy is not
-/// this field.
+/// Reads the stored session listing for [`active_supergrok_identity_id`]. A
+/// base session is not a multi-slot listing key, so the principal stored on
+/// that session (Team plus team id) is read the same way. Does not invent a
+/// workspace when that principal is absent. SuperGrok Heavy is not this field.
 pub fn compact_live_principal_role_from_process() -> Option<&'static str> {
     let home = xai_grok_shell::util::grok_home::grok_home();
     let id = xai_grok_shell::auth::active_supergrok_identity_id(&home)?;
     let map = xai_grok_shell::auth::read_auth_json(&home.join("auth.json")).ok()?;
     let listings = xai_grok_shell::auth::list_supergrok_principal_listings(&map);
-    listings
+    if let Some(role) = listings
         .iter()
-        .find(|l| l.identity_id == id)
-        .and_then(|l| match l.role_label {
+        .find(|listing| listing.identity_id == id)
+        .and_then(|listing| match listing.role_label {
             "personal" => Some("personal"),
             "business" => Some("business"),
             _ => None,
         })
+    {
+        return Some(role);
+    }
+    let mut active_auth = None;
+    let mut team_auth = None;
+    for (scope, auth) in &map {
+        if scope.contains("::personal") {
+            continue;
+        }
+        if !xai_grok_shell::auth::is_supergrok_session_mode(auth.auth_mode) {
+            continue;
+        }
+        if xai_grok_shell::auth::supergrok_identity_id_from_auth(auth, scope) != id {
+            continue;
+        }
+        if scope.contains("::team::") {
+            if team_auth.is_none() {
+                team_auth = Some(auth);
+            }
+            continue;
+        }
+        active_auth = Some(auth);
+        break;
+    }
+    let auth = active_auth.or(team_auth)?;
+    let role = xai_grok_shell::auth::role_from_session_fields(
+        auth.principal_type.as_deref(),
+        auth.team_id.as_deref(),
+    );
+    let label = xai_grok_shell::auth::role_label(role);
+    if label == "personal" || label == "business" {
+        Some(label)
+    } else {
+        None
+    }
 }
 
 /// Compact status meter text for the live sampling identity.

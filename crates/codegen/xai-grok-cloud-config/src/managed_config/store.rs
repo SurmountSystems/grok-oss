@@ -369,11 +369,12 @@ pub(super) fn apply_fetched(
     let wrote = match apply_managed_config(&home, body) {
         // A switch's destructive half lands only with its constructive half: the policy
         // files are converged above, so only the prior principal's sidecars go.
+        // Removing a prior team's files is not a write when this row serves nothing.
         Ok(wrote) => {
             if identity_changed {
                 evict_prior_sidecars(&home);
             }
-            wrote
+            wrote && (body.has_managed_config() || body.has_requirements())
         }
         // Sandbox write-deny (trust-boundary set, H1-3969489): park the verified response
         // for the next boot. Only the deny class stages, never unverified content.

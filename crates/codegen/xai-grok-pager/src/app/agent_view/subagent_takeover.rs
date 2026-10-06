@@ -146,53 +146,78 @@ impl AgentView {
         let _title_row = frame.title_row;
         let inner = frame.content;
         let _border_style = Style::default().fg(border_color);
-        let info = self.subagent_sessions.get(child_sid);
-        let raw_description = info.map(|s| s.description.as_ref()).unwrap_or("subagent");
-        let is_running = info.is_some_and(|s| s.is_running());
-        let elapsed = info
-            .map(|s| crate::util::format_duration(s.display_elapsed()))
-            .unwrap_or_default();
-        let (type_label, description): (String, String) = match info {
-            Some(s) => format_subagent_label(s),
-            None => (String::new(), raw_description.to_string()),
+        // Copy the row fields before the overlay mirror. `badge` used to borrow the
+        // session map through the mutable specialist call below.
+        let (
+            is_running,
+            elapsed,
+            type_label,
+            description,
+            icon,
+            icon_color,
+            label_color,
+            meta,
+            badge,
+        ) = {
+            let info = self.subagent_sessions.get(child_sid);
+            let raw_description = info.map(|s| s.description.as_ref()).unwrap_or("subagent");
+            let is_running = info.is_some_and(|s| s.is_running());
+            let elapsed = info
+                .map(|s| crate::util::format_duration(s.display_elapsed()))
+                .unwrap_or_default();
+            let (type_label, description): (String, String) = match info {
+                Some(s) => format_subagent_label(s),
+                None => (String::new(), raw_description.to_string()),
+            };
+            let completed = info.is_some_and(|s| {
+                s.status.as_deref() == Some("completed")
+                    || s.attempt.status.as_deref() == Some("completed")
+            });
+            let icon = if is_running {
+                let elapsed_ms = info
+                    .map(|s| u64::try_from(s.display_elapsed().as_millis()).unwrap_or(u64::MAX))
+                    .unwrap_or(0);
+                crate::glyphs::sparkler_frame_at_ms(elapsed_ms)
+            } else if completed {
+                crate::glyphs::check_mark()
+            } else {
+                crate::glyphs::ballot_x()
+            };
+            let icon_color = if is_running {
+                theme.accent_running
+            } else if completed {
+                theme.accent_success
+            } else {
+                theme.accent_error
+            };
+            let label_color = if info.is_some_and(|s| s.attempt.pending_kill) {
+                theme.accent_error
+            } else if is_running {
+                theme.accent_running
+            } else if completed {
+                theme.accent_success
+            } else {
+                theme.accent_error
+            };
+            let meta = info
+                .and_then(|s| s.attempt.model.as_deref())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .unwrap_or("")
+                .to_string();
+            let badge = info.map(format_context_badge).unwrap_or("").to_string();
+            (
+                is_running,
+                elapsed,
+                type_label,
+                description,
+                icon,
+                icon_color,
+                label_color,
+                meta,
+                badge,
+            )
         };
-        let completed = info.is_some_and(|s| {
-            s.status.as_deref() == Some("completed")
-                || s.attempt.status.as_deref() == Some("completed")
-        });
-        let icon = if is_running {
-            let elapsed_ms = info
-                .map(|s| u64::try_from(s.display_elapsed().as_millis()).unwrap_or(u64::MAX))
-                .unwrap_or(0);
-            crate::glyphs::sparkler_frame_at_ms(elapsed_ms)
-        } else if completed {
-            crate::glyphs::check_mark()
-        } else {
-            crate::glyphs::ballot_x()
-        };
-        let icon_color = if is_running {
-            theme.accent_running
-        } else if completed {
-            theme.accent_success
-        } else {
-            theme.accent_error
-        };
-        let label_color = if info.is_some_and(|s| s.attempt.pending_kill) {
-            theme.accent_error
-        } else if is_running {
-            theme.accent_running
-        } else if completed {
-            theme.accent_success
-        } else {
-            theme.accent_error
-        };
-        let meta = info
-            .and_then(|s| s.attempt.model.as_deref())
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .unwrap_or("")
-            .to_string();
-        let badge = info.map(format_context_badge).unwrap_or("");
         let borrowed_specialists = self.mirror_parented_specialists_for_overlay(child_sid);
         let activity_label: Option<String> = if is_running {
             self.subagent_views
@@ -323,7 +348,7 @@ impl AgentView {
             buf.set_span_safe(
                 rx,
                 title_y,
-                &Span::styled(badge, Style::default().fg(theme.gray_dim)),
+                &Span::styled(badge.as_str(), Style::default().fg(theme.gray_dim)),
                 badge.width() as u16,
             );
         }

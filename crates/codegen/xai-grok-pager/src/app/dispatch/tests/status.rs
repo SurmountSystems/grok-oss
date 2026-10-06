@@ -1871,6 +1871,8 @@ fn session_usage_keeps_scroll_when_page_flip_off() {
     crate::appearance::cache::set_page_flip_on_send(prev);
 }
 
+/// The click writes only. The ack is the accepted reply, not the click.
+/// A click ack makes `duplicate_settings_opt_out_rides_the_pending_write` see two effects.
 #[test]
 fn settings_opt_out_from_in_acks_now_and_writes() {
     let mut app = privacy_banner_ready_app();
@@ -1879,31 +1881,46 @@ fn settings_opt_out_from_in_acks_now_and_writes() {
 
     let effects = dispatch(Action::SetCodingDataSharing { opted_in: false }, &mut app);
 
-    assert!(
-        effects
-            .iter()
-            .any(|e| matches!(e, Effect::PersistPrivacyBannerAcked { .. })),
-        "changed opt-out must ack now: {effects:?}"
-    );
-    match effects
-        .iter()
-        .find(|e| matches!(e, Effect::SetCodingDataSharing { .. }))
-    {
-        Some(Effect::SetCodingDataSharing { opted_in, seq, .. }) => {
-            assert!(!*opted_in);
-            assert!(
-                app.coding_data_pending_write
-                    .as_ref()
-                    .is_some_and(|pending| pending.rollback_to_opted_in)
-            );
+    match effects.as_slice() {
+        [
+            Effect::SetCodingDataSharing {
+                opted_in: false,
+                seq,
+                ..
+            },
+        ] => {
             assert_eq!(*seq, app.coding_data_write_seq);
+            assert_eq!(*seq, 1);
         }
-        other => panic!("expected SetCodingDataSharing, got {effects:?} ({other:?})"),
+        other => panic!(
+            "changed opt-out must write, and only write, until the server accepts: {other:?}"
+        ),
     }
-    assert!(app.privacy_banner_acked.is_some());
+    assert!(
+        app.coding_data_pending_write
+            .as_ref()
+            .is_some_and(|pending| pending.rollback_to_opted_in)
+    );
+    assert!(app.privacy_banner_acked.is_none());
     assert!(app.coding_data_retention_opt_out);
     assert!(!app.privacy_banner_should_show());
     assert!(app.coding_data_pending_opted_in() != Some(true));
+
+    let ack_effects = dispatch(
+        Action::TaskComplete(TaskResult::CodingDataSharingUpdated {
+            agent_id: AgentId(0),
+            opted_in: false,
+            seq: 1,
+        }),
+        &mut app,
+    );
+    assert!(
+        ack_effects
+            .iter()
+            .any(|e| matches!(e, Effect::PersistPrivacyBannerAcked { .. })),
+        "the accepted opt-out must still ack: {ack_effects:?}"
+    );
+    assert!(app.privacy_banner_acked.is_some());
 }
 
 /// `ConfirmResetSetting { choice: Reset }` on a SHARED Bool

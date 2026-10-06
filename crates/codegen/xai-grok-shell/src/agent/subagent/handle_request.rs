@@ -356,6 +356,25 @@ pub(super) fn admit_explicit_tool_model(
 )]
 pub(crate) async fn run_shell_child(
     run: grok_build::task::coordinator::ChildRunRequest<ShellChildRuntime>,
+    ctx: SubagentSpawnContext,
+    completion_data: ShellCompletionData,
+    gateway: GatewaySender,
+    spawn_root: Option<tracing::Span>,
+) -> ChildRunOutput<ShellCompletionData> {
+    // Callers, including the wake tests, await this wrapper. Its frame holds
+    // the next box, not the shell-child state machine.
+    Box::pin(run_shell_child_body(
+        run,
+        ctx,
+        completion_data,
+        gateway,
+        spawn_root,
+    ))
+    .await
+}
+
+async fn run_shell_child_body(
+    run: grok_build::task::coordinator::ChildRunRequest<ShellChildRuntime>,
     mut ctx: SubagentSpawnContext,
     mut completion_data: ShellCompletionData,
     gateway: GatewaySender,
@@ -780,6 +799,8 @@ pub(crate) async fn run_shell_child(
         definition.capability_mode,
     );
     definition.capability_mode = effective_runtime.capability_mode;
+    // Heap-build the next piece so this frame does not store it.
+    Box::pin(async move {
     let child_depth = request
         .runtime_overrides
         .spawn_depth
@@ -915,10 +936,16 @@ pub(crate) async fn run_shell_child(
         ctx.resolve_auto_compact_threshold_percent(&subagent_model_id);
     let subagent_id = request.id.clone();
     let child_session_id = acp::SessionId::new(subagent_id.clone());
-    let override_cwd = select_override_cwd(resume_source.as_ref(), request.cwd.as_deref());
-    let effective_cwd = resolve_child_cwd(worktree_path.as_deref(), override_cwd, &ctx.parent_cwd)
-        .to_string_lossy()
-        .into_owned();
+    // Own the override now. The next box moves `request`, and this value must not keep that borrow.
+    let override_cwd = select_override_cwd(resume_source.as_ref(), request.cwd.as_deref())
+        .map(str::to_owned);
+    let effective_cwd = resolve_child_cwd(
+        worktree_path.as_deref(),
+        override_cwd.as_deref(),
+        &ctx.parent_cwd,
+    )
+    .to_string_lossy()
+    .into_owned();
     let child_session_info = SessionInfo {
         id: child_session_id.clone(),
         cwd: effective_cwd,
@@ -1101,6 +1128,7 @@ pub(crate) async fn run_shell_child(
     if !is_wake {
         completion_data.mark_spawned_notification_emitted();
     }
+    Box::pin(async move {
     let early_gcs_ctx = GcsUploadContext {
         bucket_url: ctx.gcs_bucket_url.clone(),
         upload_method: ctx.gcs_upload_method.clone(),
@@ -1208,7 +1236,11 @@ pub(crate) async fn run_shell_child(
             );
         }
     };
-    let child_cwd = resolve_child_cwd(worktree_path.as_deref(), override_cwd, &ctx.parent_cwd);
+    let child_cwd = resolve_child_cwd(
+        worktree_path.as_deref(),
+        override_cwd.as_deref(),
+        &ctx.parent_cwd,
+    );
     let covered_by_parent = xai_fsnotify::watch_root_covers(&ctx.parent_cwd, &child_cwd);
     let subagent_fs_watch = FsWatchCapabilities {
         hunk_tracking: ctx.hunk_tracking_enabled && !covered_by_parent,
@@ -1666,6 +1698,7 @@ pub(crate) async fn run_shell_child(
         None,
     ))
     .await;
+    Box::pin(async move {
     crate::waterfall::mark(&request.id, crate::waterfall::stage::SESSION_UP);
     spawn_timer.record(
         SubagentSpawnPhase::SessionBootstrap,
@@ -1726,15 +1759,21 @@ pub(crate) async fn run_shell_child(
         }
         None => uuid::Uuid::now_v7().to_string(),
     });
+    // The next box moves the originals. This attempt borrows these copies instead.
+    let attempt_child_handle = child_handle.clone();
+    let attempt_request = request.clone();
+    let attempt_worktree_path = worktree_path.clone();
+    let attempt_gcs_bucket_url = ctx.gcs_bucket_url.clone();
+    let attempt_gcs_upload_method = ctx.gcs_upload_method.clone();
     let mut attempt = Box::pin(run_one_turn_attempt(OneTurnAttemptInput {
-        child_handle: &child_handle,
-        request: &request,
-        worktree_path: worktree_path.as_deref(),
+        child_handle: &attempt_child_handle,
+        request: &attempt_request,
+        worktree_path: attempt_worktree_path.as_deref(),
         task_prompt_text: &task_prompt_text,
         prompt_id: child_prompt_id,
         inherited_tool_overrides: ctx.inherited_tool_overrides.clone(),
-        gcs_bucket_url: ctx.gcs_bucket_url.as_deref(),
-        gcs_upload_method: ctx.gcs_upload_method.as_ref(),
+        gcs_bucket_url: attempt_gcs_bucket_url.as_deref(),
+        gcs_upload_method: attempt_gcs_upload_method.as_ref(),
         turn_number,
         cancel_token: cancel_token.clone(),
         child_run_started_at: start,
@@ -1935,6 +1974,7 @@ pub(crate) async fn run_shell_child(
         }
         return child_run_output(result, completion_data, None);
     }
+    Box::pin(async move {
     let _progress_publisher = spawn_progress_publisher(
         child_handle.signals_handle.clone(),
         gateway.clone(),
@@ -2421,6 +2461,14 @@ pub(crate) async fn run_shell_child(
     );
     crate::waterfall::mark(&request.id, crate::waterfall::stage::CHILD_DONE);
     child_run_output(result, completion_data, disposed_snapshot_ref)
+    })
+    .await
+    })
+    .await
+    })
+    .await
+    })
+    .await
 }
 pub(crate) enum Disposal {
     Kept,

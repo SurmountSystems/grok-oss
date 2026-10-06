@@ -1678,8 +1678,7 @@ impl SessionActor {
 
 impl SessionActor {
     pub(super) async fn drain_goal_updates(&self, current_tokens: i64, purpose: DrainPurpose) {
-        self.drain_goal_updates_with_extra(current_tokens, purpose, Vec::new())
-            .await;
+        Box::pin(self.drain_goal_updates_with_extra(current_tokens, purpose, Vec::new())).await;
     }
 
     pub(super) async fn drain_goal_updates_with_extra(

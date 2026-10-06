@@ -1422,7 +1422,13 @@ impl MvpAgent {
             let _ = handle.cmd_tx.send(SessionCommand::AdvertiseCommands {
                 trigger: crate::session::AdvertiseTrigger::SessionLoad,
             });
-            if restored.awaiting_plan_approval {
+            // Disk wins when the in-memory snapshot was loaded before the
+            // seeded `plan_mode.json` (quit, then seed, then `--continue`).
+            let disk_parked = crate::session::plan_mode::load_awaiting_plan_approval(
+                cwd.as_str(),
+                session_id.0.as_ref(),
+            );
+            if restored.awaiting_plan_approval || disk_parked {
                 let _ = handle.cmd_tx.send(SessionCommand::RestorePlanApproval);
             }
             let _ = handle.cmd_tx.send(SessionCommand::RestoreTodoBoard {

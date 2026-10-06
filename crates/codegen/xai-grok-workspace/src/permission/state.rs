@@ -569,6 +569,26 @@ async fn persist_state_merging_to_dir(
     persist_state_to_dir(dir, &merged, client_identifier).await
 }
 
+/// Copy only the plain store's deny sets into `state`.
+/// A sandboxed session reads the daemon-owned file, which refuses a planted
+/// plain `permission.toml`. The denies the CLI persisted still refuse a call.
+/// Allows stay on the daemon file: a planted allow must not grant.
+pub(crate) async fn overlay_plain_persisted_denies(state: &mut PermissionState, cwd: &AbsPathBuf) {
+    let dirs = resolve_store_dirs(cwd, false).await;
+    let Some(plain) = try_load_state(&state_file_path(&dirs.dir, None)).await else {
+        return;
+    };
+    state
+        .disallowed_bash_commands
+        .extend(plain.disallowed_bash_commands);
+    state
+        .disallowed_mcp_tools
+        .extend(plain.disallowed_mcp_tools);
+    state
+        .disallowed_web_fetch_domains
+        .extend(plain.disallowed_web_fetch_domains);
+}
+
 pub(crate) async fn persist_state(
     cwd: &AbsPathBuf,
     state: &PermissionState,

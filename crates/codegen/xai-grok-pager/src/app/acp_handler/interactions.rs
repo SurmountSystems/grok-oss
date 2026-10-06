@@ -287,6 +287,10 @@ pub(super) fn handle_exit_plan_mode(
     // Replay of a stored present keeps comments. A live present starts clean.
     let is_restore = agent.session.loading_replay;
     let resume_park = params.tool_call_id.starts_with("exit-plan-mode-resume");
+    // unmount_plan_review closes the pane. Remember an already-open
+    // pane so a resume re-park can dock that pane again. A closed pane
+    // stays closed. A mid-compose draft must not open it.
+    let pane_already_open = agent.line_viewer.is_some();
     let mut carried_comments = Vec::new();
     let mut carried_next_comment_id = 0u64;
     let mut carried_feedback_draft: Option<String> = None;
@@ -440,11 +444,30 @@ pub(super) fn handle_exit_plan_mode(
     crate::appearance::cache::set_plan_approval_force_modal(
         app.current_ui.plan_approval_force_modal(),
     );
-    // A resume park keeps the waiter and leaves the pane shut unless the
-    // pane was already open or `/view-plan` already asked for it. A live
-    // present still docks Isolated Preview. Focus stays Preview.
-    let pane_already_open = agent.line_viewer.is_some();
-    let dock = !resume_park || pane_already_open || agent.view_plan_requested;
+    // A live present docks Isolated Preview. A resume re-park stays shut
+    // unless the pane was already open, `/view-plan` asked for it, or disk
+    // still says this session is awaiting plan approval. That last case is
+    // quit then `--continue`: the shell re-issues `exit_plan_mode`, and the
+    // side panel must paint Plan ready so approval chrome returns. A
+    // mid-compose draft must not open the pane. A resume with no awaiting
+    // flag and no open pane stays shut.
+    let composer_blocks_resume_dock = resume_park
+        && !agent.prompt.text().trim().is_empty()
+        && !agent.composer_holds_view_plan_slash();
+    let awaiting_on_disk = resume_park
+        && agent.session.session_id.as_ref().is_some_and(|sid| {
+            let cwd = agent.session.cwd.to_string_lossy();
+            xai_grok_shell::session::plan_mode::load_awaiting_plan_approval(&cwd, sid.0.as_ref())
+        });
+    let dock = if resume_park {
+        !composer_blocks_resume_dock
+            && (pane_already_open
+                || agent.view_plan_requested
+                || agent.composer_holds_view_plan_slash()
+                || awaiting_on_disk)
+    } else {
+        true
+    };
     if dock {
         agent.show_plan_preview_if_available();
         if let Some(ref mut viewer) = agent.line_viewer {

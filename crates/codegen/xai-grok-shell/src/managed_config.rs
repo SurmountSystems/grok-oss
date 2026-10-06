@@ -649,7 +649,13 @@ async fn sync_with_budget(
             let source = ManagedConfigSource::TeamOauth;
             // Team identity is bound via principal (team id), not a key fingerprint.
             let outcome = apply_fetched(&body, source, auth.team_id.as_deref(), None)?;
-            Ok(SyncOutcome::from_fetch(&body, source, &outcome))
+            let mut synced = SyncOutcome::from_fetch(&body, source, &outcome);
+            // A row that serves no policy text did not write artifacts. Eviction of
+            // the prior tenant is not a write of this team's config.
+            if !body.has_managed_config() && !body.has_requirements() {
+                synced.wrote = false;
+            }
+            Ok(synced)
         }
         FetchedConfig::NoPrincipal => Ok(SyncOutcome {
             wrote: false,
@@ -1005,7 +1011,12 @@ pub fn managed_policy_gate() -> Result<(), String> {
         return Ok(());
     }
     // Purge first so an offline team switch isn't misread as a substituted cache.
-    purge_prior_tenant_on_identity_change();
+    // A contended lock skips the purge. The prior tenant's files stay, which is
+    // an identity mismatch, not tamper. Do not refuse that start.
+    if purge_prior_tenant_on_identity_change() {
+        bump_managed_rollback_floor();
+        return Ok(());
+    }
     // Raise the floor after the purge so a purged marker stays absent.
     bump_managed_rollback_floor();
     managed_policy_gate_decision(
@@ -1018,24 +1029,25 @@ pub fn managed_policy_gate() -> Result<(), String> {
 /// Purge prior team (A) artifacts on a confirmed offline team switch so the gate admits
 /// team B. Detector is marker-scoped ([`crate::config::confirmed_team_switch`]): key-scoped
 /// markers never purge here; config.toml blips are not switches. Under the managed-config
-/// lock (one retry on contention, else skip like [`clear_orphan`]); a skip may refuse one
-/// signed-build start until the next purge.
-fn purge_prior_tenant_on_identity_change() {
+/// lock (one retry on contention, else skip like [`clear_orphan`]).
+/// Returns true only when a confirmed switch was skipped because the lock was held.
+fn purge_prior_tenant_on_identity_change() -> bool {
     let crate::config::ServingIdentity::Team(team_id) = current_serving_identity_any_expiry()
     else {
-        return;
+        return false;
     };
     // Same home for pre-check, lock, detector, and delete.
     let home = crate::util::grok_home::grok_home();
     // Unlocked pre-check: common no-switch start takes no lock; re-check under lock before delete.
     if crate::config::confirmed_team_switch_at(&home, &team_id).is_none() {
-        return;
+        return false;
     }
     let Some(_lock) = try_lock_managed_config(&home).or_else(|| {
         std::thread::sleep(PURGE_LOCK_RETRY_DELAY);
         try_lock_managed_config(&home)
     }) else {
-        return; // mid-apply/remove; holder owns the transition
+        // Mid-apply/remove; holder owns the transition. Not tamper.
+        return true;
     };
     if let Some(evicted) = crate::config::confirmed_team_switch_at(&home, &team_id) {
         tracing::warn!(
@@ -1045,6 +1057,7 @@ fn purge_prior_tenant_on_identity_change() {
         );
         remove_managed_config_files(&home);
     }
+    false
 }
 
 /// Floor tick (session start + background sync tick), best-effort under the

@@ -40,8 +40,9 @@ pub(crate) const RECAP_SYSTEM: &str = "Write ONE sentence recap body for a user 
      - Bullets, markdown, code fences, extra sentences\n\
      - Invent work not reflected in the transcript";
 
-/// The recap instruction for the daemon path, which forks the live session and appends this as one reminder-wrapped user message.
-/// The shell path sends [`RECAP_SYSTEM`] with a transcript instead.
+/// One reminder-wrapped user message appended to the parent conversation so the
+/// request keeps the main-turn prefix.
+/// [`RECAP_SYSTEM`] is the body-only style contract. The pager adds `Recap —`.
 /// The output is body text only: the pager adds `Recap —` on render (manual and auto).
 /// Few-shots must stay synthetic: never embed real eval/session content.
 pub fn recap_instruction(tag: &str) -> String {

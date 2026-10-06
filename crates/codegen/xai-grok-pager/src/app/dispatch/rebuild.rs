@@ -92,15 +92,16 @@ pub(crate) fn peer_rebuild_relaunch_if_applicable(
         if !xai_grok_update::peer_rebuild_request_is_actionable(request, now_secs) {
             return None;
         }
-    } else if !xai_grok_update::should_peer_relaunch_for_request_with_current_exe(
+    } else if (!xai_grok_update::should_peer_relaunch_for_request_with_current_exe(
         self_identity,
         request,
         now_secs,
         current_exe,
-    ) && !same_semver_distinct_nonhex_identity(self_identity, &request.installed_identity)
+    ) && !same_semver_distinct_nonhex_identity(
+        self_identity,
+        &request.installed_identity,
+    )) || !xai_grok_update::peer_rebuild_request_is_actionable(request, now_secs)
     {
-        return None;
-    } else if !xai_grok_update::peer_rebuild_request_is_actionable(request, now_secs) {
         return None;
     }
     if !request.installed_exe.is_file() {

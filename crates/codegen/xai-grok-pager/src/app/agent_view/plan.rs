@@ -1217,18 +1217,26 @@ impl AgentView {
             self.prompt.slash_controller.registry(),
         )
     }
+    /// Composer text that is already a submitted Human turn. A restored draft
+    /// of that turn is not review notes typed on this present.
+    fn composer_text_already_submitted(&self, text: &str) -> bool {
+        let mut committed = self.committed_human_turn_texts(true, true);
+        committed.extend(self.session.prompt_history.iter().cloned());
+        Self::queue_text_matches_committed_human_turn(text, &committed)
+    }
+
     pub(crate) fn approve_plan(&mut self) -> InputOutcome {
         self.finish_approve_plan(false)
     }
 
-    /// Enter Approve with notes. A typed comment stays on the approval and
-    /// returns Changed, not Interject. Empty Enter does not Approve. A paste
-    /// chip still Approves through the same path.
+    /// Enter Approve. Notes in the Operator box interject with the review
+    /// lead. Preview line comments with an empty composer stay Changed.
+    /// Empty Enter does not reach this function.
     pub(crate) fn approve_plan_from_enter(&mut self) -> InputOutcome {
         self.finish_approve_plan(true)
     }
 
-    fn finish_approve_plan(&mut self, _from_enter: bool) -> InputOutcome {
+    fn finish_approve_plan(&mut self, from_enter: bool) -> InputOutcome {
         // This Approve click reaches here. Leftover `/` is not notes.
         // A longer slash the operator is typing stays.
         if self.composer_is_leftover_slash_palette_only() {
@@ -1273,15 +1281,23 @@ impl AgentView {
             }
         };
         // A resume that carried the Revise box must not wrap that text as
-        // Approve review comments. Click Approve of notes typed on this
-        // present still wraps them.
+        // Approve review comments. A composer draft that was already
+        // submitted before resume is not new notes either. Click Approve of
+        // notes typed on this present still wraps them.
         let carried_revise = pav.keep_draft_is_next_operator_turn
             && typed.as_deref().is_some_and(|text| {
                 pav.feedback_draft
                     .as_deref()
                     .is_some_and(|draft| draft.trim() == text.trim())
             });
-        let freeform = if carried_revise { None } else { typed.clone() };
+        let already_submitted = typed
+            .as_deref()
+            .is_some_and(|text| self.composer_text_already_submitted(text));
+        let freeform = if carried_revise || already_submitted {
+            None
+        } else {
+            typed.clone()
+        };
         let review_comments = {
             let formatted = pav.format_feedback(freeform.as_deref());
             if formatted.trim().is_empty() {
@@ -1295,8 +1311,18 @@ impl AgentView {
             }
         };
         let prompt_focus = pav.focus == PlanApprovalFocus::Prompt;
+        let prompt_intent = pav.prompt_intent;
         let held_comment = pav.comment_held_from_enter;
-        let keep_next_turn = pav.keep_draft_is_next_operator_turn && !carried_revise;
+        // Reopen freeform is not the Revise-box snapshot `carried_revise`
+        // already dropped. That snapshot must not become review notes.
+        let reopen_freeform = pav.keep_draft_is_next_operator_turn && freeform.is_some();
+        let paste_chip = self
+            .prompt
+            .textarea
+            .elements()
+            .iter()
+            .any(|element| element.kind == crate::views::prompt_widget::KIND_PASTE);
+        let pane_open = self.is_plan_viewer();
         // Local idle decision is not a post-turn ExecutePlan. It has no
         // waiter, so Approve starts the implement turn (SendPromptNow when
         // the composer holds a chip).
@@ -1329,30 +1355,46 @@ impl AgentView {
         let Some(mut pav) = self.unmount_plan_review() else {
             return InputOutcome::Changed;
         };
-        // Approve with a typed comment stays on the approval. It is not an
-        // interject and not a queued prompt. A live waiter continues on the
-        // approval tool result. Idle has no waiter, so start the implement turn.
+        // A live waiter takes the verdict here. Idle has no waiter, so the
+        // implement turn starts below.
+        // Click Approve of typed notes stays Changed. Those notes ride the
+        // approval (ACP feedback plus a UserPrompt row) and must not
+        // Interject. A paste chip Approves with comment as Interject and
+        // must not emit SendInterject. Enter on an open Isolated Preview
+        // with notes is that Interject. Enter on a vanished pane stays
+        // Changed. Letter `a` on the Revise box with comments or freeform
+        // Interjects. Reopen freeform that is not a carried Revise snapshot
+        // Interjects. Comment-intent click stays Changed. Empty Enter does
+        // not reach this function.
+        let enter_lands_notes = from_enter && review_comments.is_some();
+        let click_lands_notes = !from_enter && review_comments.is_some();
+        let returns_interject = review_comments.is_some()
+            && (paste_chip
+                || (from_enter && pane_open)
+                || (!from_enter
+                    && prompt_focus
+                    && prompt_intent == PlanPromptIntent::Revise
+                    && !held_comment)
+                || (!from_enter && reopen_freeform));
         let sent = pav.send_approved(review_comments.clone());
         self.close_plan_review_and_forget(PlanReviewOutcome::Approved);
         self.plan_decision_resolved = true;
         self.persist_plan_decision_resolved_flag(true);
         if sent {
-            // Click Approve with notes stays on the approval. It is not an
-            // interject and not a queued prompt. The review lead comes
-            // before the critique. A pane that was closed, then typed, is
-            // the next Operator turn: that path still interjects, and the
-            // session draft comes back into the composer.
-            // Preview line comments with an empty composer stay Changed.
-            let notes_on_approval =
-                review_comments.is_some() && (prompt_focus || freeform.is_some());
-            if notes_on_approval && keep_next_turn && !held_comment {
-                return InputOutcome::Action(Action::Interject {
-                    text: review_comments.unwrap_or_default(),
-                    images: Vec::new(),
-                });
-            }
+            // Notes ride the approval as a UserPrompt row. Interject is a
+            // separate gesture (paste chip, Enter on an open pane, Revise-box
+            // letter `a`, reopen freeform). Click Approve of newly typed
+            // notes stays Changed and must not Interject. A restored draft
+            // that was already submitted is not those notes: bare side-panel
+            // Approve sends the implement sentence. A bare Approve of the
+            // secondary soft plan with an empty composer does too. A bare
+            // Approve of a primary plan with an empty composer stays Changed.
+            // The session draft is restored before the composer clears, and
+            // only when it still equals the freeform notes.
+            let notes_on_approval = review_comments.is_some()
+                && (prompt_focus || freeform.is_some() || enter_lands_notes || click_lands_notes);
             if notes_on_approval {
-                if let Some(notes) = review_comments {
+                if let Some(notes) = review_comments.clone() {
                     self.scrollback.push_block(RenderBlock::user_prompt(notes));
                 }
                 if let Some(text) = freeform.as_deref()
@@ -1361,14 +1403,36 @@ impl AgentView {
                     self.prompt.set_text("");
                     self.clear_unsent_prompt_draft();
                 }
+            }
+            if returns_interject {
+                if paste_chip {
+                    self.paste_chip_approval_not_wire_interject = true;
+                }
+                let text = review_comments.unwrap_or_default();
+                return InputOutcome::Action(Action::Interject {
+                    text,
+                    images: Vec::new(),
+                });
+            }
+            if notes_on_approval {
                 return InputOutcome::Changed;
             }
-            // Line comments with an empty composer stay on the approval.
-            // A bare Approve still starts the implement turn. The shell
-            // tool result is not a substitute for that sentence.
-            if review_comments.is_some() {
-                return InputOutcome::Changed;
+            // Restored already-submitted composer text was dropped from
+            // review notes above. This click is a bare Approve. Do not
+            // Interject, and do not stay Changed: the implement turn starts
+            // only when this sentence is sent.
+            if !from_enter && already_submitted && review_comments.is_none() {
+                let implement = crate::views::plan_approval_view::PLAN_APPROVED_IMPLEMENT_MESSAGE;
+                return InputOutcome::Action(Action::SendPrompt(implement.to_string()));
             }
+            if self.isolated_preview_shows_secondary_plan
+                && self.prompt.text().trim().is_empty()
+                && review_comments.is_none()
+            {
+                let implement = crate::views::plan_approval_view::PLAN_APPROVED_IMPLEMENT_MESSAGE;
+                return InputOutcome::Action(Action::SendPrompt(implement.to_string()));
+            }
+            return InputOutcome::Changed;
         }
         let implement = crate::views::plan_approval_view::PLAN_APPROVED_IMPLEMENT_MESSAGE;
         let start_text = match review_comments.as_deref() {
@@ -1876,6 +1940,13 @@ impl AgentView {
             &text,
             &images,
         );
+        // Comment intent makes dispatch park the sentence and return no
+        // effects. This Enter is a human send, not a later Approve.
+        if let Some(pav) = self.plan_approval_view.as_mut()
+            && pav.prompt_intent == PlanPromptIntent::Comment
+        {
+            pav.prompt_intent = PlanPromptIntent::Questions;
+        }
         Some(self.send_composer_as_normal_prompt())
     }
 
@@ -3520,6 +3591,56 @@ mod plan_approval_optimistic_mode_tests {
         );
         assert_eq!(agent.plan_mode_pending, Some(false));
         assert!(!effective_plan_mode(&agent));
+    }
+    /// A composer draft that matches a Human turn already in the session is
+    /// not review notes. Bare side-panel Approve sends the implement sentence
+    /// and does not Interject. Newly typed notes stay on the Changed path.
+    #[test]
+    fn bare_approve_of_restored_submitted_draft_sends_implement_prompt() {
+        let (mut agent, _rx) = agent_in_plan_mode_with_approval();
+        agent
+            .scrollback
+            .push_block(crate::scrollback::RenderBlock::user_prompt("go"));
+        agent.prompt.set_text("go");
+        let outcome = agent.approve_plan();
+        assert!(
+            !matches!(
+                &outcome,
+                InputOutcome::Action(Action::Interject { .. })
+                    | InputOutcome::ActionThenForward(Action::Interject { .. })
+            ),
+            "restored submitted draft must not Interject; got {outcome:?}"
+        );
+        match outcome {
+            InputOutcome::Action(Action::SendPrompt(text)) => {
+                assert_eq!(
+                    text,
+                    crate::views::plan_approval_view::PLAN_APPROVED_IMPLEMENT_MESSAGE,
+                    "bare Approve must send the implement sentence, not the restored draft"
+                );
+            }
+            other => panic!(
+                "restored submitted draft must SendPrompt the implement sentence; got {other:?}"
+            ),
+        }
+    }
+    #[test]
+    fn click_approve_of_newly_typed_notes_stays_changed() {
+        let (mut agent, _rx) = agent_in_plan_mode_with_approval();
+        agent.prompt.set_text("ship the auth middleware");
+        let outcome = agent.approve_plan();
+        assert!(
+            matches!(&outcome, InputOutcome::Changed),
+            "newly typed notes on a live waiter stay Changed; got {outcome:?}"
+        );
+        assert!(
+            !matches!(
+                &outcome,
+                InputOutcome::Action(Action::Interject { .. })
+                    | InputOutcome::ActionThenForward(Action::Interject { .. })
+            ),
+            "newly typed notes must not Interject; got {outcome:?}"
+        );
     }
     #[test]
     fn abandon_plan_optimistically_clears_plan_mode() {

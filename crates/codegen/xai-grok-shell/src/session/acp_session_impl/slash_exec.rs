@@ -12,9 +12,22 @@ impl SessionActor {
             command: action.command_name().to_string(),
             args_provided: action.args_provided(),
         });
+        // `/compact` must not construct the rest of this match. That state
+        // machine does not fit in the default 2 MB test stack.
+        if matches!(action, BuiltinAction::Compact) {
+            Box::pin(self.run_compact()).await?;
+            return ok_end_turn(0, None);
+        }
+        Box::pin(self.execute_builtin_slash_command_rest(action)).await
+    }
+
+    async fn execute_builtin_slash_command_rest(
+        self: &Arc<Self>,
+        action: BuiltinAction,
+    ) -> PromptTurnResult {
         match action {
             BuiltinAction::Compact => {
-                self.run_compact().await?;
+                Box::pin(self.run_compact()).await?;
                 ok_end_turn(0, None)
             }
             BuiltinAction::SetYolo { enabled } => {

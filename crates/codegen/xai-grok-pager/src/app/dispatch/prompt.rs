@@ -1777,12 +1777,14 @@ pub(super) fn dispatch_send_prompt_submission(
             ) && resolve_uniquely_named_live_l2(agent, &text).is_some();
             // Eligible parked send-now stays below. Images ride
             // SendPromptNow. Plain text rides immediate SendPrompt.
-            // Leader mode soft-interjects only when the Operator box still
-            // holds that body. An empty box is SendPrompt, or no effects
-            // when a local row is already queued. A non-leader Queue or
-            // Steer session falls through: Queue stays on the local
-            // drip-feed, Steer with an empty local queue is SendPrompt,
-            // and a parked Steer wait flushes through maybe_release.
+            // Soft-interject when the Operator box still holds that body,
+            // or when the body uniquely names a live L2 (the action text is
+            // the operator line; the box may already have been consumed).
+            // An empty box that does not name a live L2 is SendPrompt, or no
+            // effects when a local row is already queued. A non-leader Queue
+            // or Steer session with an empty box falls through: Queue stays
+            // on the local drip-feed, Steer with an empty local queue is
+            // SendPrompt, and a parked Steer wait flushes through maybe_release.
             // Named `/queue` hold is QueueLater above and still waits.
             let parked = agent.is_parked_on_sendable_wait();
             let hold_behind = parked && agent.has_held_user_queue();
@@ -1790,22 +1792,17 @@ pub(super) fn dispatch_send_prompt_submission(
                 && !named_live_l2
                 && immediate_server_send_eligible(agent, leader_mode)
                 && (agent.prompt.images.is_empty() || !hold_behind);
-            if leader_mode && !defer_to_send_now {
-                // Composer Enter still holds the body, so this is soft
-                // interject. A leader SendPrompt with an empty Operator box
-                // is the server queue: SendPrompt when nothing is waiting
-                // locally, and no effects when a local row is already queued.
-                let composer_trim = agent.prompt.text().trim().to_string();
-                let submitted = text.trim();
-                let typed_enter = !composer_trim.is_empty()
-                    && (composer_trim == submitted || composer_trim.contains(submitted));
-                if typed_enter {
-                    let images = agent.prompt.drain_images();
-                    return enqueue_if_interject_dropped(app, id, text, images);
-                }
-                if !agent.session.pending_prompts.is_empty() {
-                    return effects;
-                }
+            let composer_trim = agent.prompt.text().trim().to_string();
+            let submitted = text.trim();
+            let typed_enter = !composer_trim.is_empty()
+                && (composer_trim == submitted || composer_trim.contains(submitted));
+            if (typed_enter || named_live_l2) && !defer_to_send_now {
+                let images = agent.prompt.drain_images();
+                return enqueue_if_interject_dropped(app, id, text, images);
+            }
+            if leader_mode && !defer_to_send_now && !agent.session.pending_prompts.is_empty() {
+                // Empty Operator box and a local row already queued: no effects.
+                return effects;
             }
         }
 
@@ -2076,7 +2073,12 @@ fn hold_parked_plan_follow_up(agent: &mut AgentView, text: &str) -> bool {
         pav.prompt_intent,
         crate::views::plan_approval_view::PlanPromptIntent::Comment
     );
-    let shut_preview_revise = agent.line_viewer.is_none()
+    // A real post-turn review is waiting UI. A later SendPrompt starts a
+    // turn that CancelTurn must leave cancelling. A local idle park still
+    // holds Revise text instead of starting a sampler turn.
+    let real_post_turn = pav.is_after_turn() && !pav.is_local_idle_decision;
+    let shut_preview_revise = !real_post_turn
+        && agent.line_viewer.is_none()
         && matches!(
             pav.prompt_intent,
             crate::views::plan_approval_view::PlanPromptIntent::Revise

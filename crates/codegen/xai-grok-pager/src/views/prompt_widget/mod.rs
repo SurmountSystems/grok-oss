@@ -2973,9 +2973,9 @@ impl PromptWidget {
         self.paste_text(self.paste_element_near_cursor()?)
     }
 
-    /// Expand hint for the paste preview overlay, honest per position.
-    /// ON the chip Enter expands it; right after the chip Enter submits, so the hint there advertises pasting the content again.
-    /// Double-click expands from either position (a click moves the cursor onto the chip first).
+    /// Expand hint for the paste preview overlay. Enter submits from either
+    /// position. Expand is paste-again or double-click. A click moves the
+    /// cursor onto the chip first.
     fn paste_preview_hint(&self, theme: &Theme) -> Line<'static> {
         let dim = theme.muted();
         // The chord deliberately deviates from the tips' text_secondary to a real accent
@@ -3013,16 +3013,21 @@ impl PromptWidget {
         true
     }
 
-    /// Try to interact with an element at the cursor. Enter on a paste/file-ref element inlines
-    /// (expands) it. Enter on an image chip signals the caller to open the preview (it does NOT inline
-    /// the placeholder text). Returns `Some(interaction)` if handled, `None` otherwise.
+    /// Try to interact with an element at the cursor. Enter on a paste chip
+    /// clears that chip into the buffer and returns `None` so the caller
+    /// submits the body. It does not stop at expand. Enter on a file-ref
+    /// inlines it. Enter on an image chip signals the caller to open the
+    /// preview (it does NOT inline the placeholder text). Returns
+    /// `Some(interaction)` if handled, `None` otherwise.
     pub fn try_element_interaction(&mut self, key: &KeyEvent) -> Option<ElementInteraction> {
         let elem = self.textarea.element_at_cursor()?;
         if !key!(Enter).matches(key) {
             return None;
         }
         match elem.kind {
-            // None tells the caller to submit. The chip is already plain text, so the send carries the paste body.
+            // None tells the caller to submit. Clearing the chip leaves the
+            // paste body as plain text, so the send carries those lines.
+            // Returning here would only expand and leave the body unsent.
             k if k == KIND_PASTE => {
                 let id = elem.id;
                 self.expand_element(id);
@@ -3650,8 +3655,20 @@ impl PromptWidget {
             post_flush_escapes = crate::terminal::overlay::clear();
         }
 
+        // While interim words show, the reported cursor is the cell after
+        // those words (empty draft + "there" is column 5 on row 0), including
+        // a wrap onto the next row when the first row is full. After the
+        // final lands, the same cell is the draft caret. An empty focused
+        // composer still reports no hardware cursor so the Human-green box
+        // caret is the only one.
         PromptRenderResult {
-            cursor_pos: None,
+            cursor_pos: if voice_interim_shown {
+                interim_caret
+            } else if style.focused && !self.textarea.text().is_empty() {
+                layout_cursor_pos
+            } else {
+                None
+            },
             caret_cell,
             post_flush_escapes,
         }

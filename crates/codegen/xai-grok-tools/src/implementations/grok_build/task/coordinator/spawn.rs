@@ -59,8 +59,12 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
             return;
         }
         let id = request.id.clone();
+        // Identical ordinary descriptions stay live together: a peer and a
+        // nested child often share fixture text. Review-row text is the
+        // duplicate-job gate (`Review implementation` must not double).
         if !request.owner.is_workflow()
             && request.description != "goal achievement skeptic"
+            && is_implement_loop_review_description(&request.description)
             && self.live_same_description(&request)
         {
             self.reject_queries_waiting_for_spawn(&id);

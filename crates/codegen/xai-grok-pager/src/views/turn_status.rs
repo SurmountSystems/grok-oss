@@ -347,7 +347,8 @@ pub fn render_turn_status(
             } else {
                 theme.gray
             };
-            let cue_width = (icon.width() + cue.width()).min(area.width as usize) as u16;
+            let cue_cols = icon.width() + cue.width();
+            let cue_width = cue_cols.min(area.width as usize) as u16;
             let spans = vec![
                 Span::styled(icon, Style::default().fg(theme.accent_system)),
                 Span::styled(cue, Style::default().fg(label_fg)),
@@ -372,6 +373,16 @@ pub fn render_turn_status(
             };
             let pause_width = pause_str.width();
             let stop_width = stop_str.width();
+            // A full still-running sentence wins over button glyphs. Overwriting
+            // the tail turned "still running" into "still run" on a 72-column row.
+            let room_for_buttons = cue_cols + pause_width + stop_width <= area.width as usize;
+            if !room_for_buttons {
+                return TurnStatusOutput {
+                    watching_cue: (show_buttons && watchers.total() > 0)
+                        .then(|| Rect::new(area.x, area.y, cue_width, 1)),
+                    ..TurnStatusOutput::default()
+                };
+            }
             let mut button_x =
                 area.x + area.width.saturating_sub((pause_width + stop_width) as u16);
             let pause_button = if chrome.show_pause && pause_width > 0 {

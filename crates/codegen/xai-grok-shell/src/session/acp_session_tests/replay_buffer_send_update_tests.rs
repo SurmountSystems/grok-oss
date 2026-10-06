@@ -36,6 +36,16 @@ pub(super) struct ReplaySendUpdateFixture {
     pub(super) sent_ext: Arc<tokio::sync::Mutex<Vec<acp::ExtNotification>>>,
     pub(super) persistence_rx: mpsc::UnboundedReceiver<PersistenceMsg>,
 }
+/// Claim the sampler request the way the turn loop does before stream events.
+/// `handle_sampling_event` drops a token whose request is not in `turn_stream_drained`.
+fn own_stream_request(actor: &SessionActor, request_id: &xai_grok_sampler::RequestId) {
+    let (tx, _rx) = tokio::sync::oneshot::channel();
+    actor
+        .turn_stream_drained
+        .lock()
+        .insert(request_id.clone(), StreamOwnership::with_waiter(Some(tx)));
+}
+
 pub(super) async fn make_replay_send_update_fixture() -> ReplaySendUpdateFixture {
     let (gateway_tx, mut gateway_rx) = mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
     let gateway = GatewaySender::new(gateway_tx);
@@ -724,6 +734,8 @@ async fn channel_token_text_scrubs_curly_punctuation_when_on() {
             } = make_replay_send_update_fixture().await;
             let actor = Arc::new(actor);
             let req = RequestId::random();
+            // The sampler event rail drops tokens until the turn owns the request.
+            own_stream_request(&actor, &req);
             actor
                 .handle_sampling_event(SamplingEvent::StreamStarted {
                     request_id: req.clone(),
@@ -793,6 +805,8 @@ async fn channel_token_text_preserves_unicode_when_scrub_off() {
             let actor = Arc::new(fixture.actor);
             let req = RequestId::random();
             let raw = "She said \u{201C}go\u{201D}\u{2014}now".to_string();
+            // The sampler event rail drops tokens until the turn owns the request.
+            own_stream_request(&actor, &req);
             actor
                 .handle_sampling_event(SamplingEvent::StreamStarted {
                     request_id: req.clone(),

@@ -159,7 +159,7 @@ pub fn collect_skill_config_dirs(
 /// Same-scope dedupe is first-seen, so this is what makes an agents pack win.
 fn agents_before_grok<'a>(names: &'a [&'a str]) -> Vec<&'a str> {
     let mut ordered = Vec::with_capacity(names.len());
-    if names.iter().any(|name| *name == ".agents") {
+    if names.contains(&".agents") {
         ordered.push(".agents");
     }
     for name in names {

@@ -504,7 +504,9 @@ async fn run_task(
             tool_overrides: None,
         })
     } else {
-        session.handle_turn_input(request).await
+        // Heap-build the turn future. Inlining `handle_turn_input` into this
+        // task pulls the turn state machine onto the default 2 MB test stack.
+        Box::pin(session.handle_turn_input(request)).await
     };
     let elapsed_ms = elapsed_ms_saturating(started_at, std::time::Instant::now());
     let _ = completion_tx.send(TurnCompletionMsg {

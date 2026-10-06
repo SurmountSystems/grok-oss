@@ -718,6 +718,22 @@ pub(crate) fn format_subagent_snapshot(
     }
 }
 
+/// Same terminal text as [`format_subagent_snapshot`], without the parent poll
+/// cap. A reminder with no polling tool is the only copy of the child output.
+pub(crate) fn format_subagent_snapshot_uncapped(
+    snap: &SubagentSnapshot,
+    wait_hint: WaitHint,
+) -> TaskOutputOutput {
+    match &snap.status {
+        SubagentSnapshotStatus::Completed { .. }
+        | SubagentSnapshotStatus::Failed { .. }
+        | SubagentSnapshotStatus::Cancelled { .. } => {
+            TaskOutputOutput::Result(terminal_subagent_result_capped(snap, false))
+        }
+        _ => format_subagent_snapshot(snap, wait_hint),
+    }
+}
+
 /// Parent poll cap. Short answers stay intact. A last answer over this size
 /// is stored as a preview plus a report pointer, never the full string.
 const PARENT_TASK_OUTPUT_CAP_BYTES: usize = 40_000;
@@ -744,6 +760,10 @@ fn cap_parent_task_output(output: String) -> (String, bool, String, usize) {
 
 /// Terminal statuses only; reminders render the same value, so notice and poll cannot drift.
 pub(crate) fn terminal_subagent_result(snap: &SubagentSnapshot) -> TaskOutputResult {
+    terminal_subagent_result_capped(snap, true)
+}
+
+fn terminal_subagent_result_capped(snap: &SubagentSnapshot, cap: bool) -> TaskOutputResult {
     let (status, exit_code, output) = match &snap.status {
         SubagentSnapshotStatus::Completed {
             output,
@@ -781,7 +801,12 @@ pub(crate) fn terminal_subagent_result(snap: &SubagentSnapshot) -> TaskOutputRes
         }
     };
     let ended_at_epoch_ms = snap.started_at_epoch_ms + snap.duration_ms;
-    let (output, truncated, truncation_hint, raw_output_bytes) = cap_parent_task_output(output);
+    let (output, truncated, truncation_hint, raw_output_bytes) = if cap {
+        cap_parent_task_output(output)
+    } else {
+        let raw = output.len();
+        (output, false, String::new(), raw)
+    };
     TaskOutputResult {
         task_id: snap.subagent_id.clone(),
         command: format!("[subagent:{}] {}", snap.subagent_type, snap.description),
