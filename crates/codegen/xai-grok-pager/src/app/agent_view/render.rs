@@ -1457,15 +1457,20 @@ impl AgentView {
             );
         }
         let ctx_used = self.context_state.as_ref().map(|c| c.used);
-        let model_window = self.session.models.get_context_window();
-        let ctx_total = self
-            .context_state
-            .as_ref()
-            .and_then(|c| (c.total > 0).then_some(c.total))
-            .or(model_window);
-        if let Some(ctx_line) = context_bar::context_bar_line_for_session(
+        let catalog_window = self.session.models.get_context_window().or_else(|| {
+            self.context_state
+                .as_ref()
+                .and_then(|c| (c.total > 0).then_some(c.total))
+        });
+        let sampling_window = context_bar::footer_sampling_window(
+            self.session_sampling_window,
+            catalog_window,
+            self.child_link().is_some(),
+        );
+        if let Some(ctx_line) = context_bar::context_bar_line_with_windows(
             ctx_used,
-            ctx_total,
+            sampling_window,
+            catalog_window,
             self.hit_context.hovered,
             &theme,
             self.chat_kind,
@@ -6718,6 +6723,39 @@ mod header_omits_uptime_and_supergrok_period_chip {
         assert!(
             header.contains("tasks 190/200"),
             "task count stays when it is a separate widget:\n{header}"
+        );
+    }
+
+    /// When the sampling window and the catalog window differ, the header
+    /// names both. AUTO compact gates on the sampling window. Catalog size
+    /// is not implied as that gate.
+    #[test]
+    fn header_names_sampling_and_catalog_windows_when_they_differ() {
+        let mut agent = make_agent();
+        agent.session.models.override_context_window(500_000);
+        agent.context_state = Some(ContextInfo {
+            used: 400_000,
+            total: 128_000,
+            ..ContextInfo::default()
+        });
+        agent.session_sampling_window = Some(200_000);
+
+        let text = draw(&mut agent);
+        let header = text
+            .lines()
+            .find(|line| line.contains("400K"))
+            .unwrap_or(text.as_str());
+        assert!(
+            header.contains("400K / 200K sampling · 500K catalog"),
+            "header must name the sampling window and the catalog window when they differ:\n{header}"
+        );
+        assert!(
+            !header.contains("400K / 500K"),
+            "header must not paint unlabeled catalog 500K as the only window:\n{header}"
+        );
+        assert!(
+            !header.contains("128K"),
+            "header must not use context_state.total as the only window when the model catalog window is set:\n{header}"
         );
     }
 }

@@ -55,8 +55,10 @@ let
     [ openssl ]
     ++ lib.optionals stdenv.hostPlatform.isLinux [
       dbus
-      # Installed libduckdb.so for uptime. Runtime load, not a cargo C++ build.
+      # System libduckdb.so and duckdb.h. Cargo links the shared object.
+      # A missing file fails the build. This is not a C++ amalgamation.
       duckdb.lib
+      duckdb.dev
     ]
     ++ lib.optionals stdenv.hostPlatform.isDarwin [
       darwin.apple_sdk.frameworks.Security
@@ -76,6 +78,9 @@ let
       }).version;
     PROTOC = "${pkgs.protobuf}/bin/protoc";
     OPENSSL_NO_VENDOR = "1";
+    # libduckdb-sys names. Empty off Linux so the build script treats them as unset.
+    DUCKDB_LIB_DIR = lib.optionalString pkgs.stdenv.hostPlatform.isLinux "${pkgs.duckdb.lib}/lib";
+    DUCKDB_INCLUDE_DIR = lib.optionalString pkgs.stdenv.hostPlatform.isLinux "${pkgs.duckdb.dev}/include";
     GROK_GIT_SHA = self.shortRev or self.dirtyShortRev or "unknown";
     # Cap cargo fan-out inside the pure sandbox (free GHA ~16GB).
     CARGO_BUILD_JOBS = "2";

@@ -111,11 +111,13 @@ struct CreditLimitCopy {
     secondary_desc: &'static str,
     second_choice: xai_grok_telemetry::events::CreditLimitChoice,
     payg_telemetry: bool,
+    card_action: crate::scrollback::blocks::CreditLimitCardAction,
 }
 
-/// Open the credit-limit upsell Q&A on the given agent.
-/// Non-max-tier: Upgrade tier + buy-credits (or PAYG) + Try Again.
-/// Max-tier (SuperGrok Heavy): buy-credits (or PAYG) + Try Again — no upgrade option. URL options carry the target in `id` so the submit handler is position-independent.
+/// Open the credit-limit upsell on the given agent.
+/// Non-max-tier: question modal with Upgrade tier, buy-credits or PAYG, and Try Again.
+/// URL options carry the target in `id` so the submit handler is position-independent.
+/// Max-tier (SuperGrok Heavy): inline scrollback card. That path does not open the question modal.
 pub(super) fn open_credit_limit_upsell(
     agent: &mut AgentView,
     mode: CreditLimitUpsellMode,
@@ -126,10 +128,6 @@ pub(super) fn open_credit_limit_upsell(
         Question, QuestionOption,
     };
 
-    if agent.question_view.is_some() {
-        return;
-    }
-
     let copy = match mode {
         CreditLimitUpsellMode::UnifiedCredits => CreditLimitCopy {
             heading: "You hit your weekly limit.",
@@ -138,6 +136,7 @@ pub(super) fn open_credit_limit_upsell(
             secondary_desc: "Purchase credits to keep using Grok Build",
             second_choice: xai_grok_telemetry::events::CreditLimitChoice::PurchaseCredits,
             payg_telemetry: false,
+            card_action: crate::scrollback::blocks::CreditLimitCardAction::PurchaseCredits,
         },
         CreditLimitUpsellMode::LegacyPayg { enabled: true } => CreditLimitCopy {
             heading: "You\u{2019}ve hit your spending cap.",
@@ -146,6 +145,7 @@ pub(super) fn open_credit_limit_upsell(
             secondary_desc: "Raise your pay-as-you-go spending cap",
             second_choice: xai_grok_telemetry::events::CreditLimitChoice::PayAsYouGo,
             payg_telemetry: true,
+            card_action: crate::scrollback::blocks::CreditLimitCardAction::IncreasePaygLimit,
         },
         CreditLimitUpsellMode::LegacyPayg { enabled: false } => CreditLimitCopy {
             heading: "You\u{2019}ve hit the credit limit for your plan.",
@@ -154,9 +154,29 @@ pub(super) fn open_credit_limit_upsell(
             secondary_desc: "Enable pay-as-you-go credits for on-demand usage",
             second_choice: xai_grok_telemetry::events::CreditLimitChoice::PayAsYouGo,
             payg_telemetry: false,
+            card_action: crate::scrollback::blocks::CreditLimitCardAction::EnablePayg,
         },
     };
     let unified_billing = matches!(mode, CreditLimitUpsellMode::UnifiedCredits);
+
+    if max_tier {
+        log_event(xai_grok_telemetry::events::CreditLimitUpsellShown {
+            surface: xai_grok_telemetry::events::CreditLimitUpsellSurface::InlineCard,
+            max_tier: true,
+            pay_as_you_go: copy.payg_telemetry,
+            unified_billing,
+        });
+        agent.scrollback.push_block(RenderBlock::credit_limit_card(
+            copy.heading,
+            copy.card_action,
+            UPSELL_URL_PAYG,
+        ));
+        return;
+    }
+
+    if agent.question_view.is_some() {
+        return;
+    }
 
     log_event(xai_grok_telemetry::events::CreditLimitUpsellShown {
         surface: xai_grok_telemetry::events::CreditLimitUpsellSurface::QuestionModal,

@@ -691,7 +691,7 @@ Beside the status line, the 15 minute window and the 24 hour window share one sh
 
 The window reads local observations through the installed DuckDB shared library. It does not call xAI to paint.
 
-grok-oss loads that shared library when it reads the pieces. It does not link the library in a way that stops process start. If the shared library is missing, grok-oss still starts, uptime tracking stays off, and the window says uptime tracking is off because DuckDB is not installed. The product does not invent samples.
+grok-oss links the installed DuckDB shared library. On Linux that file is libduckdb.so. The build fails if that shared library or the duckdb.h header is missing. It does not compile a static copy of DuckDB. When a query cannot use the library, uptime tracking stays off and the window says uptime tracking is off because DuckDB is not installed. The product does not invent samples.
 
 Recorded observations are ones the product already made: a real model request, a real 500, a timeout, a repeating-sentence stop, a latency, a fetched token count, and an announcement banner the product already showed ("We're currently experiencing issues serving our models" or "A datacenter incident is affecting all Grok models").
 
@@ -715,7 +715,7 @@ The plan side panel still paints over the transcript behind it.
 
 Show the local 15 minute and 24 hour reading. When those windows have no observations, the reading is `15m none · 24h none`. That is the same short reading that sits beside the status line. When observations exist, `/uptime` prints the full reading: the share that succeeded, the HTTP 500 count, latency that was actually measured, and a stored token sum when every model observation has one. The status line stays the short segment.
 
-`/uptime` does not open a network connection. It does not send a request to xAI. It reads observations already stored on this machine. If the installed DuckDB shared library is missing, tracking stays off, grok-oss still starts, and `/uptime` says uptime tracking is off because DuckDB is not installed.
+`/uptime` does not open a network connection. It does not send a request to xAI. It reads observations already stored on this machine. The build requires the installed DuckDB shared library and fails if it is missing, instead of compiling a static copy. When a query cannot use the library, tracking stays off and `/uptime` says uptime tracking is off because DuckDB is not installed.
 
 ### `/announcements`
 

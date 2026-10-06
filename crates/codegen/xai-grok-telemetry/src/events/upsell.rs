@@ -70,9 +70,9 @@ pub struct CreditLimitHit {
 #[derive(Serialize, Clone, Copy)]
 #[serde(rename_all = "snake_case")]
 pub enum CreditLimitUpsellSurface {
-    /// Q&A modal (upgrade, buy / PAYG, and try again; or buy and try again at max-tier).
+    /// Q&A modal (upgrade, buy / PAYG, and try again). Not used when the account is already max tier.
     QuestionModal,
-    /// Retired: max-tier used an inline scrollback card. Kept for historical events.
+    /// Inline scrollback card when a max-tier account hits a credit limit. That path does not open the question modal.
     InlineCard,
 }
 
