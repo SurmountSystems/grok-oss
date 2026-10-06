@@ -319,6 +319,32 @@ fn mid_turn_approved_tool_result() -> &'static str {
     PLAN_APPROVED_IMPLEMENT_MESSAGE
 }
 
+/// True when `state`'s running turn is the already-approved implement turn.
+/// Resume queues that turn as `plan-resume-`. Pager Approve sends the same
+/// sentence on the queued `InputItem` (the `TurnInputRequest` blocks).
+/// A later turn that calls `exit_plan_mode` again is not this turn.
+fn running_turn_is_approved_implement(state: &State) -> bool {
+    let Some(task) = state.running_task.as_ref() else {
+        return false;
+    };
+    if task.prompt_id.starts_with("plan-resume-") {
+        return true;
+    }
+    state.pending_inputs.iter().any(|item| {
+        item.prompt_id == task.prompt_id
+            && prompt_blocks_contain_implement_sentence(&item.prompt_blocks)
+    })
+}
+
+fn prompt_blocks_contain_implement_sentence(blocks: &[acp::ContentBlock]) -> bool {
+    blocks.iter().any(|block| {
+        matches!(
+            block,
+            acp::ContentBlock::Text(text) if text.text.contains(PLAN_APPROVED_IMPLEMENT_MESSAGE)
+        )
+    })
+}
+
 /// What the mid-turn `exit_plan_mode` intercept does with a panel decision.
 ///
 /// Every outcome completes the parked tool. Approve must not fall through
@@ -2165,6 +2191,32 @@ impl SessionActor {
             is_cursor_create_plan,
             &plan_read,
         ) {
+            // Script 2 is `exit_plan_mode` on the implement turn. Approve
+            // already resolved the decision and left plan mode. Opening
+            // another waiter here consumes that script and never samples
+            // the implement result. A turn that is not this implement
+            // sentence still waits, including a later re-present.
+            if self.running_turn_is_already_approved_implement().await {
+                tracing::info!(
+                    tool_call_id = %tool_call_id,
+                    "[exit_plan_mode] already-approved implement turn; completing tool without a new waiter"
+                );
+                self.leave_plan_mode_to_default();
+                let message = mid_turn_approved_tool_result().to_string();
+                let tool_update = acp::ToolCallUpdate::new(
+                    tool_call_id.clone(),
+                    acp::ToolCallUpdateFields::new()
+                        .status(Some(acp::ToolCallStatus::Completed))
+                        .content(Some(vec![acp::ToolCallContent::from(
+                            acp::ContentBlock::Text(acp::TextContent::new(message.clone())),
+                        )])),
+                );
+                self.send_update(acp::SessionUpdate::ToolCallUpdate(tool_update), None)
+                    .await;
+                let tool_chat = ConversationItem::tool_result(call.id.clone(), message);
+                self.chat_state_handle.push_tool_result(tool_chat);
+                return Ok(Err(ToolLoop::Continue));
+            }
             tracing::info!(
                 tool_call_id = %tool_call_id,
                 cursor_create_plan = is_cursor_create_plan,
@@ -2327,6 +2379,15 @@ impl SessionActor {
             additional_context: hook_additional_context,
         };
         Ok(Ok(prepared))
+    }
+    /// Approve already decided this plan, and the running turn is the
+    /// implement sentence. Do not open a second Plan Exit waiter.
+    async fn running_turn_is_already_approved_implement(&self) -> bool {
+        if !self.plan_mode.lock().is_plan_decision_resolved() {
+            return false;
+        }
+        let state = self.state.lock().await;
+        running_turn_is_approved_implement(&state)
     }
     /// Issue the `x.ai/exit_plan_mode` reverse-request and await the user's decision.
     /// Shared by the mid-turn intercept and the resume re-park.
@@ -2527,9 +2588,37 @@ impl SessionActor {
             ResumeAction::LeaveAndImplement(text) => {
                 tracing::info!("[exit_plan_mode] resume: user approved plan");
                 self.leave_plan_mode_to_default();
+                // Session restore can leave the parked plan turn in
+                // `running_task`. That holder is not a live sampler call.
+                // Clear it before the implement sentence is queued. Do not
+                // drop a task that is already calling the model.
+                self.clear_restored_running_task_if_not_sampling().await;
                 self.start_resume_turn(text, PromptMode::Agent, completion_tx)
                     .await;
             }
+        }
+    }
+    /// Drop a restored plan-turn holder so a resumed Approve can sample.
+    /// A task that is already calling the model keeps the slot.
+    async fn clear_restored_running_task_if_not_sampling(&self) {
+        let mut state = self.state.lock().await;
+        let Some(task) = state.running_task.take() else {
+            if state.finalization_gate.is_active() {
+                state.finalization_gate.release_for_resume_implement();
+            }
+            return;
+        };
+        // A plan-resume sentence already in the slot is the sampler call.
+        // Any other holder on this path is the parked plan turn. Its abort
+        // handle stays unfinished while it waits, so `is_finished` is not a
+        // live-model check. Abort it so the implement sentence can sample.
+        if task.prompt_id.starts_with("plan-resume-") {
+            state.running_task = Some(task);
+            return;
+        }
+        task.handle.abort();
+        if state.finalization_gate.is_active() {
+            state.finalization_gate.release_for_resume_implement();
         }
     }
     /// Inject a synthetic user turn after a resumed plan decision and kick the scheduler (no in-flight turn exists on resume to continue).
@@ -2540,17 +2629,43 @@ impl SessionActor {
         completion_tx: mpsc::UnboundedSender<super::turn_task::TurnCompletionMsg>,
     ) {
         let prompt_id = format!("plan-resume-{}", chrono::Utc::now().timestamp_millis());
-        let prompt_blocks = vec![acp::ContentBlock::Text(acp::TextContent::new(text))];
+        let prompt_blocks = vec![acp::ContentBlock::Text(acp::TextContent::new(text.clone()))];
         let (respond_to, _rx) = oneshot::channel();
         let _ = self
             .queue_input(QueueInputRequest::from_legacy_prompt_id(
                 prompt_blocks,
-                prompt_id,
+                prompt_id.clone(),
                 mode,
                 respond_to,
             ))
             .await;
-        SessionActor::maybe_start_running_task(self.clone(), completion_tx).await;
+        SessionActor::maybe_start_running_task(self.clone(), completion_tx.clone()).await;
+        // `maybe_start_running_task` returns with an empty slot when the
+        // finalization gate (or a leftover plan hold) ate the sentence.
+        // The sentence stays queued. Promote it. Do not drop it.
+        if self.state.lock().await.running_task.is_none() {
+            self.plan_mode.lock().set_awaiting_plan_approval(false);
+            self.clear_restored_running_task_if_not_sampling().await;
+            let queued = self
+                .state
+                .lock()
+                .await
+                .pending_inputs
+                .iter()
+                .any(|item| item.prompt_id == prompt_id);
+            if !queued {
+                let (respond_to, _rx) = oneshot::channel();
+                let _ = self
+                    .queue_input(QueueInputRequest::from_legacy_prompt_id(
+                        vec![acp::ContentBlock::Text(acp::TextContent::new(text))],
+                        prompt_id,
+                        mode,
+                        respond_to,
+                    ))
+                    .await;
+            }
+            SessionActor::maybe_start_running_task(self, completion_tx).await;
+        }
     }
     /// Refine the initial (minimal) ToolCall that was registered during tool preparation.
     /// Returns `(title, kind, raw_input)` so callers can reuse them.

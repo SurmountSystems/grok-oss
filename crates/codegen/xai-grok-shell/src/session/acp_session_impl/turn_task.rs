@@ -137,9 +137,25 @@ impl FinalizationGate {
     pub(super) fn is_active(&self) -> bool {
         self.active.is_some()
     }
+
+    /// Drop a gate that outlived the parked plan turn.
+    /// `maybe_start_running_task` returns on an active gate even when
+    /// `running_task` is empty, which ate the resumed implement sentence.
+    /// Caller only uses this when that slot is empty (no live sampler).
+    pub(super) fn release_for_resume_implement(&mut self) {
+        self.active = None;
+    }
 }
 
 impl State {
+    /// The slot holds a spawned turn that has not finished.
+    /// A finished handle is a restored holder, not a live model call.
+    pub(super) fn running_task_calls_model(&self) -> bool {
+        self.running_task
+            .as_ref()
+            .is_some_and(|task| !task.handle.is_finished())
+    }
+
     fn front_prompt_id(&self) -> Option<&str> {
         self.pending_inputs
             .front()

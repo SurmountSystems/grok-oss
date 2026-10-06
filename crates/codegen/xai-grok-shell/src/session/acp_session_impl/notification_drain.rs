@@ -10,6 +10,35 @@ pub(super) const MAX_PENDING_NOTIFICATIONS: usize = 50;
 pub(crate) const LIVE_ORPHAN_RECONCILE_INTERVAL: std::time::Duration =
     std::time::Duration::from_secs(30);
 
+/// Pager Approve sends this sentence with a uuid prompt id. Resume also
+/// queues it under a `plan-resume-` id. Either one is the implement turn.
+const IMPLEMENT_SENTENCE: &str = "The user approved the plan. Implement the plan in plan.md.";
+
+fn input_item_is_implement_sentence(item: &InputItem) -> bool {
+    if item.prompt_id.starts_with("plan-resume-") {
+        return true;
+    }
+    item.prompt_blocks.iter().any(|block| {
+        matches!(
+            block,
+            acp::ContentBlock::Text(text) if text.text.contains(IMPLEMENT_SENTENCE)
+        )
+    })
+}
+
+fn promote_implement_sentence_to_front(pending: &mut std::collections::VecDeque<InputItem>) {
+    let Some(index) = pending.iter().position(input_item_is_implement_sentence) else {
+        return;
+    };
+    if index == 0 {
+        return;
+    }
+    let Some(item) = pending.remove(index) else {
+        return;
+    };
+    pending.push_front(item);
+}
+
 /// A notification buffered for idle-gated drain (see `maybe_drain_notifications`).
 pub(crate) struct PendingNotification {
     #[expect(
@@ -124,8 +153,43 @@ impl SessionActor {
         let may_combine;
         let queued_wake_ids: Vec<String>;
         {
-            let state = self.state.lock().await;
-            if state.running_task.is_some() || state.finalization_gate.is_active() {
+            let mut state = self.state.lock().await;
+            // An implement sentence is queued after Approve. Its id is
+            // `plan-resume-*`, or a uuid whose text is the approved-plan
+            // sentence. The resume re-park is detached, so a holder in
+            // `running_task` is the restored parked turn unless its prompt
+            // id is this sentence (that task is the sampler call).
+            promote_implement_sentence_to_front(&mut state.pending_inputs);
+            let resume_sentence_queued = state
+                .pending_inputs
+                .front()
+                .is_some_and(input_item_is_implement_sentence);
+            if resume_sentence_queued && state.running_task.is_some() {
+                let front_id = state
+                    .pending_inputs
+                    .front()
+                    .map(|item| item.prompt_id.clone());
+                let holder_is_this_sentence = state
+                    .running_task
+                    .as_ref()
+                    .is_some_and(|task| front_id.as_deref() == Some(task.prompt_id.as_str()));
+                if !holder_is_this_sentence {
+                    if let Some(task) = state.running_task.take() {
+                        task.handle.abort();
+                    }
+                }
+            }
+            let slot_blocked = state.running_task.is_some() || state.finalization_gate.is_active();
+            // An active finalization gate with an empty slot is the restored
+            // park, not a live sampler. Returning here ate the implement
+            // sentence (`running_task` stayed empty, no inference request).
+            let stale_gate_ate_resume = resume_sentence_queued
+                && state.running_task.is_none()
+                && state.finalization_gate.is_active();
+            if stale_gate_ate_resume {
+                state.finalization_gate.release_for_resume_implement();
+            }
+            if slot_blocked && !resume_sentence_queued {
                 let queue_depth = state.pending_inputs.len();
                 if queue_depth > 0 {
                     xai_grok_telemetry::unified_log::debug(
@@ -156,12 +220,13 @@ impl SessionActor {
             // re-park is detached). Promoting a queued prompt would start a
             // new turn while exit_plan_mode is still waiting on the user —
             // that hijacks the in-flight plan decision. Hold until approve /
-            // revise / abandon clears the gate.
+            // revise / abandon clears the gate. An implement sentence
+            // is already the decision, so that hold must not eat it.
             let plan_approval_open = self.plan_mode.lock().is_awaiting_plan_approval()
                 || crate::session::pending_interaction::has_parked_plan_approval(
                     &self.pending_interactions,
                 );
-            if plan_approval_open {
+            if plan_approval_open && !resume_sentence_queued {
                 let queue_depth = state.pending_inputs.len();
                 if queue_depth > 0 {
                     xai_grok_telemetry::unified_log::debug(
@@ -235,17 +300,42 @@ impl SessionActor {
         }
 
         let mut state = self.state.lock().await;
-        // Re-check after the await gap.
-        if state.running_task.is_some()
-            || state.finalization_gate.is_active()
-            || state.pending_inputs.is_empty()
-        {
+        // Re-check after the await gap. A pager SendPrompt uses a uuid, and
+        // the implement sentence may sit behind another queued row.
+        promote_implement_sentence_to_front(&mut state.pending_inputs);
+        let resume_sentence_queued = state
+            .pending_inputs
+            .front()
+            .is_some_and(input_item_is_implement_sentence);
+        if resume_sentence_queued {
+            let front_id = state
+                .pending_inputs
+                .front()
+                .map(|item| item.prompt_id.clone());
+            let holder_is_this_sentence = state
+                .running_task
+                .as_ref()
+                .is_some_and(|task| front_id.as_deref() == Some(task.prompt_id.as_str()));
+            if !holder_is_this_sentence {
+                if let Some(task) = state.running_task.take() {
+                    task.handle.abort();
+                }
+            }
+            if state.running_task.is_none() && state.finalization_gate.is_active() {
+                state.finalization_gate.release_for_resume_implement();
+            }
+        }
+        if state.running_task.is_some() || state.pending_inputs.is_empty() {
             return;
         }
-        if self.plan_mode.lock().is_awaiting_plan_approval()
-            || crate::session::pending_interaction::has_parked_plan_approval(
-                &self.pending_interactions,
-            )
+        if state.finalization_gate.is_active() && !resume_sentence_queued {
+            return;
+        }
+        if !resume_sentence_queued
+            && (self.plan_mode.lock().is_awaiting_plan_approval()
+                || crate::session::pending_interaction::has_parked_plan_approval(
+                    &self.pending_interactions,
+                ))
         {
             return;
         }
