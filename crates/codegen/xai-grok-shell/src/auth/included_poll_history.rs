@@ -89,19 +89,23 @@ pub fn recent_flat_candidate_window(
         return None;
     }
     let last_idx = samples.len() - 1;
-    let last = &samples[last_idx];
+    let last = samples.get(last_idx).expect("index out of bounds");
     // Walk newest→oldest until the span from that sample to the last covers
     // min_window. That is the tightest recent window with enough wall time.
     let mut start_idx = None;
     for i in (0..last_idx).rev() {
-        let span = (last.ts - samples[i].ts).to_std().unwrap_or(Duration::ZERO);
+        let span = (last.ts - samples.get(i).expect("index out of bounds").ts)
+            .to_std()
+            .unwrap_or(Duration::ZERO);
         if span >= min_window {
             start_idx = Some(i);
             break;
         }
     }
     let start_idx = start_idx?;
-    let window = &samples[start_idx..=last_idx];
+    let window = samples
+        .get(start_idx..=last_idx)
+        .expect("index out of bounds");
     if window.len() < min_polls {
         return None;
     }
@@ -118,8 +122,8 @@ pub fn included_debit_unproven(
     let Some(window) = recent_flat_candidate_window(samples, min_polls, min_window) else {
         return false;
     };
-    let first = &window[0];
-    for s in &window[1..] {
+    let first = window.first().expect("index out of bounds");
+    for s in window.get(1..).expect("index out of bounds") {
         if !float_same(s.credit_usage_percent, first.credit_usage_percent) {
             return false;
         }
@@ -199,8 +203,7 @@ fn grok_home_path() -> PathBuf {
     if let Ok(v) = std::env::var("GROK_HOME") {
         return PathBuf::from(v);
     }
-    #[allow(deprecated)]
-    let home = std::env::home_dir().unwrap_or_else(|| PathBuf::from("."));
+    let home = xai_dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
     home.join(".grok")
 }
 

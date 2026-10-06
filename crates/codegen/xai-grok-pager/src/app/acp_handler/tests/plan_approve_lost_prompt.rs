@@ -261,11 +261,7 @@ fn assert_prompt_sent_on_implement_turn(app: &AppView, after: &AfterClickApprove
         !notes_queued_as_prompt(app, after, needle),
         "Approve must not queue a Prompt row; effects={:?} pending={:?}",
         after.effects,
-        app.agents
-            .get(&AgentId(0))
-            .unwrap()
-            .session
-            .pending_prompts
+        app.agents.get(&AgentId(0)).unwrap().session.pending_prompts
     );
     assert!(
         prompt_in_scrollback_or_interject(app, after.interject_text.as_deref(), needle),
@@ -786,7 +782,8 @@ fn isolated_preview_vanished_pane_notes_enter_approves_with_comment() {
     assert!(
         user_prompt_texts(&app)
             .iter()
-            .any(|text| text.contains(HUMAN_BOX_PROMPT) && text.contains(PLAN_APPROVED_REVIEW_COMMENTS_LEAD)),
+            .any(|text| text.contains(HUMAN_BOX_PROMPT)
+                && text.contains(PLAN_APPROVED_REVIEW_COMMENTS_LEAD)),
         "the comment stays on the approval; scrollback={:?}",
         user_prompt_texts(&app)
     );
@@ -917,10 +914,10 @@ fn isolated_present_preview_enter_is_human_turn_then_click_approve() {
     );
     assert!(
         after.interject_text.is_none()
-            && !after.effects.iter().any(|effect| matches!(
-                effect,
-                Effect::SendInterject { .. }
-            )),
+            && !after
+                .effects
+                .iter()
+                .any(|effect| matches!(effect, Effect::SendInterject { .. })),
         "click Approve is not an interjection; effects={:?}",
         after.effects
     );
@@ -1226,7 +1223,7 @@ fn view_plan_reopens_isolated_preview_from_current_disk_plan_md_after_panel_clos
             agent
                 .plan_approval_view
                 .as_ref()
-                .is_some_and(|p| p.response_tx.is_some()),
+                .is_some_and(|p| p.has_live_ext_waiter()),
             "/view-plan must keep the live waiter so Comment then Approve can run"
         );
     }

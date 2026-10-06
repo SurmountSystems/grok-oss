@@ -1,12 +1,8 @@
-//! Layer-2 stream transforms: turn raw HTTP chunk streams into
-//! [`SamplingEvent`](crate::events::SamplingEvent) streams.
+//! Layer-2 stream transforms: turn raw HTTP chunk streams into [`SamplingEvent`](crate::events::SamplingEvent) streams.
 //!
-//! Each backend has its own transform because the raw chunk types
-//! differ; backend dispatch happens in M4's
-//! [`actor::request_task`](crate::actor::request_task), which knows
-//! the API backend from `SamplerConfig.api_backend` and calls the
-//! matching `SamplingClient::conversation_stream*` method before
-//! handing the result to the corresponding transform here.
+//! Each backend has its own transform because the raw chunk types differ.
+//! Dispatch lives in [`actor::request_task`](crate::actor::request_task), which reads `SamplerConfig.api_backend`.
+//! It calls the matching `SamplingClient::conversation_stream*` method and hands the raw stream to the transform here.
 
 pub mod chat_completions;
 pub mod collect;
@@ -151,6 +147,7 @@ const SMEAR_BLOCK_CHARS: usize = 64;
 pub(crate) struct StreamRepetitionGuard {
     text: String,
     reasoning: String,
+    narration: String,
 }
 
 impl StreamRepetitionGuard {
@@ -183,6 +180,7 @@ impl StreamRepetitionGuard {
         match channel {
             SamplingChannel::Text => &self.text,
             SamplingChannel::Reasoning => &self.reasoning,
+            SamplingChannel::Narration => &self.narration,
         }
     }
 
@@ -190,6 +188,7 @@ impl StreamRepetitionGuard {
         match channel {
             SamplingChannel::Text => &mut self.text,
             SamplingChannel::Reasoning => &mut self.reasoning,
+            SamplingChannel::Narration => &mut self.narration,
         }
     }
 }
@@ -220,17 +219,27 @@ fn tail_window(s: &str) -> &str {
     &s[start..]
 }
 
+/// Same failure as `bytes[index]` when `index` is past `bytes`.
+fn byte_at(bytes: &[u8], index: usize) -> u8 {
+    bytes.get(index).copied().expect("index out of bounds")
+}
+
+/// Same failure as `units[index]` when `index` is past `units`.
+fn unit_at<'a>(units: &[&'a str], index: usize) -> &'a str {
+    units.get(index).copied().expect("index out of bounds")
+}
+
 fn split_sentences(s: &str) -> Vec<&str> {
     let mut out = Vec::new();
     let mut start = 0;
     let bytes = s.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
-        if matches!(bytes[i], b'.' | b'?' | b'!') {
+        if matches!(byte_at(bytes, i), b'.' | b'?' | b'!') {
             let next = i + 1;
-            if next == bytes.len() || bytes[next].is_ascii_whitespace() {
+            if next == bytes.len() || byte_at(bytes, next).is_ascii_whitespace() {
                 let mut end = next;
-                while end < bytes.len() && bytes[end].is_ascii_whitespace() {
+                while end < bytes.len() && byte_at(bytes, end).is_ascii_whitespace() {
                     end += 1;
                 }
                 let piece = s[start..end].trim();
@@ -265,7 +274,7 @@ fn trailing_units_loop(units: Vec<&str>) -> bool {
     if units.is_empty() {
         return false;
     }
-    let last = units[units.len() - 1];
+    let last = unit_at(&units, units.len() - 1);
     if is_loop_phrase(last) {
         let mut k = 1usize;
         for unit in units.iter().rev().skip(1) {
@@ -287,8 +296,8 @@ fn trailing_units_loop(units: Vec<&str>) -> bool {
     if units.len() < MIN_LONG_REPEATS * 2 {
         return false;
     }
-    let a = units[units.len() - 2];
-    let b = units[units.len() - 1];
+    let a = unit_at(&units, units.len() - 2);
+    let b = unit_at(&units, units.len() - 1);
     if a == b {
         return false;
     }
@@ -301,7 +310,7 @@ fn trailing_units_loop(units: Vec<&str>) -> bool {
     let mut cycles = 1usize;
     let mut i = units.len() - 2;
     while i >= 2 {
-        if units[i - 2] == a && units[i - 1] == b {
+        if unit_at(&units, i - 2) == a && unit_at(&units, i - 1) == b {
             cycles += 1;
             i -= 2;
         } else {
@@ -335,10 +344,10 @@ fn trailing_units_loop(units: Vec<&str>) -> bool {
         } else {
             let raw = body.as_bytes();
             let mut k = 0;
-            while k < raw.len() && raw[k].is_ascii_digit() {
+            while k < raw.len() && byte_at(raw, k).is_ascii_digit() {
                 k += 1;
             }
-            if k > 0 && k < raw.len() && raw[k] == b'.' {
+            if k > 0 && k < raw.len() && byte_at(raw, k) == b'.' {
                 body = body[k + 1..].trim_start();
             }
         }
@@ -348,15 +357,15 @@ fn trailing_units_loop(units: Vec<&str>) -> bool {
         let mut start = 0usize;
         let mut at = 0usize;
         while at < bytes.len() {
-            if bytes[at] == b' ' {
+            if byte_at(bytes, at) == b' ' {
                 let mut end_num = at + 1;
-                while end_num < bytes.len() && bytes[end_num].is_ascii_digit() {
+                while end_num < bytes.len() && byte_at(bytes, end_num).is_ascii_digit() {
                     end_num += 1;
                 }
                 if end_num > at + 1
                     && end_num + 1 < bytes.len()
-                    && bytes[end_num] == b'.'
-                    && bytes[end_num + 1] == b' '
+                    && byte_at(bytes, end_num) == b'.'
+                    && byte_at(bytes, end_num + 1) == b' '
                 {
                     let piece = normalized[start..at].trim();
                     if !piece.is_empty() {
@@ -411,9 +420,9 @@ fn trailing_units_loop(units: Vec<&str>) -> bool {
         let start = units.len() - need;
         let mut matched = true;
         for offset in 0..period {
-            let base = units[start + offset];
+            let base = unit_at(&units, start + offset);
             for rep in 1..MIN_LONG_REPEATS {
-                if !same_unit(base, units[start + rep * period + offset]) {
+                if !same_unit(base, unit_at(&units, start + rep * period + offset)) {
                     matched = false;
                     break;
                 }

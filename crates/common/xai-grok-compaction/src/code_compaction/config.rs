@@ -54,7 +54,7 @@ pub fn session_attention_target_tokens(sampling_window: u64) -> u64 {
     sampling_window.saturating_mul(u64::from(SESSION_ATTENTION_TARGET_PERCENT)) / 100
 }
 
-/// 95% of [`GROK_45_CONTEXT_WINDOW_TOKENS`] — the token equivalent of the
+/// 95% of [`GROK_45_CONTEXT_WINDOW_TOKENS`], the token equivalent of the
 /// default percent threshold on the Grok 4.5 card.
 pub const GROK_45_DEFAULT_AUTO_COMPACT_TOKENS: u64 =
     GROK_45_CONTEXT_WINDOW_TOKENS * (DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT as u64) / 100;

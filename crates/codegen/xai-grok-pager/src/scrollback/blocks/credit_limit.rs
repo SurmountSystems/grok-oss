@@ -27,7 +27,7 @@ pub enum CreditLimitCardAction {
 /// Inline scrollback card for credit-limit exhaustion on max-tier accounts.
 #[derive(Debug, Clone)]
 pub struct CreditLimitBlock {
-    /// Card heading (e.g. "You've hit your free credits limit.").
+    /// Card heading (e.g. "You've hit the credit limit for your plan.").
     pub heading: String,
     /// Continue-path body copy selector.
     pub action: CreditLimitCardAction,
@@ -231,8 +231,9 @@ mod tests {
         assert!(all_text.contains(url));
 
         // Heading uses bold modifier.
+        let heading = output.lines.first().expect("heading line");
         assert!(
-            output.lines[0]
+            heading
                 .content
                 .spans
                 .iter()

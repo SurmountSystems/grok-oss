@@ -18,6 +18,10 @@ let
       in
       (craneLib.filterCargoSources path type)
       || lib.hasInfix "/crates/" path
+      || lib.hasSuffix "/frontend" path
+      || lib.hasSuffix "/frontend/apps" path
+      || lib.hasSuffix "/frontend/apps/grok-desktop" path
+      || lib.hasInfix "/frontend/apps/grok-desktop/scripts" path
       || lib.hasInfix "/prod/" path
       || lib.hasInfix "/third_party/" path
       || lib.hasInfix "/bin/" path
@@ -26,7 +30,10 @@ let
       || base == "clippy.toml"
       || base == "rustfmt.toml"
       || base == "nextest.toml"
-      || base == "protoc";
+      || base == "protoc"
+      # Repo-root justfile. Crane's cargo filter drops it; the embedded
+      # grep test include_str's this file from the crate directory.
+      || base == "justfile";
   };
 
   nativeBuildInputs =
@@ -48,8 +55,10 @@ let
     [ openssl ]
     ++ lib.optionals stdenv.hostPlatform.isLinux [
       dbus
-      # Installed libduckdb.so for uptime. Runtime load, not a cargo C++ build.
+      # System libduckdb.so and duckdb.h. Cargo links the shared object.
+      # A missing file fails the build. This is not a C++ amalgamation.
       duckdb.lib
+      duckdb.dev
     ]
     ++ lib.optionals stdenv.hostPlatform.isDarwin [
       darwin.apple_sdk.frameworks.Security
@@ -69,6 +78,9 @@ let
       }).version;
     PROTOC = "${pkgs.protobuf}/bin/protoc";
     OPENSSL_NO_VENDOR = "1";
+    # libduckdb-sys names. Empty off Linux so the build script treats them as unset.
+    DUCKDB_LIB_DIR = lib.optionalString pkgs.stdenv.hostPlatform.isLinux "${pkgs.duckdb.lib}/lib";
+    DUCKDB_INCLUDE_DIR = lib.optionalString pkgs.stdenv.hostPlatform.isLinux "${pkgs.duckdb.dev}/include";
     GROK_GIT_SHA = self.shortRev or self.dirtyShortRev or "unknown";
     # Cap cargo fan-out inside the pure sandbox (free GHA ~16GB).
     CARGO_BUILD_JOBS = "2";

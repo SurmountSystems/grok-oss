@@ -204,7 +204,11 @@ fn parse_flag_effort(lower_line: &str, flag: &str) -> Option<u8> {
         let abs = search + rel;
         // Boundary before flag
         if abs > 0 {
-            let prev = lower_line.as_bytes()[abs - 1];
+            let prev = lower_line
+                .as_bytes()
+                .get(abs - 1)
+                .copied()
+                .expect("index out of bounds");
             if !prev.is_ascii_whitespace() {
                 search = abs + 1;
                 continue;
@@ -223,7 +227,11 @@ fn parse_flag_effort(lower_line: &str, flag: &str) -> Option<u8> {
         // Must be end or whitespace after number
         let after_num = rest.get(digits.len()..).unwrap_or("");
         if !after_num.is_empty() {
-            let b = after_num.as_bytes()[0];
+            let b = after_num
+                .as_bytes()
+                .first()
+                .copied()
+                .expect("index out of bounds");
             if !b.is_ascii_whitespace() {
                 search = abs + 1;
                 continue;
@@ -290,7 +298,14 @@ fn find_effort_value_span(lower_line: &str, flag: &str, value: &str) -> Option<(
     let mut search = 0usize;
     while let Some(rel) = lower_line[search..].find(flag) {
         let abs = search + rel;
-        if abs > 0 && !lower_line.as_bytes()[abs - 1].is_ascii_whitespace() {
+        if abs > 0
+            && !lower_line
+                .as_bytes()
+                .get(abs - 1)
+                .copied()
+                .expect("index out of bounds")
+                .is_ascii_whitespace()
+        {
             search = abs + 1;
             continue;
         }

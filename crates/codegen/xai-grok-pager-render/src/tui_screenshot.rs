@@ -176,9 +176,9 @@ fn fill_rect(pixels: &mut [u8], img_w: u32, x0: u32, y0: u32, w: u32, h: u32, rg
 fn put_pixel(pixels: &mut [u8], img_w: u32, x: u32, y: u32, rgb: (u8, u8, u8)) {
     let i = ((y * img_w + x) * 3) as usize;
     if i + 2 < pixels.len() {
-        pixels[i] = rgb.0;
-        pixels[i + 1] = rgb.1;
-        pixels[i + 2] = rgb.2;
+        *pixels.get_mut(i).expect("index out of bounds") = rgb.0;
+        *pixels.get_mut(i + 1).expect("index out of bounds") = rgb.1;
+        *pixels.get_mut(i + 2).expect("index out of bounds") = rgb.2;
     }
 }
 

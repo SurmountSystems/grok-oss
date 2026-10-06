@@ -630,13 +630,9 @@ pub(crate) fn apply_replace(
     Ok(dropped_count)
 }
 
-/// `merge=true`: updates are merged into the existing state.
-/// - **Existing items**: `content` / `priority` / `meta` / `size` are optional —
-///   if omitted the previous value is kept. This lets the model mark an item
-///   from `in_progress` → `completed` without echoing the content back.
-/// - **New items** (id not yet in state): if `content` is omitted the `id`
-///   is used as a fallback so the tool never errors on a merge call. This
-///   makes the tool resilient to state being lost between calls.
+/// `merge=true`: updates are merged into the existing state. **Existing items**: `content` is optional — if omitted the previous value is kept.
+/// This lets the model mark an item from `in_progress` → `completed` without echoing the content back. **New items** (id not yet in state): if
+/// `content` is omitted the `id` is used as a fallback so the tool never errors on a merge call.
 pub(crate) fn apply_merge(state: &mut TodoState, updates: &[TodoUpdate]) -> Result<(), TodoError> {
     for u in updates {
         // `None` = omit size; `Some(v)` = set size to v (field or meta.size).
@@ -943,12 +939,9 @@ const fn default_merge() -> bool {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct TodoWriteInput {
-    /// When true (the default), merge the provided todos into the existing
-    /// list by id (partial updates are allowed — leave unchanged fields
-    /// undefined). When explicitly set to false, the provided todos replace
-    /// the existing list, except protected-prefix ids (`plan:`, `impl:`,
-    /// `pr-`, `recon:`, `residual:`, `ask:`, `feat:`, `bug:`) that are not
-    /// mentioned are kept.
+    /// When true (the default), merge the provided todos into the existing list by id (partial
+    /// updates are allowed — leave unchanged fields undefined). When explicitly set to false, the
+    /// provided todos replace the existing list entirely.
     #[serde(
         default = "default_merge",
         deserialize_with = "crate::types::schema::deserialize_lenient_bool"
@@ -964,10 +957,8 @@ pub struct TodoWriteInput {
     pub todos: Vec<TodoUpdate>,
 }
 
-/// New-architecture `TodoWrite` tool.
-///
-/// State: `State<TodoState>` — persisted across calls via Resources serde.
-/// Params: `()` — no per-tool configuration.
+/// New-architecture `TodoWrite` tool. State: `State<TodoState>` — persisted across calls via
+/// Resources serde. Params: `()` — no per-tool configuration.
 #[derive(Debug, Default)]
 pub struct TodoWriteTool;
 
@@ -990,6 +981,75 @@ Prefer merge: true upsert only (never casually wipe with merge: false). Fibonacc
 
     fn requires_expr(&self) -> Expr<ToolRequirement> {
         Expr::True
+    }
+
+    /// The non-Pi finalized contract is the short list plus id/content/status.
+    /// Runtime still accepts priority, meta, and size. Those fields stay off
+    /// the advertised schema so the checked-in snapshot stays exact.
+    fn versioned_definition(
+        &self,
+        contract_version: Option<&str>,
+        client_name: &str,
+        description_override: Option<&str>,
+        renderer: &crate::types::template_renderer::TemplateRenderer,
+        param_map: &std::collections::HashMap<String, String>,
+        input_schema: &serde_json::Value,
+        effective_params: &serde_json::Value,
+    ) -> crate::types::definition::ToolDefinition {
+        let _ = (contract_version, input_schema, effective_params);
+        let description = if let Some(override_text) = description_override {
+            renderer.render(override_text).unwrap_or_else(|err| {
+                crate::types::template_renderer::strip_markers_on_render_failure(
+                    override_text,
+                    &err,
+                )
+            })
+        } else {
+            "Create and manage a structured task list. The user sees this list live — it is your primary way to show progress.\n\nUse for any task with 3+ steps. Skip for trivial single-step work.".to_string()
+        };
+        let mut parameters = serde_json::json!({
+            "$schema": "http://json-schema.org/draft-07/schema#",
+            "required": ["todos"],
+            "type": "object",
+            "properties": {
+                "merge": {
+                    "description": "Optional. When true (default), merges the provided todos into the existing list by id — send only the items you are changing, and to flip status without changing content send just id + status. When false, the provided todos replace the existing list.",
+                    "type": "boolean",
+                    "default": true
+                },
+                "todos": {
+                    "description": "Array of todo items to write to the workspace",
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "id": {
+                                "description": "Unique identifier for the todo item",
+                                "type": "string"
+                            },
+                            "content": {
+                                "description": "The description/content of the todo item",
+                                "type": ["string", "null"]
+                            },
+                            "status": {
+                                "description": "The status of the todo item: pending, in_progress, completed, or cancelled",
+                                "type": ["string", "null"],
+                                "enum": ["pending", "in_progress", "completed", "cancelled", null]
+                            }
+                        },
+                        "required": ["id"]
+                    }
+                }
+            }
+        });
+        if !param_map.is_empty() {
+            parameters = crate::util::remap::remap_schema_properties(&parameters, param_map);
+        }
+        crate::types::definition::ToolDefinition::function(
+            client_name,
+            Some(description),
+            parameters,
+        )
     }
 }
 
@@ -1219,10 +1279,8 @@ mod tests {
 
     #[test]
     fn name_and_description() {
-        use crate::types::tool_metadata::ToolMetadata;
         let tool = TodoWriteTool;
         assert_eq!(xai_tool_runtime::Tool::id(&tool).as_str(), "todo_write");
-        assert!(ToolMetadata::description_template(&tool).contains("task list"));
     }
 
     #[tokio::test]
@@ -1349,10 +1407,12 @@ mod tests {
                 .await
                 .unwrap(),
         );
-        assert_eq!(output.todos.len(), 1);
+        let [todo] = output.todos.as_slice() else {
+            panic!("expected exactly one todo, got {}", output.todos.len());
+        };
         // Id used as fallback content
-        assert_eq!(output.todos[0].content, "explore");
-        assert_eq!(output.todos[0].status, TodoStatus::Completed);
+        assert_eq!(todo.content, "explore");
+        assert_eq!(todo.status, TodoStatus::Completed);
     }
 
     #[tokio::test]
@@ -1455,10 +1515,13 @@ mod tests {
         let restored = resources2.get::<State<TodoState>>().unwrap();
         assert_eq!(restored.0.todo_items().count(), 2);
         let items: Vec<_> = restored.0.todo_items().collect();
-        assert_eq!(items[0].content, "First");
-        assert_eq!(items[0].status, TodoStatus::Completed);
-        assert_eq!(items[1].content, "Second");
-        assert_eq!(items[1].status, TodoStatus::InProgress);
+        let [first, second] = items.as_slice() else {
+            panic!("expected two items: {items:?}");
+        };
+        assert_eq!(first.content, "First");
+        assert_eq!(first.status, TodoStatus::Completed);
+        assert_eq!(second.content, "Second");
+        assert_eq!(second.status, TodoStatus::InProgress);
     }
 
     fn seed_state(items: &[(&str, &str, TodoStatus)]) -> TodoState {
@@ -1780,13 +1843,15 @@ mod tests {
         );
 
         // Content must be preserved, not replaced with id fallback.
-        assert_eq!(output.todos.len(), 3);
-        assert_eq!(output.todos[0].content, "Explore codebase");
-        assert_eq!(output.todos[0].status, TodoStatus::Completed);
-        assert_eq!(output.todos[1].content, "Review tools");
-        assert_eq!(output.todos[1].status, TodoStatus::Completed);
-        assert_eq!(output.todos[2].content, "Write tests");
-        assert_eq!(output.todos[2].status, TodoStatus::InProgress);
+        let [first, second, third] = output.todos.as_slice() else {
+            panic!("expected three todos: {:?}", output.todos);
+        };
+        assert_eq!(first.content, "Explore codebase");
+        assert_eq!(first.status, TodoStatus::Completed);
+        assert_eq!(second.content, "Review tools");
+        assert_eq!(second.status, TodoStatus::Completed);
+        assert_eq!(third.content, "Write tests");
+        assert_eq!(third.status, TodoStatus::InProgress);
     }
 
     // ── regression: merge with null content should never error ────────

@@ -42,7 +42,7 @@ pub fn live_plan_turn(
 /// Lower-right chrome effort token. Magenta model id stays the model id.
 pub fn effort_chrome_token(effort: Option<ReasoningEffort>) -> String {
     match effort {
-        Some(e) => e.as_str().to_string(),
+        Some(e) => e.as_ref().to_string(),
         None => String::new(),
     }
 }
@@ -50,7 +50,7 @@ pub fn effort_chrome_token(effort: Option<ReasoningEffort>) -> String {
 /// `{model} ({effort})` lower-right line. Must not contain TURBO.
 pub fn model_effort_chrome_line(model: &str, effort: Option<ReasoningEffort>) -> String {
     match effort {
-        Some(e) => format!("{model} ({})", e.as_str()),
+        Some(e) => format!("{model} ({})", e.as_ref()),
         None => model.to_string(),
     }
 }

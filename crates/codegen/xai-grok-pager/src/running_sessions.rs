@@ -125,8 +125,8 @@ pub fn run_gui_cli(host: Option<&str>, ssh: Option<&str>) -> Result<()> {
     let json = if let Some(user_at_host) = ssh.map(str::trim).filter(|s| !s.is_empty()) {
         let argv = surmount_coordinator_gui::fetch_remote_running_ssh_argv(user_at_host)
             .map_err(|e| anyhow::anyhow!("{e}"))?;
-        let output = std::process::Command::new(&argv[0])
-            .args(&argv[1..])
+        let output = std::process::Command::new(argv.first().expect("index out of bounds"))
+            .args(argv.get(1..).expect("index out of bounds"))
             .output()
             .map_err(|e| anyhow::anyhow!("could not ssh to {user_at_host}: {e}"))?;
         if !output.status.success() {

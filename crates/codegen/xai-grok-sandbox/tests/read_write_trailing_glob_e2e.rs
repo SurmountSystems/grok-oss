@@ -1,12 +1,9 @@
-//! E2E: a `read_write` config entry with a trailing `/**` must grant the
-//! parent directory — not create and grant a directory literally named `**`.
+//! E2E: a `read_write` config entry with a trailing `/**` must grant the parent directory, not create and grant a directory literally named `**`.
 //!
-//! The subprocess applies a custom profile whose only extra grant is
-//! `<cache>/**`, then probes writes inside the cache tree (must succeed) and
-//! outside any grant (must fail, proving enforcement was active).
+//! The subprocess applies a custom profile whose only extra grant is `<cache>/**`.
+//! It probes writes inside the cache tree (must succeed) and outside any grant (must fail, proving enforcement was active).
 //!
-//! Soft-skips when kernel enforcement is unavailable;
-//! `SANDBOX_E2E_REQUIRE_ENFORCEMENT=1` hard-requires it.
+//! Soft-skips when kernel enforcement is unavailable; `SANDBOX_E2E_REQUIRE_ENFORCEMENT=1` hard-requires it.
 //!
 //! ```text
 //! cargo test -p xai-grok-sandbox --test read_write_trailing_glob_e2e -- --nocapture
@@ -21,8 +18,7 @@ use std::process::Command;
 const ROOT_ENV: &str = "STARSTAR_E2E_ROOT";
 const REQUIRE_ENV: &str = "SANDBOX_E2E_REQUIRE_ENFORCEMENT";
 
-/// Removes the fixture tree on both pass and panic, so failed runs don't
-/// accumulate under the real `~/.cache`.
+/// Removes the fixture tree on both pass and panic, so failed runs don't accumulate under the real `~/.cache`.
 struct CleanupGuard(PathBuf);
 
 impl Drop for CleanupGuard {
@@ -60,8 +56,8 @@ fn isolation_root_outside_temp_grants() -> PathBuf {
             .expect("clock before epoch")
             .as_millis()
     );
-    let mut bases = Vec::new();
-    if let Some(home) = dirs::home_dir() {
+    let mut bases: Vec<PathBuf> = Vec::new();
+    if let Some(home) = xai_dirs::home_dir() {
         bases.push(home.join(".cache").join("grok-starstar-e2e"));
     }
     bases.push(PathBuf::from("/dev/shm").join("grok-starstar-e2e"));
@@ -96,15 +92,13 @@ fn trailing_glob_read_write_grants_parent_directory() {
         return;
     }
 
-    // Not under TMPDIR or the test workspace: base profiles already
-    // write-allow those trees, which would hide allow-path isolation.
+    // Not under TMPDIR or the test workspace: base profiles already write-allow those trees, which would hide allow-path isolation
     let root = isolation_root_outside_temp_grants();
     let _cleanup = CleanupGuard(root.clone());
     let workspace = root.join("ws");
     let home = root.join("home");
     let grok_home = root.join("grok-home");
-    // Under the fixture HOME, which no base grant covers: only the explicit
-    // read_write entry can make this tree writable.
+    // Under the fixture HOME, which no base grant covers: only the explicit read_write entry can make this tree writable
     let cache = home.join("cargo-cache");
     for dir in [&workspace, &grok_home, &cache.join("registry-a1b2")] {
         fs::create_dir_all(dir).expect("create fixture dir");
@@ -112,7 +106,7 @@ fn trailing_glob_read_write_grants_parent_directory() {
 
     let cache_abs = dunce::canonicalize(&cache).expect("canonicalize cache");
     fs::write(
-        grok_home.join("sandbox.toml"),
+        grok_home.join(xai_grok_config::SANDBOX_CONFIG_FILENAME),
         format!(
             "[profiles.cargo]\nextends = \"workspace\"\nread_write = [{:?}]\n",
             format!("{}/**", cache_abs.display())
@@ -152,8 +146,7 @@ fn trailing_glob_read_write_grants_parent_directory() {
     );
 }
 
-/// Applies the sandbox (irreversible), so this runs only as a subprocess of
-/// the test above.
+/// Applies the sandbox (irreversible), so this runs only as a subprocess of the test above.
 #[test]
 #[ignore]
 fn subprocess_entry() {
@@ -175,8 +168,7 @@ fn subprocess_entry() {
         eprintln!("FAIL: write under granted cache tree denied: {e}");
         std::process::exit(4);
     }
-    // Control probe: HOME itself carries no grant, so enforcement being
-    // active is observable — without it the positive probe proves nothing.
+    // Control probe: HOME itself carries no grant, so enforcement being active is observable; without it the positive probe proves nothing
     if fs::write(root.join("home").join("denied-marker"), b"no").is_ok() {
         eprintln!("FAIL: write outside all grants succeeded (sandbox not enforced?)");
         std::process::exit(5);

@@ -102,7 +102,6 @@ fn idle_pause_on_over_window_compact_fail_retries_compact_and_continues_last_pro
         agent.session.state = AgentState::Idle;
         agent.session.in_flight_prompt = None;
         agent.session.compact_held_prompt = None;
-        agent.session_sampling_window = Some(500_000);
         agent.context_state = Some(xai_grok_shell::session::ContextInfo::from_notification(
             507_000, 500_000,
         ));
@@ -182,7 +181,6 @@ fn setup_idle_over_window_compact_fail_with_stale_implement(app: &mut AppView) {
     agent.session.in_flight_prompt = None;
     agent.session.compact_held_prompt = None;
     agent.session.pending_prompts.clear();
-    agent.session_sampling_window = Some(500_000);
     agent.context_state = Some(xai_grok_shell::session::ContextInfo::from_notification(
         507_000, 500_000,
     ));
@@ -379,6 +377,7 @@ fn pause_during_retrying_cancels_the_sampler_wait() {
                 attempt: 1,
                 max_retries: 3,
                 reason: "waiting for first token".into(),
+                error_type: None,
             }));
     }
     assert!(
@@ -612,7 +611,6 @@ fn idle_pause_after_http_502_does_not_skip_leftover_implement() {
         agent.session.in_flight_prompt = None;
         agent.session.compact_held_prompt = None;
         agent.session.pending_prompts.clear();
-        agent.session_sampling_window = Some(500_000);
         agent.context_state = Some(xai_grok_shell::session::ContextInfo::from_notification(
             507_000, 500_000,
         ));

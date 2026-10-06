@@ -25,16 +25,14 @@ use xai_tool_types::{
     MultiTaskOutputResult, TaskOutputOutput, TaskOutputResult, TaskOutputToolInput,
 };
 
-/// Default wait budget when a caller is already in wait mode but omitted
-/// `timeout_ms` (legacy `wait_tasks` / internal `capped_wait_timeout`). On
-/// `get_task_output`, omitting `timeout_ms` is a non-blocking snapshot — this
-/// constant is not applied unless a wait is active.
+/// Default wait budget when a caller is already in wait mode but omitted `timeout_ms` (legacy
+/// `wait_tasks` / internal `capped_wait_timeout`). On `get_task_output`, omitting `timeout_ms` is a
+/// non-blocking snapshot — this constant is not applied unless a wait is active.
 pub(crate) const DEFAULT_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// The blocking-wait ceiling: `GROK_MAX_WAIT_BLOCK_MS`, else 10 min.
-///
-/// The same value fills `{max_wait_ms}` in the descriptions, so a wait can
-/// never exceed what the model was told it may ask for.
+/// The blocking-wait ceiling: `GROK_MAX_WAIT_BLOCK_MS`, else `MAX_WAIT_BLOCK_MS_DEFAULT`. The same
+/// value fills `{max_wait_ms}` in the descriptions, so a wait can never exceed what the model was
+/// told it may ask for.
 pub(crate) fn max_wait_block() -> Duration {
     Duration::from_millis(xai_tool_types::max_wait_block_ms())
 }
@@ -81,35 +79,52 @@ impl WaitSubject {
     }
 }
 
-fn still_running_wait_hint(hint: WaitHint, subject: WaitSubject) -> String {
+fn still_running_do_not_cancel(subject: WaitSubject) -> String {
     let noun = subject.noun();
-    let lead = match hint {
+    // Bash tasks have no follow-up channel; only subagents can be told to stop.
+    let cancel_clause = match subject {
+        WaitSubject::Subagent => {
+            format!("Unless the user specified, do not kill this {noun} and do not tell it to stop")
+        }
+        WaitSubject::Task => format!("Unless the user specified, do not kill this {noun}"),
+    };
+    format!(
+        "{cancel_clause} just because this wait returned. \
+         It is still working. You will be notified automatically when it completes. \
+         Do other work, or wait again with a longer timeout_ms."
+    )
+}
+
+fn still_running_wait_hint(hint: WaitHint, subject: WaitSubject) -> String {
+    let tail = still_running_do_not_cancel(subject);
+    match hint {
         WaitHint::Elapsed { requested, waited } => {
             let waited_label = format_waited_duration(waited);
-            if requested > waited {
+            let lead = if requested > waited {
                 let requested_label = format_waited_duration(requested);
                 format!(
-                    "Waited {waited_label}, the per-call maximum, of the {requested_label} you requested; \
-                     the {noun} is still running. You do not need to call this again. \
-                     Do not re-arm a blocking wait for a living builder."
+                    "Waited {waited_label}, the per-call maximum, of the {requested_label} you requested."
                 )
             } else {
-                format!("Waited the requested {waited_label}; the {noun} is still running.")
-            }
+                format!("Waited the requested {waited_label}.")
+            };
+            format!("{lead} {tail}")
         }
         WaitHint::ReturnedEarly => {
-            format!("Wait returned early because another finished; this {noun} is still running.")
+            format!("Wait returned early because another finished. {tail}")
         }
-        WaitHint::NotRequested => "Snapshot only. Do not start a blocking wait.".to_string(),
-    };
-    format!("{lead} You will be notified automatically when the {noun} completes.")
+        WaitHint::NotRequested => {
+            format!("Use timeout_ms to wait for completion. {tail}")
+        }
+    }
 }
 
 fn format_waited_duration(d: Duration) -> String {
-    if d.as_millis() < 1000 {
-        format!("{}ms", d.as_millis())
+    let ms = d.as_millis();
+    if ms < 1000 {
+        format!("{ms}ms")
     } else {
-        xai_tty_utils::format_human_duration(d)
+        format!("{}s", ms / 1000)
     }
 }
 
@@ -182,16 +197,21 @@ impl TaskOutputTool {
         timeout_ms: Option<u64>,
         ctx: &xai_tool_runtime::ToolCallContext,
         resources: SharedResources,
+        output_byte_limit: Option<usize>,
     ) -> Result<TaskOutputOutput, xai_tool_runtime::ToolError> {
         let contract_version = ctx
             .extensions
             .get::<xai_tool_runtime::BehaviorVersion>()
             .map(|v| v.0.clone());
         let is_legacy = crate::versions::is_legacy_contract(contract_version.as_deref());
-        let terminal;
-        {
-            terminal = resources.lock().await.require::<Terminal>()?.0.clone();
-        }
+        let (terminal, my_owner) = {
+            let res = resources.lock().await;
+            (
+                res.require::<Terminal>()?.0.clone(),
+                res.get::<crate::types::resources::OwnerSessionId>()
+                    .map(|owner| owner.0.clone()),
+            )
+        };
 
         let waits = xai_tool_types::task_output_waits(timeout_ms);
         let wait_cap = max_wait_block();
@@ -221,17 +241,10 @@ impl TaskOutputTool {
                     .render("${{ tools.by_kind.read }}")
                     .map_err(|e| xai_tool_runtime::ToolError::invalid_arguments(e.to_string()))?;
             }
-            let max_output_bytes = resources
-                .lock()
-                .await
-                .get::<TruncationCfg>()
-                .map(|cfg| {
-                    cfg.0.max_output_bytes_for(
-                        "get_command_or_subagent_output",
-                        DEFAULT_TOOL_OUTPUT_BYTES,
-                    )
-                })
-                .unwrap_or(DEFAULT_TOOL_OUTPUT_BYTES);
+            let max_output_bytes = {
+                let res = resources.lock().await;
+                resolved_max_output_bytes(&res, "get_command_or_subagent_output", output_byte_limit)
+            };
             return Ok(TaskOutputOutput::Result(apply_running_wait_hint(
                 snapshot_to_result(snapshot, &read_file_name, max_output_bytes),
                 wait_hint,
@@ -267,7 +280,14 @@ impl TaskOutputTool {
             let msg = if is_legacy {
                 render_legacy_task_output_not_found(task_id)
             } else {
-                let known = terminal.list_tasks().await;
+                // The terminal backend is shared with the root session.
+                let mut known = terminal.list_tasks().await;
+                known.retain(|task| {
+                    crate::reminders::task_completion::task_owned_by_session(
+                        task,
+                        my_owner.as_deref(),
+                    )
+                });
                 if known.is_empty() {
                     format!(
                         "Task {task_id} not found. No background tasks or subagents exist in this session.",
@@ -290,6 +310,23 @@ impl TaskOutputTool {
         resources: SharedResources,
         tool_name_for_truncation: &str,
     ) -> Result<TaskOutputOutput, xai_tool_runtime::ToolError> {
+        Self::run_multi_tasks_limited(
+            task_ids,
+            timeout_ms,
+            resources,
+            tool_name_for_truncation,
+            None,
+        )
+        .await
+    }
+
+    pub(crate) async fn run_multi_tasks_limited(
+        task_ids: &[String],
+        timeout_ms: Option<u64>,
+        resources: SharedResources,
+        tool_name_for_truncation: &str,
+        output_byte_limit: Option<usize>,
+    ) -> Result<TaskOutputOutput, xai_tool_runtime::ToolError> {
         let waits = xai_tool_types::task_output_waits(timeout_ms);
         let requested = requested_wait_timeout(timeout_ms);
         let timeout = capped_wait_timeout(timeout_ms, max_wait_block());
@@ -302,13 +339,7 @@ impl TaskOutputTool {
             let rfn = renderer
                 .render("${{ tools.by_kind.read }}")
                 .map_err(|e| xai_tool_runtime::ToolError::invalid_arguments(e.to_string()))?;
-            let mob = res
-                .get::<TruncationCfg>()
-                .map(|cfg| {
-                    cfg.0
-                        .max_output_bytes_for(tool_name_for_truncation, DEFAULT_TOOL_OUTPUT_BYTES)
-                })
-                .unwrap_or(DEFAULT_TOOL_OUTPUT_BYTES);
+            let mob = resolved_max_output_bytes(&res, tool_name_for_truncation, output_byte_limit);
             (terminal, backend, rfn, mob)
         };
 
@@ -349,10 +380,7 @@ impl TaskOutputTool {
             initial.results
         };
 
-        let completed_count = results
-            .iter()
-            .filter(|r| is_terminal_status(&r.status))
-            .count();
+        let completed_count = results.iter().filter(|r| r.is_terminal()).count();
         let total = results.len();
         let mode_str = if waits { "wait_all" } else { "poll" };
         let summary = format!("{completed_count}/{total} tasks completed ({mode_str})");
@@ -366,12 +394,6 @@ impl TaskOutputTool {
 }
 
 pub(crate) use xai_tool_types::MAX_MULTI_WAIT_IDS;
-
-/// Terminal task statuses as produced by `snapshot_to_result` /
-/// `format_subagent_snapshot`; multi-wait summaries count these as finished.
-pub(crate) fn is_terminal_status(status: &str) -> bool {
-    matches!(status, "completed" | "failed" | "cancelled" | "timed_out")
-}
 
 pub(crate) fn not_found_result(task_id: &str) -> TaskOutputResult {
     TaskOutputResult {
@@ -445,23 +467,13 @@ pub(crate) async fn resolve_tasks(
         pending_subagent_ids,
     }
 }
-//
-// Uses `TerminalBackend::wait_for_completion` for bash tasks (event-driven via
-// the underlying `Notify`) and `SubagentQueryRequest { block: true }` for
-// subagents (blocks in the coordinator until the child session finishes).
+// Uses `TerminalBackend::wait_for_completion` for bash tasks (event-driven via the underlying `Notify`) and
+// `SubagentQueryRequest { block: true }` for subagents (blocks in the coordinator until the child session finishes).
 // No 200ms polling loop — wakeups happen on actual state transitions.
 
-/// Aborts all wrapped helper-wait tasks when dropped.
-///
-/// The per-task waits below are `tokio::spawn`ed so they can race each other,
-/// but they must not outlive the wait call itself: a detached wait left
-/// running after the caller returns (first completion, deadline) or is
-/// cancelled (turn abort dropping the tool future) becomes a zombie that
-/// consumes its task's completion later — marking the task `block_waited`
-/// and swallowing a result the model never saw, which suppresses the
-/// completion auto-wake. Aborting drops the underlying
-/// `wait_for_completion` future, whose dropped reply channel the terminal
-/// actor detects to keep `block_waited` accurate.
+/// Aborts all wrapped helper-wait tasks when dropped. Aborting drops the underlying
+/// `wait_for_completion` future, whose dropped reply channel the terminal actor detects to keep
+/// `block_waited` accurate.
 struct AbortWaitsOnDrop(Vec<tokio::task::AbortHandle>);
 
 impl Drop for AbortWaitsOnDrop {
@@ -607,33 +619,30 @@ pub(crate) async fn wait_all_event_driven(
     finalize_wait_outcome(outcome, deadline)
 }
 
-//
-// Historical fixture captured from the 0.4.10 implementation.
-//
-// In 0.4.10, get_task_output returned:
-//   Err(ToolError::ProcessManagerError(format!("Task {} not found", input.task_id)))
-//
-// The meaningful customer-facing message content is the inner string.
-// Subagent wording is out of scope — subagents didn't exist in 0.4.10.
+// Historical fixture captured from the 0.4.10 implementation. In 0.4.10, get_task_output returned:
+// Err(ToolError::ProcessManagerError(format!("Task {} not found", input.task_id))) The meaningful customer-facing
+// message content is the inner string. Subagent wording is out of scope — subagents didn't exist in 0.4.10.
 
 /// Exact historical not-found message for `get_task_output` in legacy-0.4.10.
 fn render_legacy_task_output_not_found(task_id: &str) -> String {
     format!("Task {} not found", task_id)
 }
 
-fn format_subagent_snapshot(snap: &SubagentSnapshot, wait_hint: WaitHint) -> TaskOutputOutput {
-    let started = format_epoch_ms_as_rfc3339(snap.started_at_epoch_ms);
+pub(crate) fn format_subagent_snapshot(
+    snap: &SubagentSnapshot,
+    wait_hint: WaitHint,
+) -> TaskOutputOutput {
     match &snap.status {
         SubagentSnapshotStatus::Initializing => {
+            let started = format_epoch_ms_as_rfc3339(snap.started_at_epoch_ms);
             let duration_secs = snap.duration_ms as f64 / 1000.0;
-            let elapsed =
-                xai_tty_utils::format_human_duration(Duration::from_millis(snap.duration_ms));
             // Measure body only — wait-hint is harness advisory, not task output.
             let body = format!(
                 "Subagent is initializing (creating worktree, resolving config).\n\
+                 Snapshot only. Do not start a blocking wait.\n\
                  Type: {}\n\
                  Description: {}\n\
-                 Elapsed: {elapsed}",
+                 Elapsed: {duration_secs:.1}s",
                 snap.subagent_type, snap.description,
             );
             let raw_output_bytes = body.len();
@@ -662,6 +671,7 @@ fn format_subagent_snapshot(snap: &SubagentSnapshot, wait_hint: WaitHint) -> Tas
             tools_used,
             error_count,
         } => {
+            let started = format_epoch_ms_as_rfc3339(snap.started_at_epoch_ms);
             let tools_str = if tools_used.is_empty() {
                 "none yet".to_string()
             } else {
@@ -669,9 +679,9 @@ fn format_subagent_snapshot(snap: &SubagentSnapshot, wait_hint: WaitHint) -> Tas
             };
             let tokens_k = tokens_used / 1000;
             let capacity_k = context_window_tokens / 1000;
-            // Measure body only — wait-hint is harness advisory, not task output.
             let elapsed =
                 xai_tty_utils::format_human_duration(Duration::from_millis(snap.duration_ms));
+            // Measure body only — wait-hint is harness advisory, not task output.
             let body = format!(
                 "Subagent is still running.\n\
                  Type: {}\n\
@@ -700,21 +710,73 @@ fn format_subagent_snapshot(snap: &SubagentSnapshot, wait_hint: WaitHint) -> Tas
                 raw_output_bytes,
             })
         }
+        SubagentSnapshotStatus::Completed { .. }
+        | SubagentSnapshotStatus::Failed { .. }
+        | SubagentSnapshotStatus::Cancelled { .. } => {
+            TaskOutputOutput::Result(terminal_subagent_result(snap))
+        }
+    }
+}
+
+/// Same terminal text as [`format_subagent_snapshot`], without the parent poll
+/// cap. A reminder with no polling tool is the only copy of the child output.
+pub(crate) fn format_subagent_snapshot_uncapped(
+    snap: &SubagentSnapshot,
+    wait_hint: WaitHint,
+) -> TaskOutputOutput {
+    match &snap.status {
+        SubagentSnapshotStatus::Completed { .. }
+        | SubagentSnapshotStatus::Failed { .. }
+        | SubagentSnapshotStatus::Cancelled { .. } => {
+            TaskOutputOutput::Result(terminal_subagent_result_capped(snap, false))
+        }
+        _ => format_subagent_snapshot(snap, wait_hint),
+    }
+}
+
+/// Parent poll cap. Short answers stay intact. A last answer over this size
+/// is stored as a preview plus a report pointer, never the full string.
+const PARENT_TASK_OUTPUT_CAP_BYTES: usize = 40_000;
+const PARENT_TASK_OUTPUT_PREVIEW_BYTES: usize = 2_000;
+
+fn cap_parent_task_output(output: String) -> (String, bool, String, usize) {
+    let raw = output.len();
+    if raw <= PARENT_TASK_OUTPUT_CAP_BYTES {
+        return (output, false, String::new(), raw);
+    }
+    let mut end = PARENT_TASK_OUTPUT_PREVIEW_BYTES.min(raw);
+    while end > 0 && !output.is_char_boundary(end) {
+        end -= 1;
+    }
+    let capped = format!(
+        "{}\n\n[Output truncated: {end} of {raw} bytes shown. \
+         Full last answer is not stored on the parent ToolResult. \
+         Use read_file on the on-disk report if one exists.]",
+        &output[..end]
+    );
+    let hint = "Output truncated. Full last answer is not stored on the parent ToolResult. Use read_file on the on-disk report if one exists.".to_string();
+    (capped, true, hint, raw)
+}
+
+/// Terminal statuses only; reminders render the same value, so notice and poll cannot drift.
+pub(crate) fn terminal_subagent_result(snap: &SubagentSnapshot) -> TaskOutputResult {
+    terminal_subagent_result_capped(snap, true)
+}
+
+fn terminal_subagent_result_capped(snap: &SubagentSnapshot, cap: bool) -> TaskOutputResult {
+    let (status, exit_code, output) = match &snap.status {
         SubagentSnapshotStatus::Completed {
             output,
             tool_calls,
             turns,
             worktree_path,
         } => {
+            let duration =
+                xai_tty_utils::format_human_duration(Duration::from_millis(snap.duration_ms));
             let mut output = format!(
-                "{output}\n\n{}",
-                xai_tool_types::format_subagent_meta_line(
-                    &snap.subagent_id,
-                    &snap.subagent_type,
-                    *tool_calls,
-                    *turns,
-                    snap.duration_ms,
-                ),
+                "{output}\n\n<subagent_meta>id={}, tool_calls={tool_calls}, \
+                 turns={turns}, duration={duration}</subagent_meta>",
+                snap.subagent_id,
             );
             if let Some(wt) = &worktree_path {
                 output.push_str(&format!("\n<worktree_path>{wt}</worktree_path>"));
@@ -722,89 +784,42 @@ fn format_subagent_snapshot(snap: &SubagentSnapshot, wait_hint: WaitHint) -> Tas
             output.push_str("\n\n");
             output.push_str(&xai_tool_types::format_resume_footer(
                 &snap.subagent_id,
-                &snap.subagent_type,
                 snap.persona.as_deref(),
             ));
-            let raw_output_bytes = output.len();
-            let (output, truncated, truncation_hint) =
-                if raw_output_bytes > DEFAULT_TOOL_OUTPUT_BYTES {
-                    let (capped, _) = crate::util::truncate::truncate_with_preview(
-                        crate::util::truncate::PartialOutput::whole(&output),
-                        DEFAULT_TOOL_OUTPUT_BYTES,
-                        crate::util::truncate::PREVIEW_SIZE,
-                        Some(
-                            "Full last answer is not stored on the parent ToolResult. \
-                         Use read_file on the on-disk report if one exists.",
-                        ),
-                    );
-                    (
-                        capped,
-                        true,
-                        "[truncated - last answer is not stored in full on the parent; \
-                     use read_file on the on-disk report if one exists]"
-                            .to_string(),
-                    )
-                } else {
-                    (output, false, String::new())
-                };
-            TaskOutputOutput::Result(TaskOutputResult {
-                task_id: snap.subagent_id.clone(),
-                command: format!("[subagent:{}] {}", snap.subagent_type, snap.description),
-                status: "completed".to_string(),
-                exit_code: Some(0),
-                started,
-                ended: Some(format_epoch_ms_as_rfc3339(
-                    snap.started_at_epoch_ms + snap.duration_ms,
-                )),
-                duration_secs: snap.duration_ms as f64 / 1000.0,
-                output,
-                output_file: String::new(),
-                truncated,
-                truncation_hint,
-                raw_output_bytes,
-            })
+            ("completed", Some(0), output)
         }
-        SubagentSnapshotStatus::Failed { error } => {
-            let raw_output_bytes = error.len();
-            TaskOutputOutput::Result(TaskOutputResult {
-                task_id: snap.subagent_id.clone(),
-                command: format!("[subagent:{}] {}", snap.subagent_type, snap.description),
-                status: "failed".to_string(),
-                exit_code: Some(1),
-                started,
-                ended: Some(format_epoch_ms_as_rfc3339(
-                    snap.started_at_epoch_ms + snap.duration_ms,
-                )),
-                duration_secs: snap.duration_ms as f64 / 1000.0,
-                output: error.clone(),
-                output_file: String::new(),
-                truncated: false,
-                truncation_hint: String::new(),
-                raw_output_bytes,
-            })
-        }
-        SubagentSnapshotStatus::Cancelled { reason } => {
-            let output = reason
+        SubagentSnapshotStatus::Failed { error } => ("failed", Some(1), error.clone()),
+        SubagentSnapshotStatus::Cancelled { reason } => (
+            "cancelled",
+            None,
+            reason
                 .clone()
-                .unwrap_or_else(|| "Subagent was cancelled".to_string());
-            let raw_output_bytes = output.len();
-            TaskOutputOutput::Result(TaskOutputResult {
-                task_id: snap.subagent_id.clone(),
-                command: format!("[subagent:{}] {}", snap.subagent_type, snap.description),
-                status: "cancelled".to_string(),
-                exit_code: None,
-                started,
-                ended: Some(format_epoch_ms_as_rfc3339(
-                    snap.started_at_epoch_ms + snap.duration_ms,
-                )),
-                duration_secs: snap.duration_ms as f64 / 1000.0,
-                output,
-                output_file: String::new(),
-                truncated: false,
-                truncation_hint: String::new(),
-                raw_output_bytes,
-            })
+                .unwrap_or_else(|| "Subagent was cancelled".to_string()),
+        ),
+        SubagentSnapshotStatus::Initializing | SubagentSnapshotStatus::Running { .. } => {
+            unreachable!("terminal_subagent_result called for a live subagent")
         }
+    };
+    let ended_at_epoch_ms = snap.started_at_epoch_ms + snap.duration_ms;
+    let (output, truncated, truncation_hint, raw_output_bytes) = if cap {
+        cap_parent_task_output(output)
+    } else {
+        let raw = output.len();
+        (output, false, String::new(), raw)
+    };
+    TaskOutputResult {
+        task_id: snap.subagent_id.clone(),
+        command: format!("[subagent:{}] {}", snap.subagent_type, snap.description),
+        status: status.to_string(),
+        exit_code,
+        started: format_epoch_ms_as_rfc3339(snap.started_at_epoch_ms),
+        ended: Some(format_epoch_ms_as_rfc3339(ended_at_epoch_ms)),
+        duration_secs: snap.duration_ms as f64 / 1000.0,
+        raw_output_bytes,
+        output,
+        output_file: String::new(),
+        truncated,
+        truncation_hint,
     }
 }
 
@@ -835,7 +850,9 @@ impl crate::types::tool_metadata::ToolMetadata for TaskOutputTool {
             xai_tool_types::build_task_output_description(&xai_tool_types::TaskOutputToolNaming {
                 monitor_tool: Some("monitor"),
                 read_tool: Some("read_file"),
-                bash_background_param: Some("is_background"),
+                // The current bash tool has no `is_background` param
+                bash_background_param: None,
+                bash_block_param: Some("block_until_ms"),
                 subagent_background_param: Some("run_in_background"),
                 task_ids_param: "task_ids",
                 timeout_ms_param: "timeout_ms",
@@ -877,11 +894,8 @@ impl crate::types::tool_metadata::ToolMetadata for TaskOutputTool {
     }
 }
 
-/// Resolve the model-facing `get_task_output` description from the finalized
-/// toolset, honoring an explicit config override. Wording lives in the shared
-/// [`xai_tool_types::build_task_output_description`] builder so the CLI and
-/// prod-chat can't drift; presence-gated clauses (monitor note, subagent
-/// source, read-file hint) follow the tools actually registered this turn.
+/// Resolves the `get_task_output` description from the finalized toolset. An explicit config override wins.
+/// The CLI and prod-chat share the wording in [`xai_tool_types::build_task_output_description`].
 fn task_output_description(
     renderer: &TemplateRenderer,
     description_override: Option<&str>,
@@ -892,10 +906,17 @@ fn task_output_description(
             ovr.to_string()
         });
     }
-    xai_tool_types::build_task_output_description(&xai_tool_types::TaskOutputToolNaming {
+    xai_tool_types::build_task_output_description(&task_output_naming(renderer))
+}
+
+/// The tool and param names the finalized toolset advertises for this description.
+/// The builder drops the clause for any tool not registered this turn.
+fn task_output_naming(renderer: &TemplateRenderer) -> xai_tool_types::TaskOutputToolNaming<'_> {
+    xai_tool_types::TaskOutputToolNaming {
         monitor_tool: renderer.tool_for_kind(ToolKind::Monitor),
         read_tool: renderer.tool_for_kind(ToolKind::Read),
         bash_background_param: renderer.param_for_kind(ToolKind::Execute, "is_background"),
+        bash_block_param: renderer.param_for_kind(ToolKind::Execute, "block_until_ms"),
         subagent_background_param: renderer.param_for_kind(ToolKind::Task, "run_in_background"),
         task_ids_param: renderer
             .param_for_kind(ToolKind::BackgroundTaskAction, "task_ids")
@@ -907,7 +928,7 @@ fn task_output_description(
         task_id_param: renderer
             .param_for_kind(ToolKind::KillTaskAction, "task_id")
             .unwrap_or("task_id"),
-    })
+    }
 }
 
 impl xai_tool_runtime::Tool for TaskOutputTool {
@@ -946,6 +967,19 @@ impl xai_tool_runtime::Tool for TaskOutputTool {
         ctx: xai_tool_runtime::ToolCallContext,
         input: TaskOutputToolInput,
     ) -> Result<TaskOutputOutput, xai_tool_runtime::ToolError> {
+        self.run_with_output_byte_limit(ctx, input, None).await
+    }
+}
+
+impl TaskOutputTool {
+    /// `output_byte_limit` is set only by `get_terminal_command_output`. `None`
+    /// is `get_task_output`: the shared truncation lookup.
+    pub(crate) async fn run_with_output_byte_limit(
+        &self,
+        ctx: xai_tool_runtime::ToolCallContext,
+        input: TaskOutputToolInput,
+        output_byte_limit: Option<usize>,
+    ) -> Result<TaskOutputOutput, xai_tool_runtime::ToolError> {
         use crate::types::tool_metadata::shared_resources;
         let resources = shared_resources(&ctx)?;
 
@@ -962,19 +996,42 @@ impl xai_tool_runtime::Tool for TaskOutputTool {
         }
 
         if ids.len() == 1 {
+            let Some(id) = ids.first() else {
+                return Err(xai_tool_runtime::ToolError::invalid_arguments(
+                    "Provide a non-empty task_ids list.".to_string(),
+                ));
+            };
             return self
-                .run_single_task(&ids[0], input.timeout_ms, &ctx, resources)
+                .run_single_task(id, input.timeout_ms, &ctx, resources, output_byte_limit)
                 .await;
         }
 
-        Self::run_multi_tasks(
+        Self::run_multi_tasks_limited(
             &ids,
             input.timeout_ms,
             resources,
             "get_command_or_subagent_output",
+            output_byte_limit,
         )
         .await
     }
+}
+
+/// `output_byte_limit` is `get_terminal_command_output`'s session param. `Some`
+/// is that tool's builtin cap, and `TruncationConfig` may override it under
+/// `get_terminal_command_output`. `None` keeps `lookup_name`.
+fn resolved_max_output_bytes(
+    res: &crate::types::resources::Resources,
+    lookup_name: &str,
+    output_byte_limit: Option<usize>,
+) -> usize {
+    let (name, builtin) = match output_byte_limit {
+        Some(limit) => ("get_terminal_command_output", limit),
+        None => (lookup_name, DEFAULT_TOOL_OUTPUT_BYTES),
+    };
+    res.get::<TruncationCfg>()
+        .map(|cfg| cfg.0.max_output_bytes_for(name, builtin))
+        .unwrap_or(builtin)
 }
 
 #[cfg(test)]
@@ -991,20 +1048,32 @@ pub(crate) mod test_helpers {
     use crate::types::template_renderer::TemplateRenderer;
     use crate::types::tool::ToolKind;
 
-    /// Mock backend that returns a pre-configured snapshot.
+    /// Mock backend that returns a pre-configured snapshot and task listing.
     pub(crate) struct MockTerminal {
         snapshot: Option<TaskSnapshot>,
+        tasks: Vec<TaskSnapshot>,
     }
 
     impl MockTerminal {
         pub(crate) fn with_snapshot(snapshot: TaskSnapshot) -> Self {
             Self {
+                tasks: vec![snapshot.clone()],
                 snapshot: Some(snapshot),
             }
         }
 
         pub(crate) fn empty() -> Self {
-            Self { snapshot: None }
+            Self {
+                snapshot: None,
+                tasks: Vec::new(),
+            }
+        }
+
+        pub(crate) fn listing(tasks: Vec<TaskSnapshot>) -> Self {
+            Self {
+                snapshot: None,
+                tasks,
+            }
         }
     }
 
@@ -1041,7 +1110,7 @@ pub(crate) mod test_helpers {
         }
 
         async fn list_tasks(&self) -> Vec<TaskSnapshot> {
-            self.snapshot.iter().cloned().collect()
+            self.tasks.clone()
         }
     }
 
@@ -1117,8 +1186,12 @@ mod tests {
             capped_wait_timeout(Some(5_000), cap),
             Duration::from_millis(5_000)
         );
-        assert_eq!(capped_wait_timeout(Some(36_000_000), cap), cap);
-        assert_eq!(capped_wait_timeout(Some(600_000), cap), cap);
+        assert_eq!(capped_wait_timeout(Some(3_600_000), cap), cap);
+        assert_eq!(capped_wait_timeout(Some(7_200_000), cap), cap);
+        assert_eq!(
+            capped_wait_timeout(Some(600_000), cap),
+            Duration::from_millis(600_000)
+        );
     }
 
     /// A client that shortens the cap at finalize must also shorten the wait —
@@ -1137,11 +1210,11 @@ mod tests {
     fn still_running_wait_hint_omitted_is_snapshot_not_a_blocking_wait() {
         assert_eq!(
             still_running_wait_hint(WaitHint::NotRequested, WaitSubject::Task),
-            "Snapshot only. Do not start a blocking wait. You will be notified automatically when the task completes."
+            "Use timeout_ms to wait for completion. Unless the user specified, do not kill this task just because this wait returned. It is still working. You will be notified automatically when it completes. Do other work, or wait again with a longer timeout_ms."
         );
         assert_eq!(
             still_running_wait_hint(WaitHint::NotRequested, WaitSubject::Subagent),
-            "Snapshot only. Do not start a blocking wait. You will be notified automatically when the subagent completes."
+            "Use timeout_ms to wait for completion. Unless the user specified, do not kill this subagent and do not tell it to stop just because this wait returned. It is still working. You will be notified automatically when it completes. Do other work, or wait again with a longer timeout_ms."
         );
     }
 
@@ -1153,13 +1226,11 @@ mod tests {
         };
         assert_eq!(
             still_running_wait_hint(hint, WaitSubject::Task),
-            "Waited the requested 30s; the task is still running. \
-             You will be notified automatically when the task completes."
+            "Waited the requested 30s. Unless the user specified, do not kill this task just because this wait returned. It is still working. You will be notified automatically when it completes. Do other work, or wait again with a longer timeout_ms."
         );
         assert_eq!(
             still_running_wait_hint(hint, WaitSubject::Subagent),
-            "Waited the requested 30s; the subagent is still running. \
-             You will be notified automatically when the subagent completes."
+            "Waited the requested 30s. Unless the user specified, do not kill this subagent and do not tell it to stop just because this wait returned. It is still working. You will be notified automatically when it completes. Do other work, or wait again with a longer timeout_ms."
         );
     }
 
@@ -1171,17 +1242,11 @@ mod tests {
         };
         assert_eq!(
             still_running_wait_hint(hint, WaitSubject::Task),
-            "Waited 10m0s, the per-call maximum, of the 40m0s you requested; \
-             the task is still running. You do not need to call this again. \
-             Do not re-arm a blocking wait for a living builder. \
-             You will be notified automatically when the task completes."
+            "Waited 600s, the per-call maximum, of the 2400s you requested. Unless the user specified, do not kill this task just because this wait returned. It is still working. You will be notified automatically when it completes. Do other work, or wait again with a longer timeout_ms."
         );
         assert_eq!(
             still_running_wait_hint(hint, WaitSubject::Subagent),
-            "Waited 10m0s, the per-call maximum, of the 40m0s you requested; \
-             the subagent is still running. You do not need to call this again. \
-             Do not re-arm a blocking wait for a living builder. \
-             You will be notified automatically when the subagent completes."
+            "Waited 600s, the per-call maximum, of the 2400s you requested. Unless the user specified, do not kill this subagent and do not tell it to stop just because this wait returned. It is still working. You will be notified automatically when it completes. Do other work, or wait again with a longer timeout_ms."
         );
     }
 
@@ -1189,13 +1254,11 @@ mod tests {
     fn still_running_wait_hint_returned_early_is_honest() {
         assert_eq!(
             still_running_wait_hint(WaitHint::ReturnedEarly, WaitSubject::Task),
-            "Wait returned early because another finished; this task is still running. \
-             You will be notified automatically when the task completes."
+            "Wait returned early because another finished. Unless the user specified, do not kill this task just because this wait returned. It is still working. You will be notified automatically when it completes. Do other work, or wait again with a longer timeout_ms."
         );
         assert_eq!(
             still_running_wait_hint(WaitHint::ReturnedEarly, WaitSubject::Subagent),
-            "Wait returned early because another finished; this subagent is still running. \
-             You will be notified automatically when the subagent completes."
+            "Wait returned early because another finished. Unless the user specified, do not kill this subagent and do not tell it to stop just because this wait returned. It is still working. You will be notified automatically when it completes. Do other work, or wait again with a longer timeout_ms."
         );
     }
 
@@ -1210,8 +1273,6 @@ mod tests {
         // rendering (monitor + task + bash + read present): concrete names, no
         // leftover template markers.
         let desc = ToolMetadata::description_template(&tool);
-        assert!(desc.contains("Get output and status from a background task"));
-        // Must name "monitor" so the model connects polling a monitor to this tool.
         assert!(desc.contains("monitor"));
         assert!(
             desc.contains("read_file"),
@@ -1263,41 +1324,22 @@ mod tests {
         for (label, kinds) in cases {
             let tools: HashMap<ToolKind, String> =
                 kinds.iter().map(|(k, n)| (*k, n.to_string())).collect();
-            // Seed the param map for present tools the way `finalize` does, so
-            // the background sources / subagent header resolve via
-            // `param_for_kind` (which reads the param map, not the tool map).
-            let mut params: HashMap<ToolKind, HashMap<String, String>> = HashMap::new();
-            for (k, _) in kinds.iter() {
-                match k {
-                    ToolKind::Execute => {
-                        params
-                            .entry(ToolKind::Execute)
-                            .or_default()
-                            .insert("is_background".to_string(), "is_background".to_string());
-                    }
-                    ToolKind::Task => {
-                        params.entry(ToolKind::Task).or_default().insert(
-                            "run_in_background".to_string(),
-                            "run_in_background".to_string(),
-                        );
-                    }
-                    _ => {}
-                }
-            }
-            let renderer = TemplateRenderer::new(tools, params);
+            let renderer = TemplateRenderer::new(tools, params_finalize_would_seed(kinds));
             let rendered = task_output_description(&renderer, None);
 
             let has_monitor = kinds.iter().any(|(k, _)| *k == ToolKind::Monitor);
             let has_task = kinds.iter().any(|(k, _)| *k == ToolKind::Task);
             let has_read = kinds.iter().any(|(k, _)| *k == ToolKind::Read);
+            let has_bash = kinds.iter().any(|(k, _)| *k == ToolKind::Execute);
 
             assert!(
                 !rendered.contains("${"),
                 "[{label}] left an unrendered template marker:\n{rendered}"
             );
-            assert!(
-                rendered.contains("background task"),
-                "[{label}] must always mention background task:\n{rendered}"
+            assert_eq!(
+                rendered.contains("block_until_ms=0 commands"),
+                has_bash,
+                "[{label}] bash source mention must match execute-tool presence:\n{rendered}"
             );
             assert_eq!(
                 rendered.contains("monitor"),
@@ -1310,11 +1352,44 @@ mod tests {
                 "[{label}] subagent mention must match task-tool presence:\n{rendered}"
             );
             assert_eq!(
+                rendered.contains("read_file"),
+                has_read,
+                "[{label}] read_file mention must match read-tool presence:\n{rendered}"
+            );
+            assert_eq!(
                 rendered.contains("output_file"),
                 has_read,
                 "[{label}] read-file hint must match read-tool presence:\n{rendered}"
             );
         }
+    }
+
+    /// Builds the param map for `kinds` the way `finalize` does.
+    /// `param_for_kind` reads this map, not the tool map.
+    fn params_finalize_would_seed(
+        kinds: &[(ToolKind, &str)],
+    ) -> std::collections::HashMap<ToolKind, std::collections::HashMap<String, String>> {
+        use std::collections::HashMap;
+
+        let mut params: HashMap<ToolKind, HashMap<String, String>> = HashMap::new();
+        for (k, _) in kinds.iter() {
+            match k {
+                ToolKind::Execute => {
+                    params
+                        .entry(ToolKind::Execute)
+                        .or_default()
+                        .insert("block_until_ms".to_string(), "block_until_ms".to_string());
+                }
+                ToolKind::Task => {
+                    params.entry(ToolKind::Task).or_default().insert(
+                        "run_in_background".to_string(),
+                        "run_in_background".to_string(),
+                    );
+                }
+                _ => {}
+            }
+        }
+        params
     }
 
     #[test]
@@ -1334,7 +1409,7 @@ mod tests {
         let params = HashMap::from([
             (
                 ToolKind::Execute,
-                HashMap::from([("is_background".to_string(), "is_background".to_string())]),
+                HashMap::from([("block_until_ms".to_string(), "wait_ms".to_string())]),
             ),
             (
                 ToolKind::BackgroundTaskAction,
@@ -1350,23 +1425,30 @@ mod tests {
         ]);
         let rendered = task_output_description(&TemplateRenderer::new(tools, params), None);
         assert!(
-            rendered.contains("Pass process_ids with"),
+            rendered.contains("process_ids"),
             "renamed task_ids must appear:\n{rendered}"
         );
         assert!(
-            rendered.contains("Omit max_wait or pass 0")
-                && rendered.contains("positive max_wait only when you must join"),
+            rendered.contains("max_wait"),
             "renamed timeout_ms must appear:\n{rendered}"
         );
         assert!(
-            rendered.contains("a monitor's id is returned by monitor"),
-            "renamed kill_task task_id must appear in monitor aside:\n{rendered}"
+            rendered.contains("from wait_ms=0 commands"),
+            "renamed bash block param must appear:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("monitor"),
+            "monitor tool name must appear:\n{rendered}"
         );
         assert!(
             !rendered.contains("task_ids")
                 && !rendered.contains("timeout_ms")
                 && !rendered.contains("task_id"),
             "canonical param names must not remain after rename:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("${"),
+            "must not leak template markers:\n{rendered}"
         );
     }
 
@@ -1553,6 +1635,69 @@ mod tests {
             }
             other => panic!("Expected TaskNotFound, got {:?}", other),
         }
+    }
+
+    /// Not-found hint for `"task-unknown"` as seen by session `"me"` when the
+    /// shared terminal lists `tasks`.
+    async fn owner_scoped_not_found_message(tasks: &[(&str, Option<&str>)]) -> String {
+        let tasks = tasks
+            .iter()
+            .map(|(id, owner)| TaskSnapshot {
+                owner_session_id: owner.map(str::to_owned),
+                ..make_snapshot(id, false, None)
+            })
+            .collect();
+        let mut resources = Resources::new();
+        let backend: Arc<dyn TerminalBackend> = Arc::new(MockTerminal::listing(tasks));
+        resources.insert(Terminal(backend));
+        resources.insert(crate::types::resources::OwnerSessionId("me".into()));
+        resources.insert(TemplateRenderer::new(
+            std::collections::HashMap::from([(ToolKind::Read, "read_file".to_string())]),
+            std::collections::HashMap::new(),
+        ));
+        let result = xai_tool_runtime::Tool::run(
+            &TaskOutputTool,
+            test_ctx(resources.into_shared()),
+            TaskOutputToolInput {
+                task_ids: vec!["task-unknown".into()],
+                timeout_ms: None,
+            },
+        )
+        .await
+        .unwrap();
+        match result {
+            TaskOutputOutput::TaskNotFound(msg) => msg,
+            other => panic!("Expected TaskNotFound, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn get_task_not_found_lists_only_this_sessions_known_tasks() {
+        let msg = owner_scoped_not_found_message(&[
+            ("task-mine", Some("me")),
+            ("task-theirs", Some("other")),
+            ("task-legacy", None),
+        ])
+        .await;
+        assert!(msg.contains("task-mine"), "msg: {msg}");
+        assert!(msg.contains("task-legacy"), "msg: {msg}");
+        assert!(!msg.contains("task-theirs"), "msg: {msg}");
+    }
+
+    #[tokio::test]
+    async fn get_task_not_found_with_only_foreign_tasks_reports_empty_session() {
+        let msg =
+            owner_scoped_not_found_message(&[("task-a", Some("other")), ("task-b", Some("other"))])
+                .await;
+        assert!(
+            msg.contains("No background tasks or subagents exist in this session."),
+            "msg: {msg}"
+        );
+        assert!(!msg.contains("Known task IDs"), "msg: {msg}");
+        assert!(
+            !msg.contains("task-a") && !msg.contains("task-b"),
+            "msg: {msg}"
+        );
     }
 
     #[tokio::test]
@@ -1875,8 +2020,10 @@ mod tests {
         );
         match result {
             TaskOutputOutput::MultiResult(m) => {
-                assert_eq!(m.results.len(), 1);
-                assert_eq!(m.results[0].status, "completed");
+                let [first] = m.results.as_slice() else {
+                    panic!("expected exactly one result, got {}", m.results.len());
+                };
+                assert_eq!(first.status, "completed");
             }
             other => panic!("Expected MultiResult, got {other:?}"),
         }
@@ -1906,7 +2053,10 @@ mod tests {
         );
         match result {
             TaskOutputOutput::MultiResult(m) => {
-                assert_eq!(m.results[0].status, "running");
+                let Some(first) = m.results.first() else {
+                    panic!("expected one result: {:?}", m.results);
+                };
+                assert_eq!(first.status, "running");
             }
             other => panic!("Expected MultiResult, got {other:?}"),
         }
@@ -2006,14 +2156,8 @@ mod tests {
         }
     }
 
-    // ── Legacy message parity fixture tests ────────────────────────
-    //
-    // These tests verify exact historical wording for legacy-0.4.10.
-    // Fixture source: the historical 0.4.10 task_output implementation.
-    //
-    // Historical 0.4.10 message (inner string from ToolError::ProcessManagerError):
-    //   "Task {task_id} not found"
-    //
+    // Legacy message parity fixture tests These tests verify exact historical wording for legacy-0.4.10. Fixture source: the historical 0.4.10
+    // task_output implementation. Historical 0.4.10 message (inner string from ToolError::ProcessManagerError): "Task {task_id} not found"
     // Subagent wording is out of scope — subagents didn't exist in 0.4.10.
 
     #[tokio::test]
@@ -2183,6 +2327,65 @@ mod tests {
             }
             other => panic!("Expected Result, got {:?}", other),
         }
+    }
+
+    // raw_output_bytes is body-only so identical Running state is stable across WaitHints.
+    #[test]
+    fn format_running_subagent_raw_output_bytes_stable_across_wait_hints_one_decimal() {
+        let snap = SubagentSnapshot {
+            subagent_id: "sub-stable".to_string(),
+            description: "stable body".to_string(),
+            subagent_type: "explore".to_string(),
+            persona: None,
+            status: SubagentSnapshotStatus::Running {
+                turn_count: 1,
+                tool_call_count: 2,
+                tokens_used: 3_000,
+                context_window_tokens: 128_000,
+                context_usage_pct: 2,
+                tools_used: vec!["bash".to_string()],
+                error_count: 0,
+            },
+            started_at_epoch_ms: 1_700_000_000_000,
+            duration_ms: 1_000,
+        };
+        let expected_body = format!(
+            "Subagent is still running.\n\
+             Type: {}\n\
+             Description: {}\n\
+             Elapsed: {:.1}s\n\
+             Progress: turn 1, 2 tool calls, \
+             3K/128K tokens (2% context)\n\
+             Tools used: bash\n\
+             Errors: 0",
+            snap.subagent_type,
+            snap.description,
+            snap.duration_ms as f64 / 1000.0,
+        );
+        let not_requested = match format_subagent_snapshot(&snap, WaitHint::NotRequested) {
+            TaskOutputOutput::Result(r) => r,
+            other => panic!("Expected Result, got {:?}", other),
+        };
+        let clamped = match format_subagent_snapshot(
+            &snap,
+            WaitHint::Elapsed {
+                requested: Duration::from_secs(2_400),
+                waited: Duration::from_secs(600),
+            },
+        ) {
+            TaskOutputOutput::Result(r) => r,
+            other => panic!("Expected Result, got {:?}", other),
+        };
+        assert_eq!(not_requested.raw_output_bytes, expected_body.len());
+        assert_eq!(clamped.raw_output_bytes, expected_body.len());
+        assert_eq!(not_requested.raw_output_bytes, clamped.raw_output_bytes);
+        assert!(not_requested.output.starts_with(&expected_body));
+        assert!(clamped.output.starts_with(&expected_body));
+        assert_ne!(
+            not_requested.output.len(),
+            clamped.output.len(),
+            "hint variants must still produce different formatted output"
+        );
     }
 
     #[test]
@@ -2939,8 +3142,10 @@ mod tests {
         handle.await.unwrap();
         match result {
             TaskOutputOutput::MultiResult(m) => {
-                assert_eq!(m.results.len(), 1);
-                assert_eq!(m.results[0].status, "completed");
+                let [first] = m.results.as_slice() else {
+                    panic!("expected exactly one result, got {}", m.results.len());
+                };
+                assert_eq!(first.status, "completed");
             }
             other => panic!("Expected MultiResult, got {other:?}"),
         }

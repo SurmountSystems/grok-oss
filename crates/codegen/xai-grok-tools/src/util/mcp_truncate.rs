@@ -46,10 +46,9 @@ pub const ENV_GROK_MAX_MCP_OUTPUT_BYTES: &str = "GROK_MAX_MCP_OUTPUT_BYTES";
 /// function tool dispatch (no live `Config`) sees the same value.
 static EFFECTIVE_MCP_MAX_OUTPUT_BYTES: AtomicUsize = AtomicUsize::new(0);
 
-/// Host (shell) sets the fully-resolved MCP output cap in bytes.
-///
-/// Pass the already-resolved limit (requirements > env > config > remote config >
-/// default). Pass `0` only in tests to clear and fall through to env / default.
+/// Host (shell) sets the fully-resolved MCP output cap in bytes. Pass the already-resolved limit
+/// (requirements > env > config > remote config > default). Pass `0` only in tests to clear and
+/// fall through to env / default.
 pub fn set_mcp_max_output_bytes(bytes: usize) {
     EFFECTIVE_MCP_MAX_OUTPUT_BYTES.store(bytes, Ordering::Relaxed);
 }
@@ -61,11 +60,9 @@ fn parse_positive_bytes_env(name: &str) -> Option<usize> {
     usize::try_from(n).ok().filter(|n| *n > 0)
 }
 
-/// Env tier: `GROK_MAX_MCP_OUTPUT_BYTES` then `MAX_MCP_OUTPUT_BYTES`.
-///
-/// Grok-native wins when both are set. Positive integers only. Used by the
-/// shell resolver and as the standalone fallback when the host has not called
-/// [`set_mcp_max_output_bytes`].
+/// Env tier: `GROK_MAX_MCP_OUTPUT_BYTES` then `MAX_MCP_OUTPUT_BYTES`. Grok-native wins when both
+/// are set. Positive integers only. Used by the shell resolver and as the standalone fallback when
+/// the host has not called [`set_mcp_max_output_bytes`].
 pub fn mcp_max_output_bytes_from_env() -> Option<usize> {
     parse_positive_bytes_env(ENV_GROK_MAX_MCP_OUTPUT_BYTES)
         .or_else(|| parse_positive_bytes_env(ENV_MAX_MCP_OUTPUT_BYTES))
@@ -127,9 +124,9 @@ impl McpDumpKind {
                 eg = examples_clause(&tools.json_tools()),
             ),
             Self::LongLineText => format!(
-                " The full output has a very long line, so grep/read_file are \
-                 ineffective on it — use `{shell}` to slice/search the saved \
-                 file{eg}.",
+                " The full output has a very long line and is plain text, not a \
+                 python program, so grep/read_file are ineffective on it — use \
+                 `{shell}` to slice/search the saved file{eg}.",
                 eg = examples_clause(&tools.text_tools()),
             ),
             Self::Other => String::new(),
@@ -217,15 +214,30 @@ pub fn densify_mcp_result_text(text: &str) -> String {
 /// Truncate `text` in place when over the limit, dumping the full payload to
 /// the session `mcp/` dir (when available) with a pointer appended.
 async fn truncate_mcp_text(text: &mut String, trunc_ctx: &McpTruncateContext) {
-    // Encode structured→text under TOON policy before the byte cap (UDAX densify).
-    densify_mcp_result_text_in_place(text);
-
+    // Densify exists to keep an over-cap body under the inline limit. A payload
+    // that already fits stays quoted JSON (`"ok": true`); TOON would drop the quotes.
     if text.len() <= trunc_ctx.max_output_bytes {
         return;
     }
 
-    let total_bytes = text.len();
-    let kind = McpDumpKind::classify(text.as_str());
+    let original = text.clone();
+    let kind_before = McpDumpKind::classify(original.as_str());
+    densify_mcp_result_text_in_place(text);
+
+    // TOON can shrink a JSON array under the cap and stop looking like JSON.
+    // The dump contract is the original shape: extension, steer, and file bytes.
+    let keep_json_kind = matches!(kind_before, McpDumpKind::Json | McpDumpKind::LongLineJson);
+    let kind = if keep_json_kind {
+        kind_before
+    } else {
+        McpDumpKind::classify(text.as_str())
+    };
+    let dump_source = if keep_json_kind {
+        original.as_str()
+    } else {
+        text.as_str()
+    };
+    let total_bytes = dump_source.len();
 
     let output_file_path = trunc_ctx.session_folder.as_ref().map(|folder| {
         folder.join("mcp").join(format!(
@@ -239,7 +251,7 @@ async fn truncate_mcp_text(text: &mut String, trunc_ctx: &McpTruncateContext) {
         if let Some(parent) = path.parent() {
             let _ = tokio::fs::create_dir_all(parent).await;
         }
-        match tokio::fs::write(path, text.as_bytes()).await {
+        match tokio::fs::write(path, dump_source.as_bytes()).await {
             Ok(()) => format!(" Full output written to: {}.", path.to_string_lossy()),
             Err(e) => {
                 tracing::warn!(
@@ -271,10 +283,9 @@ async fn truncate_mcp_text(text: &mut String, trunc_ctx: &McpTruncateContext) {
     );
 }
 
-/// Bound the `MCP`/`Text` variants to the inline size limit, keeping a preview
-/// and dumping the text that remains after any MCP image extract. Other
-/// variants pass through. MCP data-URI images go into `extracted_images`
-/// before the bound.
+/// Bound the `MCP`/`Text` variants to the inline size limit, keeping a preview and dumping the text
+/// that remains after any MCP image extract. Other variants pass through. MCP data-URI images go
+/// into `extracted_images` before the bound.
 pub async fn truncate_tool_output(
     mut output: ToolOutput,
     trunc_ctx: &McpTruncateContext,
@@ -471,7 +482,10 @@ mod tests {
             .map(|e| e.unwrap().path())
             .collect();
         assert_eq!(entries.len(), 1, "exactly one dump file");
-        assert!(entries[0].starts_with(&mcp_dir), "dump stayed inside mcp/");
+        assert!(
+            entries.first().is_some_and(|p| p.starts_with(&mcp_dir)),
+            "dump stayed inside mcp/"
+        );
     }
 
     #[tokio::test]
@@ -527,9 +541,12 @@ mod tests {
             panic!("expected MCP");
         };
         assert_eq!(mcp.extracted_images.len(), 1);
-        assert_eq!(mcp.extracted_images[0].mime_type, "image/png");
-        assert_eq!(mcp.extracted_images[0].data, payload);
-        assert_eq!(mcp.extracted_images[0].data.len(), 100_000);
+        let Some(img) = mcp.extracted_images.first() else {
+            panic!("expected extracted image");
+        };
+        assert_eq!(img.mime_type, "image/png");
+        assert_eq!(img.data, payload);
+        assert_eq!(img.data.len(), 100_000);
 
         let MCPOutputDetails::OkayOutput(text) = mcp.output() else {
             panic!("expected OkayOutput");
@@ -605,8 +622,11 @@ mod tests {
             panic!("expected MCP");
         };
         assert_eq!(mcp.extracted_images.len(), 1);
-        assert_eq!(mcp.extracted_images[0].mime_type, "image/jpeg");
-        assert_eq!(mcp.extracted_images[0].data, payload);
+        let Some(img) = mcp.extracted_images.first() else {
+            panic!("expected extracted image");
+        };
+        assert_eq!(img.mime_type, "image/jpeg");
+        assert_eq!(img.data, payload);
 
         let MCPOutputDetails::OkayOutput(text) = mcp.output() else {
             panic!("expected OkayOutput");
@@ -641,10 +661,13 @@ mod tests {
             panic!("expected MCP");
         };
         assert_eq!(mcp.extracted_images.len(), 2);
-        assert_eq!(mcp.extracted_images[0].mime_type, "image/png");
-        assert_eq!(mcp.extracted_images[0].data, p1);
-        assert_eq!(mcp.extracted_images[1].mime_type, "image/jpeg");
-        assert_eq!(mcp.extracted_images[1].data, p2);
+        let [png, jpeg] = mcp.extracted_images.as_slice() else {
+            panic!("expected two extracted images: {:?}", mcp.extracted_images);
+        };
+        assert_eq!(png.mime_type, "image/png");
+        assert_eq!(png.data, p1);
+        assert_eq!(jpeg.mime_type, "image/jpeg");
+        assert_eq!(jpeg.data, p2);
 
         let MCPOutputDetails::OkayOutput(text) = mcp.output() else {
             panic!("expected OkayOutput");
@@ -688,8 +711,11 @@ mod tests {
         };
         assert!(mcp.is_error);
         assert_eq!(mcp.extracted_images.len(), 1);
-        assert_eq!(mcp.extracted_images[0].mime_type, "image/png");
-        assert_eq!(mcp.extracted_images[0].data, payload);
+        let Some(img) = mcp.extracted_images.first() else {
+            panic!("expected extracted image");
+        };
+        assert_eq!(img.mime_type, "image/png");
+        assert_eq!(img.data, payload);
 
         let MCPOutputDetails::Error(text) = mcp.output() else {
             panic!("expected Error");

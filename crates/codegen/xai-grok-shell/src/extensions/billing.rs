@@ -1,8 +1,7 @@
 //! `x.ai/billing` extension handler.
 //!
-//! Fetches the authenticated user's Grok Build billing configuration
-//! (credit limit, usage, on-demand cap, billing period, history) from
-//! the backend. Used by the pager/desktop to display credits and usage.
+//! Fetches the authenticated user's Grok Build billing configuration (credit limit, usage, on-demand cap, billing period, history) from the backend.
+//! The pager and desktop use it to display credits and usage.
 
 use agent_client_protocol as acp;
 use serde::{Deserialize, Serialize};
@@ -10,7 +9,6 @@ use serde::{Deserialize, Serialize};
 use super::{ExtResult, to_raw_response};
 use crate::agent::MvpAgent;
 
-/// Billing period cycle identifier.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BillingCycle {
@@ -21,17 +19,14 @@ pub struct BillingCycle {
 /// Cent value from the billing API (USD cents).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Cent {
-    /// proto3 JSON omits zero-valued scalars, so a `$0` Cent arrives as `{}`;
-    /// default to 0 rather than failing the whole parse.
+    /// proto3 JSON omits zero-valued scalars, so a `$0` Cent arrives as `{}`; default to 0 rather than failing the whole parse.
     #[serde(default)]
     pub val: i64,
 }
 
 /// A usage period (weekly or monthly) from the newer credits config.
-///
-/// `start`/`end` are RFC 3339 timestamps. `period_type` is the proto enum name
-/// (e.g. `USAGE_PERIOD_TYPE_WEEKLY`); kept so callers can distinguish weekly
-/// vs monthly cycles.
+/// `start`/`end` are RFC 3339 timestamps.
+/// `period_type` is the proto enum name (e.g. `USAGE_PERIOD_TYPE_WEEKLY`); it is kept so callers can distinguish weekly from monthly cycles.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UsagePeriod {
@@ -57,42 +52,31 @@ pub struct BillingPeriodUsage {
     pub total_used: Option<Cent>,
 }
 
-/// Per-product included usage from SuperGrok credits config (`productUsage`).
-///
-/// Wire examples use proto enum names such as `PRODUCT_GROK_BUILD` with an
-/// independent `usagePercent`. Top-level `creditUsagePercent` may stay flat
-/// while a product entry moves (or the reverse); keep them distinct.
+/// Wire product id for Grok Build included usage inside `productUsage`.
+pub const PRODUCT_GROK_BUILD: &str = "PRODUCT_GROK_BUILD";
+
+/// One `productUsage` row from the credits config (camelCase on the wire).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ProductUsageEntry {
-    /// Product id from the wire (e.g. `PRODUCT_GROK_BUILD`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub product: Option<String>,
-    /// Included usage percent for this product when present (0.0–100.0+).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage_percent: Option<f64>,
 }
 
-/// Wire product id for Grok Build (CLI / coding surface).
-pub const PRODUCT_GROK_BUILD: &str = "PRODUCT_GROK_BUILD";
-
-/// Current billing configuration for Grok Build coding credits.
-///
-/// Carries both the newer credits-config fields (`credit_usage_percent`,
-/// `current_period`) and the deprecated `GrokBuildBillingConfig` fields
-/// (`monthly_limit`, `used`, `billing_period_*`). Consumers should prefer the
-/// new fields and fall back to the deprecated ones, so the same struct works
-/// against both the new `GetGrokCreditsConfig` and the legacy
-/// `GetGrokBuildBillingConfig` backend responses.
+/// Current billing configuration for Grok Build coding credits. Carries the newer credits-config fields (`credit_usage_percent`, `current_period`).
+/// It also carries the deprecated `GrokBuildBillingConfig` fields (`monthly_limit`, `used`, `billing_period_*`). Consumers should prefer the new fields and fall back to the deprecated ones.
+/// The same struct then works against both the new `GetGrokCreditsConfig` and the legacy `GetGrokBuildBillingConfig` responses.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BillingConfig {
-    /// Included credit usage as a percentage of the allowance (0.0–100.0).
-    /// Preferred over deriving from `monthly_limit`/`used`.
+    /// Included credit usage as a percentage of the allowance (0.0 to 100.0).
+    /// Prefer it over deriving from `monthly_limit`/`used`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub credit_usage_percent: Option<f64>,
-    /// Current usage period (weekly or monthly). Preferred over
-    /// `billing_period_start`/`billing_period_end`.
+    /// Current usage period (weekly or monthly).
+    /// Prefer it over `billing_period_start`/`billing_period_end`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub current_period: Option<UsagePeriod>,
     /// Deprecated: included monthly credit budget. Use `credit_usage_percent`.
@@ -105,16 +89,13 @@ pub struct BillingConfig {
     pub on_demand_cap: Option<Cent>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub on_demand_used: Option<Cent>,
-    /// SuperGrok dollar credits remaining (`prepaidBalance.val` on
-    /// `GET …/v1/billing?format=credits`). Not the console.x.ai Billing Credits
-    /// card (that card is GetAmountToPay prepaidCredits minus prepaidCreditsUsed).
-    /// Absent in the legacy billing shape.
+    /// Remaining prepaid (purchased) credit balance, positive: the "bought credits" the user has topped up.
+    /// It comes from the credits config (`GetGrokCreditsConfig.prepaid_balance`) and is absent in the legacy billing shape.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prepaid_balance: Option<Cent>,
-    /// Whether this user is on unified usage billing (shared weekly/monthly
-    /// pool). From `GrokCreditsConfig.is_unified_billing_user`, which billing
-    /// sets from remote settings `unified_consumer_billing_enabled`. `None` when
-    /// absent (legacy `GetGrokBuildBillingConfig` shape or older servers).
+    /// Whether this user is on unified usage billing (a shared weekly/monthly pool).
+    /// It comes from `GrokCreditsConfig.is_unified_billing_user`, which billing sets from the remote setting `unified_consumer_billing_enabled`.
+    /// `None` when absent (legacy `GetGrokBuildBillingConfig` shape or older servers).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub is_unified_billing_user: Option<bool>,
     /// Per-product included usage when the server sends `productUsage` (e.g.
@@ -131,47 +112,16 @@ pub struct BillingConfig {
     pub history: Vec<BillingPeriodUsage>,
 }
 
-/// Included usage percent for [`PRODUCT_GROK_BUILD`] when present on wire.
-pub fn grok_build_usage_percent(config: &BillingConfig) -> Option<f64> {
-    config.product_usage.iter().find_map(|entry| {
-        let product = entry.product.as_deref()?;
-        if product == PRODUCT_GROK_BUILD {
-            entry.usage_percent
-        } else {
-            None
-        }
-    })
-}
-
-/// Append one process poll-history sample from a successful S1 credits config.
-///
-/// Requires top-level included usage % (no invent). Build product % and
-/// SuperGrok $ extras are optional fields on the sample. Used so
-/// `flat_poll_unproven_debit` can come from real S1 history, not only tests.
-pub fn record_included_poll_history_from_config(identity_id: &str, config: &BillingConfig) {
-    let (usage_pct, _) = included_usage_and_period_end(config);
-    let Some(pct) = usage_pct else {
-        return;
-    };
-    crate::auth::record_included_poll_now(
-        identity_id,
-        pct,
-        grok_build_usage_percent(config),
-        config.prepaid_balance.as_ref().map(|c| c.val),
-    );
-}
-
-/// Top-level response (primarily from `GET /rest/grok/credits` + auto-topup-rule).
+/// Top-level response (primarily from `GET /rest/grok/credits` and the auto-topup-rule fetch).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BillingConfigResponse {
     pub config: Option<BillingConfig>,
-    /// Whether on-demand credit usage is enabled. When `false`, the pager
-    /// should hide on-demand controls. Populated from `RemoteSettings`.
+    /// Whether on-demand credit usage is enabled; when `false`, the pager should hide on-demand controls.
+    /// It comes from `RemoteSettings`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub on_demand_enabled: Option<bool>,
     /// User-friendly subscription tier name (e.g. "SuperGrok Heavy").
-    /// Populated from `RemoteSettings` so the pager can update its cached
-    /// tier on every billing fetch without an extra request.
+    /// It comes from `RemoteSettings` so the pager can update its cached tier on every billing fetch without an extra request.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subscription_tier: Option<String>,
 }
@@ -180,9 +130,8 @@ pub struct BillingConfigResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AutoTopupRule {
-    /// proto3 JSON omits `false`, so a disabled rule arrives without this field;
-    /// default to `false` rather than failing the parse (which would otherwise
-    /// keep a stale cached rule in the pager).
+    /// proto3 JSON omits `false`, so a disabled rule arrives without this field; default to `false` rather than failing the parse.
+    /// A failed parse would keep a stale cached rule in the pager.
     #[serde(default)]
     pub enabled: bool,
     pub min_before_hitting_sl: Option<Cent>,
@@ -191,7 +140,6 @@ pub struct AutoTopupRule {
     pub max_amount_per_month: Option<Cent>,
 }
 
-/// Wrapper for the auto top-up rule response.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GetAutoTopupRuleResponse {
     #[serde(default)]
@@ -280,6 +228,31 @@ pub fn included_usage_and_period_end(config: &BillingConfig) -> (Option<f64>, Op
         .and_then(|p| p.end.clone())
         .or_else(|| config.billing_period_end.clone());
     (usage_pct, period_end)
+}
+
+/// Grok Build included usage percent when `productUsage` names [`PRODUCT_GROK_BUILD`].
+pub fn grok_build_usage_percent(config: &BillingConfig) -> Option<f64> {
+    config.product_usage.iter().find_map(|entry| {
+        if entry.product.as_deref() == Some(PRODUCT_GROK_BUILD) {
+            entry.usage_percent
+        } else {
+            None
+        }
+    })
+}
+
+/// Append one included-poll sample from a credits config. Empty identity is a no-op.
+fn record_included_poll_history_from_config(identity_id: &str, config: &BillingConfig) {
+    let (usage_pct, _) = included_usage_and_period_end(config);
+    let Some(credit_usage_percent) = usage_pct else {
+        return;
+    };
+    crate::auth::included_poll_history::record_included_poll_now(
+        identity_id,
+        credit_usage_percent,
+        grok_build_usage_percent(config),
+        config.prepaid_balance.as_ref().map(|cent| cent.val),
+    );
 }
 
 /// Refresh SuperGrok included billing through the flock snapshot hub.
@@ -651,9 +624,7 @@ pub async fn poll_and_remember_non_active_supergrok_included_billing(
 }
 
 /// Structured context for unified-log entries from a successful billing fetch.
-///
-/// Keeps history to a count + the most recent period so `~/.grok/logs/unified.jsonl`
-/// stays useful without dumping unbounded period arrays.
+/// Keeps history to a count + the most recent period so `~/.grok/logs/unified.jsonl` stays useful without dumping unbounded period arrays.
 fn billing_unified_log_ctx(billing: &BillingConfigResponse) -> serde_json::Value {
     let history_len = billing
         .config
@@ -672,7 +643,7 @@ fn billing_unified_log_ctx(billing: &BillingConfigResponse) -> serde_json::Value
         .and_then(|c| serde_json::to_value(c).ok())
         .unwrap_or(serde_json::Value::Null);
     if let Some(obj) = config_value.as_object_mut() {
-        // Drop full history array; surface length + latest entry instead.
+        // Drop the full history array; log its length and the latest entry instead
         obj.remove("history");
         obj.insert("historyLen".into(), serde_json::json!(history_len));
         if let Some(latest) = latest_history {
@@ -738,6 +709,109 @@ pub fn billing_log_identity_from_auth(auth: &crate::auth::GrokAuth) -> (String, 
         auth.team_id.as_deref(),
     ));
     (identity_id, role)
+}
+
+/// `config.toml` `[auth]` or `[grok_com_config]` `auto_use_included_limits`.
+/// Missing file, unreadable file, or a missing key stays on the default (true).
+fn auto_use_included_limits_from_disk() -> bool {
+    let path = crate::util::grok_home::grok_home().join("config.toml");
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return true;
+    };
+    let Ok(value) = text.parse::<toml::Value>() else {
+        return true;
+    };
+    for table_name in ["auth", "grok_com_config"] {
+        if let Some(flag) = value
+            .get(table_name)
+            .and_then(|table| table.get("auto_use_included_limits"))
+            .and_then(|item| item.as_bool())
+        {
+            return flag;
+        }
+    }
+    true
+}
+
+trait AuthManagerRankAlign {
+    fn align_to_ranked_free_period_primary(&self) -> bool;
+}
+
+impl AuthManagerRankAlign for std::sync::Arc<xai_grok_login::AuthManager> {
+    fn align_to_ranked_free_period_primary(&self) -> bool {
+        let path = self.auth_json_path();
+        let Some(home) = path.parent() else {
+            return false;
+        };
+        let candidates = crate::auth::load_supergrok_session_candidates(home);
+        if candidates.len() < 2 {
+            return false;
+        }
+        let ranked = crate::auth::ranked_free_period_primary_token(&candidates);
+        let current_key = self.current_wire_valid().map(|auth| auth.key);
+        if !crate::auth::session_bearer_should_align_to_ranked_free_period_primary(
+            current_key.as_deref(),
+            ranked.as_deref(),
+        ) {
+            return false;
+        }
+        let Some(ranked_tok) = ranked else {
+            return false;
+        };
+        let Ok(mut map) = crate::auth::read_auth_json(path) else {
+            return false;
+        };
+        let Some(auth) = map
+            .values()
+            .find(|entry| entry.key.trim() == ranked_tok.trim())
+            .cloned()
+        else {
+            return false;
+        };
+        if !crate::auth::is_supergrok_session_mode(auth.auth_mode) {
+            return false;
+        }
+        let scope = self.grok_com_config().auth_scope();
+        crate::auth::upsert_supergrok_session(&mut map, &scope, auth.clone());
+        if let Err(err) = xai_grok_login::storage::write_auth_json(path, &map) {
+            tracing::warn!(
+                error = %err,
+                "auth: included SuperGrok period rank align disk write failed; hot_swap only"
+            );
+            xai_grok_telemetry::unified_log::warn(
+                "auth: included SuperGrok period rank align disk write failed",
+                None,
+                Some(serde_json::json!({ "error": err.to_string() })),
+            );
+        }
+        let from_suffix = current_key
+            .as_deref()
+            .map(|key| xai_grok_auth::bearer_suffix(key).to_owned());
+        let to_suffix = xai_grok_auth::bearer_suffix(auth.key.as_str()).to_owned();
+        let principal_type = auth.principal_type.clone();
+        let team_id = auth.team_id.clone();
+        let principal_id = auth.principal_id.clone();
+        self.hot_swap(auth);
+        tracing::info!(
+            from_key_prefix = ?from_suffix,
+            to_key_prefix = %to_suffix,
+            principal_type = ?principal_type,
+            team_id = ?team_id,
+            "auth: aligned SessionToken bearer to included SuperGrok period ranked primary"
+        );
+        xai_grok_telemetry::unified_log::info(
+            "auth: aligned SessionToken bearer to included SuperGrok period ranked primary",
+            None,
+            Some(serde_json::json!({
+                "from_key_prefix": from_suffix,
+                "to_key_prefix": to_suffix,
+                "principal_type": principal_type,
+                "team_id": team_id,
+                "principal_id": principal_id,
+            })),
+        );
+        true
+    }
 }
 
 async fn handle_get_billing(agent: &MvpAgent, force_refresh: bool) -> ExtResult {
@@ -856,7 +930,7 @@ async fn handle_get_billing(agent: &MvpAgent, force_refresh: bool) -> ExtResult 
             );
         }
     }
-    if agent.cfg.borrow().grok_com_config.auto_use_included_limits {
+    if auto_use_included_limits_from_disk() {
         let _ = agent.auth_manager.align_to_ranked_free_period_primary();
     }
 
@@ -890,8 +964,7 @@ async fn handle_get_auto_topup_rule(agent: &MvpAgent) -> ExtResult {
     let proxy_base = agent.cli_chat_proxy_base_url();
     let base = proxy_base.trim_end_matches('/');
 
-    // Auto top-up rule via the CLI proxy, which forwards to the backend
-    // `GetAutoTopupRule`. Same shared cooldown key family as credits polls.
+    // Fetch the auto top-up rule via the CLI proxy, which forwards to the backend `GetAutoTopupRule`
     let url = format!("{}/auto-topup-rule", base);
     let rate_key = crate::shared_http_rate_limit::billing_provider_key(base, &auth.key);
     crate::shared_http_rate_limit::wait_before_http(&rate_key).await;
@@ -900,7 +973,7 @@ async fn handle_get_auto_topup_rule(agent: &MvpAgent) -> ExtResult {
         .header("Authorization", format!("Bearer {}", auth.key))
         .header(
             "X-XAI-Token-Auth",
-            crate::auth::GrokComConfig::default().token_header,
+            xai_grok_login::GrokComConfig::default().token_header,
         )
         .header("x-userid", &auth.user_id)
         .header("x-grok-client-version", xai_grok_version::VERSION)
@@ -938,8 +1011,7 @@ async fn handle_get_auto_topup_rule(agent: &MvpAgent) -> ExtResult {
         );
     }
 
-    // Return the upstream response body verbatim (as a JSON value) so /usage
-    // can print the exact data from this request unformatted.
+    // Return the upstream response body verbatim (as a JSON value) so `/usage` can print the exact data from this request unformatted
     let body_text = response.text().await.unwrap_or_default();
     let value: serde_json::Value =
         serde_json::from_str(&body_text).unwrap_or(serde_json::json!({"raw": body_text}));
@@ -1287,10 +1359,8 @@ mod tests {
 
     #[test]
     fn auto_topup_disabled_rule_omits_enabled_field() {
-        // proto3 JSON omits `false` / `0`, so a disabled rule arrives without
-        // `enabled` (and zero Cents as `{}`). It must still deserialize (as
-        // disabled) rather than erroring — otherwise the pager keeps a stale
-        // cached rule.
+        // proto3 JSON omits `false` and `0`, so a disabled rule arrives without `enabled` (and zero Cents arrive as `{}`)
+        // It must still deserialize (as disabled) rather than erroring; otherwise the pager keeps a stale cached rule
         let json = serde_json::json!({
             "rule": { "topupAmount": {"val": 500}, "minBeforeHittingSl": {} }
         });
@@ -1330,7 +1400,9 @@ mod tests {
             Some("2025-04-01T00:00:00Z")
         );
         assert_eq!(config.history.len(), 1);
-        let period = &config.history[0];
+        let Some(period) = config.history.first() else {
+            panic!("expected one billing period");
+        };
         let cycle = period.billing_cycle.as_ref().unwrap();
         assert_eq!(cycle.year, 2025);
         assert_eq!(cycle.month, 3);
@@ -1380,20 +1452,43 @@ mod tests {
             subscription_tier: Some("SuperGrok".into()),
         };
         let ctx = billing_unified_log_ctx(&resp);
-        assert_eq!(ctx["onDemandEnabled"], true);
-        assert_eq!(ctx["subscriptionTier"], "SuperGrok");
-        let config = ctx["config"].as_object().expect("config object");
+        assert_eq!(
+            ctx.get("onDemandEnabled").and_then(|v| v.as_bool()),
+            Some(true)
+        );
+        assert_eq!(
+            ctx.get("subscriptionTier").and_then(|v| v.as_str()),
+            Some("SuperGrok")
+        );
+        let config = ctx
+            .get("config")
+            .and_then(|v| v.as_object())
+            .expect("config object");
         assert!(
             config.get("history").is_none(),
             "full history must be collapsed"
         );
-        assert_eq!(config["historyLen"], 2);
+        assert_eq!(config.get("historyLen").and_then(|v| v.as_u64()), Some(2));
         assert_eq!(
-            config["latestHistory"]["billingCycle"]["month"], 3,
+            config
+                .get("latestHistory")
+                .and_then(|h| h.get("billingCycle"))
+                .and_then(|c| c.get("month"))
+                .and_then(|v| v.as_u64()),
+            Some(3),
             "latest history period retained"
         );
-        assert_eq!(config["creditUsagePercent"], 42.5);
-        assert_eq!(config["prepaidBalance"]["val"], 100);
+        assert_eq!(
+            config.get("creditUsagePercent").and_then(|v| v.as_f64()),
+            Some(42.5)
+        );
+        assert_eq!(
+            config
+                .get("prepaidBalance")
+                .and_then(|b| b.get("val"))
+                .and_then(|v| v.as_u64()),
+            Some(100)
+        );
     }
 
     /// SuperGrok `GetGrokCreditsConfig.prepaidBalance.val` is SuperGrok dollar
@@ -1452,6 +1547,7 @@ mod tests {
             user_blocked_reason: None,
             team_blocked_reasons: vec![],
             coding_data_retention_opt_out: true,
+            can_administer_team: None,
             has_grok_code_access: None,
             refresh_token: None,
             expires_at: None,
@@ -1664,8 +1760,7 @@ mod tests {
 
     #[test]
     fn billing_config_deserializes_credits_config_shape() {
-        // Newer `GetGrokCreditsConfig` response: percentage-based usage,
-        // a typed current period, productUsage, and history keyed by `period`.
+        // Newer `GetGrokCreditsConfig` response: percentage-based usage, a typed current period, and history keyed by `period`
         let json = serde_json::json!({
             "config": {
                 "creditUsagePercent": 42.5,
@@ -1705,21 +1800,16 @@ mod tests {
         // Deprecated fields are absent in the credits shape.
         assert!(config.monthly_limit.is_none());
         assert!(config.billing_period_end.is_none());
-        assert_eq!(config.on_demand_cap.as_ref().unwrap().val, 5000);
-        assert_eq!(config.on_demand_used.as_ref().unwrap().val, 300);
-        // Bought (prepaid) credit balance is parsed from the credits config.
-        assert_eq!(config.prepaid_balance.as_ref().unwrap().val, 1250);
+        assert_eq!(config.on_demand_cap.unwrap().val, 5000);
+        assert_eq!(config.on_demand_used.unwrap().val, 300);
+        assert_eq!(config.prepaid_balance.unwrap().val, 1250);
         assert_eq!(config.is_unified_billing_user, Some(true));
-        // productUsage is retained for observability (log / limits surfaces).
-        assert_eq!(config.product_usage.len(), 1);
-        assert_eq!(
-            config.product_usage[0].product.as_deref(),
-            Some(PRODUCT_GROK_BUILD)
-        );
-        assert_eq!(config.product_usage[0].usage_percent, Some(61.2));
-        assert_eq!(grok_build_usage_percent(&config), Some(61.2));
+        // The CLI billing code does not read `productUsage` yet
         assert_eq!(config.history.len(), 1);
-        assert_eq!(config.history[0].on_demand_used.as_ref().unwrap().val, 120);
+        let Some(history) = config.history.first() else {
+            panic!("expected one history period");
+        };
+        assert_eq!(history.on_demand_used.as_ref().unwrap().val, 120);
     }
 
     #[test]

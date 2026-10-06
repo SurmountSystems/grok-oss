@@ -1,56 +1,25 @@
-//! `/plan` enters plan mode. Bare `/plan` exclusive-blocks nested
-//! implementers and paints covering exclusive present. `/plan <description>`
-//! enters plan mode and starts a turn with the description after the mode
-//! switch completes.
-//!
-//! `/plan --soft` docks Isolated Preview, the existing plan present surface
-//! on the right. It does not enter plan mode. It does not park L1. It does
-//! not enqueue the description as a Prompt. L1 docking Isolated Preview
-//! must not cancel nested L2s. Nested work stays Working. Soft planning
-//! does not reset the primary plan. It makes a secondary plan. Isolated
-//! Preview does not immediately pull up leftover current `plan.md`. Isolated
-//! Preview stays until Esc, Exit, or Approve. Present is not Approve.
-//! `--soft` is not the queue hold token (`queue` / `later`).
+//! `/plan` enters plan mode.
+//! `/plan <description>` enters plan mode and starts a turn with the description after the mode switch completes.
 //!
 //! Use `/view-plan` to open the current saved plan preview.
 
 use crate::app::actions::{Action, Effect, PlanModeKind};
 use crate::app::agent_view::AgentView;
-use crate::slash::command::{CommandExecCtx, CommandResult, SlashCommand};
+use crate::slash::command::{CommandExecCtx, CommandResult, SlashCommand, slash_meta};
 use crate::slash::queue_schedule::{plan_command_text, queue_later_command, split_schedule_token};
 
-/// Enter plan mode.
 pub struct PlanCommand;
 
 impl SlashCommand for PlanCommand {
-    fn name(&self) -> &str {
-        "plan"
-    }
-
-    fn description(&self) -> &str {
-        "Enter plan mode, or /plan --soft to dock Isolated Preview"
-    }
-
-    fn session_scoped(&self) -> bool {
-        true
-    }
-
-    fn offered_when_session_less(&self) -> bool {
-        // The dashboard offers `/plan` to start the next spawned agent in
-        // plan mode (intercepted in `dispatch_dashboard_dispatch_slash`).
-        true
-    }
-
-    fn usage(&self) -> &str {
-        "/plan [--soft] [queue|later] [description]"
-    }
-
-    fn takes_args(&self) -> bool {
-        true
-    }
-
-    fn arg_placeholder(&self) -> Option<&str> {
-        Some("[description]")
+    slash_meta! {
+        name: "plan",
+        description: "Enter plan mode",
+        usage: "/plan [description]",
+        takes_args: true,
+        session_scoped: true,
+        // The dashboard offers `/plan` to start the next spawned agent in plan mode (intercepted in `dispatch_dashboard_dispatch_slash`).
+        offered_when_session_less: true,
+        arg_placeholder: "[description]",
     }
 
     fn run(&self, _ctx: &mut CommandExecCtx, args: &str) -> CommandResult {
@@ -194,14 +163,19 @@ impl AgentView {
             if info.finished {
                 continue;
             }
-            if info.pending_kill {
+            if info.attempt.pending_kill {
                 continue;
             }
-            info.pending_kill = true;
-            info.kill_requested_at = Some(std::time::Instant::now());
+            info.attempt.pending_kill = true;
+            info.attempt.kill_requested_at = Some(std::time::Instant::now());
             effects.push(Effect::KillSubagent {
                 session_id: session_id.clone(),
                 subagent_id: info.subagent_id.to_string(),
+                attempt_id: info
+                    .attempt
+                    .lifecycle
+                    .current_attempt_id()
+                    .map(str::to_owned),
             });
         }
         effects
@@ -278,8 +252,12 @@ impl AgentView {
                 self.plan_approval_view = Some(pav);
             }
             self.show_plan_preview();
+            // Exit and abandon record a decision without starting implement.
+            // A later dock still needs a viewer when there is no plan body.
+            // Approve stays shut: do not invent that placeholder.
             if self.line_viewer.is_none()
                 && self.plan_decision_resolved
+                && !self.plan_approved_implement
                 && let Some(mut viewer) =
                     crate::views::file_search::line_viewer::LineViewerState::open_markdown_content(
                         "plan.md",
@@ -292,6 +270,7 @@ impl AgentView {
                 let plan = viewer.plan_mut();
                 plan.show_action_buttons = true;
                 plan.feedback_active = false;
+                plan.selected_cta = None;
                 self.line_viewer = Some(viewer);
             }
         }
@@ -365,6 +344,25 @@ impl AgentView {
             let _ = std::fs::create_dir_all(parent);
         }
         let _ = std::fs::write(path, body);
+    }
+
+    fn session_plan_body_from_identity(&self, plan_identity: &str) -> Option<String> {
+        let sid = self.session.session_id.as_ref().map(|s| s.0.to_string())?;
+        let cfg = xai_grok_shell::token_economy::token_economy_from_disk();
+        let from_store = xai_grok_shell::grok_oss::try_open_from_token_economy_config(&cfg)
+            .and_then(|store| {
+                store
+                    .load_session_plan_body(&sid, plan_identity)
+                    .ok()
+                    .flatten()
+            });
+        if from_store.is_some() {
+            return from_store;
+        }
+        let path = self.session_plan_markdown_path(plan_identity)?;
+        std::fs::read_to_string(path)
+            .ok()
+            .filter(|body| !body.trim().is_empty())
     }
 }
 
@@ -551,7 +549,7 @@ mod tests {
         }
     }
 
-    /// `/plan` (no args, not in plan mode) → `SetPlanMode(On)`.
+    /// `/plan` (no args, not in plan mode) dispatches `SetPlanMode(On)`.
     #[test]
     fn no_args_not_in_plan_dispatches_set_plan_mode_on() {
         let cmd = PlanCommand;
@@ -570,7 +568,7 @@ mod tests {
         }
     }
 
-    /// `/plan` (no args, already in plan mode) → idempotent `SetPlanMode(On)`.
+    /// `/plan` (no args, already in plan mode) dispatches the idempotent `SetPlanMode(On)`.
     #[test]
     fn no_args_already_in_plan_dispatches_set_plan_mode_on() {
         let cmd = PlanCommand;
@@ -585,7 +583,7 @@ mod tests {
         }
     }
 
-    /// Whitespace-only → treated as no args.
+    /// Whitespace-only args are treated as no args.
     #[test]
     fn whitespace_only_arg_not_in_plan_dispatches_set_plan_mode_on() {
         let cmd = PlanCommand;
@@ -600,7 +598,7 @@ mod tests {
         }
     }
 
-    /// `/plan <description>` → `EnterPlanMode` with description.
+    /// `/plan <description>` dispatches `EnterPlanMode` with the description.
     #[test]
     fn with_description_keeps_enter_plan_mode_when_not_in_plan() {
         let cmd = PlanCommand;
@@ -622,8 +620,7 @@ mod tests {
         }
     }
 
-    /// `/plan <description>` when already in plan mode still emits
-    /// `EnterPlanMode`; the dispatcher owns the idempotent mode handling.
+    /// `/plan <description>` when already in plan mode still emits `EnterPlanMode`; the dispatcher owns the idempotent mode handling.
     #[test]
     fn with_description_already_in_plan_keeps_enter_plan_mode() {
         let cmd = PlanCommand;

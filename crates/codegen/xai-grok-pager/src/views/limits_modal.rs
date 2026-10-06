@@ -478,21 +478,27 @@ pub fn render_limits_modal(
     let end = (start + content.height as usize).min(display_lines.len());
 
     let mut y = content.y;
-    for text in display_lines[start..end].iter() {
+    for text in display_lines
+        .get(start..end)
+        .expect("index out of bounds")
+        .iter()
+    {
         if y >= content.y + content.height {
             break;
         }
         if text.as_str() == REMAINING_BAR_SENTINEL {
             if let Some((rem, tone)) = primary_bar {
-                // Tracked bar: brackets + ░ empty so remaining extent is obvious.
-                let bar_w = content.width.saturating_sub(2);
-                if bar_w >= 4 {
+                // Indent, brackets, and the tracked cells share the content width.
+                // Inner width is not capped at 34.
+                let inner = content.width.saturating_sub(4);
+                if inner >= 4 {
                     let fg = tone_color(tone, theme);
                     let spans =
-                        progress_bar_tracked_spans(bar_w, rem, fg, theme.gray_dim, theme.bg_dark);
+                        progress_bar_tracked_spans(inner, rem, fg, theme.gray_dim, theme.bg_dark);
                     let mut bar_line =
-                        vec![Span::styled("  ", Style::default().fg(theme.text_primary))];
+                        vec![Span::styled("  [", Style::default().fg(theme.text_primary))];
                     bar_line.extend(spans);
+                    bar_line.push(Span::styled("]", Style::default().fg(theme.text_primary)));
                     buf.set_line(content.x, y, &Line::from(bar_line), content.width);
                 }
             }
@@ -1021,7 +1027,6 @@ mod tests {
         use crate::actions::ActionRegistry;
         use crate::app::agent_view::test_fixtures::make_agent;
         use crate::app::agent_view::{AppRenderParams, BannerSlotParams};
-        use crate::app::bundle::BundleState;
         use crate::scrollback::render::ScratchBuffer;
 
         struct EnvGuard {
@@ -1073,7 +1078,6 @@ mod tests {
 
         crate::appearance::cache::set_hide_header(false);
         let mut agent = make_agent();
-        agent.sampling_identity = SamplingIdentityKind::SuperGrokSession;
         agent.credit_balance = Some(bal.clone());
 
         let area = Rect::new(0, 0, 120, 40);
@@ -1087,7 +1091,6 @@ mod tests {
             None,
             false,
             BannerSlotParams::none(),
-            &BundleState::default(),
             false,
             false,
             &mut Vec::new(),
@@ -1618,11 +1621,12 @@ mod tests {
     /// put. A failed console fetch does not spend them either.
     #[test]
     fn real_402_uses_console_api_credits_when_available_and_a_100_percent_printout_does_not() {
+        use xai_grok_sampler::AllowanceExhaustAction;
         use xai_grok_shell::auth::limits_pins::{
             MeterSource, apply_limits_pins_to_sampler_config, apply_meter_source, load_limits_pins,
         };
         use xai_grok_shell::auth::{
-            AllowanceExhaustAction, LimitsSnapshotDocument, LimitsSnapshotManagement,
+            LimitsSnapshotDocument, LimitsSnapshotManagement,
             apply_billing_usage_to_session_exhaust, read_limits_snapshot_file,
             write_limits_snapshot_file,
         };
@@ -1896,11 +1900,12 @@ mod tests {
     /// end says the reset time is not available, with no invented clock.
     #[test]
     fn both_limits_and_console_api_credits_exhausted_shows_days_hours_minutes_until_reset() {
+        use xai_grok_sampler::AllowanceExhaustAction;
         use xai_grok_shell::auth::limits_pins::{
             MeterSource, apply_limits_pins_to_sampler_config, apply_meter_source, load_limits_pins,
         };
         use xai_grok_shell::auth::{
-            AllowanceExhaustAction, LimitsSnapshotDocument, LimitsSnapshotManagement,
+            LimitsSnapshotDocument, LimitsSnapshotManagement,
             apply_billing_usage_to_session_exhaust, read_limits_snapshot_file,
             write_limits_snapshot_file,
         };
@@ -1909,7 +1914,6 @@ mod tests {
         use crate::actions::ActionRegistry;
         use crate::app::agent_view::test_fixtures::make_agent;
         use crate::app::agent_view::{AppRenderParams, BannerSlotParams};
-        use crate::app::bundle::BundleState;
         use crate::scrollback::render::ScratchBuffer;
 
         struct EnvGuard {
@@ -1974,7 +1978,6 @@ mod tests {
         fn paint_status(balance: &CreditBalance) -> String {
             crate::appearance::cache::set_hide_header(false);
             let mut agent = make_agent();
-            agent.sampling_identity = SamplingIdentityKind::SuperGrokSession;
             agent.credit_balance = Some(balance.clone());
             let area = Rect::new(0, 0, 160, 40);
             let mut header = Buffer::empty(area);
@@ -1987,7 +1990,6 @@ mod tests {
                 None,
                 false,
                 BannerSlotParams::none(),
-                &BundleState::default(),
                 false,
                 false,
                 &mut Vec::new(),

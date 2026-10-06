@@ -1919,6 +1919,27 @@ User-guide [`06-theming`](crates/codegen/xai-grok-pager/docs/user-guide/06-themi
   (accessed: 2026-08-25). Dual-pin: [`AGENTS.md`](AGENTS.md) hard
   constraint 16.
 
+### Operator and Agent (pinned 2026-09-09)
+
+Prefer Operator and Agent as speaker labels. Operator is any sapient
+that is operating a machine agent. Silicon sapience can revisit later.
+Agent is vendor-neutral. Grok is one specific agent and the Operator's
+favorite, not the only one.
+
+Do not say You or Human for the operator. Do not say Me or Grok as the
+speaker label for the machine. Do not rename grok-oss, Grok OSS, or a
+Grok model id. Painted chrome and user-guide call the composer the
+Operator box. DOGE caret and operator rails are Operator green
+(`accent_user`). Identifiers such as `accent_user` and `UserPrompt`
+may stay unless a user-visible string is attached. Do not teach User
+as the speaker label for the operator.
+
+This is what speaker-label sentences mean. Dual-pin:
+[`AGENTS.md`](AGENTS.md) § *Operator and Agent* and host
+`~/.grok/AGENTS.md` same heading. This pin does not weaken Job / State
+/ Operator / Next. It supersedes the 2026-09-01 line that left the
+composer named Human box.
+
 ### Process
 
 - [x] **Process docs hierarchy**: D0 residual open-only; D1 AGENTS; D2 logs

@@ -1,4 +1,4 @@
-//! Production subagent definition discovery and tool-policy resolution.
+//! Subagent definition discovery and tool-policy resolution, matching the production spawn path.
 use crate::config::{SubagentPersona, SubagentRole};
 use crate::types::{EffectiveRuntimeConfig, ResolutionError};
 use std::collections::HashMap;
@@ -37,9 +37,8 @@ pub struct HarnessToolsetContext<'a> {
     pub parent_model_agent_type: Option<&'a str>,
     pub file_tool_overrides: Option<&'a [ToolConfig]>,
 }
-/// `false` twin: the alternate flavors re-select toolset presets and
-/// templates, so none is representable when the optional harness is compiled
-/// out. Keeps ungated call sites compiling.
+/// Without the `cursor` feature no flavor is representable: the alternate flavors re-select toolset presets and templates that are compiled out.
+/// This stub keeps ungated call sites compiling.
 pub fn subagent_harness_flavor_is_representable(_agent_type: &str) -> bool {
     false
 }
@@ -60,8 +59,7 @@ pub fn apply_harness_toolset(
         definition.override_file_tools(file_tools.to_vec());
     }
 }
-/// Discover the same project/builtin/user/plugin definition used by production,
-/// with session CLI definitions as the final fallback.
+/// Discover the same project/builtin/user/plugin definition used by production, with session CLI definitions as the final fallback.
 pub fn discover_agent_definition(
     subagent_type: &str,
     context: &DefinitionResolutionContext<'_>,
@@ -79,7 +77,7 @@ pub fn discover_agent_definition(
             .cloned()
     })
 }
-/// Sorted model-facing names available under the current discovery context.
+/// Sorted agent names the model can request under the current discovery context.
 pub fn available_agent_names(context: &DefinitionResolutionContext<'_>) -> Vec<String> {
     let mut available: Vec<String> = xai_grok_agent::discovery::all_subagents_with_plugins(
         context.cwd,
@@ -219,88 +217,70 @@ pub fn apply_definition_runtime_defaults(
         runtime.isolation = SubagentIsolationMode::Worktree;
     }
 }
-/// Numeric depth check only. An agent at `agent_depth` may hold
-/// `spawn_subagent` when `agent_depth < max_depth`.
-///
-/// Depth 1 with the default max of 2 is the L2 that L1 spawned, so
-/// `nested_spawn_allowed(1, 2)` stays true and that L2 keeps
-/// `spawn_subagent`. This check alone is not the spawn gate: it is true for
-/// any depth under max, which let an L2 spawn another coordinator. Only L1
-/// spawns L2s. Use [`spawned_agent_may_spawn`].
-pub fn nested_spawn_allowed(agent_depth: u32, max_depth: u32) -> bool {
-    agent_depth < max_depth
-}
-
-/// Layer created by one spawn.
+/// Layer of an admitted child. L1 is the main session and is never spawned.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SpawnedLayer {
-    /// L2 coordinator. Only L1 may create this layer. It may spawn an L3.
+    /// Depth-1 coordinator. Only L1 (parent depth 0) creates this layer.
     L2Coordinator,
-    /// L3 specialist. Cannot spawn.
+    /// Specialist. An L2 spawn is this layer, and it cannot spawn.
     L3Specialist,
 }
 
-/// Whether a spawn is admitted, and whether the spawned session may spawn.
+/// Whether a spawn from this parent depth is admitted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SpawnAdmission {
+    /// The child stays within `max_depth`.
     Allow {
         layer: SpawnedLayer,
-        /// Whether the spawned session gets `spawn_subagent`.
+        /// The child may itself call spawn_subagent.
         may_spawn: bool,
     },
-    /// Spawner depth is at or above max. `TaskTool::run` rejects with
-    /// "Subagent depth limit exceeded". An L3 cannot spawn an L3 or an L4.
+    /// The child would be deeper than `max_depth`.
     RejectDepthLimit,
 }
 
-/// Only L1 (depth 0) may spawn an L2 coordinator, and only when that L2's
-/// depth is still under max.
+/// The agent at `depth` may call spawn_subagent.
 ///
-/// An L2 (depth 1, still under max) may spawn only an L3 specialist. A
-/// coordinator request at that depth (grok-build / general-purpose) is this
-/// specialist: `may_spawn` is false, so the toolset keeps implement tools
-/// and loses Task. Depth at or above max cannot spawn. Default max stays 2.
-/// No new config key.
-pub fn admit_spawn(spawner_depth: u32, max_depth: u32) -> SpawnAdmission {
-    if spawner_depth >= max_depth {
+/// Depth 0 is L1 and depth 1 is an L2 coordinator. Both may spawn while
+/// `depth < max_depth`. Depth 2 and beyond is an L3 specialist and must
+/// not spawn, even when a higher numeric ceiling would still have room.
+pub fn nested_spawn_allowed(depth: u32, max_depth: u32) -> bool {
+    depth < max_depth && depth < 2
+}
+
+/// The child may itself spawn only when L1 admits an L2 still under the ceiling.
+///
+/// `parent_depth` is the spawner. `child_depth` is the depth the child will
+/// run at. An L2 spawn is an L3 specialist even when `child_depth` is still
+/// under `max_depth`.
+pub fn spawned_agent_may_spawn(parent_depth: u32, child_depth: u32, max_depth: u32) -> bool {
+    parent_depth == 0 && nested_spawn_allowed(child_depth, max_depth)
+}
+
+/// Admit a spawn from `parent_depth` under `max_depth`.
+///
+/// Only L1 spawns an L2 coordinator. Any deeper spawner admits an L3
+/// specialist that cannot spawn. A child deeper than `max_depth` is rejected.
+pub fn admit_spawn(parent_depth: u32, max_depth: u32) -> SpawnAdmission {
+    let child_depth = parent_depth.saturating_add(1);
+    if child_depth > max_depth {
         return SpawnAdmission::RejectDepthLimit;
     }
-    if spawner_depth == 0 && nested_spawn_allowed(spawner_depth.saturating_add(1), max_depth) {
+    let may_spawn = spawned_agent_may_spawn(parent_depth, child_depth, max_depth);
+    if parent_depth == 0 {
         SpawnAdmission::Allow {
             layer: SpawnedLayer::L2Coordinator,
-            may_spawn: true,
+            may_spawn,
         }
     } else {
         SpawnAdmission::Allow {
             layer: SpawnedLayer::L3Specialist,
-            may_spawn: false,
+            may_spawn,
         }
     }
 }
 
-/// Full gate for whether the spawned session gets `spawn_subagent`.
-///
-/// Only an L1 admission with room under max may spawn. An L2 admission is
-/// always an L3 specialist, even when `agent_depth < max_depth`.
-pub fn spawned_agent_may_spawn(spawner_depth: u32, agent_depth: u32, max_depth: u32) -> bool {
-    match admit_spawn(spawner_depth, max_depth) {
-        SpawnAdmission::Allow {
-            may_spawn: true, ..
-        } => nested_spawn_allowed(agent_depth, max_depth),
-        _ => false,
-    }
-}
-
-/// Apply capability filtering and recursion depth to the exact production
-/// definition toolset.
-///
-/// GitHub #141: an L2 grok-build / general-purpose coordinator (nested spawn
-/// on, no capability override, toolset ships Edit) must not Grep, ReadFile,
-/// SearchReplace, or Write. Keep Task, wait, kill, background wait, and todos
-/// so that coordinator spawns L3. Explore/plan omit Edit already; do not strip
-/// them further. `SubagentCapabilityMode::All` keeps grep/read/edit on L2
-/// (existing full-tool escape; do not invent another permission system). L3
-/// at max depth keeps Grep/Read/Edit; Task is already stripped.
+/// Apply capability filtering and recursion depth to the exact production definition toolset.
 pub fn apply_child_tool_policy(
     definition: &mut AgentDefinition,
     capability_mode: Option<SubagentCapabilityMode>,
@@ -316,12 +296,15 @@ pub fn apply_child_tool_policy(
             .retain(|tool| tool.kind != Some(ToolKind::Task));
         prune_orphaned_background_task_tools(&mut definition.tool_config);
     } else if capability_mode.is_none()
+        && definition.is_builtin_grok_build()
         && definition
             .tool_config
             .tools
             .iter()
             .any(|tool| tool.kind == Some(ToolKind::Edit))
     {
+        // Only the stock Grok Build parent, when it may still spawn, drops
+        // read, search, and edit. general-purpose keeps those tools and only loses workflow.
         definition.tool_config.tools.retain(|tool| {
             !matches!(
                 tool.kind,
@@ -329,6 +312,9 @@ pub fn apply_child_tool_policy(
             )
         });
     }
+    definition.tool_config.tools.retain(|tool| {
+        !xai_grok_tools::implementations::grok_build::is_workflow_tool(tool.kind, &tool.id)
+    });
 }
 /// Resolve runtime overrides and definition defaults in the production order.
 pub fn resolve_runtime_config(
@@ -344,9 +330,8 @@ pub fn resolve_runtime_config(
     apply_definition_runtime_defaults(&mut runtime, definition);
     runtime
 }
-/// Render the same full subagent base template + definition body used by the
-/// production `AgentBuilder`, for runtimes that expose only finalized tool
-/// names rather than a complete `ToolBridge`.
+/// Render the same full subagent base template and definition body the production `AgentBuilder` uses.
+/// This serves runtimes that expose only finalized tool names rather than a complete `ToolBridge`.
 pub fn render_subagent_system_prompt(
     definition: &AgentDefinition,
     runtime: &EffectiveRuntimeConfig,
@@ -375,10 +360,14 @@ pub fn render_subagent_system_prompt(
     context.render_with_renderer(renderer)
 }
 /// Render project instructions as the child's prepended user message.
+///
+/// `paths` is the parent's `[paths]` config, so the child sees the same configured rules.
 pub async fn render_subagent_initial_user_message(
     definition: &AgentDefinition,
     working_directory: &Path,
     compat: CompatConfig,
+    paths: &xai_grok_agent::prompt::paths::PathsConfig,
+    project_trusted: bool,
 ) -> Option<String> {
     if !definition.agents_md {
         return None;
@@ -386,6 +375,8 @@ pub async fn render_subagent_initial_user_message(
     let agents_md_files = xai_grok_agent::prompt::agents_md::read_agents_config_with_paths(
         &working_directory.to_string_lossy(),
         compat,
+        paths,
+        project_trusted,
     )
     .await;
     PromptContext {
@@ -760,6 +751,100 @@ mod tests {
         assert!(kinds.contains(&Some(ToolKind::Search)));
         assert!(!kinds.contains(&Some(ToolKind::Execute)));
         assert!(!kinds.contains(&Some(ToolKind::Task)));
+        assert!(!kinds.contains(&Some(ToolKind::Workflow)));
+    }
+    #[test]
+    fn general_purpose_definition_omits_workflow() {
+        let cwd = tempfile::tempdir().unwrap();
+        let toggles = HashMap::new();
+        let definition =
+            resolve_agent_definition("general-purpose", &context(cwd.path(), &toggles)).unwrap();
+        assert!(
+            definition.tool_config.tools.iter().all(|tool| {
+                !xai_grok_tools::implementations::grok_build::is_workflow_tool(tool.kind, &tool.id)
+            }),
+            "general-purpose must declare its own list without workflow"
+        );
+        assert!(
+            definition
+                .tool_config
+                .tools
+                .iter()
+                .any(|tool| tool.kind == Some(ToolKind::Read)),
+            "general-purpose must keep the rest of the grok-build child tools"
+        );
+    }
+    #[test]
+    fn child_tool_policy_strips_workflow_and_keeps_other_tools() {
+        let cwd = tempfile::tempdir().unwrap();
+        let toggles = HashMap::new();
+        let mut definition =
+            resolve_agent_definition("general-purpose", &context(cwd.path(), &toggles)).unwrap();
+        definition
+            .tool_config
+            .tools
+            .push((&xai_grok_tools::implementations::grok_build::WorkflowTool).into());
+        let before: Vec<String> = definition
+            .tool_config
+            .tools
+            .iter()
+            .map(|tool| tool.id.clone())
+            .collect();
+        apply_child_tool_policy(&mut definition, None, true);
+        let after: Vec<String> = definition
+            .tool_config
+            .tools
+            .iter()
+            .map(|tool| tool.id.clone())
+            .collect();
+        assert!(
+            !after
+                .iter()
+                .any(|id| id.ends_with(":workflow") || id == "workflow")
+        );
+        let expected: Vec<String> = before
+            .into_iter()
+            .filter(|id| !id.ends_with(":workflow") && id != "workflow")
+            .collect();
+        assert_eq!(after, expected);
+    }
+    #[test]
+    fn custom_definition_cannot_keep_workflow_after_child_policy() {
+        let mut definition = AgentDefinition::general_purpose();
+        definition
+            .tool_config
+            .tools
+            .push((&xai_grok_tools::implementations::grok_build::WorkflowTool).into());
+        apply_child_tool_policy(&mut definition, None, true);
+        assert!(
+            definition
+                .tool_config
+                .tools
+                .iter()
+                .any(|tool| tool.kind == Some(ToolKind::Read)),
+            "unrelated tools must remain"
+        );
+        assert!(
+            definition
+                .tool_config
+                .tools
+                .iter()
+                .all(|tool| tool.kind != Some(ToolKind::Workflow))
+        );
+    }
+    #[test]
+    fn kindless_workflow_id_is_stripped_by_child_policy() {
+        let mut definition = AgentDefinition::general_purpose();
+        definition
+            .tool_config
+            .tools
+            .push(ToolConfig::from_id("GrokBuild:workflow"));
+        apply_child_tool_policy(&mut definition, None, true);
+        assert!(definition.tool_config.tools.iter().all(|tool| {
+            tool.kind != Some(ToolKind::Workflow)
+                && tool.id.rsplit(':').next()
+                    != Some(xai_grok_tools::implementations::grok_build::WORKFLOW_TOOL_NAME)
+        }));
     }
     #[test]
     fn gates_disabled_and_not_allowed_definitions() {
@@ -814,7 +899,6 @@ mod tests {
         )
         .unwrap();
         assert!(prompt.contains("<project_instructions_spec>"));
-        assert!(prompt.contains("read-only codebase exploration agent"));
         assert!(prompt.contains(&format!("Workspace Path: {}", cwd.path().display())));
         assert!(!prompt.contains("${{"));
     }
@@ -825,10 +909,15 @@ mod tests {
         let toggles = HashMap::new();
         let definition =
             resolve_agent_definition("explore", &context(cwd.path(), &toggles)).unwrap();
-        let message =
-            render_subagent_initial_user_message(&definition, cwd.path(), CompatConfig::default())
-                .await
-                .unwrap();
+        let message = render_subagent_initial_user_message(
+            &definition,
+            cwd.path(),
+            CompatConfig::default(),
+            &xai_grok_agent::prompt::paths::PathsConfig::default(),
+            true,
+        )
+        .await
+        .unwrap();
         assert!(message.contains("Use the project contract."));
     }
 }

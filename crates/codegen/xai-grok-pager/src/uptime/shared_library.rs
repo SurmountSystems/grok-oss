@@ -1,11 +1,9 @@
 //! Load the installed DuckDB shared library when a query needs it.
 //!
-//! The `duckdb` crate is not a dependency. Its `parquet` feature turns on
-//! `bundled`, which compiles C++. Without that feature, `libduckdb-sys` still
-//! emits `cargo:rustc-link-lib=dylib=duckdb`, and the dynamic linker then
-//! aborts process start when the shared library is absent. `dlopen` /
-//! `LoadLibraryA` fail closed instead: tracking stays off, and grok-oss keeps
-//! running.
+//! The `duckdb` crate is not a dependency. Its `parquet` feature compiles the
+//! C++ amalgamation. `build.rs` links the system shared library and fails the
+//! build when that library or `duckdb.h` is missing. It does not compile
+//! `duckdb.cpp`.
 //!
 //! The `duckdb_result` layout matches libduckdb-sys 1.10505.0 (DuckDB 1.5.5).
 //! A loaded library whose version string is not 1.5 is refused so a mismatched

@@ -38,7 +38,7 @@ pub fn sha256_hex_file(path: &Path) -> std::io::Result<String> {
         if n == 0 {
             break;
         }
-        hasher.update(&buffer[..n]);
+        hasher.update(buffer.get(..n).expect("index out of bounds"));
     }
     Ok(format!("{:x}", hasher.finalize()))
 }

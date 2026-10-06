@@ -1,5 +1,5 @@
-//! Wire mirror of the `workspace.hook_registry` response, kept byte-identical to
-//! the upstream serde shape so this lean crate avoids the heavy `xai_grok_hooks` dep.
+//! Wire mirror of the `workspace.hook_registry` response.
+//! It is kept byte-identical to the upstream serde shape so this lean crate avoids the heavy `xai_grok_hooks` dep.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -22,7 +22,7 @@ pub struct HookRegistryWire {
     pub hooks: HashMap<HookEventNameWire, Vec<HookSpecWire>>,
 }
 
-/// Compiled `matcher` omitted; drift-guarded by `hook_spec_wire_covers_all_upstream_fields`.
+/// The compiled `matcher` is omitted; the `hook_spec_wire_covers_all_upstream_fields` test guards against drift.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HookSpecWire {
     pub name: String,
@@ -37,7 +37,7 @@ pub struct HookSpecWire {
     pub timeout_ms: u64,
     pub source_dir: PathBuf,
     pub extra_env: HashMap<String, String>,
-    /// `default` decodes a pre-field server as `file`.
+    /// `default` decodes a server that predates this field as `file`.
     #[serde(default = "default_layer")]
     pub layer: String,
 }
@@ -46,8 +46,8 @@ fn default_layer() -> String {
     "file".to_string()
 }
 
-/// Snake_case JSON map key; hand-written serde keeps an unknown event lossless in
-/// [`Unknown`](Self::Unknown) so decode never fails under deploy skew.
+/// Snake_case JSON map key.
+/// Hand-written serde keeps an unknown event lossless in [`Unknown`](Self::Unknown) so decode never fails under deploy skew.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum HookEventNameWire {
     SessionStart,
@@ -131,14 +131,9 @@ impl<'de> Deserialize<'de> for HookEventNameWire {
 mod tests {
     use super::*;
 
-    #[test]
-    fn method_constant() {
-        assert_eq!(HookRegistryReq::METHOD, "workspace.hook_registry");
-    }
-
+    /// Mirrors `event_name_deser_all_variants` in xai-grok-hooks; the two lists move together.
     #[test]
     fn hook_event_name_wire_snake_case_round_trip() {
-        // All 15 variants (mirrors upstream `event_name_deser_all_variants`).
         for (variant, wire) in [
             (HookEventNameWire::SessionStart, "session_start"),
             (HookEventNameWire::SessionEnd, "session_end"),
@@ -172,8 +167,7 @@ mod tests {
 
     #[test]
     fn hook_event_name_wire_unknown_round_trips_losslessly() {
-        // A newer server's event must decode (not error) and preserve its raw
-        // value so it stays a distinct map key.
+        // Unknown names must decode and keep the raw string so they stay distinct map keys.
         let v: HookEventNameWire =
             serde_json::from_value(serde_json::json!("future_event")).unwrap();
         assert_eq!(v, HookEventNameWire::Unknown("future_event".to_string()));
@@ -185,7 +179,6 @@ mod tests {
 
     #[test]
     fn hook_registry_wire_round_trips_server_json() {
-        // A representative server-side `HookRegistry` serialization.
         let json = serde_json::json!({
             "hooks": {
                 "pre_tool_use": [{

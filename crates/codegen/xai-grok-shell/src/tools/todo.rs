@@ -1,7 +1,5 @@
-//! Todo types — re-exported from `xai-grok-tools` with ACP conversion helpers.
-//!
-//! Types are canonical in `xai-grok-tools`. This module adds ACP ↔ TodoItem
-//! conversions since `xai-grok-tools` is protocol-agnostic.
+//! Types are canonical in `xai-grok-tools`.
+//! This module adds conversions between ACP plan entries and `TodoItem` since `xai-grok-tools` is protocol-agnostic.
 
 pub use xai_grok_tools::implementations::grok_build::todo::TodoId;
 pub use xai_grok_tools::implementations::grok_build::todo::TodoItem;
@@ -18,16 +16,12 @@ pub use xai_grok_tools::implementations::grok_build::todo::{ClearedReason, Clear
 
 use agent_client_protocol as acp;
 
-/// Convert an ACP `PlanEntry` to a `TodoItem`.
-///
-/// Handles the cancelled state: ACP has no `Cancelled` status, so cancelled
-/// items are stored as `Completed` with `{"cancelled": true}` in meta.
+/// ACP has no `Cancelled` status, so cancelled items are stored as `Completed` with `{"cancelled": true}` in meta.
 pub fn todo_item_from_plan_entry(entry: acp::PlanEntry) -> TodoItem {
     let status = match entry.status {
         acp::PlanEntryStatus::Pending => TodoStatus::Pending,
         acp::PlanEntryStatus::InProgress => TodoStatus::InProgress,
         acp::PlanEntryStatus::Completed => {
-            // Check if this is actually a cancelled item
             if entry
                 .meta
                 .as_ref()
@@ -66,18 +60,8 @@ pub fn todo_item_from_plan_entry(entry: acp::PlanEntry) -> TodoItem {
     }
 }
 
-/// Convert a `TodoItem` to an ACP `PlanEntry`.
-///
 /// Cancelled items become `Completed` with `{"cancelled": true}` in meta.
-/// Prefer [`plan_entry_from_todo`] when the board id is known so the client
-/// can resolve `parentId` for leaf-only progress badges.
-pub fn plan_entry_from_todo_item(item: TodoItem) -> acp::PlanEntry {
-    plan_entry_from_todo(None, item)
-}
-
-/// Convert a board `(id, item)` to an ACP `PlanEntry`, stamping `meta.id`
-/// so the pager can exclude parents from point totals (same graph as the tool).
-pub fn plan_entry_from_todo(id: Option<&str>, item: TodoItem) -> acp::PlanEntry {
+pub(crate) fn plan_entry_from_todo_item(id: Option<&str>, item: TodoItem) -> acp::PlanEntry {
     let status = match item.status {
         TodoStatus::Pending => acp::PlanEntryStatus::Pending,
         TodoStatus::InProgress => acp::PlanEntryStatus::InProgress,

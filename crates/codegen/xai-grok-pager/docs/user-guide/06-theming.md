@@ -2,6 +2,8 @@
 
 Grok OSS (`grok-oss`) draws TUI colors from a central theme. You can switch themes while Grok OSS is running, follow your operating system's light or dark appearance, and adjust scrollback layout, animations, and block styling through configuration files.
 
+Operator: composer caret, Operator rails, and the Operator box use Operator green (`accent_user`). Agent activity stays magenta.
+
 The product default theme is **DOGE**, not GrokNight.
 
 ---
@@ -18,32 +20,24 @@ Grok OSS includes six built-in themes, plus an `auto` option that follows your s
 | **TokyoNight** | `tokyonight`, `tokyo-night`, `tokyo` | Dark, blue-tinted backgrounds from the Tokyo Night palette. Loses its character when quantized. | Yes |
 | **RosePineMoon** | `rosepine`, `rose-pine`, `rosepine-moon`, `rose-pine-moon` | Muted dark palette with mauve accents, from the Rosé Pine family. | Yes |
 | **OscuraMidnight** | `oscura`, `oscura-midnight` | Deep dark base with purple accents. | Yes |
+| **Terminal** | `terminal`, `terminal-default`, `transparent`, `native` | Your terminal's own colors: no background of its own, so the terminal canvas (translucency, background images) shows through. | No |
 
 Theme names are case-insensitive. The `auto` option (alias `system`) is documented under [Auto Theme (System Appearance)](#auto-theme-system-appearance).
 
-### DOGE (default)
+### Terminal Theme
 
-**DOGE** uses a pure-black background and only the eight classic ANSI primaries (channels `0` or `255`). Config name is `doge` only (case-insensitive).
+`terminal` paints no surface backgrounds and defines almost no colors of its own — everything comes from your terminal profile. The scrollback, composer, modals, and status line leave the terminal's canvas visible (a translucent or image-backed window shows through Grok the way it shows through your shell), body text uses the terminal's default foreground, and accents (errors, diffs, links, syntax) come from your profile's 16-color ANSI palette. Because it borrows your profile's colors instead of assuming a light or dark background, it stays readable on any profile with no appearance detection, and it renders identically at every color depth.
 
-On DOGE, Grok OSS uses these roles:
-
-| Colour | Role |
-|--------|------|
-| **Green** | Operator: composer caret, operator rails, success |
-| **Magenta** | Agent: running activity, tool spinner, model accent |
-| **Yellow** | Dates, timers, secondary context |
-| **Cyan** | System tags, included SuperGrok period limits, credits, paths |
-
-Do not confuse the composer caret (Operator green) with the lower-left activity throbber (agent magenta). Mid-draft letters under the caret use ordinary text colour on the empty blink half, not neon green ink on the letter.
-
-To switch back to the previous neutral dark default:
+The theme paints no backgrounds at all: your messages render in bold instead of on a band, menus and prompt panels sit directly on the terminal canvas, and the selected or hovered row in any menu uses reverse video (your terminal's own foreground/background swap), so every combination stays readable on any profile. Decoration — idle borders, dividers, the scrollbar thumb — uses ANSI *bright black* as a foreground, the palette slot your profile tunes as its own dimmed tone. Focused chrome, like the active composer border, stays at the full default foreground so focus still pops. Grok also leaves your cursor color alone on this theme (other themes recolor it to their accent).
 
 ```toml
 [ui]
-theme = "groknight"
+theme = "terminal"
 ```
 
-Or pick **GrokNight** in `/theme` or under Appearance in `/settings`.
+Contrast is only as good as your terminal profile: a profile with a very dark bright-black slot will render faint dividers, since Grok derives everything from your palette rather than hard-coding colors.
+
+The theme is rolling out gradually. Until the rollout reaches your account it is hidden from `/theme` and `/settings`, its names do not parse, and a configured `theme = "terminal"` falls back to the default theme. Set `GROK_TERMINAL_THEME=1` (or `[features] terminal_theme = true` in `config.toml`) to enable it locally ahead of the rollout.
 
 ### Minimal Mode Has No Theming
 
@@ -57,7 +51,7 @@ Syntax highlighting in minimal mode does **not** switch between light and dark t
 
 ### In the TUI
 
-Run the `/theme` slash command (alias `/t`) to open the theme picker. As you move through the list with the arrow keys, Grok previews each theme in real time. Press Enter to apply and save your choice, or press Escape to revert.
+Run the `/theme` slash command (alias `/t`) to open the theme picker. As you move through the list with the arrow keys, Grok previews each theme in real time. Press Enter to apply and save your choice, or press Escape to revert. Typing filters the list by any of a theme's config names, so `/theme transparent` narrows it to the Terminal row.
 
 To switch without the picker, pass a name directly:
 
@@ -107,7 +101,7 @@ auto_light_theme = "grokday"
 | **macOS** | Reads `AppleInterfaceStyle` system preference |
 | **Linux** | Queries XDG Desktop Portal (`org.freedesktop.appearance.color-scheme`) |
 | **Windows** | Reads the system personalization registry |
-| **SSH / tmux / headless** | `GROK_APPEARANCE` or `LC_GROK_APPEARANCE` (`dark`/`light`), then `COLORFGBG`, then a startup OSC 11 background query. `grok-oss wrap ssh ...` stamps `LC_GROK_APPEARANCE` from the local OS theme so it survives SSH into the login shell. New tmux sessions inherit it only if the tmux server/session was created with that env (or `update-environment` includes it). OSC 11 is DCS-wrapped for tmux ≥ 3.3 when tmux is the immediate terminal (not an editor `:terminal`); reaching the outer emulator also needs `allow-passthrough`, and replies are best-effort. |
+| **SSH / tmux / headless** | `GROK_APPEARANCE` or `LC_GROK_APPEARANCE` (`dark`/`light`), then `COLORFGBG`, then a startup OSC 11 background query. `grok-oss wrap ssh …` stamps `LC_GROK_APPEARANCE` from the local OS theme so it survives SSH into the login shell. New tmux sessions inherit it only if the tmux server/session was created with that env (or `update-environment` includes it). OSC 11 is DCS-wrapped for tmux ≥ 3.3 when tmux is the immediate terminal (not an editor `:terminal`); reaching the outer emulator also needs `allow-passthrough`, and replies are best-effort. |
 
 Once running, Grok polls desktop APIs and env hints every 5 seconds. Toggling your OS between light and dark mode on a local desktop takes effect within seconds without restarting. Over SSH the wrap-stamped env is fixed for that hop.
 
@@ -304,8 +298,8 @@ wave_rows = 32     # Rows per wave cycle for accent animation
 [scrollback.blocks.edit]
 indent = true                   # Indent diff content
 vpad = false                    # Vertical padding around diffs
-# expanded_by_default = true    # Unset: follows [ui] collapsed_edit_blocks in config.toml
-                                # (flag on = collapsed one-liner); uncomment to pin either shape
+# expanded_by_default = true    # Unset follows Collapsed edit blocks. When that setting is on,
+                                # edits start collapsed even if this line is true.
 hunk_separator = "…"            # Separator between hunks ("…", "───", "⋯", or "" for none)
 dual_line_numbers = false       # Two-column line numbers (old + new, like GitHub)
 # line_summary = false          # Show +N/-M in the collapsed header; unset follows the same flag
@@ -375,13 +369,6 @@ min_lines = 2          # Minimum content lines in truncated/sticky mode
 collapse_unfocused = true    # Collapse when scrollback is focused
 mouse_hover = true           # Show hover highlight on mouse over
 show_prefix = true           # Show the prompt prefix character
-```
-
-### Todo Badges
-
-```toml
-[todo]
-badge_format = "default"   # "default" = 2/5 (done/total), "colon" = [▶:1 □:4 ✓:3 ✗:2], "comma" = [1 ▶, 4 □, 3 ✓, 2 ✗]
 ```
 
 ### Terminal Behavior
