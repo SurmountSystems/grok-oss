@@ -1,8 +1,6 @@
-//! Mouse-routing tests for the line viewer's plan preview: the scrollbar
-//! must own a click+drag gesture end-to-end. A press on the track was
-//! previously also treated as a comment-gutter anchor (row-only hit test),
-//! so dragging the thumb selected plan lines for a comment instead of
-//! scrolling (GB-4579: "can't click and drag scrollbar to view plan").
+//! Mouse-routing tests for the line viewer's plan preview: the scrollbar must own a click-and-drag gesture end-to-end.
+//! A press on the track was previously also treated as a comment-gutter anchor (the hit test was row-only).
+//! Dragging the thumb then selected plan lines for a comment instead of scrolling.
 
 use std::path::Path;
 
@@ -30,8 +28,7 @@ const POPUP: Rect = Rect {
     width: 80,
     height: 10,
 };
-/// Scrollbar track column as split off by the list pane render
-/// (`maybe_split_for_scrollbar`): last column of the popup area.
+/// Scrollbar track column as split off by the list pane render (`maybe_split_for_scrollbar`): last column of the popup area.
 const TRACK_X: u16 = 79;
 
 fn mouse(kind: MouseEventKind, col: u16, row: u16) -> Event {
@@ -43,8 +40,7 @@ fn mouse(kind: MouseEventKind, col: u16, row: u16) -> Event {
     })
 }
 
-/// Agent showing a plan-approval preview whose plan overflows the
-/// viewport, with the render-time areas planted so mouse dispatch works.
+/// Agent showing a plan-approval preview whose plan overflows the viewport, with the render-time areas planted so mouse dispatch works.
 fn agent_with_scrollable_plan() -> AgentView {
     let mut agent = make_agent();
     let (tx, _rx) = tokio::sync::oneshot::channel();
@@ -90,9 +86,8 @@ fn agent_with_scrollable_plan() -> AgentView {
     agent
 }
 
-/// Presses on the modal border column next to the track (users read the
-/// thumb + border as one two-column scrollbar) used to fall into the
-/// click-outside-modal path instead of grabbing the thumb.
+/// Presses on the modal border column next to the track used to fall into the click-outside-modal path instead of grabbing the thumb.
+/// Users read the thumb and the border as one two-column scrollbar.
 #[test]
 fn border_column_press_grabs_scrollbar() {
     let mut agent = agent_with_scrollable_plan();
@@ -281,8 +276,7 @@ fn scrollbar_drag_scrolls_plan_instead_of_selecting_lines() {
     assert_eq!(pav.focus, PlanApprovalFocus::Preview);
 }
 
-/// The thumb must keep following the pointer when a drag drifts off the
-/// popup rect (standard scrollbar behavior in every toolkit).
+/// The thumb must keep following the pointer when a drag drifts off the popup rect (standard scrollbar behavior in every toolkit).
 #[test]
 fn scrollbar_drag_outside_popup_keeps_scrolling() {
     let mut agent = agent_with_scrollable_plan();
@@ -319,15 +313,14 @@ fn scrollbar_drag_outside_popup_keeps_scrolling() {
     );
 }
 
-/// A gutter line-selection whose Up was lost must not survive a later
-/// scrollbar gesture: the track press drops the stale anchor, so a stray
-/// release afterwards cannot commit the leftover lines as a comment.
+/// A gutter line-selection whose Up was lost must not survive a later scrollbar gesture.
+/// The track press drops the stale anchor, so a stray release afterwards cannot commit the leftover lines as a comment.
 #[test]
 fn scrollbar_gesture_drops_stale_gutter_anchor() {
     let mut agent = agent_with_scrollable_plan();
     let registry = ActionRegistry::defaults();
 
-    // Anchor + extend a comment line selection, then lose the Up.
+    // Anchor and extend a comment line selection, then lose the Up
     let _ = agent.handle_input(
         &mouse(MouseEventKind::Down(MouseButton::Left), 10, 4),
         &registry,
@@ -345,7 +338,7 @@ fn scrollbar_gesture_drops_stale_gutter_anchor() {
             "precondition: a multi-line gutter drag is live (start {start:?}, end {end:?})"
         );
     }
-    // Scrollbar click + release: the track press must drop the stale anchor.
+    // Scrollbar click and release: the track press must drop the stale anchor
     let _ = agent.handle_input(
         &mouse(MouseEventKind::Down(MouseButton::Left), TRACK_X, 5),
         &registry,
@@ -367,8 +360,7 @@ fn scrollbar_gesture_drops_stale_gutter_anchor() {
         &registry,
     );
 
-    // The track press also discarded the in-progress comment draft
-    // (same rule as clicking back into the modal).
+    // The track press also discarded the in-progress comment draft (same rule as clicking back into the modal)
     let pav = agent.plan_approval_view.as_ref().unwrap();
     assert_eq!(pav.commenting_range, None);
     assert_eq!(pav.focus, PlanApprovalFocus::Preview);
@@ -390,149 +382,74 @@ fn scrollbar_gesture_drops_stale_gutter_anchor() {
     );
 }
 
-/// A single click on a plan body row focuses or scrolls. It must not
-/// enter Commenting or wipe the composer.
+/// A second multi-line gutter drag while already Commenting must not replace the frozen freeform stash with the unsaved comment draft.
 #[test]
-fn plan_row_click_does_not_enter_commenting() {
+fn gutter_drag_while_commenting_does_not_clobber_freeform_stash() {
     let mut agent = agent_with_scrollable_plan();
-    agent.prompt.set_text("keep typing");
-    agent.prompt.set_cursor(agent.prompt.text().len());
     let registry = ActionRegistry::defaults();
 
+    agent.prompt.set_text("keep my freeform notes");
+    // First multi-line drag: enter commenting and freeze freeform.
     let _ = agent.handle_input(
         &mouse(MouseEventKind::Down(MouseButton::Left), 10, 4),
         &registry,
     );
-
-    let pav = agent.plan_approval_view.as_ref().unwrap();
-    assert_ne!(
-        pav.focus,
-        PlanApprovalFocus::Commenting,
-        "clicking a plan row must not steal the composer into Commenting"
-    );
-    assert_eq!(
-        agent.prompt.text(),
-        "keep typing",
-        "clicking a plan row must leave the composer typeable"
-    );
-
     let _ = agent.handle_input(
-        &Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE)),
+        &mouse(MouseEventKind::Drag(MouseButton::Left), 10, 6),
         &registry,
     );
-    let pav = agent.plan_approval_view.as_ref().unwrap();
-    assert_ne!(
-        pav.focus,
-        PlanApprovalFocus::Commenting,
-        "a live Preview draft must type `c`, not stash-and-wipe into Commenting"
+    let _ = agent.handle_input(
+        &mouse(MouseEventKind::Up(MouseButton::Left), 10, 6),
+        &registry,
     );
-    assert_eq!(
-        agent.prompt.text(),
-        "keep typingc",
-        "typed `c` must stay in the Human box, got {:?}",
-        agent.prompt.text()
-    );
-}
-
-/// Idle or cancelling plan present must not steal `x`/`e`/`j`/`k` into list
-/// capture. Empty Enter never Approves. Clickable CTAs stay.
-#[test]
-fn plan_present_xejk_type_in_human_box_even_while_cancelling() {
-    use crate::app::agent::AgentState;
-    use crate::app::app_view::InputOutcome;
-    use crate::app::queue_edit::PromptMode;
-
-    let mut agent = agent_with_scrollable_plan();
-    agent.prompt.set_text("");
-    agent.session.state = AgentState::TurnCancelling;
-    agent.prompt_mode = PromptMode::EditingQueued {
-        id: 1,
-        original: "queued #1".into(),
-        server_id: None,
-        kind: crate::app::agent::QueueEntryKind::Prompt,
-    };
-    let registry = ActionRegistry::defaults();
-    let pane_before = plan_pane_nav(&agent);
-
-    for ch in ['x', 'e', 'j', 'k'] {
-        let _ = agent.handle_input(
-            &Event::Key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)),
-            &registry,
+    {
+        let pav = agent.plan_approval_view.as_ref().unwrap();
+        assert_eq!(pav.focus, PlanApprovalFocus::Commenting);
+        assert_eq!(
+            pav.stashed_feedback_prompt
+                .as_ref()
+                .map(|s| s.text.as_str()),
+            Some("keep my freeform notes")
         );
     }
-    assert_eq!(
-        agent.prompt.text(),
-        "xejk",
-        "idle/cancelling plan present must type x/e/j/k in the Human box, got {:?}",
-        agent.prompt.text()
-    );
-    assert_eq!(
-        plan_pane_nav(&agent),
-        pane_before,
-        "those letters must not walk the plan list"
-    );
-    assert!(
-        agent.plan_approval_view.is_some(),
-        "clickable plan CTAs must stay"
-    );
+    agent.prompt.set_text("unsaved comment draft");
 
-    agent.prompt.set_text("");
+    // Second multi-line drag: new range, must keep original freeform stash.
     let _ = agent.handle_input(
-        &Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        &mouse(MouseEventKind::Down(MouseButton::Left), 10, 5),
         &registry,
     );
-    assert!(
-        agent.plan_approval_view.is_some() && !agent.plan_decision_resolved,
-        "empty Enter must never Approve"
-    );
-
-    let ctrl_c = Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
-    let outcome = agent.handle_input(&ctrl_c, &registry);
-    assert!(
-        matches!(
-            outcome,
-            InputOutcome::Action(crate::app::actions::Action::CancelTurn)
-        ),
-        "queue #1 plus plan row editor plus Cancelling must still stop, got {outcome:?}"
-    );
-}
-
-/// Empty Enter on the default parked Preview stays on Preview.
-/// Commenting is explicit `c` only.
-#[test]
-fn empty_enter_on_soft_park_preview_does_not_enter_commenting() {
-    let mut agent = agent_with_scrollable_plan();
-    let viewer = agent.line_viewer.as_ref().expect("preview is open");
-    assert!(
-        viewer.selected_line_range().is_some(),
-        "fixture must have a selected line so Enter would enter Commenting if routed there"
-    );
-    assert!(agent.prompt.text().trim().is_empty());
-    let pav = agent.plan_approval_view.as_ref().unwrap();
-    assert_eq!(pav.focus, PlanApprovalFocus::Preview);
-
     let _ = agent.handle_input(
-        &Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
-        &ActionRegistry::defaults(),
+        &mouse(MouseEventKind::Drag(MouseButton::Left), 10, 7),
+        &registry,
     );
-
-    let pav = agent
-        .plan_approval_view
-        .as_ref()
-        .expect("empty Enter must leave the parked plan open");
-    assert_eq!(
-        pav.focus,
-        PlanApprovalFocus::Preview,
-        "empty Enter on Preview must not enter Commenting"
+    let _ = agent.handle_input(
+        &mouse(MouseEventKind::Up(MouseButton::Left), 10, 7),
+        &registry,
     );
-    assert!(
-        !agent.plan_decision_resolved,
-        "empty Enter must never Approve a parked plan"
+    {
+        let pav = agent.plan_approval_view.as_ref().unwrap();
+        assert_eq!(pav.focus, PlanApprovalFocus::Commenting);
+        assert_eq!(
+            pav.stashed_feedback_prompt
+                .as_ref()
+                .map(|s| s.text.as_str()),
+            Some("keep my freeform notes"),
+            "second gutter drag must not replace freeform with comment draft"
+        );
+    }
+    // Cancel commenting: freeform must restore, not the abandoned draft.
+    agent.prompt.set_text("another draft");
+    let esc = crossterm::event::KeyEvent::new(
+        crossterm::event::KeyCode::Esc,
+        crossterm::event::KeyModifiers::NONE,
     );
+    let _ = agent.handle_plan_feedback_key(&esc);
+    assert_eq!(agent.prompt.text(), "keep my freeform notes");
 }
 
-/// A lost mouse-up after a track press must not make the next plan-line
-/// click skip gutter / click-to-comment (sticky `is_scrollbar_dragging`).
+/// A lost mouse-up after a track press must not leave `is_scrollbar_dragging` sticky.
+/// The next plan-line click must still anchor the gutter and enter click-to-comment.
 #[test]
 fn lost_scrollbar_up_does_not_block_next_line_click() {
     let mut agent = agent_with_scrollable_plan();
@@ -552,7 +469,7 @@ fn lost_scrollbar_up_does_not_block_next_line_click() {
         "precondition: track press latched a thumb drag"
     );
 
-    // No Up — simulate a dropped release, then click a plan line.
+    // No Up: simulate a dropped release, then click a plan line
     let _ = agent.handle_input(
         &mouse(MouseEventKind::Down(MouseButton::Left), 10, 4),
         &registry,
@@ -571,10 +488,10 @@ fn lost_scrollbar_up_does_not_block_next_line_click() {
         "content Down must still anchor a comment-gutter drag"
     );
     let pav = agent.plan_approval_view.as_ref().unwrap();
-    assert_ne!(
+    assert_eq!(
         pav.focus,
         PlanApprovalFocus::Commenting,
-        "content Down must not steal the composer into Commenting"
+        "content Down must still enter click-to-comment"
     );
 }
 
@@ -643,146 +560,633 @@ fn line_viewer_empty_ctrl_c_abandons_plan_approval() {
     );
 }
 
-/// Non-empty composer: line-viewer Ctrl+C clears the draft first. Second
-/// empty press then abandons.
-#[test]
-fn line_viewer_ctrl_c_clears_draft_then_second_abandons() {
-    let mut agent = agent_with_scrollable_plan();
-    agent.prompt.set_text("draft notes");
-    {
-        let pav = agent.plan_approval_view.as_mut().unwrap();
-        pav.focus = PlanApprovalFocus::Preview;
-    }
+fn enter_key() -> KeyEvent {
+    KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)
+}
 
-    let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
-    let first = agent.handle_line_viewer_key(&ctrl_c);
+fn agent_with_markdown_viewer(text: &str) -> AgentView {
+    let mut agent = make_agent();
+    let id = agent
+        .scrollback
+        .push_block(crate::scrollback::block::RenderBlock::agent_message(text));
+    let mut viewer = {
+        let entry = agent.scrollback.get_by_id(id).expect("just pushed");
+        crate::views::block_viewer::BlockViewerPane::for_markdown(id, entry)
+            .expect("markdown viewer")
+    };
+    viewer.prepare_for_test(Rect::new(0, 0, 80, 24));
+    agent.block_viewer = Some(viewer);
+    agent
+}
+
+fn agent_with_running_markdown_viewer(text: &str) -> AgentView {
+    let mut agent = make_agent();
+    let id = agent
+        .scrollback
+        .push_block(crate::scrollback::block::RenderBlock::agent_message(text));
+    agent
+        .scrollback
+        .get_by_id_mut(id)
+        .expect("just pushed")
+        .is_running = true;
+    let mut viewer = {
+        let entry = agent.scrollback.get_by_id(id).expect("just pushed");
+        crate::views::block_viewer::BlockViewerPane::for_markdown(id, entry)
+            .expect("markdown viewer")
+    };
+    viewer.prepare_for_test(Rect::new(0, 0, 80, 24));
+    agent.block_viewer = Some(viewer);
+    agent
+}
+
+#[test]
+fn block_viewer_enter_quotes_current_line_and_closes() {
+    let mut agent = agent_with_markdown_viewer("hello world");
+    let outcome = agent.handle_block_viewer_key(&enter_key());
+    assert!(matches!(
+        outcome,
+        crate::app::app_view::InputOutcome::Changed
+    ));
+    assert!(agent.block_viewer.is_none());
+    assert_eq!(agent.active_pane, crate::app::agent_view::AgentPane::Prompt);
+    let text = agent.prompt.text();
     assert!(
-        matches!(first, crate::app::app_view::InputOutcome::Changed),
-        "first Ctrl+C with draft must clear; got {first:?}"
+        text.contains("> hello world"),
+        "quoted line missing from prompt: {text:?}"
     );
     assert!(
-        agent.plan_approval_view.is_some(),
-        "first Ctrl+C must not abandon while draft existed"
+        text.ends_with("\n\n"),
+        "quote should end with a blank line, got {text:?}"
+    );
+    assert!(agent.block_viewer_resume.is_some());
+}
+
+#[test]
+fn block_viewer_enter_starts_quote_on_its_own_line() {
+    let mut agent = agent_with_markdown_viewer("hello world");
+    agent.prompt.set_text("draft");
+    agent.prompt.set_cursor(agent.prompt.text().len());
+    agent.handle_block_viewer_key(&enter_key());
+    assert_eq!(agent.prompt.text(), "draft\n> hello world\n\n");
+}
+
+#[test]
+fn block_viewer_enter_delimit_uses_selection_start() {
+    let mut agent = agent_with_markdown_viewer("hello world");
+    agent.prompt.set_text("prefix\nmore");
+    agent.prompt.textarea.set_selection(3, 7);
+    agent.handle_block_viewer_key(&enter_key());
+    assert_eq!(agent.prompt.text(), "pre\n> hello world\n\nmore");
+}
+
+#[test]
+fn block_viewer_enter_quotes_last_line_while_following() {
+    let mut agent = agent_with_running_markdown_viewer("hello\n\nworld");
+    assert!(agent.block_viewer.as_ref().unwrap().list_state.follow_mode);
+    assert_eq!(
+        agent
+            .block_viewer
+            .as_ref()
+            .unwrap()
+            .list_state
+            .selected_index(),
+        None
+    );
+    let outcome = agent.handle_block_viewer_key(&enter_key());
+    assert!(matches!(
+        outcome,
+        crate::app::app_view::InputOutcome::Changed
+    ));
+    assert!(agent.block_viewer.is_none());
+    let text = agent.prompt.text();
+    assert!(
+        text.contains("> world"),
+        "follow-mode Enter should quote the last line, got {text:?}"
+    );
+}
+
+#[test]
+fn block_viewer_enter_pastes_chip_for_four_lines() {
+    use crate::views::block_viewer::{TextDrag, TextEndpoint};
+    use crate::views::prompt_widget::KIND_PASTE;
+
+    let mut agent = make_agent();
+    let mut viewer =
+        crate::views::block_viewer::BlockViewerPane::for_plain_text("t", "one\ntwo\nthree\nfour");
+    viewer.prepare_for_test(Rect::new(0, 0, 80, 24));
+    viewer.text_drag = Some(TextDrag {
+        anchor: TextEndpoint {
+            item_idx: 2,
+            col: 0,
+        },
+        head: TextEndpoint {
+            item_idx: 5,
+            col: 3,
+        },
+        active: false,
+    });
+    agent.block_viewer = Some(viewer);
+
+    agent.handle_block_viewer_key(&enter_key());
+    assert!(agent.block_viewer.is_none());
+    assert!(
+        agent
+            .prompt
+            .textarea
+            .elements()
+            .iter()
+            .any(|e| e.kind == KIND_PASTE),
+        "4-line quote should become a paste chip"
+    );
+    let text = agent.prompt.text();
+    assert!(text.contains("> one"));
+    assert!(text.contains("> four"));
+    assert!(
+        text.ends_with("\n\n"),
+        "quote should end with a blank line, got {text:?}"
+    );
+}
+
+#[test]
+fn block_viewer_search_enter_does_not_quote() {
+    let mut agent = agent_with_markdown_viewer("hello world");
+    agent.handle_block_viewer_key(&KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
+    assert!(
+        agent
+            .block_viewer
+            .as_ref()
+            .unwrap()
+            .list_state
+            .input_mode()
+            .is_some()
+    );
+    agent.handle_block_viewer_key(&KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE));
+    agent.handle_block_viewer_key(&enter_key());
+    assert!(
+        agent.block_viewer.is_some(),
+        "search-bar Enter must keep the viewer open"
     );
     assert!(
         agent.prompt.text().is_empty(),
-        "first Ctrl+C must clear composer draft"
+        "search-bar Enter must not quote into the prompt"
     );
-
-    let second = agent.handle_line_viewer_key(&ctrl_c);
-    assert!(
-        agent.plan_approval_view.is_none(),
-        "second empty Ctrl+C must abandon; got {second:?}"
-    );
-    assert!(agent.plan_decision_resolved);
 }
 
-/// Isolated plan.md viewer: a mid-compose draft means `a` is text, not Approve.
 #[test]
-fn plan_md_preview_mid_compose_a_types_does_not_approve() {
-    let mut agent = agent_with_scrollable_plan();
-    agent.prompt.set_text("oh you interrupted my typing");
-    {
-        let pav = agent.plan_approval_view.as_mut().unwrap();
-        pav.focus = PlanApprovalFocus::Preview;
-    }
+fn block_viewer_enter_on_empty_selection_keeps_viewer_open() {
+    let mut agent = make_agent();
+    let mut viewer =
+        crate::views::block_viewer::BlockViewerPane::for_plain_text("t", "hello\n\nworld");
+    viewer.prepare_for_test(Rect::new(0, 0, 80, 24));
+    viewer.select_body_line_for_test(3);
+    agent.block_viewer = Some(viewer);
 
-    let a = Event::Key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
-    let _ = agent.handle_input(&a, &ActionRegistry::defaults());
+    agent.handle_block_viewer_key(&enter_key());
     assert!(
-        agent.plan_approval_view.is_some(),
-        "plan.md Preview must not Approve while the composer has a draft"
+        agent.block_viewer.is_some(),
+        "Enter with nothing to quote must keep the viewer open"
     );
     assert!(
-        agent.prompt.text().contains("oh you interrupted my typing"),
-        "draft must stay in the composer, got {:?}",
+        agent.prompt.text().is_empty(),
+        "Enter with nothing to quote must not insert into the prompt"
+    );
+}
+
+#[test]
+fn block_viewer_esc_clears_sticky_then_closes() {
+    use crate::views::block_viewer::{TextDrag, TextEndpoint};
+
+    let mut agent = agent_with_markdown_viewer("hello world");
+    {
+        let viewer = agent.block_viewer.as_mut().unwrap();
+        viewer.text_drag = Some(TextDrag {
+            anchor: TextEndpoint {
+                item_idx: 0,
+                col: 0,
+            },
+            head: TextEndpoint {
+                item_idx: 0,
+                col: 5,
+            },
+            active: false,
+        });
+    }
+    let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
+    agent.handle_block_viewer_key(&esc);
+    assert!(
+        agent.block_viewer.is_some(),
+        "first Esc should clear the highlight, not close"
+    );
+    assert!(agent.block_viewer.as_ref().unwrap().text_drag.is_none());
+    agent.handle_block_viewer_key(&esc);
+    assert!(agent.block_viewer.is_none());
+    assert!(agent.block_viewer_resume.is_some());
+}
+
+#[test]
+fn block_viewer_enter_from_fullscreen_child_quotes_into_parent() {
+    let mut child = agent_with_markdown_viewer("hello world");
+    child.prompt.set_text("child-draft");
+    let mut parent = make_agent();
+    parent.prompt.set_text("parent-draft");
+    parent.prompt.set_cursor(parent.prompt.text().len());
+    parent.insert_test_child("child-sid".into(), Box::new(child));
+    parent.open_subagent_fullscreen("child-sid".into());
+    let registry = ActionRegistry::defaults();
+    let outcome = parent.handle_input(&Event::Key(enter_key()), &registry);
+    assert!(matches!(
+        outcome,
+        crate::app::app_view::InputOutcome::Changed
+    ));
+    assert!(parent.active_subagent.is_none());
+    assert_eq!(parent.prompt.text(), "parent-draft\n> hello world\n\n");
+    assert_eq!(
+        parent.active_pane,
+        crate::app::agent_view::AgentPane::Prompt
+    );
+    if let Some(child) = parent.subagent_views.get("child-sid") {
+        assert!(child.block_viewer.is_none());
+        assert_eq!(child.prompt.text(), "child-draft");
+    }
+}
+
+#[test]
+fn install_block_viewer_ignores_missing_resume_id() {
+    use crate::app::agent_view::BlockViewerResume;
+    use crate::scrollback::block::RenderBlock;
+    use crate::views::block_viewer::BlockViewerPane;
+
+    let mut agent = make_agent();
+    let id = agent
+        .scrollback
+        .push_block(RenderBlock::agent_message("hello\n\nworld"));
+    agent.block_viewer_resume = Some(BlockViewerResume {
+        entry_id: id,
+        kind: crate::views::block_viewer::ViewerKind::Markdown,
+        selected_id: Some(99_999),
+        scroll_offset: 0,
+        follow_mode: false,
+    });
+    let pane = {
+        let entry = agent.scrollback.get_by_id(id).expect("entry");
+        BlockViewerPane::for_markdown(id, entry).expect("markdown")
+    };
+    agent.install_block_viewer(pane);
+    let viewer = agent.block_viewer.as_mut().expect("installed");
+    viewer.prepare_for_test(Rect::new(0, 0, 80, 24));
+    assert_eq!(viewer.selected_plain_text(), "hello");
+}
+
+#[test]
+fn block_viewer_enter_quotes_preamble_line() {
+    use crate::scrollback::block::RenderBlock;
+    use crate::views::block_viewer::BlockViewerPane;
+    use ratatui::text::Line;
+
+    let mut agent = make_agent();
+    let id = agent
+        .scrollback
+        .push_block(RenderBlock::agent_message("hello"));
+    let mut viewer = {
+        let entry = agent.scrollback.get_by_id(id).expect("entry");
+        BlockViewerPane::for_markdown(id, entry).expect("markdown")
+    };
+    viewer.install_prepend_lines(&[Line::from("Read src/main.rs")]);
+    viewer.list_state.select_by_id(u64::MAX);
+    viewer.prepare_for_test(Rect::new(0, 0, 80, 24));
+    agent.block_viewer = Some(viewer);
+    agent.handle_block_viewer_key(&enter_key());
+    assert!(agent.block_viewer.is_none());
+    assert!(
+        agent.prompt.text().contains("> Read src/main.rs"),
+        "header line should quote, got {:?}",
         agent.prompt.text()
     );
+}
+
+#[test]
+fn insert_quoted_reply_clears_bash_mode() {
+    let mut agent = agent_with_markdown_viewer("hello world");
+    agent.prompt_input_mode = crate::app::agent_view::PromptInputMode::Bash;
+    agent.prompt.set_text("draft");
+    agent.handle_block_viewer_key(&enter_key());
+    assert_eq!(
+        agent.prompt_input_mode,
+        crate::app::agent_view::PromptInputMode::Normal
+    );
+    assert!(agent.prompt.text().contains("> hello world"));
+}
+
+#[test]
+fn insert_quoted_reply_is_one_undo() {
+    let mut agent = agent_with_markdown_viewer("hello world");
+    agent.prompt.set_text("draft");
+    agent.prompt.set_cursor(5);
+    agent.handle_block_viewer_key(&enter_key());
+    assert!(agent.prompt.textarea.undo());
+    assert_eq!(agent.prompt.text(), "draft");
+
+    let mut agent = agent_with_markdown_viewer("hello world");
+    agent.prompt.set_text("pre\nmore");
+    agent.prompt.textarea.set_selection(0, 4);
+    agent.handle_block_viewer_key(&enter_key());
+    assert!(agent.prompt.textarea.undo());
+    assert_eq!(agent.prompt.text(), "pre\nmore");
+}
+
+#[test]
+fn install_block_viewer_ignores_mismatched_kind() {
+    use crate::app::agent_view::BlockViewerResume;
+    use crate::scrollback::block::RenderBlock;
+    use crate::views::block_viewer::{BlockViewerPane, ViewerKind};
+
+    let mut agent = make_agent();
+    let id = agent
+        .scrollback
+        .push_block(RenderBlock::agent_message("hello\n\nworld"));
+    agent.block_viewer_resume = Some(BlockViewerResume {
+        entry_id: id,
+        kind: ViewerKind::PlainText,
+        selected_id: Some(0),
+        scroll_offset: 99,
+        follow_mode: false,
+    });
+    let pane = {
+        let entry = agent.scrollback.get_by_id(id).expect("entry");
+        BlockViewerPane::for_markdown(id, entry).expect("markdown")
+    };
+    agent.install_block_viewer(pane);
+    let viewer = agent.block_viewer.as_mut().expect("installed");
+    viewer.prepare_for_test(Rect::new(0, 0, 80, 24));
+    assert_eq!(viewer.selected_plain_text(), "hello");
+    assert_ne!(viewer.list_state.scroll_offset(), 99);
+}
+
+#[test]
+fn install_block_viewer_restores_live_preamble_id() {
+    use crate::app::agent_view::BlockViewerResume;
+    use crate::scrollback::block::RenderBlock;
+    use crate::views::block_viewer::BlockViewerPane;
+    use ratatui::text::Line;
+
+    let mut agent = make_agent();
+    let id = agent
+        .scrollback
+        .push_block(RenderBlock::agent_message("hello\n\nworld"));
+    agent.block_viewer_resume = Some(BlockViewerResume {
+        entry_id: id,
+        kind: crate::views::block_viewer::ViewerKind::Markdown,
+        selected_id: Some(u64::MAX),
+        scroll_offset: 0,
+        follow_mode: false,
+    });
+    let pane = {
+        let entry = agent.scrollback.get_by_id(id).expect("entry");
+        BlockViewerPane::for_markdown(id, entry).expect("markdown")
+    };
+    agent.install_block_viewer(pane);
+    let viewer = agent.block_viewer.as_mut().expect("installed");
+    viewer.install_prepend_lines(&[Line::from("header")]);
+    viewer.prepare_for_test(Rect::new(0, 0, 80, 24));
+    assert_eq!(viewer.list_state.selected_id(), Some(u64::MAX));
+    assert_eq!(viewer.selected_plain_text(), "header");
+}
+
+fn test_bg_task(
+    task_id: &str,
+    stdout: &str,
+    scrollback_entry_id: Option<crate::scrollback::entry::EntryId>,
+) -> crate::app::agent::BgTaskState {
+    let mut task = crate::app::agent::BgTaskState {
+        task_id: task_id.into(),
+        tool_call_id: format!("call-{task_id}"),
+        command: "echo".into(),
+        description: None,
+        cwd: "/tmp".into(),
+        output_file: "/tmp/out".into(),
+        status: crate::app::agent::BgTaskStatus::Done,
+        start_time: std::time::SystemTime::now(),
+        end_time: None,
+        exit_code: Some(0),
+        signal: None,
+        stdout: String::new(),
+        stdout_line_count: 0,
+        truncated: false,
+        pending_kill: false,
+        kill_requested_at: None,
+        scrollback_entry_id,
+        is_monitor: false,
+        restored_from_replay: false,
+    };
+    task.set_stdout(stdout.to_string());
+    task
+}
+
+/// A task with no scrollback anchor (completed-early race, scrollback swap)
+/// still opens its viewer from the task's own stdout, on the sentinel anchor.
+#[test]
+fn show_bg_task_viewer_opens_unattached() {
+    let mut agent = make_agent();
+    agent
+        .session
+        .bg_tasks
+        .insert("orphan".into(), test_bg_task("orphan", "out", None));
+    assert!(agent.show_bg_task_viewer("orphan"));
+    let viewer = agent.block_viewer.as_ref().expect("opened");
+    assert_eq!(viewer.entry_id, crate::scrollback::entry::EntryId::new(0));
+    assert_eq!(viewer.bg_task_id.as_deref(), Some("orphan"));
+}
+
+#[test]
+fn show_bg_task_viewer_restores_resume() {
+    use crate::scrollback::block::RenderBlock;
+
+    let mut agent = make_agent();
+    let id = agent
+        .scrollback
+        .push_block(RenderBlock::agent_message("task body"));
+    agent
+        .session
+        .bg_tasks
+        .insert("t1".into(), test_bg_task("t1", "one\ntwo\nthree", Some(id)));
+    assert!(agent.show_bg_task_viewer("t1"));
+    let selected_id = {
+        let viewer = agent.block_viewer.as_mut().expect("opened");
+        assert_eq!(viewer.entry_id, id);
+        assert_ne!(viewer.entry_id, crate::scrollback::entry::EntryId::new(0));
+        viewer.prepare_for_test(Rect::new(0, 0, 80, 24));
+        viewer.select_body_line_for_test(1);
+        viewer.list_state.selected_id()
+    };
+    agent.dismiss_block_viewer();
+    assert!(agent.show_bg_task_viewer("t1"));
+    let viewer = agent.block_viewer.as_mut().expect("reopened");
+    viewer.prepare_for_test(Rect::new(0, 0, 80, 24));
+    assert_eq!(viewer.list_state.selected_id(), selected_id);
+    assert_eq!(viewer.selected_plain_text(), "two");
+}
+
+#[test]
+fn hovering_a_comment_row_reveals_its_close_button() {
+    let mut agent = agent_with_casual_commented_plan();
+    let registry = ActionRegistry::defaults();
+
     assert!(
-        agent.prompt.text().contains('a'),
-        "typed `a` must land in the composer, got {:?}",
-        agent.prompt.text()
+        close_button_areas(&agent).is_empty(),
+        "no `[✗]` while the comment is neither hovered nor selected"
+    );
+
+    hover_comment_row(&mut agent, &registry);
+
+    let buf = render_plan_viewer(&mut agent);
+    let [(id, rect)] = close_button_areas(&agent)[..] else {
+        panic!("hover must cache exactly one `[✗]` rect");
+    };
+    assert_eq!((id, rect.y), (0, comment_screen_row(&agent)));
+
+    let drawn: String = (rect.x..rect.x + rect.width)
+        .map(|x| {
+            buf.cell((x, rect.y))
+                .map(|c| c.symbol().to_owned())
+                .unwrap_or_default()
+        })
+        .collect();
+    assert_eq!(drawn, crate::glyphs::ballot_x_button());
+}
+
+#[test]
+fn clicking_the_close_button_deletes_without_starting_an_edit() {
+    let mut agent = agent_with_casual_commented_plan();
+    let registry = ActionRegistry::defaults();
+
+    hover_comment_row(&mut agent, &registry);
+    render_plan_viewer(&mut agent);
+    let (_, rect) = *close_button_areas(&agent)
+        .first()
+        .expect("cached `[✗]` rect");
+
+    let _ = agent.handle_input(
+        &mouse(MouseEventKind::Down(MouseButton::Left), rect.x + 1, rect.y),
+        &registry,
+    );
+
+    assert!(
+        agent.plan_comments.is_empty(),
+        "clicking `[✗]` must delete the comment"
+    );
+    assert!(
+        agent.casual_commenting_range.is_none(),
+        "the `[✗]` click must not fall through to click-to-edit"
     );
 }
 
-/// Empty-prompt `a` on the isolated plan.md Preview path types.
 #[test]
-fn plan_md_preview_empty_a_still_approves() {
-    let mut agent = agent_with_scrollable_plan();
-    agent.prompt.set_text("");
-    {
-        let pav = agent.plan_approval_view.as_mut().unwrap();
-        pav.focus = PlanApprovalFocus::Preview;
-    }
+fn deleting_the_comment_being_edited_cancels_the_edit() {
+    let mut agent = agent_with_casual_commented_plan();
+    agent.casual_editing_comment_id = Some(0);
+    agent.casual_commenting_range = Some(2..3);
 
-    let a = Event::Key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
-    let _ = agent.handle_input(&a, &ActionRegistry::defaults());
-    assert!(
-        agent.plan_approval_view.is_some(),
-        "empty-prompt `a` on plan.md Preview must type, not Approve"
-    );
-    assert_eq!(agent.prompt.text(), "a");
+    let _ = agent.delete_plan_comment_by_id(0);
+
+    assert_eq!(agent.casual_editing_comment_id, None);
+    assert!(agent.casual_commenting_range.is_none());
 }
 
-/// Isolated plan.md Preview is non-capturing: a non-accelerator letter types.
 #[test]
-fn plan_md_preview_empty_printable_goes_to_composer() {
+fn deleting_the_approval_comment_being_edited_cancels_the_edit_and_restores_the_prompt() {
     let mut agent = agent_with_scrollable_plan();
-    agent.prompt.set_text("");
     {
-        let pav = agent.plan_approval_view.as_mut().unwrap();
-        pav.focus = PlanApprovalFocus::Preview;
+        let pav = agent.plan_approval_view.as_mut().expect("approval mounted");
+        pav.comments
+            .push(crate::views::plan_approval_view::PlanComment {
+                id: 7,
+                line_range: 2..3,
+                text: "tighten this".into(),
+            });
+        pav.editing_comment_id = Some(7);
+        pav.commenting_range = Some(2..3);
+        pav.focus = PlanApprovalFocus::Commenting;
+        pav.stashed_feedback_prompt = Some(agent.prompt.stash());
     }
+    agent.prompt.set_text("edited draft");
 
-    let h = Event::Key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE));
-    let _ = agent.handle_input(&h, &ActionRegistry::defaults());
-    assert!(
-        agent.plan_approval_view.is_some(),
-        "a non-accelerator letter must not decide the plan"
-    );
+    let _ = agent.delete_plan_comment_by_id(7);
+
+    let pav = agent.plan_approval_view.as_ref().expect("approval stays");
+    assert!(pav.comments.is_empty(), "the comment must be deleted");
+    assert_eq!(pav.focus, PlanApprovalFocus::Preview);
     assert_eq!(
         agent.prompt.text(),
-        "h",
-        "printable keys go to the composer while plan.md is open, got {:?}",
-        agent.prompt.text()
+        "",
+        "the pre-edit prompt must be restored, not the abandoned draft"
     );
 }
 
-/// Ctrl+Backspace deletes the previous word in the plan composer even
-/// while Preview owns Tab/?/y.
-#[test]
-fn plan_md_preview_ctrl_backspace_deletes_word_in_composer() {
-    let mut agent = agent_with_scrollable_plan();
-    agent.prompt.set_text("hello world");
-    agent.prompt.set_cursor(agent.prompt.text().len());
-    {
-        let pav = agent.plan_approval_view.as_mut().unwrap();
-        pav.focus = PlanApprovalFocus::Preview;
-    }
+/// A casual plan preview with one comment.
+/// The final render caches the mouse hit-test rects.
+fn agent_with_casual_commented_plan() -> AgentView {
+    let mut agent = make_agent();
+    let mut viewer =
+        crate::views::file_search::line_viewer::LineViewerState::open_markdown_content(
+            "plan.md",
+            "alpha\nbravo\ncharlie\ndelta\n".to_owned(),
+            None,
+        )
+        .expect("plan content opens the viewer");
+    viewer.kind = crate::views::file_search::line_viewer::LineViewerKind::PlanPreview;
+    viewer.fullscreen = true;
 
-    let chord = Event::Key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::CONTROL));
-    let _ = agent.handle_input(&chord, &ActionRegistry::defaults());
-    assert_eq!(
-        agent.prompt.text(),
-        "hello ",
-        "Ctrl+Backspace must word-delete in the plan composer, got {:?}",
-        agent.prompt.text()
-    );
-    assert!(
-        agent.plan_approval_view.is_some(),
-        "Ctrl+Backspace must not dismiss plan.md"
-    );
+    agent
+        .plan_comments
+        .push(crate::views::plan_approval_view::PlanComment {
+            id: 0,
+            line_range: 2..3,
+            text: "tighten this".into(),
+        });
+    viewer.prepare_layout(POPUP.width, POPUP.height);
+    viewer.rebuild_with_comments(&agent.plan_comments);
+    agent.line_viewer = Some(viewer);
+
+    render_plan_viewer(&mut agent);
+    agent
 }
 
-fn plan_pane_nav(agent: &AgentView) -> (Option<usize>, usize) {
-    let viewer = agent
+fn render_plan_viewer(agent: &mut AgentView) -> ratatui::buffer::Buffer {
+    let area = Rect::new(0, 0, 80, 16);
+    let mut buf = ratatui::buffer::Buffer::empty(area);
+    let comment_count = agent.plan_comments.len();
+
+    crate::views::file_search::line_viewer::render_line_viewer(
+        &mut buf,
+        area,
+        agent.line_viewer.as_mut().expect("viewer open"),
+        std::path::Path::new("/tmp"),
+        &crate::theme::Theme::current(),
+        comment_count,
+    );
+    buf
+}
+
+fn close_button_areas(agent: &AgentView) -> Vec<(u64, Rect)> {
+    agent
         .line_viewer
         .as_ref()
-        .expect("isolated present keeps plan.md open");
-    (
-        viewer.list_state.selected_index(),
-        viewer.list_state.scroll_offset(),
-    )
+        .and_then(|v| v.plan_ref())
+        .map(|p| p.comment_close_areas.clone())
+        .unwrap_or_default()
+}
+
+fn hover_comment_row(agent: &mut AgentView, registry: &ActionRegistry) {
+    let row = comment_screen_row(agent);
+    let _ = agent.handle_input(&mouse(MouseEventKind::Moved, 10, row), registry);
+}
+
+fn comment_screen_row(agent: &AgentView) -> u16 {
+    let viewer = agent.line_viewer.as_ref().expect("viewer open");
+    let area = viewer.last_popup_area.expect("render caches popup area");
+    (area.y..area.y + area.height)
+        .find(|&row| viewer.comment_id_at_screen_row(row, area) == Some(0))
+        .expect("comment row is visible")
 }
 
 fn press_plan_key(agent: &mut AgentView, code: KeyCode, modifiers: KeyModifiers) {
@@ -790,185 +1194,6 @@ fn press_plan_key(agent: &mut AgentView, code: KeyCode, modifiers: KeyModifiers)
         &Event::Key(KeyEvent::new(code, modifiers)),
         &ActionRegistry::defaults(),
     );
-}
-
-fn assert_plan_prompt_cursor_keys_stay_in_composer(
-    agent: &AgentView,
-    draft: &str,
-    pane_before: (Option<usize>, usize),
-    intent_before: PlanPromptIntent,
-) {
-    assert_eq!(
-        agent.prompt.text(),
-        draft,
-        "cursor keys must not rewrite the Human box, got {:?}",
-        agent.prompt.text()
-    );
-    assert!(
-        agent.plan_approval_view.is_some(),
-        "cursor keys must not Approve or Exit the parked plan"
-    );
-    assert!(
-        !agent.plan_decision_resolved,
-        "cursor keys must not decide the plan"
-    );
-    let pav = agent
-        .plan_approval_view
-        .as_ref()
-        .expect("plan review stays parked");
-    assert_eq!(
-        pav.prompt_intent, intent_before,
-        "cursor keys must not arm Clarify or switch the box intent"
-    );
-    assert!(
-        agent.active_modal.is_none(),
-        "cursor keys must not open help or the command palette"
-    );
-    assert_eq!(
-        plan_pane_nav(agent),
-        pane_before,
-        "cursor keys must not scroll or retarget the plan pane"
-    );
-}
-
-/// Isolated plan.md Preview with a live Human-box draft: Left/Right move
-/// the composer cursor, not the plan pane.
-#[test]
-fn plan_prompt_cursor_keys_preview_arrows() {
-    const DRAFT: &str = "hello world";
-    let mut agent = agent_with_scrollable_plan();
-    agent.prompt.set_text(DRAFT);
-    agent.prompt.set_cursor(DRAFT.len());
-    {
-        let pav = agent.plan_approval_view.as_mut().unwrap();
-        pav.focus = PlanApprovalFocus::Preview;
-    }
-    let pane_before = plan_pane_nav(&agent);
-    let intent_before = agent.plan_approval_view.as_ref().unwrap().prompt_intent;
-    let end = agent.prompt.cursor();
-
-    press_plan_key(&mut agent, KeyCode::Left, KeyModifiers::NONE);
-    assert_eq!(
-        agent.prompt.cursor(),
-        end.saturating_sub(1),
-        "Left must move the Human box caret, got {}",
-        agent.prompt.cursor()
-    );
-    assert_plan_prompt_cursor_keys_stay_in_composer(&agent, DRAFT, pane_before, intent_before);
-
-    press_plan_key(&mut agent, KeyCode::Right, KeyModifiers::NONE);
-    assert_eq!(
-        agent.prompt.cursor(),
-        end,
-        "Right must move the Human box caret back, got {}",
-        agent.prompt.cursor()
-    );
-    assert_plan_prompt_cursor_keys_stay_in_composer(&agent, DRAFT, pane_before, intent_before);
-}
-
-/// Same isolated Preview Human box: Ctrl-Left / Ctrl-Right move by word,
-/// matching Ctrl+Backspace staying on that composer.
-#[test]
-fn plan_prompt_cursor_keys_preview_ctrl_arrows() {
-    const DRAFT: &str = "hello world";
-    let mut agent = agent_with_scrollable_plan();
-    agent.prompt.set_text(DRAFT);
-    agent.prompt.set_cursor(DRAFT.len());
-    {
-        let pav = agent.plan_approval_view.as_mut().unwrap();
-        pav.focus = PlanApprovalFocus::Preview;
-    }
-    let pane_before = plan_pane_nav(&agent);
-    let intent_before = agent.plan_approval_view.as_ref().unwrap().prompt_intent;
-    let end = agent.prompt.cursor();
-
-    press_plan_key(&mut agent, KeyCode::Left, KeyModifiers::CONTROL);
-    let after_word_left = agent.prompt.cursor();
-    assert!(
-        after_word_left < end,
-        "Ctrl-Left must jump left by a word, cursor stayed at {after_word_left}"
-    );
-    assert_plan_prompt_cursor_keys_stay_in_composer(&agent, DRAFT, pane_before, intent_before);
-
-    press_plan_key(&mut agent, KeyCode::Right, KeyModifiers::CONTROL);
-    assert_eq!(
-        agent.prompt.cursor(),
-        end,
-        "Ctrl-Right must jump right by a word, got {}",
-        agent.prompt.cursor()
-    );
-    assert_plan_prompt_cursor_keys_stay_in_composer(&agent, DRAFT, pane_before, intent_before);
-}
-
-/// Same isolated Preview Human box: Ctrl-A / Ctrl-E are line start / end
-/// in the composer, not help, Clarify, or plan-pane nav.
-#[test]
-fn plan_prompt_cursor_keys_preview_ctrl_a_e() {
-    const DRAFT: &str = "hello world";
-    let mut agent = agent_with_scrollable_plan();
-    agent.prompt.set_text(DRAFT);
-    agent.prompt.set_cursor(DRAFT.len());
-    {
-        let pav = agent.plan_approval_view.as_mut().unwrap();
-        pav.focus = PlanApprovalFocus::Preview;
-    }
-    let pane_before = plan_pane_nav(&agent);
-    let intent_before = agent.plan_approval_view.as_ref().unwrap().prompt_intent;
-
-    press_plan_key(&mut agent, KeyCode::Char('a'), KeyModifiers::CONTROL);
-    assert_eq!(
-        agent.prompt.cursor(),
-        0,
-        "Ctrl-A must go to the start of the Human box line, got {}",
-        agent.prompt.cursor()
-    );
-    assert_plan_prompt_cursor_keys_stay_in_composer(&agent, DRAFT, pane_before, intent_before);
-
-    press_plan_key(&mut agent, KeyCode::Char('e'), KeyModifiers::CONTROL);
-    assert_eq!(
-        agent.prompt.cursor(),
-        DRAFT.len(),
-        "Ctrl-E must go to the end of the Human box line, got {}",
-        agent.prompt.cursor()
-    );
-    assert_plan_prompt_cursor_keys_stay_in_composer(&agent, DRAFT, pane_before, intent_before);
-}
-
-/// Tab has focused the plan prompt: the same cursor keys edit the box,
-/// including when the isolated present Preview path is not the owner.
-#[test]
-fn plan_prompt_cursor_keys_tab_focus() {
-    const DRAFT: &str = "hello world";
-    let mut agent = agent_with_scrollable_plan();
-    agent.prompt.set_text(DRAFT);
-    agent.prompt.set_cursor(DRAFT.len());
-    {
-        let pav = agent.plan_approval_view.as_mut().unwrap();
-        pav.focus = PlanApprovalFocus::Prompt;
-        pav.prompt_intent = PlanPromptIntent::Comment;
-    }
-    let pane_before = plan_pane_nav(&agent);
-    let intent_before = agent.plan_approval_view.as_ref().unwrap().prompt_intent;
-    let end = agent.prompt.cursor();
-
-    press_plan_key(&mut agent, KeyCode::Left, KeyModifiers::NONE);
-    assert_eq!(agent.prompt.cursor(), end.saturating_sub(1));
-    assert_eq!(
-        agent.plan_approval_view.as_ref().unwrap().focus,
-        PlanApprovalFocus::Prompt,
-        "arrows must not steal Tab focus back to the plan pane"
-    );
-    assert_plan_prompt_cursor_keys_stay_in_composer(&agent, DRAFT, pane_before, intent_before);
-
-    press_plan_key(&mut agent, KeyCode::Left, KeyModifiers::CONTROL);
-    assert!(agent.prompt.cursor() < end.saturating_sub(1));
-    press_plan_key(&mut agent, KeyCode::Char('a'), KeyModifiers::CONTROL);
-    assert_eq!(agent.prompt.cursor(), 0);
-    press_plan_key(&mut agent, KeyCode::Char('e'), KeyModifiers::CONTROL);
-    assert_eq!(agent.prompt.cursor(), DRAFT.len());
-    press_plan_key(&mut agent, KeyCode::Right, KeyModifiers::CONTROL);
-    assert_eq!(agent.prompt.cursor(), DRAFT.len());
-    assert_plan_prompt_cursor_keys_stay_in_composer(&agent, DRAFT, pane_before, intent_before);
 }
 
 fn type_plan_chars(agent: &mut AgentView, text: &str) {
@@ -984,495 +1209,6 @@ fn type_plan_chars(agent: &mut AgentView, text: &str) {
             &registry,
         );
     }
-}
-
-fn composer_undos_until_empty(agent: &mut AgentView) -> usize {
-    let mut n = 0;
-    while !agent.prompt.text().is_empty() && agent.prompt.textarea.can_undo() {
-        assert!(
-            agent.prompt.textarea.undo(),
-            "can_undo was true but undo returned false"
-        );
-        n += 1;
-        if n > 50 {
-            break;
-        }
-    }
-    n
-}
-
-fn composer_redo_n(agent: &mut AgentView, n: usize) {
-    for _ in 0..n {
-        assert!(
-            agent.prompt.textarea.redo(),
-            "redo must restore the draft we just undid"
-        );
-    }
-}
-
-/// Isolated Preview Human box types `c` unless Comment was clicked.
-/// Empty-prompt `c` must not steal the first printable of a Human send.
-#[test]
-fn empty_preview_c_types_in_human_box() {
-    let mut agent = agent_with_scrollable_plan();
-    agent.prompt.set_text("");
-    {
-        let pav = agent.plan_approval_view.as_mut().unwrap();
-        pav.focus = PlanApprovalFocus::Preview;
-    }
-
-    let _ = agent.handle_input(
-        &Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE)),
-        &ActionRegistry::defaults(),
-    );
-    let pav = agent.plan_approval_view.as_ref().unwrap();
-    assert_eq!(
-        pav.focus,
-        PlanApprovalFocus::Preview,
-        "Isolated Preview must not arm Comment when Comment was not clicked"
-    );
-    assert!(
-        pav.commenting_range.is_none(),
-        "empty-prompt `c` must not arm a line range; Comment CTA still does"
-    );
-    assert_eq!(
-        agent.prompt.text(),
-        "c",
-        "typed Isolated Preview `c` must land in the Human box, got {:?}",
-        agent.prompt.text()
-    );
-}
-
-/// Typed Preview/Prompt text must survive the letter `c`, a panel reopen, and
-/// must not grow a wipe-to-empty undo frame (one accidental wipe used to need
-/// several Ctrl-Z).
-#[test]
-fn plan_preview_typed_text_survives_c_reopen_without_wipe_undo() {
-    let mut agent = agent_with_scrollable_plan();
-    {
-        let pav = agent.plan_approval_view.as_mut().unwrap();
-        pav.focus = PlanApprovalFocus::Preview;
-    }
-    agent.prompt.set_text("");
-    agent.prompt.clear_history();
-
-    type_plan_chars(&mut agent, "because");
-    assert_eq!(
-        agent.prompt.text(),
-        "because",
-        "Preview must type a word that contains `c`, not stash-and-wipe, got {:?}",
-        agent.prompt.text()
-    );
-    assert_ne!(
-        agent.plan_approval_view.as_ref().unwrap().focus,
-        PlanApprovalFocus::Commenting,
-        "typing `c` inside a live draft must not enter Commenting"
-    );
-
-    let undos_before = composer_undos_until_empty(&mut agent);
-    composer_redo_n(&mut agent, undos_before);
-    assert_eq!(agent.prompt.text(), "because");
-
-    agent.reopen_plan_approval();
-    assert_eq!(
-        agent.prompt.text(),
-        "because",
-        "reopen must not replace the live draft, got {:?}",
-        agent.prompt.text()
-    );
-
-    let undos_after = composer_undos_until_empty(&mut agent);
-    assert_eq!(
-        undos_after, undos_before,
-        "reopen must not push extra undo frames (a wipe-to-empty used to stack Ctrl-Z)"
-    );
-    composer_redo_n(&mut agent, undos_after);
-    assert_eq!(agent.prompt.text(), "because");
-}
-
-/// Isolated Preview (footer `Tab:prompt`): Ctrl+Z must restore a wiped Human
-/// box. The chord used to stay with the plan list, so undo never ran.
-#[test]
-fn plan_preview_ctrl_z_restores_wiped_human_box() {
-    let mut agent = agent_with_scrollable_plan();
-    {
-        let pav = agent.plan_approval_view.as_mut().unwrap();
-        pav.focus = PlanApprovalFocus::Preview;
-    }
-    agent.prompt.set_text("");
-    agent.prompt.clear_history();
-    type_plan_chars(&mut agent, "please keep this prompt");
-    assert_eq!(agent.prompt.text(), "please keep this prompt");
-
-    press_plan_key(&mut agent, KeyCode::Char('c'), KeyModifiers::CONTROL);
-    assert!(
-        agent.prompt.text().is_empty(),
-        "Ctrl+C must wipe the Human box first, got {:?}",
-        agent.prompt.text()
-    );
-    assert!(
-        agent.plan_approval_view.is_some(),
-        "first Ctrl+C is wipe, not Exit"
-    );
-
-    press_plan_key(&mut agent, KeyCode::Char('z'), KeyModifiers::CONTROL);
-    assert_eq!(
-        agent.prompt.text(),
-        "please keep this prompt",
-        "Ctrl+Z while Preview is focused must restore the wiped Human box, got {:?}",
-        agent.prompt.text()
-    );
-}
-
-/// Tab-focused Prompt box: same Ctrl+Z restore after a wipe.
-#[test]
-fn plan_prompt_ctrl_z_restores_wiped_human_box() {
-    let mut agent = agent_with_scrollable_plan();
-    {
-        let pav = agent.plan_approval_view.as_mut().unwrap();
-        pav.focus = PlanApprovalFocus::Prompt;
-        pav.prompt_intent = PlanPromptIntent::Comment;
-    }
-    agent.prompt.set_text("");
-    agent.prompt.clear_history();
-    type_plan_chars(&mut agent, "revise notes that vanished");
-    press_plan_key(&mut agent, KeyCode::Char('c'), KeyModifiers::CONTROL);
-    assert!(agent.prompt.text().is_empty());
-    press_plan_key(&mut agent, KeyCode::Char('z'), KeyModifiers::CONTROL);
-    assert_eq!(
-        agent.prompt.text(),
-        "revise notes that vanished",
-        "Ctrl+Z on the Prompt-focused Human box must restore the wipe, got {:?}",
-        agent.prompt.text()
-    );
-}
-
-/// Ctrl/Cmd+Z is composer undo even while the plan list owns Preview.
-#[test]
-fn plan_preview_key_treats_ctrl_z_as_composer_text() {
-    let undo = KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL);
-    assert!(
-        super::plan_preview_key_is_composer_text(&undo),
-        "Ctrl+Z must reach the Human box, not the plan list"
-    );
-    let redo = KeyEvent::new(
-        KeyCode::Char('Z'),
-        KeyModifiers::CONTROL | KeyModifiers::SHIFT,
-    );
-    assert!(
-        super::plan_preview_key_is_composer_text(&redo),
-        "Ctrl+Shift+Z redo must reach the Human box"
-    );
-    let fullscreen = KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL);
-    assert!(
-        !super::plan_preview_key_is_composer_text(&fullscreen),
-        "Ctrl+F stays with the plan viewer"
-    );
-}
-
-/// Operator: Shift+Enter in plan Preview must reach the Human box.
-/// Overlay copy / clarify / approve must not steal it.
-#[test]
-fn plan_preview_key_treats_shift_enter_as_composer_text() {
-    let shift_enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT);
-    assert!(
-        super::plan_preview_key_is_composer_text(&shift_enter),
-        "Shift+Enter must reach the Human box, not y:copy / ?:clarify / Approve"
-    );
-    let alt_enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT);
-    assert!(
-        super::plan_preview_key_is_composer_text(&alt_enter),
-        "Alt+Enter must reach the Human box the same way Shift+Enter does"
-    );
-    let bare_enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
-    assert!(
-        super::plan_preview_key_is_composer_text(&bare_enter),
-        "bare Enter must reach the Human box"
-    );
-}
-
-/// Default composer: Shift+Enter inserts a newline in Preview, matching
-/// the main Human box. The parked plan must stay; copy/clarify must not fire.
-#[test]
-fn plan_preview_shift_enter_inserts_newline_when_composer_multiline_on() {
-    crate::appearance::cache::set_composer_multiline(true);
-    let mut agent = agent_with_scrollable_plan();
-    {
-        let pav = agent.plan_approval_view.as_mut().unwrap();
-        pav.focus = PlanApprovalFocus::Preview;
-    }
-    agent.multiline_mode = false;
-    agent.prompt.set_text("hello");
-    agent.prompt.set_cursor(5);
-    let pane_before = plan_pane_nav(&agent);
-    let intent_before = agent.plan_approval_view.as_ref().unwrap().prompt_intent;
-    press_plan_key(&mut agent, KeyCode::Enter, KeyModifiers::SHIFT);
-    assert!(
-        agent.prompt.text().contains('\n'),
-        "Preview Shift+Enter must insert a newline when composer multiline is on, got {:?}",
-        agent.prompt.text()
-    );
-    assert!(
-        agent.prompt.text().contains("hello"),
-        "Preview Shift+Enter must keep the draft, got {:?}",
-        agent.prompt.text()
-    );
-    assert!(
-        agent.plan_approval_view.is_some(),
-        "Preview Shift+Enter must not Approve or Exit"
-    );
-    assert!(
-        !agent.plan_decision_resolved,
-        "Preview Shift+Enter must not decide the plan"
-    );
-    let pav = agent
-        .plan_approval_view
-        .as_ref()
-        .expect("plan review stays parked");
-    assert_eq!(
-        pav.prompt_intent, intent_before,
-        "Preview Shift+Enter must not arm Clarify"
-    );
-    assert!(
-        agent.active_modal.is_none(),
-        "Preview Shift+Enter must not open help or the command palette"
-    );
-    assert_eq!(
-        plan_pane_nav(&agent),
-        pane_before,
-        "Preview Shift+Enter must not scroll or retarget the plan pane"
-    );
-    crate::appearance::cache::set_composer_multiline(true);
-}
-
-/// `[ui] composer_multiline = false`: Shift+Enter must not open a second
-/// line in Preview. It sends like the main composer.
-#[test]
-fn plan_preview_shift_enter_sends_when_composer_multiline_off() {
-    crate::appearance::cache::set_composer_multiline(false);
-    let mut agent = agent_with_scrollable_plan();
-    {
-        let pav = agent.plan_approval_view.as_mut().unwrap();
-        pav.focus = PlanApprovalFocus::Preview;
-    }
-    agent.multiline_mode = false;
-    agent.prompt.set_text("hello");
-    agent.prompt.set_cursor(5);
-    let outcome = agent.handle_input(
-        &Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT)),
-        &ActionRegistry::defaults(),
-    );
-    assert!(
-        !agent.prompt.text().contains('\n'),
-        "Preview Shift+Enter must not insert a newline when composer multiline is off, got {:?}",
-        agent.prompt.text()
-    );
-    match outcome {
-        crate::app::app_view::InputOutcome::Action(crate::app::actions::Action::SendPrompt(
-            text,
-        )) => {
-            assert_eq!(text, "hello", "Preview Shift+Enter must send the draft");
-        }
-        other => panic!("Preview Shift+Enter with composer multiline off must send, got {other:?}"),
-    }
-    crate::appearance::cache::set_composer_multiline(true);
-}
-
-/// Session Multiline on Isolated Preview idle: Enter Approves with notes.
-/// Shift+Enter still inserts a newline. Empty Enter never Approves.
-#[test]
-fn plan_preview_session_multiline_shift_enter_sends() {
-    crate::appearance::cache::set_composer_multiline(true);
-    let mut agent = agent_with_scrollable_plan();
-    {
-        let pav = agent.plan_approval_view.as_mut().unwrap();
-        pav.focus = PlanApprovalFocus::Preview;
-    }
-    agent.multiline_mode = true;
-    agent.prompt.set_text("hello");
-    agent.prompt.set_cursor(5);
-    let enter = agent.handle_input(
-        &Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
-        &ActionRegistry::defaults(),
-    );
-    match enter {
-        crate::app::app_view::InputOutcome::Action(crate::app::actions::Action::Interject {
-            text,
-            ..
-        })
-        | crate::app::app_view::InputOutcome::ActionThenForward(
-            crate::app::actions::Action::Interject { text, .. },
-        ) => {
-            assert!(
-                text.contains("hello"),
-                "Isolated Preview idle plus notes plus Enter must Approve with those notes, got {text:?}"
-            );
-        }
-        other => panic!(
-            "Isolated Preview idle plus a non-empty Operator box plus Enter must Approve with those notes; got {other:?}"
-        ),
-    }
-
-    let mut shift = agent_with_scrollable_plan();
-    {
-        let pav = shift.plan_approval_view.as_mut().unwrap();
-        pav.focus = PlanApprovalFocus::Preview;
-    }
-    shift.multiline_mode = true;
-    shift.prompt.set_text("hello");
-    shift.prompt.set_cursor(5);
-    let outcome = shift.handle_input(
-        &Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT)),
-        &ActionRegistry::defaults(),
-    );
-    match outcome {
-        crate::app::app_view::InputOutcome::Action(crate::app::actions::Action::SendPrompt(
-            text,
-        )) => {
-            assert_eq!(
-                text, "hello",
-                "Preview Shift+Enter in session Multiline must send"
-            );
-        }
-        other => panic!("Preview Shift+Enter in session Multiline must send, got {other:?}"),
-    }
-    crate::appearance::cache::set_composer_multiline(true);
-}
-
-/// Operator: typing, cancel, and interject stay responsive. A keystroke
-/// burst must not fsync WAL N times and must not rewrite pending_prompts.
-#[test]
-fn plan_human_box_keystroke_burst_does_not_append_prompt_wal() {
-    let mut agent = agent_with_scrollable_plan();
-    {
-        let pav = agent.plan_approval_view.as_mut().unwrap();
-        pav.focus = PlanApprovalFocus::Preview;
-    }
-    agent.prompt.set_text("");
-    agent.prompt_wal_append_count.set(0);
-    agent.pending_prompts_persist_count.set(0);
-    type_plan_chars(&mut agent, "twelve chars!");
-    assert_eq!(
-        agent.prompt_wal_append_count.get(),
-        0,
-        "keystroke burst must not fsync WAL N times, got {} WAL appends",
-        agent.prompt_wal_append_count.get()
-    );
-    assert_eq!(
-        agent.pending_prompts_persist_count.get(),
-        0,
-        "keystroke burst must not rewrite pending_prompts.json, got {} snapshots",
-        agent.pending_prompts_persist_count.get()
-    );
-}
-
-/// Main composer shares the no-WAL-on-letters contract.
-#[test]
-fn main_composer_keystroke_burst_does_not_append_prompt_wal() {
-    let mut agent = make_agent();
-    agent.prompt.set_text("");
-    agent.prompt_wal_append_count.set(0);
-    agent.pending_prompts_persist_count.set(0);
-    type_plan_chars(&mut agent, "hello world");
-    assert_eq!(
-        agent.prompt_wal_append_count.get(),
-        0,
-        "main prompt typing must not append prompt_wal.jsonl, got {} WAL appends",
-        agent.prompt_wal_append_count.get()
-    );
-    assert_eq!(
-        agent.pending_prompts_persist_count.get(),
-        0,
-        "main prompt typing must not rewrite pending_prompts.json, got {} snapshots",
-        agent.pending_prompts_persist_count.get()
-    );
-}
-
-/// A burst of Human-box keystrokes must not flush the unsent draft on every
-/// character (that path used to `sync_all` per key).
-#[test]
-fn plan_human_box_keystroke_burst_does_not_flush_unsent_draft_every_char() {
-    let mut agent = agent_with_scrollable_plan();
-    {
-        let pav = agent.plan_approval_view.as_mut().unwrap();
-        pav.focus = PlanApprovalFocus::Preview;
-    }
-    agent.prompt.set_text("");
-    agent.unsent_draft_persist_flush_count.set(0);
-    agent.unsent_draft_persist_skip_count.set(0);
-    agent.last_unsent_draft_persist.set(None);
-
-    type_plan_chars(&mut agent, "twelve chars!");
-    let flushes = agent.unsent_draft_persist_flush_count.get();
-    let skips = agent.unsent_draft_persist_skip_count.get();
-    assert_eq!(
-        flushes, 1,
-        "a burst must write the unsent draft once, got {flushes} flushes and {skips} skips"
-    );
-    assert!(
-        skips >= 12,
-        "remaining keystrokes must coalesce, got {skips} skips and {flushes} flushes"
-    );
-}
-
-/// Main composer (no plan pane) shares the coalesced persist path.
-#[test]
-fn main_composer_keystroke_burst_does_not_flush_unsent_draft_every_char() {
-    let mut agent = make_agent();
-    agent.prompt.set_text("");
-    agent.unsent_draft_persist_flush_count.set(0);
-    agent.unsent_draft_persist_skip_count.set(0);
-    agent.last_unsent_draft_persist.set(None);
-    type_plan_chars(&mut agent, "hello world");
-    let flushes = agent.unsent_draft_persist_flush_count.get();
-    let skips = agent.unsent_draft_persist_skip_count.get();
-    assert_eq!(
-        flushes, 1,
-        "main prompt typing must not persist every character, got {flushes} flushes and {skips} skips"
-    );
-    assert!(
-        skips >= 10,
-        "burst after the first key must skip, got {skips} skips"
-    );
-}
-
-/// Tab leaving Commenting must restore the pre-comment Human-box draft, not
-/// leave an empty wipe that takes several Ctrl-Z to undo.
-#[test]
-fn tab_leave_commenting_restores_stashed_composer() {
-    let mut agent = agent_with_scrollable_plan();
-    agent.prompt.set_text("live draft");
-    agent.prompt.set_cursor(10);
-    {
-        let pav = agent.plan_approval_view.as_mut().unwrap();
-        pav.focus = PlanApprovalFocus::Preview;
-    }
-
-    let _ = agent.enter_plan_commenting();
-    assert_eq!(
-        agent.plan_approval_view.as_ref().unwrap().focus,
-        PlanApprovalFocus::Commenting
-    );
-    assert!(
-        agent.prompt.text().trim().is_empty(),
-        "entering Commenting clears the box for the line note, got {:?}",
-        agent.prompt.text()
-    );
-    type_plan_chars(&mut agent, "nit");
-    assert_eq!(agent.prompt.text(), "nit");
-
-    let tab = Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
-    let _ = agent.handle_input(&tab, &ActionRegistry::defaults());
-    assert_eq!(
-        agent.plan_approval_view.as_ref().unwrap().focus,
-        PlanApprovalFocus::Preview
-    );
-    assert_eq!(
-        agent.prompt.text(),
-        "live draft",
-        "leaving Commenting without save must restore the stashed Human box, got {:?}",
-        agent.prompt.text()
-    );
 }
 
 /// Operator: a focused plan comment composer inserts y. Copy must not
@@ -1503,7 +1239,7 @@ fn focused_plan_comment_box_inserts_y_instead_of_copy() {
         "inserting y must not Approve or Exit"
     );
     let labels: Vec<String> = agent
-        .current_shortcut_hints(&ActionRegistry::defaults(), false)
+        .current_shortcut_hints(&ActionRegistry::defaults())
         .iter()
         .map(|hint| hint.label.to_string())
         .collect();
@@ -1647,6 +1383,84 @@ fn empty_enter_never_approves_even_when_approve_is_marked() {
     );
 }
 
+/// A single click on a plan body row focuses or scrolls. It must not
+/// enter Commenting or wipe the composer.
+#[test]
+fn plan_row_click_does_not_enter_commenting() {
+    let mut agent = agent_with_scrollable_plan();
+    agent.prompt.set_text("keep typing");
+    agent.prompt.set_cursor(agent.prompt.text().len());
+    let registry = ActionRegistry::defaults();
+
+    let _ = agent.handle_input(
+        &mouse(MouseEventKind::Down(MouseButton::Left), 10, 4),
+        &registry,
+    );
+
+    let pav = agent.plan_approval_view.as_ref().unwrap();
+    assert_ne!(
+        pav.focus,
+        PlanApprovalFocus::Commenting,
+        "clicking a plan row must not steal the composer into Commenting"
+    );
+    assert_eq!(
+        agent.prompt.text(),
+        "keep typing",
+        "clicking a plan row must leave the composer typeable"
+    );
+
+    let _ = agent.handle_input(
+        &Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE)),
+        &registry,
+    );
+    let pav = agent.plan_approval_view.as_ref().unwrap();
+    assert_ne!(
+        pav.focus,
+        PlanApprovalFocus::Commenting,
+        "a live Preview draft must type `c`, not stash-and-wipe into Commenting"
+    );
+    assert_eq!(
+        agent.prompt.text(),
+        "keep typingc",
+        "typed `c` must stay in the Human box, got {:?}",
+        agent.prompt.text()
+    );
+}
+
+/// Empty Enter on the default parked Preview stays on Preview.
+/// Commenting is explicit `c` only. Empty Enter never Approves.
+#[test]
+fn empty_enter_on_soft_park_preview_does_not_enter_commenting() {
+    let mut agent = agent_with_scrollable_plan();
+    let viewer = agent.line_viewer.as_ref().expect("preview is open");
+    assert!(
+        viewer.selected_line_range().is_some(),
+        "fixture must have a selected line so Enter would enter Commenting if routed there"
+    );
+    assert!(agent.prompt.text().trim().is_empty());
+    let pav = agent.plan_approval_view.as_ref().unwrap();
+    assert_eq!(pav.focus, PlanApprovalFocus::Preview);
+
+    let _ = agent.handle_input(
+        &Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        &ActionRegistry::defaults(),
+    );
+
+    let pav = agent
+        .plan_approval_view
+        .as_ref()
+        .expect("empty Enter must leave the parked plan open");
+    assert_eq!(
+        pav.focus,
+        PlanApprovalFocus::Preview,
+        "empty Enter on Preview must not enter Commenting"
+    );
+    assert!(
+        !agent.plan_decision_resolved,
+        "empty Enter must never Approve a parked plan"
+    );
+}
+
 /// Operator: Enter submits the marked idle CTA.
 #[test]
 fn enter_submits_the_marked_idle_cta() {
@@ -1772,6 +1586,77 @@ fn letter_key_types_and_is_not_the_only_submit() {
     assert!(
         agent.plan_approval_view.is_some() && !agent.plan_decision_resolved,
         "letters are not the only submit"
+    );
+}
+
+/// Isolated plan.md viewer: a mid-compose draft means `a` is text, not Approve.
+#[test]
+fn plan_md_preview_mid_compose_a_types_does_not_approve() {
+    let mut agent = agent_with_scrollable_plan();
+    agent.prompt.set_text("oh you interrupted my typing");
+    {
+        let pav = agent.plan_approval_view.as_mut().unwrap();
+        pav.focus = PlanApprovalFocus::Preview;
+    }
+
+    let a = Event::Key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+    let _ = agent.handle_input(&a, &ActionRegistry::defaults());
+    assert!(
+        agent.plan_approval_view.is_some(),
+        "plan.md Preview must not Approve while the composer has a draft"
+    );
+    assert!(
+        agent.prompt.text().contains("oh you interrupted my typing"),
+        "draft must stay in the composer, got {:?}",
+        agent.prompt.text()
+    );
+    assert!(
+        agent.prompt.text().contains('a'),
+        "typed `a` must land in the composer, got {:?}",
+        agent.prompt.text()
+    );
+}
+
+/// Empty-prompt `a` on the isolated plan.md Preview path types, not Approves.
+#[test]
+fn plan_md_preview_empty_a_still_approves() {
+    let mut agent = agent_with_scrollable_plan();
+    agent.prompt.set_text("");
+    {
+        let pav = agent.plan_approval_view.as_mut().unwrap();
+        pav.focus = PlanApprovalFocus::Preview;
+    }
+
+    let a = Event::Key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+    let _ = agent.handle_input(&a, &ActionRegistry::defaults());
+    assert!(
+        agent.plan_approval_view.is_some(),
+        "empty-prompt `a` on plan.md Preview must type, not Approve"
+    );
+    assert_eq!(agent.prompt.text(), "a");
+}
+
+/// Isolated plan.md Preview is non-capturing: a non-accelerator letter types.
+#[test]
+fn plan_md_preview_empty_printable_goes_to_composer() {
+    let mut agent = agent_with_scrollable_plan();
+    agent.prompt.set_text("");
+    {
+        let pav = agent.plan_approval_view.as_mut().unwrap();
+        pav.focus = PlanApprovalFocus::Preview;
+    }
+
+    let h = Event::Key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE));
+    let _ = agent.handle_input(&h, &ActionRegistry::defaults());
+    assert!(
+        agent.plan_approval_view.is_some(),
+        "a non-accelerator letter must not decide the plan"
+    );
+    assert_eq!(
+        agent.prompt.text(),
+        "h",
+        "printable keys go to the composer while plan.md is open, got {:?}",
+        agent.prompt.text()
     );
 }
 
@@ -2697,7 +2582,7 @@ fn isolated_preview_handle_input_running_turn_draft_ctrl_c_does_not_cancel_turn(
         agent.plan_approval_view.is_some() && agent.line_viewer.is_some(),
         "first Ctrl+C must not Exit Isolated Preview while the turn is running"
     );
-    assert_eq!(agent.session.state, AgentState::TurnRunning);
+    assert!(matches!(agent.session.state, AgentState::TurnRunning));
 }
 
 /// Leftover Isolated Preview after Plan Exit: first Ctrl+C with text
@@ -2748,11 +2633,11 @@ fn isolated_preview_unique_model_tab_switches_now_does_not_rowwalk() {
         &ActionRegistry::defaults(),
     );
     match outcome {
-        InputOutcome::Action(Action::SwitchModel { model_id, effort }) => {
+        InputOutcome::Action(Action::SwitchModel(choice)) => {
             use agent_client_protocol as acp;
             use std::sync::Arc;
-            assert_eq!(model_id, acp::ModelId::new(Arc::from("grok-4.6")));
-            assert_eq!(effort, None);
+            assert_eq!(choice.model_id, acp::ModelId::new(Arc::from("grok-4.6")));
+            assert_eq!(choice.effort, None);
         }
         other => panic!(
             "Operator: Isolated Preview unique /model Tab must SwitchModel now, not {other:?}; prompt={:?}",

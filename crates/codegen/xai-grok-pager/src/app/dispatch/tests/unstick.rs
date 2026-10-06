@@ -248,6 +248,7 @@ fn unstick_does_not_cancel_nested_subagents_or_rewind_tokens() {
             .subagent_sessions
             .get("live-nested")
             .expect("nested session")
+            .attempt
             .pending_kill,
         "must not mark nested subagents pending kill"
     );

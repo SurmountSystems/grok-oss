@@ -5,9 +5,8 @@
 use serde::Serialize;
 use xai_grok_tools::types::compat::{COMPAT_CELLS, CompatCell, CompatConfig};
 
-/// Derive the vendor origin from a file path. Returns `Some("cursor")` or
-/// `Some("claude")` when the path passes through a vendor config directory;
-/// `None` for native `.grok`/`.agents` paths.
+/// Derive the vendor origin from a file path.
+/// Returns `Some("cursor")` or `Some("claude")` when the path passes through a vendor config directory; `None` for native `.grok`/`.agents` paths.
 pub(super) fn derive_vendor(path: &str) -> Option<&'static str> {
     if path.contains("/.cursor/") || path.contains("\\.cursor\\") || path.ends_with("/.cursor") {
         Some("cursor")
@@ -116,7 +115,7 @@ impl ExternalCompatReport {
 }
 
 pub(super) fn resolve_inspect_compat(
-    effective_config: Result<&toml::Value, ()>,
+    effective_config: Option<&toml::Value>,
 ) -> ExternalCompatReport {
     resolve_inspect_compat_with_env(effective_config, |cell| {
         xai_grok_config::env_bool(cell.env_var())
@@ -124,7 +123,7 @@ pub(super) fn resolve_inspect_compat(
 }
 
 pub(super) fn resolve_inspect_compat_with_env(
-    effective_config: Result<&toml::Value, ()>,
+    effective_config: Option<&toml::Value>,
     env_value: impl Fn(CompatCell) -> Option<bool>,
 ) -> ExternalCompatReport {
     let defaults = CompatConfig::default();
@@ -132,7 +131,7 @@ pub(super) fn resolve_inspect_compat_with_env(
         .into_iter()
         .filter(|cell| cell.is_runtime_supported())
         .map(|cell| {
-            let config = crate::agent::config::compat_config_cell(effective_config, cell);
+            let config = xai_grok_config::compat::compat_config_cell(effective_config, cell);
             resolve_compat_entry(cell, env_value(cell), config, defaults.value(cell))
         })
         .collect();
@@ -146,14 +145,15 @@ pub(super) fn resolve_inspect_compat_with_env(
 fn resolve_compat_entry(
     cell: CompatCell,
     env: Option<bool>,
-    config: Result<Option<bool>, crate::agent::config::CompatConfigCellError>,
+    config: Result<Option<bool>, xai_grok_config::compat::CompatConfigCellError>,
     default: bool,
 ) -> ExternalCompatEntry {
     let (config, config_error) = match config {
         Ok(value) => (value, false),
         Err(_) => (Some(false), true),
     };
-    let resolved = crate::agent::config::resolve_compat_cell_with_env(env, config, None, default);
+    let resolved =
+        xai_grok_config::compat::resolve_compat_cell_with_env(env, config, None, default);
     let source = if env.is_some() {
         CompatSource::Env
     } else if config.is_some() {
@@ -167,8 +167,8 @@ fn resolve_compat_entry(
     };
 
     ExternalCompatEntry {
-        vendor: cell.vendor().as_str().to_owned(),
-        surface: cell.surface().as_str().to_owned(),
+        vendor: cell.vendor().as_ref().to_owned(),
+        surface: cell.surface().as_ref().to_owned(),
         enabled: resolved.value,
         source,
     }
@@ -178,7 +178,7 @@ fn resolve_compat_entry(
 mod tests {
     use super::*;
 
-    fn resolve_without_env(effective_config: Result<&toml::Value, ()>) -> ExternalCompatReport {
+    fn resolve_without_env(effective_config: Option<&toml::Value>) -> ExternalCompatReport {
         resolve_inspect_compat_with_env(effective_config, |_| None)
     }
 
@@ -197,7 +197,7 @@ mod tests {
     #[test]
     fn empty_config_reports_defaults_and_remote_not_loaded() {
         let effective_config = toml::Value::Table(toml::map::Map::new());
-        let report = resolve_without_env(Ok(&effective_config));
+        let report = resolve_without_env(Some(&effective_config));
 
         assert!(!report.remote_settings_loaded);
         assert_eq!(report.cells.len(), 13);
@@ -220,7 +220,10 @@ mod tests {
         assert_eq!(session.enabled, CompatConfig::default().codex.sessions);
         assert_eq!(session.source, CompatSource::Default);
         let json = serde_json::to_value(&report).unwrap();
-        assert_eq!(json["remoteSettingsLoaded"], false);
+        assert_eq!(
+            json.get("remoteSettingsLoaded"),
+            Some(&serde_json::Value::Bool(false))
+        );
         assert_eq!(
             serde_json::to_value(session).unwrap(),
             serde_json::json!({
@@ -236,7 +239,7 @@ mod tests {
     fn inspect_compat_uses_env_config_default_precedence() {
         let effective_config: toml::Value =
             toml::from_str("[compat.cursor]\nskills = false\nrules = false\n").unwrap();
-        let report = resolve_inspect_compat_with_env(Ok(&effective_config), |cell| {
+        let report = resolve_inspect_compat_with_env(Some(&effective_config), |cell| {
             (cell.env_var() == "GROK_CURSOR_SKILLS_ENABLED").then_some(true)
         });
 
@@ -253,7 +256,7 @@ mod tests {
 
     #[test]
     fn config_load_failure_fails_closed_unless_env_overrides() {
-        let report = resolve_inspect_compat_with_env(Err(()), |cell| {
+        let report = resolve_inspect_compat_with_env(None, |cell| {
             (cell.env_var() == "GROK_CURSOR_SKILLS_ENABLED").then_some(true)
         });
 
@@ -287,7 +290,7 @@ hooks = false
 "#,
         )
         .unwrap();
-        let report = resolve_without_env(Ok(&effective_config));
+        let report = resolve_without_env(Some(&effective_config));
 
         let skills = entry(&report, "cursor", "skills");
         assert!(!skills.enabled);

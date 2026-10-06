@@ -9,6 +9,7 @@ use crate::app::agent_view::AgentView;
 use crate::app::app_view::{ActiveView, AppView};
 use crate::app::global_work_pause::{GlobalWorkPause, PausedSessionSnapshot};
 use crate::scrollback::block::RenderBlock;
+use crate::scrollback::blocks::SessionEvent;
 use crate::scrollback::state::ScrollbackState;
 use std::time::Instant;
 
@@ -120,7 +121,7 @@ fn idle_session_needs_over_window_compact_unstick(app: &AppView) -> bool {
     agent.session.state.is_idle()
         && agent.session.pending_prompts.is_empty()
         && session_is_over_sampling_window(agent)
-        && agent.last_compact_stuck_index().is_some()
+        && scrollback_has_compaction_failed(agent)
 }
 
 fn try_unstick_idle_over_window_compact_fail(app: &mut AppView) -> Option<Vec<Effect>> {
@@ -142,7 +143,6 @@ fn try_unstick_idle_over_window_compact_fail(app: &mut AppView) -> Option<Vec<Ef
     if let Some(text) = continue_text {
         agent.session.enqueue_continue_prior_work(text);
     }
-    agent.drop_stale_queue_occupancy_with_chat_history();
     agent.sync_queue_pane();
     app.show_toast(OVER_WINDOW_COMPACT_RETRY_TOAST);
     Some(maybe_drain_queue_and_note_peek(app, id))
@@ -159,8 +159,8 @@ fn continue_prompt_after_compact(agent: &AgentView) -> Option<String> {
     // Scrollback still has that leftover `/implement` as a Human turn.
     // After HTTP 502 that is unfinished work to continue, not the
     // compact-fail stale-slash skip.
-    if agent.operator_prompt_already_issued_as_human_turn(&text)
-        && !agent.compact_fail_followed_by_http_502()
+    if operator_prompt_already_in_scrollback(agent, &text)
+        && !compact_fail_followed_by_http_502(agent)
     {
         return None;
     }
@@ -168,7 +168,7 @@ fn continue_prompt_after_compact(agent: &AgentView) -> Option<String> {
 }
 
 fn last_real_user_prompt_for_compact_continue(agent: &AgentView) -> Option<String> {
-    agent.continue_prompt_after_compact()
+    last_user_prompt_full_text(&agent.scrollback)
 }
 
 fn is_compact_slash(text: &str) -> bool {
@@ -176,20 +176,70 @@ fn is_compact_slash(text: &str) -> bool {
 }
 
 fn session_is_over_sampling_window(agent: &AgentView) -> bool {
-    let Some(used) = agent.context_state.as_ref().map(|c| c.used) else {
+    let Some(ctx) = agent.context_state.as_ref() else {
         return false;
     };
-    let window = agent
-        .session_sampling_window
-        .or_else(|| {
-            agent
-                .context_state
-                .as_ref()
-                .map(|c| c.total)
-                .filter(|t| *t > 0)
-        })
-        .unwrap_or(0);
-    window > 0 && used >= window
+    ctx.total > 0 && ctx.used >= ctx.total
+}
+
+fn scrollback_has_compaction_failed(agent: &AgentView) -> bool {
+    let len = agent.scrollback.len();
+    for idx in (0..len).rev() {
+        let Some(entry) = agent.scrollback.entry(idx) else {
+            continue;
+        };
+        if let RenderBlock::SessionEvent(block) = &entry.block
+            && matches!(block.event, SessionEvent::CompactionFailed { .. })
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn compact_fail_followed_by_http_502(agent: &AgentView) -> bool {
+    let mut saw_fail = false;
+    for idx in 0..agent.scrollback.len() {
+        let Some(entry) = agent.scrollback.entry(idx) else {
+            continue;
+        };
+        let RenderBlock::SessionEvent(block) = &entry.block else {
+            continue;
+        };
+        match &block.event {
+            SessionEvent::CompactionFailed { .. } => saw_fail = true,
+            SessionEvent::RequestFailed {
+                headline, detail, ..
+            } if saw_fail && (headline.contains("502") || detail.contains("502")) => {
+                return true;
+            }
+            SessionEvent::RetryFailed { error, .. } if saw_fail && error.contains("502") => {
+                return true;
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+fn operator_prompt_already_in_scrollback(agent: &AgentView, text: &str) -> bool {
+    let needle = text.trim();
+    if needle.is_empty() {
+        return false;
+    }
+    for idx in 0..agent.scrollback.len() {
+        let Some(entry) = agent.scrollback.entry(idx) else {
+            continue;
+        };
+        let RenderBlock::UserPrompt(block) = &entry.block else {
+            continue;
+        };
+        if xai_grok_shell::session::prompt_wal::operator_text_matches_recorded(needle, &block.text)
+        {
+            return true;
+        }
+    }
+    false
 }
 
 fn last_user_prompt_full_text(scrollback: &ScrollbackState) -> Option<String> {

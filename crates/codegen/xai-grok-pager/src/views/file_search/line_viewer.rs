@@ -1,15 +1,15 @@
 //! Line viewer popup for selecting line ranges from a file.
 //!
-//! A centered modal overlay showing syntax-highlighted file content with
-//! line numbers. Backed by [`ListPaneState`] for navigation, visual selection,
-//! and search. Used to build `@foo/bar.rs:10-12` line references.
+//! A centered modal overlay showing syntax-highlighted file content with line numbers.
+//! Backed by [`ListPaneState`] for navigation, visual selection, and search.
+//! Used to build `@foo/bar.rs:10-12` line references.
 //!
 //! ## Lifecycle
 //!
 //! 1. Opened via `:` in dropdown, `Ctrl-L` on element, or `<left>:` after element.
 //! 2. User navigates with j/k, searches with `/`, selects range with `v`.
-//! 3. **Enter** confirms → element updated with line range, undo group closed.
-//! 4. **Esc** cancels → undo group cancelled, reverts to pre-viewer state.
+//! 3. **Enter** confirms: the element is updated with the line range and the undo group is closed.
+//! 4. **Esc** cancels: the undo group is cancelled, reverting to the pre-viewer state.
 
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -37,25 +37,17 @@ use xai_ratatui_textarea::ElementId;
 /// Stable ids for mermaid affordance rows (above source lines and comments).
 const MERMAID_AFFORDANCE_ID_BASE: u64 = 2_000_000;
 
-// ── Line item ───────────────────────────────────────────────────────────
-
 /// A single source line for the line viewer.
-///
-/// In normal mode, each item has one `content` line (syntax-highlighted source).
-/// In markdown mode, `rendered_lines` holds the rendered markdown output for this
-/// source line (may be multiple visual lines, e.g., table with borders). The item
-/// uses custom `render()` and `desired_height()` for multi-line display.
 #[derive(Clone)]
 pub struct SourceLine {
     /// 1-based line number (for display and `@file:N-M` references).
     line_number: usize,
-    /// Unique item ID for ListPane selection tracking. In normal mode this
-    /// equals `line_number`. In markdown mode, source lines can repeat
-    /// (e.g., table borders) so we use a monotonic counter instead.
+    /// Unique item ID for ListPane selection tracking.
+    /// In normal mode this equals `line_number`; in markdown mode, source lines can repeat (table borders) so we use a monotonic counter instead.
     item_id: u64,
     /// Styled content (syntax highlighted). Used in normal mode.
     content: Line<'static>,
-    /// Prefix: right-aligned line number (dim — default).
+    /// Prefix: right-aligned line number (dim, the default).
     prefix: Line<'static>,
     /// Prefix for visual selection range (medium brightness).
     prefix_in_selection: Line<'static>,
@@ -278,8 +270,6 @@ impl ListItem for SourceLine {
     }
 }
 
-// ── Comment lines ─────────────────────────────────────────────────────
-
 /// An inline review comment displayed between source lines.
 pub struct CommentLine {
     pub comment_id: u64,
@@ -426,13 +416,11 @@ impl ListItem for CommentLine {
     }
 }
 
-// ── Mermaid affordance row ────────────────────────────────────────────
-
 /// Blank reserved row under a Mermaid diagram; buttons are painted by the
 /// draw loop (same pattern as scrollback).
 pub struct MermaidAffordanceLine {
     item_id: u64,
-    /// Fence body — data for Open / Copy path / Copy source.
+    /// Fence body: data for Open / Copy path / Copy source.
     pub source: String,
     prefix: Line<'static>,
 }
@@ -497,8 +485,7 @@ impl ListItem for MermaidAffordanceLine {
         if area.height == 0 || area.width == 0 {
             return;
         }
-        // Blank prefix only — write via cell_mut so out-of-bounds coords
-        // cannot panic (Buffer::set_line indexes and panics on OOB).
+        // Blank prefix only; write via cell_mut so out-of-bounds coords cannot panic (Buffer::set_line indexes and panics on OOB)
         let prefix_w = self.prefix_width().min(area.width);
         let style = self
             .prefix
@@ -515,8 +502,6 @@ impl ListItem for MermaidAffordanceLine {
         }
     }
 }
-
-// ── Plan viewer item ──────────────────────────────────────────────────
 
 /// Source line, review comment, or Mermaid affordance row.
 pub enum PlanViewerItem {
@@ -631,21 +616,15 @@ impl ListItem for PlanViewerItem {
     }
 }
 
-// ── Viewer state ────────────────────────────────────────────────────────
-
-/// What kind of content the line viewer is showing.
-///
-/// Replaces string-based type sniffing (`title_override == Some("plan.md")`)
-/// with a typed enum so that plan-specific behavior (commenting, approval,
-/// double-click, shortcuts) can be dispatched via `match` rather than
-/// string comparison.
+/// What kind of content the line viewer is showing. Replaces string-based type sniffing
+/// (`title_override == Some("plan.md")`) with a typed enum. Plan-specific behavior (commenting,
+/// approval, double-click, shortcuts) dispatches via `match` rather than string comparison.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum LineViewerKind {
     /// Normal file preview opened from an `@file` reference.
     #[default]
     FilePreview,
-    /// Plan document preview (plan.md) — supports commenting, approval
-    /// buttons, send-feedback, and an explicit `c` line-comment gesture.
+    /// Plan document preview (plan.md): supports commenting, approval buttons, send-feedback, and double-click-to-comment.
     PlanPreview,
 }
 
@@ -738,6 +717,9 @@ pub struct PlanViewerExtras {
     pub gutter_drag_end: Option<usize>,
     pub gutter_hovered_line: Option<usize>,
     pub active_commenting_range: Option<std::ops::Range<usize>>,
+    pub comment_close_areas: Vec<(u64, Rect)>,
+    pub hovered_comment_id: Option<u64>,
+    pub close_button_hovered: bool,
 }
 
 /// Double-click detection threshold in milliseconds.
@@ -760,14 +742,11 @@ pub struct LineViewerState {
     /// Whether we're inside an undo group (to close/cancel on exit).
     pub in_undo_group: bool,
     /// Cached inner popup area from last render (for mouse hit-testing).
-    /// Excludes the divider + footer rows in plan modes, so it matches
-    /// the area the ListPane was rendered into — used for routing list
-    /// events to `ListPaneState::handle_mouse_event`.
+    /// Excludes the divider and footer rows in plan modes, so it matches the area the ListPane was rendered into.
+    /// Used for routing list events to `ListPaneState::handle_mouse_event`.
     pub last_popup_area: Option<Rect>,
-    /// Cached full modal area (inside the border, including the footer)
-    /// from the last render. Used by the click-outside-modal check so
-    /// clicks landing on the divider or empty space between footer
-    /// buttons don't accidentally close the modal.
+    /// Cached full modal area (inside the border, including the footer) from the last render.
+    /// Used by the click-outside-modal check so clicks landing on the divider or empty space between footer buttons do not close the modal.
     pub last_modal_area: Option<Rect>,
     /// Cached close button rect from last render (for mouse hit-testing).
     pub close_button_area: Option<Rect>,
@@ -778,38 +757,31 @@ pub struct LineViewerState {
     /// Whether the fullscreen button is hovered.
     pub fullscreen_hovered: bool,
     /// Plan-specific state. `Some` only when `kind == PlanPreview`.
-    /// Keeps plan-only fields (buttons, approval, double-click) out of
-    /// the generic viewer.
+    /// Keeps plan-only fields (buttons, approval, double-click) out of the generic viewer.
     pub plan: Option<PlanViewerExtras>,
-    /// Initial scroll range (0-based indices). Consumed on first prepare_layout
-    /// to center the range in the viewport.
+    /// Initial scroll range (0-based indices), consumed on the first prepare_layout to center the range in the viewport.
     initial_scroll_range: Option<Range<usize>>,
-    /// Optional title override. When set, the viewer title bar shows this
-    /// instead of the (potentially long) file path. Used for plan previews.
+    /// Optional title override, shown in the title bar instead of the (potentially long) file path. Used for plan previews.
     pub title_override: Option<String>,
     /// Raw markdown content for rebuilding when the display width changes.
     /// `None` for non-markdown viewers.
     markdown_content: Option<String>,
     /// The last `max_table_width` used to build markdown lines.
-    /// Compared against the current content width in `prepare_layout` to
-    /// trigger a rebuild when the viewer is resized.
+    /// Compared against the current content width in `prepare_layout` to trigger a rebuild when the viewer is resized.
     last_table_width: Option<usize>,
-    /// Last overlay content `width` passed to [`Self::rebuild_markdown_for_width`].
-    /// A same-width keystroke paint must not walk the plan body again.
+    /// Last popup width passed to `rebuild_markdown_for_width`.
+    /// Same-width paints must not walk the plan body again.
     last_rebuild_width: Option<u16>,
-    /// How many times a width change reached the markdown body scan.
-    /// Keystroke paints at a stable width must not increment this.
+    /// How many times a new width was offered to the markdown rebuild.
     markdown_width_probes: u32,
-    /// How many times markdown items were rebuilt from source.
+    /// How many times the markdown body was actually re-parsed.
     markdown_rebuilds: u32,
-    /// Copy of comments last applied via `rebuild_with_comments`, so that
-    /// a width-triggered rebuild can re-interleave them automatically.
+    /// Copy of comments last applied via `rebuild_with_comments`, so that a width-triggered rebuild can re-interleave them automatically.
     last_comments: Vec<crate::views::plan_approval_view::PlanComment>,
     /// `(source_lines index to follow, diagram source)` for affordance rows.
     mermaid_after: Vec<(usize, String)>,
-    /// When `true`, the viewer uses the full overlay area instead of the
-    /// 75% centered popup. Toggled by Ctrl+F. Soft plan review docks
-    /// right instead of using either overlay.
+    /// When `true`, the viewer uses the full overlay area instead of the 75% centered popup.
+    /// Toggled by Ctrl+F.
     pub fullscreen: bool,
 }
 
@@ -866,10 +838,9 @@ impl LineViewerState {
         })
     }
 
-    /// Open a file and create the viewer with markdown rendering.
-    ///
-    /// Same as `open()` but renders the content as rich markdown instead of
-    /// raw syntax-highlighted text. Source-line-based navigation is preserved.
+    /// Open a file and create the viewer with markdown rendering. Same as `open()` but renders the
+    /// content as rich markdown instead of raw syntax-highlighted text. Source-line-based navigation is
+    /// preserved.
     pub fn open_markdown(path: &Path, element_id: Option<ElementId>) -> Option<Self> {
         let content = std::fs::read_to_string(path).ok()?;
         Self::open_markdown_content(path.to_path_buf(), content, element_id)
@@ -885,9 +856,8 @@ impl LineViewerState {
         }
         let path = path.into();
 
-        // Defer the actual markdown render to the first `prepare_layout` call
-        // which knows the display width. `rebuild_markdown_for_width` will
-        // build source_lines with the correct `max_table_width`.
+        // Defer the actual markdown render to the first `prepare_layout` call, which knows the display width
+        // `rebuild_markdown_for_width` will build source_lines with the correct `max_table_width`
         let source_lines = Vec::new();
         let lines = Vec::new();
 
@@ -933,8 +903,7 @@ impl LineViewerState {
 
     /// Set initial selection and scroll to a line range (1-based).
     ///
-    /// Enters visual mode with the range pre-selected and scrolls so the
-    /// range is visible (centered if possible).
+    /// Enters visual mode with the range pre-selected and scrolls so the range is visible (centered if possible).
     pub fn set_initial_selection(&mut self, range: Range<usize>) {
         // Convert 1-based line numbers to 0-based ListPane indices.
         let start_idx = range.start.saturating_sub(1);
@@ -942,17 +911,19 @@ impl LineViewerState {
 
         if start_idx < self.lines.len() {
             // Select the start line.
-            let start_id = self.lines[start_idx].stable_id();
+            let Some(start_id) = self.lines.get(start_idx).map(|line| line.stable_id()) else {
+                return;
+            };
             self.list_state.select_by_id(start_id);
 
             // Enter visual mode and extend to end line.
             if end_idx > start_idx + 1 {
-                // Multi-line range: enter visual mode.
                 self.list_state.enter_visual_mode(&self.lines);
                 // Move selection to the end of the range.
                 let end_line_idx = (end_idx - 1).min(self.lines.len() - 1);
-                let end_id = self.lines[end_line_idx].stable_id();
-                self.list_state.select_by_id(end_id);
+                if let Some(end_id) = self.lines.get(end_line_idx).map(|line| line.stable_id()) {
+                    self.list_state.select_by_id(end_id);
+                }
             }
 
             // Store the range for scroll centering on first render.
@@ -960,11 +931,9 @@ impl LineViewerState {
         }
     }
 
-    /// Rebuild markdown items when the available content width changes.
-    ///
-    /// Recomputes `max_table_width` from the ListPane's content width
-    /// (total width minus line-number prefix), then re-renders markdown
-    /// with constrained tables so box-drawing borders aren't word-wrapped.
+    /// Rebuild markdown items when the available content width changes. Recomputes `max_table_width`
+    /// from the ListPane's content width (total width minus line-number prefix). Markdown then
+    /// re-renders with constrained tables so box-drawing borders aren't word-wrapped.
     fn rebuild_markdown_for_width(&mut self, width: u16) {
         let Some(ref content) = self.markdown_content else {
             return;
@@ -977,7 +946,7 @@ impl LineViewerState {
         self.markdown_width_probes = self.markdown_width_probes.saturating_add(1);
 
         let prefix_width = digit_count(source_line_count(content).max(1)) + 1;
-        let scrollbar_width = SCROLLBAR_TOTAL_COLS as usize; // gap + track
+        let scrollbar_width = SCROLLBAR_TOTAL_COLS as usize; // gap and track
         let content_width = (width as usize)
             .saturating_sub(prefix_width)
             .saturating_sub(scrollbar_width);
@@ -1102,6 +1071,10 @@ impl LineViewerState {
         half.max(min).min(full_width.saturating_sub(leave_left))
     }
 
+    /// Columns of soft-plan title and body kept inside the frame.
+    /// The left border was covering the heading, so `Proposed plan.` painted as `sed plan.`
+    const SOFT_PLAN_TEXT_INSET: u16 = 5;
+
     /// Whether the plan modal should render the action-button footer.
     /// True for plan-approval and casual plan preview (not plain file preview).
     pub fn show_footer(&self) -> bool {
@@ -1111,6 +1084,14 @@ impl LineViewerState {
     }
 
     pub fn source_line_at_screen_row(&self, row: u16, content_area: Rect) -> Option<usize> {
+        self.item_at_screen_row(row, content_area)?.line_number()
+    }
+
+    pub fn comment_id_at_screen_row(&self, row: u16, content_area: Rect) -> Option<u64> {
+        self.item_at_screen_row(row, content_area)?.comment_id()
+    }
+
+    fn item_at_screen_row(&self, row: u16, content_area: Rect) -> Option<&PlanViewerItem> {
         if row < content_area.y || row >= content_area.y + content_area.height {
             return None;
         }
@@ -1118,7 +1099,22 @@ impl LineViewerState {
         let vy = self.list_state.scroll_offset() + ry;
         let vi = self.list_state.layout().item_at_y(vy)?;
         let pi = self.list_state.to_physical(vi);
-        self.lines.get(pi)?.line_number()
+        self.lines.get(pi)
+    }
+
+    pub fn selected_comment_id(&self) -> Option<u64> {
+        let vi = self.list_state.selected_index()?;
+        let pi = self.list_state.to_physical(vi);
+        self.lines.get(pi)?.comment_id()
+    }
+
+    /// The comment whose `[✗]` button, as drawn in the last render, contains the given screen position.
+    pub fn comment_close_button_at(&self, col: u16, row: u16) -> Option<u64> {
+        self.plan_ref()?
+            .comment_close_areas
+            .iter()
+            .find(|(_, area)| area.contains((col, row).into()))
+            .map(|&(id, _)| id)
     }
 
     /// Prepare the layout for rendering (must be called each frame).
@@ -1126,23 +1122,23 @@ impl LineViewerState {
         self.rebuild_markdown_for_width(width);
         self.list_state.prepare_layout(&self.lines, width, height);
 
-        // On the first render with an initial range, center the range
-        // in the viewport. Consumed once so subsequent navigation is normal.
+        // On the first render with an initial range, center the range in the viewport
+        // Consumed once so subsequent navigation is normal
         if let Some(range) = self.initial_scroll_range.take() {
             let vp = height as usize;
             let total = self.lines.len();
             let pad = 3usize; // inner padding (lines of context above/below)
 
             if total <= vp {
-                // Entire file fits — no scrolling needed.
+                // Entire file fits, so no scrolling is needed
             } else {
                 let range_len = range.end.saturating_sub(range.start);
                 let offset = if range_len + pad * 2 <= vp {
-                    // Range fits with padding — center it.
+                    // Range fits with padding: center it
                     let center = range.start + range_len / 2;
                     center.saturating_sub(vp / 2)
                 } else {
-                    // Range larger than viewport — put start near top with padding.
+                    // Range larger than viewport: put the start near the top with padding
                     range.start.saturating_sub(pad)
                 };
                 // Clamp to valid range.
@@ -1152,27 +1148,22 @@ impl LineViewerState {
         }
     }
 
-    /// Rebuild `self.lines` from source lines + comments.
-    ///
-    /// Comments are inserted after the last source line in their range.
-    /// Item IDs for comments use a high base offset to avoid colliding
-    /// with source line IDs.
+    /// Rebuild `self.lines` from source lines and comments. Comments are inserted after the last source
+    /// line in their range. Item IDs for comments use a high base offset to avoid colliding with source
+    /// line IDs.
     pub fn rebuild_with_comments(
         &mut self,
         comments: &[crate::views::plan_approval_view::PlanComment],
     ) {
         self.last_comments = comments.to_vec();
         self.interleave_comments(comments);
-        // Item count/content changed — force the list pane to recompute
-        // wrapping heights on the next render frame.
+        // Item count/content changed: force the list pane to recompute wrapping heights on the next render frame
         self.list_state.invalidate_layout();
     }
 
-    /// Interleave source lines with Mermaid affordance rows and comments
-    /// without updating `last_comments`.
+    /// Interleave source lines with Mermaid affordance rows and comments without updating `last_comments`.
     ///
-    /// `mermaid_after` is document-ordered; affordances sit under the
-    /// diagram art, before any comments on the same source line.
+    /// `mermaid_after` is document-ordered; affordances sit under the diagram art, before any comments on the same source line.
     fn interleave_comments(&mut self, comments: &[crate::views::plan_approval_view::PlanComment]) {
         let max_digits = digit_count(
             self.source_lines
@@ -1203,20 +1194,33 @@ impl LineViewerState {
             src.commented = commented_lines.contains(&ln);
             items.push(PlanViewerItem::Source(Box::new(src)));
 
-            while mermaid_i < self.mermaid_after.len() && self.mermaid_after[mermaid_i].0 == src_idx
+            while mermaid_i < self.mermaid_after.len()
+                && self
+                    .mermaid_after
+                    .get(mermaid_i)
+                    .is_some_and(|m| m.0 == src_idx)
             {
+                let Some(diagram) = self.mermaid_after.get(mermaid_i).map(|m| m.1.clone()) else {
+                    break;
+                };
                 items.push(PlanViewerItem::MermaidAffordance(
                     MermaidAffordanceLine::new(
                         MERMAID_AFFORDANCE_ID_BASE + mermaid_i as u64,
-                        self.mermaid_after[mermaid_i].1.clone(),
+                        diagram,
                         max_digits,
                     ),
                 ));
                 mermaid_i += 1;
             }
 
-            while comment_idx < sorted.len() && sorted[comment_idx].line_range.end == ln + 1 {
-                let c = sorted[comment_idx];
+            while comment_idx < sorted.len()
+                && sorted
+                    .get(comment_idx)
+                    .is_some_and(|c| c.line_range.end == ln + 1)
+            {
+                let Some(c) = sorted.get(comment_idx).copied() else {
+                    break;
+                };
                 let item_id = comment_id_base + c.id;
                 items.push(PlanViewerItem::Comment(CommentLine::new(
                     c.id,
@@ -1229,7 +1233,7 @@ impl LineViewerState {
             }
         }
 
-        for c in &sorted[comment_idx..] {
+        for c in sorted.get(comment_idx..).unwrap_or(&[]) {
             let item_id = comment_id_base + c.id;
             items.push(PlanViewerItem::Comment(CommentLine::new(
                 c.id,
@@ -1286,8 +1290,6 @@ impl LineViewerState {
     }
 }
 
-// ── Syntax highlighting ─────────────────────────────────────────────────
-
 /// Build syntax-highlighted source lines from file content.
 fn build_source_lines(path: &Path, content: &str) -> Vec<SourceLine> {
     let syntect = get_syntect();
@@ -1310,9 +1312,8 @@ fn build_source_lines(path: &Path, content: &str) -> Vec<SourceLine> {
         .enumerate()
         .map(|(i, text)| {
             let line_number = i + 1;
-            // Feed every line, blank ones included, through the highlighter so
-            // its parse state stays in sync. Skipping blanks corrupts constructs
-            // that span multiple lines (block comments, multi-line strings).
+            // Feed every line, blank ones included, through the highlighter so its parse state stays in sync
+            // Skipping blanks corrupts constructs that span multiple lines (block comments, multi-line strings)
             let styled_line = match highlighter.as_mut() {
                 Some(hl) => highlight_to_ratatui_line(hl, text, &syntect.syntax_set),
                 None if text.is_empty() => Line::from(" ".to_owned()),
@@ -1323,8 +1324,7 @@ fn build_source_lines(path: &Path, content: &str) -> Vec<SourceLine> {
         .collect()
 }
 
-/// Count source lines in content, matching `str::split('\n')` semantics
-/// with trailing-newline handling.
+/// Count source lines the way `str::split('\n')` does, not counting a final trailing newline.
 fn source_line_count(content: &str) -> usize {
     let count = content.split('\n').count();
     if content.ends_with('\n') {
@@ -1341,14 +1341,6 @@ struct BuiltMarkdownLines {
 }
 
 /// Build markdown-rendered source lines from file content.
-///
-/// Uses `MarkdownContent` to render the full document, then groups rendered
-/// lines by source line using `line_source_map`. Each source line becomes
-/// one `SourceLine` item that may span multiple visual lines (e.g., a table
-/// block renders as border + header + separator + data + border).
-///
-/// With `render_mermaid` auto/on, also anchors affordance rows under each
-/// closed mermaid fence.
 fn build_markdown_lines(content: &str, max_table_width: Option<usize>) -> BuiltMarkdownLines {
     let md = MarkdownContent::new_source_faithful(content, max_table_width);
     let pre_wrap = md.pre_wrap_lines();
@@ -1356,9 +1348,8 @@ fn build_markdown_lines(content: &str, max_table_width: Option<usize>) -> BuiltM
     let mermaid = md.mermaid_content();
     let mermaid_ranges = md.mermaid_block_ranges();
 
-    // Background colors come from each line's style (set by the renderer
-    // for code blocks etc.). pre_wrap_lines() returns owned Lines that
-    // carry their style including bg.
+    // Background colors come from each line's style (set by the renderer for code blocks etc.)
+    // pre_wrap_lines() returns owned Lines that carry their style including bg
     let line_bgs: Vec<Option<Color>> = pre_wrap.iter().map(|line| line.style.bg).collect();
 
     // Split source text into raw lines for plain_text / search.
@@ -1384,7 +1375,7 @@ fn build_markdown_lines(content: &str, max_table_width: Option<usize>) -> BuiltM
         prewrap_to_group.push(groups.len() - 1);
     }
 
-    // group index → source_lines index after blank-line injection.
+    // Maps group index to source_lines index after blank-line injection
     let mut group_to_source_idx: Vec<usize> = Vec::with_capacity(groups.len());
     let mut source_lines = Vec::new();
     let mut next_item_id = 0u64;
@@ -1489,8 +1480,7 @@ fn highlight_to_ratatui_line(
         if piece.is_empty() {
             continue;
         }
-        // Shared path: polarity-safe under the terminal-native lock, else
-        // normal theme quantize (see xai_grok_pager_render::syntax).
+        // Shared path: polarity-safe under the terminal-native lock, else normal theme quantize (see xai_grok_pager_render::syntax)
         let fg = crate::syntax::syntect_rgb_to_fg(
             style.foreground.r,
             style.foreground.g,
@@ -1514,12 +1504,18 @@ fn digit_count(n: usize) -> usize {
     }
 }
 
-// ── Rendering helpers ───────────────────────────────────────────────────
+/// Band for the active commenting / gutter-drag line range: a subtle 15% `accent_plan` tint over the canvas on RGB themes.
+/// Profile palettes (terminal theme, Reset canvas) cannot express a dim yellow tint, so the band is the solid named `accent_plan` with forced Black text — readable on both polarities.
+fn commenting_band(theme: &Theme) -> (Color, Option<Color>) {
+    match crate::render::color::blend_color(theme.bg_base, theme.accent_plan, 0.15) {
+        Some(tint) => (tint, None),
+        None => (theme.accent_plan, Some(Color::Black)),
+    }
+}
 
-/// Build a single review-footer shortcut button styled to match the
-/// shortcut hints in `modal_window::render_modal_shortcuts`:
-/// bold key in the primary text color + dim label, with a
-/// hover-highlighted background.
+/// Build a single review-footer shortcut button styled to match the shortcut hints in `modal_window::render_modal_shortcuts`.
+/// The style is a bold key in the primary text color and a dim label, with a hover-highlighted background.
+#[cfg(test)]
 fn build_shortcut_button<'a>(
     key: char,
     rest: &str,
@@ -1531,23 +1527,26 @@ fn build_shortcut_button<'a>(
     } else {
         theme.bg_base
     };
-    let key_style = Style::default()
+    let mut key_style = Style::default()
         .fg(theme.text_primary)
         .bg(bg)
         .add_modifier(Modifier::BOLD);
-    let label_style = Style::default().fg(theme.gray).bg(bg);
+    let mut label_style = Style::default().fg(theme.gray).bg(bg);
+    // Terminal theme (Reset band slots): the bg_highlight hover underlay is
+    // invisible — reverse video carries the cue, as in render_modal_shortcuts.
+    if hovered && theme.is_bandless() {
+        key_style = key_style.add_modifier(Modifier::REVERSED);
+        label_style = label_style.add_modifier(Modifier::REVERSED);
+    }
     vec![
         Span::styled(key.to_string(), key_style),
         Span::styled(format!(" {rest}"), label_style),
     ]
 }
 
-/// Render the line viewer popup.
-///
-/// File preview uses a 75% centered panel with dimmed background.
-/// Soft plan review docks a right-side pane and leaves the left
-/// transcript undimmed. Fullscreen / modal park fills the overlay
-/// without dimming.
+/// Render the line viewer popup. In normal mode, draws a 75% centered panel with dimmed background
+/// (modifiers reset). In fullscreen mode (`viewer.fullscreen`), fills the entire overlay area
+/// without dimming. Renders the ListPane inside the panel with syntax-highlighted lines.
 pub fn render_line_viewer(
     buf: &mut Buffer,
     full_area: Rect,
@@ -1556,10 +1555,9 @@ pub fn render_line_viewer(
     theme: &Theme,
     comment_count: usize,
 ) {
-    // Compute popup area. Soft plan review docks on the right of the
-    // overlay (transcript stays visible on the left). Enlarge /
-    // modal park nearly fills the overlay. File preview stays a 75%
-    // centered popup.
+    // Compute the popup area. In enlarge (fullscreen) mode it nearly fills the overlay, leaving 1 row
+    // of top and 2 cols of side padding so it doesn't crowd the edges. The caller already excludes the
+    // prompt and turn_status from `full_area`. In normal mode it sits in a 75% centered popup.
     let (popup_area, should_dim) = if viewer.fullscreen {
         const TOP_PAD: u16 = 1;
         const SIDE_PAD: u16 = 2;
@@ -1584,9 +1582,8 @@ pub fn render_line_viewer(
         (Rect::new(popup_x, popup_y, popup_width, popup_height), true)
     };
 
-    // Plan modes (both review and casual) reserve 2 extra rows inside
-    // the frame for the divider + action-button footer, so they need
-    // a slightly taller minimum than ordinary file previews.
+    // Plan modes (both review and casual) reserve 2 extra rows inside the frame for the divider and action-button footer
+    // They therefore need a slightly taller minimum than ordinary file previews
     let min_height: u16 = if viewer.show_footer() { 7 } else { 5 };
     if popup_area.width < 10 || popup_area.height < min_height {
         viewer.last_popup_area = None;
@@ -1615,28 +1612,35 @@ pub fn render_line_viewer(
     let inner = border.inner(popup_area);
     border.render(popup_area, buf);
 
-    // Plan modes reserve 2 rows at the bottom of `inner` for the
-    // divider + action-button row (rendered in step 8 below). Compute
-    // the actual content_area now so `prepare_layout` sees the true
-    // viewport height — passing the larger `inner.height` would make
-    // `ListPaneState`'s auto-scroll/paging math off by `footer_rows`
-    // (the selection can hide behind the footer; Ctrl-D/Ctrl-U jump
-    // too far; initial-scroll-to-range centering is mis-sized).
+    // Plan modes reserve 2 rows at the bottom of `inner` for the divider and action-button row
+    // (rendered in step 8 below).
     let footer_rows: u16 = if viewer.show_footer() { 2 } else { 0 };
-    let content_area = Rect {
+    let mut content_area = Rect {
         x: inner.x,
         y: inner.y,
         width: inner.width,
         height: inner.height.saturating_sub(footer_rows),
     };
+    // Soft plan text sits inside the frame so the left border cannot cover
+    // the first characters, and the body wraps in the width that remains.
+    if viewer.is_soft_plan_side_pane() {
+        let inset = LineViewerState::SOFT_PLAN_TEXT_INSET.min(content_area.width.saturating_sub(8));
+        content_area.x = content_area.x.saturating_add(inset);
+        content_area.width = content_area.width.saturating_sub(inset);
+    }
 
     // 4. Prepare layout (resolves selection index for title + rendering).
-    viewer.prepare_layout(content_area.width, content_area.height);
+    // Subtract the scrollbar before measuring so a long plan line wraps and
+    // scrolls instead of being clipped on one row.
+    let layout_width = content_area
+        .width
+        .saturating_sub(SCROLLBAR_TOTAL_COLS)
+        .max(1);
+    viewer.prepare_layout(layout_width, content_area.height);
 
-    // 5. Title bar: styled file path + line range.
-    //    Only show line range when visual selection is active.
-    //    When title_override is set (e.g. plan preview), use that instead
-    //    of the full file path to avoid overflow.
+    // 5. Title bar: styled file path and line range.
+    //    Only show the line range when visual selection is active
+    //    When title_override is set (e.g. plan preview), use that instead of the full file path to avoid overflow.
     if inner.width > 4 {
         let rel_path = viewer.path.strip_prefix(cwd).unwrap_or(&viewer.path);
         let rel_path_str = viewer
@@ -1646,14 +1650,13 @@ pub fn render_line_viewer(
             .to_string();
         let line_range = if viewer.list_state.visual_mode {
             viewer.line_range_suffix().map(|s| {
-                // Strip leading ':' — styled_file_ref adds its own.
+                // Strip the leading ':'; styled_file_ref adds its own
                 s.strip_prefix(':').unwrap_or(&s).to_owned()
             })
         } else {
             None
         };
 
-        // Build styled title with shared helper.
         let mut title = super::styled_file_ref(
             &rel_path_str,
             line_range.as_deref(),
@@ -1665,16 +1668,22 @@ pub fn render_line_viewer(
             span.style = span.style.bg(theme.bg_base);
         }
 
-        // Wrap with `─ ... ─` decorations to match other modals
-        // (see modal_window.rs:341-346) and left-align flush with the
-        // top-left corner.
+        // Wrap with `─ ... ─` decorations to match other modals (see modal_window.rs:341-346) and left-align flush with the top-left corner.
         let deco = Style::default().fg(theme.gray_dim).bg(theme.bg_base);
         title.spans.insert(0, Span::styled("\u{2500} ", deco));
         title.spans.push(Span::styled(" \u{2500}", deco));
 
         let title_width = title.width() as u16;
-        let title_x = popup_area.x + 1;
-        let max_title_width = popup_area.width.saturating_sub(2);
+        let title_inset = if viewer.is_soft_plan_side_pane() {
+            LineViewerState::SOFT_PLAN_TEXT_INSET
+        } else {
+            0
+        };
+        let title_x = popup_area.x.saturating_add(1).saturating_add(title_inset);
+        let max_title_width = popup_area
+            .width
+            .saturating_sub(2)
+            .saturating_sub(title_inset);
         buf.set_line(
             title_x,
             popup_area.y,
@@ -1683,24 +1692,15 @@ pub fn render_line_viewer(
         );
     }
 
-    // 6. Action buttons on the top border, right-aligned.
-    //    Layout: ... copy [↗][✗]  (rightmost buttons first; the two
-    //    abut flush. See the spacing notes on the close/fullscreen
-    //    labels below). Plan preview paints `copy_icon` immediately
-    //    left of `[↗]`.
-    //    The close [✗] is omitted in plan-review (feedback) mode because
-    //    the modal is not user-closeable in that state — clicking it
-    //    would be a no-op (see the close-button branch of
-    //    `handle_line_viewer_mouse` in agent_view.rs).
+    // Action buttons on the top border, right-aligned. The close [✗] is omitted in plan-review
+    // (feedback) mode because the modal is not user-closeable in that state.
     let mut right_edge = popup_area.x + popup_area.width - 1;
 
     if !viewer.feedback_active() {
         let close_text = crate::glyphs::ballot_x(); // ✗ (ASCII on legacy ConHost)
-        // Label is `[✗] ` (trailing space, no leading space). The
-        // fullscreen button's label has no trailing space when the
-        // close is visible, so the two buttons abut flush as `[↗][✗]`,
-        // tucked under the top-right corner with one space inside the
-        // frame on each side: ` [↗][✗] `.
+        // Label is `[✗] ` (trailing space, no leading space)
+        // The fullscreen button's label has no trailing space when the close is visible, so the two buttons abut flush as `[↗][✗]`
+        // They tuck under the top-right corner with one space inside the frame on each side: ` [↗][✗] `
         let close_w: u16 = 4; // "[✗] "
         if popup_area.width > close_w + 2 {
             let close_x = right_edge - close_w;
@@ -1723,14 +1723,9 @@ pub fn render_line_viewer(
         viewer.close_button_area = None;
     }
 
-    // Fullscreen toggle button. The icon stays constant regardless of
-    // current state — the button is a toggle, not a status indicator.
-    //
-    // Spacing: when the close button is rendered (casual mode) the
-    // fullscreen drops its trailing space so the two sit flush as
-    // `[↗][✗]`. When the close is hidden (plan-review mode) the
-    // fullscreen keeps its trailing space so it doesn't crowd the
-    // corner `╮`.
+    // Fullscreen toggle button. The icon stays constant regardless of current state: the button is a
+    // toggle, not a status indicator. When the close is hidden (plan-review mode) the fullscreen keeps
+    // its trailing space so it doesn't crowd the corner `╮`.
     let fs_icon = crate::glyphs::enlarge(); // ↗ (ASCII on legacy ConHost)
     let close_visible = viewer.close_button_area.is_some();
     let (fs_label, fs_w): (String, u16) = if close_visible {
@@ -1755,45 +1750,31 @@ pub fn render_line_viewer(
         viewer.fullscreen_button_area = None;
     }
 
-    // Plan preview: copy glyph immediately left of `[↗]` (the leading
-    // space of the fullscreen label). Shrink the enlarge hit rect so
-    // a copy click is not stolen by fullscreen.
-    if viewer.kind == LineViewerKind::PlanPreview {
-        let icon = crate::glyphs::copy_icon();
-        let copy_w: u16 = 1;
-        let copy_hovered = viewer.plan_ref().is_some_and(|p| p.copy_hovered);
-        let copy_style = if copy_hovered {
-            Style::default()
-                .fg(theme.text_primary)
-                .bg(theme.bg_base)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(theme.gray).bg(theme.bg_base)
-        };
-        let copy_x = match viewer.fullscreen_button_area {
-            Some(fs) if fs.width > copy_w => Some(fs.x),
-            _ if right_edge > popup_area.x + copy_w + 2 => Some(right_edge - copy_w),
-            _ => None,
-        };
-        if let Some(copy_x) = copy_x {
-            let copy_span = Span::styled(icon, copy_style);
-            buf.set_span(copy_x, popup_area.y, &copy_span, copy_w);
-            if let Some(fs) = viewer.fullscreen_button_area
-                && copy_x == fs.x
-            {
-                viewer.fullscreen_button_area = Some(Rect::new(
-                    fs.x.saturating_add(copy_w),
-                    fs.y,
-                    fs.width.saturating_sub(copy_w),
-                    fs.height,
-                ));
-            }
-            viewer.plan_mut().copy_button_area = Some(Rect::new(copy_x, popup_area.y, copy_w, 1));
-            // Magnifying glass immediately left of copy (copy stays
-            // immediately left of `[↗]`).
-            let search_w: u16 = 1;
-            if copy_x > popup_area.x + search_w + 2 {
-                let search_x = copy_x - search_w;
+    // Plan preview: copy glyph in the fullscreen label's leading pad, glass
+    // one cell to its left. Both sit on the title bar, not the CTA row.
+    if viewer.kind == LineViewerKind::PlanPreview
+        && let Some(fs) = viewer.fullscreen_button_area
+    {
+        let copy_x = fs.x;
+        if copy_x > popup_area.x {
+            let copy_hovered = viewer.plan_ref().is_some_and(|p| p.copy_hovered);
+            let copy_style = if copy_hovered {
+                Style::default()
+                    .fg(theme.text_primary)
+                    .bg(theme.bg_base)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(theme.gray).bg(theme.bg_base)
+            };
+            buf.set_span(
+                copy_x,
+                popup_area.y,
+                &Span::styled(crate::glyphs::copy_icon(), copy_style),
+                1,
+            );
+            let search_x = copy_x.saturating_sub(1);
+            let search_inside = search_x > popup_area.x;
+            if search_inside {
                 let search_hovered = viewer.plan_ref().is_some_and(|p| p.search_hovered);
                 let search_style = if search_hovered {
                     Style::default()
@@ -1803,25 +1784,36 @@ pub fn render_line_viewer(
                 } else {
                     Style::default().fg(theme.gray).bg(theme.bg_base)
                 };
-                let search_span = Span::styled(crate::glyphs::search_icon(), search_style);
-                buf.set_span(search_x, popup_area.y, &search_span, search_w);
-                viewer.plan_mut().search_button_area =
-                    Some(Rect::new(search_x, popup_area.y, search_w, 1));
-            } else {
-                viewer.plan_mut().search_button_area = None;
+                let search_glyph = if crate::glyphs::is_legacy_windows_console() {
+                    "s"
+                } else {
+                    "\u{2315}"
+                };
+                buf.set_span(
+                    search_x,
+                    popup_area.y,
+                    &Span::styled(search_glyph, search_style),
+                    1,
+                );
             }
-        } else {
-            viewer.plan_mut().copy_button_area = None;
-            viewer.plan_mut().search_button_area = None;
+            let plan = viewer.plan_mut();
+            plan.copy_button_area = Some(Rect::new(copy_x, popup_area.y, 1, 1));
+            plan.search_button_area = if search_inside {
+                Some(Rect::new(search_x, popup_area.y, 1, 1))
+            } else {
+                None
+            };
+            viewer.fullscreen_button_area = Some(Rect::new(
+                copy_x.saturating_add(1),
+                fs.y,
+                fs.width.saturating_sub(1),
+                fs.height,
+            ));
         }
-    } else if let Some(plan) = viewer.plan.as_mut() {
-        plan.search_button_area = None;
     }
 
-    // The legacy top-border "send" button is gone — both plan-approval
-    // and casual modes now render the send action in the modal footer
-    // alongside the other shortcut buttons. Clear stale hit-rects so
-    // mouse handlers don't act on positions from a previous render.
+    // The legacy top-border "send" button is gone; both plan-approval and casual modes now render the send action in the modal footer
+    // Clear stale hit-rects so mouse handlers don't act on positions from a previous render
     if let Some(plan) = viewer.plan.as_mut() {
         plan.send_button_area = None;
         plan.questions_button_area = None;
@@ -1831,27 +1823,21 @@ pub fn render_line_viewer(
         plan.abandon_button_area = None;
     }
 
-    // 7. Render ListPane.
-    //    Plan modes (review + casual) reserve 2 rows at the bottom of
-    //    `inner` for a horizontal divider plus the action-button row.
-    //    The divider sits at `inner.bottom() - 2` and the buttons at
-    //    `inner.bottom() - 1`, both inside the modal frame.
-    //
-    //    `footer_rows` / `content_area` were computed above (just
-    //    after `inner`) so `prepare_layout` could see the true
-    //    viewport height. Reuse them here.
+    // Render ListPane.
     let style = LineViewerState::list_pane_style();
 
     let pane = ListPane::new(&viewer.lines).focused(true).style(style);
     StatefulWidget::render(pane, content_area, buf, &mut viewer.list_state);
 
-    // Cache the list-rendered area (for ListPane mouse dispatch) and
-    // the full modal area inside the border (for the click-outside
-    // check that decides whether to close the modal).
+    // Cache the list-rendered area (for ListPane mouse dispatch)
+    // Also cache the full modal area inside the border, for the click-outside check that decides whether to close the modal
     viewer.last_popup_area = Some(content_area);
     viewer.last_modal_area = Some(inner);
 
-    // 7b. Line range highlight — active drag or commenting range.
+    // 7a. Per-comment `[✗]` delete buttons.
+    render_comment_close_buttons(buf, content_area, viewer, theme);
+
+    // 7b. Line range highlight: active drag or commenting range.
     if let Some(plan) = viewer.plan_ref() {
         let highlight_range =
             if let (Some(start), Some(end)) = (plan.gutter_drag_start, plan.gutter_drag_end) {
@@ -1866,12 +1852,9 @@ pub fn render_line_viewer(
                     .map(|r| (r.start, r.end.saturating_sub(1)))
             };
         if let Some((lo, hi)) = highlight_range {
-            let blend_bg =
-                crate::render::color::blend_color(theme.bg_base, theme.accent_plan, 0.15)
-                    .unwrap_or(theme.accent_plan);
-            // Stop the highlight one column before the scrollbar so
-            // the gap + track stay readable instead of being tinted
-            // by the comment-range overlay.
+            let (blend_bg, fg_override) = commenting_band(theme);
+            // Stop the highlight one column before the scrollbar
+            // The gap and track stay readable instead of being tinted by the comment-range overlay
             let highlight_width = content_area.width.saturating_sub(SCROLLBAR_TOTAL_COLS);
             for row in content_area.y..content_area.y + content_area.height {
                 if let Some(ln) = viewer.source_line_at_screen_row(row, content_area)
@@ -1880,26 +1863,16 @@ pub fn render_line_viewer(
                 {
                     let row_rect = Rect::new(content_area.x, row, highlight_width, 1);
                     buf.set_style(row_rect, Style::default().bg(blend_bg));
+                    if let Some(fg) = fg_override {
+                        crate::render::color::force_area_fg(buf, row_rect, fg);
+                    }
                 }
             }
         }
     }
 
-    // 8. Action buttons inside the modal footer (centered), for both
-    //    plan-approval and casual plan-preview modes. A full-width `─`
-    //    divider separates the button row from the content above
-    //    (matches modal_window.rs's tab divider style).
-    //
-    //    Idle plan actions are a little bigger than the bare words.
-    //    Each word has one pad cell on each side. The pipe between those
-    //    padded actions is ` | `, so the wide row reads
-    //    ` approve  |  comment  |  revise  |  exit `
-    //    with two spaces on each side of every pipe.
-    //
-    //    - Plan idle (live present and `/view-plan`): that spaced row
-    //    - Plan comment flow: the same spacing, with clarify instead of comment
-    //    Copy is the title-bar glyph, not a fifth idle CTA. Search / Esc
-    //    stay on the main hint row. Narrow docks still drop the pipes.
+    // Action buttons inside the modal footer (centered), for both plan-approval and casual
+    // plan-preview modes.
     if viewer.show_footer() && inner.height >= 2 {
         let div_y = inner.y + inner.height - 2;
         let div_style = Style::default().fg(theme.gray_dim).bg(theme.bg_base);
@@ -1908,240 +1881,204 @@ pub fn render_line_viewer(
 
         let bottom_y = inner.y + inner.height - 1;
 
-        let abandon_hovered = viewer.plan_ref().is_some_and(|p| p.abandon_hovered);
-        let comment_hovered = viewer.plan_ref().is_some_and(|p| p.comment_hovered);
-        let approve_hovered = viewer.plan_ref().is_some_and(|p| p.approve_hovered);
-        let copy_hovered = viewer.plan_ref().is_some_and(|p| p.copy_hovered);
         let is_plan_preview = viewer.kind == LineViewerKind::PlanPreview;
-
-        let separator = "  |  ";
-        let sep_w: u16 = 5;
-        let sep_style = Style::default().fg(theme.gray_dim).bg(theme.bg_base);
-
-        use unicode_width::UnicodeWidthStr;
-        let badge_text: String = if comment_count > 0 {
-            format!(" {comment_count} {}", crate::glyphs::filled_dot())
-        } else {
-            String::new()
-        };
-        let badge_w: u16 = badge_text.width() as u16;
-        let badge_style = Style::default().fg(theme.accent_plan).bg(theme.bg_base);
-        let selected = viewer.plan_ref().and_then(|p| p.selected_cta);
-        let choice_dot = format!(" {}", crate::glyphs::filled_dot());
-        let choice_dot_w: u16 = choice_dot.width() as u16;
-        let choice_dot_style = Style::default().fg(theme.text_primary).bg(theme.bg_base);
-
         if is_plan_preview {
-            // Clickable CTAs. Letter keys type, so labels have no a/A/s/q
+            // Clickable CTAs. Letter keys type, so labels have no a/c/s/q
             // prefixes. Narrow docks drop separators, then drop the badge.
-            // Idle: Comment is the notes entry. After Comment / prompt
-            // focus, Clarify replaces it so the typed comment can ride.
-            // Copy is the title-bar glyph, not a fifth idle CTA.
+            // Idle: Comment. After Comment, Clarify. Copy stays on the title bar.
+            use unicode_width::UnicodeWidthStr;
             let comment_flow = viewer.plan_ref().is_some_and(|p| p.comment_flow_active);
-            let questions_hovered = viewer.plan_ref().is_some_and(|p| p.questions_hovered);
-            let send_hovered = viewer.plan_ref().is_some_and(|p| p.send_hovered);
-            let labels = if comment_flow {
+            let labels: [&str; 4] = if comment_flow {
                 ["approve", "clarify", "revise", "exit"]
             } else {
                 ["approve", "comment", "revise", "exit"]
             };
             let hovers = [
-                approve_hovered,
+                viewer.plan_ref().is_some_and(|p| p.approve_hovered),
                 if comment_flow {
-                    questions_hovered
+                    viewer.plan_ref().is_some_and(|p| p.questions_hovered)
                 } else {
-                    comment_hovered
+                    viewer.plan_ref().is_some_and(|p| p.comment_hovered)
                 },
-                send_hovered,
-                abandon_hovered,
+                viewer.plan_ref().is_some_and(|p| p.send_hovered),
+                viewer.plan_ref().is_some_and(|p| p.abandon_hovered),
             ];
-
-            // Wide row is the spaced action string. Narrow docks drop
-            // pipes and the extra pad so the four actions still fit.
-            let spaced_row = plan_approval_spaced_action_row(labels);
-            let mut wide_part_iter = spaced_row.split(PLAN_APPROVAL_ACTION_BETWEEN);
-            let wide_parts = [
-                wide_part_iter.next().unwrap_or_default(),
-                wide_part_iter.next().unwrap_or_default(),
-                wide_part_iter.next().unwrap_or_default(),
-                wide_part_iter.next().unwrap_or_default(),
+            let selected = viewer.plan_ref().and_then(|p| p.selected_cta);
+            let pad = PLAN_APPROVAL_ACTION_PAD;
+            let pad_w = pad.width() as u16;
+            let mut between = PLAN_APPROVAL_ACTION_BETWEEN;
+            let mut between_w = between.width() as u16;
+            let word_widths = [
+                labels[0].width() as u16,
+                labels[1].width() as u16,
+                labels[2].width() as u16,
+                labels[3].width() as u16,
             ];
-            let mut painted = false;
-            for &(wide, with_badge) in &[(true, true), (false, true), (false, false)] {
-                let between = if wide {
-                    PLAN_APPROVAL_ACTION_BETWEEN
-                } else {
-                    " "
-                };
-                let between_w = between.width() as u16;
-                let mut total_w = if wide {
-                    spaced_row.width() as u16
-                } else {
-                    labels
-                        .iter()
-                        .map(|word| word.width() as u16)
-                        .sum::<u16>()
-                        .saturating_add(between_w.saturating_mul(3))
-                };
-                if with_badge {
-                    total_w = total_w.saturating_add(badge_w);
-                }
-                for i in 0..4 {
-                    if selected_cta_marks_index(selected, i, comment_flow) {
-                        total_w = total_w.saturating_add(choice_dot_w);
-                    }
-                }
-                // Isolated Preview side pane can be narrower than the
-                // preferred footer. Still paint Approve / Comment so the
-                // Comment then Approve workflow is clickable.
-                if total_w > inner.width && wide {
-                    continue;
-                }
-
-                let mut x = inner.x + (inner.width - total_w) / 2;
-                let mut areas: [Option<Rect>; 4] = [None; 4];
-                let pad_len = PLAN_APPROVAL_ACTION_PAD.len();
-                for i in 0..4 {
-                    let start = x;
-                    let marked = selected_cta_marks_index(selected, i, comment_flow);
-                    let style = if hovers[i] || marked {
-                        Style::default()
-                            .fg(theme.text_primary)
-                            .bg(theme.bg_base)
-                            .add_modifier(Modifier::BOLD)
-                    } else {
-                        Style::default().fg(theme.text_primary).bg(theme.bg_base)
-                    };
-                    let (head, trail) = if wide {
-                        let part = wide_parts[i];
-                        let split_at = part.len().saturating_sub(pad_len.min(part.len()));
-                        part.split_at(split_at)
-                    } else {
-                        (labels[i], "")
-                    };
-                    buf.set_string(x, bottom_y, head, style);
-                    x += head.width() as u16;
-                    if marked {
-                        buf.set_string(x, bottom_y, &choice_dot, choice_dot_style);
-                        x += choice_dot_w;
-                    }
-                    if i == 1 && with_badge && badge_w > 0 {
-                        buf.set_string(x, bottom_y, &badge_text, badge_style);
-                        x += badge_w;
-                    }
-                    if !trail.is_empty() {
-                        buf.set_string(x, bottom_y, trail, style);
-                        x += trail.width() as u16;
-                    }
-                    areas[i] = Some(Rect::new(start, bottom_y, x.saturating_sub(start), 1));
-                    if i < 3 {
-                        buf.set_string(x, bottom_y, between, sep_style);
-                        x += between_w;
-                    }
-                }
-
-                let plan = viewer.plan_mut();
-                plan.approve_button_area = areas[0];
-                if comment_flow {
-                    plan.questions_button_area = areas[1];
-                    plan.comment_button_area = None;
-                } else {
-                    plan.comment_button_area = areas[1];
-                    plan.questions_button_area = None;
-                }
-                plan.send_button_area = areas[2];
-                plan.abandon_button_area = areas[3];
-                plan.approve_notes_button_area = None;
-                painted = true;
-                break;
-            }
-
-            if !painted {
-                let plan = viewer.plan_mut();
-                plan.approve_button_area = None;
-                plan.approve_notes_button_area = None;
-                plan.questions_button_area = None;
-                plan.send_button_area = None;
-                plan.abandon_button_area = None;
-                plan.comment_button_area = None;
-            }
-        } else {
-            let comment_spans = build_shortcut_button('c', "comment", comment_hovered, theme);
-            let comment_w: u16 = comment_spans.iter().map(|s| s.width() as u16).sum();
-            let copy_spans = build_shortcut_button('y', "copy plan", copy_hovered, theme);
-            let copy_w: u16 = copy_spans.iter().map(|s| s.width() as u16).sum();
-            let (send_w, send_spans): (u16, Option<Vec<Span>>) = if comment_count > 0 {
-                let spans = build_shortcut_button('s', "send", approve_hovered, theme);
-                let w: u16 = spans.iter().map(|s| s.width() as u16).sum();
-                (w, Some(spans))
+            let marked = [
+                selected_cta_marks_index(selected, 0, comment_flow),
+                selected_cta_marks_index(selected, 1, comment_flow),
+                selected_cta_marks_index(selected, 2, comment_flow),
+                selected_cta_marks_index(selected, 3, comment_flow),
+            ];
+            let choice_dot = format!(" {}", crate::glyphs::filled_dot());
+            let choice_dot_w = choice_dot.width() as u16;
+            let mut badge_text = if comment_count > 0 {
+                format!(" {comment_count} {}", crate::glyphs::filled_dot())
             } else {
-                (0, None)
+                String::new()
             };
-
-            let mut total_w = comment_w.saturating_add(badge_w);
-            total_w = total_w.saturating_add(sep_w).saturating_add(copy_w);
-            if send_w > 0 {
-                total_w = total_w.saturating_add(sep_w).saturating_add(send_w);
-            }
-
-            if total_w <= inner.width {
-                let mut x = inner.x + (inner.width - total_w) / 2;
-
-                let comment_x = x;
-                for span in &comment_spans {
-                    let w = span.width() as u16;
-                    buf.set_span(x, bottom_y, span, w);
-                    x += w;
-                }
-                viewer.plan_mut().comment_button_area =
-                    Some(Rect::new(comment_x, bottom_y, comment_w, 1));
-                if badge_w > 0 {
-                    buf.set_string(x, bottom_y, &badge_text, badge_style);
-                    x += badge_w;
-                }
-
-                buf.set_string(x, bottom_y, separator, sep_style);
-                x += sep_w;
-                let copy_x = x;
-                for span in &copy_spans {
-                    let w = span.width() as u16;
-                    buf.set_span(x, bottom_y, span, w);
-                    x += w;
-                }
-                viewer.plan_mut().copy_button_area = Some(Rect::new(copy_x, bottom_y, copy_w, 1));
-
-                if let Some(spans) = &send_spans {
-                    buf.set_string(x, bottom_y, separator, sep_style);
-                    x += sep_w;
-                    let send_x = x;
-                    for span in spans {
-                        let w = span.width() as u16;
-                        buf.set_span(x, bottom_y, span, w);
-                        x += w;
+            let mut badge_w = badge_text.width() as u16;
+            let row_width = |between_w: u16, badge_w: u16| -> u16 {
+                let mut w = 0u16;
+                for i in 0..4 {
+                    w = w
+                        .saturating_add(pad_w)
+                        .saturating_add(word_widths.get(i).copied().expect("index out of bounds"))
+                        .saturating_add(pad_w);
+                    if marked.get(i).copied().expect("index out of bounds") {
+                        w = w.saturating_add(choice_dot_w);
                     }
-                    viewer.plan_mut().approve_button_area =
-                        Some(Rect::new(send_x, bottom_y, send_w, 1));
-                } else {
-                    viewer.plan_mut().approve_button_area = None;
+                    if i == 1 {
+                        w = w.saturating_add(badge_w);
+                    }
+                    if i < 3 {
+                        w = w.saturating_add(between_w);
+                    }
                 }
-
-                let plan = viewer.plan_mut();
-                plan.approve_notes_button_area = None;
-                plan.questions_button_area = None;
-                plan.send_button_area = None;
-                plan.abandon_button_area = None;
-            } else {
-                let plan = viewer.plan_mut();
-                plan.approve_button_area = None;
-                plan.approve_notes_button_area = None;
-                plan.questions_button_area = None;
-                plan.send_button_area = None;
-                plan.comment_button_area = None;
-                plan.copy_button_area = None;
-                plan.abandon_button_area = None;
+                w
+            };
+            if row_width(between_w, badge_w) > inner.width {
+                between = "";
+                between_w = 0;
             }
+            if row_width(between_w, badge_w) > inner.width {
+                badge_text.clear();
+                badge_w = 0;
+            }
+            let total_w = row_width(between_w, badge_w);
+            let mut x = inner.x + inner.width.saturating_sub(total_w) / 2;
+            let sep_style = Style::default().fg(theme.gray_dim).bg(theme.bg_base);
+            let badge_style = Style::default().fg(theme.accent_plan).bg(theme.bg_base);
+            let choice_dot_style = Style::default().fg(theme.text_primary).bg(theme.bg_base);
+            let mut areas: [Option<Rect>; 4] = [None; 4];
+            for i in 0..4 {
+                let start = x;
+                let style = if hovers.get(i).copied().expect("index out of bounds")
+                    || marked.get(i).copied().expect("index out of bounds")
+                {
+                    Style::default()
+                        .fg(theme.text_primary)
+                        .bg(theme.bg_base)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(theme.text_primary).bg(theme.bg_base)
+                };
+                if pad_w > 0 {
+                    buf.set_string(x, bottom_y, pad, style);
+                    x = x.saturating_add(pad_w);
+                }
+                buf.set_string(
+                    x,
+                    bottom_y,
+                    labels.get(i).copied().expect("index out of bounds"),
+                    style,
+                );
+                x = x.saturating_add(word_widths.get(i).copied().expect("index out of bounds"));
+                if marked.get(i).copied().expect("index out of bounds") {
+                    buf.set_string(x, bottom_y, &choice_dot, choice_dot_style);
+                    x = x.saturating_add(choice_dot_w);
+                }
+                if i == 1 && badge_w > 0 {
+                    buf.set_string(x, bottom_y, &badge_text, badge_style);
+                    x = x.saturating_add(badge_w);
+                }
+                if pad_w > 0 {
+                    buf.set_string(x, bottom_y, pad, style);
+                    x = x.saturating_add(pad_w);
+                }
+                *areas.get_mut(i).expect("index out of bounds") =
+                    Some(Rect::new(start, bottom_y, x.saturating_sub(start), 1));
+                if i < 3 && between_w > 0 {
+                    buf.set_string(x, bottom_y, between, sep_style);
+                    x = x.saturating_add(between_w);
+                }
+            }
+            let plan = viewer.plan_mut();
+            plan.approve_button_area = areas[0];
+            if comment_flow {
+                plan.questions_button_area = areas[1];
+                plan.comment_button_area = None;
+            } else {
+                plan.comment_button_area = areas[1];
+                plan.questions_button_area = None;
+            }
+            plan.send_button_area = areas[2];
+            plan.abandon_button_area = areas[3];
+            plan.approve_notes_button_area = None;
+        } else if let Some(plan) = viewer.plan.as_mut() {
+            plan.approve_button_area = None;
+            plan.comment_button_area = None;
+            plan.questions_button_area = None;
+            plan.send_button_area = None;
+            plan.abandon_button_area = None;
+            plan.approve_notes_button_area = None;
         }
     }
+}
+
+/// Draws the `[✗]` delete button on the hovered or selected comment row.
+/// The button rects are saved in `comment_close_areas` for mouse hit-testing.
+fn render_comment_close_buttons(
+    buf: &mut Buffer,
+    content_area: Rect,
+    viewer: &mut LineViewerState,
+    theme: &Theme,
+) {
+    if viewer.kind != LineViewerKind::PlanPreview {
+        return;
+    }
+
+    let hovered = viewer.plan_ref().and_then(|p| p.hovered_comment_id);
+    let close_hovered = viewer.plan_ref().is_some_and(|p| p.close_button_hovered);
+    let selected = viewer.selected_comment_id();
+
+    let label = crate::glyphs::ballot_x_button();
+    let label_w = label.chars().count() as u16;
+    let x_right = content_area.x + content_area.width.saturating_sub(SCROLLBAR_TOTAL_COLS);
+    let fits = x_right > content_area.x + label_w + 1;
+
+    let mut close_areas: Vec<(u64, Rect)> = Vec::new();
+    if fits && (hovered.is_some() || selected.is_some()) {
+        let x = x_right - label_w - 1;
+
+        // Only the first screen row of a wrapped comment gets the button
+        let mut prev_row_id: Option<u64> = None;
+
+        for row in content_area.y..content_area.y + content_area.height {
+            let Some(cid) = viewer.comment_id_at_screen_row(row, content_area) else {
+                prev_row_id = None;
+                continue;
+            };
+
+            let first_row = prev_row_id != Some(cid);
+            prev_row_id = Some(cid);
+
+            if !first_row || (Some(cid) != hovered && Some(cid) != selected) {
+                continue;
+            }
+
+            let style = if close_hovered && hovered == Some(cid) {
+                Style::default().fg(theme.accent_error)
+            } else {
+                Style::default().fg(theme.gray)
+            };
+
+            buf.set_span(x, row, &Span::styled(label, style), label_w);
+            close_areas.push((cid, Rect::new(x, row, label_w, 1)));
+        }
+    }
+
+    viewer.plan_mut().comment_close_areas = close_areas;
 }
 
 pub use crate::render::color::dim_area;
@@ -2149,6 +2086,47 @@ pub use crate::render::color::dim_area;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// RGB themes tint the commenting band (subtle blend, text keeps its fgs); the terminal theme
+    /// cannot blend against the Reset canvas, so the band is the solid plan accent with forced Black
+    /// text instead of an unreadable accent-behind-default-fg fallback.
+    #[test]
+    fn commenting_band_stays_readable_on_terminal_theme() {
+        let theme = Theme::terminal();
+        let (band, fg) = commenting_band(&theme);
+        assert_eq!(band, theme.accent_plan);
+        assert_eq!(fg, Some(Color::Black), "forced readable fg on the band");
+
+        let theme = Theme::groknight();
+        let (band, fg) = commenting_band(&theme);
+        assert_ne!(band, theme.accent_plan, "subtle tint, not the raw accent");
+        assert_eq!(fg, None, "RGB rows keep their own fgs");
+    }
+
+    /// The terminal theme's `bg_highlight` is Reset, so a hovered review-footer
+    /// button must carry reverse video (like `render_modal_shortcuts`); RGB
+    /// themes keep the plain `bg_highlight` underlay.
+    #[test]
+    fn hovered_shortcut_button_is_reversed_on_terminal_theme() {
+        let theme = Theme::terminal();
+        for (hovered, expect_reversed) in [(true, true), (false, false)] {
+            let spans = build_shortcut_button('a', "approve", hovered, &theme);
+            for span in &spans {
+                assert_eq!(
+                    span.style.add_modifier.contains(Modifier::REVERSED),
+                    expect_reversed,
+                    "hovered={hovered}"
+                );
+            }
+        }
+
+        let theme = Theme::groknight();
+        let spans = build_shortcut_button('a', "approve", true, &theme);
+        for span in &spans {
+            assert!(!span.style.add_modifier.contains(Modifier::REVERSED));
+            assert_eq!(span.style.bg, Some(theme.bg_highlight));
+        }
+    }
 
     #[test]
     fn open_markdown_content_uses_in_memory_content() {
@@ -2253,7 +2231,9 @@ mod tests {
         let area = *buf.area();
         let mut row = String::new();
         for x in area.left()..area.right() {
-            row.push_str(buf[(x, y)].symbol());
+            if let Some(cell) = buf.cell((x, y)) {
+                row.push_str(cell.symbol());
+            }
         }
         row
     }
@@ -2336,7 +2316,9 @@ mod tests {
     #[test]
     fn markdown_source_blank_line_renders_as_numbered_empty_row() {
         let built = build_markdown_lines("# Plan\n\n- First", Some(80));
-        let blank = &built.source_lines[1];
+        let Some(blank) = built.source_lines.get(1) else {
+            panic!("expected a blank source line");
+        };
         let mut buf = Buffer::empty(Rect::new(0, 0, 20, 1));
 
         blank.render(Rect::new(0, 0, 20, 1), &mut buf, false, true);
@@ -2354,8 +2336,11 @@ mod tests {
         cache::set_render_mermaid(RenderMermaid::On);
         let built = build_markdown_lines(MD, Some(80));
         assert_eq!(built.mermaid_after.len(), 1);
-        assert!(built.mermaid_after[0].1.contains("A --> B"));
-        assert!(built.mermaid_after[0].0 < built.source_lines.len());
+        let Some(first) = built.mermaid_after.first() else {
+            panic!("expected a mermaid affordance: {:?}", built.mermaid_after);
+        };
+        assert!(first.1.contains("A --> B"));
+        assert!(first.0 < built.source_lines.len());
 
         let mut viewer =
             LineViewerState::open_markdown_content("plan.md", MD.to_owned(), None).unwrap();
@@ -2370,8 +2355,11 @@ mod tests {
         );
         let placements = viewer.diagram_affordance_placements(Rect::new(0, 0, 100, 40));
         assert_eq!(placements.len(), 1);
-        assert_eq!(placements[0].screen_rect.height, 1);
-        assert!(placements[0].screen_rect.width > 0);
+        let Some(placement) = placements.first() else {
+            panic!("expected a placement: {placements:?}");
+        };
+        assert_eq!(placement.screen_rect.height, 1);
+        assert!(placement.screen_rect.width > 0);
 
         cache::set_render_mermaid(RenderMermaid::Off);
         assert!(build_markdown_lines(MD, Some(80)).mermaid_after.is_empty());
@@ -2413,14 +2401,16 @@ mod tests {
 
         assert_eq!(viewer.selected_line_range(), Some(4..5));
         assert_eq!(viewer.line_range_suffix(), Some(":4".to_owned()));
-        assert_eq!(source_line(&viewer.lines[3]).plain_text, "");
+        let Some(line) = viewer.lines.get(3) else {
+            panic!("expected line 4");
+        };
+        assert_eq!(source_line(line).plain_text, "");
     }
 
     #[test]
     fn markdown_viewer_preserves_soft_break_collapsed_lines() {
-        // Repro: consecutive non-blank lines (a poem) form one
-        // CommonMark paragraph. Source-faithful rendering must keep each line
-        // on its own numbered row instead of collapsing to one paragraph.
+        // Repro: consecutive non-blank lines (a poem) form one CommonMark paragraph
+        // Source-faithful rendering must keep each line on its own numbered row instead of collapsing to one paragraph
         let mut viewer = LineViewerState::open_markdown_content(
             "plan.md",
             "Line one,\nLine two,\nLine three.".to_owned(),
@@ -2434,7 +2424,10 @@ mod tests {
             .iter()
             .map(|item| {
                 let s = source_line(item);
-                (s.line_number, line_text(&s.rendered_lines[0]))
+                (
+                    s.line_number,
+                    s.rendered_lines.first().map(line_text).unwrap_or_default(),
+                )
             })
             .collect();
         assert_eq!(
@@ -2449,7 +2442,9 @@ mod tests {
 
     /// Soft park is a right-docked pane, not the 75% centered dimmed overlay.
     #[test]
-    fn plan_soft_park_docks_right_not_centered_overlay() {
+    fn soft_park_plan_pane_covers_transcript_not_centered_overlay() {
+        // Commenting round-trip: selecting all rows of a soft-break paragraph must map back to the full file line range
+        // The agent then inspects the correct lines; this used to collapse to a single line number
         let mut viewer = LineViewerState::open_markdown_content(
             "plan.md",
             "# Plan\n\nDo the thing\n".to_owned(),

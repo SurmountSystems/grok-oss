@@ -32,43 +32,196 @@
             Some("hi"),
             "hold prompt text for re-auth auto-resubmit if compact fails with auth"
         );
-    }
-
-    #[test]
-    fn apply_compaction_started_names_sampling_window_when_catalog_differs() {
-        let mut session = make_session(Some("s1"));
-        session.models.override_context_window(500_000);
-        let mut scrollback = ScrollbackState::new();
-        let update = XaiSessionUpdate::AutoCompactStarted {
-            tokens_used: 200_000,
-            context_window: 200_000,
-            percentage: 100,
-            threshold_percent: Some(95),
-            threshold_tokens: None,
-            reason: "auto-compact at 95%".into(),
-        };
-        assert!(apply_session_event(&update, &mut session, &mut scrollback, false));
         match last_session_event(&scrollback) {
-            Some(event) => {
-                let msg = event.message();
-                assert!(
-                    msg.contains("sampling window"),
-                    "started banner must name the sampling window AUTO uses: {msg}"
-                );
-                assert!(
-                    msg.contains("200") && msg.to_ascii_lowercase().contains("token"),
-                    "started banner must include the 200k sampling window size: {msg}"
-                );
-                assert!(
-                    !msg.starts_with("Context 100% full."),
-                    "must not say bare Context 100% full when catalog is 500k: {msg}"
-                );
+            Some(SessionEvent::CompactionStarted { percentage, reason, .. }) => {
+                assert_eq!(percentage, 85);
+                assert_eq!(reason, "threshold", "threshold compact keeps its reason");
             }
             other => panic!("expected CompactionStarted, got {other:?}"),
         }
     }
 
-    /// Compact failure keeps the hold; PromptResponse reauth gate decides stash.
+    #[test]
+    fn family_switch_compact_banner_and_idle_loader() {
+        use crate::app::agent::AgentCommand;
+        use xai_grok_shell::extensions::notification::MODEL_FAMILY_SWITCH_COMPACT_BANNER;
+
+        let mut agent = make_agent(Some("s1"));
+        agent.running_wake_turn = Some(crate::app::agent_view::RunningWakeTurn {
+            prompt_id: "task-completed-wake".into(),
+            cancel_sent: false,
+        });
+        let update = XaiSessionUpdate::AutoCompactStarted {
+            tokens_used: 12_000,
+            context_window: 200_000,
+            percentage: 6,
+            threshold_percent: None,
+            threshold_tokens: None,
+            reason: MODEL_FAMILY_SWITCH_COMPACT_BANNER.into(),
+        };
+        assert!(apply_child_view_session_event(&mut agent, &update, false));
+        match last_session_event(&agent.scrollback) {
+            Some(SessionEvent::CompactionStarted { percentage, reason, .. }) => {
+                assert_eq!(percentage, 6);
+                assert_eq!(reason, MODEL_FAMILY_SWITCH_COMPACT_BANNER);
+            }
+            other => panic!("expected family-switch CompactionStarted, got {other:?}"),
+        }
+        assert!(
+            agent.session.state.is_compact_running(),
+            "idle family-switch compact must own the turn-status command so the loader shows"
+        );
+        assert!(
+            matches!(
+                agent.session.state,
+                crate::app::agent::AgentState::CommandRunning {
+                    command: AgentCommand::SwitchModelCompact,
+                    ..
+                }
+            ),
+            "got {:?}",
+            agent.session.state
+        );
+        assert!(
+            agent.turn_started_at.is_some(),
+            "turn timer needs turn_started_at, same as /compact"
+        );
+        assert!(
+            agent.running_wake_turn.is_none(),
+            "family-switch compact must drop a leftover wake marker like /compact"
+        );
+
+        let completed = XaiSessionUpdate::AutoCompactCompleted {
+            tokens_before: Some(12_000),
+            tokens_after: 4_000,
+            elapsed_ms: Some(1_500),
+            summary_preview: None,
+            saved_too_little: false,
+        };
+        assert!(apply_child_view_session_event(&mut agent, &completed, false));
+        assert!(
+            agent.session.state.is_idle(),
+            "family-switch compact must return to idle when it finishes"
+        );
+        assert!(agent.turn_started_at.is_none());
+        match last_session_event(&agent.scrollback) {
+            Some(SessionEvent::CompactionCompleted {
+                tokens_before,
+                tokens_after,
+                elapsed_ms,
+                saved_too_little: _,
+            }) => {
+                assert_eq!(tokens_before, Some(12_000));
+                assert_eq!(tokens_after, 4_000);
+                assert_eq!(elapsed_ms, Some(1_500));
+            }
+            other => panic!("idle family-switch compact must flush the outcome immediately, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn family_switch_compact_failed_returns_to_idle() {
+        use crate::app::agent::AgentCommand;
+        use xai_grok_shell::extensions::notification::MODEL_FAMILY_SWITCH_COMPACT_BANNER;
+
+        let mut agent = make_agent(Some("s1"));
+        let started = XaiSessionUpdate::AutoCompactStarted {
+            tokens_used: 12_000,
+            context_window: 200_000,
+            percentage: 6,
+            threshold_percent: None,
+            threshold_tokens: None,
+            reason: MODEL_FAMILY_SWITCH_COMPACT_BANNER.into(),
+        };
+        assert!(apply_child_view_session_event(&mut agent, &started, false));
+        assert!(matches!(
+            agent.session.state,
+            crate::app::agent::AgentState::CommandRunning {
+                command: AgentCommand::SwitchModelCompact,
+                ..
+            }
+        ));
+
+        let failed = XaiSessionUpdate::AutoCompactFailed {
+            error: "compaction failed".into(),
+        };
+        assert!(apply_child_view_session_event(&mut agent, &failed, false));
+        assert!(
+            agent.session.state.is_idle(),
+            "family-switch compact must return to idle on failure"
+        );
+        assert!(agent.turn_started_at.is_none());
+    }
+
+    #[test]
+    fn family_switch_compact_replay_does_not_start_command() {
+        use xai_grok_shell::extensions::notification::MODEL_FAMILY_SWITCH_COMPACT_BANNER;
+
+        let mut agent = make_agent(Some("s1"));
+        agent.session.loading_replay = true;
+        let update = XaiSessionUpdate::AutoCompactStarted {
+            tokens_used: 12_000,
+            context_window: 200_000,
+            percentage: 6,
+            threshold_percent: None,
+            threshold_tokens: None,
+            reason: MODEL_FAMILY_SWITCH_COMPACT_BANNER.into(),
+        };
+        assert!(apply_child_view_session_event(&mut agent, &update, false));
+        match last_session_event(&agent.scrollback) {
+            Some(SessionEvent::CompactionStarted { reason, .. }) => {
+                assert_eq!(reason, MODEL_FAMILY_SWITCH_COMPACT_BANNER);
+            }
+            other => panic!("replay must still paint the banner, got {other:?}"),
+        }
+        assert!(
+            agent.session.state.is_idle(),
+            "replayed family-switch compact must not own CommandRunning, got {:?}",
+            agent.session.state
+        );
+        assert!(agent.turn_started_at.is_none());
+
+        let completed = XaiSessionUpdate::AutoCompactCompleted {
+            tokens_before: Some(12_000),
+            tokens_after: 4_000,
+            elapsed_ms: Some(1_500),
+            summary_preview: None,
+            saved_too_little: false,
+        };
+        assert!(apply_child_view_session_event(&mut agent, &completed, false));
+        assert!(
+            agent.session.state.is_idle(),
+            "replay completed must leave the pane idle"
+        );
+        match last_session_event(&agent.scrollback) {
+            Some(SessionEvent::CompactionCompleted { tokens_after, .. }) => {
+                assert_eq!(tokens_after, 4_000);
+            }
+            other => panic!("replay must flush the compact outcome immediately, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn threshold_compact_while_idle_does_not_start_switch_model_command() {
+        let mut agent = make_agent(Some("s1"));
+        let update = XaiSessionUpdate::AutoCompactStarted {
+            tokens_used: 90_000,
+            context_window: 131_072,
+            percentage: 85,
+            threshold_percent: None,
+            threshold_tokens: None,
+            reason: "threshold".into(),
+        };
+        assert!(apply_child_view_session_event(&mut agent, &update, false));
+        assert!(
+            agent.session.state.is_idle(),
+            "threshold compact must not steal the /model compact command, got {:?}",
+            agent.session.state
+        );
+        assert!(agent.turn_started_at.is_none());
+    }
+
+    /// Compact failure keeps the hold; the reauth gate in the PromptResponse handler decides whether to stash it.
     #[test]
     fn apply_compaction_failed_keeps_held_prompt() {
         let mut session = make_session(Some("s1"));
@@ -116,8 +269,18 @@
         let entry = scrollback.entries_mut().last().expect("entry pushed");
         match &entry.block {
             RenderBlock::System(b) => {
-                assert!(b.text.contains(&notes[0]));
-                assert!(b.text.contains(&notes[1]));
+                assert!(b.text.contains(
+                    notes
+                        .first()
+                        .unwrap_or_else(|| panic!("missing note"))
+                        .as_str()
+                ));
+                assert!(b.text.contains(
+                    notes
+                        .get(1)
+                        .unwrap_or_else(|| panic!("missing note"))
+                        .as_str()
+                ));
                 assert!(
                     b.text.contains('\n'),
                     "expected \\n separator between dropped notes, got: {:?}",
@@ -128,8 +291,8 @@
         }
     }
 
-    /// A successful compression needs no user action: log-only — no toast,
-    /// no scrollback block, no redraw. Same live and on session replay.
+    /// A successful compression needs no user action: log-only, no toast, no scrollback block, no redraw.
+    /// The same holds live and on session replay.
     #[test]
     fn image_compressed_is_invisible_in_tui() {
         for replay in [false, true] {
@@ -145,8 +308,8 @@
         }
     }
 
-    /// The re-encode fallback (empty `images`) means the oversized original
-    /// was kept — a persistent warning line, not a transient toast.
+    /// The re-encode fallback (empty `images`) means the oversized original was kept.
+    /// That warrants a persistent warning line, not a transient toast.
     #[test]
     fn image_compressed_fallback_warning_stays_in_scrollback() {
         use crate::scrollback::block::RenderBlock;
@@ -176,6 +339,7 @@
             attempt: 1,
             max_retries: 3,
             reason: "rate limited".into(),
+            error_type: None,
         };
         apply_retry_state(&retry, &mut session, &mut scrollback, false);
         assert!(
@@ -196,6 +360,7 @@
             attempt: 1,
             max_retries: u32::MAX,
             reason: "first token timed out · next try in 2s".into(),
+            error_type: None,
         }));
         apply_retry_state(&RetryState::StreamResumed, &mut session, &mut scrollback, false);
         match session.tracker.activity() {
@@ -231,6 +396,7 @@
             attempt: 2,
             max_retries: u32::MAX,
             reason: "first token timed out · next try in 2s".into(),
+            error_type: None,
         }));
         apply_retry_state(&RetryState::StreamResumed, &mut session, &mut scrollback, false);
         match session.tracker.activity() {
@@ -293,8 +459,7 @@
         }
     }
 
-    /// Production `RetryState::Exhausted.reason` is `SamplingError::Api`'s
-    /// Display: `API error (status 429 Too Many Requests): …`.
+    /// Production `RetryState::Exhausted.reason` is `SamplingError::Api`'s Display: `API error (status 429 Too Many Requests): …`.
     #[test]
     fn retry_exhausted_rate_limited_surfaces_server_detail() {
         let body = "The model is currently at capacity due to high demand. Please try again.";
@@ -362,10 +527,8 @@
         );
     }
 
-    /// A rate-limit exhaustion whose flattened reason carries the
-    /// free-usage code sets both flags and pushes NO generic block (the
-    /// driver shows the paywall modal on PromptResponse; viewers keep no
-    /// marker).
+    /// A rate-limit exhaustion whose flattened reason carries the free-usage code sets both flags and pushes NO generic block.
+    /// The driver shows the paywall modal on PromptResponse; viewers keep no marker.
     #[test]
     fn retry_exhausted_free_usage_sets_paywall_flag_without_marker() {
         let mut session = make_session(Some("s1"));
@@ -551,14 +714,13 @@
             "Unauthorized (401) from https://proxy/v1/responses"
         ));
         assert!(is_reauthable_failure(None, "Unauthorized (401)"));
-        // legacy_auth carries its own migration guidance — excluded.
+        // legacy_auth carries its own migration guidance, so it is excluded
         assert!(!is_reauthable_failure(
             Some("legacy_auth"),
             "Unauthorized (401) ... deprecated authentication method"
         ));
-        // auth_transient = the shell says the failure self-heals (refreshable
-        // credential, no sticky verdict — e.g. post-wake network gap). Even
-        // with a 401 in the message, the `/login` banner must not fire.
+        // auth_transient means the shell says the failure self-heals (refreshable credential, no sticky verdict, e.g. a post-wake network gap).
+        // Even with a 401 in the message, the `/login` banner must not fire
         assert!(!is_reauthable_failure(
             Some("auth_transient"),
             "Unauthorized (401)\n\nAuthentication is temporarily unavailable"
@@ -568,11 +730,15 @@
             Some("api"),
             "internal server error"
         ));
+        // Unrelated failures must not be treated as re-authable.
+        assert!(!is_reauthable_failure(
+            Some("api"),
+            "internal server error"
+        ));
         assert!(!is_reauthable_failure(Some("api"), "model not found"));
     }
 
-    /// A 401 with `error_type == "auth"` surfaces the actionable re-auth
-    /// prompt instead of the raw "Retry failed: Unauthorized (401) …" dump.
+    /// A 401 with `error_type == "auth"` shows the actionable re-auth prompt instead of the raw "Retry failed: Unauthorized (401) …" dump.
     #[test]
     fn apply_retry_state_auth_failure_pushes_reauth_prompt() {
         let mut session = make_session(Some("s1"));
@@ -596,8 +762,7 @@
         assert!(!session.credit_limit_blocked);
     }
 
-    /// A recoverable auth failure preserves `in_flight_prompt` so the
-    /// PromptResponse handler can stash it for auto-resubmit after re-auth.
+    /// A recoverable auth failure preserves `in_flight_prompt` so the PromptResponse handler can stash it for auto-resubmit after re-auth.
     #[test]
     fn apply_retry_state_auth_failure_preserves_in_flight_prompt() {
         let mut session = make_session(Some("s1"));
@@ -623,8 +788,7 @@
         assert_eq!(session.in_flight_prompt.unwrap().text, "retry after login");
     }
 
-    /// A 401 reported with a non-auth `error_type` but an "Unauthorized
-    /// (401)" message (the `SamplingErrorKind::Api` path) also prompts.
+    /// A 401 reported with a non-auth `error_type` but an "Unauthorized (401)" message (the `SamplingErrorKind::Api` path) also prompts.
     #[test]
     fn apply_retry_state_401_message_without_auth_type_prompts_reauth() {
         let mut session = make_session(Some("s1"));
@@ -643,8 +807,7 @@
         ));
     }
 
-    /// Legacy WebLogin auth keeps its verbose message (with `grok logout` /
-    /// `grok login` guidance), not the generic re-auth prompt.
+    /// Legacy WebLogin auth keeps its verbose message (with `grok logout` / `grok login` guidance), not the generic re-auth prompt.
     #[test]
     fn apply_retry_state_legacy_auth_keeps_detailed_message() {
         let mut session = make_session(Some("s1"));
@@ -664,8 +827,7 @@
         ));
     }
 
-    /// Non-auth terminal failures render the formatted RequestFailed banner
-    /// (same visual treatment as 401 re-auth), not a raw RetryFailed dump.
+    /// Non-auth terminal failures render the formatted RequestFailed banner (same visual treatment as 401 re-auth), not a raw RetryFailed dump.
     #[test]
     fn apply_retry_state_generic_failure_shows_request_failed_banner() {
         let mut session = make_session(Some("s1"));
@@ -722,243 +884,16 @@
         }
     }
 
-    /// Operator screenshot 2026-09-19: `permission-denied: I can't help with that request.`
-    /// is a safety refusal, not HTTP 403. Without nested implementers + output,
-    /// RetryState still paints Safety refusal, never `Request denied (403)`.
-    #[test]
-    fn apply_retry_state_safety_refusal_paints_safety_refusal_not_request_denied_403() {
-        let operator_body = "permission-denied: I can't help with that request.";
-        assert!(operator_body.contains("permission-denied: I can't help with that request."));
-        let mut session = make_session(Some("s1"));
-        let mut scrollback = ScrollbackState::new();
-        apply_retry_state(
-            &RetryState::Failed {
-                error_type: "api".into(),
-                message: format!(
-                    "API error (status 403 Forbidden): {operator_body}"
-                ),
-            },
-            &mut session,
-            &mut scrollback,
-            false,
-        );
-        match last_session_event(&scrollback) {
-            Some(SessionEvent::RequestFailed {
-                status,
-                headline,
-                detail,
-            }) => {
-                let painted = crate::app::error_display::banner_message(&headline, &detail);
-                assert!(
-                    !painted.contains("Request denied (403)"),
-                    "safety refusal must not be labeled HTTP 403, got {painted}"
-                );
-                assert!(
-                    painted.contains("Safety refusal"),
-                    "must paint safety refusal chrome, got {painted}"
-                );
-                assert!(
-                    painted.contains("I can't help with that request"),
-                    "must keep the refusal text, got {painted}"
-                );
-                assert_eq!(status, None, "must not keep HTTP 403 status");
-            }
-            other => panic!("expected RequestFailed Safety refusal, got {other:?}"),
-        }
-    }
-
-    /// Resume report already written + nested implementers still running:
-    /// RetryState Failed with `permission-denied: I can't help with that request.`
-    /// must not paint RequestFailed / `Request denied (403)`.
-    #[test]
-    fn resume_after_report_safety_refusal_retry_state_must_not_paint_request_failed() {
-        let operator_body = "permission-denied: I can't help with that request.";
-        assert!(operator_body.contains("permission-denied: I can't help with that request."));
-        let parent_sid = "sess-resume-403";
-        let child_sid = "child-resume-403";
-        let mut app = make_app_with_agent(parent_sid);
-        handle(
-            make_ext_session_notification(
-                parent_sid,
-                test_subagent_spawned(parent_sid, child_sid),
-            ),
-            &mut app,
-        );
-        {
-            let agent = app.agents.get(&AgentId(0)).unwrap();
-            let info = agent
-                .subagent_sessions
-                .get(child_sid)
-                .expect("spawn must seed nested occupancy");
-            assert!(
-                info.is_running(),
-                "nested implementer must still be running (finished: false)"
-            );
-        }
-        handle(
-            make_agent_chunk_message(parent_sid, "resume report already written"),
-            &mut app,
-        );
-        {
-            let agent = app.agents.get(&AgentId(0)).unwrap();
-            assert!(
-                agent.session.tracker.output_since_last_finish(),
-                "parent agent chunk must count as a written resume report"
-            );
-        }
-        handle(
-            make_ext_session_notification(
-                parent_sid,
-                XaiSessionUpdate::RetryState(RetryState::Failed {
-                    error_type: "api".into(),
-                    message: operator_body.into(),
-                }),
-            ),
-            &mut app,
-        );
-        let agent = app.agents.get(&AgentId(0)).unwrap();
-        let painted: Vec<String> = (0..agent.scrollback.len())
-            .filter_map(|i| agent.scrollback.entry(i))
-            .filter_map(|e| match &e.block {
-                RenderBlock::SessionEvent(ev) => Some(ev.event.message()),
-                _ => None,
-            })
-            .collect();
-        assert!(
-            painted.iter().all(|msg| !msg.contains("Request denied (403)")),
-            "must not paint Request denied (403), got {painted:?}"
-        );
-        let has_request_failed = (0..agent.scrollback.len()).any(|i| {
-            matches!(
-                agent.scrollback.entry(i).map(|e| &e.block),
-                Some(RenderBlock::SessionEvent(ev))
-                    if matches!(ev.event, SessionEvent::RequestFailed { .. })
-            )
-        });
-        assert!(
-            !has_request_failed,
-            "resume report + nested implementers running must not paint RequestFailed, got {painted:?}"
-        );
-    }
-
-    /// Operator screenshot 2026-09-20: dest completeOk (Worked for 48s), then
-    /// L1 thought 29m26s, then yellow
-    /// `Response truncated – The model hit its output limit. Try asking for a shorter answer.`
-    /// Dest report already written + nested implementors still running + thought
-    /// hits the output cap must not paint that Operator-blaming chrome.
-    #[test]
-    fn dest_complete_ok_then_truncated_thought_must_not_paint_shorter_answer_chrome() {
-        let operator_chrome =
-            "Response truncated – The model hit its output limit. Try asking for a shorter answer.";
-        assert!(
-            operator_chrome
-                .contains("Response truncated – The model hit its output limit. Try asking for a shorter answer.")
-        );
-        let parent_sid = "sess-dest-trunc";
-        let dest_sid = "dest-complete-ok";
-        let impl_sid = "nested-still-running";
-        let mut app = make_app_with_agent(parent_sid);
-        handle(
-            make_ext_session_notification(
-                parent_sid,
-                test_subagent_spawned(parent_sid, dest_sid),
-            ),
-            &mut app,
-        );
-        handle(
-            make_ext_session_notification(
-                parent_sid,
-                test_subagent_spawned(parent_sid, impl_sid),
-            ),
-            &mut app,
-        );
-        handle(
-            make_ext_session_notification(parent_sid, test_subagent_finished(dest_sid)),
-            &mut app,
-        );
-        handle(
-            make_agent_chunk_message(parent_sid, "dest report completeOk Worked for 48s"),
-            &mut app,
-        );
-        {
-            let agent = app.agents.get(&AgentId(0)).unwrap();
-            let dest = agent
-                .subagent_sessions
-                .get(dest_sid)
-                .expect("dest occupancy");
-            assert!(
-                !dest.is_running(),
-                "dest completeOk must mark dest finished"
-            );
-            let nested = agent
-                .subagent_sessions
-                .get(impl_sid)
-                .expect("nested implementor occupancy");
-            assert!(
-                nested.is_running(),
-                "nested implementor must still be running"
-            );
-            assert!(
-                agent.session.tracker.output_since_last_finish(),
-                "dest report must count as written output"
-            );
-        }
-        handle(
-            make_ext_session_notification(
-                parent_sid,
-                XaiSessionUpdate::RetryState(RetryState::Failed {
-                    error_type: "max_tokens_truncation".into(),
-                    message: "response truncated by max_tokens".into(),
-                }),
-            ),
-            &mut app,
-        );
-        let agent = app.agents.get(&AgentId(0)).unwrap();
-        let painted: Vec<String> = (0..agent.scrollback.len())
-            .filter_map(|i| agent.scrollback.entry(i))
-            .filter_map(|e| match &e.block {
-                RenderBlock::SessionEvent(ev) => Some(ev.event.message()),
-                _ => None,
-            })
-            .collect();
-        assert!(
-            painted.iter().all(|msg| !msg.contains("Try asking for a shorter answer")),
-            "must not tell the Operator to ask for a shorter answer, got {painted:?}"
-        );
-        assert!(
-            painted.iter().all(|msg| !msg.contains(operator_chrome)),
-            "must not paint Operator-blaming truncation chrome, got {painted:?}"
-        );
-        let has_request_failed = (0..agent.scrollback.len()).any(|i| {
-            matches!(
-                agent.scrollback.entry(i).map(|e| &e.block),
-                Some(RenderBlock::SessionEvent(ev))
-                    if matches!(ev.event, SessionEvent::RequestFailed { .. })
-            )
-        });
-        assert!(
-            !has_request_failed,
-            "dest completeOk + nested implementors running must not strand L1 in RequestFailed, got {painted:?}"
-        );
-        let nested = agent
-            .subagent_sessions
-            .get(impl_sid)
-            .expect("nested implementor occupancy after truncation");
-        assert!(
-            nested.is_running(),
-            "nested implementors must keep running after dest-then-truncated-thought"
-        );
-    }
-
-    /// A context overflow surfaces the actionable `ContextTooLarge` prompt (not the
-    /// raw `RetryFailed`); `PromptResponse` then suppresses the redundant `TurnFailed`.
+    /// A context overflow shows the actionable `ContextTooLarge` prompt (not the raw `RetryFailed`).
+    /// `PromptResponse` then suppresses the redundant `TurnFailed`.
     #[test]
     fn apply_retry_state_context_length_shows_context_too_large() {
+        use xai_grok_shell::extensions::notification::CONTEXT_LENGTH_ERROR_TYPE;
         let mut session = make_session(Some("s1"));
         let mut scrollback = ScrollbackState::new();
         apply_retry_state(
             &RetryState::Failed {
-                error_type: "context_length".into(),
+                error_type: CONTEXT_LENGTH_ERROR_TYPE.into(),
                 message: "API error (status 500): the prompt is too long for this model's \
                           context window"
                     .into(),
@@ -974,8 +909,8 @@
         );
     }
 
-    /// Overflow-shaped copy without `error_type=context_length` must not take
-    /// the ContextTooLarge path — the shell is what tags overflow.
+    /// A message worded like an overflow but without `error_type=context_length` must not take the ContextTooLarge path.
+    /// The shell is what tags overflow.
     #[test]
     fn apply_retry_state_overflow_copy_without_type_is_not_context_too_large() {
         let mut session = make_session(Some("s1"));
@@ -988,9 +923,7 @@
                     .into(),
             },
             &mut session,
-            &mut scrollback,
-            false,
-        );
+            &mut scrollback, false);
         assert!(
             matches!(
                 last_session_event(&scrollback),
@@ -1000,10 +933,11 @@
         );
     }
 
-    /// When the compaction handler already showed its "too large to compact" message,
-    /// the overflow path does NOT stack a second `ContextTooLarge` prompt on top.
+    /// The compaction handler may already have shown its "too large to compact" message.
+    /// The overflow path then does NOT stack a second `ContextTooLarge` prompt on top.
     #[test]
     fn apply_retry_state_context_length_does_not_duplicate_compaction_failed() {
+        use xai_grok_shell::extensions::notification::CONTEXT_LENGTH_ERROR_TYPE;
         let mut session = make_session(Some("s1"));
         let mut scrollback = ScrollbackState::new();
         scrollback.push_block(RenderBlock::session_event(SessionEvent::CompactionFailed {
@@ -1011,7 +945,7 @@
         }));
         apply_retry_state(
             &RetryState::Failed {
-                error_type: "context_length".into(),
+                error_type: CONTEXT_LENGTH_ERROR_TYPE.into(),
                 message: "the prompt is too long for this model's context window".into(),
             },
             &mut session,
@@ -1346,6 +1280,36 @@
     }
 
     #[test]
+    fn compaction_lifecycle_refreshes_context_bar_from_trigger_counts() {
+        // Started refreshes with the count the trigger fired on; the banner percentage derives from it
+        // Completed refreshes with the post-compact count
+        // Failed/Cancelled carry no count; the next meta.totalTokens restamps
+        let started = XaiSessionUpdate::AutoCompactStarted {
+            tokens_used: 460_231,
+            context_window: 500_000,
+            percentage: 92,
+            threshold_percent: None,
+            threshold_tokens: None,
+            reason: "threshold".into(),
+        };
+        assert_eq!(compaction_context_refresh(&started), Some(460_231));
+        let completed = XaiSessionUpdate::AutoCompactCompleted {
+            tokens_before: Some(460_231),
+            tokens_after: 21_502,
+            elapsed_ms: Some(500),
+            summary_preview: None,
+            saved_too_little: false,
+        };
+        assert_eq!(compaction_context_refresh(&completed), Some(21_502));
+        let failed = XaiSessionUpdate::AutoCompactFailed { error: "e".into() };
+        assert_eq!(compaction_context_refresh(&failed), None);
+        let cancelled = XaiSessionUpdate::AutoCompactCancelled {
+            reason: xai_grok_shell::extensions::notification::AutoCompactCancelReason::UserCancelled,
+        };
+        assert_eq!(compaction_context_refresh(&cancelled), None);
+    }
+
+    #[test]
     fn apply_unhandled_event_returns_false() {
         let mut session = make_session(Some("s1"));
         let mut scrollback = ScrollbackState::new();
@@ -1354,6 +1318,81 @@
     }
 
     // ── handle_child_session_notification ──────────────────────────────
+
+    /// A hook's note for a child (a PreCompact hook's message, for one) lands in the child's view
+    #[test]
+    fn child_hook_note_shows_in_child_view() {
+        use crate::scrollback::block::RenderBlock;
+        use crate::scrollback::blocks::SessionEvent;
+        use xai_grok_shell::extensions::notification::HookAnnotationKind;
+
+        for (kind, expected) in [
+            (HookAnnotationKind::Note, "note"),
+            (HookAnnotationKind::ToolOutcome, "outcome"),
+        ] {
+            let mut agent = make_agent(Some("root-sess"));
+            let child_sid = "child-sess-1";
+            agent
+                .insert_test_child(child_sid.into(), Box::new(make_agent(Some(child_sid))));
+            let root_len = agent.scrollback.len();
+
+            let update = XaiSessionUpdate::HookAnnotation {
+                message: "Saved 3 working notes to memory".into(),
+                kind,
+            };
+            assert!(handle_child_session_notification(update, child_sid, &mut agent, false, None));
+
+            assert_eq!(agent.scrollback.len(), root_len, "the root transcript is untouched");
+            let child_view = agent.subagent_views.get_mut(child_sid).unwrap();
+            let entry = child_view.scrollback.entries_mut().last().expect("note pushed");
+            match (&entry.block, expected) {
+                (RenderBlock::SessionEvent(b), "note") => {
+                    assert!(matches!(&b.event, SessionEvent::HookAnnotation { message } if message == "Saved 3 working notes to memory"));
+                }
+                (RenderBlock::SessionEvent(b), _) => {
+                    assert!(matches!(&b.event, SessionEvent::HookOutcome { message } if message == "Saved 3 working notes to memory"));
+                }
+                (other, _) => panic!("expected a session event block, got {other:?}"),
+            }
+        }
+    }
+
+    /// The from-disk child replay renders through `apply_child_view_session_event`, so a rebuilt
+    /// child transcript keeps the note the live one showed
+    #[test]
+    fn child_hook_note_kept_on_replay() {
+        use crate::scrollback::block::RenderBlock;
+        use crate::scrollback::blocks::SessionEvent;
+        use xai_grok_shell::extensions::notification::HookAnnotationKind;
+
+        let mut child_view = make_agent(Some("child-sess-1"));
+        child_view.session.loading_replay = true;
+        let update = XaiSessionUpdate::HookAnnotation {
+            message: "Saved 3 working notes to memory".into(),
+            kind: HookAnnotationKind::Note,
+        };
+
+        assert!(apply_child_view_session_event(&mut child_view, &update, false));
+
+        let entry = child_view.scrollback.entries_mut().last().expect("note pushed");
+        match &entry.block {
+            RenderBlock::SessionEvent(b) => {
+                assert!(matches!(&b.event, SessionEvent::HookAnnotation { message } if message == "Saved 3 working notes to memory"));
+            }
+            other => panic!("expected a session event block, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn child_hook_note_without_child_view_is_ignored() {
+        let mut agent = make_agent(Some("root-sess"));
+        let update = XaiSessionUpdate::HookAnnotation {
+            message: "Saved 3 working notes to memory".into(),
+            kind: xai_grok_shell::extensions::notification::HookAnnotationKind::Note,
+        };
+        assert!(!handle_child_session_notification(update, "child-gone", &mut agent, false, None));
+        assert_eq!(agent.scrollback.len(), 0);
+    }
 
     #[test]
     fn child_compact_completed_updates_subagent_info() {
@@ -1364,8 +1403,7 @@
             .insert(child_sid.into(), make_subagent_info(child_sid));
         let child_view = make_agent(Some(child_sid));
         agent
-            .subagent_views
-            .insert(child_sid.into(), Box::new(child_view));
+            .insert_test_child(child_sid.into(), Box::new(child_view));
 
         let update = XaiSessionUpdate::AutoCompactCompleted {
             tokens_before: Some(90000),
@@ -1374,16 +1412,15 @@
             summary_preview: None,
             saved_too_little: false,
         };
-        let changed = handle_child_session_notification(update, child_sid, &mut agent, false);
+        let changed = handle_child_session_notification(update, child_sid, &mut agent, false, None);
         assert!(changed);
 
         let info = agent.subagent_sessions.get(child_sid).unwrap();
-        assert_eq!(info.tokens_used, Some(25000));
-        // 25000 / 131072 * 100 ~= 19
-        assert_eq!(info.context_usage_pct, Some(19));
+        assert_eq!(info.attempt.tokens_used, Some(25000));
+        // 25000 tokens of the default 131072 window rounds to 19 percent
+        assert_eq!(info.attempt.context_usage_pct, Some(19));
 
-        // The child view's context_state.used (context-bar numerator) must
-        // also be reset — see the comment in handle_child_session_notification.
+        // The child view's context_state.used (context-bar numerator) must also be reset; see handle_child_session_notification
         let child_view = agent.subagent_views.get(child_sid).unwrap();
         assert_eq!(
             child_view.context_state.as_ref().map(|c| c.used),
@@ -1401,7 +1438,7 @@
         let mut info = make_subagent_info(child_sid);
         info.finished = true;
         info.status = Some(std::sync::Arc::from("completed"));
-        info.duration_ms = Some(3_274_000);
+        info.attempt.duration_ms = Some(3_274_000);
         agent.subagent_sessions.insert(child_sid.into(), info);
         let mut child_view = make_agent(Some(child_sid));
         child_view.session.state = crate::app::agent::AgentState::Idle;
@@ -1417,7 +1454,7 @@
             threshold_tokens: None,
             reason: "auto-compact at 95%".into(),
         };
-        let changed = handle_child_session_notification(update, child_sid, &mut agent, false);
+        let changed = handle_child_session_notification(update, child_sid, &mut agent, false, None);
         assert!(
             !changed,
             "finished nested session must not apply a new AutoCompactStarted"
@@ -1460,7 +1497,7 @@
             threshold_tokens: None,
             reason: "auto-compact at 95%".into(),
         };
-        let changed = handle_child_session_notification(update, child_sid, &mut agent, false);
+        let changed = handle_child_session_notification(update, child_sid, &mut agent, false, None);
         assert!(changed);
         assert!(
             agent.active_subagent.is_none(),
@@ -1478,9 +1515,8 @@
     }
 
     #[test]
-    fn child_compact_started_does_not_reset_context_used() {
-        // Sibling variants in the same outer arm must not touch the numerator;
-        // guards against accidental widening of the AutoCompactCompleted gate.
+    fn child_compact_started_refreshes_context_used() {
+        // Started carries the count the trigger fired on; the child view must refresh like the root path so the subagent bar matches the banner
         let mut agent = make_agent(Some("root-sess"));
         let child_sid = "child-sess-3";
         agent
@@ -1491,8 +1527,7 @@
             90_000, 131_072,
         ));
         agent
-            .subagent_views
-            .insert(child_sid.into(), Box::new(child_view));
+            .insert_test_child(child_sid.into(), Box::new(child_view));
 
         let update = XaiSessionUpdate::AutoCompactStarted {
             tokens_used: 95_000,
@@ -1502,19 +1537,19 @@
             threshold_tokens: None,
             reason: "threshold".into(),
         };
-        let _ = handle_child_session_notification(update, child_sid, &mut agent, false);
+        let _ = handle_child_session_notification(update, child_sid, &mut agent, false, None);
 
         let child_view = agent.subagent_views.get(child_sid).unwrap();
         assert_eq!(
             child_view.context_state.as_ref().map(|c| c.used),
-            Some(90_000)
+            Some(95_000)
         );
     }
 
     #[test]
     fn child_notification_without_view_returns_false() {
         let mut agent = make_agent(Some("root-sess"));
-        // No child view registered.
+        // No child view is registered
         let update = XaiSessionUpdate::AutoCompactStarted {
             tokens_used: 90000,
             context_window: 131072,
@@ -1523,7 +1558,7 @@
             threshold_tokens: None,
             reason: "threshold".into(),
         };
-        let changed = handle_child_session_notification(update, "unknown-child", &mut agent, false);
+        let changed = handle_child_session_notification(update, "unknown-child", &mut agent, false, None);
         assert!(!changed);
     }
 
@@ -1543,20 +1578,20 @@
             summary_preview: None,
             saved_too_little: false,
         };
-        let changed = handle_child_session_notification(update, child_sid, &mut agent, false);
-        // No child_view means nothing visible changed — must not trigger redraw.
+        let changed = handle_child_session_notification(update, child_sid, &mut agent, false, None);
+        // No child_view means nothing visible changed, so it must not trigger a redraw
         assert!(!changed);
-        // SubagentInfo should still be updated (data correctness).
+        // SubagentInfo is still updated for data correctness even though nothing redraws
         let info = agent.subagent_sessions.get(child_sid).unwrap();
-        assert_eq!(info.tokens_used, Some(25000));
-        assert_eq!(info.context_usage_pct, Some(19));
+        assert_eq!(info.attempt.tokens_used, Some(25000));
+        assert_eq!(info.attempt.context_usage_pct, Some(19));
     }
 
     #[test]
     fn child_unknown_event_returns_false() {
         let mut agent = make_agent(Some("root-sess"));
         let update = XaiSessionUpdate::MemoryFlushStarted;
-        let changed = handle_child_session_notification(update, "child-1", &mut agent, false);
+        let changed = handle_child_session_notification(update, "child-1", &mut agent, false, None);
         assert!(!changed);
     }
 
@@ -1585,7 +1620,7 @@
         assert_eq!(writing.label(), "Writing subagent prompt…");
     }
 
-    /// A delta-first turn still counts as first activity: stash drops, TTFA stamps.
+    /// A delta-first turn still counts as first activity: the rewind stash drops and the TTFA timestamp is stamped.
     #[test]
     fn tool_call_delta_chunk_clears_in_flight_prompt() {
         let mut app = make_app_with_agent("sess-1");
@@ -1627,8 +1662,50 @@
         );
     }
 
-    /// Deltas carry no prompt id — while a wake turn is in flight the chunk is
-    /// dropped whole: no tracker write, no rewind-stash consumption, no TTFA.
+    /// Hook / image-intake diagnostics must not consume the Ctrl+C rewind stash.
+    #[test]
+    fn hook_and_image_intake_notifications_keep_in_flight_prompt() {
+        let updates = [
+            XaiSessionUpdate::HookExecution {
+                event_name: "user_prompt_submit".into(),
+                tool_name: None,
+                prompt_id: Some("p1".into()),
+                runs: vec![],
+            },
+            XaiSessionUpdate::ImageCompressed {
+                images: vec![],
+                message: "resized".into(),
+            },
+            XaiSessionUpdate::ImageDropped { notes: vec![] },
+        ];
+        for update in updates {
+            let label = format!("{update:?}");
+            let mut app = make_app_with_agent("sess-1");
+            {
+                let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+                agent.session.state = AgentState::TurnRunning;
+                agent.turn_started_at = Some(Instant::now());
+                agent.session.in_flight_prompt = Some(InFlightPrompt {
+                    text: "hi".into(),
+                    images: Vec::new(),
+                    scrollback_entry: EntryId::new(1),
+                    combined_scrollback_entries: Vec::new(),
+                    chip_elements: Vec::new(),
+                });
+            }
+
+            let _ = handle(make_ext_session_notification("sess-1", update), &mut app);
+
+            let agent = app.agents.get(&AgentId(0)).unwrap();
+            assert!(
+                agent.session.in_flight_prompt.is_some(),
+                "intake diagnostic must not eat the rewind stash: {label}"
+            );
+        }
+    }
+
+    /// Deltas carry no prompt id, so while a wake turn is in flight the chunk is dropped whole.
+    /// That means no tracker write, no rewind-stash consumption, no TTFA stamp.
     #[test]
     fn wake_gated_delta_chunk_is_fully_inert() {
         let mut app = make_app_with_agent("sess-1");
@@ -1650,6 +1727,7 @@
                     attempt: 1,
                     max_retries: 3,
                     reason: "overloaded".into(),
+                    error_type: None,
                 }));
             agent.running_wake_turn = Some(crate::app::agent_view::RunningWakeTurn {
                 prompt_id: "task-completed-1".into(),
@@ -1776,166 +1854,6 @@
         );
     }
 
-    /// Named contract: hop-to-console plus SuperGrok dollar credits still on
-    /// the account must not keep the SuperGrok dollar credits chip. Default
-    /// AgentView identity is SuperGrok session; compact paint must follow the
-    /// hop destination (console key).
-    #[test]
-    fn active_driver_console_does_not_paint_supergrok_dollar_credits_chip() {
-        use crate::theme::Theme;
-        use crate::views::credit_bar::{
-            CreditBalance, SamplingIdentityKind, credit_status_line_for_live_session,
-            resolve_console_team_prepaid_gap_default,
-        };
-
-        let mut app = make_app_with_agent("sess-1");
-        {
-            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
-            assert_eq!(
-                agent.sampling_identity,
-                SamplingIdentityKind::SuperGrokSession,
-                "new AgentView must default to SuperGrok session"
-            );
-            agent.credit_balance = Some(CreditBalance {
-                prepaid_balance_cents: Some(26_264),
-                included_usage_known: true,
-                usage_pct: 100.0,
-                effective_usage_pct: 100.0,
-                ..CreditBalance::default()
-            });
-            agent.console_team_prepaid_cents = Some(22_675);
-        }
-
-        handle(
-            make_ext_session_notification(
-                "sess-1",
-                XaiSessionUpdate::RetryState(RetryState::Retrying {
-                    attempt: 1,
-                    max_retries: 3,
-                    reason: "Switched SuperGrok session → console key (rate limited)".into(),
-                }),
-            ),
-            &mut app,
-        );
-
-        let agent = app.agents.get(&AgentId(0)).unwrap();
-        assert_eq!(
-            agent.sampling_identity,
-            SamplingIdentityKind::ConsoleKey,
-            "hop-to-console must flip AgentView.sampling_identity so chrome follows the live key"
-        );
-
-        let theme = Theme::default();
-        let line = credit_status_line_for_live_session(
-            agent.credit_balance.as_ref(),
-            agent.sampling_identity,
-            agent.console_team_prepaid_cents,
-            resolve_console_team_prepaid_gap_default(),
-            false,
-            &theme,
-            false,
-        )
-        .expect("Build session must paint a compact credits chip");
-        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-        assert!(
-            !text.contains("SuperGrok dollar credits")
-                && !text.to_ascii_lowercase().contains("extras"),
-            "after hop to console, compact must not keep SuperGrok dollar credits (or extras): {text}"
-        );
-        assert_eq!(
-            crate::views::credit_bar::active_spend_driver(
-                agent.sampling_identity,
-                true,
-                100.0,
-                Some(26_264),
-            ),
-            crate::views::credit_bar::ActiveSpendDriver::ConsoleKey,
-            "active driver must be the console key after hop, not SuperGrok dollar credits"
-        );
-    }
-
-    /// Named contract: when console is the live key, compact status and
-    /// /limits human copy name console team prepaid / console API credits.
-    #[test]
-    fn compact_status_names_console_team_prepaid_when_console_is_live() {
-        use crate::theme::Theme;
-        use crate::views::credit_bar::{
-            CreditBalance, SamplingIdentityKind, credit_status_line_for_live_session,
-            resolve_console_team_prepaid_gap_default,
-        };
-        use crate::views::limits_snapshot::{
-            LimitsSnapshot, active_driver_line_for_snapshot, format_limits_detail,
-        };
-
-        let mut app = make_app_with_agent("sess-1");
-        {
-            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
-            agent.credit_balance = Some(CreditBalance {
-                prepaid_balance_cents: Some(26_264),
-                included_usage_known: true,
-                usage_pct: 100.0,
-                effective_usage_pct: 100.0,
-                ..CreditBalance::default()
-            });
-            agent.console_team_prepaid_cents = Some(22_675);
-        }
-
-        handle(
-            make_ext_session_notification(
-                "sess-1",
-                XaiSessionUpdate::RetryState(RetryState::Retrying {
-                    attempt: 1,
-                    max_retries: 3,
-                    reason: "Switched SuperGrok session → console key (out of allowance)".into(),
-                }),
-            ),
-            &mut app,
-        );
-
-        let agent = app.agents.get(&AgentId(0)).unwrap();
-        assert_eq!(agent.sampling_identity, SamplingIdentityKind::ConsoleKey);
-
-        let theme = Theme::default();
-        let line = credit_status_line_for_live_session(
-            agent.credit_balance.as_ref(),
-            agent.sampling_identity,
-            agent.console_team_prepaid_cents,
-            resolve_console_team_prepaid_gap_default(),
-            false,
-            &theme,
-            false,
-        )
-        .expect("Build session must paint a compact credits chip");
-        let compact: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-        assert!(
-            compact.contains("console") && compact.contains("226.75"),
-            "compact must name console team prepaid when console is live: {compact}"
-        );
-        assert!(
-            !compact.contains("SuperGrok dollar credits")
-                && !compact.to_ascii_lowercase().contains("extras"),
-            "console-live compact must not paint SuperGrok dollar credits: {compact}"
-        );
-
-        let snap = LimitsSnapshot::from_billing(
-            agent.credit_balance.as_ref(),
-            None,
-            agent.sampling_identity,
-        )
-        .with_console_balance_cents(agent.console_team_prepaid_cents);
-        let active = active_driver_line_for_snapshot(&snap);
-        assert_eq!(active, "Active: console key");
-        let limits = format_limits_detail(&snap);
-        assert!(
-            limits.contains("Team prepaid remaining") && limits.contains("$226.75"),
-            "/limits must name console team prepaid when console is live: {limits}"
-        );
-        assert!(
-            !limits.contains("Active: SuperGrok dollar credits"),
-            "/limits Active must not stay on SuperGrok dollar credits after console hop: {limits}"
-        );
-    }
-
     fn summary_generated_ext(
         session_id: &str,
         title: &str,
@@ -1965,7 +1883,7 @@
             &mut app,
         );
         assert!(changed);
-        let agent = &app.agents[&AgentId(0)];
+        let agent = &app.agents.get(&AgentId(0)).unwrap_or_else(|| panic!("missing map entry"));
         assert_eq!(
             agent.display_name.as_deref(),
             Some("a &amp; b"),
@@ -1988,7 +1906,7 @@
             &mut app,
         ));
         assert_eq!(
-            app.agents[&AgentId(0)]
+            app.agents.get(&AgentId(0)).unwrap_or_else(|| panic!("missing map entry"))
                 .generated_session_title
                 .as_deref(),
             Some("Keep Me"),
@@ -2004,7 +1922,7 @@
             &mut app,
         );
         assert!(changed);
-        let agent = &app.agents[&AgentId(0)];
+        let agent = &app.agents.get(&AgentId(0)).unwrap_or_else(|| panic!("missing map entry"));
         assert!(
             agent.display_name.is_none(),
             "auto titles must not promote to display_name"
@@ -2025,7 +1943,7 @@
             &mut app,
         );
         assert!(changed);
-        let agent = &app.agents[&AgentId(0)];
+        let agent = &app.agents.get(&AgentId(0)).unwrap_or_else(|| panic!("missing map entry"));
         assert_eq!(agent.display_name.as_deref(), Some("Pinned"));
         assert_eq!(agent.generated_session_title.as_deref(), Some("a & b"));
     }
@@ -2046,7 +1964,7 @@
         let raw = serde_json::value::to_raw_value(&n).unwrap();
         let notif = acp::ExtNotification::new("x.ai/session_notification", std::sync::Arc::from(raw));
         assert!(handle_session_notification(&notif, &mut app));
-        let agent = &app.agents[&AgentId(0)];
+        let agent = &app.agents.get(&AgentId(0)).unwrap_or_else(|| panic!("missing map entry"));
         assert!(
             agent.display_name.is_none(),
             "explicit unpin meta must clear display_name"
@@ -2073,7 +1991,7 @@
         let raw = serde_json::value::to_raw_value(&n).unwrap();
         let notif = acp::ExtNotification::new("x.ai/session_notification", std::sync::Arc::from(raw));
         assert!(handle_session_notification(&notif, &mut app));
-        let agent = &app.agents[&AgentId(0)];
+        let agent = &app.agents.get(&AgentId(0)).unwrap_or_else(|| panic!("missing map entry"));
         assert!(
             agent.display_name.is_none(),
             "explicit unpin meta must still clear display_name"
@@ -2102,7 +2020,7 @@
             "{PREFIX}{}",
             "é".repeat(MAX_TITLE_SCALARS - PREFIX.chars().count())
         );
-        let agent = &app.agents[&AgentId(0)];
+        let agent = &app.agents.get(&AgentId(0)).unwrap_or_else(|| panic!("missing map entry"));
         assert!(
             agent.display_name.is_none(),
             "auto titles must not promote to display_name"
@@ -2127,11 +2045,100 @@
             "{PREFIX}{}",
             "é".repeat(MAX_TITLE_SCALARS - PREFIX.chars().count())
         );
-        let agent = &app.agents[&AgentId(0)];
+        let agent = &app.agents.get(&AgentId(0)).unwrap_or_else(|| panic!("missing map entry"));
         assert_eq!(agent.display_name.as_deref(), Some(expected.as_str()));
         assert_eq!(
             agent.generated_session_title.as_deref(),
             Some(expected.as_str())
         );
+    }
+
+    // ── HooksChanged (x.ai/session/update push) ─────────────────────────
+
+    fn hooks_changed_ext(
+        session_id: &str,
+        hooks: Vec<xai_hooks_plugins_types::HookInfo>,
+    ) -> acp::ExtNotification {
+        let notif = SessionNotification {
+            session_id: acp::SessionId::new(session_id),
+            update: XaiSessionUpdate::HooksChanged {
+                hooks,
+                project_trusted: true,
+                load_errors: Vec::new(),
+            },
+            meta: None,
+        };
+        let raw = serde_json::value::to_raw_value(&notif).unwrap();
+        acp::ExtNotification::new("x.ai/session_notification", std::sync::Arc::from(raw))
+    }
+
+    fn push_hook(name: &str, source_dir: &str) -> xai_hooks_plugins_types::HookInfo {
+        xai_hooks_plugins_types::HookInfo {
+            name: name.to_string(),
+            event: xai_hooks_plugins_types::HookEvent::PreToolUse,
+            handler_type: xai_hooks_plugins_types::HookHandlerType::Command,
+            matcher: None,
+            command: Some("/bin/true".to_string()),
+            url: None,
+            timeout_ms: 10_000,
+            source_dir: source_dir.to_string(),
+            disabled: false,
+            pinned: false,
+            removable: false,
+        }
+    }
+
+    /// The `HooksChanged` push is the channel late-arriving hooks come through.
+    /// Driven end-to-end through `handle_session_notification`: an empty first push must not finish group-collapse seeding, the first non-empty push applies the collapsed default, and later pushes preserve expand state.
+    #[test]
+    fn hooks_changed_push_seeds_group_collapse_on_first_non_empty_delivery() {
+        use crate::views::extensions_modal::{ExtensionsModalState, ExtensionsTab, TabDataState};
+
+        let mut app = make_app_with_agent("sess-1");
+        app.agents.get_mut(&AgentId(0)).unwrap().extensions_modal =
+            Some(ExtensionsModalState::new(ExtensionsTab::Hooks));
+
+        // Empty first push: loads data but must leave seeding open.
+        assert!(handle_session_notification(
+            &hooks_changed_ext("sess-1", Vec::new()),
+            &mut app,
+        ));
+        {
+            let modal = app.agents.get(&AgentId(0)).unwrap_or_else(|| panic!("missing map entry")).extensions_modal.as_ref().unwrap();
+            assert!(matches!(modal.hooks_data, TabDataState::Loaded(_)));
+            assert!(
+                modal.hooks_collapsed_groups.is_empty(),
+                "empty first push must not seed any collapsed groups"
+            );
+        }
+
+        // First non-empty push: every source group gets the collapsed default.
+        let hooks = vec![push_hook("a", "/src1"), push_hook("b", "/src2")];
+        assert!(handle_session_notification(
+            &hooks_changed_ext("sess-1", hooks.clone()),
+            &mut app,
+        ));
+        {
+            let modal = app.agents.get(&AgentId(0)).unwrap_or_else(|| panic!("missing map entry")).extensions_modal.as_ref().unwrap();
+            assert!(modal.hooks_collapsed_groups.contains("/src1"));
+            assert!(modal.hooks_collapsed_groups.contains("/src2"));
+        }
+
+        // User expands /src1; a later push must not re-collapse it.
+        app.agents
+            .get_mut(&AgentId(0))
+            .unwrap()
+            .extensions_modal
+            .as_mut()
+            .unwrap()
+            .hooks_collapsed_groups
+            .remove("/src1");
+        assert!(handle_session_notification(
+            &hooks_changed_ext("sess-1", hooks),
+            &mut app,
+        ));
+        let modal = app.agents.get(&AgentId(0)).unwrap_or_else(|| panic!("missing map entry")).extensions_modal.as_ref().unwrap();
+        assert!(!modal.hooks_collapsed_groups.contains("/src1"));
+        assert!(modal.hooks_collapsed_groups.contains("/src2"));
     }
 

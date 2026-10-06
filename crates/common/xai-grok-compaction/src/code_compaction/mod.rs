@@ -45,9 +45,7 @@ pub use config::{
     NESTED_SESSION_CONTEXT_CAP, SESSION_ATTENTION_TARGET_PERCENT, session_attention_target_tokens,
     session_sampling_window,
 };
-pub use failure::{
-    FailureKind, classify_http_status, classify_stream_event_error, is_context_length_error,
-};
+pub use failure::is_context_length_error;
 pub use observer::{FullReplaceAttemptOutcome, FullReplaceObserver};
 pub use prompt::{
     SELF_SUMMARIZATION_PROMPT, SummaryPromptKind, build_summary_prompt, build_summary_prompt_kind,

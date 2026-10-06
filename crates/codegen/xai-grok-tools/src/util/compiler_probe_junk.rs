@@ -59,9 +59,15 @@ pub fn try_parse_compiler_probe_junk_refuse(command: &str, cwd: &Path) -> Option
     }
     let mut start = 0;
     for i in 0..=tokens.len() {
-        let is_sep = i == tokens.len() || matches!(tokens[i].as_str(), "&&" | "||" | ";" | "|");
+        let is_sep = i == tokens.len()
+            || matches!(
+                tokens.get(i).expect("index out of bounds").as_str(),
+                "&&" | "||" | ";" | "|"
+            );
         if is_sep {
-            if let Some(msg) = refuse_rustc_statement(&tokens[start..i], cwd) {
+            if let Some(msg) =
+                refuse_rustc_statement(tokens.get(start..i).expect("index out of bounds"), cwd)
+            {
                 return Some(msg);
             }
             start = i + 1;
@@ -88,11 +94,11 @@ fn refuse_rustc_message() -> String {
 
 fn refuse_rustc_statement(stmt: &[String], cwd: &Path) -> Option<String> {
     let mut i = skip_env_prefix(stmt, 0);
-    if i >= stmt.len() || !is_rustc_oneshot_bin(&stmt[i]) {
+    if i >= stmt.len() || !is_rustc_oneshot_bin(stmt.get(i).expect("index out of bounds")) {
         return None;
     }
     i += 1;
-    let args = &stmt[i..];
+    let args = stmt.get(i..).expect("index out of bounds");
     if rustc_is_info_only(args) {
         return None;
     }
@@ -112,7 +118,7 @@ fn rustc_is_info_only(args: &[String]) -> bool {
     }
     let mut i = 0;
     while i < args.len() {
-        let t = args[i].as_str();
+        let t = args.get(i).expect("index out of bounds").as_str();
         if matches!(t, "--version" | "-V" | "--help" | "-h" | "-vV") {
             i += 1;
             continue;
@@ -133,7 +139,7 @@ fn rustc_is_info_only(args: &[String]) -> bool {
 fn rustc_has_safe_artifact_dir(args: &[String], cwd: &Path) -> bool {
     let mut i = 0;
     while i < args.len() {
-        let t = args[i].as_str();
+        let t = args.get(i).expect("index out of bounds").as_str();
         if t == "--out-dir" {
             let dir = args.get(i + 1).map(String::as_str).unwrap_or(".");
             return !dirs_equal(&resolve_against_cwd(dir, cwd), cwd);
@@ -159,7 +165,7 @@ fn rustc_has_safe_artifact_dir(args: &[String], cwd: &Path) -> bool {
 fn first_junk_redirect(tokens: &[String], cwd: &Path) -> Option<PathBuf> {
     let mut i = 0;
     while i < tokens.len() {
-        let t = tokens[i].as_str();
+        let t = tokens.get(i).expect("index out of bounds").as_str();
         let target = if matches!(t, ">" | ">>" | "1>" | "2>" | "&>" | "1>>" | "2>>") {
             tokens.get(i + 1).map(|s| s.as_str())
         } else if let Some(rest) = t.strip_prefix(">>") {
@@ -201,12 +207,12 @@ fn dirs_equal(a: &Path, b: &Path) -> bool {
 }
 
 fn skip_env_prefix(stmt: &[String], mut i: usize) -> usize {
-    while i < stmt.len() && is_env_assign(&stmt[i]) {
+    while i < stmt.len() && is_env_assign(stmt.get(i).expect("index out of bounds")) {
         i += 1;
     }
-    if i < stmt.len() && file_name(&stmt[i]) == "env" {
+    if i < stmt.len() && file_name(stmt.get(i).expect("index out of bounds")) == "env" {
         i += 1;
-        while i < stmt.len() && is_env_assign(&stmt[i]) {
+        while i < stmt.len() && is_env_assign(stmt.get(i).expect("index out of bounds")) {
             i += 1;
         }
     }

@@ -18,29 +18,9 @@ Start a fresh session and clear the current conversation. Alias: `/clear`.
 
 Open the session picker to reload a previous session from disk.
 
-### `/start`
-
-Start paused or interrupted work in the current session. If every session in this process is globally paused, `/start` unpauses and continues the interrupted turns. If this session has a continue-interrupted marker (`canceled_turn_resume.json`), `/start` re-queues that prompt once. If a soft-stop hold is keeping the queue from draining, `/start` releases that hold. If nothing is paused or interrupted, it says so and does not start a new turn.
-
-After Plan Exit, `/start` leaves parked Isolated Preview so the session is not wedged on a leftover plan. Isolated Preview is not a Plan Exit timer. Isolated Preview stays until Esc, Exit, or Approve. Isolated Preview does not close when nested implementers continue. It then continues paused or interrupted work in this process. Isolated Preview after Exit must paint this session's current disk `plan.md` for a primary Isolated Preview, not leftover primary `plan.md` on a secondary Isolated Preview, and not a leftover TECH.md snapshot. With Isolated Preview closed, chrome must not stay plan. Exclusive `/plan` (bare `/plan` with no extra text) exclusive-blocks nested implementers. `/view-plan` docks Isolated Preview from this session's current disk `plan.md`. `/plan --soft` keeps nested implementers running. `/plan --soft` does not reset the primary plan. It makes a secondary plan. Isolated Preview does not immediately pull up leftover current `plan.md`. Isolated Preview does not dock leftover primary `plan.md`. `/plan` with extra Operator text submits a plan-update turn. Compact at 100% / over 500k must not swallow `/plan`. Empty Enter never Approves. Clickable Approve only ([GitHub #122](https://github.com/SurmountSystems/grok-oss/issues/122)).
-
-`/start` is not `/resume`. `/resume` only opens the session picker.
-
 ### `/unstick`
 
-Resend the last parent (L1) prompt as if the network had dropped it. Use this when graceful resume did not unstick chrome: L1 hung on Waiting for the model, nested wait already done, sampler stuck, or the last operator prompt was sent but not properly received.
-
-`/unstick` is not a duplicate send. It does not paint a second Operator line and it does not append a second `<user_query>` the operator has to see twice. It does not cancel nested agents, rewind tool results, drop the transcript, reset sampler usage meters, or compact the turn away.
-
-If a turn is hung in flight, `/unstick` orphans that hung prompt the way a dropped IPC client loses its in-flight RPC, then resends. The leader drops the hung `session/prompt` RPC with the same routing as a disconnected client (`leader.response.orphaned`). The pager stays connected. Nested work keeps running. It is not `/resume` and it is not send-now cancel.
-
-It prefers the last L1 operator text from `prompt_wal.jsonl` when that file exists. Otherwise it uses the last Operator send on this session, not a nested overlay. Image tokens stay `[Image #N]`. WAL image file ids resend as resource links (`file://` under the session `images/` directory). It never re-inlines data URLs.
-
-If there is no last parent prompt, it fails with a short toast and does not invent text.
-
-After Plan Exit, `/unstick` leaves parked Isolated Preview when resending a hung parent prompt. Isolated Preview is not a Plan Exit timer. Isolated Preview stays until Esc, Exit, or Approve. Isolated Preview does not close when nested implementers continue. Esc:close also leaves that pane. `/start` continues paused or interrupted work. Empty Enter never Approves. Clickable Approve only ([GitHub #122](https://github.com/SurmountSystems/grok-oss/issues/122)).
-
-`/unstick` is not `/resume`. `/resume` still opens the session picker. Continue interrupted turn (`canceled_turn_resume.json`) still belongs to last-session on start and `/start`.
+`/unstick` is not `/resume`. It does not paint a second Operator line. It orphans that hung prompt. The leader drops the hung session with `leader.response.orphaned`, the same way it drops a disconnected client, while the pager stays connected. Prompt write-ahead log images resend as resource links and the pager never re-inlines data URLs.
 
 ### `/dashboard`
 
@@ -75,19 +55,8 @@ grok-oss running --json
 
 The human table uses the same columns. The CLI table does not mark this window, because there is no TUI window. `--json` is the same filtered rows and the same safe fields only (`pid`, `session_id`, `cwd`, `opened_at`, `updated_at`, `activity`, `title`, `activity_line`).
 
-### `/compact [context]`
+### `/compact`
 
-Compress conversation history to reclaim context-window space. Pass a note to tell Grok what to keep. Alias: `/compaction`.
-
-Immediate `/compact` or `/compaction` still runs compact when the session is idle. To put compact on the existing composer prompt queue without running it this turn, use first-arg `queue` or `later`, or `/queue /compaction`. That is the same prompt queue as ordinary follow-ups, not a second queue. A cancelled compact still does not re-arm on the same turn.
-
-```
-/compact
-/compaction
-/compact keep the auth implementation details
-/compact queue
-/queue /compaction
-```
 
 Grok also auto-compacts once the context window hits **95%** by default (tune it with `/settings` → **Auto-compact at**, or `[session] auto_compact_threshold_percent`). Percent is of the *effective* sampling window AUTO uses. With **Economic mode** on (default), that sampling window is soft-capped at 200k tokens even when the model catalog is larger (for example 500k). The footer context chip then names both windows (`used / 200K sampling · 500K catalog`) so catalog 500k is not implied as the AUTO gate.
 
@@ -120,9 +89,12 @@ Token Economy may rewrite **implement-loop effort** (thoroughness 1–5, not mod
 
 Aliases: `/economic`, `/econ`
 
+Grok also auto-compacts once the context window hits 85% (tune it with `[session] auto_compact_threshold_percent`).
+
 ### `/context`
 
-Show how the context window is being used: a category breakdown (system prompt, messages, reasoning and overhead, free space) plus informational rows for tool definitions, the skills listing, and MCP server announcements with their estimated token cost. Pasted screenshots count as image tokens on the model path (hundreds to low thousands each, not the length of a `data:image/...;base64` crate divided by four). They ride as content parts, not through the `view_image` tool. The context chip, AUTO compact, and `/context` share that counter.
+Show the context window split into System prompt, Messages, Reasoning/overhead, and Free.
+Rows for Tool definitions, Skills, and MCP servers are already counted in those totals.
 
 ### `/recap`
 
@@ -132,7 +104,7 @@ Generate a short "where was I" summary of the session so far. Alias: `/summarize
 
 ### `/session-info`
 
-Show session details — auth method, model, turn count, and context usage. Aliases: `/status`, `/info`.
+Show session details — auth method, model, turn count, and context usage. Aliases: `/status`, `/info`. Click a value or drag to select and copy; `c` copies the session ID and `y` copies the whole block.
 
 ### `/finish`
 
@@ -228,19 +200,11 @@ Branch the current session into a new agent, keeping history up to this point.
 
 Roll the conversation back to an earlier turn and discard everything after it. `/undo` is the same command.
 
-### `/edit-prompt`
-
-In minimal mode, open an external editor for an empty composer. Grok resolves `$VISUAL`, then `$EDITOR`, then `vi`; command values may include quoted arguments. Saving replaces the draft without sending it, and saving an empty file clears it. The command is hidden outside minimal mode.
-
-```
-/edit-prompt
-```
-
 To edit an **existing** draft when a terminal or multiplexer reserves `Ctrl+G`, open the command palette and select **Edit Prompt in External Editor**. That direct route preserves the existing text and refuses pasted, file-reference, or image chips without flattening them. Typing `/edit-prompt` into the composer necessarily replaces that input, so it starts from an empty draft.
 
 ### `/copy`
 
-Copy the most recent response to the clipboard. Pass a number to copy the Nth-latest response instead, or a file path to write the text to a file rather than the clipboard (handy over SSH, where the local clipboard is often unreachable).
+Copy the most recent response's source markdown to the clipboard. Pass a number to copy the Nth-latest response instead, or a file path to write the text to a file rather than the clipboard (handy over SSH, where the local clipboard is often unreachable).
 
 ```
 /copy
@@ -280,28 +244,21 @@ Rename the current session. Alias: `/title`.
 
 `--auto` unpins a manual title and lets auto-titling resume. It applies to Build sessions only — chat conversations have no local auto-titler. It must be the only argument (`/rename --auto Something` is an error). A session cannot be named `--auto` via this command; use the dashboard rename editor (`Ctrl+R`) for that pathological case.
 
-### `/clear-completed-todos`
-
-Archive completed and cancelled rows off the live session board. Pending and in-progress items stay. This is the same action as the compact **`[−]`** (U+2212 minus) in the todo header when the board is open and finished rows exist, and as optional focused `X` on the todo pane. Hints still say **Clear finished**. This is not `h` hide-done (that only hides finished rows on screen). This is not a `merge: false` wipe of open work.
-
-```
-/clear-completed-todos
-```
-
 ---
 
 ## Model and Mode
 
 ### `/model <name>`
 
-Switch models. Accepts a model ID or display name (case-insensitive), and for reasoning models you can add an effort level as a second argument. Alias: `/m`.
+Switch models. Accepts a model ID or display name (case-insensitive). When the model offers more than one context window, you can add a window size next. For reasoning models you can add an effort level last. The picker asks in the same order: model, then window, then effort. Alias: `/m`.
 
 When the slash dropdown is `/model` or `/m` and exactly one model row is highlighted, Tab (and Enter) apply the switch immediately. The composer clears. That is not Operator chat. If more than one model row remains, Tab keeps completing. A unique complete effort row such as `Grok 4.6 xhigh` also switches now with that effort. Command-phase unique `/model` (cursor still in the command name) still completes `/model `. `Ctrl+M` still opens the model picker.
 
 ```
-/model grok-build
-/model Grok Build
+/model grok-4.6
+/model Grok 4.6
 /model Reasoning X high
+/model Reasoning X 500k high
 ```
 
 ### `/effort <level>`
@@ -312,19 +269,25 @@ Set reasoning effort on the **current** model without reselecting it. Levels are
 /effort high
 ```
 
-### `/always-approve`, `/auto`, and `/context-only`
+### `/context-window <size>`
+
+Set the context window for the current model. The command is listed only when the model supports more than one size. It accepts the short label or the raw token count. The choice lasts for the session. It carries over to a new model that supports the same size. A size smaller than the current usage starts an auto-compact.
+
+```
+/context-window 500k
+/context-window 256000
+```
+
+### `/always-approve` and `/auto`
 
 These are real toggles for the permission mode: they stay in the menu, and running the mode you're already in turns it back off.
 
 | Command | When off | When already on |
 |---|---|---|
 | `/always-approve` | Skip all permission prompts | Back to ask |
-| `/auto` | Classifier approves safe tools (dangerous ones may still prompt) | Back to ask |
-| `/context-only` | Advertise no tools; refuse any tool call. Chat stays a conversation (redteaming / harness diagnosis) | Back to ask |
+| `/auto` | Auto-review: a classifier approves safe tools (dangerous ones may still prompt) | Back to ask |
 
-Running one while another is active switches modes. For example, `/auto` while always-approve is on switches to auto. `/auto` only appears when the auto permission-mode feature is enabled. `/context-only` is always offered. You can also change mode with `/settings`. `Shift+Tab` still cycles Normal / Plan / Auto / Always-approve; it does not include context-only. `Ctrl+O` still toggles always-approve.
-
-Always-approve remains the preferred daily autonomy mode. Context-only is an explicit diagnostic mode, not the default.
+Running one while the other is active switches modes — for example, `/auto` while always-approve is on switches to Auto-review. `/auto` only appears when the Auto-review permission-mode feature is enabled. You can also change mode with `Shift+Tab` (cycles Normal / Plan / Auto-review (when enabled) / Always-approve), `Ctrl+O`, or `/settings`.
 
 ### `/blacklist <command>`
 
@@ -332,13 +295,13 @@ Blacklist one command on this machine. `/blacklist lean` adds `Bash(lean)` and `
 
 ### `/multiline`
 
-Toggle multiline input. When it is on, `Enter` in the middle of a draft inserts a newline, and `Enter` at the end of the last line still sends (or interjects if a turn is running). `Shift+Enter` (or `Alt+Enter`) still sends. `Ctrl+Enter` interjects when a running turn can take it, and otherwise inserts a newline. Mid-turn, a bare `Enter` on an empty composer still force-sends the top queued follow-up. Alias: `/ml`. This is a per-session toggle. `[ui] composer_multiline = false` disables Enter / Shift+Enter newlines; `/multiline` cannot restore those while that persist flag is off. `[ui] allow_session_multiline = false` (Settings → Editor) refuses enabling session Multiline from this command, from `Ctrl+M`, and from the Multiline settings row.
+Toggle multiline input. When it's on, `Enter` inserts a newline and `Shift+Enter` (or `Alt+Enter`) sends the message. Mid-turn, a bare `Enter` on an empty composer still force-sends the top queued follow-up. Alias: `/ml`. With multiline off, the composer footer shows the newline chord once the draft is non-empty.
 
 ### `/history`
 
 Open prompt-history search: fuzzy-search this session's prompts newest-first, then press `Enter` or `Tab` to drop a match back into the prompt.
 
-For quick recall, press `↑` on an empty prompt instead. The panel opens with your most recent prompt already filled in; `↑`/`↓` step through entries (each lands in the input), `↓` past the newest entry closes the panel, and typing edits the recalled prompt in place.
+For quick recall, press `↑` on an empty prompt instead. With prompts queued, that moves focus into the queue pane, highlighting the last row; otherwise the panel opens with your most recent prompt already filled in, and `↑`/`↓` step through entries (each lands in the input), `↓` past the newest entry closes the panel, and typing edits the recalled prompt in place.
 
 ### `/compact-mode`
 
@@ -348,17 +311,27 @@ Toggle compact display — less padding and tighter spacing for denser output.
 
 Toggle vim-style scrollback keys (`j`/`k`, `h`/`l`, `g`/`G`, `y`/`Y`, and so on). With it off (the default), a bare letter or `Shift+letter` in the scrollback just focuses the prompt and types the character. The setting persists to `[ui] vim_mode`.
 
+### `/edit-prompt`
+
+Open an external editor for the prompt, in either render mode. Grok resolves `$VISUAL`, then `$EDITOR`, then `vi`; command values may include quoted arguments. Saving replaces the draft without sending it, and saving an empty file clears it. Typing `/edit-prompt` necessarily replaces the composer's contents, so the editor starts from an empty draft; to edit an **existing** draft, choose **Edit Prompt in External Editor** from the command palette (or press `Ctrl+G` in minimal mode), which preserves the text and refuses pasted, file-reference, or image chips without flattening them.
+
+```
+/edit-prompt
+```
+
 ### `/minimal` and `/fullscreen`
 
-Reopen the current session in the other render mode. `/minimal` (offered while you're in fullscreen) switches to the experimental scrollback-native mode; `/fullscreen` (offered while you're in minimal; alias `/full`) switches back to standard fullscreen mode. Both relaunch the pager on the same conversation for this session only — they don't touch `config.toml`, and the relaunch banner reminds you how to switch back. The `--minimal` / `--fullscreen` CLI flags are session-scoped the same way. To make plain `grok-oss` open in a given mode by default, use `/settings` → **Default screen mode** or set `[ui] screen_mode`.
+Switch the current session to the other render mode, in place. `/minimal` (offered while you're in fullscreen) switches to the experimental scrollback-native mode; `/fullscreen` (offered while you're in minimal; alias `/full`) switches back to standard fullscreen mode. The switch happens inside the running process — nothing restarts, so a running turn keeps streaming and your composer draft, queued prompts, and permission mode all carry over; a marker (committed line in minimal, toast in fullscreen) reminds you how to switch back. Both are session-scoped — they don't touch `config.toml` — and the `--minimal` / `--fullscreen` CLI flags are session-scoped the same way. To make plain `grok` open in a given mode by default, use `/settings` → **Default screen mode** or set `[ui] screen_mode`. (If the in-place transition misbehaves in an exotic terminal, `GROK_SCREEN_MODE_SWITCH=exec` restores the old behavior of relaunching the pager onto the same session.)
 
-A handful of commands only work in one of the two modes, because the surface they drive doesn't exist in the other: `/find`, `/jump`, `/timeline`, `/theme`, `/tutorial`, `/workflows`, and `/dashboard` are fullscreen-only, while `/expand` and `/edit-prompt` are minimal-only. Those are hidden from the command menu and the palette in the mode they can't run in. If you type one out anyway, Grok says why — and points you at whichever is actually useful. When the other mode is the only way to get it, that's the mode switch: `/theme isn't available in minimal mode (minimal renders with your terminal's own palette). Run /fullscreen to switch this session.` When this mode already does the job another way, it names that instead: `/expand isn't available in fullscreen mode — press Tab to focus the scrollback, then → on the block.` Everything else works in both. Note that `--no-alt-screen` still counts as fullscreen here, so it keeps the fullscreen-only commands.
+A handful of commands only work in one of the two modes, because the surface they drive doesn't exist in the other: `/find`, `/jump`, `/timeline`, `/theme`, `/tutorial`, and `/dashboard` are fullscreen-only, while `/expand` is minimal-only. (`/workflow runs` is different: it opens the run pane in fullscreen and degrades to a text overview in minimal rather than refusing.) Those are hidden from the command menu and the palette in the mode they can't run in. If you type one out anyway, Grok says why — and points you at whichever is actually useful. When the other mode is the only way to get it, that's the mode switch: `/theme isn't available in minimal mode (minimal renders with your terminal's own palette). Run /fullscreen to switch this session.` When this mode already does the job another way, it names that instead: `/expand isn't available in fullscreen mode: press Tab to focus the scrollback, then → on the block.` Everything else works in both. Note that `--no-alt-screen` still counts as fullscreen here, so it keeps the fullscreen-only commands.
 
 ### `/plan`
 
 Exclusive `/plan` (bare `/plan` without `--soft`) enters plan mode. Exclusive `/plan` exclusive-blocks nested implementers. Immediate exclusive `/plan` (optionally with a description) enters plan mode when you want it now. `/plan` with extra Operator text (for example `/plan update the plan with what was accomplished and all that remains please`) submits that as a plan-update turn. It does not only dock Isolated Preview of a leftover plan. That submit writes the prompt write-ahead log. While that plan-update turn is running, Isolated Preview stays docked as rewriting-wait and quotes that Operator prompt. Idle Approve / Comment / Revise / Exit do not arm on leftover stale `plan.md`. Empty Enter never Approves. Clickable Approve only ([GitHub #122](https://github.com/SurmountSystems/grok-oss/issues/122)). When `exit_plan_mode` writes current disk `plan.md`, Isolated Preview presents that file and idle CTAs arm. Exclusive `/plan` with no extra text exclusive-blocks nested implementers. It does not dock leftover primary `plan.md`. `/view-plan` docks Isolated Preview from this session's current disk `plan.md`, not leftover "why the agent stopped" or a TECH.md persist overwrite.
 
 `/plan --soft` docks Isolated Preview on the right for a new feature. It does not enter plan mode. It does not park L1. Nested implementers stay Working. Soft planning does not reset the primary plan. It makes a secondary plan. Isolated Preview does not immediately pull up leftover current `plan.md`. Isolated Preview does not dock leftover primary `plan.md`. Isolated Preview does not close when nested implementers continue. Isolated Preview stays until Esc, Exit, or Approve. Isolated Preview is not a Plan Exit timer. Present is not Approve. Empty Enter never Approves. Clickable Approve only ([GitHub #122](https://github.com/SurmountSystems/grok-oss/issues/122)). Comment then Approve still works on a real present of that secondary plan after `exit_plan_mode` writes it. The Isolated Preview composer is an Operator box unless you click Comment. Isolated Preview idle after present, a non-empty Operator box (including a paste chip), plus Enter Approves with those notes. It does not Plan-Exit and leave the paste. `--soft` is not the queue hold token. `/plan --soft add feature` seeds Isolated Preview with that description and does not enqueue it as a Prompt. Exclusive `/plan` without `--soft` enters plan mode and exclusive-blocks nested implementers. Approve still files a GitHub issue with the plan text as documented in GitHub tracking. Comment then Approve carries notes.
+
+After Plan Exit, `/start` leaves parked Isolated Preview and continues paused or interrupted work in this process. `/start` is not `/resume`. With Isolated Preview closed, chrome must not stay plan. Compact completion must not swallow `/plan`. Exclusive `/plan` still exclusive-blocks nested implementers.
 
 To schedule plan mode on the existing composer prompt queue without entering it this turn, use first-arg `queue` or `later`, or `/queue /plan`. That is the same prompt queue as ordinary follow-ups, not a second queue.
 
@@ -378,24 +351,28 @@ Open Isolated Preview for the current saved plan in the right pane. Isolated Pre
 
 ## Memory
 
-`/flush`, `/dream`, and `/memory` require memory to be enabled (`--experimental-memory` or `GROK_MEMORY=1`); `/memory` also needs a configured memory backend. `/remember` is always available.
+`/flush` and `/dream` require memory enabled through `GROK_MEMORY=1`, `[memory] enabled = true`, or managed remote settings. `/memory` is available whenever a memory store is configured for the session, including when `[memory] enabled = false` turned memory off, so you can browse saved notes and turn memory on for the session from inside the modal. It is hidden only when no memory store is configured, or when `--no-memory` / `GROK_MEMORY=0` turned memory off for the whole process. `/remember` is always available.
 
 ### `/memory`
 
-Browse, view, and manage saved memories. Pass `on` or `off` to enable or disable memory. Alias: `/mem`.
+Browse, view, and manage saved memories. Alias: `/mem`. Inside the modal, `t`
+turns memory on or off for the session, `x` deletes the selected note, and `s`
+shows content-free queue, lease, retention, and pinned-rollout diagnostics.
+The `t` toggle is session-scoped: it does not edit `config.toml`, and new
+sessions follow the config again. It cannot override `--no-memory` or
+`GROK_MEMORY=0`.
 
 ```
 /memory
-/memory off
 ```
 
 ### `/flush`
 
-Save the current session's knowledge to memory right now, triggering an LLM summary of the most important content. Reach for it before compaction, or any time you want to lock in context.
+Save the current session's knowledge to memory right now, triggering an LLM summary of the most important content. Reach for it before compaction, or any time you want to lock in context. The status line shows "Flushing memory…" while it runs, and a scrollback line reports the outcome (for example "Memory flushed through turn 12").
 
 ### `/dream`
 
-Run memory consolidation — merge session logs into organized topics.
+Run memory consolidation — merge session logs into organized topics. The status line shows "Consolidating memory…" while it runs, and a scrollback line reports what happened: how many observations were merged into how many topics, that there was nothing to consolidate, or that another session is already consolidating.
 
 ### `/remember`
 
@@ -409,7 +386,7 @@ Save a note to memory immediately, without waiting for an automatic summary.
 
 ## Hooks and Plugins
 
-`/hooks`, `/plugins`, `/marketplace`, and `/skills` all open the same extensions modal, each on its own tab.
+`/hooks`, `/plugins`, `/marketplace`, `/skills`, and `/workflows` all open the same extensions modal, each on its own tab.
 
 ### `/hooks`
 
@@ -492,21 +469,27 @@ Kick off a background research workflow. It plans a bounded set of questions, ga
 /deep-research Compare the migration risks of PostgreSQL 17 and MySQL 9
 ```
 
-The command returns right away — follow progress in `/workflows`, and the final report appears in the conversation on its own.
+The command returns right away — follow progress in `/workflow runs`, and the final report appears in the conversation on its own.
 
-Model-launched workflows may set `agent_budget` on the `workflow` tool. It's an absolute cumulative cap on logical child-agent calls: every `agent()` call and every item in a `parallel()` panel spends one slot, while schema-correction retries don't. The default is 128, explicit values run 1–1,024, and a panel that would cross the remaining budget is rejected before any of its children launch. Separately, a host-configured cap (32 by default) bounds how many children run at a time per run; larger panels queue and still act as a barrier. `budget()` reports the cap as `total`, admitted calls as `spent`, `reserved` (always zero), and `remaining`. Named slash launches use the default budget.
+Workflows use an absolute cumulative `agent_budget` cap on logical child-agent calls: every `agent()` call and every item in a `parallel()` panel spends one slot, while schema-correction retries don't. The default is 128, explicit values run 1–1,024, and a panel that would cross the remaining budget is rejected before any of its children launch. Model-launched workflows set `agent_budget` on the `workflow` tool; named slash launches accept `--agent-budget N` or an `agent_budget` field in their JSON args. Named launches can also set child reasoning effort with `--effort LEVEL` or JSON `effort`, without changing the current session's `/effort`; a child script's own `effort` option takes precedence. Separately, a host-configured cap (32 by default) bounds how many children run at a time per run; larger panels queue and still act as a barrier. `budget()` reports the cap as `total`, admitted calls as `spent`, `reserved` (always zero), and `remaining`.
 
 ### `/workflow`
 
-Launch a saved workflow, or manage a running one by the session-unique display name shown in `/workflows`. Launch the same workflow twice and the display names are numbered (`review-changes`, `review-changes-2`); you never need the internal run IDs.
+Launch a saved workflow, or manage a running one by its session-unique display name. Launch the same workflow twice and the display names are numbered (`review-changes`, `review-changes-2`); you never need the internal run IDs. Bare `/workflow` prints a text overview of this session's runs.
+
+Type `/workflow` and a space to autocomplete saved workflow names (built-in, project, and user) plus the manage verbs `runs`, `pause`, `resume`, `stop`, and `save`. Picking a name fills it in and offers launch flags before you add args; it does not launch until you press Enter. `pause` / `resume` / `stop` / `save` then list this session's run handles — a bare `/workflow stop` does not pick a run.
 
 ```
-/workflow review-changes {"target":"origin/main...HEAD"}
+/workflow review-changes --agent-budget 256 --effort high {"target":"origin/main...HEAD"}
+/workflow review-changes {"target":"origin/main...HEAD","agent_budget":256,"effort":"high"}
+/workflow runs
 /workflow pause review-changes
 /workflow resume review-changes
 /workflow stop review-changes-2
 /workflow save review-changes
 ```
+
+`/workflow runs` opens the live **Workflow Runs** dashboard in the fullscreen TUI — active and retained runs, not a catalog of saved definitions. Each row shows the run's display name, phase, agent roster, progress, and result. Inside a run's detail view, `p` pauses, `r` resumes an ordinary pause, and `x` stops. Budget-limited runs can't bare-resume: `r` returns the shell's rejection (raise the cap with a model/tool resume that passes a higher `agent_budget`), while `x` still stops. `s` saves the run's script, but it's hidden for known built-ins and numbered duplicate handles — for those, choose a new unique `meta.name` and save the edited script explicitly. In minimal mode and non-TUI clients, `/workflow runs` prints the same text overview as bare `/workflow`.
 
 Project workflows live in `.grok/workflows/*.rhai`; user workflows live in `~/.grok/workflows/*.rhai`. A same-process pause/resume continues the original immutable script, args, and `agent_budget` cap from committed host-call results — to iterate, edit the returned script copy and launch it as a new run.
 
@@ -514,7 +497,7 @@ A budget-limited run is different: it only resumes through a model/tool resume r
 
 ### `/workflows`
 
-Open the live workflows **run** dashboard — active and retained runs, not a catalog of saved definitions. Each row shows the run's display name, phase, agent roster, progress, and result. Inside a run's detail view, `p` pauses, `r` resumes an ordinary pause, and `x` stops. Budget-limited runs can't bare-resume: `r` returns the shell's rejection (raise the cap with a model/tool resume that passes a higher `agent_budget`), while `x` still stops. `s` saves the run's script, but it's hidden for known built-ins and numbered duplicate handles — for those, choose a new unique `meta.name` and save the edited script explicitly.
+Open the extensions modal on the **Workflows** tab — a browse-only catalog of the saved workflows Grok discovered (built-ins, project `.grok/workflows/`, and user `~/.grok/workflows/`), with each entry's source, description, and path. The same catalog is listed for the model under the skill listing in the session preamble. Launch one with `/workflow <name>` (or its own slash command), then watch it in `/workflow runs`.
 
 ---
 
@@ -526,7 +509,7 @@ Switch the color theme. Alias: `/t`.
 
 ### `/feedback [message]`
 
-Report an issue or send feedback. A message sends immediately. With none, a pane opens for a longer report: `Enter` sends, `Esc` discards.
+Report an issue or send feedback. Bare `/feedback` opens the feedback form in every mode, including `--minimal`. Its **Write** tab is a report box: `Enter` sends, `Esc` closes. Its **Drafts** tab (`Ctrl+Tab` switches) holds reports saved for later — failed sends and feedback the agent drafted for you — and `Enter` loads one into Write so you can review, pick a type, and send it. `/feedback <message>` sends the message immediately, in any mode; if the send fails, the message is saved to Drafts.
 
 ```
 /feedback
@@ -545,8 +528,11 @@ In the full TUI, a finished answer opens a **Done** panel:
 
 In minimal mode (`--minimal`), the answer shows up in a dismissible panel above the prompt: `Esc` dismisses it, a finished answer is saved into native scrollback, and a late reply to an already-dismissed panel is dropped.
 
+`/btw` can also appear mid-message: the whole message (minus the token) becomes the side question and nothing goes to the main turn. Only `/btw` works this way; other commands must start the message. For a multi-line side question, use `Alt+Enter` (over SSH) or `Shift+Enter`, a trailing `\`, or `/ml`. Do not rely on `Cmd+Enter`: Apple Terminal inserts a newline locally via CoreGraphics; a delivered `SUPER+Enter` (Kitty) also inserts a newline rather than sending; over SSH Cmd never arrives and the chord sends.
+
 ```
 /btw also check the error handling
+fix the retry loop first. /btw what does WBC stand for?
 ```
 
 ### `/note`
@@ -647,6 +633,18 @@ Create, edit, and delete personas. A subagent can apply a persona to shape how i
 
 ## Account and Billing
 
+### `/limits`
+
+Grok OSS will spend included SuperGrok period limits on a stored personal SuperGrok login first. A Team / Business SuperGrok JWT is not the paying source while that personal login exists. Then SuperGrok dollar credits that never expire, then console team prepaid / console API credits. Remaining included SuperGrok period limits across distinct stored plans are added together. That sum is the real remaining included quota. A unified pool counts once. Only one `grok-oss` process fetches billing and limits. Other live TUIs read a snapshot under `$GROK_HOME` (`limits_snapshot.json`). Automatic HonorTtl is at most once an hour. When personal included SuperGrok period limits have room again, grok-oss uses personal SuperGrok, not leftover business credits, unless the Operator pinned console or pinned business. There is no extra daemon. Rebuild SIGUSR1 is not this.
+
+While included SuperGrok period limits still have room, stay on the SuperGrok session. After those included SuperGrok period limits are full, sampling uses SuperGrok dollar credits and then console team prepaid / console API credits. SuperGrok is a paid product.
+
+grok-oss limits is a client printout, not xAI billing truth. A client 100% / remaining 0 / SuperGrok dollar credits $0 printout must not mark SuperGrok used up.
+
+Named commands, same words on TUI `/limits` and CLI `grok-oss limits`: `stay-supergrok`, `use-console`, `use-personal`, `use-business`, meter included, dollar-credits, console, combined, refresh, `--help`, and `--use-credits`. `use-personal` and `use-business` persist the sidecar `$GROK_HOME/limits_pins.json` field `supergrok_identity`. Stock `preferred_method = "api_key"` still pins console. `stay-supergrok` hop-back does not require console credits.
+
+A second SuperGrok plan is visible only after a second `grok-oss login` that stores the Team principal. grok.com's account switcher is a different product.
+
 ### `/login`
 
 Log in or re-authenticate without leaving the session.
@@ -668,57 +666,9 @@ When included SuperGrok period bounds are known, also shows **linear-burn pacing
 /usage manage
 ```
 
-### `/spend`
+Inside a session this opens the usage modal with the account allowance plus that session's context and token totals. From the [Agent Dashboard](23-dashboard.md#dispatch-input) the same modal opens over the dashboard; there is no session there, so only the **Usage limit** tab carries data.
 
-Token Economy double-entry: local calculated spend (from session `usage.jsonl` ingested into `$GROK_HOME/grok_oss.db`) next to remote Management samples when a management key is available. Shows gap honesty when local cost ticks are missing. Meters stay distinct (included SuperGrok period limits ≠ SuperGrok dollar credits ≠ console team prepaid). Aliases: `/double-entry`, `/ledger`.
-
-```
-/spend
-```
-
-### `/limits`
-
-Opens a dismissible popup (Esc to close) with spend meters from cached billing, not session tokens. Same data as clicking the compact meter on the top status row. CLI: `grok-oss limits` and `grok-oss limits --json`.
-
-Keeps each meter distinct:
-
-- **Included SuperGrok period limits** (used % · remaining % · next reset). SuperGrok is paid. This is the subscription-included quota for the current SuperGrok billing period, not SuperGrok dollar credits.
-- Linear-burn pacing when period bounds exist (ahead of or behind linear burn; omit when bounds are missing).
-- SuperGrok **dollar credits** (prepaid top-ups; separate from included SuperGrok period limits).
-- **Console API key** request path and **console team prepaid** when a Management key and `[endpoints] management_team_id` (or `XAI_MANAGEMENT_TEAM_ID`) are set. Honest gaps: `no management key`, `no management team id`, `loading team prepaid...`, `team prepaid unavailable`.
-- Team postpaid OAuth / Grok Build class and usage series when Management credentials work. That is not license message counts.
-- A short double-entry spend section. Full view is `/spend`.
-
-When two SuperGrok principals are stored, `/limits` stacks a section per principal. The live sampling line names which principal (or console key) is active when known. A second SuperGrok plan is visible only after a second `grok-oss login` that stores the Team principal. grok.com's account switcher is a different product.
-
-Desired spend-order chrome (compact meter and `/limits` **Active:** line): spend included SuperGrok period limits on a stored personal SuperGrok login first. A Team / Business SuperGrok JWT is not the paying source while that personal login exists (that JWT settles as team postpaid OAuth / Grok Build and can debit the Billing Credits card). Then SuperGrok dollar credits that never expire, then console team prepaid / console API credits. Remaining included SuperGrok period limits across distinct stored plans are added together. That sum is the real remaining included quota. A unified pool (the same wire pool) counts once. While included SuperGrok period limits still have room, stay on SuperGrok session. When personal included SuperGrok period limits have room again, grok-oss uses personal SuperGrok, not leftover business credits, unless the Operator pinned console or pinned business. After those included SuperGrok period limits are full, sampling hops to SuperGrok dollar credits, then to the console API as failover.
-
-Personal SuperGrok and business SuperGrok are distinct identities. Matching `nextReset` is not a shared pool. grok-oss limits JSON is a client printout, not xAI billing truth.
-
-Only one `grok-oss` process fetches billing and limits. Other live TUIs read a snapshot under `$GROK_HOME` (`limits_snapshot.json` plus the snapshot lock). Automatic HonorTtl is at most once an hour. `/limits refresh` (ForceRefresh) still fetches even when that snapshot is younger than one hour. There is no extra daemon. Rebuild SIGUSR1 is not this.
-
-```
-/limits
-/limits --help
-/limits --json
-/limits stay-supergrok
-/limits --stay-supergrok
-/limits use-console
-/limits --use-console
-/limits use-personal
-/limits use-business
-/limits --use-credits
-/limits meter included
-/limits refresh
-```
-
-`/limits --json` prints the same machine-readable JSON as `grok-oss limits --json` into the conversation (no secrets). Fields include `schemaVersion`, `liveSampling`, and `activeDriver` (`supergrok_free_period` | `supergrok_extras` | `console_key`). Those `activeDriver` names are wire fields, not human meter names. `supergrok_free_period` is **included SuperGrok period limits**. `supergrok_extras` is **SuperGrok dollar credits** (prepaid SuperGrok top-ups). `console_key` is console team prepaid / console API credits. SuperGrok is paid. Never call SuperGrok free.
-
-A grok-oss limits JSON or compact printout of included 100%, remaining 0, or SuperGrok dollar credits $0 must not mark SuperGrok used up or hop to console so this session cannot self-fix. grok-oss limits is a client printout, not xAI billing truth. Matching `nextReset` is not proof of a shared pool. Operator Usage (grok.com for that workspace) and the console.x.ai Billing page they can see win. Real SuperGrok HTTP 402 after that request failed can still leave SuperGrok. Never invent remaining. Never call any pool used up.
-
-Named commands, same words on TUI `/limits` and CLI `grok-oss limits`: `stay-supergrok`, `use-console`, `use-personal`, `use-business`, `meter included|dollar-credits|console|combined`, `refresh` (ForceRefresh). `/limits --help` (also `help` and `-h`) lists those words. Hyphenated aliases match the unhyphenated words (`--stay-supergrok`, `--use-console`, `--use-personal`, `--use-business`, `--refresh`, `--meter`). `/limits --use-credits` pins compact chrome to SuperGrok dollar credits (same as `meter dollar-credits`). `/limits use credits` is that same pin. `use-personal` and `use-business` persist the sidecar `$GROK_HOME/limits_pins.json` field `supergrok_identity`. Personal SuperGrok and business SuperGrok are distinct weekly pools; they do not combine. SuperGrok is a paid product. `use-business` is valid even when business has no included period-limits payload. grok-oss fails loud if no stored Team login exists. A second `grok-oss login` stores the Team principal. Pins live in `$GROK_HOME/limits_pins.json`, a sibling of `exhausted_credits/`. No new `[auth]` keys. Stock `preferred_method = "api_key"` still pins console. `stay-supergrok` hop-back does not require console credits. Fail-open: a client 100% / remaining 0 / SuperGrok dollar credits $0 printout must not mark SuperGrok used up or hop to console. Automatic HonorTtl is at most once an hour. `/limits refresh` (ForceRefresh) still fetches even when that snapshot is younger than one hour. The compact meter names the driving meter (included SuperGrok period limits, SuperGrok dollar credits, console team prepaid / console API credits, or combined when remaining is across distinct SuperGrok identities). `/limits meter` chooses which of those named meters the compact line emphasizes.
-
-See [Authentication](02-authentication.md#included-supergrok-period-limits-and-limits).
+For persisted per-turn token and cost totals of any local session, use `grok usage <session-id> [turn]` from the shell. See [Session Management](17-sessions.md#the-grok-usage-subcommand).
 
 ### `/privacy`
 
@@ -729,7 +679,7 @@ Open Settings on **Coding data, retention, and training**, where you choose
 /privacy
 ```
 
-This setting doesn't touch `[features] telemetry`, `trace_upload`, or your external OTEL settings — see [Monitoring Usage](24-monitoring-usage.md#related-settings). On team accounts only a team admin can change it, and admins can also enable or disable Zero Data Retention for the team ([how to enable ZDR](https://docs.x.ai/developers/faq/security#how-to-enable-zdr)). When the choice isn't yours to make, the row says so — `ZDR` or `· Admin Managed` — instead of opening the chooser.
+This setting doesn't touch `[features] telemetry`, `trace_upload`, or your external OTEL settings — see [Monitoring Usage](24-monitoring-usage.md#related-settings). On team accounts only a team admin can change it, and admins can also enable or disable Zero Data Retention for the team ([how to enable ZDR](https://docs.x.ai/developers/faq/security#how-to-enable-zdr)). When the choice isn't yours to make, the row says so — `ZDR` or `· Admin Managed` — instead of opening the chooser. ZDR locks coding-data sharing; it does not mute external OTEL or `user.email` — see [ZDR and this stream](24-monitoring-usage.md#zdr-and-this-stream).
 
 ---
 
@@ -741,7 +691,7 @@ Beside the status line, the 15 minute window and the 24 hour window share one sh
 
 The window reads local observations through the installed DuckDB shared library. It does not call xAI to paint.
 
-grok-oss loads that shared library when it reads the pieces. It does not link the library in a way that stops process start. If the shared library is missing, grok-oss still starts, uptime tracking stays off, and the window says uptime tracking is off because DuckDB is not installed. The product does not invent samples.
+grok-oss links the installed DuckDB shared library. On Linux that file is libduckdb.so. The build fails if that shared library or the duckdb.h header is missing. It does not compile a static copy of DuckDB. When a query cannot use the library, uptime tracking stays off and the window says uptime tracking is off because DuckDB is not installed. The product does not invent samples.
 
 Recorded observations are ones the product already made: a real model request, a real 500, a timeout, a repeating-sentence stop, a latency, a fetched token count, and an announcement banner the product already showed ("We're currently experiencing issues serving our models" or "A datacenter incident is affecting all Grok models").
 
@@ -765,7 +715,7 @@ The plan side panel still paints over the transcript behind it.
 
 Show the local 15 minute and 24 hour reading. When those windows have no observations, the reading is `15m none · 24h none`. That is the same short reading that sits beside the status line. When observations exist, `/uptime` prints the full reading: the share that succeeded, the HTTP 500 count, latency that was actually measured, and a stored token sum when every model observation has one. The status line stays the short segment.
 
-`/uptime` does not open a network connection. It does not send a request to xAI. It reads observations already stored on this machine. If the installed DuckDB shared library is missing, tracking stays off, grok-oss still starts, and `/uptime` says uptime tracking is off because DuckDB is not installed.
+`/uptime` does not open a network connection. It does not send a request to xAI. It reads observations already stored on this machine. The build requires the installed DuckDB shared library and fails if it is missing, instead of compiling a static copy. When a query cannot use the library, tracking stays off and `/uptime` says uptime tracking is off because DuckDB is not installed.
 
 ### `/announcements`
 

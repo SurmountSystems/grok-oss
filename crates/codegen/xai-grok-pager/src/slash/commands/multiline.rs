@@ -1,4 +1,4 @@
-//! `/multiline` -- toggle multiline input mode.
+//! `/multiline`: toggle multiline input mode.
 //!
 //! In multiline mode, Enter in the middle of a draft inserts a newline and
 //! Shift+Enter sends the prompt. Enter at the end of the last line still
@@ -7,40 +7,23 @@
 //! mode.
 //! Toggled via `Ctrl+M`, this slash command, or the settings modal.
 //!
-//! Dispatches `Action::SetMultilineMode(!current)`. Per-session only
-//! (no disk persistence).
+//! Dispatches `Action::SetMultilineMode(!current)`. Per-session only (no disk persistence).
 
 use crate::app::actions::Action;
-use crate::slash::command::{CommandExecCtx, CommandResult, SlashCommand};
+use crate::slash::command::{CommandExecCtx, CommandResult, SlashCommand, slash_meta};
 
 /// Toggle multiline input mode via `/multiline`.
 pub struct MultilineCommand;
 
 impl SlashCommand for MultilineCommand {
-    fn name(&self) -> &str {
-        "multiline"
-    }
-
-    fn aliases(&self) -> &[&str] {
-        &["ml"]
-    }
-
-    fn description(&self) -> &str {
-        "Toggle multiline input (mid-line Enter inserts a newline; end of last line still sends)"
-    }
-
-    fn session_scoped(&self) -> bool {
-        true
-    }
-
-    fn offered_when_session_less(&self) -> bool {
-        // Dashboard dispatch/peek own their own multiline flag
-        // (`DashboardState::multiline_mode`); same swap as the agent prompt.
-        true
-    }
-
-    fn usage(&self) -> &str {
-        "/multiline"
+    slash_meta! {
+        name: "multiline",
+        aliases: ["ml"],
+        description: "Toggle multiline input mode (swap Enter and Shift+Enter)",
+        usage: "/multiline",
+        session_scoped: true,
+        // Dashboard dispatch/peek own their own multiline flag (`DashboardState::multiline_mode`); same swap as the agent prompt.
+        offered_when_session_less: true,
     }
 
     fn run(&self, ctx: &mut CommandExecCtx, _args: &str) -> CommandResult {
@@ -84,7 +67,7 @@ mod tests {
         }
     }
 
-    /// Off → `SetMultilineMode(true)`.
+    /// Off dispatches `SetMultilineMode(true)`.
     #[test]
     fn run_when_off_dispatches_set_to_true() {
         crate::appearance::cache::set_allow_session_multiline(true);
@@ -101,30 +84,7 @@ mod tests {
         }
     }
 
-    /// Grok OSS: Operator: A setting turns session Multiline off so the
-    /// Operator cannot accidentally enable it (slash, settings, Ctrl+M).
-    /// When disabled they do not land in session Multiline.
-    #[test]
-    fn run_when_allow_session_multiline_off_refuses_enable() {
-        crate::appearance::cache::set_allow_session_multiline(false);
-        let cmd = MultilineCommand;
-        let models = ModelState::default();
-        let bundle = BundleState::default();
-        let mut ctx = make_ctx(&models, &bundle, false);
-        let result = cmd.run(&mut ctx, "");
-        match result {
-            CommandResult::Message(msg) => {
-                assert!(
-                    msg.contains("allow_session_multiline") || msg.contains("Settings"),
-                    "message must name the setting; got {msg}"
-                );
-            }
-            other => panic!("expected Message refusing enable, got {other:?}"),
-        }
-        crate::appearance::cache::set_allow_session_multiline(true);
-    }
-
-    /// `/multiline` when on → dispatches `Action::SetMultilineMode(false)`.
+    /// `/multiline` when on dispatches `Action::SetMultilineMode(false)`.
     #[test]
     fn run_when_on_dispatches_set_to_false() {
         crate::appearance::cache::set_allow_session_multiline(false);

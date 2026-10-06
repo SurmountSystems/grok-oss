@@ -177,6 +177,11 @@ let
       # Order: fmt, then workspace clippy --all-targets, then nextest, doctests.
       doCheck = false;
       buildPhaseCargoCommand = ''
+        # install.sh contract also requires this desktop path. The pin body
+        # stays in the tracked CLI installer. Copy it here so a git source
+        # that omits an untracked desktop script still has the file.
+        mkdir -p frontend/apps/grok-desktop/scripts
+        cp -f crates/codegen/xai-grok-pager/scripts/install.sh frontend/apps/grok-desktop/scripts/install.sh
         ${workspaceCargoJobsFromCores}
         export LD_LIBRARY_PATH="${lib.makeLibraryPath buildInputs}''${LD_LIBRARY_PATH:+:''${LD_LIBRARY_PATH}}"
         export RULES_RUST_RUNFILES_WORKSPACE_NAME="''${RULES_RUST_RUNFILES_WORKSPACE_NAME:-grok-oss}"

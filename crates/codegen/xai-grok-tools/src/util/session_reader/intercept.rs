@@ -156,8 +156,11 @@ fn try_parse_direct(cmd: &str) -> Option<SessionReaderIntercept> {
     }
 
     let mut i = 0;
-    while i < tokens.len() && tokens[i].contains('=') && !tokens[i].starts_with('-') {
-        let t = &tokens[i];
+    while i < tokens.len()
+        && tokens.get(i).expect("index out of bounds").contains('=')
+        && !tokens.get(i).expect("index out of bounds").starts_with('-')
+    {
+        let t = tokens.get(i).expect("index out of bounds");
         if let Some((name, _)) = t.split_once('=') {
             if name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') && !name.is_empty() {
                 i += 1;
@@ -171,22 +174,30 @@ fn try_parse_direct(cmd: &str) -> Option<SessionReaderIntercept> {
         return None;
     }
 
-    let script = if is_python_bin(&tokens[i]) {
+    let script = if is_python_bin(tokens.get(i).expect("index out of bounds")) {
         i += 1;
-        while i < tokens.len() && tokens[i].starts_with('-') && tokens[i] != "-" {
-            if tokens[i] == "-c" || tokens[i].starts_with("-c") {
+        while i < tokens.len()
+            && tokens.get(i).expect("index out of bounds").starts_with('-')
+            && tokens.get(i).expect("index out of bounds") != "-"
+        {
+            if tokens.get(i).expect("index out of bounds") == "-c"
+                || tokens
+                    .get(i)
+                    .expect("index out of bounds")
+                    .starts_with("-c")
+            {
                 return None;
             }
             i += 1;
         }
-        if i >= tokens.len() || !is_allowlisted(&tokens[i]) {
+        if i >= tokens.len() || !is_allowlisted(tokens.get(i).expect("index out of bounds")) {
             return None;
         }
-        let script = tokens[i].clone();
+        let script = tokens.get(i).expect("index out of bounds").clone();
         i += 1;
         script
-    } else if is_session_reader_stub_or_cli_bin(&tokens[i]) {
-        let script = tokens[i].clone();
+    } else if is_session_reader_stub_or_cli_bin(tokens.get(i).expect("index out of bounds")) {
+        let script = tokens.get(i).expect("index out of bounds").clone();
         i += 1;
         script
     } else {
@@ -196,19 +207,19 @@ fn try_parse_direct(cmd: &str) -> Option<SessionReaderIntercept> {
     if i >= tokens.len() {
         return None;
     }
-    let tool = SessionTool::parse(&tokens[i])?;
+    let tool = SessionTool::parse(tokens.get(i).expect("index out of bounds"))?;
     i += 1;
 
     if i >= tokens.len() {
         return None;
     }
-    let action = SessionAction::parse(&tokens[i])?;
+    let action = SessionAction::parse(tokens.get(i).expect("index out of bounds"))?;
     i += 1;
 
     // Optional positional ref (not starting with -)
     let mut ref_arg = None;
-    if i < tokens.len() && !tokens[i].starts_with('-') {
-        ref_arg = Some(tokens[i].clone());
+    if i < tokens.len() && !tokens.get(i).expect("index out of bounds").starts_with('-') {
+        ref_arg = Some(tokens.get(i).expect("index out of bounds").clone());
         i += 1;
     }
 
@@ -219,14 +230,14 @@ fn try_parse_direct(cmd: &str) -> Option<SessionReaderIntercept> {
     let mut max_tool_chars: usize = 300;
 
     while i < tokens.len() {
-        let t = &tokens[i];
+        let t = tokens.get(i).expect("index out of bounds");
         match t.as_str() {
             "--cwd" => {
                 i += 1;
                 if i >= tokens.len() {
                     return None;
                 }
-                cwd = Some(tokens[i].clone());
+                cwd = Some(tokens.get(i).expect("index out of bounds").clone());
                 i += 1;
             }
             "--within-min" => {
@@ -234,7 +245,7 @@ fn try_parse_direct(cmd: &str) -> Option<SessionReaderIntercept> {
                 if i >= tokens.len() {
                     return None;
                 }
-                within_min = tokens[i].parse().ok()?;
+                within_min = tokens.get(i).expect("index out of bounds").parse().ok()?;
                 i += 1;
             }
             "--json" => {
@@ -246,7 +257,7 @@ fn try_parse_direct(cmd: &str) -> Option<SessionReaderIntercept> {
                 if i >= tokens.len() {
                     return None;
                 }
-                max_tool_chars = tokens[i].parse().ok()?;
+                max_tool_chars = tokens.get(i).expect("index out of bounds").parse().ok()?;
                 i += 1;
             }
             t if t.starts_with('>') || t == "2>&1" || t.starts_with("2>") => {

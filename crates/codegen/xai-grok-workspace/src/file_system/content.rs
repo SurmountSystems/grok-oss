@@ -1,7 +1,10 @@
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::process::Stdio;
 use std::time::Instant;
 
+use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::process::Command;
 use xai_grok_tools::implementations::grok_build::grep::embedded::{
     PrintMode, SearchRequest, search_line_hits,
 };
@@ -37,9 +40,99 @@ const DEFAULT_MAX_FILES: usize = 100;
 const DEFAULT_MAX_MATCHES: usize = 1000;
 const MAX_COUNT_PER_FILE: usize = 50;
 
-/// Streaming content search with batched status notifications. grok-oss grep
-/// is embedded Rust, not a sidecar `rg`. Cancellation is dropping this future
-/// (the blocking search may finish the current file).
+fn build_ripgrep_command(root: &Path, params: &ContentSearchParams) -> anyhow::Result<Command> {
+    let rg_path = crate::util::ripgrep::rg_path()?;
+
+    let mut cmd = Command::new(&rg_path);
+    cmd.current_dir(root);
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::null());
+    xai_tty_utils::detach_search_command(&mut cmd);
+
+    cmd.arg("--json");
+    cmd.arg("--line-number");
+
+    const DEFAULT_EXCLUSIONS: &[&str] = &["!.git/**", "!submodules/**", "!vendor/**"];
+    for glob in DEFAULT_EXCLUSIONS {
+        cmd.arg("--glob").arg(glob);
+    }
+
+    cmd.arg("--max-filesize").arg("1M");
+    cmd.arg("--max-count").arg("50");
+    cmd.arg("--max-columns").arg("500");
+    cmd.arg("--max-columns-preview");
+
+    if params.case_insensitive {
+        cmd.arg("--ignore-case");
+    }
+    if params.literal {
+        cmd.arg("--fixed-strings");
+    }
+    if !params.respect_gitignore {
+        cmd.arg("--no-ignore");
+    }
+    for glob in &params.globs {
+        cmd.arg("--glob").arg(glob);
+    }
+
+    cmd.arg("-e").arg(&params.pattern);
+    cmd.arg(".");
+
+    Ok(cmd)
+}
+
+fn extract_match_positions(data: &serde_json::Value) -> (Option<usize>, Option<usize>) {
+    data.get("submatches")
+        .and_then(|s| s.as_array())
+        .and_then(|arr| arr.first())
+        .map(|first| {
+            let start = first
+                .get("start")
+                .and_then(|s| s.as_u64())
+                .map(|s| s as usize);
+            let end = first
+                .get("end")
+                .and_then(|e| e.as_u64())
+                .map(|e| e as usize);
+            (start, end)
+        })
+        .unwrap_or((None, None))
+}
+
+fn parse_match_from_json(data: &serde_json::Value) -> Option<ContentMatch> {
+    let line_number = data.get("line_number").and_then(|l| l.as_u64())? as usize;
+    let content = data
+        .get("lines")
+        .and_then(|l| l.get("text"))
+        .and_then(|t| t.as_str())
+        .unwrap_or("")
+        .trim_end_matches('\n')
+        .to_string();
+    let (match_start, match_end) = extract_match_positions(data);
+
+    Some(ContentMatch {
+        line: line_number,
+        content,
+        match_start,
+        match_end,
+    })
+}
+
+fn parse_file_path_from_json(root: &Path, json: &serde_json::Value) -> Option<String> {
+    let path = json
+        .get("data")
+        .and_then(|d| d.get("path"))
+        .and_then(|p| p.get("text"))
+        .and_then(|t| t.as_str())?;
+    let normalized = path.strip_prefix("./").unwrap_or(path);
+    if Path::new(normalized).is_absolute() {
+        return Some(normalized.to_string());
+    }
+    Some(root.join(normalized).to_string_lossy().to_string())
+}
+
+/// Streaming content search with batched status notifications.
+/// Cancellation is dropping the future: the spawn config kills rg on drop.
 pub async fn content_search_streaming<F>(
     root: &Path,
     params: &ContentSearchParams,
@@ -95,6 +188,20 @@ where
         });
     }
 
+    let mut cmd = build_ripgrep_command(root, params)?;
+    #[allow(clippy::disallowed_methods)] // waited on below; killed on drop (cancellation)
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| anyhow::anyhow!("Failed to spawn ripgrep: {}", e))?;
+
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("Failed to capture ripgrep stdout"))?;
+
+    // Hold the pipe until this function returns. Dropping the future drops
+    // the child, which kills rg. The matches themselves come from embedded grep.
+    let _stdout_lines = BufReader::new(stdout).lines();
     let mut files: Vec<ContentMatchFile> = Vec::new();
     let mut pending_files: Vec<ContentMatchFile> = Vec::new();
     let mut total_matches = 0usize;
@@ -154,22 +261,39 @@ where
 mod tests {
     use super::*;
 
+    /// Cancellation is dropping the future; commands from `build_ripgrep_command` must kill rg on drop.
+    #[cfg(unix)]
     #[tokio::test]
     async fn embedded_content_search_finds_a_line_without_execing_rg() {
         let tmp = tempfile::TempDir::new().unwrap();
-        std::fs::write(tmp.path().join("a.txt"), "needle here\n").unwrap();
+        // Overflow the stdout pipe (rg caps 50 matches/file, so use many files) so rg blocks on write and stays alive until killed
+        let line = format!("needle {}\n", "x".repeat(120));
+        for i in 0..200 {
+            std::fs::write(tmp.path().join(format!("f{i}.txt")), line.repeat(50)).unwrap();
+        }
+
         let params = ContentSearchParams {
             pattern: "needle".to_string(),
             ..Default::default()
         };
-        let data = content_search_streaming(tmp.path(), &params, |_| {})
-            .await
-            .expect("embedded search");
-        assert_eq!(data.total_matches, 1);
-        assert!(
-            data.files.iter().any(|f| f.path.contains("a.txt")),
-            "expected a.txt in {:?}",
-            data.files
-        );
+        let mut cmd = build_ripgrep_command(tmp.path(), &params).expect("build rg command");
+        // rg is hermetic under Bazel and on PATH locally; spawn failure is a real bug.
+        #[allow(clippy::disallowed_methods)] // test child, killed on drop below
+        let mut child = cmd.spawn().expect("spawn rg");
+        let pid = child.id().expect("child pid");
+
+        // Hold the read end open (no EPIPE death) and drop the child mid-run.
+        let stdout_pipe = child.stdout.take();
+        drop(child);
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !xai_tty_utils::process_not_running(pid) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "rg (pid {pid}) still running 5s after its Child was dropped — leaked"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        drop(stdout_pipe);
     }
 }

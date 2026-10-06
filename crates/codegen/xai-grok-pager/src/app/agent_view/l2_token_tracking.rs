@@ -292,6 +292,20 @@ pub fn format_subagents_list_row_from_memory(
     }
 }
 
+/// True when this nested session was spawned and no usage sample is stored.
+///
+/// False when the id was never recorded. Subagents list paint keeps the
+/// labeled standing estimate on that never-spawned row. A spawned row with
+/// no sample returns true so paint omits the token figure instead of
+/// inventing `167.0k`.
+pub fn spawned_with_no_sample_yet(nested_session_id: &str) -> bool {
+    peek_process_tracker(|tracker| {
+        tracker.get(nested_session_id).is_some_and(|row| {
+            row.status == NestedL2Status::Spawned && row.current_tokens().is_none()
+        })
+    })
+}
+
 /// Current live sample for this nested id, if a tick has stored one.
 ///
 /// List paint calls this (via [`format_live_subagents_list_suffix`] with no

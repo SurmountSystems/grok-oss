@@ -36,7 +36,7 @@ pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
 async fn handle_clear_completed(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     let req: ClearCompletedRequest = parse_params(args)?;
     let not_found_err = format!("session not found: {}", req.session_id);
-    let sid: agent_client_protocol::SessionId = req.session_id.clone().into();
+    let sid: acp::SessionId = req.session_id.clone().into();
     let session_handle = agent.resident_handle(&sid);
     let Some(session) = session_handle else {
         return Err(acp::Error::invalid_params().data(not_found_err));

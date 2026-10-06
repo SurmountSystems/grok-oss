@@ -10,7 +10,7 @@ mod tests {
     use crate::app::agent::{AgentId, AgentState, QueueEntryKind, QueuedPrompt};
     use crate::app::dispatch::queue::maybe_drain_queue;
     use crate::scrollback::block::RenderBlock;
-    use xai_grok_shell::session::pending_prompts::PersistedQueuedPrompt;
+    use xai_grok_shell::session::unsent_prompt_draft::pending_prompts::PersistedQueuedPrompt;
 
     const LAKE_BUILD: &str = "Lake-build time-preference note";
     const LIGHTWAVE: &str =
@@ -113,7 +113,8 @@ mod tests {
         agent.session.enqueue_prompt(LIGHTWAVE.into());
         agent.session.enqueue_prompt(LIGHTWAVE.into());
         agent.session.enqueue_prompt(STILL_UNSENT.into());
-        let drain = maybe_drain_queue(agent);
+        let mut notices = Vec::new();
+        let drain = maybe_drain_queue(agent, &mut notices);
         assert!(
             !drain.effects.is_empty(),
             "idle drain must start the first LightWave copy as a Human turn"
@@ -142,7 +143,7 @@ mod tests {
         let cwd = proj.path().to_path_buf();
         let cwd_str = cwd.to_string_lossy().into_owned();
         let sid = "stale-queue-live-scrollback";
-        xai_grok_shell::session::pending_prompts::write_pending_prompts(
+        xai_grok_shell::session::unsent_prompt_draft::pending_prompts::write_pending_prompts(
             &cwd_str,
             sid,
             &[
@@ -210,7 +211,7 @@ mod tests {
         let cwd = proj.path().to_path_buf();
         let cwd_str = cwd.to_string_lossy().into_owned();
         let sid = "stale-queue-nonempty-memory";
-        xai_grok_shell::session::pending_prompts::write_pending_prompts(
+        xai_grok_shell::session::unsent_prompt_draft::pending_prompts::write_pending_prompts(
             &cwd_str,
             sid,
             &[
@@ -492,7 +493,6 @@ mod tests {
             agent.session.in_flight_prompt = None;
             agent.session.compact_held_prompt = None;
             agent.session.pending_prompts.clear();
-            agent.session_sampling_window = Some(500_000);
             agent.context_state = Some(xai_grok_shell::session::ContextInfo::from_notification(
                 507_000, 500_000,
             ));
@@ -605,6 +605,7 @@ mod tests {
                 restore_degree: None,
                 running_prompt_id: None,
                 scheduler_background_loops: None,
+                modes: None,
             }),
             &mut app,
         );
@@ -666,7 +667,7 @@ mod tests {
             marker.is_none(),
             "fixture is last-session open with no canceled_turn_resume.json"
         );
-        xai_grok_shell::session::pending_prompts::write_pending_prompts(
+        xai_grok_shell::session::unsent_prompt_draft::pending_prompts::write_pending_prompts(
             &cwd_str,
             sid,
             &[
@@ -736,6 +737,7 @@ mod tests {
                 restore_degree: None,
                 running_prompt_id: None,
                 scheduler_background_loops: None,
+                modes: None,
             }),
             &mut app,
         );

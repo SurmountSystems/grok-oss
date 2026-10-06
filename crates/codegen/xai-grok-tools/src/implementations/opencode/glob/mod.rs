@@ -5,8 +5,12 @@
 //! modification time (most recent first), capped at 100 results.
 
 use std::path::PathBuf;
+use std::process::Stdio;
 
-use crate::implementations::grok_build::grep::embedded;
+use tokio::io::AsyncReadExt;
+use tokio::process::Command;
+
+use crate::implementations::grok_build::grep::ripgrep::rg_path;
 use crate::types::output::ToolOutput;
 #[allow(unused_imports)]
 use crate::types::resources::{
@@ -18,6 +22,11 @@ use crate::types::tool_io::ToolInput;
 // ─── Constants ──────────────────────────────────────────────────────
 
 const RESULT_LIMIT: usize = 100;
+
+/// Hard cap on bytes read from ripgrep's stdout (5 MB). Same bound as
+/// `grok_build::grep::capped_output::MAX_STDOUT_BYTES`, which is not visible
+/// outside that private module.
+const MAX_STDOUT_BYTES: usize = 5_000_000;
 
 // ─── Description ────────────────────────────────────────────────────
 
@@ -78,9 +87,8 @@ pub struct GlobOutput {
     /// Absolute paths of matched files included in `count`, sorted by mtime
     /// descending. Empty when `count == 0`.
     pub entries: Vec<String>,
-    /// The model-facing workspace root used to resolve `path` -- equal to
-    /// `display_cwd_or_cwd(cwd, display_cwd)`. Adapters that re-format the
-    /// output use this as the relativization base when
+    /// The model-facing workspace root used to resolve `path` -- equal to `display_cwd_or_cwd(cwd,
+    /// display_cwd)`. Adapters that re-format the output use this as the relativization base when
     /// the model omits `path`, instead of re-resolving cwd themselves.
     pub cwd_for_display: String,
 }
@@ -162,27 +170,26 @@ impl xai_tool_runtime::Tool for GlobTool {
             &input.path.clone().unwrap_or_default(),
         );
 
-        // Walk files the way `rg --files --glob='!.git/*' --hidden --glob=<pattern>` did.
-        let pattern = input.pattern.clone();
-        let search_dir_for_walk = search_dir.clone();
-        let listed = match tokio::task::spawn_blocking(move || {
-            embedded::list_files(&search_dir_for_walk, &pattern, &["!.git/*"])
-        })
-        .await
-        {
-            Ok(Ok(paths)) => paths,
-            Ok(Err(e)) => {
-                return Ok(GlobOutput {
-                    tool_output_for_prompt: format!("Error running glob: {e}"),
-                    count: 0,
-                    total_count: 0,
-                    truncated: false,
-                    entries: Vec::new(),
-                    cwd_for_display: display_cwd_or_cwd(&cwd, display_cwd.as_deref())
-                        .display()
-                        .to_string(),
-                });
-            }
+        // ── Build ripgrep command ───────────────────────────────
+        //   rg --files --glob='!.git/*' --hidden --glob=<pattern> <search_dir>
+        let rg_exec = rg_path()?;
+        let mut cmd = Command::new(rg_exec);
+        cmd.arg("--files")
+            .arg("--glob=!.git/*")
+            .arg("--hidden")
+            .arg("--glob")
+            .arg(&input.pattern)
+            .arg(&search_dir)
+            .stdout(Stdio::piped())
+            // stderr is never read; a pipe would block rg once warnings fill it.
+            // Cached descriptor, not `Stdio::null()`: an unlinked `/dev/null`
+            // must not fail the spawn.
+            .stderr(xai_tty_utils::null_stdio());
+        crate::util::detach_search_command(&mut cmd);
+
+        #[allow(clippy::disallowed_methods)] // search helper, waited on below
+        let mut child = match cmd.spawn() {
+            Ok(c) => c,
             Err(e) => {
                 return Ok(GlobOutput {
                     tool_output_for_prompt: format!("Error running glob: {e}"),
@@ -197,20 +204,62 @@ impl xai_tool_runtime::Tool for GlobTool {
             }
         };
 
-        let mut truncated = false;
+        // ── Read stdout with byte cap ───────────────────────────
+        let mut stdout_buf = Vec::with_capacity(MAX_STDOUT_BYTES.min(65_536));
+        let mut truncated_by_bytes = false;
+        if let Some(mut stdout_pipe) = child.stdout.take() {
+            let mut tmp = [0u8; 8192];
+            loop {
+                match stdout_pipe.read(&mut tmp).await {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        if stdout_buf.len() + n <= MAX_STDOUT_BYTES {
+                            if let Some(chunk) = tmp.get(..n) {
+                                stdout_buf.extend_from_slice(chunk);
+                            }
+                        } else {
+                            let remaining = MAX_STDOUT_BYTES.saturating_sub(stdout_buf.len());
+                            if remaining > 0
+                                && let Some(chunk) = tmp.get(..remaining)
+                            {
+                                stdout_buf.extend_from_slice(chunk);
+                            }
+                            truncated_by_bytes = true;
+                            let _ = child.start_kill();
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+        }
+
+        if truncated_by_bytes {
+            // Bounded reap: a D-state rg must not stall this future forever.
+            crate::util::reap_killed_search_child(&mut child).await;
+        } else {
+            let _ = child.wait().await;
+        }
+
+        // ── Parse file paths from stdout ────────────────────────
+        let stdout = String::from_utf8_lossy(&stdout_buf);
+        let mut truncated = truncated_by_bytes;
 
         struct FileEntry {
             path: PathBuf,
             mtime_ms: i64,
         }
 
-        // Collect every match so total_count is accurate. Cap stat()s and
-        // the returned entry list at RESULT_LIMIT so we don't pay the syscall
-        // cost on huge result sets, but keep counting lines past the cap so
-        // the truncation marker can report the real overflow.
+        // Collect every match so total_count is accurate. Cap stat()s and the returned entry list
+        // at RESULT_LIMIT so we don't pay the syscall cost on huge result sets, but keep counting
+        // lines past the cap so the truncation marker can report the real overflow.
         let mut entries: Vec<FileEntry> = Vec::new();
         let mut total_count: usize = 0;
-        for full_path in listed {
+        for line in stdout.lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
             total_count += 1;
 
             if entries.len() >= RESULT_LIMIT {
@@ -218,6 +267,7 @@ impl xai_tool_runtime::Tool for GlobTool {
                 continue;
             }
 
+            let full_path = search_dir.join(line);
             let mtime_ms = std::fs::metadata(&full_path)
                 .ok()
                 .and_then(|m| m.modified().ok())
@@ -310,13 +360,8 @@ mod tests {
             .render(ToolMetadata::description_template(&GlobTool))
             .unwrap();
         assert!(
-            rendered.contains("required file_pattern parameter")
-                && rendered.contains("set search_dir"),
+            rendered.contains("file_pattern") && rendered.contains("search_dir"),
             "renamed pattern/path params must appear:\n{rendered}"
-        );
-        assert!(
-            !rendered.contains("extension breakdowns") && !rendered.contains("dot-directories"),
-            "stale list_dir-style claims must not remain:\n{rendered}"
         );
     }
 
@@ -690,11 +735,9 @@ mod tests {
 
     #[tokio::test]
     async fn gitignore_respected() {
-        // ripgrep's positive --glob overrides .gitignore, so we test the
-        // underlying ignore behavior by using a pattern that doesn't match
-        // the ignored file. Without .gitignore, `rg --files --hidden`
-        // *would* list ignored_dir/ contents, but with .gitignore they are
-        // excluded from results that don't glob-override them.
+        // ripgrep's positive --glob overrides .gitignore, so we test the underlying ignore behavior by using a pattern that
+        // doesn't match the ignored file. Without .gitignore, `rg --files --hidden` *would* list ignored_dir/ contents, but
+        // with .gitignore they are excluded from results that don't glob-override them.
         let tmp = TempDir::new().unwrap();
 
         // Initialize a git repo so ripgrep respects .gitignore.

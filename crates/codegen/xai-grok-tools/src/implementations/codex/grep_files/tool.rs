@@ -9,9 +9,10 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
+use tokio::process::Command;
 use tokio::time::timeout;
 
-use crate::implementations::grok_build::grep::embedded::{self, PrintMode, SearchRequest};
+use crate::implementations::grok_build::grep::ripgrep::rg_path;
 use crate::types::output::CodexGrepFilesOutput;
 use crate::types::requirements::Expr;
 #[allow(unused_imports)]
@@ -55,13 +56,9 @@ pub struct CodexGrepFilesInput {
 
 // ─── Tool ───────────────────────────────────────────────────────────
 
-/// Codex-namespace grep_files tool — file-path-only regex search.
-///
-/// Shares `ToolKind::Search` with the grok-build `GrepTool`. These tools are
-/// namespace-exclusive — consumers enable either `GrokBuild` or `Codex` search,
-/// never both simultaneously. This follows the same pattern as
-/// `CodexListDirTool`/`ListDirTool` (`ToolKind::ListDir`) and
-/// `CodexReadFileTool`/`ReadFileImpl` (`ToolKind::Read`).
+/// Codex-namespace grep_files tool — file-path-only regex search. Shares `ToolKind::Search` with the grok-build `GrepTool`. These tools are
+/// namespace-exclusive — consumers enable either `GrokBuild` or `Codex` search, never both simultaneously. This follows the same pattern as
+/// `CodexListDirTool`/`ListDirTool` (`ToolKind::ListDir`) and `CodexReadFileTool`/`ReadFileImpl` (`ToolKind::Read`).
 #[derive(Debug, Default)]
 pub struct CodexGrepFilesTool;
 
@@ -78,50 +75,33 @@ async fn run_rg_search(
     limit: usize,
     cwd: &Path,
 ) -> Result<Vec<String>, String> {
-    let req = SearchRequest {
-        pattern: pattern.to_string(),
-        path: if search_path.is_absolute() {
-            search_path.to_path_buf()
-        } else {
-            cwd.join(search_path)
-        },
-        case_insensitive: false,
-        literal: false,
-        glob: include.map(str::to_string),
-        extra_globs: Vec::new(),
-        deny_globs: Vec::new(),
-        file_type: None,
-        hidden: false,
-        no_ignore: false,
-        multiline: false,
-        before_context: 0,
-        after_context: 0,
-        max_filesize: None,
-        max_columns: None,
-        print: PrintMode::FilesWithMatches,
-        max_output_lines: None,
-    };
-    let output = timeout(
-        COMMAND_TIMEOUT,
-        tokio::task::spawn_blocking(move || embedded::search_to_rg_stdout(&req)),
-    )
-    .await
-    .map_err(|_| "rg timed out after 30 seconds".to_string())?
-    .map_err(|err| format!("failed to launch rg: {err}. Ensure ripgrep is installed and on PATH."))?
-    .map_err(|err| format!("rg failed: {err}"))?;
+    let rg_exec = rg_path().map_err(|e| e.to_string())?;
+    let mut command = Command::new(rg_exec);
+    command
+        .current_dir(cwd)
+        .arg("--files-with-matches")
+        .arg("--sortr=modified")
+        .arg("--regexp")
+        .arg(pattern)
+        .arg("--no-messages");
 
-    match output.exit_code {
-        0 => {
-            let mut paths = parse_results(&output.bytes, usize::MAX);
-            paths.sort_by(|a, b| {
-                let ma = std::fs::metadata(a).and_then(|m| m.modified()).ok();
-                let mb = std::fs::metadata(b).and_then(|m| m.modified()).ok();
-                mb.cmp(&ma)
-            });
-            paths.truncate(limit);
-            Ok(paths)
-        }
-        1 => Ok(Vec::new()),
+    if let Some(glob) = include {
+        command.arg("--glob").arg(glob);
+    }
+
+    command.arg("--").arg(search_path);
+    crate::util::detach_search_command(&mut command);
+
+    let output = timeout(COMMAND_TIMEOUT, command.output())
+        .await
+        .map_err(|_| "rg timed out after 30 seconds".to_string())?
+        .map_err(|err| {
+            format!("failed to launch rg: {err}. Ensure ripgrep is installed and on PATH.")
+        })?;
+
+    match output.status.code() {
+        Some(0) => Ok(parse_results(&output.stdout, limit)),
+        Some(1) => Ok(Vec::new()),
         _ => {
             let stderr = String::from_utf8_lossy(&output.stderr);
             Err(format!("rg failed: {stderr}"))
@@ -160,6 +140,10 @@ impl crate::types::tool_metadata::ToolMetadata for CodexGrepFilesTool {
 
     fn tool_namespace(&self) -> ToolNamespace {
         ToolNamespace::Codex
+    }
+
+    fn lock_path_param(&self) -> Option<&'static str> {
+        Some("path")
     }
 
     fn description_template(&self) -> &str {
@@ -272,6 +256,7 @@ impl xai_tool_runtime::Tool for CodexGrepFilesTool {
 mod tests {
     use super::*;
     use crate::types::resources::Resources;
+    use std::process::Command as StdCommand;
     use tempfile::TempDir;
 
     /// Build a runtime `ToolCallContext` with the given resources.
@@ -283,8 +268,15 @@ mod tests {
         ctx
     }
     fn rg_available() -> bool {
-        // grok-oss grep is embedded Rust, not a sidecar rg.
-        true
+        // Probe the resolver the tool uses (hermetic under Bazel), not PATH.
+        let Ok(rg) = rg_path() else {
+            return false;
+        };
+        StdCommand::new(rg)
+            .arg("--version")
+            .output()
+            .map(|output| output.status.success())
+            .unwrap_or(false)
     }
 
     /// Build a runtime `ToolCallContext` with the given resources.
@@ -342,7 +334,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(results.len(), 1);
-        assert!(results[0].contains("match.rs"));
+        assert!(results.first().is_some_and(|r| r.contains("match.rs")));
     }
 
     #[tokio::test]
@@ -358,7 +350,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(results.len(), 1);
-        assert!(results[0].contains("alpha.rs"));
+        assert!(results.first().is_some_and(|r| r.contains("alpha.rs")));
     }
 
     #[tokio::test]

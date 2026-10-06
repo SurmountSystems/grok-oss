@@ -395,7 +395,7 @@ pub fn pick_supergrok_identity_for_auto_with_pin(
 
     with_headroom.sort_by(|a, b| cmp_included_headroom_rank(a, b));
 
-    let best = with_headroom[0];
+    let best = with_headroom.first().copied().expect("index out of bounds");
     PickSupergrokForAuto::Use {
         identity_id: best.identity_id.clone(),
         role: best.role,

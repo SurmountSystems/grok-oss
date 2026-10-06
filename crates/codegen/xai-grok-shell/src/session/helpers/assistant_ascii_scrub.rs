@@ -39,7 +39,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use agent_client_protocol as acp;
-use xai_grok_tools::implementations::grok_build::DISABLE_ASCII_SCRUB_TOOL_NAME;
+use xai_grok_tools::implementations::grok_build::disable_ascii_scrub::DISABLE_ASCII_SCRUB_TOOL_NAME;
 use xai_grok_tools::util::ascii_scrub;
 
 /// Durable `[ui] scrub_ascii_punct` preference (default ON).
@@ -222,7 +222,11 @@ pub async fn apply_agent_scrub_disable_request_product(
     approval: Option<ScrubDisableApproval>,
 ) -> bool {
     apply_agent_scrub_disable_request_with_persist(approval, || async {
-        if let Err(e) = crate::util::config::set_scrub_ascii_punct(false).await {
+        if let Err(e) = crate::util::config::update_config(|cfg| {
+            cfg.ui.scrub_ascii_punct = Some(false);
+        })
+        .await
+        {
             tracing::warn!(
                 error = %e,
                 "AllowAlways scrub disable: failed to persist [ui].scrub_ascii_punct=false"

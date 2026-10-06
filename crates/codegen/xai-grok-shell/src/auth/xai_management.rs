@@ -261,9 +261,30 @@ pub fn resolve_management_api_key(
     load_stored_management_api_key(store)
 }
 
+fn endpoint_toml_string(key: &str) -> Option<String> {
+    let path = crate::util::grok_home::grok_home().join("config.toml");
+    let text = std::fs::read_to_string(path).ok()?;
+    let value: toml::Value = toml::from_str(&text).ok()?;
+    value
+        .get("endpoints")
+        .and_then(|table| table.get(key))
+        .and_then(|item| item.as_str())
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(str::to_owned)
+}
+
+fn load_management_api_key_from_config() -> Option<String> {
+    endpoint_toml_string("management_api_key")
+}
+
+fn load_management_team_id_from_config() -> Option<String> {
+    endpoint_toml_string("management_team_id")
+}
+
 /// Resolve using the process default config loader + grok-home store.
 pub fn resolve_management_api_key_default() -> Option<String> {
-    let config_key = crate::util::config::load_management_api_key_sync();
+    let config_key = load_management_api_key_from_config();
     let store = CredentialsStore::default_store();
     resolve_management_api_key(config_key.as_deref(), &store)
         .ok()
@@ -290,9 +311,7 @@ pub fn resolve_management_team_id(config_team_id: Option<&str>) -> Option<String
 /// Sync only: never hits the network. After a successful validation fetch, the
 /// discovered id is available here until TTL expiry.
 pub fn resolve_management_team_id_default() -> Option<String> {
-    if let Some(t) =
-        resolve_management_team_id(crate::util::config::load_management_team_id_sync().as_deref())
-    {
+    if let Some(t) = resolve_management_team_id(load_management_team_id_from_config().as_deref()) {
         return Some(t);
     }
     cached_discovered_team_id()
@@ -905,7 +924,7 @@ fn console_inference_api_base() -> String {
         .map(|raw| raw.trim().trim_end_matches('/').to_owned())
         .filter(|raw| !raw.is_empty())
         .unwrap_or_else(|| {
-            crate::agent::config::XAI_API_BASE_URL_DEFAULT
+            super::xai_console::XAI_CONSOLE_API_URL
                 .trim_end_matches('/')
                 .to_owned()
         })
@@ -998,7 +1017,7 @@ pub async fn fetch_console_team_prepaid_balance_at(
 /// id is unset.
 pub async fn fetch_console_team_prepaid_balance_default() -> Option<ConsoleTeamPrepaidMeter> {
     let key = resolve_management_api_key_default();
-    let config_team = crate::util::config::load_management_team_id_sync();
+    let config_team = load_management_team_id_from_config();
     let team = resolve_management_team_id_with_discovery(
         MANAGEMENT_API_BASE_URL,
         key.as_deref(),
@@ -1463,7 +1482,7 @@ pub async fn fetch_console_team_postpaid_preview_at(
 /// Resolve credentials from config/store/env defaults and fetch postpaid preview.
 pub async fn fetch_console_team_postpaid_preview_default() -> Option<ConsoleTeamPostpaidPreview> {
     let key = resolve_management_api_key_default();
-    let config_team = crate::util::config::load_management_team_id_sync();
+    let config_team = load_management_team_id_from_config();
     let team = resolve_management_team_id_with_discovery(
         MANAGEMENT_API_BASE_URL,
         key.as_deref(),
@@ -1886,7 +1905,7 @@ pub async fn fetch_console_team_usage_series_default(
     day_window: i64,
 ) -> Option<ConsoleTeamUsageSeries> {
     let key = resolve_management_api_key_default();
-    let config_team = crate::util::config::load_management_team_id_sync();
+    let config_team = load_management_team_id_from_config();
     let team = resolve_management_team_id_with_discovery(
         MANAGEMENT_API_BASE_URL,
         key.as_deref(),

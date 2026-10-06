@@ -99,10 +99,19 @@ pub fn looks_like_ssh_target(raw: &str) -> bool {
 
 fn is_windows_drive_path(s: &str) -> bool {
     let b = s.as_bytes();
-    b.len() >= 2
-        && b[0].is_ascii_alphabetic()
-        && b[1] == b':'
-        && (b.len() == 2 || b[2] == b'/' || b[2] == b'\\')
+    if b.len() < 2 {
+        return false;
+    }
+    let drive = b.first().copied().expect("index out of bounds");
+    let colon = b.get(1).copied().expect("index out of bounds");
+    if !drive.is_ascii_alphabetic() || colon != b':' {
+        return false;
+    }
+    if b.len() == 2 {
+        return true;
+    }
+    let sep = b.get(2).copied().expect("index out of bounds");
+    sep == b'/' || sep == b'\\'
 }
 
 /// True when argv/path text would run `git commit` or `git push`.
@@ -117,8 +126,10 @@ fn text_has_git_commit_or_push(text: &str) -> bool {
             .filter(|t| !t.is_empty())
             .collect();
         if tokens.windows(2).any(|w| {
-            let git = w[0] == "git" || w[0].ends_with("/git");
-            git && (w[1] == "commit" || w[1] == "push")
+            let first = w.first().copied().expect("index out of bounds");
+            let second = w.get(1).copied().expect("index out of bounds");
+            let git = first == "git" || first.ends_with("/git");
+            git && (second == "commit" || second == "push")
         }) {
             return true;
         }

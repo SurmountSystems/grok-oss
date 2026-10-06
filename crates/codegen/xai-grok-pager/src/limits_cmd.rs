@@ -113,14 +113,15 @@ pub enum LimitsCommand {
     },
     /// Force-refresh live meters (same ForceRefresh as explicit collect).
     Refresh,
-    /// Sample live limits N times and classify path (P1) vs free-period series (P2).
+    /// Sample live limits N times and classify path (P1) vs the included
+    /// SuperGrok period limits series (P2).
     ///
     /// Writes JSONL samples plus a summary under `--out-dir` (default
     /// `~/.agents/reports/limits-multipoll-<utc>/`). Exit **0** when the
     /// limits-first path is OK or skipped; exit **non-zero only** on path
-    /// failure (console live while free SuperGrok period limits still have
-    /// room). Free SuperGrok period staying flat is measurement only and does
-    /// **not** fail the process.
+    /// failure (console live while included SuperGrok period limits still have
+    /// room). Included SuperGrok period limits staying flat is measurement
+    /// only and does **not** fail the process.
     Multipoll(MultipollArgs),
 }
 
@@ -293,7 +294,8 @@ pub fn apply_limits_named_action(action: LimitsNamedAction) -> Result<String, St
 /// Args for `grok limits multipoll`.
 #[derive(Clone, Debug, Eq, PartialEq, clap::Args)]
 pub struct MultipollArgs {
-    /// Number of live samples (default 2; need ≥2 for free-period series class).
+    /// Number of live samples (default 2; need at least 2 to classify the
+    /// included SuperGrok period limits series).
     #[arg(long, default_value_t = 2)]
     pub samples: usize,
     /// Seconds to sleep between sample ends (default 30; matches flat-detector
@@ -400,11 +402,12 @@ pub struct LimitsCliReport {
     /// SuperGrok principal role when live is SuperGrok and known.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub live_principal_role: Option<String>,
-    /// Active spend driver for free-period-first token economy (Design A).
+    /// Active spend driver. Included SuperGrok period limits come first (Design A).
     ///
     /// Wire: `supergrok_free_period` | `supergrok_extras` | `console_key`.
-    /// Distinct from [`Self::live_sampling`] when SuperGrok session is live
-    /// but free period is full and SuperGrok dollar credits drive after-burner.
+    /// Distinct from [`Self::live_sampling`] when the SuperGrok session is live
+    /// but included SuperGrok period limits are full and SuperGrok dollar credits
+    /// drive after-burner.
     pub active_driver: &'static str,
     /// Human label for the active driver (matches `/limits` **Active:** line,
     /// including a `meter_source` pin when one is set). grok-oss limits JSON
@@ -417,10 +420,11 @@ pub struct LimitsCliReport {
     pub named_commands: &'static [&'static str],
     pub supergrok: SuperGrokCliSection,
     pub console: ConsoleCliSection,
-    /// True when process + durable SuperGrok included poll history shows free
-    /// SuperGrok period % flat across a multi-poll window (≥2 polls, ≥30s wall
-    /// by default). Ticket / multipoll evidence for unproven free-period debit.
-    /// Does **not** invent a higher free-period %; measurement only.
+    /// True when process + durable SuperGrok included poll history shows
+    /// included SuperGrok period limits % flat across a multi-poll window
+    /// (at least 2 polls, at least 30s wall by default). Ticket / multipoll
+    /// evidence for an unproven debit of those limits.
+    /// Does **not** invent a higher included percent; measurement only.
     pub flat_poll_unproven_debit: bool,
     /// True when every sample in the flat window carried Grok Build product %.
     /// Only meaningful when [`Self::flat_poll_unproven_debit`] is true.
@@ -437,7 +441,7 @@ pub struct LimitsCliReport {
 
 /// Active spend driver from a `/limits` snapshot (same Design A logic as status).
 ///
-/// Uses primary SuperGrok free-period % and SuperGrok dollar credits when live
+/// Uses the primary included SuperGrok period limits % and SuperGrok dollar credits when live
 /// is SuperGrok. Console live always returns console key. Team prepaid remaining
 /// and team Grok Build settlement are never the `activeDriver` label here
 /// (intent chrome only; settlement honesty notes name those meters separately).
@@ -489,9 +493,9 @@ pub struct PrincipalCliMeter {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub grok_build_usage_pct: Option<f64>,
     /// True when this principal's JWT polled credits successfully.
-    /// False when poll failed or the free-period row was only shared-pool fill.
+    /// False when poll failed or the included-period row was only shared-pool fill.
     pub poll_succeeded: bool,
-    /// Free SuperGrok period included % provenance:
+    /// Included SuperGrok period limits % provenance:
     /// `live_poll` | `process_cache` | `shared_pool_fill`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub included_source: Option<&'static str>,
@@ -689,7 +693,7 @@ pub fn build_limits_cli_from_parts_with_postpaid(
     let snap = if principals.is_empty() {
         LimitsSnapshot::from_billing(None, None, live)
     } else if principals.len() == 1 {
-        let p = &principals[0];
+        let p = principals.first().expect("index out of bounds");
         let mut s = LimitsSnapshot::from_billing(p.balance.as_ref(), p.autotopup.as_ref(), live);
         if !live.is_console() {
             s.live_principal_label = live_role
@@ -737,6 +741,50 @@ pub fn report_from_snapshot(snap: &LimitsSnapshot, notes: Vec<String>) -> Limits
     report_from_snapshot_with_meter_source(snap, notes, None)
 }
 
+fn current_billing_credits_usd(
+    stored_usd: Option<f64>,
+    newer_live_or_operator_usd: Option<f64>,
+    documented_billing_credits_field_usd: Option<f64>,
+) -> Option<f64> {
+    if let Some(named) = documented_billing_credits_field_usd {
+        return Some(named);
+    }
+    let _ = (stored_usd, newer_live_or_operator_usd);
+    None
+}
+
+fn prefer_live_documented_usd_over_stored(
+    stored_usd: Option<f64>,
+    live_documented_usd: Option<f64>,
+) -> Option<f64> {
+    match (stored_usd, live_documented_usd) {
+        (_, Some(live)) => Some(live),
+        (stored, None) => stored,
+    }
+}
+
+fn billing_credits_cents_from_core_invoice_prepaid_remaining(
+    prepaid_credits_val: &str,
+    prepaid_credits_used_val: &str,
+) -> Option<i64> {
+    fn parse_usd_cents_abs(val: &str) -> Option<i64> {
+        let n: i64 = val.trim().parse().ok()?;
+        Some(n.saturating_abs())
+    }
+    let prepaid = parse_usd_cents_abs(prepaid_credits_val)?;
+    let used = parse_usd_cents_abs(prepaid_credits_used_val)?;
+    Some(prepaid.saturating_sub(used))
+}
+
+fn views_billing_card_from_wire(wire: &str) -> crate::views::limits_snapshot::BillingCreditsCard {
+    use crate::views::limits_snapshot::BillingCreditsCard;
+    match wire {
+        "fetched" => BillingCreditsCard::Fetched,
+        "error" => BillingCreditsCard::Error,
+        _ => BillingCreditsCard::NotFetched,
+    }
+}
+
 /// Drop Billing Credits card notes that do not match the card state on `snap`.
 ///
 /// `collect_limits_report` stores honesty notes before the card is attached.
@@ -744,7 +792,7 @@ pub fn report_from_snapshot(snap: &LimitsSnapshot, notes: Vec<String>) -> Limits
 /// did not parse the Billing Credits card. One card note only.
 fn drop_stale_billing_credits_card_notes(
     notes: &mut Vec<String>,
-    card: xai_grok_sampling_types::BillingCreditsCard,
+    card: crate::views::limits_snapshot::BillingCreditsCard,
 ) {
     use crate::views::limits_honesty::{
         NOTE_BILLING_CREDITS_CARD_FETCH_FAILED, NOTE_BILLING_CREDITS_CARD_FETCHED,
@@ -754,11 +802,11 @@ fn drop_stale_billing_credits_card_notes(
         let kind = if note.as_str() == NOTE_BILLING_CREDITS_CARD_NOT_FETCHED
             || note.contains("grok-oss did not parse the")
         {
-            Some(xai_grok_sampling_types::BillingCreditsCard::NotFetched)
+            Some(crate::views::limits_snapshot::BillingCreditsCard::NotFetched)
         } else if note.as_str() == NOTE_BILLING_CREDITS_CARD_FETCHED {
-            Some(xai_grok_sampling_types::BillingCreditsCard::Fetched)
+            Some(crate::views::limits_snapshot::BillingCreditsCard::Fetched)
         } else if note.as_str() == NOTE_BILLING_CREDITS_CARD_FETCH_FAILED {
-            Some(xai_grok_sampling_types::BillingCreditsCard::Error)
+            Some(crate::views::limits_snapshot::BillingCreditsCard::Error)
         } else {
             None
         };
@@ -835,11 +883,11 @@ pub fn report_from_snapshot_with_meter_source(
             is_live_meaning: crate::views::limits_honesty::CONSOLE_IS_LIVE_MEANING,
             team_prepaid_usd: snap.console.balance_cents.map(|c| c.abs() as f64 / 100.0),
             billing_credits_card: snap.console.billing_credits_card.as_wire(),
-            billing_credits_usd: xai_grok_sampling_types::current_billing_credits_usd(
+            billing_credits_usd: current_billing_credits_usd(
                 None,
                 None,
                 match snap.console.billing_credits_card {
-                    xai_grok_sampling_types::BillingCreditsCard::Fetched => snap
+                    crate::views::limits_snapshot::BillingCreditsCard::Fetched => snap
                         .console
                         .billing_credits_cents
                         .map(|c| c.abs() as f64 / 100.0),
@@ -1528,7 +1576,10 @@ async fn collect_limits_report_at(grok_home: &Path) -> Result<(LimitsCliReport, 
         None => (report, snap),
     };
     let (report, snap) = if let Some(mgmt) = hub_doc.management.as_ref() {
-        let snap = snap.with_billing_credits(mgmt.billing_credits_card, mgmt.billing_credits_cents);
+        let snap = snap.with_billing_credits(
+            views_billing_card_from_wire(mgmt.billing_credits_card.as_wire()),
+            mgmt.billing_credits_cents,
+        );
         let mut notes = report.notes;
         // Notes were stored while the card was still not fetched. Drop that
         // stale did-not-parse sentence when the later card state is fetched
@@ -1727,17 +1778,18 @@ pub fn check_limits_first_path_json_str(
 // Multipoll evidence harness (token economy proof)
 //
 // Pure classification of fixture / live sample series. Network I/O only in
-// [`run_multipoll`]. Exit non-zero only on path failure (P1); free SuperGrok
-// period flat (P2) is measurement and never fails the process alone.
+// [`run_multipoll`]. Exit non-zero only on path failure (P1). Included
+// SuperGrok period limits staying flat (P2) is measurement and never fails
+// the process alone.
 // ---------------------------------------------------------------------------
 
-/// Free SuperGrok period used-% series across multipoll samples (P2).
+/// Included SuperGrok period limits used-% series across multipoll samples (P2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FreePeriodSeriesClass {
-    /// Free SuperGrok period used % stepped between samples (P2 stepped).
+    /// Included SuperGrok period limits used % stepped between samples (P2 stepped).
     Stepped,
-    /// Free SuperGrok period used % stayed the same (P2 flat / unproven debit).
+    /// Included SuperGrok period limits used % stayed the same (P2 flat / unproven debit).
     Flat,
     /// Fewer than two samples or no `includedUsedPct` to compare.
     Insufficient,
@@ -1757,12 +1809,12 @@ impl FreePeriodSeriesClass {
     }
 }
 
-/// Combined multipoll verdict: path (P1) + free SuperGrok period series (P2).
+/// Combined multipoll verdict: path (P1) + included SuperGrok period limits series (P2).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MultipollClassification {
     /// Limits-first path check across samples (any path fail → Fail).
     pub path: LimitsFirstPathCheck,
-    /// Free SuperGrok period used % flat / stepped / insufficient.
+    /// Included SuperGrok period limits used %: flat, stepped, or insufficient.
     pub free_period: FreePeriodSeriesClass,
 }
 
@@ -1772,13 +1824,13 @@ impl MultipollClassification {
         self.path.is_ok()
     }
 
-    /// True only when free SuperGrok period used % stepped between samples.
+    /// True only when included SuperGrok period limits used % stepped between samples.
     pub fn free_period_stepped(&self) -> bool {
         self.free_period.free_period_stepped()
     }
 
     /// Process exit code: **0** path ok/skip; **1** path fail only.
-    /// Free SuperGrok period flat never forces non-zero by itself.
+    /// Included SuperGrok period limits staying flat never forces non-zero by itself.
     pub fn exit_code(&self) -> i32 {
         if self.path.is_fail() { 1 } else { 0 }
     }
@@ -1787,7 +1839,7 @@ impl MultipollClassification {
 /// Classify multipoll fixture samples (no network).
 ///
 /// **P1 path:** any sample that fails [`check_limits_first_path_json`] makes
-/// the whole series Fail (console live under free SuperGrok period headroom).
+/// the whole series Fail (console live while included SuperGrok period limits still have room).
 /// Otherwise last non-Ok result wins when all are Skipped; all Ok → Ok.
 ///
 /// **P2 included SuperGrok period limits:** see [`classify_free_period_series`].
@@ -1826,7 +1878,7 @@ pub fn classify_multipoll_path(
     }
 }
 
-/// Free SuperGrok period used % series (P2) from multipoll `limits --json` values.
+/// Included SuperGrok period limits used % series (P2) from multipoll `limits --json` values.
 ///
 /// For each SuperGrok principal label, collect `includedUsedPct` across samples
 /// that report it. Any label with two or more known values that are not all
@@ -1864,7 +1916,7 @@ pub fn classify_free_period_series(samples: &[serde_json::Value]) -> FreePeriodS
             continue;
         }
         saw_comparable = true;
-        let first = series[0];
+        let first = series.first().copied().expect("index out of bounds");
         if series.iter().any(|v| *v != first) {
             return FreePeriodSeriesClass::Stepped;
         }
@@ -2808,9 +2860,8 @@ mod tests {
     #[test]
     fn stale_stored_dollars_are_not_reported_as_current_billing_credits_when_live_fetch_disagrees()
     {
-        use xai_grok_sampling_types::{
-            BillingCreditsCard, current_billing_credits_usd, prefer_live_documented_usd_over_stored,
-        };
+        use super::{current_billing_credits_usd, prefer_live_documented_usd_over_stored};
+        use crate::views::limits_snapshot::BillingCreditsCard;
 
         assert_eq!(
             current_billing_credits_usd(Some(89.94), Some(47.03), None),
@@ -2857,7 +2908,7 @@ mod tests {
             "must not fill the Credits card from prepaid, SuperGrok dollars, or the operator-visible $25.32 card: {human}"
         );
         assert_eq!(
-            xai_grok_sampling_types::current_billing_credits_usd(Some(25.32), None, None),
+            current_billing_credits_usd(Some(25.32), None, None),
             None,
             "operator-visible $25.32 is not a grok-oss meter without a named JSON field for that card"
         );
@@ -2878,7 +2929,7 @@ mod tests {
     /// SuperGrok `prepaidBalance.val` $248.24 must not fill the card.
     #[test]
     fn limits_json_billing_credits_card_from_named_remaining_not_total_val() {
-        use xai_grok_sampling_types::BillingCreditsCard;
+        use crate::views::limits_snapshot::BillingCreditsCard;
 
         let mut b = bal(12.0);
         b.prepaid_balance_cents = Some(24_824);
@@ -2987,9 +3038,8 @@ mod tests {
     #[test]
     fn empty_inference_read_plus_management_total_val_sets_team_prepaid_usd_not_credits_remaining()
     {
-        use xai_grok_sampling_types::{
-            BillingCreditsCard, billing_credits_cents_from_core_invoice_prepaid_remaining,
-        };
+        use super::billing_credits_cents_from_core_invoice_prepaid_remaining;
+        use crate::views::limits_snapshot::BillingCreditsCard;
         use xai_grok_shell::auth::{
             ConsoleTeamPrepaidMeter, PrepaidBalanceResponse, UsdCentsVal,
             console_team_prepaid_from_response, select_team_prepaid_meter,
@@ -3213,7 +3263,7 @@ mod tests {
     #[test]
     fn limits_printout_does_not_invent_dashboard_credits_remaining_or_usage() {
         use crate::views::limits_honesty::NOTE_DASHBOARD_THIRTY_DAY_CREDITS_NOT_PARSED;
-        use xai_grok_sampling_types::BillingCreditsCard;
+        use crate::views::limits_snapshot::BillingCreditsCard;
 
         let input = PrincipalLimitsInput {
             label: "SuperGrok".into(),
@@ -3390,8 +3440,9 @@ mod tests {
         );
     }
 
-    /// Named contract (P3/P5): free period headroom + SuperGrok dollar credits on account
-    /// → `activeDriver` is free SuperGrok period (not SuperGrok dollar credits, not console).
+    /// Named contract (P3/P5): included SuperGrok period limits still have room,
+    /// and SuperGrok dollar credits are on the account.
+    /// `activeDriver` is included SuperGrok period limits (not SuperGrok dollar credits, not console).
     #[test]
     fn limits_json_active_driver_free_period_with_dollar_credits_on_account() {
         let mut b = bal(6.0);
@@ -3425,15 +3476,16 @@ mod tests {
         let human = format_limits_human(&snap, &report.notes);
         assert!(
             human.contains("Active: SuperGrok period"),
-            "human must lead with active free period: {human}"
+            "human text must lead with the active included SuperGrok period limits: {human}"
         );
         assert!(
             !human.contains("Active: SuperGrok extras") && !human.contains("Active: console key"),
-            "must not claim extras/console active with free-period headroom: {human}"
+            "must not claim SuperGrok dollar credits or the console key are active while included SuperGrok period limits still have room: {human}"
         );
     }
 
-    /// Named contract: free period full + SuperGrok dollar credits → activeDriver SuperGrok extras (wire).
+    /// Named contract: included SuperGrok period limits are full and SuperGrok dollar credits are on the account.
+    /// `activeDriver` wire value is `supergrok_extras` (SuperGrok dollar credits, not a nickname).
     #[test]
     fn limits_json_active_driver_dollar_credits_afterburner() {
         let mut b = bal(100.0);
@@ -4494,8 +4546,8 @@ mod tests {
 
     // ----- Multipoll pure classification (fixtures, no network) -------------
 
-    /// Named contract: console live under free SuperGrok period headroom →
-    /// multipoll path fail (P1).
+    /// Named contract: console is live while included SuperGrok period limits still have room.
+    /// The multipoll path fails (P1).
     #[test]
     fn multipoll_path_fail_when_console_live_under_free_period_headroom() {
         let a = sample_limits_json("console_key", true, Some(6.0));
@@ -4507,8 +4559,8 @@ mod tests {
         assert_eq!(class.free_period, FreePeriodSeriesClass::Flat);
     }
 
-    /// Named contract: free SuperGrok period used % stays flat across samples
-    /// → P2 flat (measurement). Path OK still exit 0.
+    /// Named contract: included SuperGrok period limits used % stays flat across samples.
+    /// That is P2 flat (measurement). Path OK still exits 0.
     #[test]
     fn multipoll_free_period_flat_measurement_exit_zero_when_path_ok() {
         let a = sample_limits_json("supergrok_session", false, Some(6.0));
@@ -4521,11 +4573,11 @@ mod tests {
         assert_eq!(
             class.exit_code(),
             0,
-            "flat free SuperGrok period limits must not fail exit"
+            "flat included SuperGrok period limits must not fail the exit"
         );
     }
 
-    /// Named contract: free SuperGrok period used % steps → P2 stepped.
+    /// Named contract: included SuperGrok period limits used % steps. That is P2 stepped.
     #[test]
     fn multipoll_free_period_stepped_measurement() {
         let a = sample_limits_json("supergrok_session", false, Some(6.0));
@@ -4537,8 +4589,8 @@ mod tests {
         assert_eq!(class.exit_code(), 0);
     }
 
-    /// Named contract: path OK + free SuperGrok period flat still exit 0
-    /// (P1/P2 separation — never fail only because period stayed flat).
+    /// Named contract: path OK and included SuperGrok period limits staying flat still exit 0.
+    /// P1 and P2 stay separate. A flat period alone never fails the process.
     #[test]
     fn multipoll_path_ok_plus_flat_still_exit_zero() {
         let a = sample_limits_json("supergrok_session", false, Some(66.0));
@@ -4549,7 +4601,7 @@ mod tests {
         assert_eq!(class.exit_code(), 0);
     }
 
-    /// Named contract: one sample alone cannot prove free-period stepped/flat.
+    /// Named contract: one sample alone cannot prove whether included SuperGrok period limits stepped or stayed flat.
     #[test]
     fn multipoll_free_period_insufficient_with_one_sample() {
         let a = sample_limits_json("supergrok_session", false, Some(6.0));
@@ -4567,7 +4619,7 @@ mod tests {
         let class = classify_multipoll_samples(&[good, bad], limits_first_auto_ctx());
         assert!(class.path.is_fail(), "{:?}", class.path);
         assert_eq!(class.exit_code(), 1);
-        // Free period still flat (both 6.0) — measurement only.
+        // Included SuperGrok period limits stay flat (both 6.0). Measurement only.
         assert_eq!(class.free_period, FreePeriodSeriesClass::Flat);
     }
 

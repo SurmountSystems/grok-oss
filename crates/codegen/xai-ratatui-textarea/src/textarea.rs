@@ -1,6 +1,6 @@
 use crate::editor::{
     ApplyEditPlanError, EditBuffer, EditCommand, EditCommandCategory, EditOutcome, EditPlan,
-    WordStyle, classify_key_event,
+    HorizontalEdge, Movement, WordStyle, classify_key_event, resolve_movement,
 };
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
@@ -25,17 +25,13 @@ use tui_scrollbar::{ScrollBar, ScrollLengths};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
-/// Stable, unique identifier for a text element. Monotonically increasing, never reused.
-///
-/// The host app can use this as a key into its own metadata store
-/// (e.g. `HashMap<ElementId, PasteMetadata>`).
+/// Stable, unique identifier for a text element. Monotonically increasing, never reused. The host app can use this as a
+/// key into its own metadata store (e.g. `HashMap<ElementId, PasteMetadata>`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ElementId(u64);
 
 impl ElementId {
-    /// Construct an `ElementId` from a raw `u64` value.
-    ///
-    /// Primarily useful for tests and serialization; normal code should use
+    /// Construct an `ElementId` from a raw `u64` value. Primarily useful for tests and serialization; normal code should use
     /// the IDs returned by [`TextArea::insert_element`].
     pub fn from_raw(raw: u64) -> Self {
         Self(raw)
@@ -50,11 +46,8 @@ pub struct ElementKind(pub u16);
 
 // ── Clipboard ──
 
-/// Trait for clipboard access. The textarea calls this on copy/cut/paste.
-///
-/// The default implementation ([`InternalClipboard`]) stores text in memory.
-/// Host apps can provide a system clipboard backend (e.g. `arboard`) via
-/// [`TextArea::set_clipboard_provider`].
+/// The textarea calls this on copy/cut/paste. The default implementation ([`InternalClipboard`]) stores text in memory.
+/// Host apps can provide a system clipboard backend (e.g. `arboard`) via [`TextArea::set_clipboard_provider`].
 pub trait ClipboardProvider: std::fmt::Debug {
     /// Read the current clipboard contents (for paste).
     fn get(&mut self) -> Option<String>;
@@ -100,11 +93,8 @@ pub enum TextElementEventKind {
     HoverLeave,
 }
 
-/// An atomic text element embedded in the buffer.
-///
-/// Elements are indivisible units for navigation and editing. The cursor
-/// cannot be placed inside an element; it jumps from the start boundary
-/// to the end boundary atomically.
+/// An atomic text element embedded in the buffer. Elements are indivisible units for navigation and editing. The cursor
+/// cannot be placed inside an element; it jumps from the start boundary to the end boundary atomically.
 #[derive(Debug, Clone)]
 pub struct TextElement {
     /// Stable identifier, unique across the lifetime of the `TextArea`.
@@ -208,15 +198,9 @@ pub struct TextArea {
     /// Whether to keep the selection visible after mouse-up.
     /// When `false`, selection clears immediately on mouse-up (fully transient).
     pub keep_selection_after_mouseup: bool,
-    /// Style applied to selected text.  Defaults to a tokyonight-inspired
-    /// blue background (`rgb(49, 62, 115)`) with an explicit light foreground
-    /// (`rgb(192, 202, 245)`) so the selection is legible regardless of the
-    /// host terminal's colour scheme.
-    ///
-    /// Override to match your own theme, e.g.:
-    /// ```ignore
-    /// textarea.selection_style = Style::default().bg(Color::Rgb(60, 60, 60));
-    /// ```
+    /// Defaults to a tokyonight-inspired blue background (`rgb(49, 62, 115)`) with an explicit light foreground (`rgb(192,
+    /// 202, 245)`) so the selection is legible regardless of the host terminal's colour scheme. Override to match your own
+    /// theme, e.g.:
     pub selection_style: Style,
     /// Screen position of the last mouse-down (for distinguishing click vs drag).
     mouse_down_pos: Option<(u16, u16)>,
@@ -233,10 +217,9 @@ pub struct TextArea {
     pending_drag_scroll: Option<MouseEvent>,
     /// Tracks multi-click (double/triple) at the same position.
     click_tracker: ClickTracker,
-    /// Internal scroll offset set by mousewheel events.  When `Some`, this
-    /// overrides the external `TextAreaState.scroll` so the viewport scrolls
-    /// independently of the cursor.  Cleared whenever the cursor moves
-    /// (typing, navigation, click) so the viewport snaps back to follow it.
+    /// Internal scroll offset set by mousewheel events. When `Some`, this overrides the external `TextAreaState.scroll` so
+    /// the viewport scrolls independently of the cursor. Cleared whenever the cursor moves (typing, navigation, click) so the
+    /// viewport snaps back to follow it.
     scroll_override: Option<u16>,
     /// Whether to show a scrollbar on the right edge when content overflows.
     /// When enabled, the rightmost column is reserved for the scrollbar track
@@ -268,6 +251,13 @@ pub struct TextArea {
 struct WrapCache {
     width: u16,
     lines: Vec<Range<usize>>,
+}
+
+/// Whether a wrapped row's exclusive end is a cursor position on that row.
+#[derive(Debug, Clone, Copy)]
+enum RowEnd {
+    HardBreak,
+    SoftWrap,
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -339,15 +329,12 @@ impl Default for UndoState {
     }
 }
 
-/// Whether `key` is the undo chord [`TextArea::input`] binds: lowercase
-/// 'z' with Ctrl or Cmd. Uppercase 'Z' (redo) is intentionally excluded,
-/// which keeps this guard disjoint from the redo arm regardless of order.
-///
-/// Single source for the binding: `input()`'s undo arm consumes this
-/// predicate, and hosts that react to undo (e.g. retiring an undo hint)
-/// call it too, so the chord and its observers cannot drift.
+/// Whether `key` is the undo chord [`TextArea::input`] binds: 'z' with Ctrl or Cmd and no Shift.
+/// Ctrl+Shift+Z is redo, so leaving Shift out keeps undo and redo from matching the same key press.
+/// `input()`'s undo arm and hosts that react to undo (retiring an undo hint, for example) both call this, so the chord is written once.
 pub fn is_undo_input(key: &KeyEvent) -> bool {
     matches!(key.code, KeyCode::Char('z'))
+        && !key.modifiers.contains(KeyModifiers::SHIFT)
         && (key.modifiers.contains(KeyModifiers::CONTROL)
             || key.modifiers.contains(KeyModifiers::SUPER))
 }
@@ -371,7 +358,10 @@ impl TextArea {
     /// Compute the drag-scroll interval for the given step count.
     fn drag_scroll_interval(step: u32) -> u128 {
         let ramp = Self::DRAG_SCROLL_RAMP_MS;
-        ramp[ramp.len().min(step as usize + 1) - 1]
+        match ramp.split_last() {
+            Some((last, rest)) => rest.get(step as usize).copied().unwrap_or(*last),
+            None => 80,
+        }
     }
 
     /// How many extra lines to scroll based on distance from area edge.
@@ -385,27 +375,15 @@ impl TextArea {
         }
     }
 
-    /// Clamp a buffer position so it stays within a wrapped line's range
-    /// `[line_start, line_end)`.  Without this, `display_col_to_buffer_pos`
-    /// can return `line_end` when the column exceeds the line's display
-    /// width — and `line_end` equals the *next* wrapped line's start,
-    /// which confuses `effective_scroll` into thinking the cursor hasn't
-    /// actually moved to the target line.
-    ///
-    /// Uses `self.text` to find the last valid char boundary inside the line
-    /// so we never land in the middle of a multi-byte character.
+    /// Clamp `pos` to the start of the last grapheme in `[line_start, line_end)`. A result inside
+    /// an element is left to the caller: drag-scroll needs it so the selection expands over a chip.
     fn clamp_to_line(&self, pos: usize, line_start: usize, line_end: usize) -> usize {
-        if line_end > line_start {
-            // Find the start of the last character in the line.
-            let last_char_start = self.text[line_start..line_end]
-                .char_indices()
-                .next_back()
-                .map(|(i, _)| line_start + i)
-                .unwrap_or(line_start);
-            pos.min(last_char_start)
-        } else {
-            line_start
-        }
+        let last_grapheme_start = self
+            .text
+            .get(line_start..line_end)
+            .and_then(|line| line.grapheme_indices(true).next_back())
+            .map_or(line_start, |(i, _)| line_start + i);
+        pos.min(last_grapheme_start)
     }
 
     pub fn new() -> Self {
@@ -458,13 +436,9 @@ impl TextArea {
         }
     }
 
-    /// Expand `\t` to `tab_width` spaces (scrollback-compatible fixed width).
-    /// `tab_width == 0` or no tabs → borrowed input.
-    ///
-    /// Public because it is the exact transform every insert path applies
-    /// (see [`insert_str`](Self::insert_str) /
-    /// [`insert_element`](Self::insert_element)), letting hosts canonicalize
-    /// external text before comparing it against buffer content.
+    /// Expand `\t` to `tab_width` spaces (scrollback-compatible fixed width). Public because it is the exact transform every
+    /// insert path applies (see [`insert_str`](Self::insert_str) / [`insert_element`](Self::insert_element)), letting hosts
+    /// canonicalize external text before comparing it against buffer content.
     pub fn expand_tabs<'a>(&self, text: &'a str) -> std::borrow::Cow<'a, str> {
         expand_tabs_with_width(text, self.tab_width)
     }
@@ -693,16 +667,9 @@ impl TextArea {
         let _ = self.text.set_cursor_byte(pos);
     }
 
-    /// Override the scroll position, bypassing cursor-follow logic.
-    ///
-    /// When set to `Some(offset)`, `effective_scroll` will use this offset
-    /// instead of ensuring the cursor is visible. Useful for forcing a
-    /// specific viewport (e.g., scroll-to-top when the textarea is collapsed
-    /// and unfocused). Set to `None` to restore normal cursor-following.
-    ///
-    /// Note: unlike the internal scroll_override set by mousewheel events,
-    /// this is NOT cleared by cursor movement — it persists until explicitly
-    /// cleared by the caller.
+    /// Override the scroll position, bypassing cursor-follow logic. When set to `Some(offset)`, `effective_scroll` will use
+    /// this offset instead of ensuring the cursor is visible. Note: unlike the internal scroll_override set by mousewheel
+    /// events, this is NOT cleared by cursor movement — it persists until explicitly cleared by the caller.
     pub fn set_scroll_override(&mut self, scroll: Option<u16>) {
         self.scroll_override = scroll;
     }
@@ -721,15 +688,9 @@ impl TextArea {
         self.cursor_pos_with_state(area, TextAreaState::default())
     }
 
-    /// Compute the on-screen cursor position taking scrolling into account.
-    ///
-    /// Returns `None` if the cursor is not visible in the current viewport
-    /// (e.g. the user scrolled the viewport away from the cursor via mousewheel).
-    ///
-    /// Unlike [`screen_position_of`], this applies a wrap-boundary adjustment:
-    /// when the cursor sits at the exact wrap boundary (col == content width),
-    /// it is shown at the start of the next visual line instead of on the
-    /// invisible right border.
+    /// Compute the on-screen cursor position taking scrolling into account. Unlike [`screen_position_of`], this applies a
+    /// wrap-boundary adjustment: when the cursor sits at the exact wrap boundary (col == content width), it is shown at the
+    /// start of the next visual line instead of on the invisible right border.
     pub fn cursor_pos_with_state(&self, area: Rect, state: TextAreaState) -> Option<(u16, u16)> {
         if area.height == 0 {
             return None;
@@ -747,14 +708,12 @@ impl TextArea {
         }
         let effective_scroll = self.effective_scroll(area.height, &lines, state.scroll);
         let mut i = Self::wrapped_line_index_by_start(&lines, self.cursor())?;
-        let ls = &lines[i];
+        let ls = lines.get(i)?;
         let mut col = self.display_width_of_range(ls.start, self.cursor()) as u16;
 
-        // If the cursor sits at the exact wrap boundary (col == content width),
-        // show it at the start of the next visual line instead of on the
-        // invisible right border.  When the cursor is at text.len() and the
-        // last line is exactly full, there is no next wrapped line — but we
-        // still want the cursor on a new row at column 0.
+        // If the cursor sits at the exact wrap boundary (col == content width), show it at the start of the next visual line
+        // instead of on the invisible right border. When the cursor is at text.len() and the last line is exactly full, there is
+        // no next wrapped line — but we still want the cursor on a new row at column 0.
         if col >= tw {
             i += 1;
             col = 0;
@@ -770,11 +729,9 @@ impl TextArea {
         Some((area.x + col, area.y + screen_row))
     }
 
-    /// Compute the on-screen position of an arbitrary buffer byte offset.
-    ///
-    /// Returns `None` if the position is outside the visible viewport.
-    /// Does not apply cursor-specific wrap-boundary adjustments — see
-    /// [`cursor_pos_with_state`] for cursor positioning.
+    /// Compute the on-screen position of an arbitrary buffer byte offset. Returns `None` if the position is outside the
+    /// visible viewport. Does not apply cursor-specific wrap-boundary adjustments — see [`cursor_pos_with_state`] for cursor
+    /// positioning.
     pub fn screen_position_of(
         &self,
         pos: usize,
@@ -785,7 +742,7 @@ impl TextArea {
         let lines = self.wrapped_lines(tw);
         let effective_scroll = self.effective_scroll(area.height, &lines, state.scroll);
         let i = Self::wrapped_line_index_by_start(&lines, pos)?;
-        let ls = &lines[i];
+        let ls = lines.get(i)?;
         let col = self.display_width_of_range(ls.start, pos) as u16;
 
         let scroll = effective_scroll as usize;
@@ -797,17 +754,9 @@ impl TextArea {
         Some((area.x + col, area.y + screen_row))
     }
 
-    /// Compute the on-screen cells covered by a buffer byte range.
-    ///
-    /// A soft-wrapped range can cross visual rows, so unlike
-    /// [`screen_position_of`] this returns one height-1 [`Rect`] per visual
-    /// row the range intersects, top to bottom, clamped to the content
-    /// region (`text_width` columns — excludes any scrollbar column). Rows
-    /// scrolled outside the viewport are skipped, so a partially visible
-    /// range yields only its visible rows. Bytes belonging to no row (a
-    /// `\n`, or whitespace dropped at a wrap boundary) are not covered;
-    /// trailing spaces kept on a row are. Ranges that are empty, extend
-    /// past the text, or have non-char-boundary endpoints yield no spans.
+    /// Rows scrolled outside the viewport are skipped, so a partially visible range yields only its visible rows. Bytes
+    /// belonging to no row (a `\n`, or whitespace dropped at a wrap boundary) are not covered; trailing spaces kept on a row
+    /// are. Ranges that are empty, extend past the text, or have non-char-boundary endpoints yield no spans.
     pub fn screen_spans_of_range(
         &self,
         range: Range<usize>,
@@ -867,14 +816,9 @@ impl TextArea {
         spans
     }
 
-    /// Map screen coordinates `(col, row)` to a buffer byte position.
-    ///
-    /// Returns `None` if `(col, row)` is outside the textarea `area`.
-    ///
-    /// Edge cases:
-    /// - Click past end of a wrapped line → snaps to line end.
-    /// - Click below all text → snaps to `text.len()`.
-    /// - Click on an element → snaps to nearest element boundary (start or end).
+    /// Map screen coordinates `(col, row)` to a buffer byte position. Returns `None` if `(col, row)` is outside the textarea
+    /// `area`. Click past end of a wrapped line → snaps to line end; Click below all text → snaps to `text.len()`; Click on
+    /// an element → snaps to nearest element boundary (start or end).
     pub fn buffer_pos_at_screen(
         &self,
         col: u16,
@@ -894,12 +838,9 @@ impl TextArea {
 
         let visual_row = (row - area.y) as usize + scroll as usize;
 
-        // Below all text → end of text.
-        if visual_row >= lines.len() {
+        let Some(line) = lines.get(visual_row) else {
             return Some(self.text.len());
-        }
-
-        let line = &lines[visual_row];
+        };
         let target_col = (col - area.x) as usize;
         // Clamp line.end to text length (safety measure for edge cases).
         let line_end = line.end.min(self.text.len());
@@ -928,19 +869,15 @@ impl TextArea {
 
         let visual_row = (row - area.y) as usize + scroll as usize;
 
-        if visual_row >= lines.len() {
+        let Some(line) = lines.get(visual_row) else {
             return Some((self.text.len(), false));
-        }
-
-        let line = &lines[visual_row];
+        };
         let target_col = (col - area.x) as usize;
         let line_end = line.end.min(self.text.len());
         Some(self.display_col_to_buffer_pos(line.start, line_end, target_col))
     }
 
-    /// Return the element at screen coordinates, if any.
-    ///
-    /// Uses `buffer_pos_at_screen` to find the buffer position, then checks
+    /// Return the element at screen coordinates, if any. Uses `buffer_pos_at_screen` to find the buffer position, then checks
     /// whether that position falls inside an element.
     pub fn element_at_screen(
         &self,
@@ -976,8 +913,16 @@ impl TextArea {
         let start = sel.anchor.min(sel.head);
         let end = sel.anchor.max(sel.head);
         let expanded = self.expand_range_to_element_boundaries(start..end);
-        let clamped_start = expanded.start.min(self.text.len());
-        let clamped_end = expanded.end.min(self.text.len());
+        let mut clamped_start = expanded.start.min(self.text.len());
+        let mut clamped_end = expanded.end.min(self.text.len());
+        // Snap to char boundaries so a stale endpoint can never split a
+        // multi-byte char (slicing in selected_text would panic).
+        while clamped_start > 0 && !self.text.is_char_boundary(clamped_start) {
+            clamped_start -= 1;
+        }
+        while clamped_end < self.text.len() && !self.text.is_char_boundary(clamped_end) {
+            clamped_end += 1;
+        }
         if clamped_start >= clamped_end {
             None
         } else {
@@ -988,7 +933,7 @@ impl TextArea {
     /// Text within the current selection (buffer text, not display text).
     pub fn selected_text(&self) -> Option<String> {
         let range = self.selection_range()?;
-        Some(self.text[range].to_string())
+        Some(self.text_slice(range).to_string())
     }
 
     /// Clear the selection without affecting the clipboard.
@@ -996,10 +941,8 @@ impl TextArea {
         self.selection = None;
     }
 
-    /// Delete the selected range (if any). Returns `true` if text was deleted.
-    ///
-    /// This is a single undo step. After deletion, the cursor is placed at
-    /// the start of the deleted range and the selection is cleared.
+    /// Returns `true` if text was deleted. This is a single undo step. After deletion, the cursor is placed at the start of
+    /// the deleted range and the selection is cleared.
     pub fn delete_selection(&mut self) -> bool {
         let Some(range) = self.selection_range() else {
             return false;
@@ -1012,15 +955,54 @@ impl TextArea {
         true
     }
 
+    /// Insert `text`, replacing the active selection (if any) as a single undo step.
+    pub fn insert_str_replacing_selection(&mut self, text: &str) {
+        if self.selection_range().is_none() {
+            self.clear_selection();
+            self.insert_str(text);
+            return;
+        }
+        self.begin_undo_group();
+        self.delete_selection();
+        self.insert_str(text);
+        self.end_undo_group();
+    }
+
     /// Set the selection programmatically.
     pub fn set_selection(&mut self, anchor: usize, head: usize) {
         self.selection = Some(Selection { anchor, head });
     }
 
-    /// Take the clipboard contents (returns `None` if empty).
-    ///
-    /// This is the primary way for the host app to retrieve text
-    /// that was selected by mouse drag / double-click / triple-click.
+    /// Collapse the active selection: cursor to `pos`, selection cleared.
+    fn collapse_selection_to(&mut self, pos: usize) {
+        self.set_cursor(pos);
+        self.clear_selection();
+    }
+
+    /// Extend (or start) the selection; the anchor is sticky like browser text fields.
+    fn extend_selection(&mut self, movement: Movement) {
+        let anchor = match self.selection {
+            Some(sel) => {
+                // Move from the head — mouse selections park the cursor inside the highlight.
+                if self.cursor() != sel.head {
+                    self.set_cursor(sel.head);
+                }
+                sel.anchor
+            }
+            None => self.cursor(),
+        };
+        self.apply_movement(movement);
+        // A movement that lands on the anchor selects nothing — no phantom
+        // zero-width selection (e.g. Shift+Left at position 0).
+        if self.cursor() == anchor {
+            self.clear_selection();
+        } else {
+            self.set_selection(anchor, self.cursor());
+        }
+    }
+
+    /// Take the clipboard contents (returns `None` if empty). This is the primary way for the host app to retrieve text that
+    /// was selected by mouse drag / double-click / triple-click.
     pub fn take_clipboard(&mut self) -> Option<String> {
         self.clipboard.take()
     }
@@ -1039,10 +1021,7 @@ impl TextArea {
 
     // ── Element events ──
 
-    /// Take the pending [`TextElementEvent`], if any.
-    ///
-    /// Call this after [`handle_mouse`](Self::handle_mouse) to check whether
-    /// an element was clicked or hover-entered/left.
+    /// Call this after [`handle_mouse`](Self::handle_mouse) to check whether an element was clicked or hover-entered/left.
     pub fn poll_element_event(&mut self) -> Option<TextElementEvent> {
         self.pending_element_event.take()
     }
@@ -1057,16 +1036,9 @@ impl TextArea {
 
     // ── Timers / tick ──
 
-    /// Recommended poll timeout for the host event loop.
-    ///
-    /// When the textarea has pending timer-driven work (e.g. continuous
-    /// drag-scrolling while the mouse is held outside the area), this
-    /// returns `Some(ms)`.  The host should use this as the
-    /// `event::poll` timeout.  When the poll times out without an event,
-    /// call [`tick`](Self::tick).
-    ///
-    /// Returns `None` when no timer work is pending — the host can use
-    /// its own default timeout.
+    /// When the textarea has pending timer-driven work (e.g. continuous drag-scrolling while the mouse is held outside the
+    /// area), this returns `Some(ms)`. When the poll times out without an event, call [`tick`](Self::tick). Returns `None`
+    /// when no timer work is pending — the host can use its own default timeout.
     pub fn poll_timeout_ms(&self) -> Option<u64> {
         // Drag-scroll is the only timer-driven feature for now.
         self.pending_drag_scroll.as_ref()?;
@@ -1087,11 +1059,9 @@ impl TextArea {
 
     // ── Mouse ──
 
-    /// Shared single/double-click treatment of a click that landed on an
-    /// element display (`hit_element`): snap the cursor to the element
-    /// start, anchor drags there, and emit [`TextElementEventKind::Click`].
-    ///
-    /// Returns `None` when the click was not on an element.
+    /// Shared single/double-click treatment of a click that landed on an element display (`hit_element`): snap the cursor to
+    /// the element start, anchor drags there, and emit [`TextElementEventKind::Click`]. Returns `None` when the click was not
+    /// on an element.
     fn element_click_snap(&mut self, pos: usize, hit_element: bool) -> Option<MouseAction> {
         if !hit_element {
             return None;
@@ -1112,11 +1082,9 @@ impl TextArea {
         Some(MouseAction::CursorPlaced)
     }
 
-    /// Process a crossterm `MouseEvent` and return what happened.
-    ///
-    /// The host app is expected to call this from its event loop for
-    /// every `Event::Mouse(mouse)` and pass the textarea's render `area`
-    /// plus the current `TextAreaState` (for scroll info).
+    /// Process a crossterm `MouseEvent` and return what happened. The host app is expected to call this from its event loop
+    /// for every `Event::Mouse(mouse)` and pass the textarea's render `area` plus the current `TextAreaState` (for scroll
+    /// info).
     pub fn handle_mouse(
         &mut self,
         event: MouseEvent,
@@ -1157,10 +1125,8 @@ impl TextArea {
 
         match event.kind {
             MouseEventKind::Down(MouseButton::Left) => {
-                // Some terminals re-emit Down(Left) after a scroll event
-                // even though the button was held the whole time.  When a
-                // drag is already active, treat this as a drag continuation
-                // so the selection anchor is preserved.
+                // Some terminals re-emit Down(Left) after a scroll event even though the button was held the whole time. When a drag is
+                // already active, treat this as a drag continuation so the selection anchor is preserved.
                 if self.drag_active {
                     return self.handle_mouse(
                         MouseEvent {
@@ -1188,10 +1154,8 @@ impl TextArea {
                 // Clear any existing selection.
                 self.clear_selection();
 
-                // Map screen coordinates to buffer position.
-                // IMPORTANT: this must happen BEFORE clearing scroll_override
-                // so that effective_scroll uses the current viewport, not the
-                // cursor-following fallback.
+                // IMPORTANT: this must happen BEFORE clearing scroll_override so that effective_scroll uses the current viewport, not
+                // the cursor-following fallback.
                 let Some((pos, hit_element)) = self.buffer_pos_at_screen_ex(col, row, area, state)
                 else {
                     self.scroll_override = None;
@@ -1205,21 +1169,17 @@ impl TextArea {
 
                 match click_count {
                     2 => {
-                        // Double-click on an element display: snap like a
-                        // single click (cursor to element start + Click
-                        // event). Word-selecting would select and copy the
-                        // element's hidden buffer text to the clipboard;
-                        // the host decides what a chip double-click means.
-                        // Triple-click line-select below intentionally keeps
-                        // buffer-text semantics, element content included —
-                        // a copy gesture, like drag-select across a chip.
+                        // Word-selecting would select and copy the element's hidden buffer text to the clipboard; the host decides what a
+                        // chip double-click means. Triple-click line-select below intentionally keeps buffer-text semantics, element
+                        // content included — a copy gesture, like drag-select across a chip.
                         if let Some(action) = self.element_click_snap(pos, hit_element) {
                             return action;
                         }
                         // Double-click: select word under cursor.
                         // Whitespace clicks just place the cursor (no selection).
                         let is_ws = pos < self.text.len()
-                            && self.text[pos..]
+                            && self
+                                .text_slice(pos..)
                                 .chars()
                                 .next()
                                 .is_none_or(|ch| ch.is_whitespace());
@@ -1232,7 +1192,8 @@ impl TextArea {
                             });
                             // Place cursor on the last character of the
                             // selection (neovim style), not one past the end.
-                            let cursor = self.text[start..end]
+                            let cursor = self
+                                .text_slice(start..end)
                                 .char_indices()
                                 .next_back()
                                 .map(|(i, _)| start + i)
@@ -1273,12 +1234,8 @@ impl TextArea {
                         MouseAction::SelectionFinished
                     }
                     _ => {
-                        // Single click: place cursor.
-                        //
-                        // If click landed on an element display, snap cursor
-                        // to elem start. `hit_element` is reliable because
-                        // display_col_to_buffer_pos sets it when the column
-                        // falls within an element's visual width.
+                        // If click landed on an element display, snap cursor to elem start. `hit_element` is reliable because
+                        // display_col_to_buffer_pos sets it when the column falls within an element's visual width.
                         if let Some(action) = self.element_click_snap(pos, hit_element) {
                             return action;
                         }
@@ -1333,9 +1290,8 @@ impl TextArea {
                         let dist = area.y - event.row;
                         let n = Self::drag_scroll_lines_for_distance(dist);
                         let target_line = scroll.saturating_sub(n);
-                        let pos = if target_line < lines.len() {
+                        let pos = if let Some(line) = lines.get(target_line) {
                             let col = event.column.saturating_sub(area.x) as usize;
-                            let line = &lines[target_line];
                             let line_end = line.end.min(self.text.len());
                             let p = self.display_col_to_buffer_pos(line.start, line_end, col).0;
                             self.clamp_to_line(p, line.start, line_end)
@@ -1352,9 +1308,8 @@ impl TextArea {
                         let new_scroll = (target_line + 1)
                             .saturating_sub(area.height as usize)
                             .min(max_scroll);
-                        let pos = if target_line < lines.len() {
+                        let pos = if let Some(line) = lines.get(target_line) {
                             let col = event.column.saturating_sub(area.x) as usize;
-                            let line = &lines[target_line];
                             let line_end = line.end.min(self.text.len());
                             let pos = self.display_col_to_buffer_pos(line.start, line_end, col).0;
                             self.clamp_to_line(pos, line.start, line_end)
@@ -1444,9 +1399,11 @@ impl TextArea {
                 }
                 // If dragging, extend the selection head to follow the scroll.
                 let drag_new_pos = if self.drag_active {
-                    let target_line =
-                        (new_scroll as usize + area.height as usize - 1).min(lines.len() - 1);
-                    Some(lines[target_line].start)
+                    lines.len().checked_sub(1).and_then(|last| {
+                        let target_line =
+                            (new_scroll as usize + area.height as usize - 1).min(last);
+                        lines.get(target_line).map(|line| line.start)
+                    })
                 } else {
                     None
                 };
@@ -1478,11 +1435,7 @@ impl TextArea {
                 // If dragging, extend the selection head to follow the scroll.
                 let drag_new_pos = if self.drag_active {
                     let target_line = new_scroll as usize;
-                    Some(if target_line < lines.len() {
-                        lines[target_line].start
-                    } else {
-                        0
-                    })
+                    Some(lines.get(target_line).map(|line| line.start).unwrap_or(0))
                 } else {
                     None
                 };
@@ -1527,11 +1480,8 @@ impl TextArea {
         }
     }
 
-    /// Handle a click or drag on the scrollbar track.
-    ///
-    /// Maps the row position proportionally to a scroll offset:
-    /// clicking at the top of the track scrolls to the start, at the
-    /// bottom scrolls to the end.
+    /// Handle a click or drag on the scrollbar track. Maps the row position proportionally to a scroll offset: clicking at
+    /// the top of the track scrolls to the start, at the bottom scrolls to the end.
     fn handle_scrollbar_click(&mut self, row: u16, area: Rect, tw: u16) -> MouseAction {
         if area.height == 0 {
             return MouseAction::Nothing;
@@ -1555,10 +1505,8 @@ impl TextArea {
         MouseAction::Scrolled
     }
 
-    /// Check whether the given screen row falls on the scrollbar thumb.
-    ///
-    /// Renders the scrollbar into a scratch buffer and checks whether the
-    /// cell at `row` is a non-space character (thumb glyph) or a space (track).
+    /// Check whether the given screen row falls on the scrollbar thumb. Renders the scrollbar into a scratch buffer and
+    /// checks whether the cell at `row` is a non-space character (thumb glyph) or a space (track).
     fn is_scrollbar_thumb_at(&self, row: u16, area: Rect, tw: u16) -> bool {
         if area.height == 0 {
             return false;
@@ -1590,7 +1538,9 @@ impl TextArea {
         if row < area.y || row >= area.y + area.height {
             return false;
         }
-        scratch[(sb_x, row)].symbol() != " "
+        scratch
+            .cell((sb_x, row))
+            .is_some_and(|cell| cell.symbol() != " ")
     }
 
     pub fn is_empty(&self) -> bool {
@@ -1601,12 +1551,8 @@ impl TextArea {
         ch.is_alphanumeric() || ch == '_'
     }
 
-    /// Classify a character into a word-class for double-click selection.
-    ///
-    /// Three classes (matching vim/neovim `w` word definition):
-    /// - `0`: whitespace
-    /// - `1`: word chars (alphanumeric + underscore)
-    /// - `2`: punctuation / everything else
+    /// Classify a character into a word-class for double-click selection. Three classes (matching vim/neovim `w` word
+    /// definition): `0`: whitespace; `1`: word chars (alphanumeric + underscore); `2`: punctuation / everything else.
     fn char_class(ch: char) -> u8 {
         if ch.is_whitespace() {
             0
@@ -1617,12 +1563,8 @@ impl TextArea {
         }
     }
 
-    /// Find the start of the word containing `pos` (for double-click selection).
-    ///
-    /// Uses vim-style word classes: word chars (alphanumeric + `_`), punctuation,
-    /// and whitespace are three distinct groups.  Scans backward until the class
-    /// changes.
-    ///
+    /// Find the start of the word containing `pos` (for double-click selection). Uses vim-style word classes: word chars
+    /// (alphanumeric + `_`), punctuation, and whitespace are three distinct groups. Scans backward until the class changes.
     /// If `pos` is inside an element, returns the element start.
     fn word_start_at(&self, pos: usize) -> usize {
         // If inside an element, return element start.
@@ -1636,15 +1578,15 @@ impl TextArea {
 
         // Determine the class of the character at `pos` (or just before if at end).
         let target_class = if pos < self.text.len() {
-            Self::char_class(self.text[pos..].chars().next().unwrap())
+            Self::char_class(self.text_slice(pos..).chars().next().unwrap_or('\0'))
         } else if pos > 0 {
-            let ch = self.text[..pos].chars().next_back().unwrap();
+            let ch = self.text_slice(..pos).chars().next_back().unwrap_or('\0');
             Self::char_class(ch)
         } else {
             return 0;
         };
 
-        let before = &self.text[..pos];
+        let before = self.text_slice(..pos);
         let word_start = before
             .char_indices()
             .rev()
@@ -1654,11 +1596,8 @@ impl TextArea {
         self.adjust_pos_out_of_elements(word_start, true)
     }
 
-    /// Find the end of the word containing `pos` (for double-click selection).
-    ///
-    /// Uses vim-style word classes (see [`Self::char_class`]).
-    ///
-    /// If `pos` is inside an element, returns the element end.
+    /// Find the end of the word containing `pos` (for double-click selection). Uses vim-style word classes (see
+    /// [`Self::char_class`]). If `pos` is inside an element, returns the element end.
     fn word_end_at(&self, pos: usize) -> usize {
         // If inside an element, return element end.
         if let Some(elem) = self
@@ -1671,12 +1610,12 @@ impl TextArea {
 
         // Determine the class of the character at `pos`.
         let target_class = if pos < self.text.len() {
-            Self::char_class(self.text[pos..].chars().next().unwrap())
+            Self::char_class(self.text_slice(pos..).chars().next().unwrap_or('\0'))
         } else {
             return self.text.len();
         };
 
-        let after = &self.text[pos..];
+        let after = self.text_slice(pos..);
         let word_end = after
             .char_indices()
             .find(|&(_, ch)| Self::char_class(ch) != target_class)
@@ -1690,12 +1629,9 @@ impl TextArea {
         self.display_width_of_range(bol, self.cursor())
     }
 
-    /// Compute the display width of the buffer range `[from..to)`.
-    ///
-    /// Plain runs use tab-aware width (`tab_width` columns per `\t`, or
-    /// unicode-width when `tab_width == 0`). Element ranges with a custom
-    /// `display` use the element's display width instead of the buffer text
-    /// width. This is the core of the display projection system.
+    /// Compute the display width of the buffer range `[from..to)`. Plain runs use tab-aware width (`tab_width` columns per
+    /// `\t`, or unicode-width when `tab_width == 0`). Element ranges with a custom `display` use the element's display width
+    /// instead of the buffer text width. This is the core of the display projection system.
     fn display_width_of_range(&self, from: usize, to: usize) -> usize {
         if from >= to {
             return 0;
@@ -1714,7 +1650,7 @@ impl TextArea {
             // Plain text before this element
             if pos < elem.range.start {
                 let plain_end = elem.range.start.min(to);
-                width += self.plain_display_width(&self.text[pos..plain_end]);
+                width += self.plain_display_width(self.text_slice(pos..plain_end));
                 pos = plain_end;
             }
             if pos >= to {
@@ -1726,10 +1662,8 @@ impl TextArea {
             let elem_end_in_range = elem.range.end.min(to);
             if elem_start_in_range < elem_end_in_range {
                 if let Some(display) = &elem.display {
-                    // If the range covers the entire element (or starts at element start),
-                    // use the full display width. If it covers only a partial overlap
-                    // (cursor inside element — shouldn't happen normally), fall back to
-                    // buffer text width.
+                    // If the range covers the entire element (or starts at element start), use the full display width. If it covers only a
+                    // partial overlap (cursor inside element — shouldn't happen normally), fall back to buffer text width.
                     if elem_start_in_range == elem.range.start {
                         let display_w: usize = display
                             .spans
@@ -1739,12 +1673,13 @@ impl TextArea {
                         width += display_w;
                     } else {
                         width += self.plain_display_width(
-                            &self.text[elem_start_in_range..elem_end_in_range],
+                            self.text_slice(elem_start_in_range..elem_end_in_range),
                         );
                     }
                 } else {
-                    width += self
-                        .plain_display_width(&self.text[elem_start_in_range..elem_end_in_range]);
+                    width += self.plain_display_width(
+                        self.text_slice(elem_start_in_range..elem_end_in_range),
+                    );
                 }
                 pos = elem_end_in_range;
             }
@@ -1752,7 +1687,7 @@ impl TextArea {
 
         // Remaining plain text after all elements
         if pos < to {
-            width += self.plain_display_width(&self.text[pos..to]);
+            width += self.plain_display_width(self.text_slice(pos..to));
         }
 
         width
@@ -1765,15 +1700,33 @@ impl TextArea {
         if idx == 0 { None } else { Some(idx - 1) }
     }
 
-    /// Map a display column to a buffer byte position on a given wrapped line.
-    ///
-    /// Pure query — does not mutate any state. Handles elements (snapping to
-    /// nearest element boundary) and wide unicode graphemes.
-    /// If `target_col` is past the line's display width, returns `line_end`
-    /// (clamped to the nearest element boundary).
-    ///
-    /// Returns `(byte_pos, hit_element)` where `hit_element` is `true` when
-    /// the column fell on an element's display region.
+    /// Soft-wrapped rows are byte-adjacent because the wrap folds trailing spaces into the row;
+    /// a hard row leaves the newline or dropped whitespace between it and the next.
+    fn row_with_end(lines: &[Range<usize>], idx: usize) -> Option<(Range<usize>, RowEnd)> {
+        let row = lines.get(idx)?;
+        let end_kind = match lines.get(idx + 1) {
+            Some(next) if next.start == row.end => RowEnd::SoftWrap,
+            _ => RowEnd::HardBreak,
+        };
+        Some((row.clone(), end_kind))
+    }
+
+    fn clamp_to_row(&self, pos: usize, row: &Range<usize>, end_kind: RowEnd) -> usize {
+        match end_kind {
+            RowEnd::HardBreak => pos,
+            RowEnd::SoftWrap => {
+                let last_grapheme_start = self.clamp_to_line(pos, row.start, row.end);
+                // Elements wrap atomically: a soft row closed by one ends at the element's start.
+                self.find_element_containing(last_grapheme_start)
+                    .and_then(|idx| self.elements.get(idx))
+                    .map_or(last_grapheme_start, |element| element.range.start)
+            }
+        }
+    }
+
+    /// Map a display column to a buffer byte position on a given wrapped line. Pure query — does not mutate any state. If
+    /// `target_col` is past the line's display width, returns `line_end` (clamped to the nearest element boundary). Returns
+    /// `(byte_pos, hit_element)` where `hit_element` is `true` when the column fell on an element's display region.
     fn display_col_to_buffer_pos(
         &self,
         line_start: usize,
@@ -1785,12 +1738,11 @@ impl TextArea {
 
         while pos < line_end {
             // Check if pos is at or inside an element
-            if let Some(elem_idx) = self
+            if let Some(elem) = self
                 .elements
                 .iter()
-                .position(|e| pos >= e.range.start && pos < e.range.end)
+                .find(|e| pos >= e.range.start && pos < e.range.end)
             {
-                let elem = &self.elements[elem_idx];
                 let elem_start = elem.range.start;
                 let elem_buf_end = elem.range.end;
                 // The visible portion of the element on this line
@@ -1805,7 +1757,7 @@ impl TextArea {
                             .map(|s| s.content.as_ref().width())
                             .sum()
                     } else {
-                        self.plain_display_width(&self.text[elem_start..elem_line_end])
+                        self.plain_display_width(self.text_slice(elem_start..elem_line_end))
                     };
 
                     if width_so_far + elem_display_w > target_col {
@@ -1825,7 +1777,7 @@ impl TextArea {
                 } else {
                     // We're in the middle of an element (e.g. a wrapped line starts
                     // mid-element). Skip past the rest of the element on this line.
-                    let partial_w = self.plain_display_width(&self.text[pos..elem_line_end]);
+                    let partial_w = self.plain_display_width(self.text_slice(pos..elem_line_end));
                     if width_so_far + partial_w > target_col {
                         // Snap to element's actual end boundary
                         return (elem_buf_end, true);
@@ -1837,7 +1789,7 @@ impl TextArea {
             }
 
             // Plain text grapheme
-            let slice = &self.text[pos..line_end];
+            let slice = self.text_slice(pos..line_end);
             if let Some(grapheme) = slice.graphemes(true).next() {
                 let grapheme_width = self.grapheme_display_width(grapheme);
                 width_so_far += grapheme_width;
@@ -1855,13 +1807,12 @@ impl TextArea {
 
     fn move_to_display_col_on_line(
         &mut self,
-        line_start: usize,
-        line_end: usize,
+        row: Range<usize>,
         target_col: usize,
+        end_kind: RowEnd,
     ) {
-        let cursor = self
-            .display_col_to_buffer_pos(line_start, line_end, target_col)
-            .0;
+        let (pos, _hit_element) = self.display_col_to_buffer_pos(row.start, row.end, target_col);
+        let cursor = self.clamp_to_row(pos, &row, end_kind);
         self.set_cursor_inner(cursor);
     }
 
@@ -1869,7 +1820,7 @@ impl TextArea {
         // Scan backward for '\n' that is NOT inside an element.
         // Newlines inside elements (e.g. multi-line paste) are not line boundaries.
         for i in (0..pos).rev() {
-            if self.text.as_bytes()[i] == b'\n' && !self.is_inside_element(i) {
+            if self.text.as_bytes().get(i).copied() == Some(b'\n') && !self.is_inside_element(i) {
                 return i + 1;
             }
         }
@@ -1882,7 +1833,7 @@ impl TextArea {
     fn end_of_line(&self, pos: usize) -> usize {
         // Scan forward for '\n' that is NOT inside an element.
         for i in pos..self.text.len() {
-            if self.text.as_bytes()[i] == b'\n' && !self.is_inside_element(i) {
+            if self.text.as_bytes().get(i).copied() == Some(b'\n') && !self.is_inside_element(i) {
                 return i;
             }
         }
@@ -1913,18 +1864,69 @@ impl TextArea {
         self.apply_edit_command(command, mutation_kind);
     }
 
+    /// Execute a resolved cursor [`Movement`] (see [`resolve_movement`]).
+    fn apply_movement(&mut self, movement: Movement) {
+        match movement {
+            Movement::Command(command, _) => {
+                self.apply_edit_command(command, None);
+            }
+            Movement::VisualRowUp => self.move_cursor_up(),
+            Movement::VisualRowDown => self.move_cursor_down(),
+            Movement::VisualRowStart => self.move_cursor_to_beginning_of_line(false),
+            Movement::VisualRowEnd => self.move_cursor_to_end_of_line(false),
+            Movement::LogicalLineStart => self.set_cursor(self.beginning_of_current_line()),
+            Movement::LogicalLineEnd => self.set_cursor(self.end_of_current_line()),
+        }
+    }
+
     pub fn input(&mut self, event: KeyEvent) {
+        // ── Shift+movement extends the selection (browser-style) ──
+        // Super+Up/Down never extend (terminals claim Cmd+Up/Down); they fall
+        // through to the same plain movement as before this feature.
+        if event.modifiers.contains(KeyModifiers::SHIFT)
+            && !(matches!(event.code, KeyCode::Up | KeyCode::Down)
+                && event.modifiers.contains(KeyModifiers::SUPER))
+        {
+            // Windows Win32 input reports shifted letters uppercase — fold the
+            // case so Ctrl+Shift+A/E/P/N classify like their lowercase forms.
+            let code = match event.code {
+                KeyCode::Char(c) if c.is_ascii_uppercase() => KeyCode::Char(c.to_ascii_lowercase()),
+                code => code,
+            };
+            let unshifted = KeyEvent::new(code, event.modifiers.difference(KeyModifiers::SHIFT));
+            if let Some(movement) = resolve_movement(&unshifted) {
+                self.extend_selection(movement);
+                return;
+            }
+        }
+
         // ── Selection-aware interception ──
-        // When a selection is active, certain keys interact with the selected
-        // range rather than performing their normal single-char action.
         if self.selection.is_some() {
-            if let Some(EditCommand::Insert(character)) = classify_key_event(&event) {
-                self.begin_undo_group();
-                if !self.delete_selection() {
-                    self.clear_selection();
+            let classified = classify_key_event(&event);
+            if let Some(EditCommand::Insert(character)) = classified {
+                self.insert_str_replacing_selection(&character.to_string());
+                return;
+            }
+            let category = classified.map(EditCommand::category);
+            // Movement → collapse to the directional edge, then move FROM that edge.
+            // (Zero-width selections fail the range check and take the catch-all below.)
+            if let Some(range) = self.selection_range()
+                && let Some(movement) = resolve_movement(&event)
+            {
+                let edge = match movement.collapse_edge() {
+                    HorizontalEdge::Start => range.start,
+                    HorizontalEdge::End => range.end,
+                };
+                // Vertical continuation keeps the sticky column across the
+                // collapse (browser goal-column behavior); horizontal moves reset it.
+                let sticky_col = self.preferred_col;
+                self.collapse_selection_to(edge);
+                if matches!(movement, Movement::VisualRowUp | Movement::VisualRowDown) {
+                    self.preferred_col = sticky_col;
                 }
-                self.insert_str(&character.to_string());
-                self.end_undo_group();
+                if !movement.stops_at_collapse_edge() {
+                    self.apply_movement(movement);
+                }
                 return;
             }
             match event {
@@ -1938,44 +1940,34 @@ impl TextArea {
                     code: KeyCode::Enter,
                     ..
                 } => {
-                    self.begin_undo_group();
-                    if !self.delete_selection() {
-                        self.clear_selection();
-                    }
-                    self.insert_str("\n");
-                    self.end_undo_group();
+                    self.insert_str_replacing_selection("\n");
                     return;
                 }
-                // Backspace / Delete → delete the selection only (no extra char).
-                // If the selection is zero-width (anchor == head), delete_selection()
-                // returns false — clear the stale selection and fall through to the
-                // normal single-char delete so Backspace/Delete aren't silently swallowed.
-                KeyEvent {
-                    code: KeyCode::Backspace | KeyCode::Delete | KeyCode::Char('\x08' | '\x7f'),
-                    ..
-                }
-                | KeyEvent {
-                    code: KeyCode::Char('h'),
-                    modifiers: KeyModifiers::CONTROL,
-                    ..
-                }
-                | KeyEvent {
-                    code: KeyCode::Char('d'),
-                    modifiers: KeyModifiers::CONTROL,
-                    ..
-                } => {
+                // Delete-family chords delete just the selection; kills stash it for yank.
+                _ if matches!(
+                    category,
+                    Some(EditCommandCategory::Delete | EditCommandCategory::Kill)
+                ) =>
+                {
+                    if category == Some(EditCommandCategory::Kill)
+                        && let Some(text) = self.selected_text()
+                    {
+                        self.kill_buffer = text;
+                    }
                     if self.delete_selection() {
                         return;
                     }
                     // Zero-width selection — clear and fall through.
                     self.clear_selection();
                 }
-                // Ctrl-X → cut selection (copy to clipboard + delete).
+                // Ctrl-X (exact, matching the pre-selection binding) / Cmd+X → cut selection.
                 KeyEvent {
                     code: KeyCode::Char('x'),
-                    modifiers: KeyModifiers::CONTROL,
+                    modifiers,
                     ..
-                } => {
+                } if modifiers == KeyModifiers::CONTROL
+                    || modifiers.contains(KeyModifiers::SUPER) =>
+                {
                     if let Some(text) = self.selected_text() {
                         self.set_clipboard_text(text);
                     }
@@ -1985,11 +1977,36 @@ impl TextArea {
                     // Zero-width selection — clear and fall through.
                     self.clear_selection();
                 }
+                // Cmd+C → copy selection, keeping the highlight (browser semantics).
+                KeyEvent {
+                    code: KeyCode::Char('c'),
+                    modifiers,
+                    ..
+                } if modifiers.contains(KeyModifiers::SUPER) => {
+                    if let Some(text) = self.selected_text() {
+                        self.set_clipboard_text(text);
+                    } else {
+                        // Zero-width — nothing to copy; drop the stale selection.
+                        self.clear_selection();
+                    }
+                    return;
+                }
+                // Ctrl+Y/V fall through, selection intact — the paste arms below replace it.
+                KeyEvent {
+                    code: KeyCode::Char('y' | 'v'),
+                    modifiers: KeyModifiers::CONTROL,
+                    ..
+                } => {}
                 // All other keys → clear selection, fall through to normal handling.
                 _ => {
                     self.clear_selection();
                 }
             }
+        }
+
+        if let Some(movement) = resolve_movement(&event) {
+            self.apply_movement(movement);
+            return;
         }
 
         if let Some(command) = classify_key_event(&event) {
@@ -2016,14 +2033,26 @@ impl TextArea {
             }
 
             // Undo / Redo (Ctrl or Cmd)
+            // Terminals speaking the kitty keyboard protocol send Ctrl+Shift+Z as a lowercase 'z' with the Shift flag set.
+            // Older terminals send an uppercase 'Z' for the same chord.
             KeyEvent {
-                code: KeyCode::Char('Z'),
+                code: KeyCode::Char(c @ ('z' | 'Z')),
                 modifiers,
                 ..
-            } if modifiers.contains(KeyModifiers::CONTROL)
-                || modifiers.contains(KeyModifiers::SUPER) =>
+            } if modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::SUPER)
+                && (c == 'Z' || modifiers.contains(KeyModifiers::SHIFT)) =>
             {
-                // Ctrl/Cmd-Shift-Z → redo (terminals that report uppercase Z + Shift)
+                self.redo();
+            }
+            // Alt+Z is the redo chord on terminals where Ctrl+Shift+Z arrives as the same bytes as Ctrl+Z.
+            // Windows sends Ctrl+Alt for AltGr, so that combination has to stay text input.
+            KeyEvent {
+                code: KeyCode::Char('z' | 'Z'),
+                modifiers,
+                ..
+            } if modifiers.contains(KeyModifiers::ALT)
+                && !modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::SUPER) =>
+            {
                 self.redo();
             }
             k if is_undo_input(&k) => {
@@ -2037,88 +2066,17 @@ impl TextArea {
                 self.redo();
             }
 
-            // Ctrl-V → paste from clipboard provider.
+            // Ctrl-V → paste from clipboard provider, replacing any selection.
             KeyEvent {
                 code: KeyCode::Char('v'),
                 modifiers: KeyModifiers::CONTROL,
                 ..
             } => {
                 if let Some(text) = self.clipboard_provider.get() {
-                    self.insert_str(&text);
+                    self.insert_str_replacing_selection(&text);
                 }
             }
 
-            // Cmd+Left / Cmd+Right (macOS): terminals using the Kitty keyboard
-            // protocol (Ghostty, Kitty, WezTerm) send these as Super+Arrow.
-            KeyEvent {
-                code: KeyCode::Left,
-                modifiers: KeyModifiers::SUPER,
-                ..
-            } => {
-                self.move_cursor_to_beginning_of_line(false);
-            }
-            KeyEvent {
-                code: KeyCode::Right,
-                modifiers: KeyModifiers::SUPER,
-                ..
-            } => {
-                self.move_cursor_to_end_of_line(false);
-            }
-            KeyEvent {
-                code: KeyCode::Up, ..
-            }
-            | KeyEvent {
-                code: KeyCode::Char('p'),
-                modifiers: KeyModifiers::CONTROL,
-                ..
-            } => {
-                self.move_cursor_up();
-            }
-            KeyEvent {
-                code: KeyCode::Down,
-                ..
-            }
-            | KeyEvent {
-                code: KeyCode::Char('n'),
-                modifiers: KeyModifiers::CONTROL,
-                ..
-            } => {
-                self.move_cursor_down();
-            }
-            // Document-level: Ctrl+Home / Ctrl+PageUp → buffer start;
-            // Ctrl+End / Ctrl+PageDown → buffer end. Bare Home/End stay
-            // on this logical line (not wrap-row, not buffer). Ctrl+A/E
-            // remain logical-line with chain (emacs). Super+Left/Right
-            // stay visual-row.
-            KeyEvent {
-                code: KeyCode::Home | KeyCode::PageUp,
-                modifiers: KeyModifiers::CONTROL,
-                ..
-            } => {
-                self.set_cursor(0);
-            }
-            KeyEvent {
-                code: KeyCode::End | KeyCode::PageDown,
-                modifiers: KeyModifiers::CONTROL,
-                ..
-            } => {
-                self.set_cursor(self.text.len());
-            }
-            // Home/End → this logical line; Super+Left/Right → visual row.
-            KeyEvent {
-                code: KeyCode::Home,
-                ..
-            } => {
-                let bol = self.beginning_of_current_line();
-                self.set_cursor(bol);
-            }
-
-            KeyEvent {
-                code: KeyCode::End, ..
-            } => {
-                let eol = self.end_of_current_line();
-                self.set_cursor(eol);
-            }
             _o => {
                 #[cfg(feature = "debug-logs")]
                 tracing::debug!("Unhandled key event in TextArea: {:?}", _o);
@@ -2147,17 +2105,9 @@ impl TextArea {
         // Note: kill_buffer is intentionally NOT restored — yank is separate from undo.
     }
 
-    /// Called before a mutation to decide whether to push a new undo checkpoint.
-    ///
-    /// Batching rules:
-    /// - Inside an undo group (`group_depth > 0`) → skip entirely.
-    /// - First mutation ever → always checkpoint.
-    /// - Kind changed from last → checkpoint.
-    /// - Cursor moved since last mutation (arrows, clicks) → checkpoint.
-    /// - Kill / Element / Replace → always checkpoint (discrete actions).
-    /// - Same Insert or Delete with consecutive cursor → extend batch (no checkpoint).
-    /// - Word boundary (ws↔non-ws transition) → checkpoint (handled by callers
-    ///   resetting `last_kind` before calling this method).
+    /// Called before a mutation to decide whether to push a new undo checkpoint. Batching rules: First mutation ever → always
+    /// checkpoint; Kill / Element / Replace → always checkpoint (discrete actions); Word boundary (ws↔non-ws transition) →
+    /// checkpoint (handled by callers resetting `last_kind` before calling this method).
     fn pre_mutate(&mut self, kind: MutationKind) {
         // Inside an undo group — the group handles its own checkpoint.
         if self.undo.group_depth > 0 {
@@ -2193,15 +2143,8 @@ impl TextArea {
         self.undo.last_cursor = self.cursor();
     }
 
-    /// Clear the undo/redo history, leaving the current text and cursor
-    /// untouched.
-    ///
-    /// Use this when a buffer is reset to represent a *new logical
-    /// context* — e.g. a shared input widget that is reused for a
-    /// different target — so that a later `undo` can't resurrect text
-    /// that belonged to the previous context. `set_text` deliberately
-    /// records a checkpoint (so an accidental replace is undoable), so
-    /// callers that want a hard reset must follow it with this.
+    /// Clear the undo/redo history, leaving the current text and cursor untouched. `set_text` deliberately records a
+    /// checkpoint (so an accidental replace is undoable), so callers that want a hard reset must follow it with this.
     pub fn clear_history(&mut self) {
         self.undo.stack.clear();
         self.undo.redo.clear();
@@ -2249,15 +2192,9 @@ impl TextArea {
         !self.undo.redo.is_empty()
     }
 
-    /// Begin an undo group. All mutations between `begin_undo_group()` and
-    /// `end_undo_group()` are collapsed into a single undo step.
-    ///
-    /// Groups can be nested: only the outermost `end_undo_group()` pushes
-    /// the checkpoint. Inner begin/end pairs are reference-counted.
-    ///
-    /// Use cases:
-    /// - Autocomplete: `replace_range_with_element` + `insert_str(" ")` = 1 undo step
-    /// - Line-select: enter → N live-updates → confirm = 1 undo step
+    /// All mutations between `begin_undo_group()` and `end_undo_group()` are collapsed into a single undo step. Groups can be
+    /// nested: only the outermost `end_undo_group()` pushes the checkpoint. Autocomplete: `replace_range_with_element` +
+    /// `insert_str(" ")` = 1 undo step; Line-select: enter → N live-updates → confirm = 1 undo step.
     pub fn begin_undo_group(&mut self) {
         if self.undo.group_depth == 0 {
             // Outermost group — take the snapshot.
@@ -2293,10 +2230,8 @@ impl TextArea {
         }
     }
 
-    /// Cancel an undo group. Restores the textarea to the state it was in
-    /// when `begin_undo_group()` was called — no undo entry is created.
-    ///
-    /// Use case: line-select cancel → revert all live-updates, leave no trace.
+    /// Restores the textarea to the state it was in when `begin_undo_group()` was called — no undo entry is created. Use
+    /// case: line-select cancel → revert all live-updates, leave no trace.
     pub fn cancel_undo_group(&mut self) {
         if self.undo.group_depth == 0 {
             return; // Unbalanced call — ignore.
@@ -2380,11 +2315,9 @@ impl TextArea {
         );
     }
 
-    /// Delete text to the right of the cursor using readline-style word semantics.
-    ///
-    /// Deletes from the current cursor position through the end of the next word as determined
-    /// by `end_of_next_word()`. Any delimiters between the cursor and that word
-    /// (whitespace, punctuation, newlines) are included in the deletion.
+    /// Delete text to the right of the cursor using readline-style word semantics. Deletes from the current cursor position
+    /// through the end of the next word as determined by `end_of_next_word()`. Any delimiters between the cursor and that
+    /// word (whitespace, punctuation, newlines) are included in the deletion.
     pub fn delete_forward_word(&mut self) {
         self.apply_edit_command(
             EditCommand::DeleteWordForward(WordStyle::Small),
@@ -2421,12 +2354,21 @@ impl TextArea {
         if self.kill_buffer.is_empty() {
             return;
         }
+        // Yank over a highlight replaces it as a single undo step.
+        let replacing_selection = self.selection_range().is_some();
+        if replacing_selection {
+            self.begin_undo_group();
+            self.delete_selection();
+        }
         let text = self.kill_buffer.clone();
         self.apply_edit_replacement(
             self.cursor()..self.cursor(),
             &text,
             Some(MutationKind::Insert),
         );
+        if replacing_selection {
+            self.end_undo_group();
+        }
         if let Some(last) = text.chars().last() {
             self.undo.last_insert_ws = last.is_whitespace();
         }
@@ -2445,37 +2387,29 @@ impl TextArea {
     pub fn move_cursor_up(&mut self) {
         self.scroll_override = None;
         // If we have a wrapping cache, prefer navigating across wrapped (visual) lines.
-        if let Some((target_col, maybe_line)) = {
+        let wrapped_move = {
             let cache_ref = self.wrap_cache.borrow();
-            if let Some(cache) = cache_ref.as_ref() {
+            cache_ref.as_ref().and_then(|cache| {
                 let lines = &cache.lines;
-                if let Some(idx) = Self::wrapped_line_index_by_start(lines, self.cursor()) {
-                    let cur_range = &lines[idx];
-                    let target_col = self.preferred_col.unwrap_or_else(|| {
-                        self.display_width_of_range(cur_range.start, self.cursor())
-                    });
-                    if idx > 0 {
-                        let prev = &lines[idx - 1];
-                        let line_start = prev.start;
-                        let line_end = prev.end;
-                        Some((target_col, Some((line_start, line_end))))
-                    } else {
-                        Some((target_col, None))
-                    }
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
-        } {
+                let idx = Self::wrapped_line_index_by_start(lines, self.cursor())?;
+                let cur_range = lines.get(idx)?;
+                let target_col = self
+                    .preferred_col
+                    .unwrap_or_else(|| self.display_width_of_range(cur_range.start, self.cursor()));
+                let prev = idx
+                    .checked_sub(1)
+                    .and_then(|prev_idx| Self::row_with_end(lines, prev_idx));
+                Some((target_col, prev))
+            })
+        };
+        if let Some((target_col, maybe_line)) = wrapped_move {
             // We had wrapping info. Apply movement accordingly.
             match maybe_line {
-                Some((line_start, line_end)) => {
+                Some((prev, end_kind)) => {
                     if self.preferred_col.is_none() {
                         self.preferred_col = Some(target_col);
                     }
-                    self.move_to_display_col_on_line(line_start, line_end, target_col);
+                    self.move_to_display_col_on_line(prev, target_col, end_kind);
                     return;
                 }
                 None => {
@@ -2488,7 +2422,7 @@ impl TextArea {
         }
 
         // Fallback to logical line navigation if we don't have wrapping info yet.
-        if let Some(prev_nl) = self.text[..self.cursor()].rfind('\n') {
+        if let Some(prev_nl) = self.text_slice(..self.cursor()).rfind('\n') {
             let target_col = match self.preferred_col {
                 Some(c) => c,
                 None => {
@@ -2497,9 +2431,17 @@ impl TextArea {
                     c
                 }
             };
-            let prev_line_start = self.text[..prev_nl].rfind('\n').map(|i| i + 1).unwrap_or(0);
+            let prev_line_start = self
+                .text_slice(..prev_nl)
+                .rfind('\n')
+                .map(|i| i + 1)
+                .unwrap_or(0);
             let prev_line_end = prev_nl;
-            self.move_to_display_col_on_line(prev_line_start, prev_line_end, target_col);
+            self.move_to_display_col_on_line(
+                prev_line_start..prev_line_end,
+                target_col,
+                RowEnd::HardBreak,
+            );
         } else {
             self.set_cursor_inner(0);
             self.preferred_col = None;
@@ -2509,36 +2451,25 @@ impl TextArea {
     pub fn move_cursor_down(&mut self) {
         self.scroll_override = None;
         // If we have a wrapping cache, prefer navigating across wrapped (visual) lines.
-        if let Some((target_col, move_to_last)) = {
+        let wrapped_move = {
             let cache_ref = self.wrap_cache.borrow();
-            if let Some(cache) = cache_ref.as_ref() {
+            cache_ref.as_ref().and_then(|cache| {
                 let lines = &cache.lines;
-                if let Some(idx) = Self::wrapped_line_index_by_start(lines, self.cursor()) {
-                    let cur_range = &lines[idx];
-                    let target_col = self.preferred_col.unwrap_or_else(|| {
-                        self.display_width_of_range(cur_range.start, self.cursor())
-                    });
-                    if idx + 1 < lines.len() {
-                        let next = &lines[idx + 1];
-                        let line_start = next.start;
-                        let line_end = next.end;
-                        Some((target_col, Some((line_start, line_end))))
-                    } else {
-                        Some((target_col, None))
-                    }
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
-        } {
+                let idx = Self::wrapped_line_index_by_start(lines, self.cursor())?;
+                let cur_range = lines.get(idx)?;
+                let target_col = self
+                    .preferred_col
+                    .unwrap_or_else(|| self.display_width_of_range(cur_range.start, self.cursor()));
+                Some((target_col, Self::row_with_end(lines, idx + 1)))
+            })
+        };
+        if let Some((target_col, move_to_last)) = wrapped_move {
             match move_to_last {
-                Some((line_start, line_end)) => {
+                Some((next, end_kind)) => {
                     if self.preferred_col.is_none() {
                         self.preferred_col = Some(target_col);
                     }
-                    self.move_to_display_col_on_line(line_start, line_end, target_col);
+                    self.move_to_display_col_on_line(next, target_col, end_kind);
                     return;
                 }
                 None => {
@@ -2559,16 +2490,22 @@ impl TextArea {
                 c
             }
         };
-        if let Some(next_nl) = self.text[self.cursor()..]
+        if let Some(next_nl) = self
+            .text_slice(self.cursor()..)
             .find('\n')
             .map(|i| i + self.cursor())
         {
             let next_line_start = next_nl + 1;
-            let next_line_end = self.text[next_line_start..]
+            let next_line_end = self
+                .text_slice(next_line_start..)
                 .find('\n')
                 .map(|i| i + next_line_start)
                 .unwrap_or(self.text.len());
-            self.move_to_display_col_on_line(next_line_start, next_line_end, target_col);
+            self.move_to_display_col_on_line(
+                next_line_start..next_line_end,
+                target_col,
+                RowEnd::HardBreak,
+            );
         } else {
             self.set_cursor_inner(self.text.len());
             self.preferred_col = None;
@@ -2613,37 +2550,22 @@ impl TextArea {
         let cache = self.wrap_cache.borrow();
         let cache = cache.as_ref()?;
         let idx = Self::wrapped_line_index_by_start(&cache.lines, self.cursor())?;
-        Some(cache.lines[idx].start)
+        cache.lines.get(idx).map(|line| line.start)
     }
 
-    /// Soft-continued visual rows land on the last char (exclusive end is the
-    /// next row's start). Final segment of a logical line uses exclusive end.
     fn end_of_current_visual_line(&self) -> Option<usize> {
         let cache = self.wrap_cache.borrow();
         let cache = cache.as_ref()?;
         let idx = Self::wrapped_line_index_by_start(&cache.lines, self.cursor())?;
-        let line = &cache.lines[idx];
-        let end = line.end.min(self.text.len());
-        let soft_continued = cache
-            .lines
-            .get(idx + 1)
-            .is_some_and(|next| next.start == end);
-        if soft_continued && end > line.start {
-            Some(self.clamp_to_line(end, line.start, end))
-        } else {
-            Some(end)
-        }
+        let (line, end_kind) = Self::row_with_end(&cache.lines, idx)?;
+        Some(self.clamp_to_row(line.end, &line, end_kind))
     }
 
     // ===== Text elements support =====
 
-    /// Insert an atomic text element at the current cursor position.
-    ///
-    /// The `text` is inserted into the buffer and registered as an element.
-    /// The `kind` tag is opaque to the textarea (host-defined).
-    /// The `display` optionally overrides how the element is rendered.
-    ///
-    /// Returns the assigned [`ElementId`] so the host can store associated metadata.
+    /// Insert an atomic text element at the current cursor position. The `text` is inserted into the buffer and registered as
+    /// an element. The `kind` tag is opaque to the textarea (host-defined). The `display` optionally overrides how the
+    /// element is rendered. Returns the assigned [`ElementId`] so the host can store associated metadata.
     pub fn insert_element(
         &mut self,
         text: &str,
@@ -2654,13 +2576,9 @@ impl TextArea {
         self.apply_element_transaction(plan, kind, display)
     }
 
-    /// Replace a range of buffer text with an atomic element.
-    ///
-    /// This is the "confirm autocomplete" operation: the trigger text (e.g. `@foo`)
-    /// is deleted and replaced with element text (e.g. `@src/foo.rs`) in a single
-    /// atomic operation. The cursor is placed at the end of the new element.
-    ///
-    /// Returns the assigned [`ElementId`].
+    /// Replace a range of buffer text with an atomic element. This is the "confirm autocomplete" operation: the trigger text
+    /// (e.g. `@foo`) is deleted and replaced with element text (e.g. `@src/foo.rs`) in a single atomic operation. The cursor
+    /// is placed at the end of the new element. Returns the assigned [`ElementId`].
     pub fn replace_range_with_element(
         &mut self,
         range: Range<usize>,
@@ -2710,11 +2628,9 @@ impl TextArea {
         id
     }
 
-    /// Returns the element at the current cursor position, if any.
-    ///
-    /// If the cursor is at an element's start boundary, that element is returned.
-    /// If the cursor is strictly inside an element (shouldn't happen in normal
-    /// operation), the containing element is returned.
+    /// Returns the element at the current cursor position, if any. If the cursor is at an element's start boundary, that
+    /// element is returned. If the cursor is strictly inside an element (shouldn't happen in normal operation), the
+    /// containing element is returned.
     pub fn element_at_cursor(&self) -> Option<&TextElement> {
         self.elements
             .iter()
@@ -2726,7 +2642,15 @@ impl TextArea {
         self.elements
             .iter()
             .find(|e| e.id == id)
-            .map(|e| &self.text[e.range.clone()])
+            .and_then(|e| self.get_range(e.range.clone()))
+    }
+
+    pub fn get_range(&self, range: Range<usize>) -> Option<&str> {
+        self.text().get(range)
+    }
+
+    fn text_slice<R: std::slice::SliceIndex<str, Output = str>>(&self, range: R) -> &str {
+        self.text.get(range).unwrap_or("")
     }
 
     /// Update the display for an existing element. Invalidates the wrap cache.
@@ -2742,33 +2666,51 @@ impl TextArea {
         &self.elements
     }
 
-    /// Re-register elements after a [`set_text`] call that placed their
-    /// buffer text back verbatim. Each `(range, kind, display)` tuple
-    /// describes one element whose text already occupies `range` in the
-    /// buffer. No text is inserted — this only recreates the element
-    /// metadata so the textarea renders chips instead of raw text.
+    /// Re-register elements after a [`set_text`] call that placed their buffer text back verbatim. No text is inserted — this
+    /// only recreates the element metadata so the textarea renders chips instead of raw text. Invalid ranges are skipped
+    /// because restored ranges can outlive the buffer.
     pub fn restore_elements(
         &mut self,
         elems: impl IntoIterator<Item = (Range<usize>, ElementKind, Option<Line<'static>>)>,
     ) {
         for (range, kind, display) in elems {
+            if self.get_range(range.clone()).is_none() {
+                continue;
+            }
             self.add_element(range, kind, display);
         }
         self.wrap_cache.replace(None);
     }
 
-    /// Inline an element: remove it from the element list so its buffer text
-    /// becomes plain editable characters. The text content is unchanged.
-    ///
-    /// The cursor is placed at the end of the inlined region.
-    /// This operation is a single undoable step.
-    ///
+    /// Register one element over existing buffer text without editing. `None` when `range` is not a valid slice or
+    /// strictly intersects an existing element (adjacent ranges are accepted). Not undoable, like [`Self::restore_elements`].
+    pub fn restore_element(
+        &mut self,
+        range: Range<usize>,
+        kind: ElementKind,
+        display: Option<Line<'static>>,
+    ) -> Option<ElementId> {
+        self.get_range(range.clone())?;
+        let intersects = self
+            .elements
+            .iter()
+            .any(|e| e.range.start < range.end && range.start < e.range.end);
+        if intersects {
+            return None;
+        }
+        Some(self.add_element(range, kind, display))
+    }
+
+    /// Inline an element: remove it from the element list so its buffer text becomes plain editable characters. The text
+    /// content is unchanged. The cursor is placed at the end of the inlined region. This operation is a single undoable step.
     /// Returns `true` if the element was found and inlined, `false` otherwise.
     pub fn inline_element(&mut self, id: ElementId) -> bool {
         let Some(idx) = self.elements.iter().position(|e| e.id == id) else {
             return false;
         };
-        let end = self.elements[idx].range.end;
+        let Some(end) = self.elements.get(idx).map(|e| e.range.end) else {
+            return false;
+        };
 
         // Snapshot for undo before removing the element.
         self.pre_mutate(MutationKind::Element);
@@ -2782,13 +2724,9 @@ impl TextArea {
         true
     }
 
-    /// Get the contiguous non-whitespace "word" that the cursor is inside or at the start of.
-    ///
-    /// Returns `(byte_range, text)` where `byte_range` is the range in the buffer.
-    /// Returns `None` if the cursor is on whitespace or the buffer is empty.
-    ///
-    /// This is useful for trigger-character detection (e.g. finding `@foo` under the cursor
-    /// for autocomplete). The host can then check `text.starts_with('@')` etc.
+    /// Get the contiguous non-whitespace "word" that the cursor is inside or at the start of. Returns `(byte_range, text)`
+    /// where `byte_range` is the range in the buffer. Returns `None` if the cursor is on whitespace or the buffer is empty.
+    /// This is useful for trigger-character detection (e.g. finding `@foo` under the cursor for autocomplete).
     pub fn word_at_cursor(&self) -> Option<(Range<usize>, &str)> {
         if self.text.is_empty() {
             return None;
@@ -2796,10 +2734,12 @@ impl TextArea {
         let pos = self.cursor().min(self.text.len());
 
         // Find word start: scan backward from cursor to find whitespace boundary
-        let start = self.text[..pos]
+        let start = self
+            .text_slice(..pos)
             .rfind(|c: char| c.is_whitespace())
             .map(|i| {
-                i + self.text[i..]
+                i + self
+                    .text_slice(i..)
                     .chars()
                     .next()
                     .map(|c| c.len_utf8())
@@ -2808,7 +2748,8 @@ impl TextArea {
             .unwrap_or(0);
 
         // Find word end: scan forward from cursor to find whitespace boundary
-        let end = self.text[pos..]
+        let end = self
+            .text_slice(pos..)
             .find(|c: char| c.is_whitespace())
             .map(|i| i + pos)
             .unwrap_or(self.text.len());
@@ -2822,7 +2763,7 @@ impl TextArea {
 
         // If cursor is beyond the word end (cursor at whitespace after word), return None
         // Unless cursor is exactly at start position of the word
-        let word = &self.text[start..end];
+        let word = self.text_slice(start..end);
         if word.chars().all(|c| c.is_whitespace()) {
             return None;
         }
@@ -2841,7 +2782,9 @@ impl TextArea {
             pos = self.text.len();
         }
         if let Some(idx) = self.find_element_containing(pos) {
-            let e = &self.elements[idx];
+            let Some(e) = self.elements.get(idx) else {
+                return pos;
+            };
             let dist_start = pos.saturating_sub(e.range.start);
             let dist_end = e.range.end.saturating_sub(pos);
             if dist_start <= dist_end {
@@ -2905,12 +2848,9 @@ impl TextArea {
         self.shift_elements(start, end.saturating_sub(start), inserted_len);
     }
 
-    /// Move to the beginning of the previous navigable chunk.
-    ///
-    /// Word characters are alphanumeric plus `_`. Punctuation runs (such as
-    /// `-`) are their own chunk, so moving left across `aa-bb` stops at the
-    /// right side of `-`, then the left side of `-`, then the start of `aa`.
-    /// Whitespace is skipped over. Elements remain atomic units.
+    /// Move to the beginning of the previous navigable chunk. Word characters are alphanumeric plus `_`. Punctuation runs are
+    /// their own chunk, so moving left across `aa-bb` stops at the right side of `-`, then the left side of `-`, then the
+    /// start of `aa`. Whitespace is skipped over. Elements remain atomic units.
     pub fn beginning_of_previous_word(&self) -> usize {
         let ranges = self.element_ranges();
         self.text
@@ -2930,11 +2870,8 @@ impl TextArea {
             .cursor_byte()
     }
 
-    /// Move to the end of the next navigable chunk.
-    ///
-    /// Word characters are alphanumeric plus `_`. Punctuation runs (such as
-    /// `-`) are their own chunk, so moving right across `aa-bb` stops at the
-    /// left side of `-`, then the right side of `-`, then the end of `bb`.
+    /// Move to the end of the next navigable chunk. Word characters are alphanumeric plus `_`. Punctuation runs are their own
+    /// chunk, so moving right across `aa-bb` stops at the left side of `-`, then the right side of `-`, then the end of `bb`.
     /// Whitespace is skipped over. Elements remain atomic units.
     pub fn end_of_next_word(&self) -> usize {
         let ranges = self.element_ranges();
@@ -2945,7 +2882,9 @@ impl TextArea {
 
     fn adjust_pos_out_of_elements(&self, pos: usize, prefer_start: bool) -> usize {
         if let Some(idx) = self.find_element_containing(pos) {
-            let e = &self.elements[idx];
+            let Some(e) = self.elements.get(idx) else {
+                return pos;
+            };
             if prefer_start {
                 e.range.start
             } else {
@@ -2987,16 +2926,9 @@ impl TextArea {
         Ref::map(cache, |c| &c.as_ref().unwrap().lines)
     }
 
-    /// Element-display-aware greedy wrapping.
-    ///
-    /// Produces wrap ranges where each range is `start..end` with `end` being
-    /// the exclusive byte position of the content (including any trailing
-    /// spaces that belong to this visual line).
-    ///
-    /// Elements are treated as atomic units for wrapping: if an element's
-    /// display width doesn't fit on the current line, the element is moved
-    /// to a new line (like word-wrap). If it doesn't fit on *any* line
-    /// (wider than terminal), it gets its own line and rendering truncates it.
+    /// Produces wrap ranges where each range is `start..end` with `end` being the exclusive byte position of the content
+    /// (including any trailing spaces that belong to this visual line). Elements are treated as atomic units for wrapping: if
+    /// an element's display width doesn't fit on the current line, the element is moved to a new line (like word-wrap).
     fn element_aware_wrap_ranges(&self, width: usize) -> Vec<Range<usize>> {
         let width = width.max(1);
         let mut result = Vec::new();
@@ -3038,7 +2970,7 @@ impl TextArea {
                 pos = elem.range.end;
                 continue;
             }
-            if self.text.as_bytes()[pos] == b'\n' {
+            if self.text.as_bytes().get(pos).copied() == Some(b'\n') {
                 return pos;
             }
             pos += 1;
@@ -3081,7 +3013,7 @@ impl TextArea {
                         .map(|s| s.content.as_ref().width())
                         .sum()
                 } else {
-                    self.plain_display_width(&self.text[elem.range.start..elem_end])
+                    self.plain_display_width(self.text_slice(elem.range.start..elem_end))
                 };
 
                 if display_w > 0 && display_w + elem_dw > width {
@@ -3110,7 +3042,7 @@ impl TextArea {
             }
 
             // Plain text grapheme cluster
-            let slice = &self.text[pos..end];
+            let slice = self.text_slice(pos..end);
             let Some(grapheme) = slice.graphemes(true).next() else {
                 break;
             };
@@ -3151,11 +3083,8 @@ impl TextArea {
         result.push(line_start..end);
     }
 
-    /// Calculate the scroll offset that should be used to satisfy the
-    /// invariants given the current area size and wrapped lines.
-    ///
-    /// - Cursor is always on screen.
-    /// - No scrolling if content fits in the area.
+    /// Calculate the scroll offset that should be used to satisfy the invariants given the current area size and wrapped
+    /// lines. Cursor is always on screen; No scrolling if content fits in the area.
     fn effective_scroll(
         &self,
         area_height: u16,
@@ -3191,14 +3120,9 @@ impl TextArea {
         scroll
     }
 
-    /// Compute the effective content width for text wrapping, accounting for
-    /// the scrollbar column.  Uses a 2-shot approach:
-    ///
-    /// 1. Wrap at full `area_width` to get line count.
-    /// 2. If scrollbar needed (lines > height) and `show_scrollbar`, reduce
-    ///    width by 1 for the scrollbar track.
-    ///
-    /// Returns `(content_width, needs_scrollbar)`.
+    /// Compute the effective content width for text wrapping, accounting for the scrollbar column. Uses a 2-shot approach:
+    /// Wrap at full `area_width` to get line count; If scrollbar needed (lines > height) and `show_scrollbar`, reduce width
+    /// by 1 for the scrollbar track. Returns `(content_width, needs_scrollbar)`.
     fn content_width(&self, area_width: u16, area_height: u16) -> (u16, bool) {
         if !self.show_scrollbar || area_width <= 1 {
             return (area_width, false);
@@ -3253,10 +3177,8 @@ impl StatefulWidgetRef for &TextArea {
 }
 
 impl TextArea {
-    /// Render a scrollbar in the rightmost column of `area`.
-    ///
-    /// Uses `tui_scrollbar::ScrollBar` rendered into a scratch ratatui-core
-    /// buffer, then copies cells into the main buffer with muted styling.
+    /// Render a scrollbar in the rightmost column of `area`. Uses `tui_scrollbar::ScrollBar` rendered into a scratch
+    /// ratatui-core buffer, then copies cells into the main buffer with muted styling.
     fn render_scrollbar(
         &self,
         area: Rect,
@@ -3298,8 +3220,12 @@ impl TextArea {
         for row in 0..sb_area.height {
             let x = sb_area.x;
             let y = sb_area.y + row;
-            let src = &scratch[(x, y)];
-            let dst = &mut buf[(x, y)];
+            let Some(src) = scratch.cell((x, y)) else {
+                continue;
+            };
+            let Some(dst) = buf.cell_mut((x, y)) else {
+                continue;
+            };
             let symbol = src.symbol();
             dst.set_symbol(symbol);
             if symbol == " " {
@@ -3321,14 +3247,15 @@ impl TextArea {
         let sel_range = self.selection_range();
 
         for (row, idx) in range.enumerate() {
-            let r = &lines[idx];
+            let Some(r) = lines.get(idx) else {
+                continue;
+            };
             let y = area.y + row as u16;
             let line_range = r.start..r.end;
 
-            // Render the line segment-by-segment (plain text → element → plain text → …)
-            // using display-aware x positioning. This ensures that when an element's
-            // display text is wider (or narrower) than its buffer text, all subsequent
-            // content is positioned correctly.
+            // Render the line segment-by-segment (plain text → element → plain text → …) using display-aware x positioning. This
+            // ensures that when an element's display text is wider (or narrower) than its buffer text, all subsequent content is
+            // positioned correctly.
             let mut display_x: u16 = 0; // current display column
             let mut buf_pos = line_range.start; // current position in the buffer
 
@@ -3349,7 +3276,7 @@ impl TextArea {
 
                 // 1. Render plain text before this element (buf_pos..overlap_start)
                 if buf_pos < overlap_start && display_x < area.width {
-                    let plain = &self.text[buf_pos..overlap_start];
+                    let plain = self.text_slice(buf_pos..overlap_start);
                     let avail = (area.width - display_x) as usize;
                     let (paint, paint_w) = paint_plain_for_display(plain, avail, self.tab_width);
                     buf.set_string(area.x + display_x, y, paint.as_ref(), Style::default());
@@ -3383,7 +3310,7 @@ impl TextArea {
                     // display_x doesn't advance (already blank in the buffer).
                 } else {
                     // No custom display: render buffer text with default element style.
-                    let styled = &self.text[overlap_start..overlap_end];
+                    let styled = self.text_slice(overlap_start..overlap_end);
                     let style = Style::default().fg(Color::Cyan);
                     let (paint, paint_w) = paint_plain_for_display(styled, avail, self.tab_width);
                     buf.set_string(area.x + display_x, y, paint.as_ref(), style);
@@ -3395,7 +3322,7 @@ impl TextArea {
 
             // 3. Render any remaining plain text after the last element
             if buf_pos < line_range.end && display_x < area.width {
-                let plain = &self.text[buf_pos..line_range.end];
+                let plain = self.text_slice(buf_pos..line_range.end);
                 let avail = (area.width - display_x) as usize;
                 let (paint, paint_w) = paint_plain_for_display(plain, avail, self.tab_width);
                 buf.set_string(area.x + display_x, y, paint.as_ref(), Style::default());
@@ -3419,8 +3346,9 @@ impl TextArea {
                     let col_start = col_start.min(area.width);
                     let col_end = col_end.min(area.width);
                     for cx in col_start..col_end {
-                        let cell = &mut buf[(area.x + cx, y)];
-                        cell.set_style(self.selection_style);
+                        if let Some(cell) = buf.cell_mut((area.x + cx, y)) {
+                            cell.set_style(self.selection_style);
+                        }
                     }
                 }
             }
@@ -3471,7 +3399,7 @@ fn clip_str_to_display_width_with_tab(s: &str, max_width: usize, tab_width: u8) 
     for (i, grapheme) in s.grapheme_indices(true) {
         let grapheme_width = grapheme_display_width_with_tab(grapheme, tab_width);
         if width + grapheme_width > max_width {
-            return &s[..i];
+            return s.get(..i).unwrap_or("");
         }
         width += grapheme_width;
     }
@@ -3491,14 +3419,9 @@ fn paint_plain_for_display(
     (paint, w)
 }
 
-/// Truncate a display `Line` to fit within `max_width` columns.
-///
-/// If the line fits, it is returned as-is (cloned). If it overflows:
-/// - Reserve 1 column for `…`.
-/// - **Bracket-preservation heuristic:** if the display text ends with a closing
-///   bracket (`]`, `)`, `}`, `>`), preserve it so e.g. `[Pasted ~10 lines]`
-///   becomes `[Pasted ~1…]` rather than `[Pasted ~10…`.
-/// - Otherwise, truncate and append `…`.
+/// Truncate a display `Line` to fit within `max_width` columns. If it overflows: Reserve 1 column for `…`;
+/// Bracket-preservation heuristic: if the display text ends with a closing bracket (`]`, `)`, `}`, `>`), preserve it so
+/// e.g. `[Pasted ~10 lines]` becomes `[Pasted ~1…]` rather than `[Pasted ~10…`; Otherwise, truncate and append `…`.
 fn truncate_line_display(line: &Line<'static>, max_width: usize) -> Line<'static> {
     use ratatui::text::Span;
 

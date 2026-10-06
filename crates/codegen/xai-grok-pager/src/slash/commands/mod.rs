@@ -1,8 +1,4 @@
-//! Concrete slash command implementations.
-//!
-//! Each command lives in its own submodule. This module re-exports
-//! command structs and provides `builtin_commands()` for registry
-//! construction.
+//! Each command lives in its own submodule. This module re-exports command structs and provides `builtin_commands()` for registry construction.
 pub mod always_approve;
 pub mod announcements;
 pub mod auto;
@@ -131,14 +127,20 @@ pub mod blacklist {
         };
         match doc.get("permission") {
             None => {
-                doc["permission"] = toml_edit::Item::Table(toml_edit::Table::new());
+                doc.insert(
+                    "permission",
+                    toml_edit::Item::Table(toml_edit::Table::new()),
+                );
             }
             Some(item) if item.as_table().is_some() => {}
             Some(_) => {
                 return Err("[permission] is not a table; refusing to overwrite".to_string());
             }
         }
-        let Some(permission) = doc["permission"].as_table_mut() else {
+        let Some(permission) = doc
+            .get_mut("permission")
+            .and_then(toml_edit::Item::as_table_mut)
+        else {
             return Err("[permission] is not a table; refusing to overwrite".to_string());
         };
         match permission.get("deny") {
@@ -299,6 +301,7 @@ pub mod compact_mode;
 pub mod config_agents;
 pub mod context;
 pub mod context_only;
+pub mod context_window;
 pub mod copy;
 pub mod dashboard;
 pub mod debug;
@@ -329,6 +332,8 @@ pub mod login;
 pub mod logout;
 pub mod loop_cmd;
 pub mod mcps;
+pub mod memory;
+pub mod memory_ops;
 pub mod metadata;
 pub mod model;
 pub mod multiline;
@@ -350,7 +355,6 @@ pub mod rewind;
 pub mod running;
 pub mod screen_mode_switch;
 pub mod screenshot;
-pub mod scroll_debug;
 pub mod session_info;
 pub mod settings_cmd;
 pub mod share;
@@ -370,110 +374,116 @@ pub mod view_plan;
 pub mod vim_mode;
 pub mod voice;
 pub mod what;
+pub mod workflow;
 pub mod workflows;
 use super::command::SlashCommand;
 use std::sync::Arc;
-/// All pager-local builtin commands, in display order.
+/// All pager-local builtin commands, in menu order: this vec breaks ties after MRU recency and tags, so moving an entry moves it in the menu.
 ///
-/// This is the single source of truth for the builtin command set.
-/// The registry is constructed from this list.
+/// This is the single source of truth for the builtin command set. The registry is constructed from this list.
 pub fn builtin_commands() -> Vec<Arc<dyn SlashCommand>> {
     vec![
-        Arc::new(exit::ExitCommand),
-        Arc::new(help::HelpCommand),
-        Arc::new(docs::DocsCommand),
-        Arc::new(home::HomeCommand),
-        Arc::new(delete::DeleteCommand),
+        // The rows the dropdown shows before it scrolls.
+        Arc::new(tutorial::TutorialCommand),
+        Arc::new(settings_cmd::SettingsCommand),
+        Arc::new(dashboard::DashboardCommand),
+        Arc::new(workflows::WorkflowsCommand),
+        Arc::new(plugin::PluginsCommand),
+        Arc::new(btw::BtwCommand),
+        Arc::new(voice::VoiceCommand),
         Arc::new(new::NewCommand),
-        Arc::new(fork::ForkCommand),
+        // Per turn.
+        Arc::new(effort::EffortCommand),
+        Arc::new(context_window::ContextWindowCommand),
+        Arc::new(model::ModelCommand),
+        Arc::new(context::ContextCommand),
         Arc::new(compact::CompactCommand),
+        Arc::new(economic_mode::EconomicModeCommand),
         Arc::new(copy::CopyCommand),
         Arc::new(find::FindCommand),
         Arc::new(screenshot::ScreenshotCommand),
         Arc::new(history::HistoryCommand),
-        Arc::new(export::ExportCommand),
         Arc::new(transcript::TranscriptCommand),
-        Arc::new(edit_prompt::EditPromptCommand),
-        Arc::new(expand::ExpandCommand),
-        Arc::new(context::ContextCommand),
+        Arc::new(export::ExportCommand),
+        Arc::new(usage::UsageCommand),
+        Arc::new(uptime::UptimeCommand),
+        Arc::new(tasks::TasksCommand),
+        // Extending the agent.
+        Arc::new(plugin::SkillsCommand),
+        Arc::new(mcps::McpsCommand),
+        Arc::new(plugin::HooksCommand),
+        Arc::new(plugin::MarketplaceCommand),
+        Arc::new(workflow::WorkflowCommand),
+        Arc::new(personas::PersonasCommand),
+        Arc::new(config_agents::ConfigAgentsCommand),
+        // Settings and display.
+        Arc::new(theme::ThemeCommand),
+        Arc::new(auto::AutoCommand),
+        Arc::new(always_approve::AlwaysApproveCommand),
+        Arc::new(vim_mode::VimModeCommand),
+        Arc::new(multiline::MultilineCommand),
+        Arc::new(compact_mode::CompactModeCommand),
+        Arc::new(timestamps::TimestampsCommand),
+        Arc::new(toggle_mouse_reporting::ToggleMouseReportingCommand),
         // Screen-mode switchers: visible only in the opposite mode.
         Arc::new(screen_mode_switch::ScreenModeSwitchCommand::minimal()),
         Arc::new(screen_mode_switch::ScreenModeSwitchCommand::fullscreen()),
-        Arc::new(model::ModelCommand),
-        Arc::new(effort::EffortCommand),
-        Arc::new(always_approve::AlwaysApproveCommand),
+        // Reached for occasionally.
+        Arc::new(timeline::TimelineCommand),
         Arc::new(blacklist::BlacklistCommand),
-        Arc::new(auto::AutoCommand),
-        Arc::new(context_only::ContextOnlyCommand),
-        Arc::new(multiline::MultilineCommand),
-        Arc::new(compact_mode::CompactModeCommand),
-        Arc::new(economic_mode::EconomicModeCommand),
-        Arc::new(vim_mode::VimModeCommand),
-        Arc::new(plugin::HooksCommand),
-        Arc::new(plugin::PluginsCommand),
-        Arc::new(plugin::MarketplaceCommand),
-        Arc::new(plugin::SkillsCommand),
+        Arc::new(cd::CdCommand),
+        Arc::new(imagine::ImagineCommand),
+        Arc::new(imagine_video::ImagineVideoCommand),
+        // Docs, account and one-off maintenance.
+        Arc::new(docs::DocsCommand),
+        Arc::new(release_notes::ReleaseNotesCommand),
+        Arc::new(announcements::AnnouncementsCommand),
+        Arc::new(feedback::FeedbackCommand),
+        Arc::new(privacy::PrivacyCommand),
+        Arc::new(doctor::DoctorCommand),
+        Arc::new(import_claude::ImportClaudeCommand),
+        Arc::new(login::LoginCommand),
+        Arc::new(logout::LogoutCommand),
+        Arc::new(home::HomeCommand),
+        Arc::new(delete::DeleteCommand),
+        Arc::new(help::HelpCommand),
+        Arc::new(exit::ExitCommand),
+        // Commands the curated prefix dropped. Rank stays after that prefix.
+        // Hidden until revealed: `/recap`. Hidden until scheduler tools exist: `/loop`.
+        Arc::new(plan::PlanCommand),
+        Arc::new(view_plan::ViewPlanCommand),
+        Arc::new(edit_prompt::EditPromptCommand),
+        Arc::new(metadata::MetadataCommand),
+        Arc::new(remember::RememberCommand),
+        Arc::new(resume::ResumeCommand),
+        Arc::new(start::StartCommand),
+        Arc::new(fork::ForkCommand),
+        Arc::new(rewind::RewindCommand),
+        Arc::new(expand::ExpandCommand),
+        Arc::new(jump::JumpCommand),
         Arc::new(share::ShareCommand),
+        Arc::new(rename::RenameCommand),
         Arc::new(session_info::SessionInfoCommand),
+        Arc::new(unstick::UnstickCommand),
+        Arc::new(queue::QueueCommand),
+        Arc::new(running::RunningCommand),
+        Arc::new(recap::RecapCommand),
         Arc::new(finish::FinishCommand),
         Arc::new(reports::ReportsCommand),
         Arc::new(what::WhatCommand),
-        Arc::new(metadata::MetadataCommand),
-        Arc::new(rename::RenameCommand),
-        Arc::new(dashboard::DashboardCommand),
-        Arc::new(cd::CdCommand),
-        Arc::new(theme::ThemeCommand),
-        Arc::new(feedback::FeedbackCommand),
-        Arc::new(announcements::AnnouncementsCommand),
-        Arc::new(uptime::UptimeCommand),
-        Arc::new(remember::RememberCommand),
-        Arc::new(plan::PlanCommand),
-        Arc::new(view_plan::ViewPlanCommand),
-        Arc::new(resume::ResumeCommand),
-        Arc::new(unstick::UnstickCommand),
-        Arc::new(start::StartCommand),
-        Arc::new(mcps::McpsCommand),
-        Arc::new(workflows::WorkflowsCommand),
-        Arc::new(btw::BtwCommand),
-        Arc::new(recap::RecapCommand),
-        Arc::new(doctor::DoctorCommand),
-        Arc::new(rebuild::RebuildCommand),
-        Arc::new(voice::VoiceCommand),
-        Arc::new(loop_cmd::LoopCommand),
-        Arc::new(imagine::ImagineCommand),
-        Arc::new(imagine_video::ImagineVideoCommand),
-        Arc::new(timestamps::TimestampsCommand),
-        Arc::new(timeline::TimelineCommand),
-        Arc::new(toggle_mouse_reporting::ToggleMouseReportingCommand),
-        Arc::new(settings_cmd::SettingsCommand),
-        Arc::new(privacy::PrivacyCommand),
-        Arc::new(rewind::RewindCommand),
-        Arc::new(jump::JumpCommand),
-        Arc::new(login::LoginCommand),
-        Arc::new(logout::LogoutCommand),
-        Arc::new(import_claude::ImportClaudeCommand),
-        Arc::new(usage::UsageCommand),
         Arc::new(limits::LimitsCommand),
         Arc::new(spend::SpendCommand),
-        Arc::new(queue::QueueCommand),
-        Arc::new(tasks::TasksCommand),
-        Arc::new(running::RunningCommand),
-        Arc::new(release_notes::ReleaseNotesCommand),
-        Arc::new(tutorial::TutorialCommand),
-        Arc::new(config_agents::ConfigAgentsCommand),
-        Arc::new(personas::PersonasCommand),
-        Arc::new(clear_completed_todos::ClearCompletedTodosCommand),
-        Arc::new(note::NoteCommand),
+        Arc::new(rebuild::RebuildCommand),
+        Arc::new(loop_cmd::LoopCommand),
+        Arc::new(context_only::ContextOnlyCommand),
         // Hidden easter egg: never listed, runs on bare `/gboom`.
         Arc::new(gboom::GboomCommand),
-        // Hidden diagnostic: never listed, toggles the scroll-debug HUD.
-        Arc::new(scroll_debug::ScrollDebugCommand),
         // Debug toggles: always registered, listed only on debug binaries.
         Arc::new(debug::DebugCommand),
     ]
 }
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::acp::model_state::ModelState;
     use crate::app::actions::Action;
@@ -613,21 +623,6 @@ mod tests {
         assert!(matches!(result, CommandResult::Action(Action::ExitSession)));
     }
     #[test]
-    fn start_returns_start_paused_or_interrupted_work_action() {
-        let models = ModelState::default();
-        let mut ctx = make_ctx(&models);
-        let result = start::StartCommand.run(&mut ctx, "");
-        assert!(matches!(
-            result,
-            CommandResult::Action(Action::StartPausedOrInterruptedWork)
-        ));
-        let resume = resume::ResumeCommand.run(&mut ctx, "");
-        assert!(
-            matches!(resume, CommandResult::Action(Action::ShowSessionPicker)),
-            "/start must not be an alias of /resume"
-        );
-    }
-    #[test]
     fn delete_requires_session_and_dispatches() {
         let models = ModelState::default();
         let cmd = delete::DeleteCommand;
@@ -660,16 +655,16 @@ mod tests {
         }
     }
     #[test]
-    fn compact_with_context_returns_queue_command_with_args() {
+    fn compact_with_args_is_refused() {
         let models = ModelState::default();
         let mut ctx = make_ctx(&models);
         let cmd = compact::CompactCommand;
         let result = cmd.run(&mut ctx, "focus on auth");
         match result {
-            CommandResult::QueueCommand(text) => {
-                assert_eq!(text, "/compact focus on auth")
+            CommandResult::Error(text) => {
+                assert_eq!(text, "/compact takes no arguments.")
             }
-            other => panic!("expected QueueCommand, got {other:?}"),
+            other => panic!("expected Error, got {other:?}"),
         }
     }
     #[test]
@@ -683,8 +678,8 @@ mod tests {
             other => panic!("expected QueueCommand, got {other:?}"),
         }
     }
-    /// Bare `/model <name>` → `SetDefaultModel` (switch + persist).
-    /// `/model <name> <effort>` → `SwitchModel` (session-scoped).
+    /// Bare `/model <name>` returns `SetDefaultModel`, which switches and persists.
+    /// `/model <name> <effort>` returns `SwitchModel`, which is session-scoped.
     #[test]
     fn model_resolves_by_display_name() {
         let models = sample_models();
@@ -766,6 +761,8 @@ mod tests {
             billing_surface_visible: true,
             usage_command_visible: true,
             workflows_available: true,
+            saved_workflows: &[],
+            workflow_runs: &[],
             screen_mode: crate::app::ScreenMode::Fullscreen,
             current_title: None,
         };
@@ -793,6 +790,8 @@ mod tests {
             billing_surface_visible: true,
             usage_command_visible: true,
             workflows_available: true,
+            saved_workflows: &[],
+            workflow_runs: &[],
             screen_mode: crate::app::ScreenMode::Fullscreen,
             current_title: None,
         };
@@ -882,6 +881,8 @@ mod tests {
             billing_surface_visible: true,
             usage_command_visible: true,
             workflows_available: true,
+            saved_workflows: &[],
+            workflow_runs: &[],
             screen_mode: crate::app::ScreenMode::Fullscreen,
             current_title: None,
         };
@@ -900,6 +901,8 @@ mod tests {
             billing_surface_visible: true,
             usage_command_visible: true,
             workflows_available: false,
+            saved_workflows: &[],
+            workflow_runs: &[],
             screen_mode: crate::app::ScreenMode::Fullscreen,
             current_title: None,
         };
@@ -929,6 +932,8 @@ mod tests {
             billing_surface_visible: true,
             usage_command_visible: false,
             workflows_available: false,
+            saved_workflows: &[],
+            workflow_runs: &[],
             screen_mode: crate::app::ScreenMode::Fullscreen,
             current_title: None,
         };
@@ -1018,6 +1023,8 @@ mod tests {
             billing_surface_visible: true,
             usage_command_visible: true,
             workflows_available: true,
+            saved_workflows: &[],
+            workflow_runs: &[],
             screen_mode: crate::app::ScreenMode::Fullscreen,
             current_title: None,
         };
@@ -1106,8 +1113,8 @@ mod tests {
         reg.set_voice_visible(false);
         assert!(reg.get("voice").is_none());
     }
-    /// Every pager builtin trigger key must appear in the shell's
-    /// `PAGER_COMMAND_KEYS`. Add new names there when adding a pager builtin.
+    /// Every pager builtin trigger key must appear in the shell's `PAGER_COMMAND_KEYS`.
+    /// Add new names there when adding a pager builtin.
     #[test]
     fn pager_builtin_triggers_are_reserved_in_shell() {
         let reserved: std::collections::HashSet<&str> = xai_grok_shell::session::PAGER_COMMAND_KEYS

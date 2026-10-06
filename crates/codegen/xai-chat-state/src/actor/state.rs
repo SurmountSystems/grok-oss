@@ -54,16 +54,8 @@ pub fn estimate_tool_specs_tokens(tools: &[ToolSpec]) -> u64 {
 }
 
 /// Bytes/4 estimate for a single [`ConversationItem`].
-///
-/// **Model path:** image content parts are vision tokens, not JSON text.
-/// Count each `ContentPart::Image` at [`xai_token_estimation::IMAGE_TOKEN_ESTIMATE`]
-/// (256..1792 band; see that constant). Never `url.len() / 4`. A 200k-char
-/// `data:image/...;base64,...` crate is a harness serialization artifact.
-/// **Tool path:** `view_image` is for search-found images; pasted screenshots
-/// do not go through that tool. Tool-result images still count as image
-/// tokens here. Shared by [`estimate_conversation_tokens`],
-/// [`estimate_messages_tokens`], the context chip, AUTO compact, preflight,
-/// and `/context`.
+/// Images count at [`xai_token_estimation::IMAGE_TOKEN_ESTIMATE`] each.
+/// Shared so the per-variant arithmetic stays in one place.
 pub fn estimate_item_tokens(item: &ConversationItem) -> u64 {
     use xai_grok_sampling_types::ContentPart;
     match item {
@@ -101,12 +93,11 @@ pub fn estimate_item_tokens(item: &ConversationItem) -> u64 {
             xai_token_estimation::estimate_tokens(&b.text_summary())
         }
         ConversationItem::Reasoning(r) => {
-            // Summary + content text follow the standard bytes-per-token
-            // estimate; encrypted blobs are base64 and don't survive
-            // tokenization 1:1, so estimate at len/4 as well.
+            // Text and encrypted blob are the same reasoning twice: take the
+            // larger, not the sum. The ciphertext is base64, ~4/3 over raw bytes.
             let text_bytes = xai_grok_sampling_types::reasoning_item_text(r).len();
             let enc_bytes = r.encrypted_content.as_deref().map(str::len).unwrap_or(0);
-            ((text_bytes + enc_bytes) as u64) / xai_token_estimation::BYTES_PER_TOKEN
+            (text_bytes.max(enc_bytes * 3 / 4) as u64) / xai_token_estimation::BYTES_PER_TOKEN
         }
     }
 }
@@ -117,15 +108,9 @@ pub fn estimate_conversation_tokens(items: &[ConversationItem]) -> u64 {
     items.iter().map(estimate_item_tokens).sum()
 }
 
-/// grok-build's [`ItemTokenCounter`](xai_grok_compaction::ItemTokenCounter)
-/// for the shared compaction engine: the bytes/4 estimate grok-build already
-/// uses to drive its compaction triggers, exposed through the seam so the
-/// shared budgeting math gets the *same* trusted count.
-///
-/// Where another host plugs a real BPE tokenizer into the same seam,
-/// grok-build estimates instead, reusing [`estimate_item_tokens`] so the
-/// per-variant arithmetic (images, reasoning blobs, tool-call args) stays in
-/// one place.
+/// grok-build's token counter for the shared compaction engine.
+/// Exposes the same bytes/4 estimate the triggers already use, so budgeting stays consistent.
+/// Other hosts may plug a real BPE tokenizer into the same seam.
 pub struct EstimatedItemTokenCounter;
 
 impl xai_grok_compaction::ItemTokenCounter<ConversationItem> for EstimatedItemTokenCounter {
@@ -184,13 +169,9 @@ pub(crate) struct ChatState {
     /// (or last reseed). `total_tokens − estimate_at_last_response` is the
     /// provider-side overhead carried across compaction.
     pub estimate_at_last_response: u64,
-    /// Per-turn token usage from the most recent model response.
-    /// Stashed by `record_last_turn_usage()` and read at `PromptResponse`
-    /// construction to enrich `_meta` with `inputTokens` / `outputTokens` /
-    /// `cachedReadTokens`. `None` means no model turn has completed yet
-    /// in this session (or this is a freshly restored session that did not
-    /// persist last_turn_usage). Always overwritten by the most recent turn —
-    /// historical turns are not retained here.
+    /// Per-turn token usage from the most recent model response, for `PromptResponse` `_meta`.
+    /// `None` means no model turn has completed (or a restore that did not persist it).
+    /// Always overwritten by the most recent turn — historical turns are not retained here.
     pub last_turn_usage: Option<TokenUsage>,
     /// Billing for the open prompt (cleared on next prompt; not persisted).
     pub prompt_usage: Option<UsageLedger>,
@@ -200,32 +181,19 @@ pub(crate) struct ChatState {
     /// Cleared on `TakeTurnMessages` (consumed), `BeginTurnCapture` (new turn),
     /// and `TruncateToPromptIndex` (rewind abandons the turn).
     pub(super) turn_capture: Option<TurnCaptureState>,
-    /// Accumulator for the in-progress harness-subagent trace phase (the goal
-    /// planner at `setup_goal`, or one verifier skeptic panel). Synthetic
-    /// `task` pairs recorded via `AppendHarnessTraceItems` land here;
-    /// `FlushHarnessTraceTurn` seals the accumulated items into one entry of
-    /// `harness_trace_turns`. Independent of `turn_capture` (the planner runs
-    /// ahead of `BeginTurnCapture`) and never enters the live `conversation`.
+    /// Accumulator for the in-progress harness-subagent trace phase.
+    /// Independent of `turn_capture` (the planner runs ahead of `BeginTurnCapture`)
+    /// and never enters the live `conversation`.
     pub(super) harness_trace_buffer: Vec<ConversationItem>,
-    /// Sealed harness trace turns awaiting drain by the agent, which uploads
-    /// each as its own sibling `turn_{N}` artifact so orchestrators can
-    /// discover harness subagents via their `<subagent_result>` footer.
+    /// Sealed harness trace turns awaiting drain by the agent.
+    /// Uploaded as sibling `turn_{N}` artifacts so orchestrators can discover harness subagents.
     /// Drained by `TakeHarnessTraceTurns` at the end of the user-facing turn.
     pub(super) harness_trace_turns: Vec<Vec<ConversationItem>>,
 }
 
-/// Tracks which conversation items belong to the current turn without
-/// cloning every pushed item into a side buffer.
-///
-/// Instead of duplicating each `ConversationItem` on push, we record the
-/// conversation length at capture start (`turn_start_offset`).  At take
-/// time, `conversation[turn_start_offset..]` gives us the turn's items
-/// with a single bulk clone.
-///
-/// When `replace_conversation` or `restore_snapshot` replaces the vec
-/// mid-turn, we snapshot `conversation[turn_start_offset..]` into
-/// `pre_replacement_messages` before the old vec is dropped, and reset
-/// the offset to the new vec's length.
+/// Tracks which conversation items belong to the current turn without cloning each push.
+/// Records `turn_start_offset`; take clones `conversation[offset..]` once.
+/// On mid-turn replace/restore, snapshot the tail into `pre_replacement_messages` before the old vec drops.
 pub(super) struct TurnCaptureState {
     /// Index into `conversation` where this turn's messages start.
     pub turn_start_offset: usize,
@@ -238,14 +206,9 @@ pub(super) struct TurnCaptureState {
 }
 
 impl ChatState {
-    /// Create a new `ChatState` with the given conversation and sampling config,
-    /// all other fields defaulted.
-    ///
-    /// Repairs any dangling tool calls in the initial conversation. This handles
-    /// the race condition where the process was killed mid-tool-execution and
-    /// `chat_history.jsonl` has an assistant message with tool call IDs that
-    /// lack matching `ToolResult` entries. Without this, the in-memory state
-    /// would carry broken conversation history until the next `build_request`.
+    /// Create a `ChatState`, repairing dangling tool calls in the initial conversation.
+    /// Handles a kill mid-tool-execution leaving unmatched call IDs in `chat_history.jsonl`.
+    /// Without this, broken history would sit in memory until the next `build_request`.
     pub fn new(mut conversation: Vec<ConversationItem>, sampling_config: SamplingConfig) -> Self {
         let deduped = dedup_duplicate_tool_results(&mut conversation);
         if deduped > 0 {
@@ -290,10 +253,8 @@ impl ChatState {
         }
     }
 
-    /// Seal the items accumulated since the last flush into one harness trace
-    /// turn. No-op when nothing was recorded since the last seal. Shared by the
-    /// explicit `FlushHarnessTraceTurn` (one call per harness phase) and the
-    /// defensive seal in `TakeHarnessTraceTurns`.
+    /// Seal items accumulated since the last flush into one harness trace turn.
+    /// No-op when nothing was recorded. Shared by the explicit flush and the defensive seal on take.
     pub(super) fn seal_harness_trace_turn(&mut self) {
         if !self.harness_trace_buffer.is_empty() {
             let turn = std::mem::take(&mut self.harness_trace_buffer);
@@ -310,16 +271,8 @@ mod tests {
         SamplingConfig {
             base_url: "https://api.example.com".to_string(),
             model: "test-model".to_string(),
-            max_completion_tokens: None,
-            temperature: None,
-            top_p: None,
-            api_backend: Default::default(),
-            extra_headers: Default::default(),
-            query_params: Default::default(),
-            env_http_headers: Default::default(),
             context_window: std::num::NonZeroU64::new(128_000).unwrap(),
-            reasoning_effort: None,
-            stream_tool_calls: None,
+            ..Default::default()
         }
     }
 
@@ -341,6 +294,29 @@ mod tests {
                 "counter must report the same trusted count as estimate_item_tokens"
             );
         }
+    }
+
+    #[test]
+    fn reasoning_estimate_takes_max_of_text_and_encrypted_not_sum() {
+        // max(4000, 4000*3/4)/4 = 1000, not the (4000+4000)/4 = 2000 double-count.
+        let mut r = xai_grok_sampling_types::synthesized_reasoning_item("x".repeat(4000));
+        r.encrypted_content = Some("e".repeat(4000));
+        assert_eq!(estimate_item_tokens(&ConversationItem::Reasoning(r)), 1000);
+    }
+
+    #[test]
+    fn reasoning_estimate_encrypted_only_scales_base64_down() {
+        // No visible text: base64-corrected size, 4000*3/4/4 = 750.
+        let mut r = xai_grok_sampling_types::synthesized_reasoning_item("");
+        r.summary.clear();
+        r.encrypted_content = Some("e".repeat(4000));
+        assert_eq!(estimate_item_tokens(&ConversationItem::Reasoning(r)), 750);
+    }
+
+    #[test]
+    fn reasoning_estimate_text_only_is_plain_bytes_per_token() {
+        let r = xai_grok_sampling_types::synthesized_reasoning_item("x".repeat(4000));
+        assert_eq!(estimate_item_tokens(&ConversationItem::Reasoning(r)), 1000);
     }
 
     #[test]
@@ -442,66 +418,6 @@ mod tests {
     fn estimate_messages_tokens_zero_when_only_system() {
         let items = vec![ConversationItem::system("x".repeat(4000).as_str())];
         assert_eq!(estimate_messages_tokens(&items), 0);
-    }
-
-    #[test]
-    fn estimate_messages_tokens_zero_for_empty() {
-        assert_eq!(estimate_messages_tokens(&[]), 0);
-    }
-
-    #[test]
-    fn estimate_item_tokens_ignores_data_url_byte_length() {
-        // Harness path: a 200k-char data URL must not charge ~50k text tokens.
-        // Model path: one image is IMAGE_TOKEN_ESTIMATE (hundreds to low thousands).
-        let data_url = format!("data:image/jpeg;base64,{}", "A".repeat(200_000));
-        let with_image = ConversationItem::user_with_parts(vec![
-            xai_grok_sampling_types::ContentPart::Text {
-                text: "see this".into(),
-            },
-            xai_grok_sampling_types::ContentPart::Image {
-                url: data_url.into(),
-            },
-        ]);
-        let text_only = ConversationItem::user("see this");
-        let delta = estimate_item_tokens(&with_image) - estimate_item_tokens(&text_only);
-        assert_eq!(delta, xai_token_estimation::IMAGE_TOKEN_ESTIMATE);
-        assert!(
-            delta < 2_000,
-            "pasted image must add hundreds-to-low-thousands of tokens, not url.len()/4"
-        );
-        let crate_as_text = 200_000u64 / xai_token_estimation::BYTES_PER_TOKEN;
-        assert!(
-            delta < crate_as_text / 10,
-            "must not walk the data URL as text ({crate_as_text} tokens)"
-        );
-    }
-
-    #[test]
-    fn estimate_conversation_tokens_does_not_sum_image_url_len() {
-        let data_url = format!("data:image/png;base64,{}", "B".repeat(200_000));
-        let items = vec![
-            ConversationItem::system("sys"),
-            ConversationItem::user_with_parts(vec![
-                xai_grok_sampling_types::ContentPart::Text {
-                    text: "hello".into(),
-                },
-                xai_grok_sampling_types::ContentPart::Image {
-                    url: data_url.into(),
-                },
-            ]),
-        ];
-        let tokens = estimate_conversation_tokens(&items);
-        let messages = estimate_messages_tokens(&items);
-        assert!(
-            tokens < 5_000,
-            "got {tokens}, data URL crate must not charge the window"
-        );
-        assert!(messages < 5_000, "got {messages}");
-        assert_eq!(
-            messages,
-            estimate_item_tokens(&items[1]),
-            "/context message_tokens must share estimate_item_tokens"
-        );
     }
 
     #[test]

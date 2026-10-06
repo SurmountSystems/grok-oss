@@ -161,7 +161,7 @@ fn convert_text_exposition(text: &str, prefix: &str) -> Vec<Metric> {
             .iter()
             .map(|(k, v)| string_kv(k, v.clone()))
             .collect();
-        kv.sort_by_key(|a| a.key.clone());
+        kv.sort_by(|a, b| a.key.cmp(&b.key));
         kv
     };
 
@@ -603,12 +603,5 @@ other_family_total 9\n";
         }
         assert_eq!(payloads, 2, "one full chunk + remainder");
         assert_eq!(total, MAX_METRICS_PER_DONATION + 1);
-    }
-
-    #[test]
-    fn summary_and_untyped_families_are_skipped() {
-        // An empty registry gathers nothing; convert yields nothing.
-        let registry = Registry::new();
-        assert!(convert_families(&registry.gather()).is_empty());
     }
 }

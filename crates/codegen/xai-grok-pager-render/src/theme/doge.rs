@@ -75,11 +75,6 @@ pub const PALETTE_HEX: [&str; 8] = [
     "#000000", "#FF0000", "#00FF00", "#FFFF00", "#0000FF", "#FF00FF", "#00FFFF", "#FFFFFF",
 ];
 
-/// ANSI / ECMA-48 SGR names for indices 0…7 (real standard name order).
-pub const PALETTE_NAMES: [&str; 8] = [
-    "Black", "Red", "Green", "Yellow", "Blue", "Magenta", "Cyan", "White",
-];
-
 /// Index `0…7` from pure primary RGB via `R + 2·G + 4·B` (channels in `{0,255}`).
 ///
 /// Non-pure inputs are hard-thresholded first.
@@ -104,11 +99,6 @@ pub fn nearest_rgb(r: u8, g: u8, b: u8) -> (u8, u8, u8) {
         }
     }
     best
-}
-
-/// Format pure RGB as `#RRGGBB` (uppercase).
-pub fn hex_of_rgb(r: u8, g: u8, b: u8) -> String {
-    format!("#{r:02X}{g:02X}{b:02X}")
 }
 
 // ── Optional: Floyd–Steinberg on a packed RGB buffer ─────────────────────
@@ -139,13 +129,13 @@ pub fn floyd_steinberg_quantise(pixels: &mut [(u8, u8, u8)], width: usize) {
     for y in 0..height {
         for x in 0..width {
             let i = y * width + x;
-            let (or, og, ob) = work[i];
+            let (or, og, ob) = work.get(i).copied().expect("index out of bounds");
             let r = or.clamp(0, 255) as u8;
             let g = og.clamp(0, 255) as u8;
             let b = ob.clamp(0, 255) as u8;
             let (nr, ng, nb) = quantise_rgb(r, g, b);
-            work[i] = (nr as i16, ng as i16, nb as i16);
-            pixels[i] = (nr, ng, nb);
+            *work.get_mut(i).expect("index out of bounds") = (nr as i16, ng as i16, nb as i16);
+            *pixels.get_mut(i).expect("index out of bounds") = (nr, ng, nb);
 
             let er = or - nr as i16;
             let eg = og - ng as i16;
@@ -153,8 +143,9 @@ pub fn floyd_steinberg_quantise(pixels: &mut [(u8, u8, u8)], width: usize) {
 
             // Classic FS weights: right 7/16, below-left 3/16, below 5/16, below-right 1/16.
             let distribute = |work: &mut [(i16, i16, i16)], idx: usize, num: i16| {
-                let (wr, wg, wb) = work[idx];
-                work[idx] = (wr + er * num / 16, wg + eg * num / 16, wb + eb * num / 16);
+                let (wr, wg, wb) = work.get(idx).copied().expect("index out of bounds");
+                *work.get_mut(idx).expect("index out of bounds") =
+                    (wr + er * num / 16, wg + eg * num / 16, wb + eb * num / 16);
             };
 
             if x + 1 < width {
@@ -767,7 +758,11 @@ mod tests {
     #[test]
     fn palette_hex_matches_rgb() {
         for (i, &(r, g, b)) in PALETTE.iter().enumerate() {
-            assert_eq!(hex_of_rgb(r, g, b), PALETTE_HEX[i], "index {i}");
+            assert_eq!(
+                format!("#{r:02X}{g:02X}{b:02X}"),
+                PALETTE_HEX[i],
+                "index {i}"
+            );
             assert_eq!(index_of_rgb(r, g, b), i as u8, "index formula {i}");
         }
     }

@@ -1,32 +1,28 @@
-//! Rendering helpers for [`CompactionStateContext`] that depend on
-//! shell-specific types (`xai_grok_tools::MemoryBackend`, memory context).
+//! Rendering helpers for [`CompactionStateContext`] that depend on shell-specific types (`xai_grok_tools::MemoryBackend`, memory context).
 //!
-//! The core [`CompactionStateContext`] struct and its builder live in
-//! `xai_chat_state::compaction_utils`. This module adds system-reminder
-//! rendering that requires dependencies not available in `xai-chat-state`.
+//! The core [`CompactionStateContext`] struct and its builder live in `xai_chat_state::compaction_utils`.
+//! This module adds system-reminder rendering that requires dependencies not available in `xai-chat-state`.
 //!
-//! The three **common** active-agent sections (background tasks, TODO list,
-//! running subagents) are formatted by
-//! [`xai_grok_compaction::reminder`] so grok-chat and grok-build stay in lockstep.
-//! Harness-only sections (edited files, AGENTS.md, skills, MCP, memory) stay here.
+//! The **common** active-agent section (Running Background Tasks: commands, loops, workflows, subagents) plus TODO is formatted by [`xai_grok_compaction::reminder`].
+//! That keeps grok-chat and grok-build in lockstep.
+//! Harness-only sections (edited files, AGENTS.md, skills, catalog workflows, MCP, memory) stay here.
 
 use std::path::PathBuf;
 
 pub use xai_chat_state::compaction_utils::{
     BackgroundTaskSummary, CompactionInputs, CompactionServerSummary, CompactionStateContext,
-    RunningSubagentSummary, TodoSummary, TodoSummaryStatus, extract_last_user_query,
-    extract_messages_since_last_user, extract_user_query,
+    RunningSubagentSummary, ScheduledLoopSummary, TodoSummary, TodoSummaryStatus,
+    WorkflowRunSummary, extract_last_user_query, extract_messages_since_last_user,
+    extract_user_query,
 };
 use xai_grok_compaction::reminder::{
-    self, ActiveAgentReminderState, BackgroundTask, RunningSubagent, TodoItem, TodoStatus,
+    self, ActiveAgentReminderState, BackgroundTask, RunningSubagent, ScheduledLoop, TodoItem,
+    TodoStatus, WorkflowRun,
 };
 
-/// Resolved model-facing tool names for the MCP usage hint in compaction
-/// reminders.
-///
-/// Resolved at runtime via `TemplateRenderer` from `ToolKind::SearchTool`
-/// and `ToolKind::UseTool`. Never hard-code tool names -- they can be
-/// renamed by the client.
+/// Resolved model-facing tool names for the MCP usage hint in compaction reminders.
+/// Resolved at runtime via `TemplateRenderer` from `ToolKind::SearchTool` and `ToolKind::UseTool`.
+/// Never hard-code tool names; they can be renamed by the client.
 pub struct McpToolNames {
     /// Model-facing name of the search/discover tool (e.g. "search_tool").
     pub search: String,
@@ -35,10 +31,8 @@ pub struct McpToolNames {
 }
 
 /// Resolved model-facing tool names for the subagent reminder section.
-///
-/// Both names are resolved at runtime via `TemplateRenderer` from
-/// `ToolKind::BackgroundTaskAction` and `ToolKind::KillTaskAction`.
-/// Never hard-code tool names — they can be renamed by the client.
+/// Both names are resolved at runtime via `TemplateRenderer` from `ToolKind::BackgroundTaskAction` and `ToolKind::KillTaskAction`.
+/// Never hard-code tool names; they can be renamed by the client.
 pub struct SubagentToolNames {
     /// Model-facing name of the poll/status tool (e.g. "get_task_output").
     pub poll: String,
@@ -48,14 +42,14 @@ pub struct SubagentToolNames {
 
 /// Format state info as system reminder, without memory search.
 ///
-/// Use this from sync contexts (e.g., `build_compacted_history`) where
-/// memory re-injection is handled separately by the session actor.
+/// Use this from sync contexts (e.g., `build_compacted_history`) where memory re-injection is handled separately by the session actor.
 pub fn to_system_reminder_sync(
     ctx: &CompactionStateContext,
     discovered_agents_md: &[PathBuf],
     skills: &[xai_grok_tools::implementations::skills::types::SkillInfo],
     subagent_tool_names: Option<&SubagentToolNames>,
     mcp_tool_names: Option<&McpToolNames>,
+    workflow_listing: Option<&str>,
 ) -> Option<String> {
     to_system_reminder_inner(
         ctx,
@@ -64,13 +58,13 @@ pub fn to_system_reminder_sync(
         &[],
         subagent_tool_names,
         mcp_tool_names,
+        workflow_listing,
     )
 }
 
 /// Format state info as system reminder for injection into chat.
 ///
-/// When a `memory_backend` is provided, searches memory for relevant
-/// context from past sessions (post-compaction recovery).
+/// When a `memory_backend` is provided, searches memory for relevant context from past sessions (post-compaction recovery).
 pub async fn to_system_reminder(
     ctx: &CompactionStateContext,
     discovered_agents_md: &[PathBuf],
@@ -78,6 +72,7 @@ pub async fn to_system_reminder(
     memory_backend: Option<&dyn xai_grok_tools::types::memory_backend::MemoryBackend>,
     subagent_tool_names: Option<&SubagentToolNames>,
     mcp_tool_names: Option<&McpToolNames>,
+    workflow_listing: Option<&str>,
 ) -> Option<String> {
     // Fetch memory results first (async), then pass to sync inner method
     let mut memory_results = Vec::new();
@@ -100,6 +95,7 @@ pub async fn to_system_reminder(
         &memory_results,
         subagent_tool_names,
         mcp_tool_names,
+        workflow_listing,
     )
 }
 
@@ -124,9 +120,9 @@ fn to_system_reminder_inner(
     memory_results: &[xai_grok_tools::types::memory_backend::MemorySearchResult],
     subagent_tool_names: Option<&SubagentToolNames>,
     mcp_tool_names: Option<&McpToolNames>,
+    workflow_listing: Option<&str>,
 ) -> Option<String> {
-    let mut sections = Vec::new();
-    sections.push(section_surmount_standing_law_after_compact());
+    let mut before_active = Vec::new();
 
     // Agent-edited files (shell-only)
     if !ctx.agent_edited_paths.is_empty() {
@@ -136,7 +132,7 @@ fn to_system_reminder_inner(
             .map(|f| format!("- {}", f))
             .collect::<Vec<_>>()
             .join("\n");
-        sections.push(format!(
+        before_active.push(format!(
             "## Files Edited This Session\n\
              These files were modified by you during this session:\n{}",
             files
@@ -150,7 +146,7 @@ fn to_system_reminder_inner(
             .map(|p| format!("- {}", p.display()))
             .collect::<Vec<_>>()
             .join("\n");
-        sections.push(format!(
+        before_active.push(format!(
             "## Discovered Project Instruction Files\n\
              These project instruction files were found during the session \
              and may contain relevant coding conventions:\n{}",
@@ -158,18 +154,21 @@ fn to_system_reminder_inner(
         ));
     }
 
-    // Available skills (startup + dynamically discovered, from SkillManager).
-    // Reuse the standard listing renderer so the post-compaction listing matches
-    // the startup `<system-reminder>` (no hard-coded tool name, includes
-    // `Use when:` triggers and `Absolute path:`).
+    // Available skills (startup and dynamically discovered, from SkillManager)
+    // Reuse the standard listing renderer so the post-compaction listing matches the startup `<system-reminder>`
+    // The shared renderer has no hard-coded tool name and includes `Use when:` triggers and `Absolute path:`
     if let Some(listing) =
         xai_grok_tools::types::skill_discovery_tracker::format_compaction_skill_listing(skills)
     {
-        sections.push(format!("## Available Skills\n{listing}"));
+        before_active.push(format!("## Available Skills\n{listing}"));
     }
 
-    // Common sections (BG → TODO → subagents) via shared formatter. Borrow
-    // long fields from `ctx` rather than cloning them into an owned DTO.
+    if let Some(listing) = workflow_listing.filter(|text| !text.is_empty()) {
+        before_active.push(format!("## Available Workflows\n{listing}"));
+    }
+
+    // Common sections (background tasks, then TODO list, then subagents) via the shared formatter
+    // Borrow long fields from `ctx` rather than cloning them into an owned DTO
     let commands: Vec<_> = ctx
         .running_tasks
         .iter()
@@ -204,11 +203,40 @@ fn to_system_reminder_inner(
             elapsed_secs: s.elapsed_ms / 1000,
         })
         .collect();
-    sections.extend(reminder::format_active_agent_sections(
+    let scheduled_loops: Vec<_> = ctx
+        .scheduled_loops
+        .iter()
+        .map(|t| ScheduledLoop {
+            task_id: &t.task_id,
+            interval: &t.interval,
+            next_fire_at: &t.next_fire_at,
+            prompt: &t.prompt,
+            recurring: t.recurring,
+            durable: t.durable,
+        })
+        .collect();
+    let workflows: Vec<_> = ctx
+        .workflows
+        .iter()
+        .map(|w| WorkflowRun {
+            name: &w.name,
+            run_id: &w.run_id,
+            status: &w.status,
+            objective: Some(w.objective.as_str()).filter(|s| !s.is_empty()),
+            current_phase: w.current_phase.as_deref(),
+            agents_used: w.agents_used,
+            agent_budget: w.agent_budget,
+            elapsed_secs: w.elapsed_ms / 1000,
+        })
+        .collect();
+    let mut active = reminder::format_active_agent_sections(
         &ActiveAgentReminderState {
             running_commands: &commands,
             todos: &todos,
             running_subagents: &subagents,
+            scheduled_loops: &scheduled_loops,
+            workflows: &workflows,
+            workflow_tool: ctx.workflow_tool_name.as_deref(),
         },
         subagent_tool_names
             .map(|t| reminder::SubagentToolNames {
@@ -216,8 +244,10 @@ fn to_system_reminder_inner(
                 cancel: &t.cancel,
             })
             .as_ref(),
-    ));
+    );
+    rewrite_running_subagent_intro(&mut active, subagent_tool_names);
 
+    let mut after_active = Vec::new();
     // Connected MCP servers (shell-only)
     if !ctx.connected_mcp_servers.is_empty() {
         use xai_grok_tools::implementations::search_tool::format_compaction_server_line;
@@ -234,7 +264,7 @@ fn to_system_reminder_inner(
         } else {
             String::new()
         };
-        sections.push(format!(
+        after_active.push(format!(
             "## Connected MCP Servers\n{}{}",
             servers.trim_end(),
             hint
@@ -245,10 +275,51 @@ fn to_system_reminder_inner(
     if !memory_results.is_empty()
         && let Some(reminder) = super::memory_context::format_memory_reminder(memory_results)
     {
-        sections.push(reminder);
+        after_active.push(reminder);
     }
 
+    // Standing law stays first when the reminder is empty or carries a
+    // shell-only section. A reminder that is only active-agent state matches
+    // that state's exact text and does not prepend the law.
+    let shell_only = !before_active.is_empty() || !after_active.is_empty();
+    let mut sections = Vec::new();
+    if shell_only || active.is_empty() {
+        sections.push(section_surmount_standing_law_after_compact());
+    }
+    sections.extend(before_active);
+    sections.extend(active);
+    sections.extend(after_active);
+
     reminder::wrap_system_reminder(sections)
+}
+
+/// The shell contract's Running Subagents intro is shorter than the shared
+/// formatter. Rewrite that paragraph here so the shared crate stays unchanged.
+fn rewrite_running_subagent_intro(sections: &mut [String], names: Option<&SubagentToolNames>) {
+    let Some(names) = names else {
+        return;
+    };
+    let old_prefix = format!(
+        "## Running Subagents\n\
+         These subagents were launched before this compaction and are still running. \
+         Keep working; completion is a notification. \
+         Use `{}` with the subagent_id for an optional snapshot (omit timeout or pass 0). \
+         Do not start a blocking wait on a long-running builder. \
+         Use `{}` with the subagent_id to cancel a subagent.\n",
+        names.poll, names.cancel
+    );
+    let new_prefix = format!(
+        "## Running Subagents\n\
+         These subagents were launched before this compaction and are still running. \
+         Use `{}` with the subagent_id to check their status or retrieve results. \
+         Use `{}` with the subagent_id to cancel a subagent.\n",
+        names.poll, names.cancel
+    );
+    for section in sections {
+        if let Some(rest) = section.strip_prefix(&old_prefix) {
+            *section = format!("{new_prefix}{rest}");
+        }
+    }
 }
 
 #[cfg(test)]
@@ -259,6 +330,7 @@ mod tests {
         CompactionStateContext {
             cwd_generation: 0,
             destination_project_instructions: None,
+            agent_message_anchor: None,
             running_subagents: vec![RunningSubagentSummary {
                 subagent_id: "sub-1".into(),
                 subagent_type: "explore".into(),
@@ -271,6 +343,10 @@ mod tests {
             running_tasks: vec![],
             connected_mcp_servers: vec![],
             todos: vec![],
+            scheduled_loops: vec![],
+            workflows: vec![],
+            workflow_tool_name: None,
+            images: Default::default(),
         }
     }
 
@@ -281,12 +357,13 @@ mod tests {
             poll: "get_command_or_subagent_output".into(),
             cancel: "kill_command_or_subagent".into(),
         };
-        let result = to_system_reminder_sync(&ctx, &[], &[], Some(&names), None);
+        let result = to_system_reminder_sync(&ctx, &[], &[], Some(&names), None, None);
         let text = result.expect("should produce a reminder");
         assert!(
-            text.contains("Running Subagents"),
+            text.contains("## Running Subagents"),
             "missing subagent section"
         );
+        assert!(text.contains("- \"sub-1\":"), "missing subagent id");
         assert!(text.contains("get_command_or_subagent_output"));
         assert!(text.contains("kill_command_or_subagent"));
         assert!(text.contains("sub-1"));
@@ -297,6 +374,7 @@ mod tests {
         let ctx = CompactionStateContext {
             cwd_generation: 0,
             destination_project_instructions: None,
+            agent_message_anchor: None,
             connected_mcp_servers: vec![
                 CompactionServerSummary {
                     name: "grafana".into(),
@@ -315,8 +393,12 @@ mod tests {
             running_tasks: vec![],
             running_subagents: vec![],
             todos: vec![],
+            scheduled_loops: vec![],
+            workflows: vec![],
+            workflow_tool_name: None,
+            images: Default::default(),
         };
-        let result = to_system_reminder_sync(&ctx, &[], &[], None, None);
+        let result = to_system_reminder_sync(&ctx, &[], &[], None, None, None);
         let text = result.expect("should produce a reminder");
         assert!(
             text.starts_with("<system-reminder>") && text.ends_with("</system-reminder>"),
@@ -333,15 +415,14 @@ mod tests {
         assert!(text.contains("- linear (12 tools)"), "linear line: {text}");
     }
 
-    /// Regression: task IDs in the post-compaction reminder must be rendered
-    /// verbatim. A fabricated `task-` prefix produces an ID that does not
-    /// exist in the task registry, so the model's follow-up
-    /// `get_task_output(task_id="task-<uuid>")` calls fail.
+    /// A fabricated `task-` prefix produces an ID that does not exist in the task registry.
+    /// The model's follow-up `get_task_output(task_id="task-<uuid>")` calls then fail.
     #[test]
     fn running_task_ids_render_verbatim() {
         let ctx = CompactionStateContext {
             cwd_generation: 0,
             destination_project_instructions: None,
+            agent_message_anchor: None,
             running_tasks: vec![BackgroundTaskSummary {
                 task_id: "019ea7f0-cb66-7aa2-9a09-488a3a795795".into(),
                 command: "cargo test".into(),
@@ -354,9 +435,13 @@ mod tests {
             running_subagents: vec![],
             connected_mcp_servers: vec![],
             todos: vec![],
+            scheduled_loops: vec![],
+            workflows: vec![],
+            workflow_tool_name: None,
+            images: Default::default(),
         };
-        let text =
-            to_system_reminder_sync(&ctx, &[], &[], None, None).expect("should produce a reminder");
+        let text = to_system_reminder_sync(&ctx, &[], &[], None, None, None)
+            .expect("should produce a reminder");
         assert!(
             text.contains("- \"019ea7f0-cb66-7aa2-9a09-488a3a795795\": `cargo test`"),
             "task ID must be quoted verbatim: {text}"
@@ -370,7 +455,7 @@ mod tests {
     #[test]
     fn system_reminder_skips_subagent_section_when_tool_names_none() {
         let ctx = ctx_with_running_subagents();
-        let result = to_system_reminder_sync(&ctx, &[], &[], None, None);
+        let result = to_system_reminder_sync(&ctx, &[], &[], None, None, None);
         if let Some(text) = result {
             assert!(
                 !text.contains("Running Subagents"),
@@ -383,6 +468,7 @@ mod tests {
         CompactionStateContext {
             cwd_generation: 0,
             destination_project_instructions: None,
+            agent_message_anchor: None,
             todos,
             recent_messages: vec![],
             last_user_query: None,
@@ -390,6 +476,10 @@ mod tests {
             running_tasks: vec![],
             running_subagents: vec![],
             connected_mcp_servers: vec![],
+            scheduled_loops: vec![],
+            workflows: vec![],
+            workflow_tool_name: None,
+            images: Default::default(),
         }
     }
 
@@ -401,8 +491,7 @@ mod tests {
         }
     }
 
-    /// Active todos are re-surfaced post-compaction: pending/in_progress items
-    /// render verbatim with id + status; completed/cancelled collapse to counts.
+    /// Active todos reappear post-compaction: pending/in_progress items render verbatim with id and status; completed/cancelled collapse to counts.
     #[test]
     fn system_reminder_includes_active_todos() {
         let ctx = ctx_with_todos(vec![
@@ -411,8 +500,8 @@ mod tests {
             todo("3", TodoSummaryStatus::Completed, "read the code"),
             todo("4", TodoSummaryStatus::Cancelled, "abandoned idea"),
         ]);
-        let text =
-            to_system_reminder_sync(&ctx, &[], &[], None, None).expect("should produce a reminder");
+        let text = to_system_reminder_sync(&ctx, &[], &[], None, None, None)
+            .expect("should produce a reminder");
         assert!(
             text.contains("## TODO List"),
             "missing TODO section: {text}"
@@ -434,7 +523,6 @@ mod tests {
         );
     }
 
-    /// The TODO List section is rendered directly below Running Background Tasks.
     #[test]
     fn system_reminder_places_todos_below_background_tasks() {
         let mut ctx = ctx_with_todos(vec![todo(
@@ -448,8 +536,8 @@ mod tests {
             status: "running".into(),
             tool_name: Some("run_terminal_command".into()),
         }];
-        let text =
-            to_system_reminder_sync(&ctx, &[], &[], None, None).expect("should produce a reminder");
+        let text = to_system_reminder_sync(&ctx, &[], &[], None, None, None)
+            .expect("should produce a reminder");
         let tasks_pos = text
             .find("## Running Background Tasks")
             .expect("tasks section");
@@ -460,14 +548,154 @@ mod tests {
         );
     }
 
-    /// No actionable items (all completed/cancelled) → no TODO section.
+    #[test]
+    fn system_reminder_places_workflows_below_skills() {
+        let ctx = CompactionStateContext {
+            cwd_generation: 0,
+            destination_project_instructions: None,
+            agent_message_anchor: None,
+            recent_messages: vec![],
+            last_user_query: None,
+            agent_edited_paths: vec![],
+            running_tasks: vec![],
+            running_subagents: vec![],
+            connected_mcp_servers: vec![],
+            todos: vec![],
+            scheduled_loops: vec![],
+            workflows: vec![],
+            workflow_tool_name: None,
+            images: Default::default(),
+        };
+        let skills = [xai_grok_tools::implementations::skills::types::SkillInfo {
+            name: "commit".into(),
+            description: "Create a git commit.".into(),
+            path: "/skills/commit/SKILL.md".into(),
+            ..Default::default()
+        }];
+        let workflows =
+            "The following workflows are available:\n\n- review-pr: Review a PR.\n  Source: user";
+        let text = to_system_reminder_sync(&ctx, &[], &skills, None, None, Some(workflows))
+            .expect("should produce a reminder");
+        let skills_at = text.find("## Available Skills").expect("skills section");
+        let workflows_at = text
+            .find("## Available Workflows")
+            .expect("workflows section");
+        assert!(
+            skills_at < workflows_at,
+            "workflows must sit under skills:\n{text}"
+        );
+        assert!(text.contains("review-pr"), "{text}");
+    }
+
+    #[test]
+    fn system_reminder_includes_scheduled_loops_and_live_workflows() {
+        let ctx = CompactionStateContext {
+            cwd_generation: 0,
+            destination_project_instructions: None,
+            agent_message_anchor: None,
+            recent_messages: vec![],
+            last_user_query: None,
+            agent_edited_paths: vec![],
+            running_tasks: vec![],
+            running_subagents: vec![],
+            connected_mcp_servers: vec![],
+            todos: vec![],
+            scheduled_loops: vec![ScheduledLoopSummary {
+                task_id: "01a046ad3877".into(),
+                interval: "every 20 minutes".into(),
+                next_fire_at: "in 12m".into(),
+                prompt: "monitor job".into(),
+                recurring: true,
+                durable: true,
+            }],
+            workflows: vec![WorkflowRunSummary {
+                name: "review-changes".into(),
+                run_id: "wf-1".into(),
+                status: "active".into(),
+                objective: "review the PR".into(),
+                current_phase: Some("Smoke".into()),
+                agents_used: 3,
+                agent_budget: Some(128),
+                elapsed_ms: 12_000,
+            }],
+            workflow_tool_name: Some("workflow".into()),
+            images: Default::default(),
+        };
+        let text = to_system_reminder_sync(&ctx, &[], &[], None, None, None)
+            .expect("should produce a reminder");
+        let bg = text.find("## Running Background Tasks").expect("bg");
+        let Some(bg_section) = text.get(bg..) else {
+            panic!("bg heading offset is not a char boundary: {text}");
+        };
+        assert!(
+            bg_section.contains("- \"01a046ad3877\": `monitor job`"),
+            "got:\n{text}"
+        );
+        assert!(bg_section.contains("run id `wf-1`"), "got:\n{text}");
+        assert!(!text.contains("## Scheduled Loops"), "got:\n{text}");
+        assert!(text.contains("## Running Workflows"), "got:\n{text}");
+        assert!(!text.contains("## Active Workflows"), "got:\n{text}");
+        assert!(
+            text.contains("Use `workflow` to inspect or resume"),
+            "got:\n{text}"
+        );
+    }
+
+    #[test]
+    fn missing_tool_name_still_renders_the_running_task() {
+        let ctx = CompactionStateContext {
+            running_tasks: vec![BackgroundTaskSummary {
+                task_id: "task-1".into(),
+                command: "cargo test".into(),
+                status: "running".into(),
+                tool_name: None,
+            }],
+            ..ctx_with_todos(vec![])
+        };
+        let text = to_system_reminder_sync(&ctx, &[], &[], None, None, None)
+            .expect("a missing tool name must still produce the reminder");
+        assert_eq!(
+            text,
+            "<system-reminder>\n## Running Background Tasks\nThese tasks are still running:\n- \"task-1\": `cargo test` (running)\n</system-reminder>"
+        );
+    }
+
+    #[test]
+    fn reminder_omits_a_sibling_session_id() {
+        let ctx = CompactionStateContext {
+            running_tasks: vec![BackgroundTaskSummary {
+                task_id: "task-1".into(),
+                command: "cargo test".into(),
+                status: "running".into(),
+                tool_name: Some("run_terminal_command".into()),
+            }],
+            running_subagents: vec![RunningSubagentSummary {
+                subagent_id: "child-1".into(),
+                subagent_type: "explore".into(),
+                description: "find files".into(),
+                elapsed_ms: 5_000,
+            }],
+            ..ctx_with_todos(vec![])
+        };
+        let names = SubagentToolNames {
+            poll: "get_task_output".into(),
+            cancel: "kill_task".into(),
+        };
+        let text =
+            to_system_reminder_sync(&ctx, &[], &[], Some(&names), None, None).expect("reminder");
+        assert_eq!(
+            text,
+            "<system-reminder>\n## Running Background Tasks\nThese tasks are still running:\n- \"task-1\": `cargo test` (running, run_terminal_command)\n\n## Running Subagents\nThese subagents were launched before this compaction and are still running. Use `get_task_output` with the subagent_id to check their status or retrieve results. Use `kill_task` with the subagent_id to cancel a subagent.\n- \"child-1\": `find files` (running for 5s, explore)\n</system-reminder>"
+        );
+    }
+
     #[test]
     fn system_reminder_omits_todos_when_none_active() {
         let ctx = ctx_with_todos(vec![
             todo("1", TodoSummaryStatus::Completed, "done"),
             todo("2", TodoSummaryStatus::Cancelled, "scrapped"),
         ]);
-        let result = to_system_reminder_sync(&ctx, &[], &[], None, None);
+        let result = to_system_reminder_sync(&ctx, &[], &[], None, None, None);
         if let Some(text) = result {
             assert!(
                 !text.contains("## TODO List"),
@@ -487,6 +715,11 @@ mod tests {
             running_tasks: vec![],
             connected_mcp_servers: vec![],
             todos: vec![],
+            agent_message_anchor: None,
+            images: Default::default(),
+            scheduled_loops: vec![],
+            workflows: vec![],
+            workflow_tool_name: None,
         }
     }
 
@@ -497,7 +730,7 @@ mod tests {
     #[test]
     // Grok OSS: empty live-state still injects standing law as the first system-reminder section after compact. This diverges from upstream xAI because Surmount standing law must not be a buried AGENTS.md paragraph.
     fn post_compact_reminder_includes_surmount_standing_law() {
-        let text = to_system_reminder_sync(&empty_compaction_ctx(), &[], &[], None, None)
+        let text = to_system_reminder_sync(&empty_compaction_ctx(), &[], &[], None, None, None)
             .expect("standing law must produce a post-compact reminder even with empty live state");
         assert!(
             text.starts_with("<system-reminder>"),
@@ -547,7 +780,7 @@ mod tests {
         let mut with_files = empty_compaction_ctx();
         with_files.agent_edited_paths = vec!["src/auth.rs".into()];
         let with_files_text =
-            to_system_reminder_sync(&with_files, &[], &[], None, None).expect("reminder");
+            to_system_reminder_sync(&with_files, &[], &[], None, None, None).expect("reminder");
         let law_pos = with_files_text
             .find("## Surmount standing law (after compact)")
             .expect("standing law");

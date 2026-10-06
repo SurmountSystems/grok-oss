@@ -6,7 +6,7 @@
 
 #[cfg(test)]
 mod tests {
-    use xai_grok_shell::session::pending_prompts::PersistedQueuedPrompt;
+    use xai_grok_shell::session::unsent_prompt_draft::pending_prompts::PersistedQueuedPrompt;
 
     fn write_session_chat_history(cwd: &str, sid: &str, jsonl: &str) {
         let path = xai_grok_shell::session::prompt_wal::chat_history_path(cwd, sid)
@@ -334,7 +334,7 @@ mod tests {
         let goal_wal = "/goal run just check-remote";
         let quoted_wal = r#"say "noted""#;
         let still_queued = "follow-up that is not yet a user turn";
-        xai_grok_shell::session::pending_prompts::write_pending_prompts(
+        xai_grok_shell::session::unsent_prompt_draft::pending_prompts::write_pending_prompts(
             &cwd_str,
             sid,
             &[
@@ -433,7 +433,10 @@ mod tests {
             agent.persist_session_work_to_disk_for_rebuild();
         }
 
-        let rows = xai_grok_shell::session::pending_prompts::load_pending_prompts(&cwd_str, sid)
+        let rows =
+            xai_grok_shell::session::unsent_prompt_draft::pending_prompts::load_pending_prompts(
+                &cwd_str, sid,
+            )
             .expect("load queue");
         assert!(
             !rows

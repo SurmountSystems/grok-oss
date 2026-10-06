@@ -7,7 +7,8 @@ use std::path::Path;
 
 use super::credentials_store::CredentialsStore;
 use super::model::{
-    API_KEY_SCOPE, AuthMode, SupergrokPrincipalListing, list_supergrok_principal_listings,
+    API_KEY_SCOPE, AuthMode, LEGACY_SCOPE, SupergrokPrincipalListing, fingerprint_session_token,
+    list_supergrok_principal_listings, supergrok_identity_id_from_auth,
 };
 use super::storage::read_auth_json;
 use super::xai_console::{fingerprint_console_key, list_console_api_key_fingerprints};
@@ -73,7 +74,10 @@ impl DualAuthStatus {
                 (false, _) => out.push_str("  SuperGrok session: no (run `grok login`)\n"),
             }
         } else if self.supergrok_principals.len() == 1 {
-            let p = &self.supergrok_principals[0];
+            let p = self
+                .supergrok_principals
+                .first()
+                .expect("index out of bounds");
             out.push_str(&format!(
                 "  SuperGrok session: yes ({role}, {mode})\n    fingerprint {fp}\n",
                 role = p.role_label,
@@ -249,7 +253,7 @@ pub fn collect_dual_auth_status_with(
     let map = read_auth_json(&path).ok();
     let supergrok_principals = map
         .as_ref()
-        .map(list_supergrok_principal_listings)
+        .map(listings_including_lone_base_session)
         .unwrap_or_default();
     let (session_present, session_mode) = probe_session_from_map(map.as_ref());
     let store = CredentialsStore::at_grok_home(grok_home);
@@ -269,6 +273,39 @@ pub fn collect_dual_auth_status_with(
         preferred_method,
         auto_use_included_limits,
     }
+}
+
+/// The slot lister only emits `::personal` and `::team::` keys. A single
+/// `grok-oss login` is stored at the OAuth base scope with no slot suffix.
+/// That login is one personal principal. A base key that already has slots
+/// is the mirror and must not become a third listing.
+fn listings_including_lone_base_session(
+    map: &super::model::AuthStore,
+) -> Vec<SupergrokPrincipalListing> {
+    let listings = list_supergrok_principal_listings(map);
+    if !listings.is_empty() {
+        return listings;
+    }
+    for (scope, auth) in map {
+        if scope == API_KEY_SCOPE || scope == LEGACY_SCOPE {
+            continue;
+        }
+        if scope.ends_with("::personal") || scope.contains("::team::") {
+            continue;
+        }
+        let mode_label = match auth.auth_mode {
+            AuthMode::Oidc => "oidc",
+            AuthMode::External => "external",
+            AuthMode::ApiKey | AuthMode::WebLogin => continue,
+        };
+        return vec![SupergrokPrincipalListing {
+            role_label: "personal",
+            mode_label,
+            identity_id: supergrok_identity_id_from_auth(auth, scope),
+            fingerprint: fingerprint_session_token(&auth.key),
+        }];
+    }
+    Vec::new()
 }
 
 fn probe_session_from_map(map: Option<&super::model::AuthStore>) -> (bool, Option<&'static str>) {

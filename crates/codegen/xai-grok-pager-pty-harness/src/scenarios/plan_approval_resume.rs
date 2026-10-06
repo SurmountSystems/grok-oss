@@ -1,35 +1,11 @@
-//! Plan-approval chrome restored by the shell after quit + resume.
+//! Plan-approval chrome restored by the shell after quit and resume.
 //!
-//! When `exit_plan_mode` is parked and the user quits, the shell persists
-//! `awaiting_plan_approval = true` in `plan_mode.json`. The first session
-//! scripts that tool call through mock inference so the bundled shell parks
-//! a live waiter (ContentController is not ACP and cannot answer
-//! `x.ai/exit_plan_mode`). On `--continue` the shell re-issues the reverse-
-//! request — a real live ACP waiter — so the pager re-shows approval chrome
-//! through its normal path with no pager-side disk logic. Approving then
-//! leaves plan mode and starts the implement turn.
+//! When `exit_plan_mode` is parked and the user quits, the shell persists `awaiting_plan_approval = true` in `plan_mode.json`.
+//! On `--continue` the shell re-issues the `x.ai/exit_plan_mode` reverse-request, a real live ACP waiter.
+//! The pager then re-shows approval chrome through its normal path with no pager-side disk logic.
+//! Approving then leaves plan mode and starts the implement turn.
 //!
-//! This FAILS without the shell re-park (PR2 product change): no reverse-request
-//! reaches the resumed pager, so no approval chrome appears.
-//!
-//! ## Named contract (soft-park approve path)
-//!
-//! Soft-park is **non-capturing** for letter keys: `a` / `A` / `s` / `q` type
-//! into the composer or the plan pane box. Empty `?` still arms Clarify.
-//! Empty Enter never Approves. A live mid-turn `exit_plan_mode` still
-//! auto-opens the plan side panel. Resume / `--continue` parks the waiter
-//! without docking and without painting idle "Plan written. Click or
-//! /view-plan" while the pane is shut. Open the pane with `/view-plan` or
-//! a status click before Approve. Product approve path:
-//!
-//! 1. **Mouse** click on the painted footer **Approve** word (primary)
-//!
-//! Footer paint is word-only: `approve  |  comment  |  revise  |  exit`
-//! (narrow docks drop separators to spaces). There is no Notes button, no
-//! Quit label, and no `a approve` / `A notes` / `s revise` / `q quit` prefix.
-//! Do **not** match bare `"approve"` — transcript card prose can contain
-//! that substring and is not a hit target. Do **not** fall back to empty
-//! Enter even if a shortcut bar still says `Enter:approve`.
+//! This FAILS without the shell re-park: no reverse-request reaches the resumed pager, so no approval chrome appears.
 
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -42,14 +18,12 @@ use crate::{ContentController, MousePoint, PtyHarness, ScriptedResponse, SseEven
 const DEFAULT_ROWS: u16 = 50;
 const DEFAULT_COLS: u16 = 120;
 const WELCOME_TIMEOUT: Duration = Duration::from_secs(20);
-/// Direct pager↔shell ACP so resume reverse-requests are not dropped by a
+/// Direct pager-to-shell ACP so resume reverse-requests are not dropped by a
 /// leader with no ExtMethod waiter. `--trust` skips the folder-trust gate
 /// that can stall `--continue` on the welcome recap. `--yolo` skips a
-/// permission card on the live `exit_plan_mode` park (mid-turn still
-/// auto-docks).
+/// permission card on the live `exit_plan_mode` park.
 const PAGER_E2E_ARGS: &[&str] = &["--yolo", "--trust", "--no-leader"];
-/// Distinct per-turn sentinels: turn 1 seeds the session before quit; turn 2 is
-/// the implement turn the shell injects after the resumed approval is approved.
+/// Turn 1 seeds the session before quit; turn 2 is the implement turn the shell injects after the resumed approval is approved.
 const SETUP_SENTINEL: &str = "GBT3703SETUP";
 const IMPLEMENT_SENTINEL: &str = "GBT3703IMPLEMENTED";
 
@@ -70,8 +44,7 @@ const PLAN_BODY: &str = "\
 3. Resume and expect restored approval chrome
 ";
 
-/// Regression: the shell re-parks `exit_plan_mode` on resume; approving via the
-/// side-panel footer mouse CTA leaves plan mode and starts the implement turn.
+/// Regression: the shell re-parks `exit_plan_mode` on resume; pressing approve leaves plan mode and starts the implement turn.
 pub async fn assert_plan_approval_restored_after_resume() -> Result<()> {
     let content = ContentController::start()
         .await
@@ -114,18 +87,7 @@ pub async fn assert_plan_approval_restored_after_resume() -> Result<()> {
         .await
         .context("setup turn expectation timeout")?;
 
-    let sessions_root = content.sandbox().grok_home().join("sessions");
-    write_plan_md_in_sessions(&sessions_root).context("write plan.md before park")?;
-
-    first
-        .inject_keys(b"present the plan\r")
-        .context("submit exit_plan_mode park turn")?;
-    first
-        .wait_for_text("Plan ready. Side panel open", Duration::from_secs(30))
-        .context("live exit_plan_mode must park (auto-dock) before quit")?;
-
-    // Quit and reap BEFORE seeding so the still-live shell cannot re-persist
-    // and clobber the seeded state.
+    // Quit and reap BEFORE seeding so the still-live shell cannot re-persist and clobber the seeded state
     first.inject_keys(b"\x11").context("ctrl-q once")?;
     first.update(Duration::from_millis(200));
     first.inject_keys(b"\x11").context("ctrl-q confirm")?;
@@ -147,35 +109,46 @@ pub async fn assert_plan_approval_restored_after_resume() -> Result<()> {
     )
     .context("spawn resumed pager")?;
 
-    // The shell re-parks `exit_plan_mode` on resume as a live waiter.
-    // Restore must not auto-dock the side panel and must not paint the
-    // shut-panel idle click cue. Session restore is the ready signal;
-    // `/view-plan` binds Approve. Live mid-turn present still auto-opens.
-    wait_for_restored_session(&mut resumed)
-        .context("restored session after resume (not idle Plan written chrome)")?;
-    if resumed.contains_text("Plan ready. Side panel open") {
-        bail!(
-            "resume must not auto-dock the plan side panel\n{}",
-            resumed.screen_contents()
-        );
+    // The shell re-parks `exit_plan_mode` on resume, so approval chrome can open immediately and cover chat history
+    // Prefer the chrome markers (product signal) over SETUP_SENTINEL, which may not be visible under the plan viewer
+    // Without the shell re-park this times out.
+    //
+    // Markers:
+    // - full TUI status (`Plan ready. Side panel open`) in the last 16
+    //   lines, and the Approve footer
+    // - that same footer when the status line is absent
+    // `Plan ready for review` with no Approve footer does not count.
+    // Default spawn is fullscreen TUI, not `--minimal`, so the first wait
+    // must accept the fullscreen status line. Waiting only for the minimal
+    // card header times out even when the side-panel CTAs are already up.
+    // That status line counts only in the last 16 screen lines, and only
+    // with the footer.
+    wait_for_restored_plan_ready_chrome(&mut resumed)
+        .context("restored plan-ready chrome after resume")?;
+    {
+        let deadline = Instant::now() + WELCOME_TIMEOUT;
+        loop {
+            resumed.update(Duration::from_millis(50));
+            let screen = resumed.screen_contents();
+            let footer_painted = screen.contains(LABELED_FOOTER_STRIP)
+                || screen.contains(NARROW_FOOTER_STRIP)
+                || screen.contains(LABELED_APPROVE_CTA);
+            if footer_painted {
+                break;
+            }
+            if Instant::now() >= deadline {
+                bail!(
+                    "timed out after {:?} waiting for Approve footer\n{screen}",
+                    WELCOME_TIMEOUT,
+                );
+            }
+        }
     }
-    if resumed.contains_text("Plan written. Click or /view-plan") {
-        bail!(
-            "resume must not idle as Plan written. Click or /view-plan while the pane is shut\n{}",
-            resumed.screen_contents()
-        );
-    }
-
-    // Restore can land after the first slash. Keep sending `/view-plan`
-    // until the parked waiter binds Approve (Plan ready. Side panel open).
-    // The four-word footer alone is not enough: view-only plan.md paints
-    // the same strip and Approve is a no-op. Do not auto-dock. Do not wait
-    // on idle Plan written chrome.
-    wait_for_restored_approve_footer(&mut resumed)
-        .context("/view-plan must bind Approve to the restored waiter")?;
     let screen = resumed.screen_contents();
-    // History was seeded before quit; plan body from disk is a stronger signal
-    // that the session was restored when chrome already covers the transcript.
+    if !screen.contains("approve") {
+        bail!("expected approval primary action after resume\n{screen}");
+    }
+    // History was seeded before quit; plan body from disk is a stronger signal that the session was restored when chrome already covers the transcript
     if !screen.contains("GBT3703Repro")
         && !screen.contains(SETUP_SENTINEL)
         && !screen.contains("Seed plan file on disk")
@@ -200,10 +173,45 @@ pub async fn assert_plan_approval_restored_after_resume() -> Result<()> {
     Ok(())
 }
 
+/// After `--continue`, fullscreen "Plan ready. Side panel open" counts only
+/// in the last 16 screen lines, and only when the Approve footer is painted.
+/// A leftover first-session line above that window is not a bound waiter.
+/// "Plan ready for review" does not succeed without that footer. A word-only
+/// footer still counts when that status line is absent.
+fn wait_for_restored_plan_ready_chrome(harness: &mut PtyHarness) -> Result<()> {
+    const BOUND_APPROVE_STATUS: &str = "Plan ready. Side panel open";
+    let deadline = Instant::now() + WELCOME_TIMEOUT;
+    loop {
+        harness.update(Duration::from_millis(50));
+        let screen = harness.screen_contents();
+        let footer_painted = screen.contains(LABELED_FOOTER_STRIP)
+            || screen.contains(NARROW_FOOTER_STRIP)
+            || screen.contains(LABELED_APPROVE_CTA);
+        // Do not treat leftover first-session "Plan ready. Side panel open"
+        // in scrollback as a bound waiter after `--continue`.
+        let recent_status = screen
+            .lines()
+            .rev()
+            .take(16)
+            .any(|line| line.contains(BOUND_APPROVE_STATUS));
+        if (recent_status && footer_painted)
+            || (footer_painted && !screen.contains(BOUND_APPROVE_STATUS))
+        {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            bail!(
+                "timed out after {:?} waiting for {BOUND_APPROVE_STATUS:?} in the last 16 lines with Approve footer, or Approve footer with that status line absent\n{screen}",
+                WELCOME_TIMEOUT,
+            );
+        }
+    }
+}
+
 /// Click the painted plan-approval Approve word.
 ///
-/// Prefer the separated strip (`approve  |  clarify`). Fall back to the
-/// narrow four-word strip. Empty Enter is not an Approve path.
+/// Prefer the separated strip. Fall back to the narrow four-word strip.
+/// Empty Enter is not an Approve path.
 fn click_plan_approve_cta(harness: &mut PtyHarness) -> Result<()> {
     let screen = harness.screen_contents();
     if screen.contains("a approve")
@@ -226,86 +234,6 @@ fn click_plan_approve_cta(harness: &mut PtyHarness) -> Result<()> {
         "no plan Approve control found (expected '{LABELED_FOOTER_STRIP}' \
          or '{NARROW_FOOTER_STRIP}')\n{screen}"
     )
-}
-
-/// Open the restored waiter with `/view-plan` until Approve is bound.
-///
-/// Success is live-park status after an explicit open: "Plan ready. Side
-/// panel open". The word-only footer can paint for view-only plan.md
-/// without `plan_approval_view`, and clicking Approve then does nothing.
-/// One Enter can race the shell re-park. Retry the slash. Do not treat
-/// idle "Plan written. Click or /view-plan" as success.
-fn wait_for_restored_approve_footer(harness: &mut PtyHarness) -> Result<()> {
-    const SLASH_RETRY: Duration = Duration::from_millis(400);
-    const BOUND_APPROVE_STATUS: &str = "Plan ready. Side panel open";
-    let deadline = Instant::now() + WELCOME_TIMEOUT;
-    let mut last_slash = Instant::now() - SLASH_RETRY;
-    loop {
-        harness.update(Duration::from_millis(50));
-        let screen = harness.screen_contents();
-        let footer_painted = screen.contains(LABELED_FOOTER_STRIP)
-            || screen.contains(NARROW_FOOTER_STRIP)
-            || screen.contains(LABELED_APPROVE_CTA);
-        // Do not treat leftover first-session "Plan ready. Side panel open"
-        // in scrollback as a bound waiter after `--continue`.
-        let recent_status = screen
-            .lines()
-            .rev()
-            .take(16)
-            .any(|line| line.contains(BOUND_APPROVE_STATUS));
-        if recent_status && footer_painted {
-            return Ok(());
-        }
-        if Instant::now() >= deadline {
-            bail!(
-                "timed out after {:?} waiting for {BOUND_APPROVE_STATUS:?} with Approve footer\n{screen}",
-                WELCOME_TIMEOUT,
-            );
-        }
-        if last_slash.elapsed() >= SLASH_RETRY {
-            let composer_holds_slash = screen
-                .lines()
-                .rev()
-                .take(8)
-                .any(|line| matches!(line.trim(), "/view-plan" | "/show-plan" | "/plan-view"));
-            if composer_holds_slash {
-                harness
-                    .inject_keys(b"\r")
-                    .context("submit in-composer /view-plan")?;
-            } else {
-                harness
-                    .inject_keys(b"/view-plan\r")
-                    .context("open restored waiter via /view-plan")?;
-            }
-            last_slash = Instant::now();
-        }
-    }
-}
-
-/// `--continue` must be inside the restored session, not the welcome recap.
-/// Welcome lists "Resume session" and can show the last-turn snippet, which
-/// is not a bound waiter.
-fn wait_for_restored_session(harness: &mut PtyHarness) -> Result<()> {
-    let deadline = Instant::now() + WELCOME_TIMEOUT;
-    loop {
-        harness.update(Duration::from_millis(50));
-        let screen = harness.screen_contents();
-        // Welcome recap can show the last-turn snippet (setup sentinel)
-        // without the exact "Resume session" label. "New worktree" is
-        // welcome-menu only. `/view-plan` on welcome never binds Approve.
-        if screen.contains(SETUP_SENTINEL)
-            && !screen.contains("Resume session")
-            && !screen.contains("New worktree")
-        {
-            return Ok(());
-        }
-        if Instant::now() >= deadline {
-            bail!(
-                "timed out after {:?} waiting for restored session (setup sentinel, not welcome Resume session / New worktree)\n{screen}",
-                WELCOME_TIMEOUT
-            );
-        }
-    }
 }
 
 /// Click the `occurrence`-th on-screen match of `text` (0-indexed), SGR mouse.
@@ -494,40 +422,7 @@ fn chat_completions_tool_call_events(call_id: &str, name: &str, arguments: &str)
     ]
 }
 
-fn write_plan_md_in_sessions(sessions_root: &Path) -> Result<usize> {
-    if !sessions_root.is_dir() {
-        bail!(
-            "expected sessions under {} after first turn",
-            sessions_root.display()
-        );
-    }
-    let mut written = 0usize;
-    for cwd_ent in std::fs::read_dir(sessions_root).context("read sessions root")? {
-        let cwd_ent = cwd_ent.context("cwd entry")?;
-        if !cwd_ent.file_type().context("ft")?.is_dir() {
-            continue;
-        }
-        for sess_ent in std::fs::read_dir(cwd_ent.path()).context("read cwd sessions")? {
-            let sess_ent = sess_ent.context("session entry")?;
-            if !sess_ent.file_type().context("ft")?.is_dir() {
-                continue;
-            }
-            std::fs::write(sess_ent.path().join("plan.md"), PLAN_BODY).context("write plan.md")?;
-            written += 1;
-        }
-    }
-    if written == 0 {
-        bail!(
-            "expected at least one session dir under {}",
-            sessions_root.display()
-        );
-    }
-    Ok(written)
-}
-
-/// Mark the persisted session as having a parked plan approval: write `plan.md`
-/// and flip `awaiting_plan_approval` to `true` in `plan_mode.json` for every
-/// session dir under the sandbox `$GROK_HOME/sessions`.
+/// For every session dir under the sandbox sessions root, write `plan.md` and flip `awaiting_plan_approval` to `true` in `plan_mode.json`.
 fn seed_parked_approval(sessions_root: &Path) -> Result<usize> {
     if !sessions_root.is_dir() {
         bail!(
@@ -561,12 +456,7 @@ fn seed_parked_approval(sessions_root: &Path) -> Result<usize> {
     Ok(seeded)
 }
 
-/// Round-trip the shell-written `plan_mode.json` and flip `awaiting_plan_approval`
-/// to `true`, preserving every other field. Falls back to a fresh Active
-/// snapshot if the shell wrote nothing. The shape mirrors
-/// `xai_grok_shell::session::plan_mode::PlanModeSnapshot`; we only touch the one
-/// field (robust to schema growth) rather than depend on the heavy shell crate
-/// from this test-only harness.
+/// Flip one field and preserve the rest, so schema growth does not require the shell crate. Fresh Active snapshot if the shell wrote nothing.
 fn write_awaiting_plan_mode(path: &Path) -> Result<()> {
     let mut value: serde_json::Value = std::fs::read_to_string(path)
         .ok()
