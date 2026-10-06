@@ -75,11 +75,6 @@ pub const PALETTE_HEX: [&str; 8] = [
     "#000000", "#FF0000", "#00FF00", "#FFFF00", "#0000FF", "#FF00FF", "#00FFFF", "#FFFFFF",
 ];
 
-/// ANSI / ECMA-48 SGR names for indices 0…7 (real standard name order).
-pub const PALETTE_NAMES: [&str; 8] = [
-    "Black", "Red", "Green", "Yellow", "Blue", "Magenta", "Cyan", "White",
-];
-
 /// Index `0…7` from pure primary RGB via `R + 2·G + 4·B` (channels in `{0,255}`).
 ///
 /// Non-pure inputs are hard-thresholded first.
@@ -104,11 +99,6 @@ pub fn nearest_rgb(r: u8, g: u8, b: u8) -> (u8, u8, u8) {
         }
     }
     best
-}
-
-/// Format pure RGB as `#RRGGBB` (uppercase).
-pub fn hex_of_rgb(r: u8, g: u8, b: u8) -> String {
-    format!("#{r:02X}{g:02X}{b:02X}")
 }
 
 // ── Optional: Floyd–Steinberg on a packed RGB buffer ─────────────────────
@@ -768,7 +758,11 @@ mod tests {
     #[test]
     fn palette_hex_matches_rgb() {
         for (i, &(r, g, b)) in PALETTE.iter().enumerate() {
-            assert_eq!(hex_of_rgb(r, g, b), PALETTE_HEX[i], "index {i}");
+            assert_eq!(
+                format!("#{r:02X}{g:02X}{b:02X}"),
+                PALETTE_HEX[i],
+                "index {i}"
+            );
             assert_eq!(index_of_rgb(r, g, b), i as u8, "index formula {i}");
         }
     }

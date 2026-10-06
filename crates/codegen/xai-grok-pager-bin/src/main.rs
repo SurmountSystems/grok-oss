@@ -2820,10 +2820,12 @@ async fn run_update_command(
                     .ok()
             });
         if let Some(agent_cfg) = telemetry_cfg {
-            let auth_manager = std::sync::Arc::new(xai_grok_shell::auth::AuthManager::new(
-                &xai_grok_shell::util::grok_home::grok_home(),
-                agent_cfg.grok_com_config.clone(),
-            ));
+            let auth_manager =
+                std::sync::Arc::new(xai_grok_shell::auth::AuthManager::new_with_proxy_base_url(
+                    &xai_grok_shell::util::grok_home::grok_home(),
+                    agent_cfg.grok_com_config.clone(),
+                    agent_cfg.endpoints.proxy_url(),
+                ));
             xai_grok_shell::agent::init::update_telemetry_config(&agent_cfg, &auth_manager);
         }
         let result = auto_update::run_update(
