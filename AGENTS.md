@@ -713,6 +713,33 @@ less than product code and tests. Do not invent long essays or git nags.
     image for viewing. Dual-pin: [`FORK.md`](FORK.md) **Named tests
     are contracts** § *Composer copy, closed header, and plan
     approval*.
+    **Main composer copy and header credits (pinned 2026-10-07).**
+    These sentences say what those surfaces must do. They are not a
+    claim that the tests already pass. Do not reshape the asserts to
+    match today's paint. SuperGrok is paid. Older pins above stay.
+    The main composer does not paint the six-column yellow word
+    `[Copy]` at the bottom right next to the mode caption. Named
+    test:
+    `main_composer_does_not_paint_yellow_copy_at_the_bottom_right`.
+    `composer_copy_control_is_a_bracketed_glyph_inset_from_the_white_stroke`
+    only checks the top row. Today the bottom right still paints that
+    yellow word. The header credits slot shows percent used of
+    included SuperGrok period limits only when the next request draws
+    that meter. Otherwise it shows credits remaining for the meter
+    that request spends. A live Team JWT with hard-expired personal
+    SuperGrok shows team postpaid Billing Credits remaining, not the
+    words `Limits and Credits`, and not `limits N%`. That Team
+    settlement is not included SuperGrok period limits, not SuperGrok
+    dollar credits, and not console team prepaid.
+    `closed_plan_header_opens_limits_and_credits_without_a_false_percent`
+    used to require the words. The Operator replaced that requirement.
+    The team-JWT test
+    `limits_mode_does_not_paint_limits_in_use_for_a_team_jwt_and_an_unread_meter_is_not_zero_percent`
+    still forbids `limits 0%`, `limits 1%`, `Using limits`, and an
+    unread meter painted as zero. When a live personal session draws
+    included limits, the header still shows `limits 28%`. Dual-pin:
+    [`FORK.md`](FORK.md) **Named tests are contracts** § *Main
+    composer copy and header credits*.
 16. **No bash-in-nix; SHA-1 is git object ids only (pinned 2026-08-25).**
     Do not wrap old `.sh` in `pkgs.writeShellApplication` (or equivalent
     bash-in-nix). CI/Nix helper logic belongs in named `flake/*.nix` modules

@@ -8438,14 +8438,20 @@ fn popup_dashboard_button_dismisses_the_popup_not_the_dashboard() {
 
 /// Plan mode closed, and the plan-approval screen with the side panel
 /// open and the footer `approve | comment | revise | exit`. Both use a
-/// live Team JWT, and `next_request_draws_included_period_limits()` is
-/// false. The header shows the exact words `Limits and Credits`,
-/// `hit_credits` covers those cells, the text is not `limits 0%` and
-/// not `limits N%`, and a click yields `Action::ShowLimits`. Opening
-/// the card through `dispatch_show_limits` shows Limits before Credits.
+/// live Team JWT and a hard-expired personal SuperGrok session, so
+/// `next_request_draws_included_period_limits()` is false. The header
+/// shows the credits remaining for team postpaid Billing Credits, taken
+/// from this fixture's live reading. It does not show the words
+/// `Limits and Credits`. It does not show `limits N%`, `limits 0%`, or
+/// `limits 1%`. `hit_credits` covers that remaining, and a click yields
+/// `Action::ShowLimits`. Opening the card through `dispatch_show_limits`
+/// shows Limits before Credits.
 ///
-/// Fails today because plan mode closed pushes no credits slot, and
-/// the approval screen in the 11:16 shot has no Limits control.
+/// Team postpaid Billing Credits is not included SuperGrok period limits,
+/// not SuperGrok dollar credits, and not console team prepaid. SuperGrok
+/// is paid. The reading is not `$0`.
+///
+/// Fails today because the header paints `Limits and Credits`.
 #[test]
 #[serial_test::serial]
 fn closed_plan_header_opens_limits_and_credits_without_a_false_percent() {
@@ -8465,7 +8471,12 @@ fn closed_plan_header_opens_limits_and_credits_without_a_false_percent() {
     use xai_grok_shell::auth::limits_pins::{
         LimitsPins, MeterSource, next_request_draws_included_period_limits, save_limits_pins,
     };
-    use xai_grok_shell::auth::{AuthMode, GrokAuth, upsert_supergrok_session};
+    use xai_grok_shell::auth::{
+        AuthMode, GrokAuth, PostpaidInvoicePreviewResponse,
+        billing_credits_remaining_cents_from_preview, cached_console_team_postpaid,
+        clear_console_team_postpaid_cache, console_team_postpaid_from_response,
+        seed_console_team_postpaid_cache, upsert_supergrok_session,
+    };
     use xai_grok_test_support::EnvGuard;
 
     fn weekly_bal(pct: f64, reset_at: DateTime<Utc>) -> CreditBalance {
@@ -8488,6 +8499,19 @@ fn closed_plan_header_opens_limits_and_credits_without_a_false_percent() {
             grok_build_usage_pct: None,
             included_usage_known: true,
         }
+    }
+
+    fn dollars_from_cents(cents: i64) -> String {
+        let negative = cents < 0;
+        let cents = cents.unsigned_abs();
+        let dollars = cents / 100;
+        let frac = cents % 100;
+        let body = if frac == 0 {
+            format!("${dollars}")
+        } else {
+            format!("${dollars}.{frac:02}")
+        };
+        if negative { format!("-{body}") } else { body }
     }
 
     fn paints_limits_percent(text: &str) -> bool {
@@ -8610,9 +8634,50 @@ fn closed_plan_header_opens_limits_and_credits_without_a_false_percent() {
     })
     .expect("stay pin restored");
 
+    struct ClearTeamPostpaidCache;
+    impl Drop for ClearTeamPostpaidCache {
+        fn drop(&mut self) {
+            clear_console_team_postpaid_cache();
+        }
+    }
+    let _clear_team_postpaid_cache = ClearTeamPostpaidCache;
+    clear_console_team_postpaid_cache();
+    let team_id = "team-fixture";
+    let preview: PostpaidInvoicePreviewResponse = serde_json::from_value(serde_json::json!({
+        "coreInvoice": {
+            "lines": [],
+            "totalWithCorr": { "val": "82371" },
+            "prepaidCredits": { "val": "-11245" },
+            "prepaidCreditsUsed": { "val": "6542" }
+        },
+        "defaultCredits": "2500"
+    }))
+    .expect("team postpaid Billing Credits preview");
+    let parsed = billing_credits_remaining_cents_from_preview(&preview)
+        .expect("the fixture's live reading of team postpaid Billing Credits; do not invent $0");
+    assert_ne!(
+        parsed, 0,
+        "team postpaid Billing Credits remaining is not $0"
+    );
+    let meter = console_team_postpaid_from_response(team_id, &preview)
+        .expect("postpaid meter from the fixture preview");
+    assert_eq!(meter.billing_credits_remaining_cents, Some(parsed));
+    seed_console_team_postpaid_cache(meter);
+    let live_cents = cached_console_team_postpaid(team_id)
+        .and_then(|cached| cached.billing_credits_remaining_cents)
+        .expect("read team postpaid Billing Credits back from the fixture cache");
+    assert_eq!(live_cents, parsed);
+    let remaining = dollars_from_cents(live_cents);
+    let supergrok_dollar_credits = dollars_from_cents(1_250);
+    assert_ne!(remaining, "$0");
+    assert_ne!(remaining, "$0.00");
+    assert_ne!(
+        remaining, supergrok_dollar_credits,
+        "team postpaid Billing Credits is not SuperGrok dollar credits ({supergrok_dollar_credits})"
+    );
+
     let balance = weekly_bal(1.0, end);
     let area = Rect::new(0, 0, 140, 40);
-    let phrase = "Limits and Credits";
     crate::appearance::cache::set_hide_header(false);
 
     let draw = |agent: &mut crate::app::agent_view::AgentView| -> (Buffer, String) {
@@ -8671,20 +8736,20 @@ fn closed_plan_header_opens_limits_and_credits_without_a_false_percent() {
         ("plan approval", &approval_screen),
     ] {
         assert!(
-            !screen.contains("limits 0%"),
-            "{which} must not say limits 0%:\n{screen}"
-        );
-        assert!(
-            !paints_limits_percent(screen),
-            "{which} must not say limits N%:\n{screen}"
+            !screen.contains("Limits and Credits")
+                && !screen.contains("limits 0%")
+                && !screen.contains("limits 1%")
+                && !paints_limits_percent(screen)
+                && screen.contains(&remaining),
+            "{which} must show the credits remaining for team postpaid Billing Credits ({remaining}), taken from the fixture's live reading. The header does not contain Limits and Credits, limits 0%, limits 1%, or limits N%. team postpaid Billing Credits is not included SuperGrok period limits, not SuperGrok dollar credits, and not console team prepaid. The header paints `Limits and Credits` today.\n{screen}"
         );
     }
 
-    let closed_at = phrase_at(&closed_screen, phrase);
-    let approval_at = phrase_at(&approval_screen, phrase);
+    let closed_at = phrase_at(&closed_screen, &remaining);
+    let approval_at = phrase_at(&approval_screen, &remaining);
     assert!(
         closed_at.is_some() && approval_at.is_some(),
-        "plan mode closed pushes no credits slot, and the approval screen in the 11:16 shot has no Limits control. Both headers must show the exact words Limits and Credits.\nplan mode closed:\n{closed_screen}\nplan approval:\n{approval_screen}"
+        "both headers must show the credits remaining for team postpaid Billing Credits ({remaining}). The header paints `Limits and Credits` today.\nplan mode closed:\n{closed_screen}\nplan approval:\n{approval_screen}"
     );
     assert!(
         footer_is_plan_approval(&approval_screen),
@@ -8695,16 +8760,21 @@ fn closed_plan_header_opens_limits_and_credits_without_a_false_percent() {
                      buf: &Buffer,
                      at: (u16, u16)| {
         let (x, y) = at;
-        let width = phrase.chars().count() as u16;
+        let width = remaining.chars().count() as u16;
         for dx in 0..width {
             assert!(
                 agent.hit_credits.contains(x + dx, y),
-                "hit_credits must cover Limits and Credits"
+                "hit_credits must cover the team postpaid Billing Credits remaining"
             );
         }
         let control: String = (0..width).map(|dx| buf[(x + dx, y)].symbol()).collect();
-        assert_eq!(control, phrase);
+        assert_eq!(control, remaining);
+        assert!(
+            !control.contains("Limits and Credits"),
+            "the control must not say Limits and Credits, got {control}"
+        );
         assert_ne!(control, "limits 0%");
+        assert_ne!(control, "limits 1%");
         assert!(
             !paints_limits_percent(&control),
             "the control text must not be limits N%, got {control}"
@@ -8720,7 +8790,7 @@ fn closed_plan_header_opens_limits_and_credits_without_a_false_percent() {
         );
         assert!(
             matches!(outcome, InputOutcome::Action(Action::ShowLimits)),
-            "a click on Limits and Credits must yield Action::ShowLimits, got {outcome:?}"
+            "a click on the team postpaid Billing Credits remaining must yield Action::ShowLimits, got {outcome:?}"
         );
 
         let mut app = test_app_with_agent();

@@ -187,17 +187,18 @@ fn seal_prompt_bottom_rule(
     }
 }
 
-/// `Limits and Credits` on the status row, ending at the soft plan pane.
-/// The pane clears the right-aligned chip. Returns the painted hit rect.
+/// Credits meter on the status row, ending at the soft plan pane.
+/// The pane clears the right-aligned chip. `label` is the same text the
+/// chip painted. Returns the painted hit rect.
 fn paint_limits_and_credits_left_of_soft_plan(
     buf: &mut Buffer,
     full_area: Rect,
     status_bar: Rect,
     existing: Option<Rect>,
     theme: &Theme,
+    label: &str,
 ) -> Option<Rect> {
-    const LABEL: &str = "Limits and Credits";
-    let width = LABEL.len() as u16;
+    let width = label.chars().count() as u16;
     if status_bar.height == 0 || width == 0 || full_area.width == 0 {
         return None;
     }
@@ -223,7 +224,7 @@ fn paint_limits_and_credits_left_of_soft_plan(
         return None;
     }
     let style = Style::default().fg(theme.text_secondary).bg(theme.bg_base);
-    buf.set_string_safe(x, y, LABEL, style);
+    buf.set_string_safe(x, y, label, style);
     Some(Rect::new(x, y, width, 1))
 }
 
@@ -269,6 +270,90 @@ fn status_row_paints_included_period_limits_chip(
         && balance.included_usage_known
         && balance.usage_pct.is_finite()
         && xai_grok_shell::auth::limits_pins::next_request_draws_included_period_limits()
+}
+
+/// `$GROK_HOME` on each call. `grok_home()` is a OnceLock and misses the
+/// test home the fixture writes.
+fn limits_grok_home() -> std::path::PathBuf {
+    match std::env::var("GROK_HOME") {
+        Ok(home) => std::path::PathBuf::from(home),
+        Err(_) => xai_grok_shell::util::grok_home::grok_home(),
+    }
+}
+
+/// Team id on a live Team JWT. Hard-expired rows and the personal slot
+/// are not this id. That id is what the postpaid cache was seeded with.
+fn live_team_jwt_team_id() -> Option<String> {
+    let map = xai_grok_shell::auth::read_auth_json(&limits_grok_home().join("auth.json")).ok()?;
+    for (scope, auth) in &map {
+        if scope.contains("::personal") {
+            continue;
+        }
+        if !xai_grok_shell::auth::is_supergrok_session_mode(auth.auth_mode) {
+            continue;
+        }
+        if auth.key.trim().is_empty() || !auth.is_team_principal() {
+            continue;
+        }
+        if auth.expires_at.is_some_and(|end| chrono::Utc::now() >= end) {
+            continue;
+        }
+        if let Some(id) = auth
+            .team_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+        {
+            return Some(id.to_owned());
+        }
+    }
+    None
+}
+
+/// Whole dollars as `$N`, otherwise `$N.NN`. A different cent balance
+/// paints a different string. Do not hardcode one amount.
+fn format_remaining_cents_as_dollars(cents: i64) -> String {
+    let negative = cents < 0;
+    let abs_cents = cents.unsigned_abs();
+    let dollars = abs_cents / 100;
+    let frac = abs_cents % 100;
+    let body = if frac == 0 {
+        format!("${dollars}")
+    } else {
+        format!("${dollars}.{frac:02}")
+    };
+    if negative { format!("-{body}") } else { body }
+}
+
+/// Team postpaid Billing Credits remaining from the process cache.
+/// Not included SuperGrok period limits, not SuperGrok dollar credits,
+/// and not console team prepaid.
+fn team_postpaid_billing_credits_remaining_label() -> Option<String> {
+    let team_id = live_team_jwt_team_id()?;
+    let cents = xai_grok_shell::auth::cached_console_team_postpaid(&team_id)?
+        .billing_credits_remaining_cents?;
+    Some(format_remaining_cents_as_dollars(cents))
+}
+
+/// Header text when the next request does not draw included SuperGrok
+/// period limits. A live Team JWT with a cached Billing Credits reading
+/// paints that remaining. Dollar-credits and console pins do not.
+/// Without the reading the chip stays `Limits and Credits`.
+fn credits_label_when_included_period_is_not_next_request() -> String {
+    let pins = xai_grok_shell::auth::limits_pins::load_limits_pins();
+    let pinned_other_meter = pins.use_console
+        || matches!(
+            pins.meter_source,
+            Some(
+                xai_grok_shell::auth::limits_pins::MeterSource::DollarCredits
+                    | xai_grok_shell::auth::limits_pins::MeterSource::Console
+            )
+        );
+    if pinned_other_meter {
+        return "Limits and Credits".to_owned();
+    }
+    team_postpaid_billing_credits_remaining_label()
+        .unwrap_or_else(|| "Limits and Credits".to_owned())
 }
 
 /// AppView-owned per-frame inputs to [`AgentView::draw`]: state the agent view cannot see itself (voice pipeline, Esc ownership, status row).
@@ -1665,11 +1750,10 @@ impl AgentView {
         }
         // Short status chip only. Do not use the verbose SuperGrok period helper.
         // `limits N%` only when the next request draws included SuperGrok
-        // period limits. SuperGrok dollar credits and console API credits
-        // do not get that label. When that meter is not the next request,
-        // the header offers Limits and Credits, including with plan mode
-        // closed and on the plan-approval screen. That control is not
-        // `limits 0%` and not `limits N%`.
+        // period limits. When it does not, a live Team JWT paints team
+        // postpaid Billing Credits remaining from the process cache.
+        // Without that reading the chip stays `Limits and Credits`.
+        // That control is not `limits 0%` and not `limits N%`.
         if let Some(balance) = self.credit_balance.as_ref()
             && let Some(label) = both_refused_status_chip_label(balance)
         {
@@ -1700,7 +1784,7 @@ impl AgentView {
             }
             status.push("credits", Line::from(Span::styled(label, chip_style)));
         } else if !xai_grok_shell::auth::limits_pins::next_request_draws_included_period_limits() {
-            let label = "Limits and Credits";
+            let label = credits_label_when_included_period_is_not_next_request();
             let chip_style = hover_or(
                 self.hit_credits.hovered,
                 Style::default().fg(theme.text_secondary).bg(theme.bg_base),
@@ -3987,12 +4071,14 @@ impl AgentView {
                     .is_none();
             if offer_limits_and_credits {
                 let existing = self.hit_credits.rect;
+                let label = credits_label_when_included_period_is_not_next_request();
                 if let Some(rect) = paint_limits_and_credits_left_of_soft_plan(
                     buf,
                     area,
                     layout.status_bar,
                     existing,
                     &theme,
+                    &label,
                 ) {
                     if self
                         .hit_bg_status
@@ -6171,6 +6257,60 @@ mod plan_approval_draw_contract_tests {
         assert!(
             !yellow_copy && inset,
             "AgentView::draw paints COMPOSER_COPY_LABEL (`[Copy]`) in theme.gray (yellow) on the prompt's top border row; the copy control must be three columns `[`, the copy glyph, `]`, inset from the white prompt stroke, fully visible. yellow `[Copy]` on that row: {yellow_copy}; bracketed glyph inset and fully visible: {inset}"
+        );
+    }
+
+    /// Main composer on DOGE. The bottom caption is
+    /// `Grok 4.7 (high) · always-approve`. The bottom right must not show
+    /// the six-column yellow word `[Copy]`.
+    /// `composer_copy_control_is_a_bracketed_glyph_inset_from_the_white_stroke`
+    /// only checks the prompt's top border row. This test does not change
+    /// that check.
+    #[test]
+    fn main_composer_does_not_paint_yellow_copy_at_the_bottom_right() {
+        use crate::theme::{Theme, cache};
+        use ratatui::style::Color;
+
+        let _pin = cache::pin_theme();
+        cache::set(crate::theme::ThemeKind::Doge);
+        let theme = Theme::current();
+        let yellow = Color::Rgb(255, 255, 0);
+        assert_eq!(theme.gray, yellow, "DOGE theme.gray is yellow");
+
+        let mut agent = make_agent();
+        agent.plan_mode_active = false;
+        agent.plan_mode_pending = None;
+        agent.session_mode_pending = None;
+        agent
+            .session
+            .models
+            .set_served_model_name(Some("Grok 4.7".to_string()));
+        agent.session.models.reasoning_effort =
+            Some(xai_grok_shell::sampling::types::ReasoningEffort::High);
+        agent.session.set_yolo_mode_for_test(true);
+
+        let (buf, text) = draw_buf(&mut agent);
+        let prompt = agent.pane_areas.prompt;
+        assert!(
+            prompt.width > 8 && prompt.height > 2,
+            "main composer must be open; got {prompt:?}"
+        );
+        let stroke = prompt_stroke(&buf, prompt);
+        let bottom_row: String = (stroke.left..=stroke.right)
+            .filter_map(|x| {
+                buf.cell((x, stroke.bottom))
+                    .map(|cell| cell.symbol().to_string())
+            })
+            .collect();
+        let caption = "Grok 4.7 (high) · always-approve";
+        assert!(
+            bottom_row.contains(caption),
+            "bottom caption must be `{caption}`; bottom row: {bottom_row}\n{text}"
+        );
+        let yellow_copy = yellow_copy_on_row(&buf, prompt, stroke.bottom, theme.gray);
+        assert!(
+            !yellow_copy,
+            "the bottom right still shows the six-column yellow word `[Copy]` next to `{caption}`. AgentView::draw paints COMPOSER_COPY_LABEL (`[Copy]`) in theme.gray (yellow) at the bottom right of the main composer, next to the mode caption. yellow `[Copy]` on that row: {yellow_copy}; bottom row: {bottom_row}"
         );
     }
 
