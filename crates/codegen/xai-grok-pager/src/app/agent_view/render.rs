@@ -138,6 +138,95 @@ fn clear_clipped_composer_tail(
     }
 }
 
+/// Three columns on the prompt's top rule: `[`, the copy glyph, `]`.
+/// Inset one column from both corners. Not the six-column yellow word `[Copy]`.
+fn paint_inset_composer_copy(buf: &mut Buffer, area: Rect, theme: &Theme) -> Option<Rect> {
+    if area.width < 8 || area.height < 2 {
+        return None;
+    }
+    let right = area.x.saturating_add(area.width).saturating_sub(1);
+    let x = right.saturating_sub(4);
+    if x < area.x.saturating_add(2) {
+        return None;
+    }
+    let y = area.y;
+    let style = Style::default().fg(theme.text_secondary).bg(theme.bg_base);
+    buf.set_string_safe(x, y, "[", style);
+    buf.set_string_safe(x.saturating_add(1), y, crate::glyphs::copy_icon(), style);
+    buf.set_string_safe(x.saturating_add(2), y, "]", style);
+    Some(Rect::new(x, y, 3, 1))
+}
+
+/// Plan approval draws the model caption on the bottom rule. Repaint that
+/// row so the rule is `─` through the left cell and meets `╯` on the right.
+/// The foreground is the prompt stroke color (white on DOGE).
+fn seal_prompt_bottom_rule(
+    buf: &mut Buffer,
+    area: Rect,
+    fg: ratatui::style::Color,
+    bg: ratatui::style::Color,
+) {
+    if area.width < 2 || area.height < 2 {
+        return;
+    }
+    let y = area.y.saturating_add(area.height).saturating_sub(1);
+    let left = area.x;
+    let right = area.x.saturating_add(area.width).saturating_sub(1);
+    let style = Style::default().fg(fg).bg(bg);
+    let mut x = left;
+    while x <= right {
+        if let Some(cell) = buf.cell_mut((x, y)) {
+            let ch = if x == right { '\u{256f}' } else { '\u{2500}' };
+            cell.set_char(ch);
+            cell.set_style(style);
+        }
+        if x == u16::MAX {
+            break;
+        }
+        x = x.saturating_add(1);
+    }
+}
+
+/// `Limits and Credits` on the status row, ending at the soft plan pane.
+/// The pane clears the right-aligned chip. Returns the painted hit rect.
+fn paint_limits_and_credits_left_of_soft_plan(
+    buf: &mut Buffer,
+    full_area: Rect,
+    status_bar: Rect,
+    existing: Option<Rect>,
+    theme: &Theme,
+) -> Option<Rect> {
+    const LABEL: &str = "Limits and Credits";
+    let width = LABEL.len() as u16;
+    if status_bar.height == 0 || width == 0 || full_area.width == 0 {
+        return None;
+    }
+    let pane_w = crate::views::file_search::line_viewer::LineViewerState::soft_plan_pane_width(
+        full_area.width,
+    );
+    let pane_x = full_area
+        .x
+        .saturating_add(full_area.width.saturating_sub(pane_w));
+    if let Some(hit) = existing
+        && hit.y == status_bar.y
+        && hit.width >= width
+        && hit.x.saturating_add(hit.width) <= pane_x
+    {
+        return None;
+    }
+    let y = status_bar.y;
+    if y < full_area.y || y >= full_area.y.saturating_add(full_area.height) {
+        return None;
+    }
+    let x = pane_x.saturating_sub(width);
+    if x < full_area.x || x.saturating_add(width) > pane_x {
+        return None;
+    }
+    let style = Style::default().fg(theme.text_secondary).bg(theme.bg_base);
+    buf.set_string_safe(x, y, LABEL, style);
+    Some(Rect::new(x, y, width, 1))
+}
+
 pub(crate) fn laid_out_prompt_height(
     focused: bool,
     content_height: u16,
@@ -1577,9 +1666,10 @@ impl AgentView {
         // Short status chip only. Do not use the verbose SuperGrok period helper.
         // `limits N%` only when the next request draws included SuperGrok
         // period limits. SuperGrok dollar credits and console API credits
-        // do not get that label. While plan mode is open and that meter is
-        // not the next request, the header offers Limits and Credits. That
-        // control is not `limits 0%` and not `limits N%`.
+        // do not get that label. When that meter is not the next request,
+        // the header offers Limits and Credits, including with plan mode
+        // closed and on the plan-approval screen. That control is not
+        // `limits 0%` and not `limits N%`.
         if let Some(balance) = self.credit_balance.as_ref()
             && let Some(label) = both_refused_status_chip_label(balance)
         {
@@ -1609,9 +1699,7 @@ impl AgentView {
                 chip_style = chip_style.add_modifier(ratatui::style::Modifier::BOLD);
             }
             status.push("credits", Line::from(Span::styled(label, chip_style)));
-        } else if effective_plan
-            && !xai_grok_shell::auth::limits_pins::next_request_draws_included_period_limits()
-        {
+        } else if !xai_grok_shell::auth::limits_pins::next_request_draws_included_period_limits() {
             let label = "Limits and Credits";
             let chip_style = hover_or(
                 self.hit_credits.hovered,
@@ -3251,47 +3339,24 @@ impl AgentView {
             } else {
                 None
             };
-            let copy_label = super::composer_copy::COMPOSER_COPY_LABEL;
-            let copy_w = copy_label.len() as u16;
-            let copy_reserve = copy_w.saturating_add(1);
-            let (prompt_area, copy_button) = if layout.prompt.width > copy_reserve.saturating_add(8)
-            {
-                let prompt_area = Rect {
-                    x: layout.prompt.x,
-                    y: layout.prompt.y,
-                    width: layout.prompt.width.saturating_sub(copy_reserve),
-                    height: layout.prompt.height,
-                };
-                let button = Rect {
-                    x: prompt_area
-                        .x
-                        .saturating_add(prompt_area.width)
-                        .saturating_add(1),
-                    y: prompt_area.y,
-                    width: copy_w,
-                    height: 1,
-                };
-                (prompt_area, Some(button))
-            } else {
-                (layout.prompt, None)
-            };
             let prompt_result_inner = self.prompt.draw(
                 buf,
-                prompt_area,
+                layout.prompt,
                 Some(layout.scrollback),
                 &prompt_style,
                 Some(&info),
                 voice_overlay,
             );
-            if let Some(button) = copy_button {
-                buf.set_string_safe(
-                    button.x,
-                    button.y,
-                    copy_label,
-                    Style::default().fg(theme.gray).bg(theme.bg_base),
+            let copy_button = paint_inset_composer_copy(buf, layout.prompt, &theme);
+            self.set_composer_copy_button(copy_button);
+            if self.plan_approval_view.is_some() {
+                seal_prompt_bottom_rule(
+                    buf,
+                    layout.prompt,
+                    theme.prompt_border_active,
+                    theme.bg_base,
                 );
             }
-            self.set_composer_copy_button(copy_button);
             if let Some((s, ovr)) = saved_scroll {
                 self.prompt.textarea.set_scroll_override(ovr);
                 self.prompt.set_scroll(s);
@@ -3867,7 +3932,9 @@ impl AgentView {
                 ShortcutsBar::new(&viewer_hints).render(layout.shortcuts, buf);
             }
             self.pane_areas = layout.pane_areas();
-            let viewer_cursor = if plan_prompt_focused || self.is_casual_commenting() {
+            // `casual_commenting` was read before `line_viewer` was borrowed.
+            // Calling `is_casual_commenting` here borrows `self` again.
+            let viewer_cursor = if plan_prompt_focused || casual_commenting {
                 prompt_cursor_pos
             } else {
                 None
@@ -3908,6 +3975,47 @@ impl AgentView {
                         theme.bg_base,
                         allow_block_glyph,
                     );
+                }
+            }
+            let soft_plan_side_pane = viewer.is_soft_plan_side_pane();
+            let offer_limits_and_credits = soft_plan_side_pane
+                && !xai_grok_shell::auth::limits_pins::next_request_draws_included_period_limits()
+                && self
+                    .credit_balance
+                    .as_ref()
+                    .and_then(both_refused_status_chip_label)
+                    .is_none();
+            if offer_limits_and_credits {
+                let existing = self.hit_credits.rect;
+                if let Some(rect) = paint_limits_and_credits_left_of_soft_plan(
+                    buf,
+                    area,
+                    layout.status_bar,
+                    existing,
+                    &theme,
+                ) {
+                    if self
+                        .hit_bg_status
+                        .rect
+                        .is_some_and(|hit| hit.intersects(rect))
+                    {
+                        self.hit_bg_status.rect = None;
+                    }
+                    if self
+                        .hit_goal_status
+                        .rect
+                        .is_some_and(|hit| hit.intersects(rect))
+                    {
+                        self.hit_goal_status.rect = None;
+                    }
+                    if self
+                        .hit_context
+                        .rect
+                        .is_some_and(|hit| hit.intersects(rect))
+                    {
+                        self.hit_context.rect = None;
+                    }
+                    self.hit_credits.rect = Some(rect);
                 }
             }
             return (viewer_cursor, prompt_post_flush);
@@ -5902,6 +6010,274 @@ mod plan_approval_draw_contract_tests {
         assert_ne!(
             ask_fg, theme.bg_base,
             "ask mode prompt outline must not use theme.bg_base; got {ask_fg:?}"
+        );
+    }
+
+    fn draw_buf(agent: &mut AgentView) -> (Buffer, String) {
+        let reg = ActionRegistry::defaults();
+        let area = Rect::new(0, 0, 100, 40);
+        let mut buf = Buffer::empty(area);
+        let mut scratch = ScratchBuffer::new();
+        agent.draw(
+            area,
+            &mut buf,
+            &reg,
+            &mut scratch,
+            None,
+            false,
+            crate::app::agent_view::BannerSlotParams::none(),
+            false,
+            false,
+            &mut Vec::new(),
+            super::AppRenderParams::default(),
+        );
+        let text = (0..area.height)
+            .map(|y| {
+                (0..area.width)
+                    .filter_map(|x| buf.cell((x, y)).map(|cell| cell.symbol().to_string()))
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        (buf, text)
+    }
+
+    struct PromptStroke {
+        left: u16,
+        right: u16,
+        top: u16,
+        bottom: u16,
+    }
+
+    /// Top-left `╭`, top-right `╮`, and bottom-left `╰` of the prompt box.
+    fn prompt_stroke(buf: &Buffer, prompt: Rect) -> PromptStroke {
+        let mut top_left = None;
+        for y in prompt.y..prompt.y.saturating_add(prompt.height) {
+            for x in prompt.x..prompt.x.saturating_add(prompt.width) {
+                if buf
+                    .cell((x, y))
+                    .is_some_and(|cell| cell.symbol() == "\u{256d}")
+                {
+                    top_left = Some((x, y));
+                    break;
+                }
+            }
+            if top_left.is_some() {
+                break;
+            }
+        }
+        let (left, top) = top_left.expect("prompt input must paint a top-left stroke");
+        let right = (left + 1..prompt.x.saturating_add(prompt.width))
+            .rev()
+            .find(|&x| {
+                buf.cell((x, top))
+                    .is_some_and(|cell| cell.symbol() == "\u{256e}")
+            })
+            .expect("prompt input must paint a top-right stroke");
+        let bottom = (top + 1..prompt.y.saturating_add(prompt.height))
+            .rev()
+            .find(|&y| {
+                buf.cell((left, y))
+                    .is_some_and(|cell| cell.symbol() == "\u{2570}")
+            })
+            .unwrap_or(prompt.y.saturating_add(prompt.height).saturating_sub(1));
+        PromptStroke {
+            left,
+            right,
+            top,
+            bottom,
+        }
+    }
+
+    fn yellow_copy_on_row(
+        buf: &Buffer,
+        prompt: Rect,
+        y: u16,
+        yellow: ratatui::style::Color,
+    ) -> bool {
+        if prompt.width < 6 {
+            return false;
+        }
+        let end = prompt.x.saturating_add(prompt.width).saturating_sub(5);
+        for x in prompt.x..end {
+            let word: String = (0..6)
+                .filter_map(|i| buf.cell((x + i, y)).map(|cell| cell.symbol().to_string()))
+                .collect();
+            let yellow_word =
+                (0..6).all(|i| buf.cell((x + i, y)).is_some_and(|cell| cell.fg == yellow));
+            if word == "[Copy]" && yellow_word {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// `[`, copy glyph, `]` at least one column inside the prompt stroke.
+    fn bracketed_copy_inset(buf: &Buffer, stroke: &PromptStroke) -> bool {
+        let glyph = crate::glyphs::copy_icon();
+        let last = stroke.right.saturating_sub(2);
+        for y in stroke.top..=stroke.bottom {
+            let mut x = stroke.left.saturating_add(2);
+            while x.saturating_add(2) <= last {
+                let symbols = ["[", glyph, "]"];
+                let visible = symbols.iter().enumerate().all(|(i, symbol)| {
+                    buf.cell((x + i as u16, y))
+                        .is_some_and(|cell| cell.symbol() == *symbol)
+                });
+                if visible {
+                    return true;
+                }
+                x = x.saturating_add(1);
+            }
+        }
+        false
+    }
+
+    /// On DOGE, while the Operator box is open, the copy control is three
+    /// columns: `[`, the copy glyph, `]`, inset from the white prompt stroke,
+    /// fully visible. The screen must not show the six-column yellow word
+    /// `[Copy]` on the prompt's top border row.
+    #[test]
+    fn composer_copy_control_is_a_bracketed_glyph_inset_from_the_white_stroke() {
+        use crate::theme::{Theme, cache};
+        use ratatui::style::Color;
+
+        let _pin = cache::pin_theme();
+        cache::set(crate::theme::ThemeKind::Doge);
+        let theme = Theme::current();
+        let white = Color::Rgb(255, 255, 255);
+        let yellow = Color::Rgb(255, 255, 0);
+        assert_eq!(
+            theme.prompt_border_active, white,
+            "DOGE prompt stroke is white"
+        );
+        assert_eq!(theme.gray, yellow, "DOGE theme.gray is yellow");
+
+        let mut agent = make_agent();
+        let (buf, _) = draw_buf(&mut agent);
+        let prompt = agent.pane_areas.prompt;
+        assert!(
+            prompt.width > 4 && prompt.height > 2,
+            "Operator box must be open; got {prompt:?}"
+        );
+        let stroke = prompt_stroke(&buf, prompt);
+        let top_left = buf
+            .cell((stroke.left, stroke.top))
+            .expect("top-left prompt stroke");
+        assert_eq!(top_left.fg, white, "Operator box stroke is white");
+
+        let yellow_copy = yellow_copy_on_row(&buf, prompt, stroke.top, theme.gray);
+        let inset = bracketed_copy_inset(&buf, &stroke);
+        assert!(
+            !yellow_copy && inset,
+            "AgentView::draw paints COMPOSER_COPY_LABEL (`[Copy]`) in theme.gray (yellow) on the prompt's top border row; the copy control must be three columns `[`, the copy glyph, `]`, inset from the white prompt stroke, fully visible. yellow `[Copy]` on that row: {yellow_copy}; bracketed glyph inset and fully visible: {inset}"
+        );
+    }
+
+    /// Plan-approval screen from the 11:16 shot (`Plan ready. Side panel open`).
+    /// Footer text is `approve | comment | revise | exit`. Every side of the
+    /// prompt stroke is `Rgb(255, 255, 255)`. Left, top, and right are already
+    /// white. The bottom rule does not meet the bottom-right corner because
+    /// the status row sits on it.
+    #[test]
+    fn plan_approval_prompt_stroke_is_white_on_every_side() {
+        use crate::theme::{Theme, cache};
+        use ratatui::style::Color;
+
+        let _pin = cache::pin_theme();
+        cache::set(crate::theme::ThemeKind::Doge);
+        let theme = Theme::current();
+        let white = Color::Rgb(255, 255, 255);
+        assert_eq!(
+            theme.prompt_border_active, white,
+            "DOGE prompt stroke is white"
+        );
+
+        let mut agent = make_agent();
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        let request = crate::views::plan_approval_view::ExitPlanModeExtRequest {
+            session_id: "test-session".into(),
+            tool_call_id: "call-file-plan".into(),
+            plan_content: Some("# Isolated plan.md\n\nDo the thing\n".into()),
+        };
+        agent.plan_approval_view = Some(
+            crate::views::plan_approval_view::PlanApprovalViewState::with_source(
+                request,
+                crate::views::plan_approval_view::PlanReviewSource::FileBacked,
+                agent.prompt.stash(),
+                tx,
+            ),
+        );
+        agent.plan_mode_active = true;
+        agent.show_plan_preview_if_available();
+        assert!(
+            agent
+                .line_viewer
+                .as_ref()
+                .is_some_and(|viewer| viewer.feedback_active()),
+            "file-backed approval sets feedback_active() on Plan ready. Side panel open"
+        );
+
+        let (buf, text) = draw_buf(&mut agent);
+        let lower = text.to_ascii_lowercase();
+        assert!(
+            text.contains("Plan ready. Side panel open"),
+            "this is the side-panel approval screen:\n{text}"
+        );
+        for needle in ["approve", "comment", "revise", "exit"] {
+            assert!(
+                lower.contains(needle),
+                "footer must read approve | comment | revise | exit; missing {needle}:\n{text}"
+            );
+        }
+
+        let prompt = agent.pane_areas.prompt;
+        assert!(
+            prompt.width > 4 && prompt.height > 2,
+            "plan approval prompt must have a painted area; got {prompt:?}"
+        );
+        let stroke = prompt_stroke(&buf, prompt);
+        let top_left = buf
+            .cell((stroke.left, stroke.top))
+            .expect("top-left stroke");
+        assert_eq!(top_left.symbol(), "\u{256d}");
+        assert_eq!(top_left.fg, white, "top stroke is white");
+        let top_right = buf
+            .cell((stroke.right, stroke.top))
+            .expect("top-right stroke");
+        assert_eq!(top_right.symbol(), "\u{256e}");
+        assert_eq!(top_right.fg, white, "top-right stroke is white");
+        let left_y = (stroke.top + 1..stroke.bottom)
+            .find(|&y| {
+                buf.cell((stroke.left, y))
+                    .is_some_and(|cell| cell.symbol() == "\u{2502}")
+            })
+            .expect("left stroke");
+        let left_side = buf.cell((stroke.left, left_y)).expect("left stroke cell");
+        assert_eq!(left_side.fg, white, "left stroke is white");
+        let right_side = buf.cell((stroke.right, left_y)).expect("right stroke cell");
+        assert_eq!(right_side.symbol(), "\u{2502}");
+        assert_eq!(right_side.fg, white, "right stroke is white");
+
+        let mut broken = None;
+        let mut x = stroke.right;
+        while x > stroke.left {
+            x -= 1;
+            let Some(cell) = buf.cell((x, stroke.bottom)) else {
+                broken = Some((x, "?".to_string(), Color::Reset));
+                break;
+            };
+            if cell.symbol() != "\u{2500}" || cell.fg != white {
+                broken = Some((x, cell.symbol().to_string(), cell.fg));
+                break;
+            }
+        }
+        let corner = buf.cell((stroke.right, stroke.bottom));
+        let corner_white =
+            corner.is_some_and(|cell| cell.symbol() == "\u{256f}" && cell.fg == white);
+        assert!(
+            broken.is_none() && corner_white,
+            "the bottom rule does not meet the bottom-right corner because the status row sits on it (Grok 4.7 (high) · plan approval · always-approve); every side of the prompt stroke must be Rgb(255, 255, 255). first break at {broken:?}"
         );
     }
 

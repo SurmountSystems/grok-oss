@@ -2019,6 +2019,27 @@ impl AgentView {
             );
             return self.handle_paste_key_deferred(clipboard_text);
         }
+        // Enter on `[Image #N]` opens the viewer. The main composer does
+        // this from `handle_prompt_key`. The plan prompt calls
+        // `ImageViewerState::open` first so the bytes are kept even when
+        // this terminal has no graphics protocol. A failed open still
+        // toasts the same way. Paste-chip Enter still falls through.
+        if key.code == KeyCode::Enter && key.modifiers.is_empty() {
+            let paste_chip = self.prompt.paste_element_at_cursor().is_some();
+            let image_here = self.prompt.image_at_cursor().is_some();
+            if image_here && !paste_chip {
+                let opened = self
+                    .prompt
+                    .image_at_cursor()
+                    .and_then(crate::prompt_images::ImageViewerState::open);
+                if let Some(viewer) = opened {
+                    self.image_viewer = Some(viewer);
+                } else if self.guard_image_support() {
+                    self.show_toast("Couldn't load image preview");
+                }
+                return InputOutcome::Changed;
+            }
+        }
         let is_commenting = self
             .plan_approval_view
             .as_ref()
@@ -4267,6 +4288,72 @@ mod plan_approval_optimistic_mode_tests {
                 .iter()
                 .any(|image| { image.encoded_bytes.as_deref() == Some([0xA5u8; 16].as_slice()) }),
             "while plan mode is open, an image the operator provides is kept on that plan turn; the action carried no image: {outcome:?}"
+        );
+    }
+    /// Enter on `[Image #N]` in the normal composer calls `ImageViewerState::open`.
+    /// While the plan pane is up, the same Enter goes through `handle_plan_feedback_key`
+    /// and never opens the viewer. A chip is not a view.
+    #[test]
+    fn planning_opens_an_attached_image_for_viewing() {
+        let mut agent = agent_with_post_turn_review();
+        assert!(agent.plan_mode_active, "plan mode is open");
+        assert!(
+            agent.line_viewer.is_some(),
+            "the plan pane is up, so Enter is a plan-prompt key"
+        );
+        if let Some(pav) = agent.plan_approval_view.as_mut() {
+            pav.focus = PlanApprovalFocus::Prompt;
+            pav.prompt_intent = PlanPromptIntent::Revise;
+        }
+        // At least 8×8. `insert_image` rejects a 1×1 preview.
+        let png = {
+            let img: image::ImageBuffer<image::Rgba<u8>, Vec<u8>> =
+                image::ImageBuffer::from_pixel(8, 8, image::Rgba([1, 2, 3, 4]));
+            let mut buf = Vec::new();
+            img.write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)
+                .expect("8×8 png");
+            buf
+        };
+        agent.prompt.set_text("look at this screenshot ");
+        agent
+            .prompt
+            .insert_image(crate::prompt_images::PastedImage {
+                element_id: xai_ratatui_textarea::ElementId::from_raw(1),
+                display_number: 1,
+                mime_type: "image/png".into(),
+                dimensions: Some((8, 8)),
+                byte_len: png.len(),
+                encoded_bytes: Some(png.clone().into()),
+                source_path: None,
+                staged_temp_path: None,
+                session_image_path: None,
+                preview: crate::prompt_images::PromptImagePreview::default(),
+            })
+            .expect("the operator attaches an image while planning");
+        let chip_at = agent
+            .prompt
+            .text()
+            .find("[Image #")
+            .expect("paste still inserts the chip");
+        agent.prompt.set_cursor(chip_at);
+        assert!(
+            agent.prompt.image_at_cursor().is_some(),
+            "Enter is on [Image #N], the chip the normal composer opens"
+        );
+        assert!(
+            agent.image_viewer.is_none(),
+            "the viewer stays closed until the plan prompt opens it"
+        );
+        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        let _ = agent.handle_plan_feedback_key(&enter);
+        let viewer = agent.image_viewer.as_ref().unwrap_or_else(|| {
+            panic!(
+                "while planning, Enter on [Image #N] must call ImageViewerState::open and the viewer must receive those bytes; the plan prompt does not"
+            )
+        });
+        assert_eq!(
+            viewer.image_bytes, png,
+            "the viewer receives the attached image bytes"
         );
     }
     fn user_prompt_texts(agent: &AgentView) -> Vec<String> {

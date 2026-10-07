@@ -186,7 +186,7 @@ fn tone_color(tone: AllowanceMeterTone, theme: &Theme) -> ratatui::style::Color 
 /// and is the default open tab.
 const CARD_TABS: &[&str] = &["Limits", "Credits"];
 /// Default open tab. Limits mode shows this tab.
-const LIMITS_TAB: usize = 0;
+pub(crate) const LIMITS_TAB: usize = 0;
 /// Second tab. SuperGrok dollar credits and console API credits stay here.
 const CREDITS_TAB: usize = 1;
 

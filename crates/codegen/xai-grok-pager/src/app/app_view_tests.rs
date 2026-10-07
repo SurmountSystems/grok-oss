@@ -8435,3 +8435,323 @@ fn popup_dashboard_button_dismisses_the_popup_not_the_dashboard() {
         "the dashboard itself stays open"
     );
 }
+
+/// Plan mode closed, and the plan-approval screen with the side panel
+/// open and the footer `approve | comment | revise | exit`. Both use a
+/// live Team JWT, and `next_request_draws_included_period_limits()` is
+/// false. The header shows the exact words `Limits and Credits`,
+/// `hit_credits` covers those cells, the text is not `limits 0%` and
+/// not `limits N%`, and a click yields `Action::ShowLimits`. Opening
+/// the card through `dispatch_show_limits` shows Limits before Credits.
+///
+/// Fails today because plan mode closed pushes no credits slot, and
+/// the approval screen in the 11:16 shot has no Limits control.
+#[test]
+#[serial_test::serial]
+fn closed_plan_header_opens_limits_and_credits_without_a_false_percent() {
+    use crate::actions::ActionRegistry;
+    use crate::app::actions::Action;
+    use crate::app::agent_view::test_fixtures::make_agent;
+    use crate::app::agent_view::{AppRenderParams, BannerSlotParams};
+    use crate::app::app_view::InputOutcome;
+    use crate::scrollback::render::ScratchBuffer;
+    use crate::theme::Theme;
+    use crate::views::credit_bar::{CreditBalance, SamplingIdentityKind};
+    use crate::views::limits_modal::LIMITS_TAB;
+    use chrono::{DateTime, Utc};
+    use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+    use ratatui::buffer::Buffer;
+    use ratatui::layout::Rect;
+    use xai_grok_shell::auth::limits_pins::{
+        LimitsPins, MeterSource, next_request_draws_included_period_limits, save_limits_pins,
+    };
+    use xai_grok_shell::auth::{AuthMode, GrokAuth, upsert_supergrok_session};
+    use xai_grok_test_support::EnvGuard;
+
+    fn weekly_bal(pct: f64, reset_at: DateTime<Utc>) -> CreditBalance {
+        CreditBalance {
+            usage_pct: pct,
+            effective_usage_pct: pct,
+            period_end_display: Some(
+                reset_at
+                    .with_timezone(&chrono::Local)
+                    .format("%B %-d, %H:%M")
+                    .to_string(),
+            ),
+            period_end_at: Some(reset_at),
+            pay_as_you_go: false,
+            on_demand_cap_cents: None,
+            on_demand_used_cents: None,
+            prepaid_balance_cents: Some(1250),
+            period_type: Some("USAGE_PERIOD_TYPE_WEEKLY".into()),
+            is_unified_billing_user: None,
+            grok_build_usage_pct: None,
+            included_usage_known: true,
+        }
+    }
+
+    fn paints_limits_percent(text: &str) -> bool {
+        for line in text.lines() {
+            let mut rest = line;
+            while let Some(idx) = rest.find("limits ") {
+                let after = &rest[idx + "limits ".len()..];
+                let digits = after.chars().take_while(|c| c.is_ascii_digit()).count();
+                if digits > 0 && after[digits..].starts_with('%') {
+                    return true;
+                }
+                rest = &rest[idx + "limits ".len()..];
+            }
+        }
+        false
+    }
+
+    fn screen_of(buf: &Buffer, area: Rect) -> String {
+        (0..area.height)
+            .map(|y| {
+                (0..area.width)
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn phrase_at(screen: &str, phrase: &str) -> Option<(u16, u16)> {
+        for (y, line) in screen.lines().enumerate() {
+            if let Some(byte) = line.find(phrase) {
+                let x = line[..byte].chars().count() as u16;
+                return Some((x, y as u16));
+            }
+        }
+        None
+    }
+
+    fn footer_is_plan_approval(screen: &str) -> bool {
+        screen.lines().any(|line| {
+            let collapsed = line.split_whitespace().collect::<Vec<_>>().join(" ");
+            collapsed.contains("approve | comment | revise | exit")
+        })
+    }
+
+    let home = tempfile::TempDir::new().expect("temp GROK_HOME");
+    let _env = EnvGuard::set("GROK_HOME", home.path());
+    std::fs::write(
+        home.path().join("config.toml"),
+        "[auth]\npreferred_method = \"oidc\"\nauto_use_included_limits = true\n",
+    )
+    .expect("preferred oidc");
+    save_limits_pins(&LimitsPins {
+        stay_supergrok: true,
+        use_console: false,
+        meter_source: None,
+        supergrok_identity: None,
+    })
+    .expect("stay pin");
+
+    let end = DateTime::parse_from_rfc3339("2026-10-12T06:59:00Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    let base = "https://auth.x.ai::closed-plan-limits-opener-fixture";
+    let live = chrono::Utc::now() + chrono::Duration::days(1);
+    let expired = chrono::Utc::now() - chrono::Duration::days(1);
+    let session = |key: &str, user_id: &str, team: bool, expires_at| GrokAuth {
+        key: key.into(),
+        auth_mode: AuthMode::Oidc,
+        user_id: user_id.into(),
+        principal_type: if team {
+            Some("Team".to_string())
+        } else {
+            Some("User".to_string())
+        },
+        principal_id: Some(user_id.to_string()),
+        team_id: team.then(|| "team-fixture".to_string()),
+        expires_at: Some(expires_at),
+        ..GrokAuth::default()
+    };
+    let mut map = std::collections::BTreeMap::new();
+    upsert_supergrok_session(
+        &mut map,
+        base,
+        session("tok-personal-expired", "u-personal-expired", false, expired),
+    );
+    map.get_mut(&format!("{base}::personal"))
+        .expect("expired personal slot")
+        .team_id = Some("stale-team".to_string());
+    upsert_supergrok_session(
+        &mut map,
+        base,
+        session("tok-team-only", "u-team", true, live),
+    );
+    std::fs::write(
+        home.path().join("auth.json"),
+        serde_json::to_vec_pretty(&map).expect("auth json"),
+    )
+    .expect("write auth");
+    assert!(
+        !next_request_draws_included_period_limits(),
+        "an expired personal session beside a live Team JWT does not draw included SuperGrok period limits"
+    );
+    save_limits_pins(&LimitsPins {
+        meter_source: Some(MeterSource::Included),
+        stay_supergrok: true,
+        use_console: false,
+        supergrok_identity: None,
+    })
+    .expect("included pin");
+    assert!(
+        !next_request_draws_included_period_limits(),
+        "an Included pin cannot paint limits in use for a Team JWT"
+    );
+    save_limits_pins(&LimitsPins {
+        stay_supergrok: true,
+        use_console: false,
+        meter_source: None,
+        supergrok_identity: None,
+    })
+    .expect("stay pin restored");
+
+    let balance = weekly_bal(1.0, end);
+    let area = Rect::new(0, 0, 140, 40);
+    let phrase = "Limits and Credits";
+    crate::appearance::cache::set_hide_header(false);
+
+    let draw = |agent: &mut crate::app::agent_view::AgentView| -> (Buffer, String) {
+        let mut buf = Buffer::empty(area);
+        let mut scratch = ScratchBuffer::new();
+        agent.draw(
+            area,
+            &mut buf,
+            &ActionRegistry::defaults(),
+            &mut scratch,
+            None,
+            false,
+            BannerSlotParams::none(),
+            false,
+            false,
+            &mut Vec::new(),
+            AppRenderParams::default(),
+        );
+        let screen = screen_of(&buf, area);
+        (buf, screen)
+    };
+
+    let mut closed = make_agent();
+    closed.plan_mode_active = false;
+    closed.plan_approval_view = None;
+    closed.sampling_identity = SamplingIdentityKind::SuperGrokSession;
+    closed.credit_balance = Some(balance.clone());
+    assert!(
+        !closed.plan_mode_active,
+        "the first screen is plan mode closed"
+    );
+    let (closed_buf, closed_screen) = draw(&mut closed);
+
+    let mut approval = make_agent();
+    approval.plan_mode_active = true;
+    approval.sampling_identity = SamplingIdentityKind::SuperGrokSession;
+    approval.credit_balance = Some(balance.clone());
+    approval.plan_approval_view = Some(
+        crate::views::plan_approval_view::PlanApprovalViewState::for_idle_decision(Some(
+            "# Proposed plan.\n\nDo the thing.\n".to_owned(),
+        )),
+    );
+    approval.show_plan_preview_if_available();
+    let (approval_buf, approval_screen) = draw(&mut approval);
+    assert!(
+        approval.plan_approval_view.is_some(),
+        "the second screen is the plan-approval screen"
+    );
+
+    assert!(
+        !next_request_draws_included_period_limits(),
+        "the next request still does not draw included SuperGrok period limits"
+    );
+    for (which, screen) in [
+        ("plan mode closed", &closed_screen),
+        ("plan approval", &approval_screen),
+    ] {
+        assert!(
+            !screen.contains("limits 0%"),
+            "{which} must not say limits 0%:\n{screen}"
+        );
+        assert!(
+            !paints_limits_percent(screen),
+            "{which} must not say limits N%:\n{screen}"
+        );
+    }
+
+    let closed_at = phrase_at(&closed_screen, phrase);
+    let approval_at = phrase_at(&approval_screen, phrase);
+    assert!(
+        closed_at.is_some() && approval_at.is_some(),
+        "plan mode closed pushes no credits slot, and the approval screen in the 11:16 shot has no Limits control. Both headers must show the exact words Limits and Credits.\nplan mode closed:\n{closed_screen}\nplan approval:\n{approval_screen}"
+    );
+    assert!(
+        footer_is_plan_approval(&approval_screen),
+        "the plan-approval screen keeps the side panel open and the footer approve | comment | revise | exit:\n{approval_screen}"
+    );
+
+    let open_from = |agent: &mut crate::app::agent_view::AgentView,
+                     buf: &Buffer,
+                     at: (u16, u16)| {
+        let (x, y) = at;
+        let width = phrase.chars().count() as u16;
+        for dx in 0..width {
+            assert!(
+                agent.hit_credits.contains(x + dx, y),
+                "hit_credits must cover Limits and Credits"
+            );
+        }
+        let control: String = (0..width).map(|dx| buf[(x + dx, y)].symbol()).collect();
+        assert_eq!(control, phrase);
+        assert_ne!(control, "limits 0%");
+        assert!(
+            !paints_limits_percent(&control),
+            "the control text must not be limits N%, got {control}"
+        );
+        let outcome = agent.handle_input(
+            &crossterm::event::Event::Mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: x,
+                row: y,
+                modifiers: KeyModifiers::empty(),
+            }),
+            &ActionRegistry::defaults(),
+        );
+        assert!(
+            matches!(outcome, InputOutcome::Action(Action::ShowLimits)),
+            "a click on Limits and Credits must yield Action::ShowLimits, got {outcome:?}"
+        );
+
+        let mut app = test_app_with_agent();
+        app.credit_balance = Some(balance.clone());
+        let _ = super::super::dispatch::dispatch(Action::ShowLimits, &mut app);
+        let opened = app.agents.values_mut().next().expect("agent");
+        let modal_area = Rect::new(0, 0, 100, 40);
+        let mut modal = Buffer::empty(modal_area);
+        opened.draw_active_modal(modal_area, &mut modal, Theme::default(), false);
+        let card = screen_of(&modal, modal_area);
+        let tab_line = card
+            .lines()
+            .find(|line| line.contains("Limits") && line.contains("Credits"))
+            .unwrap_or("");
+        let limits_at = tab_line.find("Limits").unwrap_or(usize::MAX);
+        let credits_at = tab_line.find("Credits").unwrap_or(0);
+        assert!(
+            limits_at < credits_at,
+            "opening the card through dispatch_show_limits shows Limits before Credits:\n{card}"
+        );
+        let Some(crate::views::modal::ActiveModal::Limits { state }) = opened.active_modal.as_ref()
+        else {
+            panic!("dispatch_show_limits must open the Limits card");
+        };
+        assert_eq!(state.window.active_tab, LIMITS_TAB);
+    };
+
+    open_from(&mut closed, &closed_buf, closed_at.expect("closed header"));
+    open_from(
+        &mut approval,
+        &approval_buf,
+        approval_at.expect("approval header"),
+    );
+}

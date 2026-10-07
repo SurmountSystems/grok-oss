@@ -1662,8 +1662,9 @@ fn plan_header_control_style(theme: &Theme, hovered: bool) -> Style {
 
 /// Plan title bar, right to left: `[✗]` `[↗]` `[⧉]` `[⌕]`.
 ///
-/// Each label is 3 columns. One cell sits between them. Close is omitted
-/// while plan review is not user-closeable.
+/// Each label is 3 columns. One cell sits between them. Close stays on
+/// file-backed approval, including when `feedback_active()` is true and
+/// the footer is `approve | comment | revise | exit`.
 fn paint_plan_header_controls(
     buf: &mut Buffer,
     popup_area: Rect,
@@ -1716,10 +1717,8 @@ fn paint_plan_header_controls(
         Some(Rect::new(x, y, W, 1))
     };
 
-    if !viewer.feedback_active() {
-        let hovered = viewer.close_hovered;
-        viewer.close_button_area = place(crate::glyphs::ballot_x_button(), hovered);
-    }
+    let hovered = viewer.close_hovered;
+    viewer.close_button_area = place(crate::glyphs::ballot_x_button(), hovered);
     let fs_hovered = viewer.fullscreen_hovered;
     viewer.fullscreen_button_area = place(crate::glyphs::enlarge_button(), fs_hovered);
     let copy_hovered = viewer.plan_ref().is_some_and(|p| p.copy_hovered);
@@ -2023,7 +2022,9 @@ pub fn render_line_viewer(
         // Stop the top rule before search. Otherwise it runs through the
         // gap cells and the bracket controls read as one flat string.
         let header_reserve = if viewer.kind == LineViewerKind::PlanPreview {
-            let controls: u16 = if viewer.feedback_active() { 3 } else { 4 };
+            // Search, copy, enlarge, and close. Close stays while feedback
+            // is active, so the title must stop before all four.
+            let controls: u16 = 4;
             let gaps = controls.saturating_sub(1);
             controls
                 .saturating_mul(3)
@@ -2047,9 +2048,10 @@ pub fn render_line_viewer(
     }
 
     // Action buttons on the top border, right-aligned. Plan preview uses
-    // four equal bracket controls with a one-cell gap. Other viewers keep
-    // the close and enlarge pair. Close is omitted in plan-review
-    // (feedback) mode because the modal is not user-closeable in that state.
+    // four equal bracket controls with a one-cell gap, including while
+    // file-backed approval shows `approve | comment | revise | exit`.
+    // Other viewers keep the close and enlarge pair and omit close while
+    // feedback is active.
     if viewer.kind == LineViewerKind::PlanPreview {
         paint_plan_header_controls(buf, popup_area, viewer, theme);
     } else {
@@ -3636,6 +3638,123 @@ mod tests {
             5,
             "plan text stays inset from the left frame"
         );
+    }
+
+    /// File-backed plan approval sets `feedback_active()` true on the side
+    /// panel whose footer is `approve | comment | revise | exit`. That footer
+    /// is not the feedback composer. The header must still include `[✗]`.
+    /// Search, copy, and enlarge stay. This test does not remove `[build]`
+    /// or `[plan]`.
+    #[test]
+    fn plan_approval_header_shows_the_close_control() {
+        let mut viewer = LineViewerState::open_markdown_content(
+            "plan.md",
+            "# Plan\n\nFile-backed approval\n".to_owned(),
+            None,
+        )
+        .expect("open plan");
+        viewer.kind = LineViewerKind::PlanPreview;
+        viewer.fullscreen = false;
+        viewer.plan_mut().feedback_active = true;
+        viewer.plan_mut().show_action_buttons = true;
+        viewer.plan_mut().comment_flow_active = false;
+        assert!(
+            viewer.feedback_active(),
+            "file-backed plan approval sets feedback_active() true on this side panel"
+        );
+
+        let full = Rect::new(0, 0, 100, 30);
+        let mut buf = Buffer::empty(full);
+        let theme = crate::theme::Theme::current();
+        render_line_viewer(&mut buf, full, &mut viewer, Path::new("/tmp"), &theme, 0);
+
+        assert!(
+            viewer.feedback_active(),
+            "drawing the approval screen must leave feedback_active() true"
+        );
+        let modal = viewer.last_modal_area.expect("approval side panel");
+        let footer_y = modal.y + modal.height.saturating_sub(1);
+        let footer = row_text(&buf, footer_y);
+        let lower = footer.to_ascii_lowercase();
+        for needle in ["approve", "comment", "revise", "exit"] {
+            assert!(
+                lower.contains(needle),
+                "approval footer must name {needle}; got {footer:?}"
+            );
+        }
+        assert!(
+            footer.contains('|'),
+            "approval footer is approve | comment | revise | exit; got {footer:?}"
+        );
+        assert!(
+            !lower.contains("clarify"),
+            "this approval footer is not the feedback composer; got {footer:?}"
+        );
+
+        let plan = viewer.plan_ref().expect("plan extras");
+        assert_title_bar_copy_left_of_enlarge(&buf, plan, footer_y);
+        assert_title_bar_search_left_of_copy(&buf, plan);
+        let search = plan
+            .search_button_area
+            .expect("search stays on the approval header");
+        let copy = plan
+            .copy_button_area
+            .expect("copy stays on the approval header");
+        let enlarge = viewer
+            .fullscreen_button_area
+            .expect("enlarge stays on the approval header");
+        for area in [search, copy, enlarge] {
+            assert_eq!(area.width, 3, "search, copy, and enlarge stay 3 columns");
+            assert_eq!(area.height, 1, "search, copy, and enlarge stay one row");
+        }
+        assert_eq!(
+            buf[(enlarge.x + 1, enlarge.y)].symbol(),
+            crate::glyphs::enlarge(),
+            "enlarge stays"
+        );
+
+        let header = row_text(&buf, search.y);
+        let close_label = crate::glyphs::ballot_x_button();
+        assert!(
+            header.contains(close_label),
+            "close is omitted on this screen; the header must include the three-column close control {close_label}; got {header:?}"
+        );
+        let close = viewer.close_button_area.expect(
+            "close is omitted on this screen; the hit target must cover the three-column close control",
+        );
+        assert_eq!(close.width, 3, "the close control is three columns");
+        assert_eq!(close.height, 1, "the close control is one row");
+        assert_eq!(close.y, search.y, "close stays on the header row");
+        assert_eq!(
+            buf[(close.x, close.y)].symbol(),
+            "[",
+            "close control opens with a square bracket"
+        );
+        assert_eq!(
+            buf[(close.x + 1, close.y)].symbol(),
+            crate::glyphs::ballot_x(),
+            "close control is [✗]"
+        );
+        assert_eq!(
+            buf[(close.x + 2, close.y)].symbol(),
+            "]",
+            "close control closes with a square bracket"
+        );
+        for dx in 0..3u16 {
+            let col = close.x.saturating_add(dx);
+            assert!(
+                close.contains((col, close.y).into()),
+                "the hit target must cover [✗]; close is omitted on this screen when the rect misses column {col}"
+            );
+        }
+        assert_eq!(
+            enlarge.x + enlarge.width + 1,
+            close.x,
+            "one-cell gap between enlarge and close"
+        );
+        assert!(search.x + search.width < copy.x);
+        assert!(copy.x + copy.width < enlarge.x);
+        assert!(enlarge.x + enlarge.width < close.x);
     }
 
     /// Query `plan` matches `Plan` and `PLAN`. Reuse LineViewerState search.

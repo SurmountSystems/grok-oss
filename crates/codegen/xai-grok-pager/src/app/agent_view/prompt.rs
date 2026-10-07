@@ -22,6 +22,22 @@ fn composer_cursor_at_end_of_last_line(prompt: &PromptWidget) -> bool {
 }
 
 impl AgentView {
+    /// Shift-Enter, the four bare arrows, and Ctrl-Backspace on a plan prompt
+    /// use the same composer path as the main Human box.
+    pub(super) fn plan_prompt_key_reaches_main_composer(key: &KeyEvent) -> bool {
+        if crate::input::is_mod_enter(key) {
+            return true;
+        }
+        let bare_arrow = matches!(
+            key.code,
+            KeyCode::Up | KeyCode::Down | KeyCode::Left | KeyCode::Right
+        ) && key.modifiers.is_empty();
+        if bare_arrow {
+            return true;
+        }
+        key.code == KeyCode::Backspace && key.modifiers == KeyModifiers::CONTROL
+    }
+
     /// When Ctrl+Enter must interject (`x.ai/interject`) instead of inserting
     /// a newline. Appropriate: a sampler turn is running, the Human box has
     /// text or images, and the target can take it (L1 or L2 overlay). Not
@@ -2969,5 +2985,142 @@ mod queue_recall_tests {
 
         assert_eq!(agent.active_pane, AgentPane::Prompt);
         assert_eq!(agent.prompt.text(), "an older prompt");
+    }
+}
+
+#[cfg(test)]
+mod shared_prompt_key_tests {
+    use super::test_fixtures;
+    use crate::actions::ActionRegistry;
+    use crate::views::file_search::line_viewer::{LineViewerKind, LineViewerState};
+    use crate::views::plan_approval_view::PlanApprovalFocus;
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+
+    /// Same seed on every surface. The caret sits in the middle line so Up,
+    /// Down, Left, and Right each move, and Ctrl-Backspace has a word to delete.
+    const SEED: &str = "alpha beta\nsecond line\nthird";
+
+    fn caret() -> usize {
+        SEED.find("second").expect("second") + 3
+    }
+
+    fn key_event(name: &str) -> KeyEvent {
+        match name {
+            "Shift-Enter" => KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT),
+            "Up" => KeyEvent::new(KeyCode::Up, KeyModifiers::NONE),
+            "Down" => KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+            "Left" => KeyEvent::new(KeyCode::Left, KeyModifiers::NONE),
+            "Right" => KeyEvent::new(KeyCode::Right, KeyModifiers::NONE),
+            "Ctrl-Backspace" => KeyEvent::new(KeyCode::Backspace, KeyModifiers::CONTROL),
+            other => panic!("unknown prompt key {other}"),
+        }
+    }
+
+    fn composer(agent: &super::AgentView) -> (String, usize) {
+        (agent.prompt.text().to_string(), agent.prompt.cursor())
+    }
+
+    fn seed(agent: &mut super::AgentView) {
+        agent.multiline_mode = true;
+        agent.active_pane = super::AgentPane::Prompt;
+        agent.prompt.set_text(SEED);
+        agent.prompt.set_cursor(caret());
+    }
+
+    /// Plan side panel open. Preview focus is the default, so Shift-Enter,
+    /// the arrows, and Ctrl-Backspace do not reach `handle_prompt_key`.
+    fn plan_approval_screen() -> super::AgentView {
+        let mut agent = test_fixtures::make_agent();
+        seed(&mut agent);
+        agent.plan_mode_active = true;
+        agent.plan_approval_view = Some(test_fixtures::make_plan_approval_view_state());
+        let Some(mut viewer) =
+            LineViewerState::open_markdown_content("plan.md", "# Plan\n\nStep\n".to_owned(), None)
+        else {
+            panic!("plan side panel must open");
+        };
+        viewer.kind = LineViewerKind::PlanPreview;
+        agent.line_viewer = Some(viewer);
+        agent
+    }
+
+    fn ask_prompt() -> super::AgentView {
+        let mut agent = test_fixtures::make_agent();
+        seed(&mut agent);
+        agent.plan_mode_active = false;
+        agent.session_mode_pending = None;
+        agent.session_mode = xai_grok_tools::types::SessionMode::Ask;
+        agent
+    }
+
+    /// Comment composer on the plan screen. Session multiline is on, so
+    /// Shift-Enter can submit here instead of inserting a newline.
+    fn comment_prompt() -> super::AgentView {
+        let mut agent = plan_approval_screen();
+        let Some(pav) = agent.plan_approval_view.as_mut() else {
+            panic!("comment needs the plan-approval screen");
+        };
+        pav.focus = PlanApprovalFocus::Commenting;
+        pav.commenting_range = Some(0..1);
+        agent
+    }
+
+    fn oracle(key: &KeyEvent) -> (String, usize) {
+        let mut agent = test_fixtures::make_agent();
+        seed(&mut agent);
+        let _ = agent.handle_prompt_key_for_test(key);
+        composer(&agent)
+    }
+
+    fn press_screen(agent: &mut super::AgentView, key: &KeyEvent) -> (String, usize) {
+        let registry = ActionRegistry::non_vscode_for_test();
+        let _ = agent.handle_input(&Event::Key(*key), &registry);
+        composer(agent)
+    }
+
+    /// Shift-Enter, Up, Down, Left, Right, and Ctrl-Backspace on the
+    /// plan-approval screen, on Ask, and on comment must match the main
+    /// composer (`AgentView::handle_prompt_key`). A dropped key is a failure.
+    /// The plan-approval screen does not call that function for these keys
+    /// while Preview focus is the default.
+    #[test]
+    fn every_prompt_handles_shift_enter_arrows_and_ctrl_backspace_like_the_main_composer() {
+        crate::appearance::cache::set_composer_multiline(true);
+        let names = [
+            "Shift-Enter",
+            "Up",
+            "Down",
+            "Left",
+            "Right",
+            "Ctrl-Backspace",
+        ];
+        let seed_snap = (SEED.to_string(), caret());
+        let mut misses = Vec::new();
+        for name in names {
+            let key = key_event(name);
+            let expected = oracle(&key);
+            assert_ne!(
+                expected, seed_snap,
+                "main composer handle_prompt_key must change the prompt for {name}"
+            );
+            let surfaces: [(&str, super::AgentView); 3] = [
+                ("plan approval", plan_approval_screen()),
+                ("Ask", ask_prompt()),
+                ("comment", comment_prompt()),
+            ];
+            for (surface, mut agent) in surfaces {
+                let got = press_screen(&mut agent, &key);
+                if got != expected {
+                    misses.push(format!(
+                        "{surface} dropped or diverged on {name}: composer {got:?}, main composer {expected:?}"
+                    ));
+                }
+            }
+        }
+        assert!(
+            misses.is_empty(),
+            "prompt keys must match AgentView::handle_prompt_key:\n{}",
+            misses.join("\n")
+        );
     }
 }

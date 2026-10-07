@@ -357,6 +357,16 @@ impl AgentView {
                 _ => self.clear_stuck_scrollback_drag(),
             }
         }
+        // The status-row control sits outside the plan pane. The line viewer
+        // and the plan-approval mouse path return Changed for that outside
+        // click. A left click on Limits and Credits opens the card instead,
+        // with plan mode closed and on the plan-approval screen.
+        if let Event::Mouse(mouse) = ev
+            && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+            && self.hit_credits.contains(mouse.column, mouse.row)
+        {
+            return InputOutcome::Action(Action::ShowLimits);
+        }
         if let Some(outcome) = self.intercept_takeover_input(ev, registry, prompt_paging) {
             return outcome;
         }
@@ -619,6 +629,22 @@ impl AgentView {
                 && self.hit_voice_stop_button.contains(mouse.column, mouse.row)
             {
                 return InputOutcome::Action(Action::VoiceToggle);
+            }
+            // Plan approval and comment share the main composer for
+            // Shift-Enter, the four arrows, and Ctrl-Backspace. Preview
+            // focus otherwise keeps those keys on the plan list. Ask has
+            // no line viewer and already reaches `handle_prompt_key`.
+            // The search bar keeps its own arrows.
+            if let Event::Key(key) = ev
+                && key.kind != KeyEventKind::Release
+                && self.plan_approval_view.is_some()
+                && self
+                    .line_viewer
+                    .as_ref()
+                    .is_some_and(|viewer| viewer.list_state.input_mode().is_none())
+                && Self::plan_prompt_key_reaches_main_composer(key)
+            {
+                return self.handle_prompt_key(key, registry, false);
             }
             let plan_prompt_focused = self
                 .plan_approval_view

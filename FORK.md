@@ -2541,6 +2541,50 @@ Differences from tests that do not cover this screen:
   contract. `approve_or_revise_drains_plan_composer_images` uses the
   idle-local fixture, not the after-turn `RevisePlan(text)` arm.
 
+**Composer copy, closed header, and plan approval (pinned 2026-10-07).**
+These sentences say what those screens must do. They are not a claim that
+the tests already pass. Do not reshape the asserts to match today's paint.
+Rebuild IPC is already wired. This wave does not rewrite
+`RelaunchForUpdate`. SuperGrok is paid.
+
+- On DOGE the composer copy control is a three-column square-bracketed
+  copy glyph, inset from the white stroke. Named test:
+  `composer_copy_control_is_a_bracketed_glyph_inset_from_the_white_stroke`.
+  The older test
+  `soft_plan_side_panel_shows_full_title_bordered_copy_muted_divider_and_hides_actions_after_approve`
+  draws the plan-header glyph `[⧉]`. It does not draw this composer
+  label. Today the composer paints the yellow word `[Copy]`.
+- With plan mode closed, and on the plan-approval screen, the header
+  shows `Limits and Credits` when the next request does not draw included
+  SuperGrok period limits. A click opens the card. The label is not a
+  percent. Named test:
+  `closed_plan_header_opens_limits_and_credits_without_a_false_percent`.
+  The older test
+  `plan_mode_screen_offers_limits_and_credits_when_included_limits_are_not_the_next_request`
+  forces plan mode on and builds the modal itself. It does not draw the
+  header while plan mode is closed, and it does not draw the
+  plan-approval header. The team-JWT test
+  `limits_mode_does_not_paint_limits_in_use_for_a_team_jwt_and_an_unread_meter_is_not_zero_percent`
+  still forbids `limits 0%`, `limits 1%`, and a card that says included
+  limits are in use. That assert stays.
+- Shift-Enter, the arrow keys, and Ctrl-Backspace do the same thing on
+  the plan-approval prompt, Ask, and comment as on the main composer.
+  Named test:
+  `every_prompt_handles_shift_enter_arrows_and_ctrl_backspace_like_the_main_composer`.
+- The approval header shows `[✗]` while the footer is
+  `approve | comment | revise | exit`. Named test:
+  `plan_approval_header_shows_the_close_control`.
+- That approval prompt's stroke is white on every side. Named test:
+  `plan_approval_prompt_stroke_is_white_on_every_side`.
+  `plan_mode_prompt_input_keeps_a_white_outline` stays. It draws the
+  white outline on the plan-mode prompt input. It does not draw this
+  approval screen.
+- While planning, the Operator can view an attached image. Named test:
+  `planning_opens_an_attached_image_for_viewing`.
+  `plan_mode_keeps_an_image_the_operator_provides` stays the send path.
+  It keeps the image on that plan turn. It does not open the image for
+  viewing.
+
 **Rules (not product class numbers):**
 
 - **`FORK_PATHS` restore is docs and scripts only.** Product seams inside
