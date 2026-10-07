@@ -103,11 +103,20 @@ dump_bash_state() {
     local content="$1"
     local var_name="$2"
     if [[ -n "$content" ]]; then
+      # A restored `set -a` must not export this decoder temporary, or define
+      # functions, into the environment. On a large CI environment that `exec`
+      # fails with status 126 and replaces the user command's exit code.
+      builtin printf '%s\n' '__grok_ax=0; case $- in *a*) __grok_ax=1 ;; esac'
+      builtin printf '%s\n' 'builtin set +o allexport 2>/dev/null || true'
+      builtin printf '%s\n' 'builtin declare +x __grok_ax 2>/dev/null || true'
       builtin printf 'grok_snap_%s=$(command base64 -d <<'"'"'GROK_SNAP_EOF_%s'"'"'\n' "$var_name" "$var_name"
       command base64 <<<"$content" | command tr -d '\n'
       builtin printf '\nGROK_SNAP_EOF_%s\n' "$var_name"
       builtin printf ')\n'
-      builtin printf 'eval "$grok_snap_%s"\n' "$var_name"
+      builtin printf 'builtin eval "$grok_snap_%s"\n' "$var_name"
+      builtin printf '%s\n' 'if [[ "$__grok_ax" == 1 ]]; then builtin set -o allexport; fi'
+      builtin printf '%s\n' 'builtin unset __grok_ax'
+      builtin printf 'builtin unset grok_snap_%s\n' "$var_name"
     fi
   }
 
@@ -116,7 +125,7 @@ dump_bash_state() {
   _emit "$PWD"
 
   local env_vars
-  env_vars=$(builtin export -p 2>/dev/null | command grep -viE '_proxy=|GROK_SANDBOX|GROK_AGENT=|SUDO_ASKPASS|GROK_ASKPASS|ELECTRON_RUN_AS_NODE|SSH_AUTH_SOCK|DBUS_SESSION_BUS_ADDRESS|XDG_RUNTIME_DIR|WAYLAND_DISPLAY|GPG_TTY|__grok_user_cmd' || true)
+  env_vars=$(builtin export -p 2>/dev/null | command grep -viE '_proxy=|GROK_SANDBOX|GROK_AGENT=|SUDO_ASKPASS|GROK_ASKPASS|ELECTRON_RUN_AS_NODE|SSH_AUTH_SOCK|DBUS_SESSION_BUS_ADDRESS|XDG_RUNTIME_DIR|WAYLAND_DISPLAY|GPG_TTY|__grok_user_cmd|__grok_ax=' || true)
   _emit_encoded "$env_vars" "ENV_VARS_B64"
 
   _emit_encoded "$posix_opts" "POSIX_OPTS_B64"
@@ -422,9 +431,15 @@ impl ShellState {
                  builtin export PWD=\"$(builtin pwd)\"; \
                  builtin shopt -s expand_aliases 2>/dev/null; {sudo_inject}{search_inject}\
                  builtin printf '%s' \"${{2:-}}\"; \
-                 __grok_user_cmd=\"$1\"; builtin declare +x __grok_user_cmd 2>/dev/null; builtin set --; \
+                 __grok_ax=0; case $- in *a*) __grok_ax=1 ;; esac; \
+                 builtin set +o allexport 2>/dev/null || true; \
+                 builtin declare +x __grok_ax 2>/dev/null || true; \
+                 __grok_user_cmd=\"$1\"; builtin declare +x __grok_user_cmd 2>/dev/null || true; \
+                 if [[ \"$__grok_ax\" == 1 ]]; then builtin set -o allexport; fi; \
+                 builtin unset __grok_ax; \
+                 builtin set --; \
                  builtin eval \"$__grok_user_cmd\" 2>&1; }}; \
-                 COMMAND_EXIT_CODE=$?; builtin unset __grok_user_cmd 2>/dev/null; {dump_fn} >&4; builtin exit $COMMAND_EXIT_CODE"
+                 COMMAND_EXIT_CODE=$?; builtin unset __grok_user_cmd 2>/dev/null; builtin set +e; ( {dump_fn} ) >&4; builtin exit $COMMAND_EXIT_CODE"
             ),
             // After snapshot restore: force nonomatch so login dumps cannot re-arm NOMATCH for
             // model globs. See the bash wrapper comment for why positional parameters are cleared

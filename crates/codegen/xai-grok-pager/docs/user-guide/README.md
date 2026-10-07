@@ -54,4 +54,4 @@ Automate, script, and integrate Grok OSS with other systems.
 | 24 | [Monitoring Usage (External OpenTelemetry)](24-monitoring-usage.md) | Customer OTEL export. Spend meters and included SuperGrok period limits live on `/limits`, not here. |
 | 25 | [Status Line](25-status-line.md) | The bottom status row: built-in segments, command scripts, and the stdin JSON contract |
 | 26 | [Configuration Reference](26-config-reference.md) | Field list for `config.toml`, `managed_config.toml`, and `requirements.toml` |
-| 27 | [Limits](25-limits.md) | Weekly limits chip (`limits 28%`, hover `72% left`), Credits and Limits, and one session calling the billing APIs. |
+| 27 | [Limits](25-limits.md) | Weekly limits chip (`limits 28%`, hover `72% left`) only when that meter is in use, Limits then Credits, and one session calling the billing APIs. |

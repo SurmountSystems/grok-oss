@@ -2311,6 +2311,146 @@ async fn l2_auto_compact_still_fires_at_95_percent_of_200k() {
         .await;
 }
 
+/// Owed outcome: an L2 or L3 session does not continue past 200k tokens.
+/// The stored catalog window may still be 500k. That must not let a nested
+/// session keep sampling. L1 stays on the catalog 500k window, so this
+/// cannot be satisfied by capping every session at 200k.
+///
+/// L3 near that window summarizes and stops. It must not compact itself
+/// and continue. L2 compacts against the nested 200k window instead of
+/// the catalog 500k window.
+#[tokio::test(flavor = "current_thread")]
+async fn l2_and_l3_do_not_continue_past_200k_while_l1_keeps_the_catalog_500k_window() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (l1_gateway, _) = mpsc::unbounded_channel();
+            let (l1_persistence, _) = mpsc::unbounded_channel();
+            let l1 = create_test_actor(200_000, 500_000, 95, l1_gateway, l1_persistence).await;
+            assert!(
+                !l1.sampling_window_is_full().await,
+                "L1 stays on the catalog 500k window"
+            );
+            assert!(
+                l1.check_auto_compact_needed().await.is_none(),
+                "L1 stays on the catalog 500k window"
+            );
+            assert_eq!(
+                l1.chat_state_handle
+                    .get_sampling_config()
+                    .await
+                    .expect("L1 sampling config")
+                    .context_window
+                    .get(),
+                500_000,
+                "L1 stays on the catalog 500k window"
+            );
+            l1.compaction_at_tokens.set(Some(
+                xai_grok_sampling_types::CompactionAtTokens::Enabled(true),
+            ));
+            let l1_sample = l1.reconstruct_full_config().await;
+            assert_eq!(
+                l1_sample.context_window, 500_000,
+                "L1 stays on the catalog 500k window"
+            );
+            assert_eq!(
+                l1_sample
+                    .extra_headers
+                    .get("x-compaction-at")
+                    .map(String::as_str),
+                Some("475000"),
+                "L1 stays on the catalog 500k window"
+            );
+
+            let (l2_gateway, _) = mpsc::unbounded_channel();
+            let (l2_persistence, _) = mpsc::unbounded_channel();
+            let mut l2 = create_test_actor(200_000, 500_000, 95, l2_gateway, l2_persistence).await;
+            l2.startup_hints.is_subagent = true;
+            l2.tool_context.subagent_depth = 1;
+            assert_eq!(
+                l2.chat_state_handle
+                    .get_sampling_config()
+                    .await
+                    .expect("L2 sampling config")
+                    .context_window
+                    .get(),
+                500_000,
+                "stored catalog may stay 500k; the sample must not"
+            );
+            l2.compaction_at_tokens.set(Some(
+                xai_grok_sampling_types::CompactionAtTokens::Enabled(true),
+            ));
+            let l2_sample = l2.reconstruct_full_config().await;
+            assert_eq!(
+                l2_sample.context_window, 200_000,
+                "an L2 or L3 session does not continue past 200k tokens"
+            );
+            assert_eq!(
+                l2_sample
+                    .extra_headers
+                    .get("x-compaction-at")
+                    .map(String::as_str),
+                Some("190000"),
+                "an L2 or L3 session does not continue past 200k tokens"
+            );
+            assert!(
+                l2.sampling_window_is_full().await,
+                "an L2 or L3 session does not continue past 200k tokens"
+            );
+            let l2_trigger = l2.check_auto_compact_needed().await;
+            let l2_info =
+                l2_trigger.expect("an L2 or L3 session does not continue past 200k tokens");
+            assert_eq!(
+                l2_info.context_window, 200_000,
+                "an L2 or L3 session does not continue past 200k tokens"
+            );
+            assert_eq!(
+                l2_info.tokens_used, 200_000,
+                "an L2 or L3 session does not continue past 200k tokens"
+            );
+
+            let (l3_gateway, _) = mpsc::unbounded_channel();
+            let (l3_persistence, _) = mpsc::unbounded_channel();
+            let mut l3 = create_test_actor(200_000, 500_000, 95, l3_gateway, l3_persistence).await;
+            l3.startup_hints.is_subagent = true;
+            l3.tool_context.subagent_depth = 2;
+            l3.compaction_at_tokens.set(Some(
+                xai_grok_sampling_types::CompactionAtTokens::Enabled(true),
+            ));
+            let l3_sample = l3.reconstruct_full_config().await;
+            assert_eq!(
+                l3_sample.context_window, 200_000,
+                "an L2 or L3 session does not continue past 200k tokens"
+            );
+            assert_eq!(
+                l3_sample
+                    .extra_headers
+                    .get("x-compaction-at")
+                    .map(String::as_str),
+                Some("190000"),
+                "an L2 or L3 session does not continue past 200k tokens"
+            );
+            assert!(
+                l3.sampling_window_is_full().await,
+                "an L2 or L3 session does not continue past 200k tokens"
+            );
+            assert!(
+                l3.l3_nested_window_is_full().await,
+                "an L2 or L3 session does not continue past 200k tokens"
+            );
+            assert!(
+                l3.check_auto_compact_needed().await.is_none(),
+                "an L2 or L3 session does not continue past 200k tokens"
+            );
+            assert!(
+                !l3.should_compact_on_error(&api_error_with_context_window(500_000))
+                    .await,
+                "an L3 must not compact itself and continue"
+            );
+        })
+        .await;
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn resuming_a_specialist_does_not_finish_with_no_inference_or_replay_the_previous_assistant_text()
  {

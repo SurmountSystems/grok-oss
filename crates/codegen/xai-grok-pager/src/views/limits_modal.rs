@@ -181,8 +181,14 @@ fn tone_color(tone: AllowanceMeterTone, theme: &Theme) -> ratatui::style::Color 
     }
 }
 
-/// Credits is personal credits and console API credits. Limits is the included allowance, the bar, and the short week line.
-const CARD_TABS: &[&str] = &["Credits", "Limits"];
+/// Limits is the included allowance, the bar, and the short week line.
+/// Credits is personal credits and console API credits. Limits is first
+/// and is the default open tab.
+const CARD_TABS: &[&str] = &["Limits", "Credits"];
+/// Default open tab. Limits mode shows this tab.
+const LIMITS_TAB: usize = 0;
+/// Second tab. SuperGrok dollar credits and console API credits stay here.
+const CREDITS_TAB: usize = 1;
 
 /// Limits tab copy. The status row does not use this phrase.
 fn linear_week_label(pacing: xai_grok_shell::token_economy::PeriodPacing) -> String {
@@ -213,7 +219,13 @@ fn limits_tab_lines(state: &LimitsModalState, now: DateTime<Utc>) -> Vec<String>
         Some(text) => format!("  Next reset: {text}"),
         None => "  Next reset: not known yet".to_string(),
     };
-    vec![allowance, reset, short_week_line(included, now)]
+    let mut lines = vec![allowance, reset, short_week_line(included, now)];
+    // Failed console fetch: same field the Credits tab uses, on this body too.
+    let console = credits_tab_meter_line(&console_credits_line(state));
+    if console.trim() == "Console API credits: not available" {
+        lines.push(console);
+    }
+    lines
 }
 
 fn short_week_line(
@@ -326,35 +338,71 @@ fn console_api_credits_balance_available(state: &LimitsModalState) -> bool {
     matches!(state.snapshot.console.balance_cents, Some(cents) if cents > 0)
 }
 
-/// Console API credits are in use only when the meter pin is console and team
-/// prepaid remaining is available. This is not the `use_console` flag.
-fn using_console_api_credits(state: &LimitsModalState) -> bool {
-    let pins = xai_grok_shell::auth::limits_pins::load_limits_pins();
-    pins.meter_source == Some(xai_grok_shell::auth::limits_pins::MeterSource::Console)
-        && console_api_credits_balance_available(state)
+/// True when the card may say `Using limits`. A team inference balance the
+/// requests are spending is not included SuperGrok period limits.
+fn showing_using_limits(state: &LimitsModalState) -> bool {
+    let team_balance =
+        inference_key_balance_for_unmarked_card(state).is_some_and(|cents| cents > 0);
+    xai_grok_shell::auth::limits_pins::next_request_draws_included_period_limits() && !team_balance
 }
 
 fn spend_status_and_button(state: &LimitsModalState) -> (&'static str, &'static str) {
-    let team_balance =
-        inference_key_balance_for_unmarked_card(state).is_some_and(|cents| cents > 0);
-    if using_console_api_credits(state) || team_balance {
-        ("Using credits", "Use limits")
-    } else {
+    if showing_using_limits(state) {
         ("Using limits", "Use credits")
+    } else {
+        ("Using credits", "Use limits")
     }
+}
+
+/// Limits label on the left, Credits label on the right.
+///
+/// The labels are `'static`. The signature must say so. Eliding the
+/// lifetime would keep `state` borrowed for the whole array, and the
+/// modal cannot mutably borrow `state.window` while that borrow lives.
+fn spend_shortcuts(state: &LimitsModalState) -> [Shortcut<'static>; 3] {
+    let (status_label, button_label) = spend_status_and_button(state);
+    let limits_is_status = status_label == "Using limits";
+    let (first_label, first_clickable, second_label, second_clickable) = if limits_is_status {
+        (status_label, false, button_label, true)
+    } else {
+        (button_label, true, status_label, false)
+    };
+    let click_id = |clickable: bool| {
+        if clickable { SPEND_OTHER_CHOICE_ID } else { 0 }
+    };
+    [
+        Shortcut {
+            label: first_label,
+            clickable: first_clickable,
+            id: click_id(first_clickable),
+        },
+        Shortcut {
+            label: second_label,
+            clickable: second_clickable,
+            id: click_id(second_clickable),
+        },
+        Shortcut {
+            label: "Esc close",
+            clickable: true,
+            id: 1,
+        },
+    ]
 }
 
 fn persist_other_spend_choice(state: &LimitsModalState) -> std::io::Result<()> {
     use xai_grok_shell::auth::limits_pins::{MeterSource, load_limits_pins, save_limits_pins};
     let mut pins = load_limits_pins();
     pins.use_console = false;
-    if using_console_api_credits(state) {
+    if showing_using_limits(state) {
+        if console_api_credits_balance_available(state) {
+            pins.meter_source = Some(MeterSource::Console);
+            pins.stay_supergrok = false;
+        } else if pins.meter_source == Some(MeterSource::DollarCredits) {
+            pins.meter_source = Some(MeterSource::Included);
+        }
+    } else {
         pins.meter_source = Some(MeterSource::Included);
-    } else if console_api_credits_balance_available(state) {
-        pins.meter_source = Some(MeterSource::Console);
         pins.stay_supergrok = false;
-    } else if pins.meter_source == Some(MeterSource::DollarCredits) {
-        pins.meter_source = Some(MeterSource::Included);
     }
     save_limits_pins(&pins)
 }
@@ -389,24 +437,7 @@ pub fn render_limits_modal(
     compact: bool,
     now: DateTime<Utc>,
 ) {
-    let (status_label, button_label) = spend_status_and_button(state);
-    let shortcuts = [
-        Shortcut {
-            label: status_label,
-            clickable: false,
-            id: 0,
-        },
-        Shortcut {
-            label: button_label,
-            clickable: true,
-            id: SPEND_OTHER_CHOICE_ID,
-        },
-        Shortcut {
-            label: "Esc close",
-            clickable: true,
-            id: 1,
-        },
-    ];
+    let shortcuts = spend_shortcuts(state);
     let sizing = ModalSizing {
         width_pct: 0.55,
         max_width: 88,
@@ -445,10 +476,11 @@ pub fn render_limits_modal(
     });
     let mut display_lines: Vec<String> = Vec::new();
     let mut injected_bar = false;
-    let body = if state.window.active_tab == 1 {
-        limits_tab_lines(state, now)
-    } else {
+    let on_credits_tab = state.window.active_tab == CREDITS_TAB;
+    let body = if on_credits_tab {
         credits_tab_lines(state)
+    } else {
+        limits_tab_lines(state, now)
     };
     for raw in body {
         let is_allowance_meter = is_included_allowance_used_line(&raw);
@@ -458,7 +490,7 @@ pub fn render_limits_modal(
         // banner; the full note stays in content_lines.
         let display_src = if raw.as_str() == NOTE_LIMITS_PRINTOUT_NOT_USAGE {
             TUI_PRINTOUT_BANNER.to_string()
-        } else if state.window.active_tab == 0 {
+        } else if on_credits_tab {
             credits_tab_meter_line(raw.as_str())
         } else {
             raw
@@ -869,7 +901,7 @@ mod tests {
                 .collect::<Vec<_>>()
                 .join("\n")
         };
-        let limits = paint_tab(&mut state, 1);
+        let limits = paint_tab(&mut state, LIMITS_TAB);
         assert!(
             limits.contains("40% used · 60% remaining"),
             "Limits tab allowance:\n{limits}"
@@ -898,7 +930,7 @@ mod tests {
             !limits.contains("behind linear burn"),
             "Limits tab must not show the long burn note:\n{limits}"
         );
-        let credits = paint_tab(&mut state, 0);
+        let credits = paint_tab(&mut state, CREDITS_TAB);
         assert!(
             credits.contains("Personal credits"),
             "Credits tab personal:\n{credits}"
@@ -946,7 +978,7 @@ mod tests {
         let mut state = LimitsModalState::new(snap);
         let theme = Theme::default();
         let area = Rect::new(0, 0, 80, 30);
-        state.window.active_tab = 1;
+        state.window.active_tab = LIMITS_TAB;
         let mut buf = Buffer::empty(area);
         render_limits_modal(&mut buf, area, &mut state, &theme, false, now);
 
@@ -1155,24 +1187,43 @@ mod tests {
                 .collect::<Vec<_>>()
                 .join("\n")
         };
-        let credits = painted(&buf);
+        let opened = painted(&buf);
         assert!(
-            credits.contains("Credits") && credits.contains("Limits"),
-            "clicking the chip must open Credits and Limits tabs:\n{credits}"
+            opened.contains("Credits") && opened.contains("Limits"),
+            "clicking the chip must open Limits and Credits tabs:\n{opened}"
+        );
+        let tab_line = opened
+            .lines()
+            .find(|line| line.contains("Limits") && line.contains("Credits"))
+            .unwrap_or("");
+        let limits_at = tab_line.find("Limits").expect("Limits tab label");
+        let credits_at = tab_line.find("Credits").expect("Credits tab label");
+        assert!(
+            limits_at < credits_at,
+            "Limits comes before Credits on the tab row:\n{tab_line}"
+        );
+        assert_eq!(
+            state.window.active_tab, LIMITS_TAB,
+            "limits mode opens on the Limits tab"
         );
         assert!(
-            !credits.contains("linear week"),
-            "pacing stays off the Credits tab and off the header:\n{credits}"
+            opened.contains("12% ahead of a linear week")
+                || opened.contains("behind a linear week"),
+            "Limits tab must show ahead of or behind a linear week:\n{opened}"
+        );
+        assert!(
+            opened.contains("12% ahead of a linear week"),
+            "half a week at 62% used is 12% ahead of a linear week:\n{opened}"
         );
 
-        let limits_tab = state.window.tab_rects[1].expect("Limits tab rectangle");
+        let credits_tab = state.window.tab_rects[CREDITS_TAB].expect("Credits tab rectangle");
         let outcome = modal_window::handle_modal_mouse(
             &mut state.window,
             MouseEventKind::Down(MouseButton::Left),
-            limits_tab.x,
-            limits_tab.y,
+            credits_tab.x,
+            credits_tab.y,
         );
-        assert_eq!(outcome, ModalWindowOutcome::TabChanged(1));
+        assert_eq!(outcome, ModalWindowOutcome::TabChanged(CREDITS_TAB));
         let pin_after_tab = std::fs::read(home.path().join("limits_pins.json")).expect("pin");
         assert_eq!(
             pin_before, pin_after_tab,
@@ -1181,15 +1232,10 @@ mod tests {
 
         let mut buf = Buffer::empty(modal_area);
         render_limits_modal(&mut buf, modal_area, &mut state, &theme, false, now);
-        let limits = painted(&buf);
+        let credits_body = painted(&buf);
         assert!(
-            limits.contains("12% ahead of a linear week")
-                || limits.contains("behind a linear week"),
-            "Limits tab must show ahead of or behind a linear week:\n{limits}"
-        );
-        assert!(
-            limits.contains("12% ahead of a linear week"),
-            "half a week at 62% used is 12% ahead of a linear week:\n{limits}"
+            !credits_body.contains("linear week"),
+            "pacing stays off the Credits tab and off the header:\n{credits_body}"
         );
         assert!(
             !row.contains("linear week") && !row.contains("behind linear burn"),
@@ -1253,11 +1299,15 @@ mod tests {
                     snap.with_console_balance_cents(console_cents)
                 };
                 let mut state = LimitsModalState::new(snap);
+                state.window.active_tab = CREDITS_TAB;
                 let theme = Theme::default();
                 let area = Rect::new(0, 0, 100, 40);
                 let mut buf = Buffer::empty(area);
                 render_limits_modal(&mut buf, area, &mut state, &theme, false, now);
-                assert_eq!(state.window.active_tab, 0, "Credits is the open tab");
+                assert_eq!(
+                    state.window.active_tab, CREDITS_TAB,
+                    "Credits is the second tab"
+                );
                 (0..area.height)
                     .map(|y| {
                         (0..area.width)
@@ -1476,14 +1526,22 @@ mod tests {
         assert!(credits.contains("Using limits"), "{credits}");
         assert!(credits.contains("Use credits"), "{credits}");
         assert!(!credits.contains("Using credits"), "{credits}");
-        let limits_tab = state.window.tab_rects[1].expect("Limits tab rectangle");
+        let credits_tab = state.window.tab_rects[CREDITS_TAB].expect("Credits tab rectangle");
+        let outcome = modal_window::handle_modal_mouse(
+            &mut state.window,
+            MouseEventKind::Down(MouseButton::Left),
+            credits_tab.x,
+            credits_tab.y,
+        );
+        assert_eq!(outcome, ModalWindowOutcome::TabChanged(CREDITS_TAB));
+        let limits_tab = state.window.tab_rects[LIMITS_TAB].expect("Limits tab rectangle");
         let outcome = modal_window::handle_modal_mouse(
             &mut state.window,
             MouseEventKind::Down(MouseButton::Left),
             limits_tab.x,
             limits_tab.y,
         );
-        assert_eq!(outcome, ModalWindowOutcome::TabChanged(1));
+        assert_eq!(outcome, ModalWindowOutcome::TabChanged(LIMITS_TAB));
         let limits = paint(&mut state);
         assert!(limits.contains("Using limits"), "{limits}");
         assert!(limits.contains("Use credits"), "{limits}");
@@ -1491,14 +1549,6 @@ mod tests {
             !home.path().join("limits_pins.json").exists(),
             "changing tabs must not write the spend pin"
         );
-        let credits_tab = state.window.tab_rects[0].expect("Credits tab rectangle");
-        let outcome = modal_window::handle_modal_mouse(
-            &mut state.window,
-            MouseEventKind::Down(MouseButton::Left),
-            credits_tab.x,
-            credits_tab.y,
-        );
-        assert_eq!(outcome, ModalWindowOutcome::TabChanged(0));
         let _credits = paint(&mut state);
         click_other(&mut state);
 
@@ -2660,6 +2710,7 @@ mod tests {
                 .with_console_balance_cents(cents)
                 .with_console_key_available(true);
         let mut state = LimitsModalState::new(snap);
+        state.window.active_tab = CREDITS_TAB;
         let theme = Theme::default();
         let area = Rect::new(0, 0, 100, 40);
         let mut buf = Buffer::empty(area);
@@ -2725,6 +2776,7 @@ mod tests {
                 .with_console_key_available(true)
                 .with_console_prepaid_gap(ConsoleTeamPrepaidGap::MissingManagementKey);
         let mut gap_state = LimitsModalState::new(gap);
+        gap_state.window.active_tab = CREDITS_TAB;
         let mut gap_buf = Buffer::empty(area);
         render_limits_modal(&mut gap_buf, area, &mut gap_state, &theme, false, now);
         let gap_paint = (0..area.height)
@@ -2867,6 +2919,7 @@ mod tests {
         let snap =
             LimitsSnapshot::from_billing(Some(&bal), None, SamplingIdentityKind::SuperGrokSession);
         let mut state = LimitsModalState::new(snap);
+        state.window.active_tab = CREDITS_TAB;
         let theme = Theme::default();
         let area = Rect::new(0, 0, 100, 40);
         let mut buf = Buffer::empty(area);
@@ -3013,5 +3066,211 @@ mod tests {
                 "the next request stayed on the console key, so the footer must not say Using limits:\n{painted}"
             );
         }
+    }
+
+    /// The limits label is absent when included SuperGrok period limits are
+    /// not the meter in use. Limits mode defaults to limits enabled. Limits
+    /// is ordered before Credits.
+    #[test]
+    fn limits_label_is_absent_unless_that_meter_is_in_use_and_limits_mode_defaults_enabled_and_limits_come_before_credits()
+     {
+        use crate::actions::ActionRegistry;
+        use crate::app::agent_view::test_fixtures::make_agent;
+        use crate::app::agent_view::{AppRenderParams, BannerSlotParams};
+        use crate::scrollback::render::ScratchBuffer;
+        use xai_grok_shell::auth::limits_pins::{
+            LimitsPins, MeterSource, load_limits_pins, next_request_draws_included_period_limits,
+            save_limits_pins,
+        };
+
+        struct EnvGuard {
+            prev_home: Option<std::ffi::OsString>,
+        }
+        impl Drop for EnvGuard {
+            fn drop(&mut self) {
+                // Safety: this test runs alone (`--test-threads=1`) and restores GROK_HOME.
+                unsafe {
+                    match self.prev_home.take() {
+                        Some(value) => std::env::set_var("GROK_HOME", value),
+                        None => std::env::remove_var("GROK_HOME"),
+                    }
+                }
+            }
+        }
+
+        let home = tempfile::TempDir::new().expect("temp GROK_HOME");
+        let _env = EnvGuard {
+            prev_home: std::env::var_os("GROK_HOME"),
+        };
+        // Safety: restored by EnvGuard.
+        unsafe {
+            std::env::set_var("GROK_HOME", home.path());
+        }
+
+        assert!(
+            xai_grok_shell::auth::limits_pins::limits_mode_enables_included_period_limits_by_default(),
+            "when the mode is limits, included SuperGrok period limits are enabled by default"
+        );
+        assert!(
+            xai_grok_shell::auth::default_auto_use_included_limits(),
+            "limits mode keeps auto_use_included_limits on by default"
+        );
+        assert_eq!(load_limits_pins(), LimitsPins::default());
+        assert!(
+            next_request_draws_included_period_limits(),
+            "a fresh home draws included SuperGrok period limits"
+        );
+        assert_eq!(CARD_TABS[0], "Limits");
+        assert_eq!(CARD_TABS[1], "Credits");
+
+        let end = DateTime::parse_from_rfc3339("2026-08-08T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let now = DateTime::parse_from_rfc3339("2026-08-04T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let balance = weekly_bal(28.0, end);
+
+        let paint_header = |balance: &CreditBalance| -> String {
+            crate::appearance::cache::set_hide_header(false);
+            let mut agent = make_agent();
+            agent.sampling_identity = SamplingIdentityKind::SuperGrokSession;
+            agent.credit_balance = Some(balance.clone());
+            let area = Rect::new(0, 0, 120, 40);
+            let mut header = ratatui::buffer::Buffer::empty(area);
+            let mut scratch = ScratchBuffer::new();
+            agent.draw(
+                area,
+                &mut header,
+                &ActionRegistry::defaults(),
+                &mut scratch,
+                None,
+                false,
+                BannerSlotParams::none(),
+                false,
+                false,
+                &mut Vec::new(),
+                AppRenderParams::default(),
+            );
+            (0..area.height)
+                .map(|y| {
+                    (0..area.width)
+                        .filter_map(|x| header.cell((x, y)).map(|cell| cell.symbol().to_string()))
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let header = paint_header(&balance);
+        let row = header
+            .lines()
+            .find(|line| line.contains("limits 28%"))
+            .unwrap_or("")
+            .to_string();
+        assert!(
+            row.contains("limits 28%"),
+            "limits mode paints the short limits label when that meter is in use:\n{header}"
+        );
+
+        let snap = LimitsSnapshot::from_billing(
+            Some(&balance),
+            None,
+            SamplingIdentityKind::SuperGrokSession,
+        );
+        let mut state = LimitsModalState::new(snap);
+        let theme = Theme::default();
+        let area = Rect::new(0, 0, 100, 40);
+        let paint_card = |state: &mut LimitsModalState| -> String {
+            let mut buf = ratatui::buffer::Buffer::empty(area);
+            render_limits_modal(&mut buf, area, state, &theme, false, now);
+            (0..area.height)
+                .map(|y| {
+                    (0..area.width)
+                        .map(|x| buf[(x, y)].symbol())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let card = paint_card(&mut state);
+        assert_eq!(state.window.active_tab, LIMITS_TAB);
+        assert!(
+            card.contains("Using limits"),
+            "limits mode says Using limits:\n{card}"
+        );
+        let tab_line = card
+            .lines()
+            .find(|line| line.contains("Limits") && line.contains("Credits"))
+            .unwrap_or("");
+        let limits_at = tab_line.find("Limits").expect("Limits tab");
+        let credits_at = tab_line.find("Credits").expect("Credits tab");
+        assert!(
+            limits_at < credits_at,
+            "Limits is ordered before Credits:\n{tab_line}"
+        );
+
+        save_limits_pins(&LimitsPins {
+            meter_source: Some(MeterSource::DollarCredits),
+            ..LimitsPins::default()
+        })
+        .expect("dollar credits pin");
+        assert!(
+            !next_request_draws_included_period_limits(),
+            "SuperGrok dollar credits are not included SuperGrok period limits"
+        );
+        let dollar_header = paint_header(&balance);
+        let dollar_row = dollar_header
+            .lines()
+            .find(|line| line.contains("/tmp"))
+            .unwrap_or("");
+        assert!(
+            !dollar_row.contains("limits"),
+            "the limits label is absent when SuperGrok dollar credits are the meter:\n{dollar_row}"
+        );
+        let dollar_card = paint_card(&mut state);
+        assert!(
+            !dollar_card.contains("Using limits"),
+            "the card must not say Using limits when the meter is SuperGrok dollar credits:\n{dollar_card}"
+        );
+        let dollar_tabs = dollar_card
+            .lines()
+            .find(|line| line.contains("Limits") && line.contains("Credits"))
+            .unwrap_or("");
+        assert!(
+            dollar_tabs.find("Limits").unwrap_or(usize::MAX)
+                < dollar_tabs.find("Credits").unwrap_or(0),
+            "Limits stays before Credits when the meter is SuperGrok dollar credits:\n{dollar_tabs}"
+        );
+
+        std::fs::write(
+            home.path().join("config.toml"),
+            "[auth]\npreferred_method = \"api_key\"\n",
+        )
+        .expect("preferred_method api_key");
+        save_limits_pins(&LimitsPins {
+            stay_supergrok: true,
+            use_console: false,
+            meter_source: None,
+            supergrok_identity: None,
+        })
+        .expect("stay pin");
+        assert!(
+            !next_request_draws_included_period_limits(),
+            "stay-supergrok with preferred_method api_key keeps the console key"
+        );
+        let console_header = paint_header(&balance);
+        let console_row = console_header
+            .lines()
+            .find(|line| line.contains("/tmp"))
+            .unwrap_or("");
+        assert!(
+            !console_row.contains("limits"),
+            "the limits label is absent when the next request is the console key:\n{console_row}"
+        );
+        let console_card = paint_card(&mut state);
+        assert!(
+            !console_card.contains("Using limits"),
+            "the card must not say Using limits when the next request is the console key:\n{console_card}"
+        );
     }
 }

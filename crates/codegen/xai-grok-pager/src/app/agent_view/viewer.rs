@@ -1569,20 +1569,31 @@ impl AgentView {
                 (right_x.saturating_sub(2), corner_y)
             };
             if !selection_box.top_clipped || inline {
-                let areas = render_char_buttons(
+                let view_areas = render_char_buttons(
                     buf,
                     btn_right_x,
                     y,
-                    [
-                        (crate::glyphs::copy_icon(), self.hit_sb_copy.hovered),
-                        (crate::glyphs::enlarge(), self.hit_sb_view.hovered),
-                    ],
+                    [(crate::glyphs::enlarge(), self.hit_sb_view.hovered)],
                     btn_base,
                     btn_hover,
-                    1,
+                    0,
                 );
-                self.hit_sb_copy.set(Some(areas[0]));
-                self.hit_sb_view.set(Some(areas[1]));
+                let copy_w: u16 = 3;
+                let gap: u16 = 1;
+                let copy_x = btn_right_x.saturating_sub(gap.saturating_add(copy_w));
+                let copy_style = if self.hit_sb_copy.hovered {
+                    btn_hover
+                } else {
+                    btn_base
+                };
+                buf.set_span(
+                    copy_x,
+                    y,
+                    &ratatui::text::Span::styled(crate::glyphs::copy_button(), copy_style),
+                    copy_w,
+                );
+                self.hit_sb_copy.set(Some(Rect::new(copy_x, y, copy_w, 1)));
+                self.hit_sb_view.set(Some(view_areas[0]));
             } else {
                 self.hit_sb_copy.clear();
                 self.hit_sb_view.clear();
@@ -1596,16 +1607,20 @@ impl AgentView {
                 (right_x.saturating_sub(2), corner_y)
             };
             if !selection_box.top_clipped || inline {
-                let areas = render_char_buttons(
-                    buf,
-                    btn_right_x,
+                let copy_w: u16 = 3;
+                let copy_x = btn_right_x.saturating_sub(copy_w.saturating_sub(1));
+                let copy_style = if self.hit_sb_copy.hovered {
+                    btn_hover
+                } else {
+                    btn_base
+                };
+                buf.set_span(
+                    copy_x,
                     y,
-                    [(crate::glyphs::copy_icon(), self.hit_sb_copy.hovered)],
-                    btn_base,
-                    btn_hover,
-                    0,
+                    &ratatui::text::Span::styled(crate::glyphs::copy_button(), copy_style),
+                    copy_w,
                 );
-                self.hit_sb_copy.set(Some(areas[0]));
+                self.hit_sb_copy.set(Some(Rect::new(copy_x, y, copy_w, 1)));
             } else {
                 self.hit_sb_copy.clear();
             }

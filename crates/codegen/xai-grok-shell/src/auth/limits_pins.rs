@@ -515,6 +515,48 @@ pub fn apply_meter_source(source: MeterSource) -> Result<(), std::io::Error> {
     save_limits_pins(&pins)
 }
 
+/// Whether the next request draws included SuperGrok period limits.
+///
+/// The status chip and the limits card must use this. Do not paint a limits
+/// label when this is false. A DollarCredits pin is SuperGrok dollar credits.
+/// A Console pin with team prepaid remaining is console API credits. Neither
+/// is included SuperGrok period limits.
+pub fn next_request_draws_included_period_limits() -> bool {
+    next_request_draws_included_period_limits_for(&load_limits_pins())
+}
+
+/// Same rule as [`next_request_draws_included_period_limits`] for a pins value.
+pub fn next_request_draws_included_period_limits_for(pins: &LimitsPins) -> bool {
+    if pins.use_console {
+        return false;
+    }
+    match pins.meter_source {
+        Some(MeterSource::DollarCredits) => false,
+        Some(MeterSource::Console) => !console_team_prepaid_available(),
+        Some(MeterSource::Included) => true,
+        None | Some(MeterSource::Combined) => {
+            let console_primary_blocks_default = disk_preferred_is_console_primary()
+                && (pins.stay_supergrok || pins.supergrok_identity.is_some());
+            !console_primary_blocks_default
+        }
+    }
+}
+
+/// Limits mode is the default. Included SuperGrok period limits are enabled.
+///
+/// Default pins have no meter pin, `use_console` false, and `stay_supergrok`
+/// false. `[auth] auto_use_included_limits` defaults on. That is limits mode,
+/// and the next request draws included SuperGrok period limits.
+pub fn limits_mode_enables_included_period_limits_by_default() -> bool {
+    let pins = LimitsPins::default();
+    super::default_auto_use_included_limits()
+        && pins.meter_source.is_none()
+        && !pins.use_console
+        && !pins.stay_supergrok
+        && pins.supergrok_identity.is_none()
+        && next_request_draws_included_period_limits_for(&pins)
+}
+
 /// Stock `[auth] preferred_method = "api_key"` under `$GROK_HOME/config.toml`.
 /// Campaign / overlay loaders are not consulted so a temp `$GROK_HOME` stays isolated.
 fn disk_preferred_is_console_primary() -> bool {

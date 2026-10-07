@@ -1544,6 +1544,133 @@ fn build_shortcut_button<'a>(
     ]
 }
 
+/// One empty cell between plan-header bracket controls.
+const PLAN_HEADER_CONTROL_GAP: u16 = 1;
+
+/// Soft plan side-pane frame.
+///
+/// A real muted hairline when [`Theme::panel_border_fg`] is visible and is not
+/// a bright white stroke. On DOGE that hairline is the black canvas, so the
+/// frame glyphs stay and are not a white or neon-cyan rectangle.
+pub(crate) fn soft_plan_frame_fg(theme: &Theme) -> Color {
+    let hairline = theme.panel_border_fg();
+    if !is_bright_white_stroke(theme, hairline)
+        && hairline != theme.bg_base
+        && hairline != theme.bg_light
+    {
+        hairline
+    } else {
+        theme.bg_base
+    }
+}
+
+fn force_soft_plan_frame(buf: &mut Buffer, area: Rect, fg: Color, bg: Color) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let style = Style::default().fg(fg).bg(bg);
+    let right = area.x + area.width - 1;
+    let bottom = area.y + area.height - 1;
+    for x in area.x..area.x + area.width {
+        if let Some(cell) = buf.cell_mut((x, area.y)) {
+            cell.set_style(style);
+        }
+        if bottom != area.y
+            && let Some(cell) = buf.cell_mut((x, bottom))
+        {
+            cell.set_style(style);
+        }
+    }
+    for y in area.y..area.y + area.height {
+        if let Some(cell) = buf.cell_mut((area.x, y)) {
+            cell.set_style(style);
+        }
+        if right != area.x
+            && let Some(cell) = buf.cell_mut((right, y))
+        {
+            cell.set_style(style);
+        }
+    }
+}
+
+fn is_bright_white_stroke(theme: &Theme, color: Color) -> bool {
+    color == theme.prompt_border
+        || color == theme.prompt_border_active
+        || color == theme.selection_border
+        || color == theme.text_primary
+        || matches!(color, Color::White | Color::Rgb(255, 255, 255))
+}
+
+fn plan_header_control_style(theme: &Theme, hovered: bool) -> Style {
+    if hovered {
+        Style::default()
+            .fg(theme.text_primary)
+            .bg(theme.bg_base)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(theme.gray).bg(theme.bg_base)
+    }
+}
+
+/// Plan title bar, right to left: `[✗]` `[↗]` `[⧉]` `[⌕]`.
+///
+/// Each label is 3 columns. One cell sits between them. Close is omitted
+/// while plan review is not user-closeable.
+fn paint_plan_header_controls(
+    buf: &mut Buffer,
+    popup_area: Rect,
+    viewer: &mut LineViewerState,
+    theme: &Theme,
+) {
+    viewer.close_button_area = None;
+    viewer.fullscreen_button_area = None;
+    if let Some(plan) = viewer.plan.as_mut() {
+        plan.copy_button_area = None;
+        plan.search_button_area = None;
+    }
+
+    let mut end = popup_area
+        .x
+        .saturating_add(popup_area.width)
+        .saturating_sub(2);
+    let left_limit = popup_area.x.saturating_add(1);
+    let y = popup_area.y;
+
+    let mut place = |label: &'static str, hovered: bool| -> Option<Rect> {
+        const W: u16 = 3;
+        if end < left_limit.saturating_add(W - 1) {
+            return None;
+        }
+        let x = end.saturating_sub(W - 1);
+        if x < left_limit {
+            return None;
+        }
+        buf.set_span(
+            x,
+            y,
+            &Span::styled(label, plan_header_control_style(theme, hovered)),
+            W,
+        );
+        end = x.saturating_sub(1).saturating_sub(PLAN_HEADER_CONTROL_GAP);
+        Some(Rect::new(x, y, W, 1))
+    };
+
+    if !viewer.feedback_active() {
+        let hovered = viewer.close_hovered;
+        viewer.close_button_area = place(crate::glyphs::ballot_x_button(), hovered);
+    }
+    let fs_hovered = viewer.fullscreen_hovered;
+    viewer.fullscreen_button_area = place(crate::glyphs::enlarge_button(), fs_hovered);
+    let copy_hovered = viewer.plan_ref().is_some_and(|p| p.copy_hovered);
+    let search_hovered = viewer.plan_ref().is_some_and(|p| p.search_hovered);
+    let copy_area = place(crate::glyphs::copy_button(), copy_hovered);
+    let search_area = place(crate::glyphs::search_button(), search_hovered);
+    if let Some(plan) = viewer.plan.as_mut() {
+        plan.copy_button_area = copy_area;
+        plan.search_button_area = search_area;
+    }
+}
+
 /// Render the line viewer popup. In normal mode, draws a 75% centered panel with dimmed background
 /// (modifiers reset). In fullscreen mode (`viewer.fullscreen`), fills the entire overlay area
 /// without dimming. Renders the ListPane inside the panel with syntax-highlighted lines.
@@ -1603,14 +1730,25 @@ pub fn render_line_viewer(
         Style::default().fg(theme.text_primary).bg(theme.bg_base),
     );
 
-    // 3. Draw border.
+    // 3. Draw border. The soft plan side pane uses the muted frame, not
+    // gray_dim (neon cyan on DOGE) and not the white prompt stroke.
+    let frame_fg = if viewer.is_soft_plan_side_pane() {
+        soft_plan_frame_fg(theme)
+    } else {
+        theme.gray_dim
+    };
     let border = ratatui::widgets::Block::default()
         .borders(ratatui::widgets::Borders::ALL)
         .border_type(ratatui::widgets::BorderType::Rounded)
-        .border_style(Style::default().fg(theme.gray_dim))
+        .border_style(Style::default().fg(frame_fg))
         .style(Style::default().bg(theme.bg_base));
     let inner = border.inner(popup_area);
     border.render(popup_area, buf);
+    if viewer.is_soft_plan_side_pane() {
+        // Block style merge can leave the popup's primary-white fg on the
+        // stroke. Force the muted frame after the glyphs are in place.
+        force_soft_plan_frame(buf, popup_area, frame_fg, theme.bg_base);
+    }
 
     // Plan modes reserve 2 rows at the bottom of `inner` for the divider and action-button row
     // (rendered in step 8 below).
@@ -1669,7 +1807,8 @@ pub fn render_line_viewer(
         }
 
         // Wrap with `─ ... ─` decorations to match other modals (see modal_window.rs:341-346) and left-align flush with the top-left corner.
-        let deco = Style::default().fg(theme.gray_dim).bg(theme.bg_base);
+        // Soft plan uses the same frame color so the top rule is not a cyan stroke.
+        let deco = Style::default().fg(frame_fg).bg(theme.bg_base);
         title.spans.insert(0, Span::styled("\u{2500} ", deco));
         title.spans.push(Span::styled(" \u{2500}", deco));
 
@@ -1692,91 +1831,28 @@ pub fn render_line_viewer(
         );
     }
 
-    // Action buttons on the top border, right-aligned. The close [✗] is omitted in plan-review
+    // Action buttons on the top border, right-aligned. Plan preview uses
+    // four equal bracket controls with a one-cell gap. Other viewers keep
+    // the close and enlarge pair. Close is omitted in plan-review
     // (feedback) mode because the modal is not user-closeable in that state.
-    let mut right_edge = popup_area.x + popup_area.width - 1;
-
-    if !viewer.feedback_active() {
-        let close_text = crate::glyphs::ballot_x(); // ✗ (ASCII on legacy ConHost)
-        // Label is `[✗] ` (trailing space, no leading space)
-        // The fullscreen button's label has no trailing space when the close is visible, so the two buttons abut flush as `[↗][✗]`
-        // They tuck under the top-right corner with one space inside the frame on each side: ` [↗][✗] `
-        let close_w: u16 = 4; // "[✗] "
-        if popup_area.width > close_w + 2 {
-            let close_x = right_edge - close_w;
-            let close_style = if viewer.close_hovered {
-                Style::default()
-                    .fg(theme.text_primary)
-                    .bg(theme.bg_base)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(theme.gray).bg(theme.bg_base)
-            };
-            let close_span = Span::styled(format!("[{close_text}] "), close_style);
-            buf.set_span(close_x, popup_area.y, &close_span, close_w);
-            viewer.close_button_area = Some(Rect::new(close_x, popup_area.y, close_w, 1));
-            right_edge = close_x;
-        } else {
-            viewer.close_button_area = None;
+    if viewer.kind == LineViewerKind::PlanPreview {
+        paint_plan_header_controls(buf, popup_area, viewer, theme);
+    } else {
+        if let Some(plan) = viewer.plan.as_mut() {
+            plan.copy_button_area = None;
+            plan.search_button_area = None;
         }
-    } else {
-        viewer.close_button_area = None;
-    }
+        let mut right_edge = popup_area.x + popup_area.width - 1;
 
-    // Fullscreen toggle button. The icon stays constant regardless of current state: the button is a
-    // toggle, not a status indicator. When the close is hidden (plan-review mode) the fullscreen keeps
-    // its trailing space so it doesn't crowd the corner `╮`.
-    let fs_icon = crate::glyphs::enlarge(); // ↗ (ASCII on legacy ConHost)
-    let close_visible = viewer.close_button_area.is_some();
-    let (fs_label, fs_w): (String, u16) = if close_visible {
-        (format!(" [{fs_icon}]"), 4)
-    } else {
-        (format!(" [{fs_icon}] "), 5)
-    };
-    if right_edge > popup_area.x + fs_w + 2 {
-        let fs_x = right_edge - fs_w;
-        let fs_style = if viewer.fullscreen_hovered {
-            Style::default()
-                .fg(theme.text_primary)
-                .bg(theme.bg_base)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(theme.gray).bg(theme.bg_base)
-        };
-        let fs_span = Span::styled(fs_label, fs_style);
-        buf.set_span(fs_x, popup_area.y, &fs_span, fs_w);
-        viewer.fullscreen_button_area = Some(Rect::new(fs_x, popup_area.y, fs_w, 1));
-    } else {
-        viewer.fullscreen_button_area = None;
-    }
-
-    // Plan preview: copy glyph in the fullscreen label's leading pad, glass
-    // one cell to its left. Both sit on the title bar, not the CTA row.
-    if viewer.kind == LineViewerKind::PlanPreview
-        && let Some(fs) = viewer.fullscreen_button_area
-    {
-        let copy_x = fs.x;
-        if copy_x > popup_area.x {
-            let copy_hovered = viewer.plan_ref().is_some_and(|p| p.copy_hovered);
-            let copy_style = if copy_hovered {
-                Style::default()
-                    .fg(theme.text_primary)
-                    .bg(theme.bg_base)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(theme.gray).bg(theme.bg_base)
-            };
-            buf.set_span(
-                copy_x,
-                popup_area.y,
-                &Span::styled(crate::glyphs::copy_icon(), copy_style),
-                1,
-            );
-            let search_x = copy_x.saturating_sub(1);
-            let search_inside = search_x > popup_area.x;
-            if search_inside {
-                let search_hovered = viewer.plan_ref().is_some_and(|p| p.search_hovered);
-                let search_style = if search_hovered {
+        if !viewer.feedback_active() {
+            let close_text = crate::glyphs::ballot_x(); // ✗ (ASCII on legacy ConHost)
+            // Label is `[✗] ` (trailing space, no leading space)
+            // The fullscreen button's label has no trailing space when the close is visible, so the two buttons abut flush as `[↗][✗]`
+            // They tuck under the top-right corner with one space inside the frame on each side: ` [↗][✗] `
+            let close_w: u16 = 4; // "[✗] "
+            if popup_area.width > close_w + 2 {
+                let close_x = right_edge - close_w;
+                let close_style = if viewer.close_hovered {
                     Style::default()
                         .fg(theme.text_primary)
                         .bg(theme.bg_base)
@@ -1784,31 +1860,42 @@ pub fn render_line_viewer(
                 } else {
                     Style::default().fg(theme.gray).bg(theme.bg_base)
                 };
-                let search_glyph = if crate::glyphs::is_legacy_windows_console() {
-                    "s"
-                } else {
-                    "\u{2315}"
-                };
-                buf.set_span(
-                    search_x,
-                    popup_area.y,
-                    &Span::styled(search_glyph, search_style),
-                    1,
-                );
-            }
-            let plan = viewer.plan_mut();
-            plan.copy_button_area = Some(Rect::new(copy_x, popup_area.y, 1, 1));
-            plan.search_button_area = if search_inside {
-                Some(Rect::new(search_x, popup_area.y, 1, 1))
+                let close_span = Span::styled(format!("[{close_text}] "), close_style);
+                buf.set_span(close_x, popup_area.y, &close_span, close_w);
+                viewer.close_button_area = Some(Rect::new(close_x, popup_area.y, close_w, 1));
+                right_edge = close_x;
             } else {
-                None
+                viewer.close_button_area = None;
+            }
+        } else {
+            viewer.close_button_area = None;
+        }
+
+        // Fullscreen toggle button. The icon stays constant regardless of current state: the button is a
+        // toggle, not a status indicator. When the close is hidden (plan-review mode) the fullscreen keeps
+        // its trailing space so it doesn't crowd the corner `╮`.
+        let fs_icon = crate::glyphs::enlarge(); // ↗ (ASCII on legacy ConHost)
+        let close_visible = viewer.close_button_area.is_some();
+        let (fs_label, fs_w): (String, u16) = if close_visible {
+            (format!(" [{fs_icon}]"), 4)
+        } else {
+            (format!(" [{fs_icon}] "), 5)
+        };
+        if right_edge > popup_area.x + fs_w + 2 {
+            let fs_x = right_edge - fs_w;
+            let fs_style = if viewer.fullscreen_hovered {
+                Style::default()
+                    .fg(theme.text_primary)
+                    .bg(theme.bg_base)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(theme.gray).bg(theme.bg_base)
             };
-            viewer.fullscreen_button_area = Some(Rect::new(
-                copy_x.saturating_add(1),
-                fs.y,
-                fs.width.saturating_sub(1),
-                fs.height,
-            ));
+            let fs_span = Span::styled(fs_label, fs_style);
+            buf.set_span(fs_x, popup_area.y, &fs_span, fs_w);
+            viewer.fullscreen_button_area = Some(Rect::new(fs_x, popup_area.y, fs_w, 1));
+        } else {
+            viewer.fullscreen_button_area = None;
         }
     }
 
@@ -2238,7 +2325,7 @@ mod tests {
         row
     }
 
-    /// Copy is the title-bar glyph immediately left of `[↗]`, not a footer CTA.
+    /// Copy is a 3-column `[⧉]` one cell left of `[↗]`, not a footer CTA.
     fn assert_title_bar_copy_left_of_enlarge(buf: &Buffer, plan: &PlanViewerExtras, footer_y: u16) {
         let area = plan
             .copy_button_area
@@ -2247,26 +2334,48 @@ mod tests {
             area.y, footer_y,
             "copy glyph must not sit on the Approve CTA row"
         );
+        assert_eq!(area.width, 3, "copy is the same 3 columns as [↗] and [✗]");
+        assert_eq!(area.height, 1, "copy stays one row on the title bar");
         let icon = crate::glyphs::copy_icon();
         assert_eq!(
             buf[(area.x, area.y)].symbol(),
+            "[",
+            "copy control opens with a square bracket"
+        );
+        assert_eq!(
+            buf[(area.x.saturating_add(1), area.y)].symbol(),
             icon,
             "copy_button_area must cover the title-bar copy glyph"
         );
-        let bracket_x = area.x.saturating_add(area.width);
+        assert_eq!(
+            buf[(area.x.saturating_add(2), area.y)].symbol(),
+            "]",
+            "copy control closes with a square bracket"
+        );
+        let gap_x = area.x.saturating_add(area.width);
+        let gap = buf[(gap_x, area.y)].symbol();
+        assert_ne!(
+            gap, "[",
+            "one-cell gap between copy and [↗]; they must not glue together"
+        );
+        assert_ne!(
+            gap, "]",
+            "one-cell gap between copy and [↗]; they must not glue together"
+        );
+        let bracket_x = gap_x.saturating_add(1);
         assert_eq!(
             buf[(bracket_x, area.y)].symbol(),
             "[",
-            "copy glyph must sit immediately left of [↗]"
+            "copy sits one cell left of [↗]"
         );
         assert_eq!(
             buf[(bracket_x.saturating_add(1), area.y)].symbol(),
             crate::glyphs::enlarge(),
-            "copy glyph must sit immediately left of [↗]"
+            "copy sits one cell left of [↗]"
         );
     }
 
-    /// Glass is immediately left of copy. Copy stays immediately left of `[↗]`.
+    /// Glass is a 3-column `[⌕]` one cell left of the bordered copy control.
     fn assert_title_bar_search_left_of_copy(buf: &Buffer, plan: &PlanViewerExtras) {
         let search = plan
             .search_button_area
@@ -2274,16 +2383,32 @@ mod tests {
         let copy = plan
             .copy_button_area
             .expect("copy must stay next to enlarge");
+        assert_eq!(search.width, 3, "search is the same 3 columns as copy");
+        assert_eq!(copy.width, 3, "copy is the same 3 columns as search");
         assert_eq!(
-            search.x + search.width,
+            search.width, copy.width,
+            "search and copy are the same size"
+        );
+        assert_eq!(
+            search.x + search.width + 1,
             copy.x,
-            "glass must sit immediately left of copy"
+            "one-cell gap between the bracketed glass and the bracketed copy"
         );
         assert_eq!(search.y, copy.y, "glass shares the title-bar row with copy");
         assert_eq!(
             buf[(search.x, search.y)].symbol(),
+            "[",
+            "search control opens with a square bracket"
+        );
+        assert_eq!(
+            buf[(search.x.saturating_add(1), search.y)].symbol(),
             crate::glyphs::search_icon(),
             "search_button_area must cover the title-bar glass glyph"
+        );
+        assert_eq!(
+            buf[(search.x.saturating_add(2), search.y)].symbol(),
+            "]",
+            "search control closes with a square bracket"
         );
     }
 
@@ -3085,8 +3210,8 @@ mod tests {
         assert_eq!(viewer.line_range_suffix(), Some(":1-3".to_owned()));
     }
 
-    /// Glass sits immediately left of copy; copy stays immediately left of
-    /// `[↗]`. Do not steal `assert_title_bar_copy_left_of_enlarge`.
+    /// Glass is a bracketed control one cell left of copy. Copy stays one
+    /// cell left of `[↗]`. Do not steal `assert_title_bar_copy_left_of_enlarge`.
     #[test]
     fn plan_preview_title_bar_search_glass_immediately_left_of_copy() {
         let mut viewer = LineViewerState::open_markdown_content(
@@ -3110,6 +3235,170 @@ mod tests {
         let plan = viewer.plan_ref().expect("plan extras");
         assert_title_bar_copy_left_of_enlarge(&buf, plan, footer_y);
         assert_title_bar_search_left_of_copy(&buf, plan);
+    }
+
+    /// The plan side panel frame is not a bright white stroke. Copy is a
+    /// bordered control. Search and copy use the same bracket size and the
+    /// same one-cell gap as enlarge and close.
+    #[test]
+    fn soft_plan_side_panel_uses_muted_frame_and_bracketed_header_controls() {
+        let _pin = crate::theme::cache::pin_theme();
+        crate::theme::cache::set(crate::theme::ThemeKind::Doge);
+        let theme = crate::theme::Theme::doge();
+
+        let mut viewer = LineViewerState::open_markdown_content(
+            "plan.md",
+            "# Proposed plan.\n\nKeep the inset and the wrapping body.\n".to_owned(),
+            None,
+        )
+        .expect("open plan");
+        viewer.kind = LineViewerKind::PlanPreview;
+        viewer.fullscreen = false;
+        viewer.plan_mut().feedback_active = false;
+        viewer.plan_mut().show_action_buttons = true;
+
+        let full = Rect::new(0, 0, 100, 30);
+        let mut buf = Buffer::empty(full);
+        render_line_viewer(&mut buf, full, &mut viewer, Path::new("/tmp"), &theme, 0);
+
+        let pane_w = LineViewerState::soft_plan_pane_width(full.width);
+        let pane_x = full.width.saturating_sub(pane_w);
+        let edge = &buf[(pane_x, 4)];
+        let fg = edge.style().fg;
+        assert!(
+            edge.symbol() == "│" || edge.symbol() == "┃",
+            "the side panel keeps a frame glyph; got {:?}",
+            edge.symbol()
+        );
+        assert_eq!(
+            fg,
+            Some(theme.bg_base),
+            "DOGE plan frame uses the canvas hairline, not a bright stroke"
+        );
+        assert_ne!(
+            fg,
+            Some(theme.prompt_border),
+            "plan frame is not the white prompt border"
+        );
+        assert_ne!(fg, Some(theme.prompt_border_active));
+        assert_ne!(fg, Some(theme.selection_border));
+        assert_ne!(
+            fg,
+            Some(theme.text_primary),
+            "plan frame is not primary white text"
+        );
+        assert_ne!(
+            fg,
+            Some(theme.gray_dim),
+            "plan frame is not the neon cyan gray_dim stroke"
+        );
+        assert_ne!(fg, Some(Color::White));
+        assert_ne!(fg, Some(Color::Rgb(255, 255, 255)));
+
+        let right = &buf[(pane_x + pane_w - 1, 4)];
+        assert_eq!(
+            right.style().fg,
+            Some(theme.bg_base),
+            "the right edge uses the same muted frame"
+        );
+        assert!(
+            right.symbol() == "│" || right.symbol() == "┃",
+            "the right edge keeps a frame glyph; got {:?}",
+            right.symbol()
+        );
+
+        let plan = viewer.plan_ref().expect("plan extras");
+        let search = plan
+            .search_button_area
+            .expect("search stays a clickable header control");
+        let copy = plan
+            .copy_button_area
+            .expect("copy stays a clickable header control");
+        let enlarge = viewer
+            .fullscreen_button_area
+            .expect("enlarge stays on the title bar");
+        let close = viewer
+            .close_button_area
+            .expect("close stays on the title bar");
+        for area in [search, copy, enlarge, close] {
+            assert_eq!(area.width, 3, "each header control is 3 columns");
+            assert_eq!(area.height, 1, "each header control is one row");
+            assert_eq!(
+                buf[(area.x, area.y)].symbol(),
+                "[",
+                "header control opens with a square bracket"
+            );
+            assert_eq!(
+                buf[(area.x + 2, area.y)].symbol(),
+                "]",
+                "header control closes with a square bracket"
+            );
+        }
+        assert_eq!(
+            buf[(copy.x + 1, copy.y)].symbol(),
+            crate::glyphs::copy_icon(),
+            "copy control has a border around the glyph"
+        );
+        assert_ne!(
+            crate::glyphs::copy_button(),
+            crate::glyphs::copy_icon(),
+            "the bordered copy control is not the bare glyph"
+        );
+        assert!(
+            crate::glyphs::copy_button().starts_with('[')
+                && crate::glyphs::copy_button().ends_with(']'),
+            "tool-card and plan-header copy is a bordered control, not flat text"
+        );
+        assert_eq!(
+            buf[(search.x + 1, search.y)].symbol(),
+            crate::glyphs::search_icon()
+        );
+        assert_eq!(
+            buf[(enlarge.x + 1, enlarge.y)].symbol(),
+            crate::glyphs::enlarge()
+        );
+        assert_eq!(
+            buf[(close.x + 1, close.y)].symbol(),
+            crate::glyphs::ballot_x()
+        );
+        assert_eq!(
+            search.x + search.width + 1,
+            copy.x,
+            "one-cell gap between search and copy"
+        );
+        assert_eq!(
+            copy.x + copy.width + 1,
+            enlarge.x,
+            "one-cell gap between copy and enlarge"
+        );
+        assert_eq!(
+            enlarge.x + enlarge.width + 1,
+            close.x,
+            "one-cell gap between enlarge and close"
+        );
+        assert!(search.x + search.width < copy.x);
+        assert!(copy.x + copy.width < enlarge.x);
+        assert!(enlarge.x + enlarge.width < close.x);
+
+        let modal = viewer.last_modal_area.expect("soft plan pane");
+        let footer_y = modal.y + modal.height.saturating_sub(1);
+        let footer = row_text(&buf, footer_y);
+        let lower = footer.to_ascii_lowercase();
+        for needle in ["approve", "comment", "revise", "exit"] {
+            assert!(
+                lower.contains(needle),
+                "footer CTAs stay; missing {needle} in {footer:?}"
+            );
+        }
+        assert_ne!(
+            copy.y, footer_y,
+            "copy stays on the title bar, not the CTA row"
+        );
+        assert_eq!(
+            LineViewerState::SOFT_PLAN_TEXT_INSET,
+            5,
+            "plan text stays inset from the left frame"
+        );
     }
 
     /// Query `plan` matches `Plan` and `PLAN`. Reuse LineViewerState search.

@@ -481,13 +481,24 @@ impl SessionActor {
         if current_config.context_window != new_context_window
             && !self.is_context_window_fixed(current_config.context_window)
         {
-            tracing::info!(
-                old_context_window = current_config.context_window.get(),
-                new_context_window = new_context_window.get(),
-                "Context window updated on session resume"
-            );
-            updated_config.context_window = new_context_window;
-            config_changed = true;
+            let effective_cw = if self.startup_hints.is_subagent {
+                std::num::NonZeroU64::new(crate::util::config::session_sampling_window(
+                    new_context_window.get(),
+                    true,
+                ))
+                .unwrap_or(new_context_window)
+            } else {
+                new_context_window
+            };
+            if effective_cw != current_config.context_window {
+                tracing::info!(
+                    old_context_window = current_config.context_window.get(),
+                    new_context_window = effective_cw.get(),
+                    "Context window updated on session resume"
+                );
+                updated_config.context_window = effective_cw;
+                config_changed = true;
+            }
         }
         if let Some(new_mct) = new_max_completion_tokens
             && current_config.max_completion_tokens != Some(new_mct)
@@ -573,11 +584,22 @@ impl SessionActor {
             .update_sampling_config(updated_config);
     }
     /// Uses a kept selection once the catalog lists it, as after a resume without a catalog.
+    /// Nested L2/L3 selections cannot raise the stored window above 200k.
     pub(super) async fn apply_supported_context_window_selection(&self) {
-        let Some(selection) = crate::session::handle::load_context_window_selection(
+        self.clamp_stored_sampling_window_for_nested().await;
+        let Some(loaded) = crate::session::handle::load_context_window_selection(
             &self.compaction.context_window_selection,
         ) else {
             return;
+        };
+        let selection = if self.startup_hints.is_subagent {
+            std::num::NonZeroU64::new(crate::util::config::session_sampling_window(
+                loaded.get(),
+                true,
+            ))
+            .unwrap_or(loaded)
+        } else {
+            loaded
         };
         let Some(cfg) = self.chat_state_handle.get_sampling_config().await else {
             return;
@@ -595,6 +617,7 @@ impl SessionActor {
                 context_window: selection,
                 ..cfg
             });
+        self.clamp_stored_sampling_window_for_nested().await;
     }
     /// True when the debug override or the selection in use set `current`.
     pub(super) fn is_context_window_fixed(&self, current: std::num::NonZeroU64) -> bool {

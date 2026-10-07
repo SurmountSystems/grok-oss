@@ -526,9 +526,10 @@ pub fn render_peek_panel(
                         };
                         let res = reply.draw(buf, slot, overlay_area, &widget_style, None, None);
                         if selected && panel.focused {
-                            // Software box caret hides the terminal cursor
-                            // (`draw` returns `cursor_pos: None`). Peek still
-                            // reports the insertion cell for mouse routing.
+                            // Chromeless reply reports the layout cursor.
+                            // `caret_cell` covers a frame that painted the
+                            // software caret instead. Either one is the
+                            // insertion cell for mouse routing.
                             caret = res.caret_cell.or(res.cursor_pos);
                         }
                     }

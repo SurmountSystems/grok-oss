@@ -103,14 +103,21 @@ fn assert_materialized_auto_socket_denies(profile: &SandboxProfile) {
 
 #[cfg(unix)]
 fn temp_runtime_root(tag: &str) -> PathBuf {
-    let nanos = std::time::SystemTime::now()
+    // `sun_path` holds 107 bytes plus a NUL. A long `$TMPDIR` (GitHub
+    // `RUNNER_TEMP`) plus the old leaf made `UnixListener::bind` return
+    // "path must be shorter than SUN_LEN".
+    let tick = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
-        .as_nanos();
-    let root = std::env::temp_dir().join(format!(
-        "grok-runtime-sockets-{tag}-{}-{nanos}",
-        std::process::id()
-    ));
+        .subsec_nanos();
+    let leaf = format!("grs-{tag}-{}-{tick}", std::process::id());
+    let mut root = std::env::temp_dir().join(&leaf);
+    // Longest socket suffix in these fixtures (`run/user/42/podman/podman.sock`).
+    const LONGEST_SUFFIX: usize = 40;
+    const SUN_PATH_MAX: usize = 107;
+    if root.as_os_str().len() + 1 + LONGEST_SUFFIX >= SUN_PATH_MAX {
+        root = PathBuf::from("/tmp").join(&leaf);
+    }
     std::fs::create_dir_all(&root).unwrap();
     root
 }
@@ -273,6 +280,35 @@ fn materialized_socket_paths_propagate_parent_resolution_errors() {
             .to_string()
             .contains("could not resolve runtime-socket deny path"),
         "unexpected error: {error}"
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+#[cfg(unix)]
+fn materialized_socket_paths_skip_unsearchable_parents() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = temp_runtime_root("unsearchable");
+    let locked = root.join("locked");
+    let socket = locked.join("podman/podman.sock");
+    std::fs::create_dir_all(socket.parent().unwrap()).unwrap();
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let probe = std::fs::symlink_metadata(&socket);
+    let blocked = probe.is_err_and(|error| error.raw_os_error() == Some(libc::EACCES));
+    if !blocked {
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let _ = std::fs::remove_dir_all(&root);
+        // Root ignores mode 000, so this fixture cannot prove the skip.
+        return;
+    }
+
+    let paths = materialize_runtime_socket_deny_paths_from([socket.clone()])
+        .expect("an unsearchable runtime socket must not fail profile resolution");
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(
+        paths.is_empty(),
+        "unsearchable endpoint must be skipped, got {paths:?}"
     );
     let _ = std::fs::remove_dir_all(root);
 }

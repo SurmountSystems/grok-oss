@@ -2977,6 +2977,32 @@ impl SessionActor {
                     return Err(self.surface_compact_auth_failure(e).await);
                 }
             }
+            self.clamp_stored_sampling_window_for_nested().await;
+            if self.l3_nested_window_is_full().await {
+                tracing::info!(
+                    session_id = %self.session_info.id,
+                    "nested window is full before sample; ending child without compact"
+                );
+                self.finalize_turn_bookkeeping(
+                    req_id,
+                    std::mem::take(&mut turn_span_totals),
+                    turn_sampling,
+                )
+                .await;
+                return Ok(TurnOutcome::Completed {
+                    tools_called: turn_tools_called,
+                    structured_output: None,
+                    stop: CompletedStop::EndTurn,
+                });
+            }
+            if self.startup_hints.is_subagent
+                && !self.never_auto_compact()
+                && self.tool_context.task_output_token_budget.is_none()
+                && !salvage.awaiting_continuation()
+                && self.sampling_window_is_full().await
+            {
+                self.refuse_over_window_sample().await?;
+            }
             let due_reminder = {
                 let mut state = self.long_reasoning_turn_state.lock();
                 if salvage.awaiting_continuation() {
@@ -4007,6 +4033,7 @@ impl SessionActor {
                 }
                 continue;
             }
+            self.clamp_stored_sampling_window_for_nested().await;
             if self.l3_nested_window_is_full().await {
                 tracing::info!(
                     session_id = %self.session_info.id,

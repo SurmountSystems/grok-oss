@@ -2677,10 +2677,13 @@ fn isolated_preview_search_glass_clickable_next_to_copy_and_expand() {
         .and_then(|v| v.plan_ref())
         .and_then(|p| p.copy_button_area)
         .expect("copy stays next to enlarge");
+    assert_eq!(search.width, 3, "glass is the same 3 columns as copy");
+    assert_eq!(copy.width, 3, "copy is a bordered 3-column control");
+    assert_eq!(search.width, copy.width, "glass and copy are the same size");
     assert_eq!(
-        search.x + search.width,
+        search.x + search.width + 1,
         copy.x,
-        "glass must sit immediately left of copy"
+        "one-cell gap between the bracketed glass and the bracketed copy"
     );
     let _ = agent.handle_input(
         &mouse(MouseEventKind::Down(MouseButton::Left), search.x, search.y),

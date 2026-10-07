@@ -82,8 +82,8 @@ fn paint_leftover_viewport_wait(buf: &mut Buffer, area: Rect, label: &str, style
     buf.set_string(area.x, y, label, style);
 }
 
-/// Operator-green composer caret. A mid-buffer space keeps the space and
-/// takes an `accent_user` plate. A block glyph is only for the end of the draft.
+/// Operator-green composer caret. Delegates to the shared phase painter so
+/// Preview and the focused plan editor blink the same block.
 fn paint_composer_box_cursor(
     buf: &mut Buffer,
     x: u16,
@@ -92,31 +92,19 @@ fn paint_composer_box_cursor(
     canvas_bg: ratatui::style::Color,
     allow_block_glyph: bool,
 ) {
-    let Some(cell) = buf.cell_mut((x, y)) else {
-        return;
-    };
-    let accent = theme.accent_user;
-    if !allow_block_glyph && cell.symbol() == " " {
-        cell.set_bg(accent);
-        return;
-    }
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|elapsed| elapsed.as_millis() as u64)
         .unwrap_or(0);
-    let filled = crate::glyphs::cursor_box_filled_phase(now_ms);
-    if allow_block_glyph && filled {
-        cell.set_symbol(crate::glyphs::cursor_box_filled());
-        cell.set_fg(accent);
-        cell.set_bg(accent);
-    } else if allow_block_glyph {
-        cell.set_symbol(crate::glyphs::cursor_box_filled());
-        cell.set_fg(accent);
-        cell.set_bg(canvas_bg);
-    } else {
-        cell.set_fg(accent);
-        cell.set_bg(accent);
-    }
+    crate::views::prompt_widget::paint_composer_box_cursor_phase(
+        buf,
+        x,
+        y,
+        theme,
+        canvas_bg,
+        crate::glyphs::cursor_box_filled_phase(now_ms),
+        allow_block_glyph,
+    );
 }
 
 /// Empty composer under plan Preview paints a placeholder, then one caret cell.
@@ -180,6 +168,18 @@ fn both_refused_status_chip_label(
     let hours = (total_secs % 86_400) / 3_600;
     let mins = (total_secs % 3_600) / 60;
     Some(format!("{days}d {hours}h {mins}m"))
+}
+
+/// The short `limits N%` chip is only for included SuperGrok period limits.
+/// SuperGrok dollar credits and console API credits must not wear that label.
+fn status_row_paints_included_period_limits_chip(
+    identity: crate::views::credit_bar::SamplingIdentityKind,
+    balance: &crate::views::credit_bar::CreditBalance,
+) -> bool {
+    identity == crate::views::credit_bar::SamplingIdentityKind::SuperGrokSession
+        && balance.included_usage_known
+        && balance.usage_pct.is_finite()
+        && xai_grok_shell::auth::limits_pins::next_request_draws_included_period_limits()
 }
 
 /// AppView-owned per-frame inputs to [`AgentView::draw`]: state the agent view cannot see itself (voice pipeline, Esc ownership, status row).
@@ -1575,6 +1575,9 @@ impl AgentView {
             }
         }
         // Short status chip only. Do not use the verbose SuperGrok period helper.
+        // `limits N%` only when the next request draws included SuperGrok
+        // period limits. SuperGrok dollar credits and console API credits
+        // do not get that label.
         if let Some(balance) = self.credit_balance.as_ref()
             && let Some(label) = both_refused_status_chip_label(balance)
         {
@@ -1583,11 +1586,8 @@ impl AgentView {
                 chip_style = chip_style.add_modifier(ratatui::style::Modifier::BOLD);
             }
             status.push("credits", Line::from(Span::styled(label, chip_style)));
-        } else if self.sampling_identity
-            == crate::views::credit_bar::SamplingIdentityKind::SuperGrokSession
-            && let Some(balance) = self.credit_balance.as_ref()
-            && balance.included_usage_known
-            && balance.usage_pct.is_finite()
+        } else if let Some(balance) = self.credit_balance.as_ref()
+            && status_row_paints_included_period_limits_chip(self.sampling_identity, balance)
         {
             let used = balance.usage_pct.round().clamp(0.0, 100.0) as u8;
             let label = if self.hit_credits.hovered {
@@ -5317,6 +5317,138 @@ mod plan_approval_draw_contract_tests {
                  not a vanished empty cell:\n{text}"
             );
         }
+    }
+
+    /// The focused plan editor must have a visible blinking block caret.
+    /// Filled half is Operator green (`accent_user`). The empty half on a
+    /// letter is normal text (`text_primary`), not neon ink on the letter.
+    #[test]
+    fn focused_plan_editor_paints_blinking_block_caret() {
+        use crate::theme::cache;
+        use crate::views::plan_approval_view::PlanApprovalFocus;
+
+        let _pin = cache::pin_theme();
+        cache::set(crate::theme::ThemeKind::Doge);
+        let theme = crate::theme::Theme::current();
+        let filled = crate::glyphs::cursor_box_filled();
+        let owed = "the focused plan editor must have a visible blinking block caret";
+        assert_eq!(
+            theme.accent_user,
+            ratatui::style::Color::Rgb(0, 255, 0),
+            "{owed}: DOGE caret is Operator green"
+        );
+
+        let area = Rect::new(0, 0, 100, 40);
+        let draw = |agent: &mut AgentView| {
+            let reg = ActionRegistry::defaults();
+            let mut buf = Buffer::empty(area);
+            let mut scratch = ScratchBuffer::new();
+            agent.draw(
+                area,
+                &mut buf,
+                &reg,
+                &mut scratch,
+                None,
+                false,
+                crate::app::agent_view::BannerSlotParams::none(),
+                false,
+                false,
+                &mut Vec::new(),
+                super::AppRenderParams {
+                    voice_available: false,
+                    voice_listening: false,
+                    ..Default::default()
+                },
+            );
+            buf
+        };
+        let cell_at = |buf: &Buffer, symbol: &str| -> Option<ratatui::buffer::Cell> {
+            for y in area.y..area.y + area.height {
+                for x in area.x..area.x + area.width {
+                    if let Some(cell) = buf.cell((x, y))
+                        && cell.symbol() == symbol
+                    {
+                        return Some(cell.clone());
+                    }
+                }
+            }
+            None
+        };
+
+        let mut agent = plan_approval_agent();
+        if let Some(ref mut pav) = agent.plan_approval_view {
+            pav.focus = PlanApprovalFocus::Prompt;
+        }
+        agent.prompt.set_text("Q");
+        agent.prompt.set_cursor(agent.prompt.text().len());
+
+        let filled_block = {
+            let _phase = crate::glyphs::pin_cursor_box_filled_phase(true);
+            let buf = draw(&mut agent);
+            cell_at(&buf, filled)
+        };
+        let hollow_block = {
+            let _phase = crate::glyphs::pin_cursor_box_filled_phase(false);
+            let buf = draw(&mut agent);
+            cell_at(&buf, filled)
+        };
+        let filled_block = filled_block.unwrap_or_else(|| {
+            panic!("{owed}: filled half must paint the block glyph");
+        });
+        let hollow_block = hollow_block.unwrap_or_else(|| {
+            panic!("{owed}: empty half must keep a visible block glyph");
+        });
+        assert_eq!(
+            filled_block.bg, theme.accent_user,
+            "{owed}: filled half is Operator green"
+        );
+        assert_ne!(
+            hollow_block.bg, theme.accent_user,
+            "{owed}: the two blink halves must differ"
+        );
+        assert_eq!(
+            hollow_block.fg, theme.accent_user,
+            "{owed}: empty insertion cell stays Operator-green ink"
+        );
+
+        agent.prompt.set_cursor(0);
+        let filled_letter = {
+            let _phase = crate::glyphs::pin_cursor_box_filled_phase(true);
+            let buf = draw(&mut agent);
+            cell_at(&buf, "Q")
+        };
+        let hollow_letter = {
+            let _phase = crate::glyphs::pin_cursor_box_filled_phase(false);
+            let buf = draw(&mut agent);
+            cell_at(&buf, "Q")
+        };
+        let filled_letter = filled_letter.expect("letter Q under the caret");
+        let hollow_letter = hollow_letter.expect("letter Q on the empty blink half");
+        assert_eq!(
+            filled_letter.symbol(),
+            "Q",
+            "{owed}: a letter must stay a letter, not a block glyph"
+        );
+        assert_eq!(
+            filled_letter.bg, theme.accent_user,
+            "{owed}: filled half on a letter is an Operator-green plate"
+        );
+        assert_eq!(
+            filled_letter.fg, theme.text_primary,
+            "{owed}: filled half must not paint neon ink on the letter"
+        );
+        assert_eq!(
+            hollow_letter.fg, theme.text_primary,
+            "{owed}: an empty blink half is normal text (text_primary), not neon ink on the letter"
+        );
+        assert_ne!(
+            hollow_letter.fg, theme.accent_user,
+            "{owed}: an empty blink half is normal text (text_primary), not neon ink on the letter"
+        );
+        assert_ne!(
+            hollow_letter.bg, theme.accent_user,
+            "{owed}: the letter's empty half drops the Operator-green plate"
+        );
     }
 
     /// Isolated file-backed `plan.md` approval (no CreatePlan / inline title).

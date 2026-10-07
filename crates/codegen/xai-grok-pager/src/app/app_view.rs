@@ -838,6 +838,9 @@ pub struct AppView {
     /// Last shimmer frame drawn on the welcome screen.
     /// Lets `tick` throttle the wall-clock logo animation to a few fps instead of the full tick rate.
     pub welcome_shimmer_frame: u64,
+    /// Last software block-caret half. `true` is the filled Operator-green half.
+    /// `None` until a blink tick has observed the phase.
+    pub(crate) caret_blink_filled: Option<bool>,
     /// CLI model override (`-m` / `--model`).
     /// Seeded into every new `AgentSession.deferred_model_switch` so the model is applied once the session is created.
     pub cli_model_override: Option<acp::ModelId>,
@@ -1506,6 +1509,7 @@ impl AppView {
             session_picker_pending_delete: None,
             welcome_tick: 0,
             welcome_shimmer_frame: 0,
+            caret_blink_filled: None,
             cli_model_override: None,
             cli_effort_token: None,
             default_yolo: false,
@@ -5586,7 +5590,41 @@ impl AppView {
         needs_redraw |= self.tick_scroll();
         self.update_status_line();
         needs_redraw |= self.status_line.take_changed();
+        needs_redraw |= self.note_caret_blink_phase();
         needs_redraw
+    }
+    /// Redraw when the focused block caret crosses a 600ms blink half.
+    /// The first observation records the phase already on screen.
+    fn note_caret_blink_phase(&mut self) -> bool {
+        if !self.focused_text_caret_should_blink() {
+            self.caret_blink_filled = None;
+            return false;
+        }
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_millis() as u64)
+            .unwrap_or(0);
+        let filled = crate::glyphs::cursor_box_filled_phase(now_ms);
+        let flipped = self
+            .caret_blink_filled
+            .is_some_and(|previous| previous != filled);
+        self.caret_blink_filled = Some(filled);
+        flipped
+    }
+    /// The focused composer, an open plan panel, or a line-viewer text bar.
+    fn focused_text_caret_should_blink(&self) -> bool {
+        match self.active_view {
+            ActiveView::Welcome => self.welcome_prompt_focused,
+            ActiveView::Agent(id) => self.agents.get(&id).is_some_and(|agent| {
+                agent.active_pane == crate::views::agent::ActivePane::Prompt
+                    || agent.plan_approval_view.is_some()
+                    || agent
+                        .line_viewer
+                        .as_ref()
+                        .is_some_and(|viewer| viewer.list_state.input_mode().is_some())
+            }),
+            ActiveView::AgentDashboard => false,
+        }
     }
     /// Flush pending scroll lines (stream gap detection, redraw cadence).
     /// Without this, stale streams are never finalized after the user stops scrolling, and sub-line fractional remainders may not be flushed.
@@ -5847,6 +5885,15 @@ impl AppView {
                             .values()
                             .any(|child| child.needs_link_modifier_poll()))
                 {
+                    return TickDemand::Slow;
+                }
+                let caret_blink = agent.active_pane == crate::views::agent::ActivePane::Prompt
+                    || agent.plan_approval_view.is_some()
+                    || agent
+                        .line_viewer
+                        .as_ref()
+                        .is_some_and(|viewer| viewer.list_state.input_mode().is_some());
+                if caret_blink {
                     return TickDemand::Slow;
                 }
                 TickDemand::None

@@ -283,6 +283,7 @@ pub(crate) fn test_app() -> AppView {
         session_picker_pending_delete: None,
         welcome_tick: 0,
         welcome_shimmer_frame: 0,
+        caret_blink_filled: None,
         startup_warnings: Vec::new(),
         is_api_key_auth: false,
         pending_update_version: None,
@@ -763,6 +764,26 @@ fn needs_animation_gates_scrollback_search_tick_delivery() {
     assert!(
         !app.needs_animation(),
         "closing the search stops the animation ticks"
+    );
+}
+#[test]
+fn focused_plan_editor_demands_slow_ticks_for_blinking_block_caret() {
+    let mut app = test_app_with_agent();
+    let id = super::super::agent::AgentId(0);
+    let owed = "the focused plan editor must have a visible blinking block caret";
+    assert_eq!(app.tick_demand(), TickDemand::None, "idle agent parks");
+    app.agents.get_mut(&id).unwrap().active_pane = crate::views::agent::ActivePane::Prompt;
+    assert_eq!(app.tick_demand(), TickDemand::Slow, "{owed}");
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.active_pane = crate::views::agent::ActivePane::Scrollback;
+        agent.plan_approval_view =
+            Some(crate::app::agent_view::test_fixtures::make_plan_approval_view_state());
+    }
+    assert_eq!(
+        app.tick_demand(),
+        TickDemand::Slow,
+        "{owed}: an open plan panel still blinks the block caret"
     );
 }
 #[test]

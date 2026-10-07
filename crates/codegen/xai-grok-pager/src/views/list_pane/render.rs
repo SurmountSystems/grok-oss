@@ -607,7 +607,7 @@ mod tests {
     use crate::tracing::TracingEntry;
     use crate::views::list_pane::layout::WrapMode;
     use crate::views::list_pane::{
-        FilterMatcher, ListMatcher, ListPaneStyle, MatchMode, QueryKind,
+        FilterMatcher, ListMatcher, ListPaneConfig, ListPaneStyle, MatchMode, QueryKind,
     };
     use ratatui::style::Style;
     use ratatui::text::Line;
@@ -701,6 +701,71 @@ mod tests {
         assert_eq!(row_text(&buf, 0, 0, 20), ">alpha");
         assert_eq!(row_text(&buf, 1, 0, 20), " beta");
         assert_eq!(row_text(&buf, 2, 0, 20), " gamma");
+    }
+
+    /// Code-file and plan search editors share this input bar. The focused
+    /// editor must show a blinking Operator-green block caret.
+    #[test]
+    fn focused_code_file_search_editor_paints_blinking_block_caret() {
+        use crate::theme::cache;
+
+        let _pin = cache::pin_theme();
+        cache::set(crate::theme::ThemeKind::Doge);
+        let theme = crate::theme::Theme::current();
+        let filled = crate::glyphs::cursor_box_filled();
+        let owed = "the focused plan editor must have a visible blinking block caret";
+        let items = vec![RenderTestItem::new(0, "alpha")];
+        // `ListPaneState::new` leaves search off, so `/` does not open the bar.
+        let mut state = ListPaneState::new_with_config(
+            WrapMode::NoWrap,
+            false,
+            ListPaneConfig {
+                search_enabled: true,
+                ..ListPaneConfig::default()
+            },
+        );
+        let area = Rect::new(0, 0, 24, 4);
+        state.prepare_layout(&items, area.width, area.height);
+        assert!(state.handle_key_event(&crate::key!('/').to_key_event(), &items));
+
+        let paint = |state: &mut ListPaneState| {
+            let mut buf = Buffer::empty(area);
+            StatefulWidget::render(ListPane::new(&items), area, &mut buf, state);
+            buf
+        };
+        let find_block = |buf: &Buffer| -> Option<ratatui::buffer::Cell> {
+            for y in area.y..area.y + area.height {
+                for x in area.x..area.x + area.width {
+                    if let Some(cell) = buf.cell((x, y))
+                        && cell.symbol() == filled
+                    {
+                        return Some(cell.clone());
+                    }
+                }
+            }
+            None
+        };
+
+        let filled_cell = {
+            let _phase = crate::glyphs::pin_cursor_box_filled_phase(true);
+            find_block(&paint(&mut state))
+        };
+        let hollow_cell = {
+            let _phase = crate::glyphs::pin_cursor_box_filled_phase(false);
+            find_block(&paint(&mut state))
+        };
+        let filled_cell =
+            filled_cell.unwrap_or_else(|| panic!("{owed}: search editor filled half is missing"));
+        let hollow_cell =
+            hollow_cell.unwrap_or_else(|| panic!("{owed}: search editor empty half is missing"));
+        assert_eq!(
+            filled_cell.bg, theme.accent_user,
+            "{owed}: filled half is Operator green"
+        );
+        assert_ne!(
+            hollow_cell.bg, theme.accent_user,
+            "{owed}: the two blink halves must differ"
+        );
     }
 
     #[test]

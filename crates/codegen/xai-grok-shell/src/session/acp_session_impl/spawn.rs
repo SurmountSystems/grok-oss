@@ -621,6 +621,11 @@ pub(crate) async fn spawn_session_actor(
             "GROK_DEBUG_CONTEXT_WINDOW override active"
         );
     }
+    let seeded_context_window = seed_sampling_context_window(
+        baseline_context_window,
+        context_window_override,
+        startup_hints.is_subagent,
+    );
     let resolved_max_retries = xai_grok_sampler::resolve_max_retries(session_max_retries_source(
         sampling_config.max_retries,
         max_retries,
@@ -641,7 +646,7 @@ pub(crate) async fn spawn_session_actor(
         conversation_group_id: sampling_config.conversation_group_id.clone(),
         query_params: sampling_config.query_params.clone(),
         env_http_headers: sampling_config.env_http_headers.clone(),
-        context_window: context_window_override.unwrap_or(baseline_context_window),
+        context_window: seeded_context_window,
         max_request_bytes: sampling_config.max_request_bytes,
         reasoning_effort: sampling_config.reasoning_effort,
         reasoning_summary: sampling_config.reasoning_summary,
@@ -1155,9 +1160,7 @@ pub(crate) async fn spawn_session_actor(
     };
     drop(memory_init_span);
     drop(memory_init_timer);
-    let context_window_tokens = context_window_override
-        .map(|c| c.get())
-        .unwrap_or(sampling_config.context_window);
+    let context_window_tokens = seeded_context_window.get();
     let scheduler_background_loops = scheduler_background_loops_from_env();
     let managed_gateway_tool_client = auth_manager.as_ref().map(|am| {
         xai_grok_tools::types::resources::ManagedGatewayToolClient(Arc::new(

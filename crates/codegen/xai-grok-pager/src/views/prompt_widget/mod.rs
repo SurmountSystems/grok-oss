@@ -3293,7 +3293,7 @@ impl PromptWidget {
         // Slash overlays: teal command name and args ghost text
         // Both use the same snapshot, so clone once
         // Capture flags for later ghost text suppression to avoid a second clone
-        let (slash_active, slash_has_inline_ghost) = {
+        let (slash_active, slash_has_inline_ghost, inline_ghost_at_cursor, args_ghost_at_cursor) = {
             let snap = self.slash_state.snapshot();
 
             // Slash command-name highlight color
@@ -3383,7 +3383,20 @@ impl PromptWidget {
                 );
             }
 
-            (snap.active, snap.inline_ghost.is_some())
+            let inline_ghost_at_cursor = snap.inline_ghost.as_ref().is_some_and(|ghost| {
+                !ghost.text.is_empty() && ghost.token_range.end == self.textarea.cursor()
+            });
+            let args_ghost_at_cursor = snap.args_query_is_empty
+                && snap
+                    .args_placeholder
+                    .as_ref()
+                    .is_some_and(|placeholder| !placeholder.is_empty());
+            (
+                snap.active,
+                snap.inline_ghost.is_some(),
+                inline_ghost_at_cursor,
+                args_ghost_at_cursor,
+            )
         };
 
         // Interim STT: muted italic overlay (not in the textarea)
@@ -3612,6 +3625,47 @@ impl PromptWidget {
             }
         }
 
+        // Ghost text owns the insertion cell. A block glyph must not replace it.
+        let cursor_at_end = self.textarea.cursor() == self.textarea.text().len();
+        let shell_ghost_at_caret = style.focused
+            && !voice_interim_shown
+            && cursor_at_end
+            && self.suggestions.ghost_text().is_some()
+            && !slash_active
+            && !slash_has_inline_ghost;
+        let prompt_ghost_at_caret =
+            style.focused && !voice_interim_shown && self.prompt_suggestion_ghost().is_some();
+        let ghost_covers_caret = shell_ghost_at_caret
+            || prompt_ghost_at_caret
+            || inline_ghost_at_cursor
+            || args_ghost_at_cursor;
+
+        // Bordered composer: software block caret, hardware cursor hidden.
+        // Chromeless draws keep cell symbols (voice row text, ghost text) and
+        // report the layout cursor instead. Filled half is Operator green.
+        // Empty half on a letter is normal text.
+        if style.focused
+            && style.chrome
+            && !voice_interim_shown
+            && !ghost_covers_caret
+            && let Some((cx, cy)) = caret_cell
+        {
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|elapsed| elapsed.as_millis() as u64)
+                .unwrap_or(0);
+            let allow_block_glyph = cursor_at_end;
+            paint_composer_box_cursor_phase(
+                buf,
+                cx,
+                cy,
+                &theme,
+                bg,
+                crate::glyphs::cursor_box_filled_phase(now_ms),
+                allow_block_glyph,
+            );
+        }
+
         // Paste preview overlay: show when cursor is on or right after a paste element
         if style.focused
             && let Some(overlay) = overlay_area
@@ -3657,14 +3711,13 @@ impl PromptWidget {
 
         // While interim words show, the reported cursor is the cell after
         // those words (empty draft + "there" is column 5 on row 0), including
-        // a wrap onto the next row when the first row is full. After the
-        // final lands, the same cell is the draft caret. An empty focused
-        // composer still reports no hardware cursor so the Human-green box
-        // caret is the only one.
+        // a wrap onto the next row when the first row is full. A bordered
+        // composer paints the software block caret and reports no hardware
+        // cursor. A chromeless composer reports the layout cell.
         PromptRenderResult {
             cursor_pos: if voice_interim_shown {
                 interim_caret
-            } else if style.focused && !self.textarea.text().is_empty() {
+            } else if style.focused && !style.chrome {
                 layout_cursor_pos
             } else {
                 None
@@ -4040,9 +4093,10 @@ fn images_high_water(images: &[PastedImage]) -> usize {
 mod image_state;
 mod recording_frame;
 
-#[cfg(test)]
 /// Composer caret with an explicit filled phase, so tests do not sleep on the clock.
-/// A mid-buffer space keeps the space and takes an `accent_user` plate.
+/// End of the draft paints a block. A letter keeps its grapheme: filled half is an
+/// `accent_user` plate with `text_primary` ink, empty half is normal text on the canvas.
+/// A mid-buffer space keeps the space. The filled half takes an `accent_user` plate.
 pub(crate) fn paint_composer_box_cursor_phase(
     buf: &mut Buffer,
     x: u16,
@@ -4057,20 +4111,29 @@ pub(crate) fn paint_composer_box_cursor_phase(
     };
     let accent = theme.accent_user;
     if !allow_block_glyph && cell.symbol() == " " {
-        cell.set_bg(accent);
+        if filled_phase {
+            cell.set_bg(accent);
+        } else {
+            cell.set_fg(theme.text_primary);
+            cell.set_bg(canvas_bg);
+        }
         return;
     }
-    if allow_block_glyph && filled_phase {
-        cell.set_symbol(crate::glyphs::cursor_box_filled());
-        cell.set_fg(accent);
+    if !allow_block_glyph {
+        cell.set_fg(theme.text_primary);
+        if filled_phase {
+            cell.set_bg(accent);
+        } else {
+            cell.set_bg(canvas_bg);
+        }
+        return;
+    }
+    cell.set_symbol(crate::glyphs::cursor_box_filled());
+    cell.set_fg(accent);
+    if filled_phase {
         cell.set_bg(accent);
-    } else if allow_block_glyph {
-        cell.set_symbol(crate::glyphs::cursor_box_filled());
-        cell.set_fg(accent);
-        cell.set_bg(canvas_bg);
     } else {
-        cell.set_fg(accent);
-        cell.set_bg(accent);
+        cell.set_bg(canvas_bg);
     }
 }
 

@@ -639,7 +639,8 @@ impl SessionActor {
 
     /// Reconstruct a full `SamplerConfig` (with credentials) by combining the actor's `SamplingConfig` and `Credentials`.
     /// Folds in the URL-derived headers (cli-chat-proxy auth, the staging auth header) so the sampler crate stays URL-agnostic.
-    pub(super) async fn reconstruct_full_config(&self) -> SamplingConfig {
+    /// Nested L2/L3 sample against the 200k window even when chat-state still stores the catalog 500k.
+    pub(crate) async fn reconstruct_full_config(&self) -> SamplingConfig {
         #[allow(clippy::items_after_statements)]
         #[derive(Debug)]
         struct TraceContextInjector;
@@ -686,6 +687,11 @@ impl SessionActor {
                 reasoning_summary: None,
                 stream_tool_calls: None,
             });
+        // Stored chat-state may still be the catalog 500k. The next sample must not use that for L2/L3.
+        let sampling_window = crate::util::config::session_sampling_window(
+            cfg.context_window.get(),
+            self.startup_hints.is_subagent,
+        );
         let creds = self.chat_state_handle.get_credentials().await;
         let model_facts = self.model_auth_facts(cfg.model.as_str());
         // Gate on the stable session classifier, not `creds.auth_type`; see `crate::agent::auth_method::session_token_auth_gate`
@@ -735,10 +741,7 @@ impl SessionActor {
             // Send on the uncompacted prefix; drop the header once the session compacts.
             if !has_compaction_summary
                 && let Some(value) = compaction_at_tokens.and_then(|c| {
-                    c.resolve(
-                        cfg.context_window.get(),
-                        self.compaction.threshold_percent.get(),
-                    )
+                    c.resolve(sampling_window, self.compaction.threshold_percent.get())
                 })
             {
                 extra_headers.insert("x-compaction-at".to_string(), value.to_string());
@@ -766,7 +769,7 @@ impl SessionActor {
             extra_response_includes,
             query_params: cfg.query_params.clone(),
             env_http_headers: cfg.env_http_headers.clone(),
-            context_window: cfg.context_window.get(),
+            context_window: sampling_window,
             max_request_bytes: cfg.max_request_bytes,
             client_version: creds.client_version,
             reasoning_effort: cfg.reasoning_effort,
@@ -1292,10 +1295,9 @@ impl SessionActor {
         // still uses the session window. An ordinary L2 skips this arm.
         if self.never_auto_compact() {
             let session_cw = self
-                .chat_state_handle
-                .get_sampling_config()
+                .effective_sampling_window()
                 .await
-                .map(|c| c.context_window.get())
+                .map(|cw| cw.get())
                 .filter(|cw| *cw > 0);
             let error_cw = error
                 .model_metadata
@@ -1325,10 +1327,9 @@ impl SessionActor {
             // `model_metadata: None`; catalog 500k on a 5xx must not replace
             // a nested 200k session window.
             let session_cw = self
-                .chat_state_handle
-                .get_sampling_config()
+                .effective_sampling_window()
                 .await
-                .map(|c| c.context_window.get())
+                .map(|cw| cw.get())
                 .filter(|cw| *cw > 0);
             let error_cw = error
                 .model_metadata
@@ -1352,9 +1353,13 @@ impl SessionActor {
                     if new_cw.get() > self.compaction.model_context_window.get() {
                         self.compaction.model_context_window.set(new_cw.get());
                     }
-                    let effective = crate::util::config::apply_economic_context_cap(
+                    let economic = crate::util::config::apply_economic_context_cap(
                         self.compaction.model_context_window.get().max(new_cw.get()),
                         self.compaction.economic_mode.get(),
+                    );
+                    let effective = crate::util::config::session_sampling_window(
+                        economic,
+                        self.startup_hints.is_subagent,
                     );
                     cfg.context_window = std::num::NonZeroU64::new(effective).unwrap_or(new_cw);
                     self.chat_state_handle.update_sampling_config(cfg);

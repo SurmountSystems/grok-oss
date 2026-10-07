@@ -195,19 +195,56 @@ impl SessionActor {
         self.is_l3_session() || self.is_once_run_nested()
     }
 
+    /// Sampling window this session may use.
+    ///
+    /// Nested L2/L3 never exceed 200k, even when the stored catalog window
+    /// is 500k. L1 keeps the stored catalog window.
+    pub(crate) async fn effective_sampling_window(&self) -> Option<std::num::NonZeroU64> {
+        let cfg = self.chat_state_handle.get_sampling_config().await?;
+        let effective = crate::util::config::session_sampling_window(
+            cfg.context_window.get(),
+            self.startup_hints.is_subagent,
+        );
+        std::num::NonZeroU64::new(effective).or(Some(cfg.context_window))
+    }
+
+    /// Stored catalog window is larger than the nested 200k cap. Shrink it.
+    /// L1 is unchanged.
+    pub(crate) async fn clamp_stored_sampling_window_for_nested(&self) {
+        if !self.startup_hints.is_subagent {
+            return;
+        }
+        let Some(cfg) = self.chat_state_handle.get_sampling_config().await else {
+            return;
+        };
+        let capped = crate::util::config::session_sampling_window(cfg.context_window.get(), true);
+        let Some(capped) = std::num::NonZeroU64::new(capped) else {
+            return;
+        };
+        if capped == cfg.context_window {
+            return;
+        }
+        self.chat_state_handle
+            .update_sampling_config(xai_grok_sampling_types::SamplingConfig {
+                context_window: capped,
+                ..cfg
+            });
+    }
+
     /// True when an L3 or once-run nested role has a painted model total
     /// (`get_total_tokens`) at or over its sampling window. The byte
     /// estimate is not this gate. A painted total under the window must
     /// fall through to the sampler. Callers must end the run, not
     /// `run_compact_only`. The specialist still must not compact itself.
+    /// The window is the nested 200k cap when the stored catalog is larger.
     pub(crate) async fn l3_nested_window_is_full(&self) -> bool {
         if !self.never_auto_compact() {
             return false;
         }
-        let Some(cfg) = self.chat_state_handle.get_sampling_config().await else {
+        let Some(cw) = self.effective_sampling_window().await else {
             return false;
         };
-        let cw = cfg.context_window.get();
+        let cw = cw.get();
         if cw == 0 {
             return false;
         }
@@ -215,11 +252,12 @@ impl SessionActor {
     }
 
     /// True when used tokens are at or over this session's sampling window.
+    /// Nested L2/L3 use the 200k cap. L1 uses the stored catalog window.
     pub(crate) async fn sampling_window_is_full(&self) -> bool {
-        let Some(cfg) = self.chat_state_handle.get_sampling_config().await else {
+        let Some(cw) = self.effective_sampling_window().await else {
             return false;
         };
-        let cw = cfg.context_window.get();
+        let cw = cw.get();
         if cw == 0 {
             return false;
         }
@@ -236,10 +274,10 @@ impl SessionActor {
         if self.compaction.is_suppressed() {
             return false;
         }
-        let sampling_cfg = self.chat_state_handle.get_sampling_config().await;
-        let Some(cw) = sampling_cfg.as_ref().map(|c| c.context_window.get()) else {
+        let Some(cw_nz) = self.effective_sampling_window().await else {
             return false;
         };
+        let cw = cw_nz.get();
         let estimated_total = self.chat_state_handle.get_estimated_total_tokens().await;
         // Prefire lead is percent-based; when the user pinned an absolute
         // token threshold, derive an effective percent of the live window.
@@ -2247,10 +2285,9 @@ impl SessionActor {
     ) -> bool {
         let estimated_total = self.chat_state_handle.get_estimated_total_tokens().await;
         let session_window = self
-            .chat_state_handle
-            .get_sampling_config()
+            .effective_sampling_window()
             .await
-            .map(|c| c.context_window.get())
+            .map(|cw| cw.get())
             .filter(|cw| *cw > 0)
             .unwrap_or(0);
         let error_window = err
@@ -2277,10 +2314,10 @@ impl SessionActor {
         if self.tool_context.task_output_token_budget.is_some() {
             return Ok(());
         }
-        let Some(cfg) = self.chat_state_handle.get_sampling_config().await else {
+        let Some(cw_nz) = self.effective_sampling_window().await else {
             return Ok(());
         };
-        let cw = cfg.context_window.get();
+        let cw = cw_nz.get();
         let used = self.chat_state_handle.get_estimated_total_tokens().await;
         if cw == 0 || used < cw {
             return Ok(());
@@ -2332,10 +2369,9 @@ impl SessionActor {
             return None;
         }
         let cw = self
-            .chat_state_handle
-            .get_sampling_config()
+            .effective_sampling_window()
             .await
-            .map(|cfg| cfg.context_window.get())
+            .map(|cw| cw.get())
             .filter(|cw| *cw > 0)?;
         let tokens_used = self.chat_state_handle.get_total_tokens().await;
         let ratio = tokens_used.saturating_mul(100) / cw;
@@ -2367,7 +2403,12 @@ impl SessionActor {
             return None;
         }
         let sampling_cfg = self.chat_state_handle.get_sampling_config().await;
-        let context_window = sampling_cfg.as_ref().map(|c| c.context_window)?;
+        let stored_window = sampling_cfg.as_ref().map(|c| c.context_window)?;
+        let effective_tokens = crate::util::config::session_sampling_window(
+            stored_window.get(),
+            self.startup_hints.is_subagent,
+        );
+        let context_window = std::num::NonZeroU64::new(effective_tokens).unwrap_or(stored_window);
         let cw = context_window.get();
         let model = sampling_cfg
             .as_ref()
@@ -2425,8 +2466,11 @@ impl SessionActor {
         }
         let estimated_total = self.chat_state_handle.get_estimated_total_tokens().await;
         let cfg = self.chat_state_handle.get_sampling_config().await?;
-        let cw = cfg.context_window.get();
-        if estimated_total <= cw {
+        let cw = crate::util::config::session_sampling_window(
+            cfg.context_window.get(),
+            self.startup_hints.is_subagent,
+        );
+        if cw == 0 || estimated_total <= cw {
             return None;
         }
         let overflow = estimated_total.saturating_sub(cw);
@@ -2473,11 +2517,15 @@ impl SessionActor {
         self.compaction
             .last_auto_compact_saved_too_little
             .store(false, std::sync::atomic::Ordering::Relaxed);
-        if prev.context_window <= cfg.context_window.get() {
+        let live = self
+            .effective_sampling_window()
+            .await
+            .unwrap_or(cfg.context_window);
+        if prev.context_window <= live.get() {
             return Ok(());
         }
         let total_tokens = self.chat_state_handle.get_estimated_total_tokens().await;
-        let Some(trigger_info) = self.should_auto_compact(total_tokens, cfg.context_window) else {
+        let Some(trigger_info) = self.should_auto_compact(total_tokens, live) else {
             return Ok(());
         };
         tracing::info!(
@@ -2485,7 +2533,7 @@ impl SessionActor {
             prev.model_slug,
             prev.context_window,
             cfg.model,
-            cfg.context_window.get(),
+            live.get(),
             trigger_info.percentage,
         );
         if let Err(e) = Box::pin(self.run_compact_only(trigger_info, false)).await {
