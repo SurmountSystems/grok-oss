@@ -437,7 +437,9 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
             vec![]
         }
         Action::SendPrompt(text) => dispatch_send_prompt(app, text),
-        Action::RevisePlan(text) => super::prompt::dispatch_revise_plan(app, text),
+        Action::RevisePlan { text, images } => {
+            super::prompt::dispatch_revise_plan(app, text, images)
+        }
         Action::SubmitFollowUp(text) => dispatch_send_prompt_inner(app, text, false, true, true),
         Action::SendSlashCommandPreservingDraft(text) => {
             dispatch_send_prompt_inner(app, text, false, false, false)

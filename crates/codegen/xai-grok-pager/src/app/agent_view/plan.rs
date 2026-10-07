@@ -1739,10 +1739,8 @@ impl AgentView {
                 self.plan_feedback_in_flight = Some(PlanFeedbackInFlight::Revising);
                 self.show_toast("Plan revision sent.");
                 log_plan_submit("revise");
-                return InputOutcome::Action(Action::Interject {
-                    text,
-                    images: Vec::new(),
-                });
+                let images = self.prompt.drain_images();
+                return InputOutcome::Action(Action::Interject { text, images });
             }
             return InputOutcome::Changed;
         };
@@ -1780,7 +1778,8 @@ impl AgentView {
         if post_turn {
             self.plan_approval_view = Some(pav);
             let text = to_send.unwrap_or_default();
-            return InputOutcome::Action(Action::RevisePlan(text));
+            let images = self.prompt.drain_images();
+            return InputOutcome::Action(Action::RevisePlan { text, images });
         }
         let sent_acp = pav.send_cancelled(to_send.clone());
         if pav.source == PlanReviewSource::Inline {
@@ -4193,7 +4192,8 @@ mod plan_approval_optimistic_mode_tests {
         let mut agent = agent_with_post_turn_review();
         assert!(matches!(
             agent.send_plan_feedback(Some("add a rollback".into())),
-            InputOutcome::Action(Action::RevisePlan(text)) if text.contains("add a rollback")
+            InputOutcome::Action(Action::RevisePlan { text, .. })
+                if text.contains("add a rollback")
         ));
         assert!(
             agent.plan_approval_view.is_some(),
@@ -4211,6 +4211,62 @@ mod plan_approval_optimistic_mode_tests {
             agent.kept_plan.body(),
             Some("# Build it\n"),
             "content-only keeps stay so the next EndTurn can reopen review"
+        );
+    }
+    #[test]
+    fn plan_mode_keeps_an_image_the_operator_provides() {
+        let mut agent = agent_with_post_turn_review();
+        assert!(agent.plan_mode_active, "plan mode is open");
+        assert!(
+            agent
+                .plan_approval_view
+                .as_ref()
+                .is_some_and(|pav| { pav.is_after_turn() && !pav.is_local_idle_decision }),
+            "the review is the after-turn arm, not the idle-local fixture"
+        );
+        agent.prompt.set_text("look at this screenshot ");
+        agent
+            .prompt
+            .insert_image(crate::prompt_images::PastedImage {
+                element_id: xai_ratatui_textarea::ElementId::from_raw(1),
+                display_number: 1,
+                mime_type: "image/png".into(),
+                dimensions: Some((100, 80)),
+                byte_len: 16,
+                encoded_bytes: Some(vec![0xA5u8; 16].into()),
+                source_path: None,
+                staged_temp_path: None,
+                session_image_path: None,
+                preview: crate::prompt_images::PromptImagePreview::default(),
+            })
+            .expect("the operator provides an image while plan mode is open");
+        assert!(
+            agent.prompt.text().contains("[Image #1]"),
+            "paste still inserts the chip"
+        );
+        let notes = agent.prompt.text_without_image_chips();
+        let outcome = agent.send_plan_feedback(Some(notes.trim().to_owned()));
+        assert!(
+            matches!(
+                &outcome,
+                InputOutcome::Action(Action::RevisePlan { text, .. })
+                    if text.contains("look at this screenshot")
+            ),
+            "after-turn revise returns RevisePlan with the notes; got {outcome:?}"
+        );
+        let carried: &[crate::prompt_images::PastedImage] = match &outcome {
+            InputOutcome::Action(Action::Interject { images, .. })
+            | InputOutcome::Action(Action::SendPromptNow { images, .. })
+            | InputOutcome::Action(Action::RevisePlan { images, .. }) => images,
+            other => panic!(
+                "while plan mode is open, an image the operator provides is kept on that plan turn; got {other:?}"
+            ),
+        };
+        assert!(
+            carried
+                .iter()
+                .any(|image| { image.encoded_bytes.as_deref() == Some([0xA5u8; 16].as_slice()) }),
+            "while plan mode is open, an image the operator provides is kept on that plan turn; the action carried no image: {outcome:?}"
         );
     }
     fn user_prompt_texts(agent: &AgentView) -> Vec<String> {
@@ -4260,7 +4316,7 @@ mod plan_approval_optimistic_mode_tests {
             .set_screen_mode(crate::app::ScreenMode::Minimal);
         let outcome = agent.send_plan_feedback(Some("add a rollback".into()));
         assert!(
-            matches!(outcome, InputOutcome::Action(Action::RevisePlan(_))),
+            matches!(outcome, InputOutcome::Action(Action::RevisePlan { .. })),
             "post-turn revise must dispatch a real prompt"
         );
         assert!(
@@ -4299,7 +4355,7 @@ mod plan_approval_optimistic_mode_tests {
         agent.open_post_turn_plan_review();
         assert!(matches!(
             agent.send_plan_feedback(Some("add a rollback".into())),
-            InputOutcome::Action(Action::RevisePlan(text))
+            InputOutcome::Action(Action::RevisePlan { text, .. })
                 if text.contains("add a rollback")
         ));
         agent.commit_post_turn_plan_revised();
@@ -4827,7 +4883,7 @@ mod plan_approval_optimistic_mode_tests {
         agent.open_post_turn_plan_review();
         assert!(matches!(
             agent.send_plan_feedback(Some("tighten the rollout".into())),
-            InputOutcome::Action(Action::RevisePlan(_))
+            InputOutcome::Action(Action::RevisePlan { .. })
         ));
         agent.commit_post_turn_plan_revised();
         assert!(agent.kept_plan.body().is_none());

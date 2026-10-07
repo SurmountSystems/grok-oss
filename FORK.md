@@ -2506,6 +2506,41 @@ or join. Adjacent to this paragraph, **Named tests are contracts**,
 lost-prompt, and § *Hunter's razor*; it does not replace them. Dual-pin:
 [`AGENTS.md`](AGENTS.md) § *Wasted human time* (hard constraint 24).
 
+**Plan mode screen (pinned 2026-10-07).** These sentences say what that
+screen must do. They are not a claim that the tests already pass. Do not
+reshape the asserts to match today's paint. Older tests below are not
+this screen.
+
+- While plan mode is open, the prompt input shows a white outline. The
+  frame glyphs use `prompt_border_active` (`Rgb(255, 255, 255)` on DOGE).
+  They do not use `bg_base`. Ask mode and commenting keep that same white
+  stroke. This is not the plan side panel. Named test:
+  `plan_mode_prompt_input_keeps_a_white_outline`.
+- While plan mode is open, the screen offers a Limits and Credits control
+  when the next request does not draw included SuperGrok period limits.
+  Opening it shows Limits before Credits. The control does not say
+  `limits 0%` or `limits N%` unless that meter is the one the next request
+  draws. SuperGrok is paid. The meters stay distinct (included SuperGrok
+  period limits, SuperGrok dollar credits, and console team prepaid /
+  console API credits). Named test:
+  `plan_mode_screen_offers_limits_and_credits_when_included_limits_are_not_the_next_request`.
+- While plan mode is open, an image the operator provides is kept on that
+  plan turn. Named test: `plan_mode_keeps_an_image_the_operator_provides`.
+
+Differences from tests that do not cover this screen:
+
+- `titled_doge_composer_frame_is_prompt_border_not_context_yellow` leaves
+  `border_color_override` unset.
+- `plan_prompt_window_paints_white_titled_frame` does not set
+  `plan_mode_active`.
+- `clicking_the_chip_opens_the_card_and_the_limits_tab_shows_ahead_or_behind_a_linear_week`
+  builds `LimitsModalState` itself.
+- `limits_mode_does_not_paint_limits_in_use_for_a_team_jwt_and_an_unread_meter_is_not_zero_percent`
+  requires the in-use chip to stay off. That assert stays.
+- A test that attaches an image only outside plan mode is not the image
+  contract. `approve_or_revise_drains_plan_composer_images` uses the
+  idle-local fixture, not the after-turn `RevisePlan(text)` arm.
+
 **Rules (not product class numbers):**
 
 - **`FORK_PATHS` restore is docs and scripts only.** Product seams inside

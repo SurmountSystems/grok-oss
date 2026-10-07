@@ -2932,7 +2932,13 @@ fn revise_send_success_commits_review_after_gates() {
     let id = AgentId(0);
     install_post_turn_review(&mut app, id);
 
-    let effects = dispatch(Action::RevisePlan("add a rollback".into()), &mut app);
+    let effects = dispatch(
+        Action::RevisePlan {
+            text: "add a rollback".into(),
+            images: Vec::new(),
+        },
+        &mut app,
+    );
     assert!(
         matches!(effects.as_slice(), [Effect::SendPrompt { .. }]),
         "revise notes must send, got {effects:?}"

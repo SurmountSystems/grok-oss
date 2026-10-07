@@ -888,9 +888,9 @@ impl AgentView {
             } else {
                 mode_accent
             },
-            border_color_override: mode_accent.map(|accent| {
-                crate::render::color::blend_color(theme.bg_base, accent, 0.4).unwrap_or(accent)
-            }),
+            // Plan, comment, and Ask keep the prompt outline on
+            // `prompt_border_active`. A 0.4 blend of `bg_base` is black on DOGE.
+            border_color_override: mode_accent.map(|_| theme.prompt_border_active),
             prefix_override: if let Some(p) = self.prompt_input_mode.prefix_override(&theme) {
                 Some(p)
             } else if casual_commenting
@@ -1577,7 +1577,9 @@ impl AgentView {
         // Short status chip only. Do not use the verbose SuperGrok period helper.
         // `limits N%` only when the next request draws included SuperGrok
         // period limits. SuperGrok dollar credits and console API credits
-        // do not get that label.
+        // do not get that label. While plan mode is open and that meter is
+        // not the next request, the header offers Limits and Credits. That
+        // control is not `limits 0%` and not `limits N%`.
         if let Some(balance) = self.credit_balance.as_ref()
             && let Some(label) = both_refused_status_chip_label(balance)
         {
@@ -1606,6 +1608,15 @@ impl AgentView {
             if self.hit_credits.hovered {
                 chip_style = chip_style.add_modifier(ratatui::style::Modifier::BOLD);
             }
+            status.push("credits", Line::from(Span::styled(label, chip_style)));
+        } else if effective_plan
+            && !xai_grok_shell::auth::limits_pins::next_request_draws_included_period_limits()
+        {
+            let label = "Limits and Credits";
+            let chip_style = hover_or(
+                self.hit_credits.hovered,
+                Style::default().fg(theme.text_secondary).bg(theme.bg_base),
+            );
             status.push("credits", Line::from(Span::styled(label, chip_style)));
         }
         let areas = status.render(buf, layout.status_bar);
@@ -5795,6 +5806,102 @@ mod plan_approval_draw_contract_tests {
             mid_left.fg, white,
             "plan prompt side must stay white; got {:?}",
             mid_left.fg
+        );
+    }
+
+    /// While plan mode is open, the prompt input keeps a white outline.
+    /// Ask mode keeps that same white stroke. The frame glyph is `╭` or
+    /// `─`, its foreground is `Rgb(255, 255, 255)`, and that foreground is
+    /// not `theme.bg_base`. This is the prompt input, not the plan side panel.
+    #[test]
+    fn plan_mode_prompt_input_keeps_a_white_outline() {
+        use crate::theme::{Theme, cache};
+        use ratatui::style::Color;
+
+        let _pin = cache::pin_theme();
+        cache::set(crate::theme::ThemeKind::Doge);
+        let theme = Theme::current();
+        let white = Color::Rgb(255, 255, 255);
+        assert_eq!(
+            theme.prompt_border_active, white,
+            "DOGE prompt outline is white"
+        );
+        assert_ne!(
+            theme.bg_base, white,
+            "DOGE bg_base is not the white outline"
+        );
+
+        fn prompt_frame_fg(agent: &mut AgentView, label: &str) -> Color {
+            let reg = ActionRegistry::defaults();
+            let area = Rect::new(0, 0, 100, 40);
+            let mut buf = Buffer::empty(area);
+            let mut scratch = ScratchBuffer::new();
+            agent.draw(
+                area,
+                &mut buf,
+                &reg,
+                &mut scratch,
+                None,
+                false,
+                crate::app::agent_view::BannerSlotParams::none(),
+                false,
+                false,
+                &mut Vec::new(),
+                super::AppRenderParams::default(),
+            );
+            let prompt = agent.pane_areas.prompt;
+            assert!(
+                prompt.width > 4 && prompt.height > 2,
+                "{label}: prompt input must have a painted area; got {prompt:?}"
+            );
+            let mut corner = None;
+            let mut rule = None;
+            for y in prompt.y..prompt.y.saturating_add(prompt.height) {
+                for x in prompt.x..prompt.x.saturating_add(prompt.width) {
+                    let Some(cell) = buf.cell((x, y)) else {
+                        continue;
+                    };
+                    if cell.symbol() == "\u{256d}" {
+                        corner = Some(cell.fg);
+                        break;
+                    }
+                    if rule.is_none() && cell.symbol() == "\u{2500}" {
+                        rule = Some(cell.fg);
+                    }
+                }
+                if corner.is_some() {
+                    break;
+                }
+            }
+            corner.or(rule).unwrap_or_else(|| {
+                panic!("{label}: prompt input must paint ╭ or ─");
+            })
+        }
+
+        let mut plan = make_agent();
+        plan.plan_mode_active = true;
+        let plan_fg = prompt_frame_fg(&mut plan, "plan mode");
+        assert_eq!(
+            plan_fg, white,
+            "plan mode prompt outline must be white Rgb(255, 255, 255); got {plan_fg:?}"
+        );
+        assert_ne!(
+            plan_fg, theme.bg_base,
+            "plan mode prompt outline must not use theme.bg_base; got {plan_fg:?}"
+        );
+
+        let mut ask = make_agent();
+        ask.plan_mode_active = false;
+        ask.session_mode_pending = None;
+        ask.session_mode = xai_grok_tools::types::SessionMode::Ask;
+        let ask_fg = prompt_frame_fg(&mut ask, "ask mode");
+        assert_eq!(
+            ask_fg, white,
+            "ask mode prompt outline must be white Rgb(255, 255, 255); got {ask_fg:?}"
+        );
+        assert_ne!(
+            ask_fg, theme.bg_base,
+            "ask mode prompt outline must not use theme.bg_base; got {ask_fg:?}"
         );
     }
 

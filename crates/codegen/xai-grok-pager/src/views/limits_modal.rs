@@ -3793,4 +3793,224 @@ mod tests {
             "a live personal SuperGrok session says Using limits:\n{personal_card}"
         );
     }
+
+    /// While plan mode is open, and the next request does not draw included
+    /// SuperGrok period limits, the screen offers a Limits and Credits
+    /// control. Opening it shows Limits before Credits. The control does not
+    /// say `limits 0%` or `limits N%`.
+    ///
+    /// A live Team JWT leaves the in-use chip off. Header paint arms
+    /// `hit_credits` only for that chip.
+    #[test]
+    #[serial_test::serial]
+    fn plan_mode_screen_offers_limits_and_credits_when_included_limits_are_not_the_next_request() {
+        use crate::actions::ActionRegistry;
+        use crate::app::agent_view::test_fixtures::make_agent;
+        use crate::app::agent_view::{AppRenderParams, BannerSlotParams};
+        use crate::scrollback::render::ScratchBuffer;
+        use xai_grok_shell::auth::limits_pins::{
+            LimitsPins, MeterSource, next_request_draws_included_period_limits, save_limits_pins,
+        };
+        use xai_grok_shell::auth::{AuthMode, GrokAuth, upsert_supergrok_session};
+        use xai_grok_test_support::EnvGuard;
+
+        fn paints_limits_percent(text: &str) -> bool {
+            for line in text.lines() {
+                let mut rest = line;
+                while let Some(idx) = rest.find("limits ") {
+                    let after = &rest[idx + "limits ".len()..];
+                    let digits = after.chars().take_while(|c| c.is_ascii_digit()).count();
+                    if digits > 0 && after[digits..].starts_with('%') {
+                        return true;
+                    }
+                    rest = &rest[idx + "limits ".len()..];
+                }
+            }
+            false
+        }
+
+        let home = tempfile::TempDir::new().expect("temp GROK_HOME");
+        let _env = EnvGuard::set("GROK_HOME", home.path());
+        std::fs::write(
+            home.path().join("config.toml"),
+            "[auth]\npreferred_method = \"oidc\"\nauto_use_included_limits = true\n",
+        )
+        .expect("preferred oidc");
+        save_limits_pins(&LimitsPins {
+            stay_supergrok: true,
+            use_console: false,
+            meter_source: None,
+            supergrok_identity: None,
+        })
+        .expect("stay pin");
+
+        let end = DateTime::parse_from_rfc3339("2026-10-12T06:59:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let now = DateTime::parse_from_rfc3339("2026-10-07T11:38:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let base = "https://auth.x.ai::plan-mode-limits-menu-fixture";
+        let live = chrono::Utc::now() + chrono::Duration::days(1);
+        let expired = chrono::Utc::now() - chrono::Duration::days(1);
+        let session = |key: &str, user_id: &str, team: bool, expires_at| GrokAuth {
+            key: key.into(),
+            auth_mode: AuthMode::Oidc,
+            user_id: user_id.into(),
+            principal_type: if team {
+                Some("Team".to_string())
+            } else {
+                Some("User".to_string())
+            },
+            principal_id: Some(user_id.to_string()),
+            team_id: team.then(|| "team-fixture".to_string()),
+            expires_at: Some(expires_at),
+            ..GrokAuth::default()
+        };
+        let mut map = std::collections::BTreeMap::new();
+        upsert_supergrok_session(
+            &mut map,
+            base,
+            session("tok-personal-expired", "u-personal-expired", false, expired),
+        );
+        map.get_mut(&format!("{base}::personal"))
+            .expect("expired personal slot")
+            .team_id = Some("stale-team".to_string());
+        upsert_supergrok_session(
+            &mut map,
+            base,
+            session("tok-team-only", "u-team", true, live),
+        );
+        std::fs::write(
+            home.path().join("auth.json"),
+            serde_json::to_vec_pretty(&map).expect("auth json"),
+        )
+        .expect("write auth");
+        assert!(
+            !next_request_draws_included_period_limits(),
+            "an expired personal session beside a live Team JWT does not draw included SuperGrok period limits"
+        );
+        save_limits_pins(&LimitsPins {
+            meter_source: Some(MeterSource::Included),
+            stay_supergrok: true,
+            use_console: false,
+            supergrok_identity: None,
+        })
+        .expect("included pin");
+        assert!(
+            !next_request_draws_included_period_limits(),
+            "an Included pin cannot paint limits in use for a Team JWT"
+        );
+        save_limits_pins(&LimitsPins {
+            stay_supergrok: true,
+            use_console: false,
+            meter_source: None,
+            supergrok_identity: None,
+        })
+        .expect("stay pin restored");
+
+        crate::appearance::cache::set_hide_header(false);
+        let mut agent = make_agent();
+        agent.plan_mode_active = true;
+        agent.sampling_identity = SamplingIdentityKind::SuperGrokSession;
+        let balance = weekly_bal(1.0, end);
+        agent.credit_balance = Some(balance.clone());
+        let area = Rect::new(0, 0, 140, 40);
+        let mut buf = Buffer::empty(area);
+        let mut scratch = ScratchBuffer::new();
+        agent.draw(
+            area,
+            &mut buf,
+            &ActionRegistry::defaults(),
+            &mut scratch,
+            None,
+            false,
+            BannerSlotParams::none(),
+            false,
+            false,
+            &mut Vec::new(),
+            AppRenderParams::default(),
+        );
+        let screen = (0..area.height)
+            .map(|y| {
+                (0..area.width)
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            agent.plan_mode_active,
+            "this draw is the plan-mode agent screen"
+        );
+        assert!(
+            !next_request_draws_included_period_limits(),
+            "the next request still does not draw included SuperGrok period limits"
+        );
+        assert!(
+            !screen.contains("limits 0%"),
+            "the control must not say limits 0% while the in-use chip is off:\n{screen}"
+        );
+        assert!(
+            !paints_limits_percent(&screen),
+            "the control must not say limits N% while included SuperGrok period limits are not the next request:\n{screen}"
+        );
+
+        let phrase = "Limits and Credits";
+        let mut found = None;
+        for (y, line) in screen.lines().enumerate() {
+            if let Some(byte) = line.find(phrase) {
+                let x = line[..byte].chars().count() as u16;
+                found = Some((x, y as u16));
+                break;
+            }
+        }
+        let (x, y) = found.expect(
+            "while plan mode is open and the next request does not draw included SuperGrok period limits, the screen must show a Limits and Credits control. The in-use chip is off, and header paint arms hit_credits only for that chip:\n{screen}",
+        );
+        let width = phrase.chars().count() as u16;
+        for dx in 0..width {
+            assert!(
+                agent.hit_credits.contains(x + dx, y),
+                "the Limits and Credits control must be the click that opens the card"
+            );
+        }
+        let control_text: String = (0..width).map(|dx| buf[(x + dx, y)].symbol()).collect();
+        assert_eq!(control_text, phrase);
+        assert_ne!(control_text, "limits 0%");
+        assert!(
+            !paints_limits_percent(&control_text),
+            "the control text must not be limits N%, got {control_text}"
+        );
+
+        let snap = LimitsSnapshot::from_billing(
+            Some(&balance),
+            None,
+            SamplingIdentityKind::SuperGrokSession,
+        );
+        let mut state = LimitsModalState::new(snap);
+        let theme = Theme::default();
+        let modal_area = Rect::new(0, 0, 100, 40);
+        let mut modal = Buffer::empty(modal_area);
+        render_limits_modal(&mut modal, modal_area, &mut state, &theme, false, now);
+        let card = (0..modal_area.height)
+            .map(|row| {
+                (0..modal_area.width)
+                    .map(|col| modal[(col, row)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let tab_line = card
+            .lines()
+            .find(|line| line.contains("Limits") && line.contains("Credits"))
+            .unwrap_or("");
+        let limits_at = tab_line.find("Limits").expect("Limits tab");
+        let credits_at = tab_line.find("Credits").expect("Credits tab");
+        assert!(
+            limits_at < credits_at,
+            "opening the control shows Limits before Credits:\n{tab_line}"
+        );
+        assert_eq!(state.window.active_tab, LIMITS_TAB);
+    }
 }

@@ -157,8 +157,12 @@ pub enum Action {
     SendPrompt(String),
     /// Post-turn plan revise: send notes without consuming the pre-review draft.
     /// [`Self::SendPrompt`] would wipe that draft and drain its images into the
-    /// revision turn.
-    RevisePlan(String),
+    /// revision turn. Images the operator attached on this plan turn ride here.
+    /// The pre-review draft stays stashed until the revise is accepted.
+    RevisePlan {
+        text: String,
+        images: Vec<crate::prompt_images::PastedImage>,
+    },
     /// Submit a clicked follow-up suggestion chip as a LITERAL model prompt.
     /// The suggestion text is server/model-controlled, so it must bypass slash-command and exit-alias resolution.
     /// A `/always-approve` or `/quit` chip must never execute as a command.

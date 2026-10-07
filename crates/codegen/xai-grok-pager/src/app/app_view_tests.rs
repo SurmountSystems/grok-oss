@@ -4437,7 +4437,10 @@ fn slash_preserving_send_retires_armed_clear_so_next_esc_swallows() {
 }
 #[test]
 fn revise_plan_retires_armed_clear_so_next_esc_swallows() {
-    assert_submit_path_retires_clear_arm(Action::RevisePlan("add a rollback".into()));
+    assert_submit_path_retires_clear_arm(Action::RevisePlan {
+        text: "add a rollback".into(),
+        images: Vec::new(),
+    });
 }
 #[test]
 fn stale_idle_clear_arm_never_fires_on_busy_agent() {

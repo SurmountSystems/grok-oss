@@ -267,7 +267,24 @@ pub(super) fn dispatch_send_prompt(app: &mut AppView, text: String) -> Vec<Effec
 /// must not toast "sent" or drop the review. Notes are literal so slash
 /// commands and exit aliases go to the model instead of running as pager
 /// commands (same as `SubmitFollowUp`).
-pub(super) fn dispatch_revise_plan(app: &mut AppView, text: String) -> Vec<Effect> {
+pub(super) fn dispatch_revise_plan(
+    app: &mut AppView,
+    text: String,
+    images: Vec<crate::prompt_images::PastedImage>,
+) -> Vec<Effect> {
+    // `send_plan_feedback` already drained these bytes onto the action. Put
+    // them back before any refuse so a dropped revise does not lose the
+    // screenshot. `consume_input` below attaches them the same way a normal
+    // composer send does. The pre-review draft stays on the review stash.
+    let plan_turn_images = !images.is_empty();
+    if plan_turn_images
+        && let ActiveView::Agent(id) = app.active_view
+        && let Some(agent) = app.agents.get_mut(&id)
+    {
+        for image in images {
+            let _ = agent.prompt.insert_image(image);
+        }
+    }
     if app.reconnect_pending {
         if let Some(agent) = get_active_agent_mut(app) {
             agent.show_toast(RECONNECTING_NOTICE);
@@ -306,7 +323,10 @@ pub(super) fn dispatch_revise_plan(app: &mut AppView, text: String) -> Vec<Effec
         return vec![];
     }
     let dispatched = dispatch_send_prompt_with_outcome(
-        app, text, /* consume_input */ false, /* literal */ true,
+        app,
+        text,
+        /* consume_input */ plan_turn_images,
+        /* literal */ true,
         /* is_follow_up */ false,
     );
     if has_post_turn_review

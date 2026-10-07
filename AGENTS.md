@@ -637,6 +637,38 @@ less than product code and tests. Do not invent long essays or git nags.
     contract. Dual-pin: [`FORK.md`](FORK.md) Land checklist **Named tests
     are contracts**; this file § *The operator's words are the spec*.
     Host: § *Test intent*.
+    **Plan mode screen (pinned 2026-10-07).** These sentences say what
+    that screen must do. They are not a claim that the tests already
+    pass. Do not reshape the asserts to match today's paint.
+    While plan mode is open, the prompt input shows a white outline.
+    The frame glyphs use `prompt_border_active` (`Rgb(255, 255, 255)`
+    on DOGE). They do not use `bg_base`. Ask mode and commenting keep
+    that same white stroke. This is not the plan side panel. Named
+    test: `plan_mode_prompt_input_keeps_a_white_outline`.
+    While plan mode is open, the screen offers a Limits and Credits
+    control when the next request does not draw included SuperGrok
+    period limits. Opening it shows Limits before Credits. The control
+    does not say `limits 0%` or `limits N%` unless that meter is the
+    one the next request draws. SuperGrok is paid. The meters stay
+    distinct: included SuperGrok period limits, SuperGrok dollar
+    credits, and console team prepaid / console API credits. Named test:
+    `plan_mode_screen_offers_limits_and_credits_when_included_limits_are_not_the_next_request`.
+    While plan mode is open, an image the operator provides is kept on
+    that plan turn. Named test:
+    `plan_mode_keeps_an_image_the_operator_provides`.
+    Differences: `titled_doge_composer_frame_is_prompt_border_not_context_yellow`
+    leaves `border_color_override` unset.
+    `plan_prompt_window_paints_white_titled_frame` does not set
+    `plan_mode_active`.
+    `clicking_the_chip_opens_the_card_and_the_limits_tab_shows_ahead_or_behind_a_linear_week`
+    builds `LimitsModalState` itself.
+    `limits_mode_does_not_paint_limits_in_use_for_a_team_jwt_and_an_unread_meter_is_not_zero_percent`
+    requires the in-use chip to stay off. That assert stays.
+    A test that attaches an image only outside plan mode is not the
+    image contract. `approve_or_revise_drains_plan_composer_images`
+    uses the idle-local fixture, not the after-turn `RevisePlan(text)`
+    arm. Dual-pin: [`FORK.md`](FORK.md) **Named tests are
+    contracts** § *Plan mode screen*.
 16. **No bash-in-nix; SHA-1 is git object ids only (pinned 2026-08-25).**
     Do not wrap old `.sh` in `pkgs.writeShellApplication` (or equivalent
     bash-in-nix). CI/Nix helper logic belongs in named `flake/*.nix` modules
@@ -839,6 +871,10 @@ Preview writers on the same files.
 This pin does not weaken one live `just check-remote` at a time,
 fire-and-return, or the rule that the Operator owns the VPS builder.
 Dual-pin: this file and host `~/.grok/AGENTS.md` same heading.
+
+### Work on everything with parallel L2s (pinned 2026-10-07)
+
+Operator: remember to work on everything with parallel L2s. When a job has more than one contract, start one L2 per disjoint write set in the same turn. Do not put independent tests on a single L2. A shared file stays with one L2. One runner still owns `just check-remote`. Do not serialize independent work. Dual-pin: host `~/.grok/AGENTS.md` same heading. This does not replace the older implementor-cap pins.
 
 ## Take the Operator seriously (pinned 2026-09-09)
 
