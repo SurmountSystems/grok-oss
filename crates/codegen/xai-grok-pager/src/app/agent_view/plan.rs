@@ -257,6 +257,16 @@ impl AgentView {
     /// Mill rewrote session plan.md. Isolated Preview must paint that file,
     /// not leftover present / TECH.md persist overwrite. Does not Approve.
     fn paint_isolated_preview_from_mill_plan_md(&mut self, disk: String) {
+        // Approve already left the decision chrome. A later mill reread must
+        // not open the pane on `approve | comment | revise | exit` or arm
+        // `Plan ready. Side panel open`.
+        if self.plan_approved_implement || self.plan_decision_resolved {
+            self.latest_inline_plan_content = Some(disk.clone());
+            self.persist_session_plan_body(&disk);
+            self.line_viewer = None;
+            self.persist_session_plan_dock_open(false);
+            return;
+        }
         self.isolated_preview_shows_secondary_plan = false;
         if let Some(pav) = self.plan_approval_view.as_mut() {
             pav.plan_content = Some(disk.clone());
@@ -3550,6 +3560,172 @@ mod plan_approval_optimistic_mode_tests {
         agent.post_turn_plan_review = true;
         agent
     }
+
+    /// The side pane shows the full heading `Proposed plan.`, a body that
+    /// still starts at `The user wants`, a bordered copy control with a real
+    /// gap, and a muted footer rule. After Approve, a mill reread does not
+    /// open `approve | comment | revise | exit` or `Plan ready. Side panel open`.
+    #[test]
+    fn soft_plan_side_panel_shows_full_title_bordered_copy_muted_divider_and_hides_actions_after_approve()
+     {
+        use crate::views::file_search::line_viewer::{
+            LineViewerKind, LineViewerState, render_line_viewer,
+        };
+
+        let _pin = crate::theme::cache::pin_theme();
+        crate::theme::cache::set(crate::theme::ThemeKind::Doge);
+        let theme = crate::theme::Theme::doge();
+
+        let body = "# Proposed plan.\n\nThe user wants the status row to show two tokens.\n";
+        let mut viewer = LineViewerState::open_markdown_content("plan.md", body.to_owned(), None)
+            .expect("open plan");
+        viewer.kind = LineViewerKind::PlanPreview;
+        viewer.fullscreen = false;
+        viewer.plan_mut().feedback_active = false;
+        viewer.plan_mut().show_action_buttons = true;
+
+        let full = ratatui::layout::Rect::new(0, 0, 100, 30);
+        let mut buf = ratatui::buffer::Buffer::empty(full);
+        render_line_viewer(
+            &mut buf,
+            full,
+            &mut viewer,
+            std::path::Path::new("/tmp"),
+            &theme,
+            0,
+        );
+
+        let mut saw_full_title = false;
+        let mut saw_body_start = false;
+        for y in 0..full.height {
+            let mut row = String::new();
+            for x in 0..full.width {
+                if let Some(cell) = buf.cell((x, y)) {
+                    row.push_str(cell.symbol());
+                }
+            }
+            if row.contains("Proposed plan.") {
+                saw_full_title = true;
+            }
+            if row.contains("sed plan.") && !row.contains("Proposed plan.") {
+                panic!("title paints as sed plan., not Proposed plan.: {row:?}");
+            }
+            if row.contains("The user wants the status row to show two t") {
+                saw_body_start = true;
+            }
+            if row.contains("er wants the status") && !row.contains("The user wants") {
+                panic!("body left edge is clipped: {row:?}");
+            }
+        }
+        assert!(
+            saw_full_title,
+            "the pane must paint the full heading Proposed plan."
+        );
+        assert!(
+            saw_body_start,
+            "the body must keep its left edge, starting at The user wants"
+        );
+
+        let plan = viewer.plan_ref().expect("plan extras");
+        let search = plan
+            .search_button_area
+            .expect("search stays a header control");
+        let copy = plan.copy_button_area.expect("copy stays a header control");
+        let enlarge = viewer
+            .fullscreen_button_area
+            .expect("enlarge stays a header control");
+        assert_eq!(buf[(copy.x, copy.y)].symbol(), "[");
+        assert_eq!(buf[(copy.x + 2, copy.y)].symbol(), "]");
+        assert_eq!(
+            buf[(copy.x + 1, copy.y)].symbol(),
+            crate::glyphs::copy_icon(),
+            "copy is a bordered control, not flat text"
+        );
+        assert_eq!(
+            buf[(search.x + search.width, search.y)].symbol(),
+            " ",
+            "a gap cell separates search and copy"
+        );
+        assert_ne!(
+            buf[(search.x + search.width, search.y)].symbol(),
+            "\u{2500}",
+            "the gap is not a connecting rule"
+        );
+        assert_eq!(
+            buf[(copy.x + copy.width, copy.y)].symbol(),
+            " ",
+            "a gap cell separates copy and enlarge"
+        );
+        assert_ne!(
+            buf[(enlarge.x.saturating_sub(1), enlarge.y)].symbol(),
+            crate::glyphs::copy_icon()
+        );
+
+        let modal = viewer.last_modal_area.expect("soft plan pane");
+        let div_y = modal.y + modal.height.saturating_sub(2);
+        let mut saw_rule = false;
+        for x in modal.x..modal.x + modal.width {
+            let cell = &buf[(x, div_y)];
+            if cell.symbol() == "\u{2500}" || cell.symbol() == "-" {
+                saw_rule = true;
+                assert_eq!(
+                    cell.style().fg,
+                    Some(theme.bg_base),
+                    "the footer divider is the muted canvas hairline"
+                );
+                assert_ne!(
+                    cell.style().fg,
+                    Some(theme.gray_dim),
+                    "the footer divider is not the bright gray_dim stroke"
+                );
+            }
+        }
+        assert!(saw_rule, "the footer divider is painted");
+
+        let mut agent = make_agent();
+        agent.plan_approved_implement = true;
+        agent.plan_decision_resolved = true;
+        agent.paint_isolated_preview_from_mill_plan_md(body.to_owned());
+        if let Some(viewer) = agent.line_viewer.as_mut() {
+            let mut after = ratatui::buffer::Buffer::empty(full);
+            render_line_viewer(
+                &mut after,
+                full,
+                viewer,
+                std::path::Path::new("/tmp"),
+                &theme,
+                0,
+            );
+            let mut text = String::new();
+            for y in 0..full.height {
+                for x in 0..full.width {
+                    if let Some(cell) = after.cell((x, y)) {
+                        text.push_str(cell.symbol());
+                    }
+                }
+                text.push('\n');
+            }
+            let lower = text.to_ascii_lowercase();
+            assert!(
+                !lower.contains("approve | comment | revise | exit"),
+                "after Approve the four actions stay hidden: {text:?}"
+            );
+            assert!(
+                !text.contains("Plan ready. Side panel open"),
+                "after Approve the ready status stays hidden"
+            );
+        }
+        assert!(
+            agent.line_viewer.is_none(),
+            "after Approve, mill plan.md must not open the pane"
+        );
+        assert_ne!(
+            agent.plan_loop_status_label(),
+            Some("Plan ready. Side panel open"),
+            "after Approve, mill plan.md must not arm Plan ready. Side panel open"
+        );
+    }
+
     fn agent_in_plan_mode_with_approval() -> (
         AgentView,
         tokio::sync::oneshot::Receiver<xai_acp_lib::AcpResult<acp::ExtResponse>>,

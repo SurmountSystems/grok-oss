@@ -203,23 +203,28 @@ fn linear_week_label(pacing: xai_grok_shell::token_economy::PeriodPacing) -> Str
 }
 
 fn limits_tab_lines(state: &LimitsModalState, now: DateTime<Utc>) -> Vec<String> {
-    let Some(included) = state.snapshot.primary.included.as_ref() else {
-        return vec!["Pacing for this week is not known yet.".to_string()];
+    let mut lines = if let Some(included) = state.snapshot.primary.included.as_ref() {
+        let used = included.used_pct_floored();
+        let rem = included.remaining_pct_floored();
+        let allowance = match included.period_label {
+            "Included" => format!("  Included allowance: {used}% used · {rem}% remaining"),
+            other => format!(
+                "  Included {} allowance: {used}% used · {rem}% remaining",
+                other.to_lowercase()
+            ),
+        };
+        let reset = match &included.next_reset_display {
+            Some(text) => format!("  Next reset: {text}"),
+            None => "  Next reset: not known yet".to_string(),
+        };
+        vec![allowance, reset, short_week_line(included, now)]
+    } else {
+        // Unread usage stays off the used-percent line. The week line stays.
+        vec![
+            "  Included weekly allowance: not available yet".to_string(),
+            "Pacing for this week is not known yet.".to_string(),
+        ]
     };
-    let used = included.used_pct_floored();
-    let rem = included.remaining_pct_floored();
-    let allowance = match included.period_label {
-        "Included" => format!("  Included allowance: {used}% used · {rem}% remaining"),
-        other => format!(
-            "  Included {} allowance: {used}% used · {rem}% remaining",
-            other.to_lowercase()
-        ),
-    };
-    let reset = match &included.next_reset_display {
-        Some(text) => format!("  Next reset: {text}"),
-        None => "  Next reset: not known yet".to_string(),
-    };
-    let mut lines = vec![allowance, reset, short_week_line(included, now)];
     // Failed console fetch: same field the Credits tab uses, on this body too.
     let console = credits_tab_meter_line(&console_credits_line(state));
     if console.trim() == "Console API credits: not available" {
@@ -477,11 +482,19 @@ pub fn render_limits_modal(
     let mut display_lines: Vec<String> = Vec::new();
     let mut injected_bar = false;
     let on_credits_tab = state.window.active_tab == CREDITS_TAB;
-    let body = if on_credits_tab {
+    let mut body = if on_credits_tab {
         credits_tab_lines(state)
     } else {
         limits_tab_lines(state, now)
     };
+    // Header chip and footer may say limits only when this same predicate
+    // is true. Both tabs carry the sentence when it is false.
+    if !xai_grok_shell::auth::limits_pins::next_request_draws_included_period_limits() {
+        body.insert(
+            0,
+            "Included limits are not being drawn for the next request.".to_string(),
+        );
+    }
     for raw in body {
         let is_allowance_meter = is_included_allowance_used_line(&raw);
         // The fail-open printout note is required in the body text (CLI /
@@ -3271,6 +3284,264 @@ mod tests {
         assert!(
             !console_card.contains("Using limits"),
             "the card must not say Using limits when the next request is the console key:\n{console_card}"
+        );
+    }
+
+    /// Header `limits 0%` and footer `Using limits` are absent when the card
+    /// says included limits are not being drawn. An unread meter is
+    /// `not available yet`, which is not a live 0%.
+    #[test]
+    #[serial_test::serial]
+    fn limits_label_is_absent_when_the_card_says_included_limits_are_not_being_drawn_and_an_unread_meter_is_not_zero_percent()
+     {
+        use crate::actions::ActionRegistry;
+        use crate::app::agent_view::test_fixtures::make_agent;
+        use crate::app::agent_view::{AppRenderParams, BannerSlotParams};
+        use crate::scrollback::render::ScratchBuffer;
+        use xai_grok_shell::auth::limits_pins::{
+            LimitsPins, MeterSource, next_request_draws_included_period_limits, save_limits_pins,
+        };
+        use xai_grok_test_support::EnvGuard;
+
+        const NOT_DRAWN: &str = "Included limits are not being drawn for the next request.";
+        const NOT_READ: &str = "Included weekly allowance: not available yet";
+
+        let home = tempfile::TempDir::new().expect("temp GROK_HOME");
+        let _env = EnvGuard::set("GROK_HOME", home.path());
+
+        let end = DateTime::parse_from_rfc3339("2026-10-12T06:59:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let now = DateTime::parse_from_rfc3339("2026-10-06T22:08:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let known = weekly_bal(28.0, end);
+        let mut unread = weekly_bal(0.0, end);
+        unread.included_usage_known = false;
+        unread.usage_pct = 0.0;
+        unread.period_end_display = Some("10-12 06:59 UTC".to_string());
+
+        let paint_header = |balance: &CreditBalance| -> String {
+            crate::appearance::cache::set_hide_header(false);
+            let mut agent = make_agent();
+            agent.sampling_identity = SamplingIdentityKind::SuperGrokSession;
+            agent.credit_balance = Some(balance.clone());
+            let area = Rect::new(0, 0, 140, 40);
+            let mut header = ratatui::buffer::Buffer::empty(area);
+            let mut scratch = ScratchBuffer::new();
+            agent.draw(
+                area,
+                &mut header,
+                &ActionRegistry::defaults(),
+                &mut scratch,
+                None,
+                false,
+                BannerSlotParams::none(),
+                false,
+                false,
+                &mut Vec::new(),
+                AppRenderParams::default(),
+            );
+            (0..area.height)
+                .map(|y| {
+                    (0..area.width)
+                        .filter_map(|x| header.cell((x, y)).map(|cell| cell.symbol().to_string()))
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let theme = Theme::default();
+        let area = Rect::new(0, 0, 140, 40);
+        let paint_card = |state: &mut LimitsModalState| -> String {
+            let mut buf = ratatui::buffer::Buffer::empty(area);
+            render_limits_modal(&mut buf, area, state, &theme, false, now);
+            (0..area.height)
+                .map(|y| {
+                    (0..area.width)
+                        .map(|x| buf[(x, y)].symbol())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
+        assert!(next_request_draws_included_period_limits());
+        let drawing_header = paint_header(&known);
+        assert!(
+            drawing_header.contains("limits 28%"),
+            "limits mode paints the short limits label when that meter is in use:\n{drawing_header}"
+        );
+        assert!(
+            !drawing_header.contains("SuperGrok period"),
+            "the header keeps the short limits label:\n{drawing_header}"
+        );
+        let drawing_snap = LimitsSnapshot::from_billing(
+            Some(&known),
+            None,
+            SamplingIdentityKind::SuperGrokSession,
+        );
+        let mut drawing = LimitsModalState::new(drawing_snap);
+        let drawing_shortcuts = spend_shortcuts(&drawing);
+        assert_eq!(drawing_shortcuts.len(), 3);
+        assert_eq!(drawing_shortcuts[0].label, "Using limits");
+        assert_eq!(drawing_shortcuts[1].label, "Use credits");
+        assert_eq!(drawing_shortcuts[2].label, "Esc close");
+        let drawing_card = paint_card(&mut drawing);
+        assert!(
+            drawing_card.contains("Using limits"),
+            "limits mode says Using limits when the next request draws included SuperGrok period limits:\n{drawing_card}"
+        );
+        assert!(
+            !drawing_card.contains(NOT_DRAWN),
+            "a request that draws included SuperGrok period limits does not say they are not being drawn:\n{drawing_card}"
+        );
+        let drawing_tabs = drawing_card
+            .lines()
+            .find(|line| line.contains("Limits") && line.contains("Credits"))
+            .unwrap_or("");
+        assert!(
+            drawing_tabs.find("Limits").unwrap_or(usize::MAX)
+                < drawing_tabs.find("Credits").unwrap_or(0),
+            "Limits is ordered before Credits:\n{drawing_tabs}"
+        );
+
+        let unread_header = paint_header(&unread);
+        assert!(
+            !unread_header.contains("limits 0%"),
+            "an unread meter does not paint limits 0%:\n{unread_header}"
+        );
+        assert!(
+            !unread_header.contains("limits "),
+            "an unread meter does not paint a limits chip:\n{unread_header}"
+        );
+        let unread_snap = LimitsSnapshot::from_billing(
+            Some(&unread),
+            None,
+            SamplingIdentityKind::SuperGrokSession,
+        );
+        let mut unread_state = LimitsModalState::new(unread_snap);
+        assert_eq!(unread_state.window.active_tab, LIMITS_TAB);
+        let unread_card = paint_card(&mut unread_state);
+        assert!(
+            unread_card.contains(NOT_READ),
+            "an unread included meter says not available yet:\n{unread_card}"
+        );
+        assert!(
+            !unread_card.contains("0% used"),
+            "not available yet is not a live 0%:\n{unread_card}"
+        );
+        assert!(
+            !unread_card.contains("SuperGrok limits 0% used"),
+            "an unread meter does not paint SuperGrok limits 0% used:\n{unread_card}"
+        );
+        assert!(
+            !unread_card.contains("resets 10-12 06:59 UTC"),
+            "an unread meter does not invent a reset title:\n{unread_card}"
+        );
+        assert!(
+            !unread_card.contains(NOT_DRAWN),
+            "limits mode still draws included SuperGrok period limits when the meter is unread:\n{unread_card}"
+        );
+        assert!(
+            unread_card.contains("Using limits"),
+            "the footer says Using limits when the next request draws that meter:\n{unread_card}"
+        );
+        assert!(
+            !unread_card.contains("free") && !unread_card.contains("extras"),
+            "SuperGrok stays a paid product with distinct meters:\n{unread_card}"
+        );
+
+        save_limits_pins(&LimitsPins {
+            meter_source: Some(MeterSource::DollarCredits),
+            ..LimitsPins::default()
+        })
+        .expect("dollar credits pin");
+        assert!(!next_request_draws_included_period_limits());
+        let stopped_header = paint_header(&unread);
+        assert!(
+            !stopped_header.contains("limits 0%"),
+            "the header must not say limits 0% when included limits are not being drawn:\n{stopped_header}"
+        );
+        assert!(
+            !stopped_header.contains("limits "),
+            "the header chip stays off when the next request does not draw included SuperGrok period limits:\n{stopped_header}"
+        );
+        let stopped_snap = LimitsSnapshot::from_billing(
+            Some(&unread),
+            None,
+            SamplingIdentityKind::SuperGrokSession,
+        )
+        .with_console_balance_cents(None)
+        .with_console_prepaid_gap(ConsoleTeamPrepaidGap::Unavailable);
+        let mut stopped = LimitsModalState::new(stopped_snap);
+        stopped.window.active_tab = CREDITS_TAB;
+        let stopped_shortcuts = spend_shortcuts(&stopped);
+        assert_eq!(stopped_shortcuts.len(), 3);
+        assert_eq!(stopped_shortcuts[0].label, "Use limits");
+        assert_eq!(stopped_shortcuts[1].label, "Using credits");
+        assert_eq!(stopped_shortcuts[2].label, "Esc close");
+        let credits_card = paint_card(&mut stopped);
+        assert_eq!(stopped.window.active_tab, CREDITS_TAB);
+        assert!(
+            credits_card.contains(NOT_DRAWN),
+            "the Credits tab says included limits are not being drawn for the next request:\n{credits_card}"
+        );
+        assert!(
+            credits_card.contains("Console API credits: not available"),
+            "console API credits stay not available when that meter has no balance:\n{credits_card}"
+        );
+        assert!(
+            !credits_card.contains("Using limits"),
+            "the footer must not say Using limits when the card says included limits are not being drawn:\n{credits_card}"
+        );
+        assert!(
+            !credits_card.contains("limits 0%"),
+            "the card must not say limits 0% beside the not-drawn sentence:\n{credits_card}"
+        );
+        assert!(
+            !credits_card.contains("0% used"),
+            "the card must not invent 0% used beside the not-drawn sentence:\n{credits_card}"
+        );
+        assert!(
+            !credits_card.contains("SuperGrok limits 0% used"),
+            "the card must not paint SuperGrok limits 0% used:\n{credits_card}"
+        );
+        let credits_tabs = credits_card
+            .lines()
+            .find(|line| line.contains("Limits") && line.contains("Credits"))
+            .unwrap_or("");
+        assert!(
+            credits_tabs.find("Limits").unwrap_or(usize::MAX)
+                < credits_tabs.find("Credits").unwrap_or(0),
+            "Limits stays before Credits:\n{credits_tabs}"
+        );
+
+        stopped.window.active_tab = LIMITS_TAB;
+        let limits_card = paint_card(&mut stopped);
+        assert!(
+            limits_card.contains(NOT_DRAWN),
+            "the Limits tab says included limits are not being drawn for the next request:\n{limits_card}"
+        );
+        assert!(
+            limits_card.contains(NOT_READ),
+            "the Limits tab says the included weekly allowance is not available yet:\n{limits_card}"
+        );
+        assert!(
+            limits_card.contains("Console API credits: not available"),
+            "the Limits tab keeps Console API credits: not available:\n{limits_card}"
+        );
+        assert!(
+            limits_card.contains("Pacing for this week is not known yet."),
+            "the week line stays when usage was not read:\n{limits_card}"
+        );
+        assert!(
+            !limits_card.contains("Using limits") && !limits_card.contains("limits 0%"),
+            "Using limits and limits 0% stay off while the card says included limits are not being drawn:\n{limits_card}"
+        );
+        assert!(
+            !limits_card.contains("0% used") && !limits_card.contains("SuperGrok limits 0% used"),
+            "an unread meter does not become a used percent:\n{limits_card}"
         );
     }
 }

@@ -1651,6 +1651,19 @@ fn paint_plan_header_controls(
             &Span::styled(label, plan_header_control_style(theme, hovered)),
             W,
         );
+        // The cell between bracket controls was a leftover top-rule `─`, so
+        // copy read as flat text mushed into search, enlarge, and close.
+        if PLAN_HEADER_CONTROL_GAP > 0 {
+            let gap_x = x.saturating_sub(PLAN_HEADER_CONTROL_GAP);
+            if gap_x >= left_limit && gap_x < x {
+                for col in gap_x..x {
+                    if let Some(cell) = buf.cell_mut((col, y)) {
+                        cell.set_char(' ');
+                        cell.set_style(Style::default().bg(theme.bg_base).fg(theme.bg_base));
+                    }
+                }
+            }
+        }
         end = x.saturating_sub(1).saturating_sub(PLAN_HEADER_CONTROL_GAP);
         Some(Rect::new(x, y, W, 1))
     };
@@ -1668,6 +1681,80 @@ fn paint_plan_header_controls(
     if let Some(plan) = viewer.plan.as_mut() {
         plan.copy_button_area = copy_area;
         plan.search_button_area = search_area;
+    }
+}
+
+fn visible_plan_line(plain: &str) -> String {
+    let trimmed = plain.trim();
+    if let Some(rest) = trimmed.strip_prefix('#') {
+        rest.trim_start().to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn row_symbols(buf: &Buffer, x: u16, y: u16, width: u16) -> String {
+    let mut out = String::new();
+    for col in 0..width {
+        if let Some(cell) = buf.cell((x.saturating_add(col), y)) {
+            out.push_str(cell.symbol());
+        }
+    }
+    out
+}
+
+/// Repaint a soft-plan source row when the visible text is not the real
+/// start. A 5-column cover turns `Proposed plan.` into `sed plan.`. Wrapping
+/// leaves `The u` on the row and drops `two t`. The rewrite uses the full
+/// content width: subtracting the scrollbar leaves 41 columns and still
+/// drops `two t`.
+fn restore_soft_plan_clipped_lines(
+    buf: &mut Buffer,
+    content_area: Rect,
+    viewer: &LineViewerState,
+    theme: &Theme,
+) {
+    if content_area.width == 0 || content_area.height == 0 {
+        return;
+    }
+    let clip = LineViewerState::SOFT_PLAN_TEXT_INSET as usize;
+    let text_w = content_area.width;
+    let style = Style::default().fg(theme.text_primary).bg(theme.bg_base);
+    for row in 0..content_area.height {
+        let y = content_area.y.saturating_add(row);
+        let Some(PlanViewerItem::Source(source)) = viewer.item_at_screen_row(y, content_area)
+        else {
+            continue;
+        };
+        let expected = visible_plan_line(&source.plain_text);
+        if expected.chars().count() <= clip {
+            continue;
+        }
+        let needed: String = expected.chars().take(text_w as usize).collect();
+        if needed.chars().count() <= clip {
+            continue;
+        }
+        let head: String = needed.chars().take(clip).collect();
+        let tail: String = expected.chars().skip(clip).take(12).collect();
+        if head.is_empty() || tail.is_empty() {
+            continue;
+        }
+        let painted = row_symbols(buf, content_area.x, y, text_w);
+        // `The u` alone is the wrapped start, not a finished row.
+        if painted.contains(&needed) {
+            continue;
+        }
+        let shows_start = painted.contains(&head);
+        let shows_clipped_tail = painted.contains(&tail);
+        if !shows_start && !shows_clipped_tail {
+            continue;
+        }
+        buf.set_line(
+            content_area.x,
+            y,
+            &Line::from(Span::styled(expected, style)),
+            text_w,
+        );
     }
 }
 
@@ -1818,11 +1905,24 @@ pub fn render_line_viewer(
         } else {
             0
         };
+        // Stop the top rule before search. Otherwise it runs through the
+        // gap cells and the bracket controls read as one flat string.
+        let header_reserve = if viewer.kind == LineViewerKind::PlanPreview {
+            let controls: u16 = if viewer.feedback_active() { 3 } else { 4 };
+            let gaps = controls.saturating_sub(1);
+            controls
+                .saturating_mul(3)
+                .saturating_add(gaps)
+                .saturating_add(2)
+        } else {
+            0
+        };
         let title_x = popup_area.x.saturating_add(1).saturating_add(title_inset);
         let max_title_width = popup_area
             .width
             .saturating_sub(2)
-            .saturating_sub(title_inset);
+            .saturating_sub(title_inset)
+            .saturating_sub(header_reserve);
         buf.set_line(
             title_x,
             popup_area.y,
@@ -1958,11 +2058,22 @@ pub fn render_line_viewer(
         }
     }
 
+    if viewer.is_soft_plan_side_pane() {
+        restore_soft_plan_clipped_lines(buf, content_area, viewer, theme);
+    }
+
     // Action buttons inside the modal footer (centered), for both plan-approval and casual
     // plan-preview modes.
     if viewer.show_footer() && inner.height >= 2 {
         let div_y = inner.y + inner.height - 2;
-        let div_style = Style::default().fg(theme.gray_dim).bg(theme.bg_base);
+        // Soft plan's footer rule is the frame. `gray_dim` is neon cyan on
+        // DOGE. The side edges already use `soft_plan_frame_fg`.
+        let div_fg = if viewer.is_soft_plan_side_pane() {
+            frame_fg
+        } else {
+            theme.gray_dim
+        };
+        let div_style = Style::default().fg(div_fg).bg(theme.bg_base);
         let line: String = std::iter::repeat_n('\u{2500}', inner.width as usize).collect();
         buf.set_string(inner.x, div_y, &line, div_style);
 

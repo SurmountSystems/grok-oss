@@ -1107,13 +1107,34 @@ fn subagents_config_default_enabled() {
         assert!(sa.enabled);
     });
 }
+/// Unset ceiling is L1 → L2 → L3. The floor stays 1.
+/// `subagents_max_depth_defaults_to_one` locked that ceiling to the floor.
 #[test]
-fn subagents_max_depth_defaults_to_one() {
+fn subagents_max_depth_unset_is_l2_may_spawn_l3_and_floor_stays_one() {
+    assert_eq!(SubagentsConfig::MAX_DEPTH_FLOOR, 1);
     assert_eq!(
-            SubagentsConfig::resolve_max_depth(None, None, None),
-            SubagentsConfig::DEFAULT_MAX_DEPTH
-        );
-    assert_eq!(SubagentsConfig::DEFAULT_MAX_DEPTH, 1);
+        SubagentsConfig::resolve_max_depth(None, None, None),
+        SubagentsConfig::DEFAULT_MAX_DEPTH
+    );
+    assert_eq!(
+        SubagentsConfig::DEFAULT_MAX_DEPTH, 2,
+        "unset config must admit an L3; a default of 1 strips spawn_subagent from an L2"
+    );
+    assert_eq!(
+        SubagentsConfig::clamp_max_depth(1, "test"),
+        SubagentsConfig::MAX_DEPTH_FLOOR,
+        "explicit max_depth 1 is not clamped up to the unset ceiling"
+    );
+    assert_eq!(
+        SubagentsConfig::resolve_max_depth(None, Some(1), None),
+        1,
+        "explicit operator TOML max_depth = 1 is not clamped up to 2"
+    );
+    assert_eq!(
+        SubagentsConfig::resolve_max_depth(Some("1"), None, None),
+        1,
+        "explicit operator env max_depth = 1 is not clamped up to 2"
+    );
 }
 #[test]
 fn subagents_max_depth_env_beats_toml_and_remote() {
@@ -1152,6 +1173,11 @@ fn resolve_max_depth_remote_one_does_not_block_l2_spawn() {
         1,
         "operator TOML max_depth 1 still wins over remote"
     );
+    assert_eq!(
+        SubagentsConfig::resolve_max_depth(None, None, Some(0)),
+        SubagentsConfig::DEFAULT_MAX_DEPTH,
+        "remote max_depth 0 is below the L1→L2→L3 default and is ignored"
+    );
 }
 #[test]
 fn subagents_max_depth_clamps_below_one_to_one() {
@@ -1163,10 +1189,6 @@ fn subagents_max_depth_clamps_below_one_to_one() {
         );
     assert_eq!(
             SubagentsConfig::resolve_max_depth(None, Some(0), Some(3)),
-            1
-        );
-    assert_eq!(
-            SubagentsConfig::resolve_max_depth(None, None, Some(0)),
             1
         );
 }

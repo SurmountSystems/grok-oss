@@ -418,6 +418,74 @@ mod tests {
         );
     }
 
+    /// Unset ceiling admits an L3. Explicit operator max depth 1 does not.
+    /// A default of 1 strips spawn_subagent from an L2 and does not admit an L3.
+    #[test]
+    fn unset_max_depth_l2_tool_list_includes_spawn_subagent_and_l3_cannot_spawn() {
+        let max_depth = xai_grok_tools::implementations::grok_build::task::MAX_SUBAGENT_DEPTH;
+        assert_eq!(
+            max_depth, 2,
+            "unset ceiling must be 2 (L1 spawns L2, L2 spawns L3). A default of 1 strips spawn_subagent from an L2"
+        );
+
+        assert!(
+            spawned_agent_may_spawn(0, 1, max_depth),
+            "unset config: L1 admits an L2 that may spawn"
+        );
+        let mut l2 = AgentDefinition::default_grok_build();
+        apply_child_tool_policy(&mut l2, None, spawned_agent_may_spawn(0, 1, max_depth));
+        assert!(
+            l2.tool_config
+                .tools
+                .iter()
+                .any(|tool| tool.kind == Some(ToolKind::Task)),
+            "unset config: an L2 tool list includes spawn_subagent"
+        );
+
+        assert!(
+            matches!(
+                admit_spawn(1, max_depth),
+                SpawnAdmission::Allow {
+                    layer: SpawnedLayer::L3Specialist,
+                    may_spawn: false,
+                }
+            ),
+            "unset config: an L3 is admitted and cannot spawn an L4"
+        );
+        let mut l3 = AgentDefinition::default_grok_build();
+        apply_child_tool_policy(&mut l3, None, spawned_agent_may_spawn(1, 2, max_depth));
+        assert!(
+            !l3.tool_config
+                .tools
+                .iter()
+                .any(|tool| tool.kind == Some(ToolKind::Task)),
+            "unset config: an L3 tool list does not include spawn_subagent"
+        );
+        assert!(
+            matches!(admit_spawn(2, max_depth), SpawnAdmission::RejectDepthLimit),
+            "unset config: an L3 cannot spawn an L4"
+        );
+
+        assert!(
+            !spawned_agent_may_spawn(0, 1, 1),
+            "explicit operator max_depth = 1: an L2 may not spawn"
+        );
+        let mut explicit = AgentDefinition::default_grok_build();
+        apply_child_tool_policy(&mut explicit, None, spawned_agent_may_spawn(0, 1, 1));
+        assert!(
+            !explicit
+                .tool_config
+                .tools
+                .iter()
+                .any(|tool| tool.kind == Some(ToolKind::Task)),
+            "explicit operator max_depth = 1: an L2 tool list omits spawn_subagent"
+        );
+        assert!(
+            matches!(admit_spawn(1, 1), SpawnAdmission::RejectDepthLimit),
+            "explicit operator max_depth = 1 does not admit an L3"
+        );
+    }
+
     /// Operator: "L2s should not be able to spawn other L2s."
     /// "They can only spawn L3s."
     /// Only L1 spawns L2s.

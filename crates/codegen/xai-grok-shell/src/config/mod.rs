@@ -257,16 +257,23 @@ impl SubagentsConfig {
         self.discover_roles_in_dir(&roles_dir);
     }
     pub const ENV_MAX_DEPTH: &'static str = "GROK_SUBAGENTS_MAX_DEPTH";
-    pub const DEFAULT_MAX_DEPTH: u32 = 1;
-    /// Clamp to `1..=u32::MAX`. Values below 1 (including 0 and negatives) warn and become 1 so nesting is never accidentally disabled.
+    /// Lowest accepted max depth. Values below 1 clamp to this.
+    /// An explicit operator `max_depth = 1` stays 1. This is not the unset ceiling.
+    pub const MAX_DEPTH_FLOOR: u32 = 1;
+    /// Unset ceiling: L1 spawns an L2, an L2 spawns an L3, an L3 does not spawn an L4.
+    /// Not the floor. Do not clamp an operator `max_depth = 1` up to this value.
+    pub const DEFAULT_MAX_DEPTH: u32 =
+        xai_grok_tools::implementations::grok_build::task::MAX_SUBAGENT_DEPTH;
+    /// Clamp to `MAX_DEPTH_FLOOR..=u32::MAX`. Values below 1 (including 0 and negatives) warn and become 1 so nesting is never accidentally disabled.
+    /// The floor is not [`Self::DEFAULT_MAX_DEPTH`]. Raising the unset ceiling must not turn operator `max_depth = 1` into 2.
     pub(crate) fn clamp_max_depth(raw: i64, source: &str) -> u32 {
-        if raw < i64::from(Self::DEFAULT_MAX_DEPTH) {
+        if raw < i64::from(Self::MAX_DEPTH_FLOOR) {
             tracing::warn!(
                 source,
                 value = raw,
                 "subagents max_depth < 1; clamping to 1"
             );
-            Self::DEFAULT_MAX_DEPTH
+            Self::MAX_DEPTH_FLOOR
         } else if raw > i64::from(u32::MAX) {
             tracing::warn!(
                 source,
@@ -281,6 +288,8 @@ impl SubagentsConfig {
     /// Precedence: env > TOML > remote > [`Self::DEFAULT_MAX_DEPTH`].
     /// Depth 0 is the top-level session; a child is parent+1. Spawn is rejected when `depth >= max`.
     /// So `max = 1` allows only top-level spawns; nested spawns from a first-level subagent need `max >= 2`.
+    /// Operator env and TOML use [`Self::MAX_DEPTH_FLOOR`] and are not raised to the unset ceiling.
+    /// Remote values below [`Self::DEFAULT_MAX_DEPTH`] are ignored so a remote `1` does not block an L2.
     pub(crate) fn resolve_max_depth(
         env: Option<&str>,
         config: Option<i64>,

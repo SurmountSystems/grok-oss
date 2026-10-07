@@ -40,8 +40,12 @@ use xai_tool_types::{SubagentCompletedOutput, SubagentIsolationMode, TaskToolInp
 
 pub const TASK_TOOL_NAME: &str = "task";
 
-/// Default max nesting depth when [`MaxSubagentDepth`] is not injected.
-pub const MAX_SUBAGENT_DEPTH: u32 = 1;
+/// Unset nesting ceiling when [`MaxSubagentDepth`] is not injected.
+///
+/// L1 spawns an L2, an L2 spawns an L3, and an L3 does not spawn an L4.
+/// This is not a floor. An explicit operator `max_depth = 1` is injected as
+/// [`MaxSubagentDepth`] and must stay 1.
+pub const MAX_SUBAGENT_DEPTH: u32 = 2;
 
 pub fn effective_max_subagent_depth(resources: &crate::types::resources::Resources) -> u32 {
     resources

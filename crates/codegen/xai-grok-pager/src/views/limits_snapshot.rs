@@ -567,7 +567,7 @@ impl LimitsSnapshot {
     ) -> Self {
         let (included, dollar_credits) = match balance {
             Some(bal) => (
-                Some(included_from_balance(bal)),
+                included_from_balance(bal),
                 dollar_credits_from_balance(bal, autotopup),
             ),
             None => (None, None),
@@ -775,19 +775,33 @@ impl LimitsSnapshot {
                         // observed on this principal's credits poll (not invented).
                         let dollar_credits = dollar_credits_from_balance(bal, p.autotopup.as_ref());
                         let dollar_credits_observed = bal.prepaid_balance_cents.is_some();
+                        let included = included_from_balance(bal);
+                        let included_source = if included.is_some() {
+                            IncludedSource::ProcessCache
+                        } else {
+                            IncludedSource::Unknown
+                        };
                         (
-                            Some(included_from_balance(bal)),
+                            included,
                             dollar_credits,
                             dollar_credits_observed,
-                            IncludedSource::ProcessCache,
+                            included_source,
                         )
                     }
-                    Some(bal) => (
-                        Some(included_from_balance(bal)),
-                        dollar_credits_from_balance(bal, p.autotopup.as_ref()),
-                        true,
-                        IncludedSource::LivePoll,
-                    ),
+                    Some(bal) => {
+                        let included = included_from_balance(bal);
+                        let included_source = if included.is_some() {
+                            IncludedSource::LivePoll
+                        } else {
+                            IncludedSource::Unknown
+                        };
+                        (
+                            included,
+                            dollar_credits_from_balance(bal, p.autotopup.as_ref()),
+                            true,
+                            included_source,
+                        )
+                    }
                     // included_billing_only with no % yet still means SuperGrok
                     // dollar credits unobserved.
                     None if p.included_billing_only => (None, None, false, IncludedSource::Unknown),
@@ -960,18 +974,23 @@ pub fn active_driver_line_for_snapshot_with_meter_source(
     format!("Active: {label}")
 }
 
-fn included_from_balance(bal: &CreditBalance) -> IncludedAllowanceMeter {
+/// Copy included usage only when the poll set `included_usage_known` and the
+/// percent is finite. An unread placeholder stays absent. A real zero stays.
+fn included_from_balance(bal: &CreditBalance) -> Option<IncludedAllowanceMeter> {
+    if !bal.included_usage_known || !bal.usage_pct.is_finite() {
+        return None;
+    }
     let period_label = match bal.period_type.as_deref() {
         Some(t) if t.contains("WEEKLY") => "Weekly",
         Some(t) if t.contains("MONTHLY") => "Monthly",
         _ => "Included",
     };
-    IncludedAllowanceMeter {
+    Some(IncludedAllowanceMeter {
         period_label,
         used_pct: bal.usage_pct,
         next_reset_display: bal.period_end_display.clone(),
         next_reset_at: bal.period_end_at,
-    }
+    })
 }
 
 /// Live countdown to next reset: `Xd Yh Zm Ws` (or `0d 0h 0m 0s` when past).
