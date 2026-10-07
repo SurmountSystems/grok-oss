@@ -204,6 +204,13 @@ impl ListItem for SourceLine {
             let wrapped = word_wrap_line(line, text_w);
             total += (wrapped.len() as u16).max(1);
         }
+        // A rendered row can be width-clipped (`…two` with `tokens.` gone).
+        // Reserve a row for every word of the source line, not the clip.
+        if markdown_plain_needs_full_paint(&self.rendered_lines, &self.plain_text) {
+            let plain = visible_plan_line(&self.plain_text);
+            let plain_rows = word_wrap_line(&Line::from(plain), text_w).len() as u16;
+            total = total.max(plain_rows);
+        }
         total.max(1)
     }
 
@@ -238,8 +245,29 @@ impl ListItem for SourceLine {
 
         let mut y = area.y;
         let mut is_first_visual = true;
-        for (i, line) in self.rendered_lines.iter().enumerate() {
-            let bg = self.rendered_bgs.get(i).copied().flatten();
+        // Paint the source sentence when the rendered row dropped its tail.
+        // Wrapped rows stay; characters must not.
+        let plain_paint = markdown_plain_needs_full_paint(&self.rendered_lines, &self.plain_text);
+        let plain_line = if plain_paint {
+            let style = Style::default().fg(theme.text_primary).bg(theme.bg_base);
+            Some(Line::from(Span::styled(
+                visible_plan_line(&self.plain_text),
+                style,
+            )))
+        } else {
+            None
+        };
+        let paint_lines: &[Line<'_>] = if let Some(line) = plain_line.as_ref() {
+            std::slice::from_ref(line)
+        } else {
+            self.rendered_lines.as_slice()
+        };
+        for (i, line) in paint_lines.iter().enumerate() {
+            let bg = if plain_paint {
+                None
+            } else {
+                self.rendered_bgs.get(i).copied().flatten()
+            };
             let wrapped = word_wrap_line(line, text_w as usize);
             let visual_lines = if wrapped.is_empty() {
                 vec![Line::default()]
@@ -1063,7 +1091,11 @@ impl LineViewerState {
         self.kind == LineViewerKind::PlanPreview && !self.fullscreen
     }
 
-    /// Width reserved on the right for a soft plan pane.
+    /// Width of the right-side soft plan pane.
+    ///
+    /// Half the draw, at least 24 columns, leaving 16 columns on the left.
+    /// A 100-column draw keeps 50. An 80-column draw keeps 40. The
+    /// 49-column sentence wraps inside that content column.
     pub fn soft_plan_pane_width(full_width: u16) -> u16 {
         let half = full_width / 2;
         let min = 24.min(full_width);
@@ -1071,8 +1103,10 @@ impl LineViewerState {
         half.max(min).min(full_width.saturating_sub(leave_left))
     }
 
-    /// Columns of soft-plan title and body kept inside the frame.
-    /// The left border was covering the heading, so `Proposed plan.` painted as `sed plan.`
+    /// Column pad between the soft-plan frame and the text.
+    ///
+    /// Padding only. It must not slice the heading or the body.
+    /// `Proposed plan.` stays `Proposed plan.`; the first five characters stay.
     const SOFT_PLAN_TEXT_INSET: u16 = 5;
 
     /// Whether the plan modal should render the action-button footer.
@@ -1549,18 +1583,32 @@ const PLAN_HEADER_CONTROL_GAP: u16 = 1;
 
 /// Soft plan side-pane frame.
 ///
-/// A real muted hairline when [`Theme::panel_border_fg`] is visible and is not
-/// a bright white stroke. On DOGE that hairline is the black canvas, so the
-/// frame glyphs stay and are not a white or neon-cyan rectangle.
+/// The canvas hairline. White prompt strokes and neon cyan (`gray_dim` / path
+/// on DOGE) are not the frame. On DOGE the hairline is the black canvas.
 pub(crate) fn soft_plan_frame_fg(theme: &Theme) -> Color {
     let hairline = theme.panel_border_fg();
-    if !is_bright_white_stroke(theme, hairline)
-        && hairline != theme.bg_base
-        && hairline != theme.bg_light
+    let neon = hairline == theme.gray_dim
+        || hairline == theme.path
+        || matches!(
+            hairline,
+            Color::Cyan | Color::LightCyan | Color::Rgb(0, 255, 255)
+        );
+    if is_bright_white_stroke(theme, hairline)
+        || neon
+        || hairline == theme.bg_base
+        || hairline == theme.bg_light
     {
-        hairline
-    } else {
         theme.bg_base
+    } else {
+        hairline
+    }
+}
+
+fn is_soft_plan_frame_glyph(symbol: &str) -> bool {
+    let mut chars = symbol.chars();
+    match (chars.next(), chars.next()) {
+        (Some(ch), None) => ('\u{2500}'..='\u{257F}').contains(&ch) || ch == '-' || ch == '|',
+        _ => false,
     }
 }
 
@@ -1571,24 +1619,24 @@ fn force_soft_plan_frame(buf: &mut Buffer, area: Rect, fg: Color, bg: Color) {
     let style = Style::default().fg(fg).bg(bg);
     let right = area.x + area.width - 1;
     let bottom = area.y + area.height - 1;
-    for x in area.x..area.x + area.width {
-        if let Some(cell) = buf.cell_mut((x, area.y)) {
+    let mut paint = |x: u16, y: u16| {
+        let glyph = buf
+            .cell((x, y))
+            .is_some_and(|cell| is_soft_plan_frame_glyph(cell.symbol()));
+        if glyph && let Some(cell) = buf.cell_mut((x, y)) {
             cell.set_style(style);
         }
-        if bottom != area.y
-            && let Some(cell) = buf.cell_mut((x, bottom))
-        {
-            cell.set_style(style);
+    };
+    for x in area.x..area.x + area.width {
+        paint(x, area.y);
+        if bottom != area.y {
+            paint(x, bottom);
         }
     }
     for y in area.y..area.y + area.height {
-        if let Some(cell) = buf.cell_mut((area.x, y)) {
-            cell.set_style(style);
-        }
-        if right != area.x
-            && let Some(cell) = buf.cell_mut((right, y))
-        {
-            cell.set_style(style);
+        paint(area.x, y);
+        if right != area.x {
+            paint(right, y);
         }
     }
 }
@@ -1693,6 +1741,36 @@ fn visible_plan_line(plain: &str) -> String {
     }
 }
 
+fn squash_plan_text(text: &str) -> String {
+    text.split_whitespace().collect()
+}
+
+/// True when joined markdown spans dropped part of the source line.
+/// Wrapped rows still count. A missing tail does not.
+fn markdown_plain_needs_full_paint(lines: &[Line<'_>], plain_text: &str) -> bool {
+    let expected = squash_plan_text(&visible_plan_line(plain_text));
+    if expected.is_empty() {
+        return false;
+    }
+    let mut rendered = String::new();
+    for line in lines {
+        for span in &line.spans {
+            rendered.push_str(span.content.as_ref());
+        }
+        rendered.push(' ');
+    }
+    !squash_plan_text(&rendered).contains(&expected)
+}
+
+fn clear_soft_plan_text_row(buf: &mut Buffer, x: u16, y: u16, width: u16, bg: Color) {
+    for col in 0..width {
+        if let Some(cell) = buf.cell_mut((x.saturating_add(col), y)) {
+            cell.set_char(' ');
+            cell.set_style(Style::default().bg(bg));
+        }
+    }
+}
+
 fn row_symbols(buf: &Buffer, x: u16, y: u16, width: u16) -> String {
     let mut out = String::new();
     for col in 0..width {
@@ -1703,12 +1781,26 @@ fn row_symbols(buf: &Buffer, x: u16, y: u16, width: u16) -> String {
     out
 }
 
-/// Repaint a soft-plan source row when the visible text is not the real
-/// start. A 5-column cover turns `Proposed plan.` into `sed plan.`. Wrapping
-/// leaves `The u` on the row and drops `two t`. The rewrite uses the full
-/// content width: subtracting the scrollbar leaves 41 columns and still
-/// drops `two t`.
-fn restore_soft_plan_clipped_lines(
+/// True when `painted` shows the tail of `expected` and not its start.
+/// `Proposed plan.` covered on the left reads `sed plan.`
+fn dropped_left_edge(painted: &str, expected: &str, clip: usize) -> bool {
+    if expected.is_empty() || painted.contains(expected) {
+        return false;
+    }
+    let head: String = expected.chars().take(clip).collect();
+    if head.is_empty() || painted.contains(&head) {
+        return false;
+    }
+    let tail: String = expected.chars().skip(clip).take(12).collect();
+    !tail.is_empty() && painted.contains(&tail)
+}
+
+/// Repaint a soft-plan source item whose left edge or tail was sliced.
+///
+/// The replacement is the full source line, word-wrapped into the text
+/// column after the line-number gutter. Every wrapped row is painted, so
+/// `tokens.` stays inside the content area.
+fn repair_soft_plan_dropped_left_edge(
     buf: &mut Buffer,
     content_area: Rect,
     viewer: &LineViewerState,
@@ -1718,43 +1810,66 @@ fn restore_soft_plan_clipped_lines(
         return;
     }
     let clip = LineViewerState::SOFT_PLAN_TEXT_INSET as usize;
-    let text_w = content_area.width;
-    let style = Style::default().fg(theme.text_primary).bg(theme.bg_base);
-    for row in 0..content_area.height {
+    let mut row = 0u16;
+    while row < content_area.height {
         let y = content_area.y.saturating_add(row);
         let Some(PlanViewerItem::Source(source)) = viewer.item_at_screen_row(y, content_area)
         else {
+            row = row.saturating_add(1);
             continue;
         };
+        let id = source.stable_id();
+        let mut rows = 1u16;
+        let mut next = row.saturating_add(1);
+        while next < content_area.height {
+            let ny = content_area.y.saturating_add(next);
+            match viewer.item_at_screen_row(ny, content_area) {
+                Some(PlanViewerItem::Source(other)) if other.stable_id() == id => {
+                    rows = rows.saturating_add(1);
+                    next = next.saturating_add(1);
+                }
+                _ => break,
+            }
+        }
         let expected = visible_plan_line(&source.plain_text);
-        if expected.chars().count() <= clip {
-            continue;
+        if expected.chars().count() > clip {
+            let mut painted = String::new();
+            for i in 0..rows {
+                let py = content_area.y.saturating_add(row.saturating_add(i));
+                painted.push_str(&row_symbols(buf, content_area.x, py, content_area.width));
+            }
+            let missing_tail = !squash_plan_text(&painted).contains(&squash_plan_text(&expected));
+            if dropped_left_edge(&painted, &expected, clip) || missing_tail {
+                let prefix_w = source
+                    .prefix()
+                    .map(|p| crate::views::list_pane::line_display_width(&p))
+                    .unwrap_or(0) as u16;
+                let text_x = content_area.x.saturating_add(prefix_w);
+                // The list item already paints in this content width. Subtracting
+                // the scrollbar again wraps `tokens.` past the last content row.
+                let text_w = content_area.width.saturating_sub(prefix_w).max(1);
+                let style = Style::default().fg(theme.text_primary).bg(theme.bg_base);
+                let line = Line::from(Span::styled(expected, style));
+                let wrapped = word_wrap_line(&line, text_w as usize);
+                let count = if wrapped.is_empty() { 1 } else { wrapped.len() };
+                // `rows` already includes later rows that still resolve to this
+                // source line. A one-row clip must not drop the continuation.
+                let room = (rows as usize).max(count).min(content_area.height as usize);
+                for i in 0..count.min(room) {
+                    let py = content_area.y.saturating_add(row.saturating_add(i as u16));
+                    if py >= content_area.y.saturating_add(content_area.height) {
+                        break;
+                    }
+                    clear_soft_plan_text_row(buf, text_x, py, text_w, theme.bg_base);
+                    if wrapped.is_empty() {
+                        buf.set_line(text_x, py, &line, text_w);
+                    } else if let Some(wline) = wrapped.get(i) {
+                        buf.set_line(text_x, py, wline, text_w);
+                    }
+                }
+            }
         }
-        let needed: String = expected.chars().take(text_w as usize).collect();
-        if needed.chars().count() <= clip {
-            continue;
-        }
-        let head: String = needed.chars().take(clip).collect();
-        let tail: String = expected.chars().skip(clip).take(12).collect();
-        if head.is_empty() || tail.is_empty() {
-            continue;
-        }
-        let painted = row_symbols(buf, content_area.x, y, text_w);
-        // `The u` alone is the wrapped start, not a finished row.
-        if painted.contains(&needed) {
-            continue;
-        }
-        let shows_start = painted.contains(&head);
-        let shows_clipped_tail = painted.contains(&tail);
-        if !shows_start && !shows_clipped_tail {
-            continue;
-        }
-        buf.set_line(
-            content_area.x,
-            y,
-            &Line::from(Span::styled(expected, style)),
-            text_w,
-        );
+        row = row.saturating_add(rows);
     }
 }
 
@@ -2059,7 +2174,9 @@ pub fn render_line_viewer(
     }
 
     if viewer.is_soft_plan_side_pane() {
-        restore_soft_plan_clipped_lines(buf, content_area, viewer, theme);
+        // Repaint a source line whose tail was width-clipped (`tokens.`).
+        // Wrapped rows stay inside the content area.
+        repair_soft_plan_dropped_left_edge(buf, content_area, viewer, theme);
     }
 
     // Action buttons inside the modal footer (centered), for both plan-approval and casual
@@ -2221,6 +2338,15 @@ pub fn render_line_viewer(
             plan.abandon_button_area = None;
             plan.approve_notes_button_area = None;
         }
+    }
+
+    if viewer.is_soft_plan_side_pane() {
+        // Content paint can leave a bright stroke on the perimeter. Restyle
+        // the frame glyphs, then put the bracket controls back so copy stays
+        // a bordered control with a one-cell gap. Search, enlarge, and close
+        // stay.
+        force_soft_plan_frame(buf, popup_area, frame_fg, theme.bg_base);
+        paint_plan_header_controls(buf, popup_area, viewer, theme);
     }
 }
 

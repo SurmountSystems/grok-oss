@@ -202,28 +202,39 @@ fn linear_week_label(pacing: xai_grok_shell::token_economy::PeriodPacing) -> Str
     }
 }
 
-fn limits_tab_lines(state: &LimitsModalState, now: DateTime<Utc>) -> Vec<String> {
-    let mut lines = if let Some(included) = state.snapshot.primary.included.as_ref() {
-        let used = included.used_pct_floored();
-        let rem = included.remaining_pct_floored();
-        let allowance = match included.period_label {
-            "Included" => format!("  Included allowance: {used}% used · {rem}% remaining"),
-            other => format!(
-                "  Included {} allowance: {used}% used · {rem}% remaining",
-                other.to_lowercase()
-            ),
-        };
-        let reset = match &included.next_reset_display {
-            Some(text) => format!("  Next reset: {text}"),
-            None => "  Next reset: not known yet".to_string(),
-        };
-        vec![allowance, reset, short_week_line(included, now)]
-    } else {
+fn limits_tab_lines(
+    state: &LimitsModalState,
+    now: DateTime<Utc>,
+    draws_included: bool,
+) -> Vec<String> {
+    let mut lines = match (draws_included, state.snapshot.primary.included.as_ref()) {
+        (true, Some(included)) => {
+            let used = included.used_pct_floored();
+            let rem = included.remaining_pct_floored();
+            let allowance = match included.period_label {
+                "Included" => format!("  Included allowance: {used}% used · {rem}% remaining"),
+                other => format!(
+                    "  Included {} allowance: {used}% used · {rem}% remaining",
+                    other.to_lowercase()
+                ),
+            };
+            let reset = match &included.next_reset_display {
+                Some(text) => format!("  Next reset: {text}"),
+                None => "  Next reset: not known yet".to_string(),
+            };
+            vec![allowance, reset, short_week_line(included, now)]
+        }
+        // A known reading is not the meter for the next request. Do not paint
+        // a used percent, a remaining percent, or a week percent from it.
+        (false, Some(included)) => match &included.next_reset_display {
+            Some(text) => vec![format!("  Next reset: {text}")],
+            None => vec!["  Next reset: not known yet".to_string()],
+        },
         // Unread usage stays off the used-percent line. The week line stays.
-        vec![
+        (_, None) => vec![
             "  Included weekly allowance: not available yet".to_string(),
             "Pacing for this week is not known yet.".to_string(),
-        ]
+        ],
     };
     // Failed console fetch: same field the Credits tab uses, on this body too.
     let console = credits_tab_meter_line(&console_credits_line(state));
@@ -443,8 +454,11 @@ pub fn render_limits_modal(
     now: DateTime<Utc>,
 ) {
     let shortcuts = spend_shortcuts(state);
+    // 0.70 keeps the 57-column not-drawn sentence on one line in a
+    // 100-column terminal. At 0.55 that sentence wraps across the border,
+    // so the card no longer contains it.
     let sizing = ModalSizing {
-        width_pct: 0.55,
+        width_pct: 0.70,
         max_width: 88,
         min_width: 48,
         v_margin: 3,
@@ -474,22 +488,30 @@ pub fn render_limits_modal(
     // Detect the included-allowance meter on the unwrapped line: wrap can
     // split "Included ... allowance:" from "% used" and would skip the bar.
     let width = content.width as usize;
-    let primary_bar = state.snapshot.primary.included.as_ref().map(|inc| {
-        let rem = inc.remaining_fraction();
-        let tone = AllowanceMeterTone::from_used_pct(inc.used_pct);
-        (rem, tone)
-    });
+    // Header chip, footer, used percent, and remaining bar share this
+    // predicate. A Team JWT with no live personal SuperGrok session is false.
+    let draws_included =
+        xai_grok_shell::auth::limits_pins::next_request_draws_included_period_limits();
+    let primary_bar = if draws_included {
+        state.snapshot.primary.included.as_ref().map(|inc| {
+            let rem = inc.remaining_fraction();
+            let tone = AllowanceMeterTone::from_used_pct(inc.used_pct);
+            (rem, tone)
+        })
+    } else {
+        None
+    };
     let mut display_lines: Vec<String> = Vec::new();
     let mut injected_bar = false;
     let on_credits_tab = state.window.active_tab == CREDITS_TAB;
     let mut body = if on_credits_tab {
         credits_tab_lines(state)
     } else {
-        limits_tab_lines(state, now)
+        limits_tab_lines(state, now, draws_included)
     };
-    // Header chip and footer may say limits only when this same predicate
-    // is true. Both tabs carry the sentence when it is false.
-    if !xai_grok_shell::auth::limits_pins::next_request_draws_included_period_limits() {
+    // Both tabs carry the sentence when the next request does not draw
+    // included SuperGrok period limits.
+    if !draws_included {
         body.insert(
             0,
             "Included limits are not being drawn for the next request.".to_string(),
@@ -3542,6 +3564,233 @@ mod tests {
         assert!(
             !limits_card.contains("0% used") && !limits_card.contains("SuperGrok limits 0% used"),
             "an unread meter does not become a used percent:\n{limits_card}"
+        );
+    }
+
+    /// When limits mode is on, the next model request draws included SuperGrok
+    /// period limits, and an unread meter does not paint `limits 0%`.
+    /// A live Team JWT with no live personal SuperGrok session must not paint
+    /// `limits 1%` or `Using limits`.
+    #[test]
+    #[serial_test::serial]
+    fn limits_mode_does_not_paint_limits_in_use_for_a_team_jwt_and_an_unread_meter_is_not_zero_percent()
+     {
+        use crate::actions::ActionRegistry;
+        use crate::app::agent_view::test_fixtures::make_agent;
+        use crate::app::agent_view::{AppRenderParams, BannerSlotParams};
+        use crate::scrollback::render::ScratchBuffer;
+        use xai_grok_shell::auth::limits_pins::{
+            LimitsPins, MeterSource, next_request_draws_included_period_limits, save_limits_pins,
+        };
+        use xai_grok_shell::auth::{AuthMode, GrokAuth, upsert_supergrok_session};
+        use xai_grok_test_support::EnvGuard;
+
+        const NOT_DRAWN: &str = "Included limits are not being drawn for the next request.";
+
+        let home = tempfile::TempDir::new().expect("temp GROK_HOME");
+        let _env = EnvGuard::set("GROK_HOME", home.path());
+        std::fs::write(
+            home.path().join("config.toml"),
+            "[auth]\npreferred_method = \"oidc\"\nauto_use_included_limits = true\n",
+        )
+        .expect("preferred oidc");
+        save_limits_pins(&LimitsPins {
+            stay_supergrok: true,
+            use_console: false,
+            meter_source: None,
+            supergrok_identity: None,
+        })
+        .expect("stay pin");
+
+        let end = DateTime::parse_from_rfc3339("2026-10-12T06:59:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let now = DateTime::parse_from_rfc3339("2026-10-07T11:38:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let base = "https://auth.x.ai::limits-paint-fixture";
+        let live = chrono::Utc::now() + chrono::Duration::days(1);
+        let expired = chrono::Utc::now() - chrono::Duration::days(1);
+        let session = |key: &str, user_id: &str, team: bool, expires_at| GrokAuth {
+            key: key.into(),
+            auth_mode: AuthMode::Oidc,
+            user_id: user_id.into(),
+            principal_type: if team {
+                Some("Team".to_string())
+            } else {
+                Some("User".to_string())
+            },
+            principal_id: Some(user_id.to_string()),
+            team_id: team.then(|| "team-fixture".to_string()),
+            expires_at: Some(expires_at),
+            ..GrokAuth::default()
+        };
+        let write_auth = |map: &std::collections::BTreeMap<String, GrokAuth>| {
+            std::fs::write(
+                home.path().join("auth.json"),
+                serde_json::to_vec_pretty(map).expect("auth json"),
+            )
+            .expect("write auth");
+        };
+
+        let mut map = std::collections::BTreeMap::new();
+        upsert_supergrok_session(
+            &mut map,
+            base,
+            session("tok-personal-expired", "u-personal-expired", false, expired),
+        );
+        map.get_mut(&format!("{base}::personal"))
+            .expect("expired personal slot")
+            .team_id = Some("stale-team".to_string());
+        upsert_supergrok_session(
+            &mut map,
+            base,
+            session("tok-team-only", "u-team", true, live),
+        );
+        write_auth(&map);
+        assert!(
+            !next_request_draws_included_period_limits(),
+            "an expired personal session beside a live Team JWT does not draw included SuperGrok period limits"
+        );
+
+        save_limits_pins(&LimitsPins {
+            meter_source: Some(MeterSource::Included),
+            stay_supergrok: true,
+            use_console: false,
+            supergrok_identity: None,
+        })
+        .expect("included pin");
+        assert!(
+            !next_request_draws_included_period_limits(),
+            "an Included pin cannot paint limits in use for a Team JWT"
+        );
+        save_limits_pins(&LimitsPins {
+            stay_supergrok: true,
+            use_console: false,
+            meter_source: None,
+            supergrok_identity: None,
+        })
+        .expect("stay pin restored");
+
+        let paint_header = |balance: &CreditBalance| -> String {
+            crate::appearance::cache::set_hide_header(false);
+            let mut agent = make_agent();
+            agent.sampling_identity = SamplingIdentityKind::SuperGrokSession;
+            agent.credit_balance = Some(balance.clone());
+            let area = Rect::new(0, 0, 140, 40);
+            let mut header = ratatui::buffer::Buffer::empty(area);
+            let mut scratch = ScratchBuffer::new();
+            agent.draw(
+                area,
+                &mut header,
+                &ActionRegistry::defaults(),
+                &mut scratch,
+                None,
+                false,
+                BannerSlotParams::none(),
+                false,
+                false,
+                &mut Vec::new(),
+                AppRenderParams::default(),
+            );
+            (0..area.height)
+                .map(|y| {
+                    (0..area.width)
+                        .filter_map(|x| header.cell((x, y)).map(|cell| cell.symbol().to_string()))
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let one = weekly_bal(1.0, end);
+        let team_header = paint_header(&one);
+        assert!(
+            !team_header.contains("limits 1%") && !team_header.contains("limits 0%"),
+            "a Team JWT must not paint limits 1% or limits 0%:\n{team_header}"
+        );
+        let theme = Theme::default();
+        let area = Rect::new(0, 0, 100, 40);
+        let snap =
+            LimitsSnapshot::from_billing(Some(&one), None, SamplingIdentityKind::SuperGrokSession);
+        let mut state = LimitsModalState::new(snap);
+        let mut buf = ratatui::buffer::Buffer::empty(area);
+        render_limits_modal(&mut buf, area, &mut state, &theme, false, now);
+        let team_card = (0..area.height)
+            .map(|y| {
+                (0..area.width)
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            team_card.contains(NOT_DRAWN),
+            "the card says included limits are not being drawn for the next request:\n{team_card}"
+        );
+        assert!(
+            !team_card.contains("Using limits") && !team_card.contains("limits 0%"),
+            "the footer must not say Using limits for a Team JWT:\n{team_card}"
+        );
+        assert!(
+            !team_card.contains("1% used")
+                && !team_card.contains("99%")
+                && !team_card.contains("limits 1%"),
+            "the card must not paint Included weekly allowance: 1% used or 99% remaining when included limits are not being drawn:\n{team_card}"
+        );
+
+        let mut live_map = std::collections::BTreeMap::new();
+        upsert_supergrok_session(
+            &mut live_map,
+            base,
+            session("tok-team-only", "u-team", true, live),
+        );
+        upsert_supergrok_session(
+            &mut live_map,
+            base,
+            session("tok-personal-included", "u-personal", false, live),
+        );
+        write_auth(&live_map);
+        assert!(
+            next_request_draws_included_period_limits(),
+            "when limits mode is on and a live personal SuperGrok session exists, the next model request draws included SuperGrok period limits"
+        );
+        let known = weekly_bal(28.0, end);
+        let personal_header = paint_header(&known);
+        assert!(
+            personal_header.contains("limits 28%"),
+            "limits mode paints the short limits label when that meter is in use:\n{personal_header}"
+        );
+        assert!(
+            !personal_header.contains("SuperGrok period"),
+            "the header keeps the short limits label:\n{personal_header}"
+        );
+        let mut unread = weekly_bal(0.0, end);
+        unread.included_usage_known = false;
+        unread.usage_pct = 0.0;
+        let unread_header = paint_header(&unread);
+        assert!(
+            !unread_header.contains("limits 0%"),
+            "an unread meter does not paint limits 0%:\n{unread_header}"
+        );
+        let known_snap = LimitsSnapshot::from_billing(
+            Some(&known),
+            None,
+            SamplingIdentityKind::SuperGrokSession,
+        );
+        let mut known_state = LimitsModalState::new(known_snap);
+        let mut known_buf = ratatui::buffer::Buffer::empty(area);
+        render_limits_modal(&mut known_buf, area, &mut known_state, &theme, false, now);
+        let personal_card = (0..area.height)
+            .map(|y| {
+                (0..area.width)
+                    .map(|x| known_buf[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            personal_card.contains("Using limits") && !personal_card.contains(NOT_DRAWN),
+            "a live personal SuperGrok session says Using limits:\n{personal_card}"
         );
     }
 }

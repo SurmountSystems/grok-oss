@@ -515,12 +515,60 @@ pub fn apply_meter_source(source: MeterSource) -> Result<(), std::io::Error> {
     save_limits_pins(&pins)
 }
 
+/// A live SuperGrok session JWT. Hard-expired rows are not live.
+fn auth_is_live_supergrok_session(auth: &super::model::GrokAuth) -> bool {
+    super::model::is_supergrok_session_mode(auth.auth_mode)
+        && !auth.key.trim().is_empty()
+        && !super::model::is_expired_with_buffer(auth, chrono::Duration::zero())
+}
+
+/// `(personal, team)` from `auth.json`. Read-only. An unread meter is not a percent.
+fn live_personal_and_team_session_flags() -> (bool, bool) {
+    let path = grok_home_path().join("auth.json");
+    let Ok(map) = super::read_auth_json(&path) else {
+        return (false, false);
+    };
+    let mut personal = false;
+    let mut team = false;
+    for auth in map.values() {
+        if !auth_is_live_supergrok_session(auth) {
+            continue;
+        }
+        if auth.is_team_principal() {
+            team = true;
+        } else {
+            personal = true;
+        }
+    }
+    (personal, team)
+}
+
+/// The next request sends a live Team JWT, which settles as team postpaid
+/// OAuth / Billing Credits. That is not included SuperGrok period limits.
+/// A live personal SuperGrok session is that meter unless Business is pinned.
+fn next_request_sends_team_jwt_not_included_period(pins: &LimitsPins) -> bool {
+    let (personal, team) = live_personal_and_team_session_flags();
+    if !team {
+        return false;
+    }
+    if pins.supergrok_identity == Some(SupergrokIdentityPin::Business) {
+        return true;
+    }
+    if pins.supergrok_identity == Some(SupergrokIdentityPin::Personal) && personal {
+        return false;
+    }
+    !personal
+}
+
 /// Whether the next request draws included SuperGrok period limits.
 ///
 /// The status chip and the limits card must use this. Do not paint a limits
 /// label when this is false. A DollarCredits pin is SuperGrok dollar credits.
 /// A Console pin with team prepaid remaining is console API credits. Neither
-/// is included SuperGrok period limits.
+/// is included SuperGrok period limits. A live Team JWT with no live personal
+/// SuperGrok session does not draw included SuperGrok period limits, so an
+/// unread meter must not paint `limits 0%` and a known team percent must not
+/// paint `limits N%`.
 pub fn next_request_draws_included_period_limits() -> bool {
     next_request_draws_included_period_limits_for(&load_limits_pins())
 }
@@ -530,7 +578,7 @@ pub fn next_request_draws_included_period_limits_for(pins: &LimitsPins) -> bool 
     if pins.use_console {
         return false;
     }
-    match pins.meter_source {
+    let pins_allow = match pins.meter_source {
         Some(MeterSource::DollarCredits) => false,
         Some(MeterSource::Console) => !console_team_prepaid_available(),
         Some(MeterSource::Included) => true,
@@ -539,7 +587,8 @@ pub fn next_request_draws_included_period_limits_for(pins: &LimitsPins) -> bool 
                 && (pins.stay_supergrok || pins.supergrok_identity.is_some());
             !console_primary_blocks_default
         }
-    }
+    };
+    pins_allow && !next_request_sends_team_jwt_not_included_period(pins)
 }
 
 /// Limits mode is the default. Included SuperGrok period limits are enabled.
@@ -1407,5 +1456,104 @@ preferred_method = "api_key"
         );
         assert!(!load_limits_pins().use_console);
         assert_eq!(load_limits_pins().meter_source, Some(MeterSource::Included));
+    }
+
+    fn write_live_session(
+        map: &mut std::collections::BTreeMap<String, crate::auth::GrokAuth>,
+        base: &str,
+        key: &str,
+        user_id: &str,
+        team: bool,
+        expires_at: chrono::DateTime<chrono::Utc>,
+    ) {
+        use crate::auth::{AuthMode, GrokAuth, upsert_supergrok_session};
+        upsert_supergrok_session(
+            map,
+            base,
+            GrokAuth {
+                key: key.into(),
+                auth_mode: AuthMode::Oidc,
+                user_id: user_id.into(),
+                principal_type: team.then(|| "Team".to_string()),
+                principal_id: team.then(|| "team-fixture".to_string()),
+                team_id: team.then(|| "team-fixture".to_string()),
+                expires_at: Some(expires_at),
+                ..Default::default()
+            },
+        );
+    }
+
+    /// When limits mode is on, the next model request draws included SuperGrok
+    /// period limits, and an unread meter does not paint `limits 0%`.
+    /// A live Team JWT with no live personal SuperGrok session does not draw
+    /// included SuperGrok period limits. The header must not paint `limits N%`
+    /// for that request. A live personal session still draws that meter.
+    #[test]
+    #[serial_test::serial]
+    fn limits_mode_draws_included_period_limits_unless_the_bearer_is_a_team_jwt() {
+        let home = TempDir::new().expect("temp grok home");
+        let _env = EnvGuard::set("GROK_HOME", home.path());
+        fs::write(
+            home.path().join("config.toml"),
+            "[auth]\npreferred_method = \"oidc\"\nauto_use_included_limits = true\n",
+        )
+        .expect("preferred oidc");
+        save_limits_pins(&LimitsPins {
+            stay_supergrok: true,
+            use_console: false,
+            meter_source: None,
+            supergrok_identity: None,
+        })
+        .expect("stay pin");
+        assert!(
+            next_request_draws_included_period_limits(),
+            "a home with no session still draws included SuperGrok period limits in limits mode"
+        );
+
+        let base = "https://auth.x.ai::limits-meter-fixture";
+        let live = chrono::Utc::now() + chrono::Duration::days(1);
+        let mut map = std::collections::BTreeMap::new();
+        write_live_session(&mut map, base, "tok-team-only", "u-team", true, live);
+        fs::write(
+            home.path().join("auth.json"),
+            serde_json::to_vec_pretty(&map).expect("auth json"),
+        )
+        .expect("write team session");
+        assert!(
+            !next_request_draws_included_period_limits(),
+            "limits mode with only a live Team JWT does not draw included SuperGrok period limits"
+        );
+        assert!(
+            !next_request_draws_included_period_limits_for(&LimitsPins {
+                meter_source: Some(MeterSource::Included),
+                ..LimitsPins::default()
+            }),
+            "an Included pin cannot paint limits in use for a Team JWT"
+        );
+
+        write_live_session(
+            &mut map,
+            base,
+            "tok-personal-included",
+            "u-personal",
+            false,
+            live,
+        );
+        fs::write(
+            home.path().join("auth.json"),
+            serde_json::to_vec_pretty(&map).expect("auth json"),
+        )
+        .expect("write personal session");
+        save_limits_pins(&LimitsPins {
+            stay_supergrok: true,
+            use_console: false,
+            meter_source: None,
+            supergrok_identity: None,
+        })
+        .expect("stay pin still limits mode");
+        assert!(
+            next_request_draws_included_period_limits(),
+            "when limits mode is on and a live personal SuperGrok session exists, the next model request draws included SuperGrok period limits"
+        );
     }
 }

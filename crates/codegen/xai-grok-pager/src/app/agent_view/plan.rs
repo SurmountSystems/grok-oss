@@ -260,7 +260,10 @@ impl AgentView {
         // Approve already left the decision chrome. A later mill reread must
         // not open the pane on `approve | comment | revise | exit` or arm
         // `Plan ready. Side panel open`.
-        if self.plan_approved_implement || self.plan_decision_resolved {
+        if self.plan_approved_implement
+            || self.plan_decision_resolved
+            || self.is_post_turn_build_starting()
+        {
             self.latest_inline_plan_content = Some(disk.clone());
             self.persist_session_plan_body(&disk);
             self.line_viewer = None;
@@ -784,7 +787,7 @@ impl AgentView {
             }
             return Some(in_flight.status_label());
         }
-        if self.plan_decision_resolved {
+        if self.plan_decision_resolved || self.plan_approved_implement {
             return None;
         }
         if let Some(ref pav) = self.plan_approval_view {
@@ -1371,9 +1374,13 @@ impl AgentView {
             }
             let notes = review_comments.as_deref();
             // Close the side panel now. The review stays mounted until the
-            // worker accepts, so a refuse can still restore approve/build.
+            // worker accepts. `plan_approved_implement` keeps mill and
+            // show_plan_preview from opening the pane again.
+            // `plan_decision_resolved` stays false until accept, so this
+            // click does not record the verdict early.
             self.line_viewer = None;
             self.casual_commenting_range = None;
+            self.plan_approved_implement = true;
             return InputOutcome::Action(Action::ExecutePlan {
                 plan_file_content: Self::plan_content_with_review(snapshot, notes),
                 plan_file_uri: notes
@@ -3561,10 +3568,16 @@ mod plan_approval_optimistic_mode_tests {
         agent
     }
 
-    /// The side pane shows the full heading `Proposed plan.`, a body that
-    /// still starts at `The user wants`, a bordered copy control with a real
-    /// gap, and a muted footer rule. After Approve, a mill reread does not
-    /// open `approve | comment | revise | exit` or `Plan ready. Side panel open`.
+    /// Box-drawing and block glyphs are the pane frame, not body text.
+    fn is_plan_frame_join_char(ch: char) -> bool {
+        ('\u{2500}'..='\u{257F}').contains(&ch) || ('\u{2580}'..='\u{259F}').contains(&ch)
+    }
+
+    /// The side pane shows the full heading `Proposed plan.`, the full body
+    /// sentence `The user wants the status row to show two tokens.` (wrapped
+    /// is fine, dropped characters are not), a bordered copy control with a
+    /// real gap, and a muted footer rule. After Approve, a mill reread does
+    /// not open `approve | comment | revise | exit` or `Plan ready. Side panel open`.
     #[test]
     fn soft_plan_side_panel_shows_full_title_bordered_copy_muted_divider_and_hides_actions_after_approve()
      {
@@ -3576,7 +3589,8 @@ mod plan_approval_optimistic_mode_tests {
         crate::theme::cache::set(crate::theme::ThemeKind::Doge);
         let theme = crate::theme::Theme::doge();
 
-        let body = "# Proposed plan.\n\nThe user wants the status row to show two tokens.\n";
+        let owed = "The user wants the status row to show two tokens.";
+        let body = format!("# Proposed plan.\n\n{owed}\n");
         let mut viewer = LineViewerState::open_markdown_content("plan.md", body.to_owned(), None)
             .expect("open plan");
         viewer.kind = LineViewerKind::PlanPreview;
@@ -3596,7 +3610,8 @@ mod plan_approval_optimistic_mode_tests {
         );
 
         let mut saw_full_title = false;
-        let mut saw_body_start = false;
+        let mut saw_left_edge = false;
+        let mut squashed = String::new();
         for y in 0..full.height {
             let mut row = String::new();
             for x in 0..full.width {
@@ -3610,11 +3625,19 @@ mod plan_approval_optimistic_mode_tests {
             if row.contains("sed plan.") && !row.contains("Proposed plan.") {
                 panic!("title paints as sed plan., not Proposed plan.: {row:?}");
             }
-            if row.contains("The user wants the status row to show two t") {
-                saw_body_start = true;
+            if row.contains("The user wants") {
+                saw_left_edge = true;
             }
             if row.contains("er wants the status") && !row.contains("The user wants") {
                 panic!("body left edge is clipped: {row:?}");
+            }
+            // Frame glyphs sit on every pane row. Whitespace-only joining
+            // glues `│` between wrapped parts and hides `tokens.`
+            for ch in row.chars() {
+                if ch.is_whitespace() || is_plan_frame_join_char(ch) {
+                    continue;
+                }
+                squashed.push(ch);
             }
         }
         assert!(
@@ -3622,8 +3645,12 @@ mod plan_approval_optimistic_mode_tests {
             "the pane must paint the full heading Proposed plan."
         );
         assert!(
-            saw_body_start,
+            saw_left_edge,
             "the body must keep its left edge, starting at The user wants"
+        );
+        assert!(
+            squashed.contains("Theuserwantsthestatusrowtoshowtwotokens."),
+            "the full source sentence must be readable, wrapped inside the content area: {owed}"
         );
 
         let plan = viewer.plan_ref().expect("plan extras");
@@ -3723,6 +3750,45 @@ mod plan_approval_optimistic_mode_tests {
             agent.plan_loop_status_label(),
             Some("Plan ready. Side panel open"),
             "after Approve, mill plan.md must not arm Plan ready. Side panel open"
+        );
+
+        let mut post = make_agent();
+        post.plan_mode_active = true;
+        post.kept_plan = crate::app::agent_view::KeptPlan::kept(Some(body.to_owned()), None);
+        post.open_post_turn_plan_review();
+        assert!(
+            post.line_viewer.is_some(),
+            "the present opens the side pane before Approve"
+        );
+        assert!(
+            matches!(
+                post.approve_plan(),
+                InputOutcome::Action(Action::ExecutePlan { .. })
+            ),
+            "post-turn Approve dispatches the build"
+        );
+        assert!(
+            post.plan_approval_view.is_some(),
+            "review stays mounted until the worker accepts"
+        );
+        assert!(
+            post.plan_approved_implement,
+            "Approve keeps the pane shut before the worker accepts"
+        );
+        assert!(
+            !post.plan_decision_resolved,
+            "the verdict waits until the worker accepts"
+        );
+        post.paint_isolated_preview_from_mill_plan_md(body);
+        post.show_plan_preview();
+        assert!(
+            post.line_viewer.is_none(),
+            "after Approve the pane stays closed"
+        );
+        assert_ne!(
+            post.plan_loop_status_label(),
+            Some("Plan ready. Side panel open"),
+            "after Approve the ready status stays hidden"
         );
     }
 

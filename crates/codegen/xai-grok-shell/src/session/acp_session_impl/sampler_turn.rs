@@ -705,6 +705,16 @@ impl SessionActor {
         // Refresh the session token before the sampler reads it; gated to sessions that use it.
         if use_bearer_resolver && let Some(am) = self.auth_manager.as_ref() {
             let _ = am.auth().await;
+            // SamplingClient::post stamps bearer_resolver, not the ranked api_key.
+            // When limits mode is on, align that bearer to the included
+            // SuperGrok period primary before the request is built.
+            if am.grok_com_config().auto_use_included_limits
+                && am.grok_com_config().preferred_method
+                    != Some(xai_grok_login::PreferredAuthMethod::ApiKey)
+            {
+                use crate::auth::supergrok_identity_rank::AuthManagerRankAlign;
+                let _ = am.align_to_ranked_free_period_primary();
+            }
         }
         // Session path: only seed a wire-valid AT
         // Hard-expired keys must not land in default headers when the resolver has nothing to stamp
