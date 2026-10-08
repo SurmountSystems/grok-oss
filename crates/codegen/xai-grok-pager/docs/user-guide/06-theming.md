@@ -417,10 +417,10 @@ The theme system manages these slots internally and quantizes them automatically
 
 ## Transcript message colors
 
-These sentences say what the transcript must paint. They are not a claim that the tests already pass.
+These sentences say what the transcript must paint. They are not a claim that the tests already pass. The message body stays white. The left accent carries the color.
 
-The Operator's own message text, which sits on the left of the transcript, is Operator green. That role is `accent_user`. On DOGE, `accent_user` is pure green (`#00FF00`). That text is not the default body color (`text_primary`). The composer caret and the operator rails stay Operator green. The mid-draft letter under the caret still uses `text_primary` on the empty blink half. The named test is `operator_message_text_on_the_left_is_green`.
+The Operator's message body stays white. On DOGE that is `text_primary`, not `accent_user`. The left accent rail is Operator green, `accent_user` (pure green, `#00FF00`, on DOGE). That rail stays present, including when the prompt is collapsed, because the body is still on screen. The composer caret and the operator rails stay Operator green. The mid-draft letter under the caret still uses `text_primary` on the empty blink half. The named test is `operator_message_text_stays_white_and_the_left_accent_is_green`.
 
-Chain of thought text is cyan. On DOGE the cyan role is `accent_system` (`#00FFFF`). `accent_thinking` stays magenta and is the thinking chrome, not the chain of thought body. The named test is `chain_of_thought_text_is_cyan`.
+Chain of thought body stays white (`text_primary`). Its left accent, when the thought is open, is cyan, `accent_system` (`#00FFFF` on DOGE). `accent_thinking` stays magenta and is not that left accent. The named test is `chain_of_thought_text_stays_white_and_the_left_accent_is_cyan`.
 
-The Agent's actual response text is magenta. That role is `accent_running`. On DOGE, `accent_running` is pure magenta (`#FF00FF`). That text is not `text_primary` and not `md_text`. The named test is `agent_response_text_is_magenta`.
+The Agent's response body stays white (`text_primary`). Its left accent, while the turn is active, is magenta, `accent_running` (pure magenta, `#FF00FF`, on DOGE). A finished turn does not keep a permanent rail. The named test is `agent_response_text_stays_white_and_the_left_accent_is_magenta`.

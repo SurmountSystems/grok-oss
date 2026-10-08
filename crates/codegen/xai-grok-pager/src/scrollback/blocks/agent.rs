@@ -151,10 +151,6 @@ impl BlockContent for AgentMessageBlock {
         } else {
             self.rendered_output(ctx).0
         };
-        let response = crate::theme::Theme::current().accent_running;
-        for line in &mut out.lines {
-            super::markdown_content::repaint_default_body_role(&mut line.content, response);
-        }
         super::append_bubble_copy_button(&mut out.lines, ctx);
         out
     }
@@ -185,10 +181,11 @@ impl BlockContent for AgentMessageBlock {
     }
 
     /// Magenta Agent rail only while the turn is active (`ctx.is_running`).
-    /// Streaming / thinking / tool-running: left `┃` in `theme.accent_running`
-    /// (Reset → Cyan so the rail stays visible under NO_COLOR). Finished
-    /// scrollback has no coloured rail. Human green is the other side of this
-    /// pair (`UserPromptBlock`).
+    /// The message body stays `text_primary`. Streaming / thinking /
+    /// tool-running: left `┃` in `theme.accent_running` (Reset → Cyan so
+    /// the rail stays visible under NO_COLOR). Finished scrollback has no
+    /// coloured rail. Human green is the other side of this pair
+    /// (`UserPromptBlock`).
     fn accent(&self, ctx: &BlockContext) -> Option<AccentStyle> {
         if !ctx.is_running {
             return None;
@@ -452,11 +449,11 @@ mod tests {
         assert_eq!(non_selectable(&raw), 0, "raw mode shows the fence verbatim");
     }
 
-    /// The Agent's response text is magenta (`accent_running` on DOGE).
-    /// That is the message body, not only the rail, and it is not the
-    /// default body color.
+    /// The Agent's response body stays white. While the turn is active,
+    /// the left accent is magenta (`accent_running`). A finished turn
+    /// does not keep a permanent rail.
     #[test]
-    fn agent_response_text_is_magenta() {
+    fn agent_response_text_stays_white_and_the_left_accent_is_magenta() {
         use ratatui::style::Color;
 
         let _lock = crate::theme::cache::test_lock()
@@ -467,13 +464,27 @@ mod tests {
 
         let theme = crate::theme::Theme::current();
         let magenta = Color::Rgb(255, 0, 255);
+        let white = theme.text_primary;
         assert_eq!(theme.accent_running, magenta, "DOGE Agent magenta");
-        assert_ne!(theme.accent_running, theme.text_primary);
-        assert_ne!(theme.accent_running, theme.md_text);
+        assert_eq!(white, Color::Rgb(255, 255, 255));
+        assert_ne!(white, magenta);
+        assert_ne!(theme.md_text, magenta);
         assert_ne!(theme.accent_running, theme.accent_user);
         assert_ne!(theme.accent_running, theme.accent_system);
 
         let block = AgentMessageBlock::new("the agent answer is here");
+        assert!(
+            block.accent(&ctx(80, false)).is_none(),
+            "a finished turn does not keep a permanent rail"
+        );
+        let accent = block
+            .accent(&ctx_running(80, false, true))
+            .expect("an active turn keeps a left accent");
+        assert!(!accent.animated);
+        assert_eq!(accent.color, magenta);
+        assert_eq!(accent.color, theme.accent_running);
+        assert_ne!(accent.color, white);
+
         let out = block.output(&ctx(80, false));
         let mut saw_body = false;
         for line in &out.lines {
@@ -493,12 +504,12 @@ mod tests {
                 saw_body = true;
                 assert_eq!(
                     span.style.fg,
-                    Some(magenta),
-                    "agent response text is magenta: {span:?}"
+                    Some(white),
+                    "agent response body stays white: {span:?}"
                 );
-                assert_eq!(span.style.fg, Some(theme.accent_running));
-                assert_ne!(span.style.fg, Some(theme.text_primary));
-                assert_ne!(span.style.fg, Some(theme.md_text));
+                assert_eq!(span.style.fg, Some(theme.text_primary));
+                assert_ne!(span.style.fg, Some(theme.accent_running));
+                assert_ne!(span.style.fg, Some(magenta));
             }
         }
         assert!(saw_body, "agent response body was not painted");

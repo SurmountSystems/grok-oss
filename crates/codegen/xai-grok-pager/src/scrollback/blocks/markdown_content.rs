@@ -18,24 +18,6 @@ use crate::syntax::get_syntect;
 use crate::theme::{ThemeKind, cache as theme_cache, md_style};
 use xai_grok_markdown::StreamingMarkdownRenderer;
 
-/// Spans that still use the default body color take `role`.
-///
-/// Default body means no foreground, or a foreground that is still
-/// `md_text` or `text_primary`. Code, links, and headings keep their own
-/// colors when those colors differ from the default body.
-pub(super) fn repaint_default_body_role(line: &mut Line<'_>, role: ratatui::style::Color) {
-    let theme = crate::theme::Theme::current();
-    for span in &mut line.spans {
-        let is_default_body = match span.style.fg {
-            None => true,
-            Some(color) => color == theme.md_text || color == theme.text_primary,
-        };
-        if is_default_body {
-            span.style.fg = Some(role);
-        }
-    }
-}
-
 /// Mutable rendering state behind a single `RefCell`.
 /// Groups the renderer and wrap-cache together.
 /// `ensure_wrapped` (called from `&self` methods via the `BlockContent` trait) can then update the table-width setting and the cache in one borrow.

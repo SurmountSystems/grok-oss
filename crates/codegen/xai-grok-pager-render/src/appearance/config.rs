@@ -460,7 +460,8 @@ impl Default for PromptConfig {
 
 #[derive(Debug, Clone)]
 pub struct ThinkingConfig {
-    /// Accent color for the thinking block.
+    /// Left-rail color for the thinking block. The default is
+    /// `accent_system` (cyan on DOGE). The body stays `text_primary`.
     pub accent: Color,
     /// Whether accent line is enabled. When false, no accent in any mode.
     pub accent_enabled: bool,
@@ -493,7 +494,7 @@ pub struct ThinkingConfig {
 impl Default for ThinkingConfig {
     fn default() -> Self {
         Self {
-            accent: crate::theme::Theme::current().gray_dim,
+            accent: crate::theme::Theme::current().accent_system,
             accent_enabled: true,
             bg_blend: 0.7,
             truncated_lines: 3,
@@ -1434,8 +1435,8 @@ impl From<RawPromptConfig> for PromptConfig {
 
 impl From<RawThinkingConfig> for ThinkingConfig {
     fn from(raw: RawThinkingConfig) -> Self {
-        // Default accent is gray_dim from theme, already quantized
-        let default_accent = crate::theme::Theme::current().gray_dim;
+        // Default left accent is accent_system (cyan on DOGE), already quantized.
+        let default_accent = crate::theme::Theme::current().accent_system;
         let accent = raw.accent.to_option().unwrap_or(default_accent);
         let bg_blend = (raw.bg_blend.min(100) as f32) / 100.0;
         Self {

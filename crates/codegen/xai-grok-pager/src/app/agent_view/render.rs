@@ -326,8 +326,8 @@ fn console_team_prepaid_remaining_label() -> Option<String> {
 /// `use_console` wins when both are set, because that flag is what the
 /// next request spends. Those pins do not show team postpaid Billing
 /// Credits. A team-only JWT with no such pin shows team postpaid Billing
-/// Credits when that cache was read. Without the reading the chip stays
-/// `Limits and Credits`.
+/// Credits when that cache or the fetched limits snapshot was read.
+/// Without the reading the chip stays `Limits and Credits`.
 fn credits_label_when_included_period_is_not_next_request() -> String {
     let pins = xai_grok_shell::auth::limits_pins::load_limits_pins();
     let console_meter = pins.use_console

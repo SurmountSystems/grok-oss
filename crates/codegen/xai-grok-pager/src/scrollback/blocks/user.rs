@@ -208,17 +208,18 @@ impl UserPromptBlock {
         }
     }
 
-    /// Prefix and message body use `accent_user` (Operator green on DOGE).
-    /// Skill tokens stay `accent_skill`. Bold only when `terminal_native`
-    /// (minimal mode). Minimal keeps a Cyan pointer when `accent_user` is
-    /// Reset (its prompt rows have no band, so the pointer is the turn cue).
+    /// Prefix uses `accent_user` (Operator green on DOGE). The message
+    /// body stays `text_primary`. Skill tokens stay `accent_skill`.
+    /// Bold only when `terminal_native` (minimal mode). Minimal keeps a
+    /// Cyan pointer when `accent_user` is Reset (its prompt rows have no
+    /// band, so the pointer is the turn cue).
     fn prompt_styles(theme: &Theme, terminal_native: bool) -> (Style, Style, Style) {
         let prefix_color = match theme.accent_user {
             ratatui::style::Color::Reset if terminal_native => ratatui::style::Color::Cyan,
             c => c,
         };
         let mut prefix_style = theme.fg(prefix_color);
-        let mut text_style = theme.fg(theme.accent_user);
+        let mut text_style = theme.fg(theme.text_primary);
         let mut skill_style = theme.fg(theme.accent_skill);
         if terminal_native {
             prefix_style = prefix_style.add_modifier(Modifier::BOLD);
@@ -690,7 +691,7 @@ mod tests {
             span_at(spans, 2).content.as_ref(),
             " create a ticket for this"
         );
-        assert_eq!(span_at(spans, 2).style.fg, Some(theme.accent_user));
+        assert_eq!(span_at(spans, 2).style.fg, Some(theme.text_primary));
     }
 
     #[test]
@@ -719,11 +720,11 @@ mod tests {
         assert_eq!(span_at(line0, 1).content.as_ref(), "/foo");
         assert_eq!(span_at(line0, 1).style.fg, Some(theme.accent_skill));
         assert_eq!(span_at(line0, 2).content.as_ref(), " bar");
-        assert_eq!(span_at(line0, 2).style.fg, Some(theme.accent_user));
+        assert_eq!(span_at(line0, 2).style.fg, Some(theme.text_primary));
 
         let line1 = &line_at(&lines, 1).content.spans;
         assert_eq!(span_at(line1, 1).content.as_ref(), "baz");
-        assert_eq!(span_at(line1, 1).style.fg, Some(theme.accent_user));
+        assert_eq!(span_at(line1, 1).style.fg, Some(theme.text_primary));
     }
 
     #[test]
@@ -738,11 +739,11 @@ mod tests {
         let spans = &line_at(&lines, 0).content.spans;
         assert_eq!(spans.len(), 4);
         assert_eq!(span_at(spans, 1).content.as_ref(), "great ");
-        assert_eq!(span_at(spans, 1).style.fg, Some(theme.accent_user));
+        assert_eq!(span_at(spans, 1).style.fg, Some(theme.text_primary));
         assert_eq!(span_at(spans, 2).content.as_ref(), "/pr-workflow");
         assert_eq!(span_at(spans, 2).style.fg, Some(theme.accent_skill));
         assert_eq!(span_at(spans, 3).content.as_ref(), " all good now");
-        assert_eq!(span_at(spans, 3).style.fg, Some(theme.accent_user));
+        assert_eq!(span_at(spans, 3).style.fg, Some(theme.text_primary));
     }
 
     #[test]
@@ -781,7 +782,7 @@ mod tests {
         );
         let line1 = &line_at(&lines, 1).content.spans;
         assert_eq!(span_at(line1, 1).content.as_ref(), "then ");
-        assert_eq!(span_at(line1, 1).style.fg, Some(theme.accent_user));
+        assert_eq!(span_at(line1, 1).style.fg, Some(theme.text_primary));
         assert_eq!(span_at(line1, 2).content.as_ref(), "/model");
         assert_eq!(span_at(line1, 2).style.fg, Some(theme.accent_skill));
         assert_eq!(span_at(line1, 3).content.as_ref(), " here");
@@ -824,7 +825,7 @@ mod tests {
         let theme = Theme::current();
         assert_eq!(
             span_at(&line_at(&lines, 0).content.spans, 1).style.fg,
-            Some(theme.accent_user)
+            Some(theme.text_primary)
         );
     }
 
@@ -873,7 +874,7 @@ mod tests {
         let body: String = last
             .spans
             .iter()
-            .filter(|s| s.style.fg == Some(theme.accent_user))
+            .filter(|s| s.style.fg == Some(theme.text_primary))
             .map(|s| s.content.as_ref())
             .collect();
         assert!(body.contains("more"), "args stay body-styled, got {body:?}");
@@ -1420,11 +1421,17 @@ mod tests {
         assert_ne!(rail.fg, Color::Rgb(255, 255, 255));
     }
 
-    /// The Operator's own message text, on the left of the transcript, is
-    /// Operator green (`accent_user`). That is the message body, not only
-    /// the arrow or the rail, and it is not the default body color.
+    /// The Operator's message body stays white (`text_primary`). The left
+    /// `┃` rail is Operator green (`accent_user`), including when the
+    /// prompt is collapsed and the body is still on screen.
     #[test]
-    fn operator_message_text_on_the_left_is_green() {
+    fn operator_message_text_stays_white_and_the_left_accent_is_green() {
+        use crate::render::Renderable;
+        use crate::scrollback::RenderBlock;
+        use crate::scrollback::entry::ScrollbackEntry;
+        use crate::scrollback::wrappers::EntryRenderer;
+        use ratatui::buffer::Buffer;
+        use ratatui::layout::Rect;
         use ratatui::style::Color;
 
         let _lock = crate::theme::cache::test_lock()
@@ -1435,11 +1442,9 @@ mod tests {
 
         let theme = Theme::current();
         let green = Color::Rgb(0, 255, 0);
+        let white = theme.text_primary;
         assert_eq!(theme.accent_user, green, "DOGE Operator green");
-        assert_ne!(
-            theme.accent_user, theme.text_primary,
-            "operator message text is not the default body color"
-        );
+        assert_ne!(white, green, "the message body is not the green accent");
 
         let block = UserPromptBlock::new("hello from the operator\nstill the operator");
         let lines = block.wrap_prompt_lines(80, None, true, false);
@@ -1462,11 +1467,11 @@ mod tests {
         assert_ne!(
             first.spans.first().map(|span| span.content.as_ref()),
             Some(body.content.as_ref()),
-            "the green body is the message text, not only the left arrow"
+            "the white body is the message text, not the left arrow"
         );
-        assert_eq!(body.style.fg, Some(green));
-        assert_eq!(body.style.fg, Some(theme.accent_user));
-        assert_ne!(body.style.fg, Some(theme.text_primary));
+        assert_eq!(body.style.fg, Some(white));
+        assert_eq!(body.style.fg, Some(theme.text_primary));
+        assert_ne!(body.style.fg, Some(theme.accent_user));
 
         let second = &line_at(&lines, 1).content;
         let continued = second
@@ -1474,8 +1479,50 @@ mod tests {
             .iter()
             .find(|span| span.content.contains("still the operator"))
             .expect("continued operator message text");
-        assert_eq!(continued.style.fg, Some(green));
-        assert_eq!(continued.style.fg, Some(theme.accent_user));
-        assert_ne!(continued.style.fg, Some(theme.text_primary));
+        assert_eq!(continued.style.fg, Some(white));
+        assert_eq!(continued.style.fg, Some(theme.text_primary));
+        assert_ne!(continued.style.fg, Some(theme.accent_user));
+
+        // A long prompt collapses, and collapsed rows used to drop the rail.
+        // The body is still on screen, so the left accent must stay.
+        let long = "hello from the operator ".repeat(12);
+        let entry = ScrollbackEntry::new(RenderBlock::user_prompt(long));
+        assert_eq!(
+            entry.display_mode,
+            DisplayMode::Collapsed,
+            "this fixture is the collapsed prompt that was missing its rail"
+        );
+        let accent = entry
+            .block
+            .accent(&accent_test_ctx())
+            .expect("the operator prompt keeps a left accent");
+        assert_eq!(accent.color, green);
+
+        let renderer = EntryRenderer::new(&entry, &theme);
+        let width = 40u16;
+        let height = renderer.desired_height(width).max(4);
+        let area = Rect::new(0, 0, width, height);
+        let mut buf = Buffer::empty(area);
+        renderer.render(area, &mut buf);
+
+        let bar = crate::glyphs::accent_bar();
+        let rail = (0..area.height)
+            .find_map(|y| {
+                let cell = buf.cell((0, y))?;
+                (cell.symbol() == bar).then_some(cell.clone())
+            })
+            .expect("a collapsed operator prompt must still paint the left ┃ rail");
+        assert_eq!(rail.fg, green, "the left accent is Operator green");
+        assert_ne!(rail.fg, white);
+
+        let letter = (0..area.height)
+            .flat_map(|y| (0..area.width).map(move |x| (x, y)))
+            .find_map(|(x, y)| {
+                let cell = buf.cell((x, y))?;
+                (cell.symbol() == "h").then_some(cell.clone())
+            })
+            .expect("the operator message body is painted");
+        assert_eq!(letter.fg, white, "the message body stays white");
+        assert_ne!(letter.fg, green);
     }
 }

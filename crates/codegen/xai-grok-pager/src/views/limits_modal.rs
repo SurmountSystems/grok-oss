@@ -39,6 +39,9 @@ pub struct LimitsModalState {
     pub zero_refresh_sent: bool,
     /// Wall-clock of last snapshot apply (for tests / dogfood).
     pub last_updated_at: DateTime<Utc>,
+    /// Painted `Use limits` control from the last render. Absent when that
+    /// button is not on screen.
+    pub use_limits_hit: Option<Rect>,
 }
 
 impl LimitsModalState {
@@ -49,6 +52,7 @@ impl LimitsModalState {
             scroll: 0,
             zero_refresh_sent: false,
             last_updated_at: Utc::now(),
+            use_limits_hit: None,
         }
     }
 
@@ -255,12 +259,32 @@ pub(crate) fn format_remaining_cents_as_dollars(cents: i64) -> String {
     if negative { format!("-{body}") } else { body }
 }
 
+/// On-disk team postpaid Billing Credits remaining.
+///
+/// The open Limits card and the header share this after a process-cache
+/// miss. `limits_snapshot.json` counts only when the Billing Credits card
+/// was fetched and names a team. Prepaid cents are console team prepaid,
+/// not this remaining. An unread card stays unread. This does not invent `$0`.
+fn team_postpaid_billing_credits_cents_from_snapshot() -> Option<i64> {
+    let doc = xai_grok_shell::auth::read_limits_snapshot_file(limits_reading_grok_home())?;
+    let mgmt = doc.management?;
+    if mgmt.billing_credits_card.as_wire() != "fetched" {
+        return None;
+    }
+    let team = mgmt.team_id.as_deref().map(str::trim).unwrap_or("");
+    if team.is_empty() {
+        return None;
+    }
+    mgmt.billing_credits_cents
+}
+
 /// Team postpaid Billing Credits remaining shared by the header chip and
 /// the Limits card. The process cache is one slot, keyed by the Management
 /// API team id, which is not the Team JWT team id. Try that management id
-/// first, then the JWT id. `None` stays unread. This does not invent `$0`.
-/// Not included SuperGrok period limits, not SuperGrok dollar credits, and
-/// not console team prepaid.
+/// first, then the JWT id, then the fetched snapshot the open card already
+/// shows. `None` stays unread. This does not invent `$0`. Not included
+/// SuperGrok period limits, not SuperGrok dollar credits, and not console
+/// team prepaid.
 pub(crate) fn team_postpaid_billing_credits_remaining_dollars() -> Option<String> {
     let cents = xai_grok_shell::auth::cached_console_team_postpaid_default()
         .and_then(|meter| meter.billing_credits_remaining_cents)
@@ -268,7 +292,8 @@ pub(crate) fn team_postpaid_billing_credits_remaining_dollars() -> Option<String
             let team_id = live_team_jwt_team_id()?;
             xai_grok_shell::auth::cached_console_team_postpaid(&team_id)?
                 .billing_credits_remaining_cents
-        })?;
+        })
+        .or_else(team_postpaid_billing_credits_cents_from_snapshot)?;
     Some(format_remaining_cents_as_dollars(cents))
 }
 
@@ -497,13 +522,54 @@ fn persist_other_spend_choice(state: &LimitsModalState) -> std::io::Result<()> {
     save_limits_pins(&pins)
 }
 
+/// Cells that paint the words `Use limits`.
+fn painted_use_limits_rect(buf: &Buffer, area: Rect) -> Option<Rect> {
+    const PHRASE: &str = "Use limits";
+    let width = PHRASE.chars().count() as u16;
+    if width == 0 || area.width < width || area.height == 0 {
+        return None;
+    }
+    for y in area.y..area.y.saturating_add(area.height) {
+        let mut row = String::new();
+        for x in area.x..area.x.saturating_add(area.width) {
+            row.push_str(buf[(x, y)].symbol());
+        }
+        if let Some(byte) = row.find(PHRASE) {
+            let x_off = row[..byte].chars().count() as u16;
+            return Some(Rect {
+                x: area.x.saturating_add(x_off),
+                y,
+                width,
+                height: 1,
+            });
+        }
+    }
+    None
+}
+
 /// Click on the limits card. The spend button writes the meter pin.
+/// A left click on the painted `Use limits` control is that button.
 pub fn handle_limits_mouse(
     state: &mut LimitsModalState,
     kind: crossterm::event::MouseEventKind,
     column: u16,
     row: u16,
 ) -> LimitsModalOutcome {
+    let left_down = matches!(
+        kind,
+        crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left)
+    );
+    let on_use_limits = left_down
+        && state
+            .use_limits_hit
+            .is_some_and(|rect| rect.contains((column, row).into()));
+    if on_use_limits {
+        return if persist_other_spend_choice(state).is_ok() {
+            LimitsModalOutcome::Changed
+        } else {
+            LimitsModalOutcome::Unchanged
+        };
+    }
     match modal_window::handle_modal_mouse(&mut state.window, kind, column, row) {
         ModalWindowOutcome::CloseRequested => LimitsModalOutcome::Close,
         ModalWindowOutcome::ShortcutActivated(id) if id == SPEND_OTHER_CHOICE_ID => {
@@ -550,7 +616,15 @@ pub fn render_limits_modal(
     };
     let Some(mca) = modal_window::render_modal_window(buf, area, &mut state.window, &config, theme)
     else {
+        state.use_limits_hit = None;
         return;
+    };
+    // Record the painted words, not only the shortcut id. `Use credits`
+    // shares that id. `Using limits` is a status, not this control.
+    state.use_limits_hit = if showing_using_limits(state) {
+        None
+    } else {
+        painted_use_limits_rect(buf, area)
     };
     let content = mca.content;
     if content.width == 0 || content.height == 0 {
@@ -2539,6 +2613,353 @@ mod tests {
             next.base_url
         );
         assert_eq!(bal.prepaid_balance_cents, Some(personal_cents));
+    }
+
+    /// A left click on the painted `Use limits` control is handled.
+    ///
+    /// The header chip is forced over that same rect, which is the swallow
+    /// the open card must ignore. Exit, comment, revise, Esc close, and the
+    /// close control do not write this pin. A team-only JWT with personal
+    /// SuperGrok hard-expired still takes the click and does not paint
+    /// `limits N%` or `Using limits`. A live personal session writes
+    /// `MeterSource::Included`, draws included SuperGrok period limits, and
+    /// the header shows percent used.
+    #[test]
+    #[serial_test::serial]
+    fn clicking_use_limits_on_the_limits_card_is_handled() {
+        use crate::actions::ActionRegistry;
+        use crate::app::actions::Action;
+        use crate::app::agent_view::test_fixtures::make_agent;
+        use crate::app::agent_view::{AppRenderParams, BannerSlotParams};
+        use crate::app::app_view::InputOutcome;
+        use crate::scrollback::render::ScratchBuffer;
+        use crossterm::event::{Event, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+        use xai_grok_shell::auth::limits_pins::{
+            LimitsPins, MeterSource, load_limits_pins, next_request_draws_included_period_limits,
+            save_limits_pins,
+        };
+        use xai_grok_shell::auth::{
+            AuthMode, GrokAuth, clear_console_team_postpaid_cache, upsert_supergrok_session,
+        };
+
+        fn paints_limits_percent(text: &str) -> bool {
+            for line in text.lines() {
+                let mut rest = line;
+                while let Some(idx) = rest.find("limits ") {
+                    let after = &rest[idx + "limits ".len()..];
+                    let digits = after.chars().take_while(|c| c.is_ascii_digit()).count();
+                    if digits > 0 && after[digits..].starts_with('%') {
+                        return true;
+                    }
+                    rest = &rest[idx + "limits ".len()..];
+                }
+            }
+            false
+        }
+
+        fn screen_of(buf: &Buffer, area: Rect) -> String {
+            (0..area.height)
+                .map(|y| {
+                    (0..area.width)
+                        .map(|x| buf[(x, y)].symbol())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
+
+        fn painted(buf: &Buffer, rect: Rect) -> String {
+            (0..rect.width)
+                .map(|dx| buf[(rect.x.saturating_add(dx), rect.y)].symbol())
+                .collect::<String>()
+        }
+
+        fn phrase_rect(buf: &Buffer, area: Rect, phrase: &str) -> Rect {
+            let width = phrase.chars().count() as u16;
+            for y in area.y..area.y.saturating_add(area.height) {
+                let mut row = String::new();
+                for x in area.x..area.x.saturating_add(area.width) {
+                    row.push_str(buf[(x, y)].symbol());
+                }
+                if let Some(byte) = row.find(phrase) {
+                    let x_off = row[..byte].chars().count() as u16;
+                    return Rect {
+                        x: area.x.saturating_add(x_off),
+                        y,
+                        width,
+                        height: 1,
+                    };
+                }
+            }
+            panic!("painted {phrase} is missing");
+        }
+
+        let home = tempfile::TempDir::new().expect("temp GROK_HOME");
+        let _env = xai_grok_test_support::EnvGuard::set("GROK_HOME", home.path());
+        clear_console_team_postpaid_cache();
+        std::fs::write(
+            home.path().join("config.toml"),
+            "[auth]\npreferred_method = \"oidc\"\nauto_use_included_limits = true\n",
+        )
+        .expect("preferred oidc");
+
+        let end = DateTime::parse_from_rfc3339("2026-10-12T06:59:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let base = "https://auth.x.ai::use-limits-click";
+        let live = chrono::Utc::now() + chrono::Duration::days(1);
+        let expired = chrono::Utc::now() - chrono::Duration::days(1);
+        let session = |key: &str, user_id: &str, team_id: Option<&str>, expires_at| GrokAuth {
+            key: key.into(),
+            auth_mode: AuthMode::Oidc,
+            user_id: user_id.into(),
+            principal_type: if team_id.is_some() {
+                Some("Team".into())
+            } else {
+                Some("User".into())
+            },
+            principal_id: Some(user_id.into()),
+            team_id: team_id.map(str::to_string),
+            expires_at: Some(expires_at),
+            ..GrokAuth::default()
+        };
+        let write_auth = |map: &std::collections::BTreeMap<String, GrokAuth>| {
+            std::fs::write(
+                home.path().join("auth.json"),
+                serde_json::to_vec_pretty(map).expect("auth json"),
+            )
+            .expect("write auth");
+        };
+        let pin_dollars = || {
+            save_limits_pins(&LimitsPins {
+                stay_supergrok: false,
+                use_console: false,
+                meter_source: Some(MeterSource::DollarCredits),
+                supergrok_identity: None,
+            })
+            .expect("dollar-credits pin");
+        };
+        let mut team_map = std::collections::BTreeMap::new();
+        upsert_supergrok_session(
+            &mut team_map,
+            base,
+            session("tok-personal-expired", "u-personal-expired", None, expired),
+        );
+        team_map
+            .get_mut(&format!("{base}::personal"))
+            .expect("expired personal slot")
+            .team_id = Some("stale-team".into());
+        upsert_supergrok_session(
+            &mut team_map,
+            base,
+            session(
+                "tok-team-only",
+                "u-team",
+                Some("team-use-limits-click"),
+                live,
+            ),
+        );
+        write_auth(&team_map);
+        pin_dollars();
+        assert!(
+            !next_request_draws_included_period_limits(),
+            "a hard-expired personal session beside a Team JWT does not draw included SuperGrok period limits"
+        );
+
+        let registry = ActionRegistry::defaults();
+        let area = Rect::new(0, 0, 140, 40);
+        crate::appearance::cache::set_hide_header(false);
+        let mut agent = make_agent();
+        let open = |agent: &mut crate::app::agent_view::AgentView, pct: f64| {
+            let mut bal = weekly_bal(pct, end);
+            bal.included_usage_known = true;
+            agent.plan_mode_active = false;
+            agent.plan_approval_view = None;
+            agent.sampling_identity = SamplingIdentityKind::SuperGrokSession;
+            agent.credit_balance = Some(bal.clone());
+            let snap = LimitsSnapshot::from_billing(
+                Some(&bal),
+                None,
+                SamplingIdentityKind::SuperGrokSession,
+            );
+            agent.active_modal = Some(crate::views::modal::ActiveModal::Limits {
+                state: Box::new(LimitsModalState::new(snap)),
+            });
+        };
+        let draw = |agent: &mut crate::app::agent_view::AgentView| -> Buffer {
+            let mut buf = Buffer::empty(area);
+            let mut scratch = ScratchBuffer::new();
+            agent.draw(
+                area,
+                &mut buf,
+                &registry,
+                &mut scratch,
+                None,
+                false,
+                BannerSlotParams::none(),
+                false,
+                false,
+                &mut Vec::new(),
+                AppRenderParams::default(),
+            );
+            buf
+        };
+        let click = |agent: &mut crate::app::agent_view::AgentView, column: u16, row: u16| {
+            agent.handle_input(
+                &Event::Mouse(MouseEvent {
+                    kind: MouseEventKind::Down(MouseButton::Left),
+                    column,
+                    row,
+                    modifiers: KeyModifiers::NONE,
+                }),
+                &registry,
+            )
+        };
+
+        open(&mut agent, 28.0);
+        let buf = draw(&mut agent);
+        let screen = screen_of(&buf, area);
+        assert!(
+            screen.contains("Use limits") && screen.contains("Using credits"),
+            "the team-only card offers Use limits:\n{screen}"
+        );
+        assert!(
+            !screen.contains("Using limits") && !paints_limits_percent(&screen),
+            "a Team JWT that is not drawing included limits does not claim them:\n{screen}"
+        );
+        let close = match agent.active_modal.as_ref() {
+            Some(crate::views::modal::ActiveModal::Limits { state }) => {
+                state.window.close_button_rect.expect("close control")
+            }
+            _ => panic!("limits card stays open"),
+        };
+        let esc = phrase_rect(&buf, area, "Esc close");
+        let use_limits = phrase_rect(&buf, area, "Use limits");
+        assert_eq!(painted(&buf, use_limits), "Use limits");
+        let recorded = match agent.active_modal.as_ref() {
+            Some(crate::views::modal::ActiveModal::Limits { state }) => {
+                state.use_limits_hit.expect("painted Use limits hit")
+            }
+            _ => panic!("limits card stays open"),
+        };
+        assert_eq!(recorded, use_limits);
+        assert!(!recorded.intersects(close));
+        assert!(!recorded.intersects(esc));
+        assert!(
+            agent.hit_credits.rect.is_some(),
+            "full draw arms the header chip"
+        );
+
+        let closed = click(&mut agent, close.x, close.y);
+        assert!(
+            matches!(closed, InputOutcome::Changed),
+            "the close control is its own click, got {closed:?}"
+        );
+        assert!(
+            agent.active_modal.is_none(),
+            "the close control closes the card"
+        );
+        assert_eq!(
+            load_limits_pins().meter_source,
+            Some(MeterSource::DollarCredits),
+            "the close control does not run Use limits"
+        );
+
+        open(&mut agent, 28.0);
+        let buf = draw(&mut agent);
+        let esc = phrase_rect(&buf, area, "Esc close");
+        let esc_click = click(&mut agent, esc.x, esc.y);
+        assert!(
+            matches!(esc_click, InputOutcome::Changed),
+            "Esc close is its own click, got {esc_click:?}"
+        );
+        assert!(
+            matches!(
+                agent.active_modal,
+                Some(crate::views::modal::ActiveModal::Limits { .. })
+            ),
+            "Esc close does not run Use limits"
+        );
+        assert_eq!(
+            load_limits_pins().meter_source,
+            Some(MeterSource::DollarCredits)
+        );
+
+        let use_limits = phrase_rect(&buf, area, "Use limits");
+        agent.hit_credits.rect = Some(use_limits);
+        let outcome = click(&mut agent, use_limits.x, use_limits.y);
+        assert!(
+            matches!(outcome, InputOutcome::Changed),
+            "a left click on the painted Use limits control is not a no-op, got {outcome:?}"
+        );
+        assert!(
+            !matches!(outcome, InputOutcome::Action(Action::ShowLimits)),
+            "Use limits is not swallowed as a header-chip click"
+        );
+        let pins = load_limits_pins();
+        assert!(!pins.use_console);
+        assert_eq!(pins.meter_source, Some(MeterSource::Included));
+        assert_ne!(pins.meter_source, Some(MeterSource::Console));
+        assert!(!next_request_draws_included_period_limits());
+        assert!(
+            matches!(
+                agent.active_modal,
+                Some(crate::views::modal::ActiveModal::Limits { .. })
+            ),
+            "Use limits keeps the card open"
+        );
+        let buf = draw(&mut agent);
+        let after = screen_of(&buf, area);
+        assert!(
+            after.contains("Using credits")
+                && after.contains("Use limits")
+                && !after.contains("Using limits")
+                && !paints_limits_percent(&after)
+                && !after.contains("limits 0%")
+                && !after.contains("$0"),
+            "the Team JWT click does not paint limits N% or Using limits:\n{after}"
+        );
+
+        let mut personal = std::collections::BTreeMap::new();
+        upsert_supergrok_session(
+            &mut personal,
+            base,
+            session("tok-personal-live", "u-personal-live", None, live),
+        );
+        write_auth(&personal);
+        pin_dollars();
+        assert!(
+            !next_request_draws_included_period_limits(),
+            "a dollar-credits pin is not included SuperGrok period limits"
+        );
+        open(&mut agent, 28.0);
+        let buf = draw(&mut agent);
+        let use_limits = phrase_rect(&buf, area, "Use limits");
+        assert_eq!(painted(&buf, use_limits), "Use limits");
+        agent.hit_credits.rect = Some(use_limits);
+        let outcome = click(&mut agent, use_limits.x.saturating_add(1), use_limits.y);
+        assert!(
+            matches!(outcome, InputOutcome::Changed),
+            "a personal session click on Use limits is handled, got {outcome:?}"
+        );
+        let pins = load_limits_pins();
+        assert_eq!(pins.meter_source, Some(MeterSource::Included));
+        assert!(!pins.use_console);
+        assert!(
+            next_request_draws_included_period_limits(),
+            "Use limits makes the next request draw included SuperGrok period limits"
+        );
+        let buf = draw(&mut agent);
+        let personal_screen = screen_of(&buf, area);
+        assert!(
+            personal_screen.contains("limits 28%") && personal_screen.contains("Using limits"),
+            "the header shows percent used after Use limits:\n{personal_screen}"
+        );
+        assert!(
+            !personal_screen.contains("limits 0%") && !personal_screen.contains("$0"),
+            "the personal header does not invent limits 0% or $0:\n{personal_screen}"
+        );
+        clear_console_team_postpaid_cache();
     }
 
     /// No pin file. The card says `Using limits`. The next request uses

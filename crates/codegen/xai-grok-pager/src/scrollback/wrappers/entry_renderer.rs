@@ -780,9 +780,14 @@ impl Renderable for EntryRenderer<'_> {
                 RenderBlock::ToolCall(_) | RenderBlock::Thinking(_)
             );
 
-        // Collapsed rows are one-line summaries, so a rail beside them is noise, flash included
-        // Truncated counts as open: it shows real content, and thinking blocks rest in that state
-        let accent = (!self.hide_accent && self.entry.display_mode != DisplayMode::Collapsed)
+        // Collapsed tool and thinking rows are one-line summaries, so a rail
+        // beside them is noise, flash included. An operator prompt still
+        // shows its message when collapsed, and that left `┃` is the
+        // Operator green accent. Truncated counts as open: it shows real
+        // content, and thinking blocks rest in that state.
+        let collapsed_drops_rail = self.entry.display_mode == DisplayMode::Collapsed
+            && !matches!(self.entry.block, RenderBlock::UserPrompt(_));
+        let accent = (!self.hide_accent && !collapsed_drops_rail)
             .then(|| {
                 if recently_finished {
                     let color = self

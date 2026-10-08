@@ -389,9 +389,6 @@ impl ThinkingBlock {
         } else {
             0
         };
-        // Quote-bar detection already ran. Body text takes the cyan role
-        // (`accent_system` on DOGE), not the default body color.
-        super::markdown_content::repaint_default_body_role(&mut content, fg_default);
         let mut blended = blend_line_with_default(content, bg_base, fg_default, blend_factor);
         if let Some(emphasis) = emphasis {
             for span in &mut blended.spans {
@@ -422,7 +419,7 @@ impl ThinkingBlock {
 
             let theme = Theme::current();
             let bg_base = theme.bg_base;
-            let fg_default = theme.accent_system;
+            let fg_default = theme.text_primary;
 
             let total = wrapped.lines.len();
             if total <= n {
@@ -498,7 +495,7 @@ impl ThinkingBlock {
 
             let theme = Theme::current();
             let bg_base = theme.bg_base;
-            let fg_default = theme.accent_system;
+            let fg_default = theme.text_primary;
 
             let mut output = BlockOutput {
                 lines: wrapped
@@ -960,10 +957,11 @@ mod tests {
         }
     }
 
-    /// Chain of thought text is cyan. On DOGE that role is `accent_system`.
-    /// `accent_thinking` stays magenta chrome and is not the body color.
+    /// Chain of thought body stays white. The open thought's left accent
+    /// is cyan (`accent_system`). `accent_thinking` stays magenta and is
+    /// not that rail.
     #[test]
-    fn chain_of_thought_text_is_cyan() {
+    fn chain_of_thought_text_stays_white_and_the_left_accent_is_cyan() {
         use ratatui::style::Color;
 
         let _lock = crate::theme::cache::test_lock()
@@ -975,23 +973,38 @@ mod tests {
         let theme = Theme::current();
         let cyan = Color::Rgb(0, 255, 255);
         let magenta = Color::Rgb(255, 0, 255);
+        let white = theme.text_primary;
         assert_eq!(theme.accent_system, cyan, "DOGE cyan role is accent_system");
         assert_eq!(
             theme.accent_thinking, magenta,
-            "accent_thinking stays magenta chrome, not the chain of thought body"
+            "accent_thinking stays magenta and is not the chain of thought rail"
         );
-        assert_ne!(theme.accent_system, theme.text_primary);
-        assert_ne!(theme.accent_system, theme.md_text);
+        assert_eq!(white, Color::Rgb(255, 255, 255));
+        assert_ne!(white, cyan);
+        assert_ne!(theme.md_text, cyan);
         assert_ne!(theme.accent_system, theme.accent_thinking);
         assert_ne!(theme.accent_system, theme.accent_running);
 
         let mut appearance = AppearanceConfig::default();
         appearance.scrollback.blocks.thinking.header = false;
+        assert_eq!(
+            appearance.scrollback.blocks.thinking.accent, cyan,
+            "the default chain-of-thought rail is accent_system"
+        );
         let ctx = BlockContext {
             appearance,
             ..ctx(DisplayMode::Expanded, 80)
         };
         let block = ThinkingBlock::new("plain reasoning text");
+        let accent = block
+            .accent(&ctx)
+            .expect("an open chain of thought keeps a left accent");
+        assert!(!accent.animated);
+        assert_eq!(accent.color, cyan);
+        assert_eq!(accent.color, theme.accent_system);
+        assert_ne!(accent.color, theme.accent_thinking);
+        assert_ne!(accent.color, white);
+
         let out = block.output(&ctx);
         let mut saw_body = false;
         for line in &out.lines {
@@ -1006,12 +1019,12 @@ mod tests {
                 saw_body = true;
                 assert_eq!(
                     span.style.fg,
-                    Some(cyan),
-                    "chain of thought text is cyan: {span:?}"
+                    Some(white),
+                    "chain of thought body stays white: {span:?}"
                 );
-                assert_eq!(span.style.fg, Some(theme.accent_system));
-                assert_ne!(span.style.fg, Some(theme.text_primary));
-                assert_ne!(span.style.fg, Some(theme.md_text));
+                assert_eq!(span.style.fg, Some(theme.text_primary));
+                assert_ne!(span.style.fg, Some(theme.accent_system));
+                assert_ne!(span.style.fg, Some(cyan));
                 assert_ne!(span.style.fg, Some(theme.accent_thinking));
                 assert_ne!(span.style.fg, Some(theme.accent_running));
             }

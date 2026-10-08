@@ -9177,6 +9177,172 @@ fn header_credits_slot_matches_the_team_postpaid_dollars_the_limits_card_shows()
     );
 }
 
+/// The header and the open Limits card show the same team postpaid Billing
+/// Credits remaining from the fetched limits snapshot. The card is built
+/// the way `/limits` opens it (`LimitsSnapshot::from_billing`), which does
+/// not copy Billing Credits onto that object. This fixture does not seed
+/// the process cache. Prepaid cents on the same file stay console team
+/// prepaid. A card that was not fetched stays unread.
+#[test]
+#[serial_test::serial]
+fn header_shows_the_same_team_postpaid_figure_the_open_card_shows() {
+    use crate::actions::ActionRegistry;
+    use crate::app::agent_view::test_fixtures::make_agent;
+    use crate::app::agent_view::{AppRenderParams, BannerSlotParams};
+    use crate::scrollback::render::ScratchBuffer;
+    use crate::views::credit_bar::SamplingIdentityKind;
+    use crate::views::limits_modal::LimitsModalState;
+    use crate::views::limits_snapshot::LimitsSnapshot;
+    use xai_grok_shell::auth::limits_pins::{
+        MeterSource, next_request_draws_included_period_limits,
+    };
+    use xai_grok_shell::auth::{
+        cached_console_team_postpaid, cached_console_team_postpaid_default,
+        read_limits_snapshot_file,
+    };
+
+    assert_header_fixture_amounts();
+    let _caches = HeaderMeterCacheGuard::install();
+    let home = tempfile::TempDir::new().expect("temp GROK_HOME");
+    let _env = xai_grok_test_support::EnvGuard::set("GROK_HOME", home.path());
+    write_oidc_preferred(home.path());
+    let team_id = "team-open-card-postpaid";
+    let base = "https://auth.x.ai::header-open-card-same-figure";
+    write_team_only_jwt(home.path(), base, team_id);
+    save_header_meter_pin(Some(MeterSource::Included), false);
+    assert!(
+        !next_request_draws_included_period_limits(),
+        "personal SuperGrok is hard-expired, so the Team JWT is not included SuperGrok period limits"
+    );
+
+    let write_card = |fetched: bool| {
+        let card = if fetched { "fetched" } else { "not_fetched" };
+        let management: xai_grok_shell::auth::LimitsSnapshotManagement =
+            serde_json::from_value(serde_json::json!({
+                "teamId": team_id,
+                "prepaidCents": 407_131,
+                "billingCreditsCard": card,
+                "billingCreditsCents": HEADER_TEAM_POSTPAID_DECOY_CENTS,
+                "postpaidPeriodTotalCents": 110_085,
+            }))
+            .expect("limits snapshot management");
+        let mut doc = xai_grok_shell::auth::LimitsSnapshotDocument::empty(1_791_447_441_029);
+        doc.management = Some(management);
+        xai_grok_shell::auth::write_limits_snapshot_file(home.path(), &doc)
+            .expect("write limits snapshot");
+    };
+    write_card(true);
+    let saved = read_limits_snapshot_file(home.path())
+        .and_then(|doc| doc.management)
+        .expect("snapshot management");
+    assert_eq!(saved.billing_credits_card.as_wire(), "fetched");
+    assert_eq!(
+        saved.billing_credits_cents,
+        Some(HEADER_TEAM_POSTPAID_DECOY_CENTS)
+    );
+    assert_eq!(saved.prepaid_cents, Some(407_131));
+    assert_eq!(saved.team_id.as_deref(), Some(team_id));
+    assert!(cached_console_team_postpaid_default().is_none());
+    assert!(
+        cached_console_team_postpaid(team_id).is_none(),
+        "this fixture does not seed the process cache"
+    );
+
+    let area = ratatui::layout::Rect::new(0, 0, 140, 40);
+    let paint_open = |balance: &crate::views::credit_bar::CreditBalance| -> (String, Option<i64>) {
+        crate::appearance::cache::set_hide_header(false);
+        let mut agent = make_agent();
+        agent.plan_mode_active = false;
+        agent.plan_approval_view = None;
+        agent.sampling_identity = SamplingIdentityKind::SuperGrokSession;
+        agent.credit_balance = Some(balance.clone());
+        let snap = LimitsSnapshot::from_billing(
+            Some(balance),
+            None,
+            SamplingIdentityKind::SuperGrokSession,
+        );
+        agent.active_modal = Some(crate::views::modal::ActiveModal::Limits {
+            state: Box::new(LimitsModalState::new(snap)),
+        });
+        let mut buf = ratatui::buffer::Buffer::empty(area);
+        let mut scratch = ScratchBuffer::new();
+        agent.draw(
+            area,
+            &mut buf,
+            &ActionRegistry::defaults(),
+            &mut scratch,
+            None,
+            false,
+            BannerSlotParams::none(),
+            false,
+            false,
+            &mut Vec::new(),
+            AppRenderParams::default(),
+        );
+        let card_cents = match agent.active_modal.as_ref() {
+            Some(crate::views::modal::ActiveModal::Limits { state }) => {
+                state.snapshot.console.billing_credits_cents
+            }
+            _ => panic!("the open card stays open"),
+        };
+        (header_screen_of(&buf, area), card_cents)
+    };
+
+    let balance = header_weekly_balance(28.0);
+    let (screen, card_cents) = paint_open(&balance);
+    assert_eq!(
+        card_cents, None,
+        "from_billing does not copy Billing Credits onto the card object"
+    );
+    let card_line = format!("Team postpaid Billing Credits: {HEADER_POSTPAID_LABEL} left");
+    let header_rows: String = screen.lines().take(3).collect::<Vec<_>>().join("\n");
+    assert!(
+        header_rows.contains(HEADER_POSTPAID_LABEL),
+        "the header row shows {HEADER_POSTPAID_LABEL}:\n{screen}"
+    );
+    assert!(
+        screen.contains(&card_line),
+        "the open card shows the same team postpaid figure ({card_line}):\n{screen}"
+    );
+    assert!(
+        screen.matches(HEADER_POSTPAID_LABEL).count() >= 2,
+        "the header and the card both show {HEADER_POSTPAID_LABEL}:\n{screen}"
+    );
+    assert!(
+        !screen.contains("Limits and Credits")
+            && !screen.contains("$4071.31")
+            && !screen.contains("$0")
+            && !screen.contains("limits 0%")
+            && !header_paints_limits_percent(&screen)
+            && screen.contains("Using credits")
+            && !screen.contains("Using limits"),
+        "the fetched card is team postpaid Billing Credits, not prepaid dollars or limits N%:\n{screen}"
+    );
+    assert!(cached_console_team_postpaid(team_id).is_none());
+    assert!(cached_console_team_postpaid_default().is_none());
+
+    write_card(false);
+    let unread_saved = read_limits_snapshot_file(home.path())
+        .and_then(|doc| doc.management)
+        .expect("not fetched snapshot");
+    assert_eq!(unread_saved.billing_credits_card.as_wire(), "not_fetched");
+    assert_eq!(
+        unread_saved.billing_credits_cents,
+        Some(HEADER_TEAM_POSTPAID_DECOY_CENTS)
+    );
+    let (unread, _) = paint_open(&balance);
+    assert!(
+        unread.contains("Limits and Credits")
+            && !unread.contains(HEADER_POSTPAID_LABEL)
+            && !unread.contains("$4071.31")
+            && !unread.contains("$0")
+            && !unread.contains("limits 0%")
+            && !header_paints_limits_percent(&unread),
+        "a Billing Credits card that was not fetched stays unread:\n{unread}"
+    );
+    assert!(cached_console_team_postpaid(team_id).is_none());
+}
+
 /// A live personal SuperGrok session can draw included SuperGrok period
 /// limits. This fixture is not a team-only JWT. Personal SuperGrok is not
 /// hard-expired. The pin starts on SuperGrok dollar credits, so

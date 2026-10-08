@@ -388,9 +388,17 @@ impl AgentView {
         // click. A left click writes Included when this session can draw
         // included SuperGrok period limits, then opens the card. Plan mode
         // closed and the plan-approval screen share this path.
+        // An open Limits card owns clicks on its own controls. `Use limits`
+        // must reach that card. Exit, comment, revise, and the close control
+        // stay on their own paths.
+        let limits_card_open = matches!(
+            self.active_modal,
+            Some(crate::views::modal::ActiveModal::Limits { .. })
+        );
         if let Event::Mouse(mouse) = ev
             && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
             && self.hit_credits.contains(mouse.column, mouse.row)
+            && !limits_card_open
         {
             pin_header_credits_click_to_included_period_limits();
             return InputOutcome::Action(Action::ShowLimits);
