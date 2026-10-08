@@ -22,10 +22,10 @@ use std::time::Instant;
 ///
 /// It writes `MeterSource::Included` when that pin would make the next
 /// request draw included SuperGrok period limits. It does not toggle back
-/// to SuperGrok dollar credits or the console API key. An Included pin
-/// stays. A team-only JWT with personal SuperGrok hard-expired cannot
-/// draw that meter, so this click leaves the pin and the header stays on
-/// team postpaid Billing Credits remaining.
+/// to SuperGrok dollar credits or the console API key. It does not set
+/// `use_console`. An Included pin draws that meter even beside a Team JWT.
+/// `use_console` still does not draw it, so this click leaves the pin when
+/// `use_console` is already set.
 fn pin_header_credits_click_to_included_period_limits() {
     use xai_grok_shell::auth::limits_pins::{
         MeterSource, apply_meter_source, load_limits_pins,

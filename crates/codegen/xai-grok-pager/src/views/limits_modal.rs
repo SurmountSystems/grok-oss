@@ -453,20 +453,33 @@ fn console_api_credits_balance_available(state: &LimitsModalState) -> bool {
     matches!(state.snapshot.console.balance_cents, Some(cents) if cents > 0)
 }
 
-/// True when the card may say `Using limits`. A team inference balance the
-/// requests are spending is not included SuperGrok period limits.
+/// True when the card may say `Using limits`.
+///
+/// That is the next request drawing included SuperGrok period limits. An
+/// accepted Included choice is that request, including beside a Team JWT.
+/// An unmarked card that shows a team inference balance is spending that
+/// team credit balance. A missing pin must not call that `Using limits`.
+/// The explicit Included pin still does, so that balance does not put
+/// `Use limits` back.
 fn showing_using_limits(state: &LimitsModalState) -> bool {
+    let pins = xai_grok_shell::auth::limits_pins::load_limits_pins();
+    let explicit_included =
+        pins.meter_source == Some(xai_grok_shell::auth::limits_pins::MeterSource::Included);
     let team_balance =
         inference_key_balance_for_unmarked_card(state).is_some_and(|cents| cents > 0);
-    xai_grok_shell::auth::limits_pins::next_request_draws_included_period_limits() && !team_balance
+    if team_balance && !explicit_included {
+        return false;
+    }
+    xai_grok_shell::auth::limits_pins::next_request_draws_included_period_limits()
 }
 
-fn spend_status_and_button(state: &LimitsModalState) -> (&'static str, &'static str) {
-    if showing_using_limits(state) {
-        ("Using limits", "Use credits")
-    } else {
-        ("Using credits", "Use limits")
-    }
+/// The operator asked for included SuperGrok period limits, and the next
+/// request still does not draw that meter. `use_console` is that case.
+/// An Included pin beside a Team JWT is not that case.
+fn included_limits_were_requested_but_are_not_drawn() -> bool {
+    let pins = xai_grok_shell::auth::limits_pins::load_limits_pins();
+    pins.meter_source == Some(xai_grok_shell::auth::limits_pins::MeterSource::Included)
+        && !xai_grok_shell::auth::limits_pins::next_request_draws_included_period_limits()
 }
 
 /// Limits label on the left, Credits label on the right.
@@ -474,34 +487,52 @@ fn spend_status_and_button(state: &LimitsModalState) -> (&'static str, &'static 
 /// The labels are `'static`. The signature must say so. Eliding the
 /// lifetime would keep `state` borrowed for the whole array, and the
 /// modal cannot mutably borrow `state.window` while that borrow lives.
-fn spend_shortcuts(state: &LimitsModalState) -> [Shortcut<'static>; 3] {
-    let (status_label, button_label) = spend_status_and_button(state);
-    let limits_is_status = status_label == "Using limits";
-    let (first_label, first_clickable, second_label, second_clickable) = if limits_is_status {
-        (status_label, false, button_label, true)
+fn spend_shortcuts(state: &LimitsModalState) -> Vec<Shortcut<'static>> {
+    let esc = Shortcut {
+        label: "Esc close",
+        clickable: true,
+        id: 1,
+    };
+    if showing_using_limits(state) {
+        vec![
+            Shortcut {
+                label: "Using limits",
+                clickable: false,
+                id: 0,
+            },
+            Shortcut {
+                label: "Use credits",
+                clickable: true,
+                id: SPEND_OTHER_CHOICE_ID,
+            },
+            esc,
+        ]
+    } else if included_limits_were_requested_but_are_not_drawn() {
+        // `use_console` still blocks the Included pin. `Using limits` would
+        // claim a meter this request does not draw.
+        vec![
+            Shortcut {
+                label: "Using credits",
+                clickable: false,
+                id: 0,
+            },
+            esc,
+        ]
     } else {
-        (button_label, true, status_label, false)
-    };
-    let click_id = |clickable: bool| {
-        if clickable { SPEND_OTHER_CHOICE_ID } else { 0 }
-    };
-    [
-        Shortcut {
-            label: first_label,
-            clickable: first_clickable,
-            id: click_id(first_clickable),
-        },
-        Shortcut {
-            label: second_label,
-            clickable: second_clickable,
-            id: click_id(second_clickable),
-        },
-        Shortcut {
-            label: "Esc close",
-            clickable: true,
-            id: 1,
-        },
-    ]
+        vec![
+            Shortcut {
+                label: "Use limits",
+                clickable: true,
+                id: SPEND_OTHER_CHOICE_ID,
+            },
+            Shortcut {
+                label: "Using credits",
+                clickable: false,
+                id: 0,
+            },
+            esc,
+        ]
+    }
 }
 
 fn persist_other_spend_choice(state: &LimitsModalState) -> std::io::Result<()> {
@@ -520,6 +551,30 @@ fn persist_other_spend_choice(state: &LimitsModalState) -> std::io::Result<()> {
         pins.stay_supergrok = false;
     }
     save_limits_pins(&pins)
+}
+
+/// Footer control that paints the words `Use limits`.
+///
+/// The shortcut renderer splits the label at the space (`Use` bold, ` limits`
+/// muted). Those cells are still one rect. A transcript line that happens to
+/// contain the same words is not this control.
+fn use_limits_control_rect(
+    buf: &Buffer,
+    shortcuts: &[Shortcut<'_>],
+    hits: &[crate::views::modal_window::ShortcutHitArea],
+) -> Option<Rect> {
+    const PHRASE: &str = "Use limits";
+    let idx = shortcuts
+        .iter()
+        .position(|shortcut| shortcut.label == PHRASE)?;
+    let hit = hits.iter().find(|hit| hit.shortcuts_idx == idx)?;
+    let painted = (0..hit.rect.width)
+        .map(|dx| buf[(hit.rect.x.saturating_add(dx), hit.rect.y)].symbol())
+        .collect::<String>();
+    if painted == PHRASE {
+        return Some(hit.rect);
+    }
+    painted_use_limits_rect(buf, hit.rect).or(Some(hit.rect))
 }
 
 /// Cells that paint the words `Use limits`.
@@ -619,13 +674,11 @@ pub fn render_limits_modal(
         state.use_limits_hit = None;
         return;
     };
-    // Record the painted words, not only the shortcut id. `Use credits`
-    // shares that id. `Using limits` is a status, not this control.
-    state.use_limits_hit = if showing_using_limits(state) {
-        None
-    } else {
-        painted_use_limits_rect(buf, area)
-    };
+    // Record the footer letters, not only the shortcut id. `Use credits`
+    // shares that id. `Using limits` is a status, not this control. A click
+    // that already asked for included limits, when this request cannot draw
+    // them, takes the control off the card.
+    state.use_limits_hit = use_limits_control_rect(buf, &shortcuts, &state.window.shortcut_hits);
     let content = mca.content;
     if content.width == 0 || content.height == 0 {
         return;
@@ -637,7 +690,8 @@ pub fn render_limits_modal(
     // split "Included ... allowance:" from "% used" and would skip the bar.
     let width = content.width as usize;
     // Header chip, footer, used percent, and remaining bar share this
-    // predicate. A Team JWT with no live personal SuperGrok session is false.
+    // predicate. An Included pin is true even beside a Team JWT. Without
+    // that pin, a Team JWT with no live personal SuperGrok session is false.
     let draws_included =
         xai_grok_shell::auth::limits_pins::next_request_draws_included_period_limits();
     let primary_bar = if draws_included {
@@ -2615,15 +2669,18 @@ mod tests {
         assert_eq!(bal.prepaid_balance_cents, Some(personal_cents));
     }
 
-    /// A left click on the painted `Use limits` control is handled.
+    /// A left click on the painted `Use limits` words changes the card.
     ///
     /// The header chip is forced over that same rect, which is the swallow
     /// the open card must ignore. Exit, comment, revise, Esc close, and the
-    /// close control do not write this pin. A team-only JWT with personal
-    /// SuperGrok hard-expired still takes the click and does not paint
-    /// `limits N%` or `Using limits`. A live personal session writes
-    /// `MeterSource::Included`, draws included SuperGrok period limits, and
-    /// the header shows percent used.
+    /// close control do not write this pin. A hard-expired personal session
+    /// beside a Team JWT still takes the click. The click writes
+    /// `MeterSource::Included` and does not set `use_console`. The next
+    /// request draws included SuperGrok period limits. The card shows
+    /// `Using limits`. The `Use limits` control is gone. The card does not
+    /// say included limits are not being drawn. The usage reading in this
+    /// fixture is known, so the header shows `limits 28%`. It does not
+    /// invent `limits 0%` or `$0`. A live personal session does the same.
     #[test]
     #[serial_test::serial]
     fn clicking_use_limits_on_the_limits_card_is_handled() {
@@ -2886,6 +2943,11 @@ mod tests {
         );
 
         let use_limits = phrase_rect(&buf, area, "Use limits");
+        let before = screen_of(&buf, area);
+        assert!(
+            before.contains("Use limits"),
+            "the click lands on the painted Use limits control:\n{before}"
+        );
         agent.hit_credits.rect = Some(use_limits);
         let outcome = click(&mut agent, use_limits.x, use_limits.y);
         assert!(
@@ -2900,7 +2962,10 @@ mod tests {
         assert!(!pins.use_console);
         assert_eq!(pins.meter_source, Some(MeterSource::Included));
         assert_ne!(pins.meter_source, Some(MeterSource::Console));
-        assert!(!next_request_draws_included_period_limits());
+        assert!(
+            next_request_draws_included_period_limits(),
+            "Use limits makes the next request draw included SuperGrok period limits"
+        );
         assert!(
             matches!(
                 agent.active_modal,
@@ -2910,14 +2975,25 @@ mod tests {
         );
         let buf = draw(&mut agent);
         let after = screen_of(&buf, area);
+        assert_ne!(
+            after, before,
+            "a left click on Use limits must change the team-session screen"
+        );
         assert!(
-            after.contains("Using credits")
-                && after.contains("Use limits")
-                && !after.contains("Using limits")
-                && !paints_limits_percent(&after)
-                && !after.contains("limits 0%")
-                && !after.contains("$0"),
-            "the Team JWT click does not paint limits N% or Using limits:\n{after}"
+            !after.contains("Use limits"),
+            "the Use limits control must not still be sitting there:\n{after}"
+        );
+        assert!(
+            !after.contains("Included limits are not being drawn for the next request."),
+            "the accepted choice does not refuse included SuperGrok period limits:\n{after}"
+        );
+        assert!(
+            after.contains("Using limits") && after.contains("limits 28%"),
+            "the card shows Using limits and the header shows percent used:\n{after}"
+        );
+        assert!(
+            !after.contains("limits 0%") && !after.contains("$0"),
+            "the Team JWT click does not invent limits 0% or $0:\n{after}"
         );
 
         let mut personal = std::collections::BTreeMap::new();
@@ -4156,8 +4232,8 @@ mod tests {
         })
         .expect("included pin");
         assert!(
-            !next_request_draws_included_period_limits(),
-            "an Included pin cannot paint limits in use for a Team JWT"
+            next_request_draws_included_period_limits(),
+            "an Included pin makes the next request draw included SuperGrok period limits even beside a Team JWT"
         );
         save_limits_pins(&LimitsPins {
             stay_supergrok: true,
@@ -4393,8 +4469,8 @@ mod tests {
         })
         .expect("included pin");
         assert!(
-            !next_request_draws_included_period_limits(),
-            "an Included pin cannot paint limits in use for a Team JWT"
+            next_request_draws_included_period_limits(),
+            "an Included pin makes the next request draw included SuperGrok period limits even beside a Team JWT"
         );
         save_limits_pins(&LimitsPins {
             stay_supergrok: true,

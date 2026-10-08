@@ -8623,8 +8623,8 @@ fn closed_plan_header_opens_limits_and_credits_without_a_false_percent() {
     })
     .expect("included pin");
     assert!(
-        !next_request_draws_included_period_limits(),
-        "an Included pin cannot paint limits in use for a Team JWT"
+        next_request_draws_included_period_limits(),
+        "an Included pin makes the next request draw included SuperGrok period limits even beside a Team JWT"
     );
     save_limits_pins(&LimitsPins {
         stay_supergrok: true,
@@ -9193,9 +9193,7 @@ fn header_shows_the_same_team_postpaid_figure_the_open_card_shows() {
     use crate::views::credit_bar::SamplingIdentityKind;
     use crate::views::limits_modal::LimitsModalState;
     use crate::views::limits_snapshot::LimitsSnapshot;
-    use xai_grok_shell::auth::limits_pins::{
-        MeterSource, next_request_draws_included_period_limits,
-    };
+    use xai_grok_shell::auth::limits_pins::next_request_draws_included_period_limits;
     use xai_grok_shell::auth::{
         cached_console_team_postpaid, cached_console_team_postpaid_default,
         read_limits_snapshot_file,
@@ -9209,10 +9207,13 @@ fn header_shows_the_same_team_postpaid_figure_the_open_card_shows() {
     let team_id = "team-open-card-postpaid";
     let base = "https://auth.x.ai::header-open-card-same-figure";
     write_team_only_jwt(home.path(), base, team_id);
-    save_header_meter_pin(Some(MeterSource::Included), false);
+    // This screen spends team postpaid Billing Credits. An Included pin
+    // would draw included SuperGrok period limits instead, and the header
+    // would show percent used. No pin keeps the credit-meter figure.
+    save_header_meter_pin(None, false);
     assert!(
         !next_request_draws_included_period_limits(),
-        "personal SuperGrok is hard-expired, so the Team JWT is not included SuperGrok period limits"
+        "with no Included pin, a hard-expired personal session beside a Team JWT does not draw included SuperGrok period limits"
     );
 
     let write_card = |fetched: bool| {

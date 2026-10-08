@@ -565,10 +565,11 @@ fn next_request_sends_team_jwt_not_included_period(pins: &LimitsPins) -> bool {
 /// The status chip and the limits card must use this. Do not paint a limits
 /// label when this is false. A DollarCredits pin is SuperGrok dollar credits.
 /// A Console pin with team prepaid remaining is console API credits. Neither
-/// is included SuperGrok period limits. A live Team JWT with no live personal
-/// SuperGrok session does not draw included SuperGrok period limits, so an
-/// unread meter must not paint `limits 0%` and a known team percent must not
-/// paint `limits N%`.
+/// is included SuperGrok period limits. `use_console` is not that meter.
+/// An explicit Included pin is that meter, including beside a Team JWT.
+/// Without that pin, a live Team JWT with no live personal SuperGrok session
+/// does not draw included SuperGrok period limits, so an unread meter must
+/// not paint `limits 0%`.
 pub fn next_request_draws_included_period_limits() -> bool {
     next_request_draws_included_period_limits_for(&load_limits_pins())
 }
@@ -579,9 +580,11 @@ pub fn next_request_draws_included_period_limits_for(pins: &LimitsPins) -> bool 
         return false;
     }
     let pins_allow = match pins.meter_source {
+        // The operator chose included SuperGrok period limits. A Team JWT
+        // does not veto that choice, and this does not set `use_console`.
+        Some(MeterSource::Included) => return true,
         Some(MeterSource::DollarCredits) => false,
         Some(MeterSource::Console) => !console_team_prepaid_available(),
-        Some(MeterSource::Included) => true,
         None | Some(MeterSource::Combined) => {
             let console_primary_blocks_default = disk_preferred_is_console_primary()
                 && (pins.stay_supergrok || pins.supergrok_identity.is_some());
@@ -1486,8 +1489,9 @@ preferred_method = "api_key"
     /// When limits mode is on, the next model request draws included SuperGrok
     /// period limits, and an unread meter does not paint `limits 0%`.
     /// A live Team JWT with no live personal SuperGrok session does not draw
-    /// included SuperGrok period limits. The header must not paint `limits N%`
-    /// for that request. A live personal session still draws that meter.
+    /// included SuperGrok period limits until the operator chooses that meter.
+    /// An Included pin is that choice, even beside a Team JWT. A live personal
+    /// session still draws that meter with no pin.
     #[test]
     #[serial_test::serial]
     fn limits_mode_draws_included_period_limits_unless_the_bearer_is_a_team_jwt() {
@@ -1524,11 +1528,11 @@ preferred_method = "api_key"
             "limits mode with only a live Team JWT does not draw included SuperGrok period limits"
         );
         assert!(
-            !next_request_draws_included_period_limits_for(&LimitsPins {
+            next_request_draws_included_period_limits_for(&LimitsPins {
                 meter_source: Some(MeterSource::Included),
                 ..LimitsPins::default()
             }),
-            "an Included pin cannot paint limits in use for a Team JWT"
+            "an Included pin makes the next request draw included SuperGrok period limits even beside a Team JWT"
         );
 
         write_live_session(
