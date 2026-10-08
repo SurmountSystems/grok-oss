@@ -1102,6 +1102,10 @@ impl AgentView {
                     } else if is_plan_preview && !self.plan_comments.is_empty() {
                         // Casual mode: the only action button shown is `s send` (when there are comments to send)
                         return self.send_casual_plan_comments();
+                    } else if is_plan_preview {
+                        // Plan Exit leaves this footer up with no review.
+                        // The painted word Approve still starts implement.
+                        return self.approve_unmounted_plan_footer();
                     }
                     return InputOutcome::Changed;
                 }

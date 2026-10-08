@@ -202,6 +202,76 @@ fn linear_week_label(pacing: xai_grok_shell::token_economy::PeriodPacing) -> Str
     }
 }
 
+/// `$GROK_HOME` on each call. The process grok home OnceLock misses a
+/// fixture home written after the lock.
+fn limits_reading_grok_home() -> std::path::PathBuf {
+    match std::env::var("GROK_HOME") {
+        Ok(home) => std::path::PathBuf::from(home),
+        Err(_) => xai_grok_shell::util::grok_home::grok_home(),
+    }
+}
+
+/// Team id on a live Team JWT. Hard-expired rows and the personal slot
+/// are not this id.
+fn live_team_jwt_team_id() -> Option<String> {
+    let map =
+        xai_grok_shell::auth::read_auth_json(&limits_reading_grok_home().join("auth.json")).ok()?;
+    for (scope, auth) in &map {
+        if scope.contains("::personal") {
+            continue;
+        }
+        if !xai_grok_shell::auth::is_supergrok_session_mode(auth.auth_mode) {
+            continue;
+        }
+        if auth.key.trim().is_empty() || !auth.is_team_principal() {
+            continue;
+        }
+        if auth.expires_at.is_some_and(|end| chrono::Utc::now() >= end) {
+            continue;
+        }
+        if let Some(id) = auth
+            .team_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+        {
+            return Some(id.to_owned());
+        }
+    }
+    None
+}
+
+/// Whole dollars as `$N`, otherwise `$N.NN`. A missing reading is not `$0`.
+pub(crate) fn format_remaining_cents_as_dollars(cents: i64) -> String {
+    let negative = cents < 0;
+    let abs_cents = cents.unsigned_abs();
+    let dollars = abs_cents / 100;
+    let frac = abs_cents % 100;
+    let body = if frac == 0 {
+        format!("${dollars}")
+    } else {
+        format!("${dollars}.{frac:02}")
+    };
+    if negative { format!("-{body}") } else { body }
+}
+
+/// Team postpaid Billing Credits remaining shared by the header chip and
+/// the Limits card. The process cache is one slot, keyed by the Management
+/// API team id, which is not the Team JWT team id. Try that management id
+/// first, then the JWT id. `None` stays unread. This does not invent `$0`.
+/// Not included SuperGrok period limits, not SuperGrok dollar credits, and
+/// not console team prepaid.
+pub(crate) fn team_postpaid_billing_credits_remaining_dollars() -> Option<String> {
+    let cents = xai_grok_shell::auth::cached_console_team_postpaid_default()
+        .and_then(|meter| meter.billing_credits_remaining_cents)
+        .or_else(|| {
+            let team_id = live_team_jwt_team_id()?;
+            xai_grok_shell::auth::cached_console_team_postpaid(&team_id)?
+                .billing_credits_remaining_cents
+        })?;
+    Some(format_remaining_cents_as_dollars(cents))
+}
+
 fn limits_tab_lines(
     state: &LimitsModalState,
     now: DateTime<Utc>,
@@ -240,6 +310,10 @@ fn limits_tab_lines(
     let console = credits_tab_meter_line(&console_credits_line(state));
     if console.trim() == "Console API credits: not available" {
         lines.push(console);
+    }
+    // Same remaining the header chip paints. Omit the line when unread.
+    if let Some(dollars) = team_postpaid_billing_credits_remaining_dollars() {
+        lines.push(format!("  Team postpaid Billing Credits: {dollars} left"));
     }
     lines
 }

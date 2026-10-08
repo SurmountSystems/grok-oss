@@ -389,6 +389,9 @@ impl ThinkingBlock {
         } else {
             0
         };
+        // Quote-bar detection already ran. Body text takes the cyan role
+        // (`accent_system` on DOGE), not the default body color.
+        super::markdown_content::repaint_default_body_role(&mut content, fg_default);
         let mut blended = blend_line_with_default(content, bg_base, fg_default, blend_factor);
         if let Some(emphasis) = emphasis {
             for span in &mut blended.spans {
@@ -419,7 +422,7 @@ impl ThinkingBlock {
 
             let theme = Theme::current();
             let bg_base = theme.bg_base;
-            let fg_default = theme.text_primary;
+            let fg_default = theme.accent_system;
 
             let total = wrapped.lines.len();
             if total <= n {
@@ -495,7 +498,7 @@ impl ThinkingBlock {
 
             let theme = Theme::current();
             let bg_base = theme.bg_base;
-            let fg_default = theme.text_primary;
+            let fg_default = theme.accent_system;
 
             let mut output = BlockOutput {
                 lines: wrapped
@@ -955,5 +958,64 @@ mod tests {
             let out = empty.output(&hinted(mode, 60));
             assert!(!text_of(&out).contains(EXPAND_HINT), "empty/{mode:?}");
         }
+    }
+
+    /// Chain of thought text is cyan. On DOGE that role is `accent_system`.
+    /// `accent_thinking` stays magenta chrome and is not the body color.
+    #[test]
+    fn chain_of_thought_text_is_cyan() {
+        use ratatui::style::Color;
+
+        let _lock = crate::theme::cache::test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::theme::cache::reset_for_test();
+        crate::theme::cache::set(crate::theme::ThemeKind::Doge);
+
+        let theme = Theme::current();
+        let cyan = Color::Rgb(0, 255, 255);
+        let magenta = Color::Rgb(255, 0, 255);
+        assert_eq!(theme.accent_system, cyan, "DOGE cyan role is accent_system");
+        assert_eq!(
+            theme.accent_thinking, magenta,
+            "accent_thinking stays magenta chrome, not the chain of thought body"
+        );
+        assert_ne!(theme.accent_system, theme.text_primary);
+        assert_ne!(theme.accent_system, theme.md_text);
+        assert_ne!(theme.accent_system, theme.accent_thinking);
+        assert_ne!(theme.accent_system, theme.accent_running);
+
+        let mut appearance = AppearanceConfig::default();
+        appearance.scrollback.blocks.thinking.header = false;
+        let ctx = BlockContext {
+            appearance,
+            ..ctx(DisplayMode::Expanded, 80)
+        };
+        let block = ThinkingBlock::new("plain reasoning text");
+        let out = block.output(&ctx);
+        let mut saw_body = false;
+        for line in &out.lines {
+            let plain = crate::scrollback::types::line_plain_text(&line.content);
+            if !plain.contains("plain reasoning text") {
+                continue;
+            }
+            for span in &line.content.spans {
+                if !span.content.chars().any(|c| c.is_ascii_alphabetic()) {
+                    continue;
+                }
+                saw_body = true;
+                assert_eq!(
+                    span.style.fg,
+                    Some(cyan),
+                    "chain of thought text is cyan: {span:?}"
+                );
+                assert_eq!(span.style.fg, Some(theme.accent_system));
+                assert_ne!(span.style.fg, Some(theme.text_primary));
+                assert_ne!(span.style.fg, Some(theme.md_text));
+                assert_ne!(span.style.fg, Some(theme.accent_thinking));
+                assert_ne!(span.style.fg, Some(theme.accent_running));
+            }
+        }
+        assert!(saw_body, "chain of thought body was not painted");
     }
 }

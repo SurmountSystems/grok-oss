@@ -2638,6 +2638,61 @@ paint. SuperGrok is paid. Older pins above stay.
   stays the team-only `$47.03` contract. Do not invent a hop to the
   console API key.
 
+**Dollar-credits pin, console pin, and use_console header (pinned
+2026-10-07).** These sentences say what the header must do. They are
+not a claim that the tests already pass. Do not reshape the asserts
+to match today's paint. SuperGrok is paid. Older pins above stay.
+The meters stay distinct: included SuperGrok period limits, SuperGrok
+dollar credits, console team prepaid / console API credits, and team
+postpaid Billing Credits.
+
+- A SuperGrok dollar-credits pin (`MeterSource::DollarCredits`) and a
+  known SuperGrok dollar-credits remaining show those dollars on the
+  header. The header does not show the words `Limits and Credits`. It
+  does not show team postpaid Billing Credits. It does not show console
+  team prepaid. It does not show `limits N%`. When that remaining was
+  not read, the header stays on the words `Limits and Credits`. It does
+  not become `$0` or `limits 0%`. Named test:
+  `header_shows_supergrok_dollar_credits_remaining_when_that_pin_is_set`.
+  The fixture remaining is `$87.65`.
+- A console pin (`MeterSource::Console`) and a known console team
+  prepaid / console API credits remaining show those dollars. The
+  header does not show the words `Limits and Credits`, team postpaid
+  Billing Credits, SuperGrok dollar credits, or `limits N%`. The
+  snapshot prepaid remaining wins over a different process-cache
+  amount. When that remaining was not read, the header stays on the
+  words. It does not become `$0` or `limits 0%`. Named test:
+  `header_shows_console_credits_remaining_when_the_console_pin_is_set`.
+  The fixture remaining is `$154.20`.
+- `use_console` and a known console team prepaid / console API credits
+  remaining show those dollars. `use_console` wins when a dollar-credits
+  pin is also set, because that flag is what the next request spends.
+  An unread console remaining stays on the words even when SuperGrok
+  dollar credits were read. Named test:
+  `header_shows_console_credits_remaining_when_use_console_is_set`.
+  The fixture remaining is `$154.20`.
+- Included SuperGrok period limits, when they are what the next request
+  draws and the usage reading is known, still paint percent used
+  (`limits 28%` in the personal fixture). A team-only JWT does not hop
+  to the console API key and does not paint `limits N%` while it is
+  not drawing included limits.
+- `header_credits_slot_matches_the_team_postpaid_dollars_the_limits_card_shows`
+  stays. It requires `$442.97` for team postpaid Billing Credits.
+  `closed_plan_header_opens_limits_and_credits_without_a_false_percent`
+  stays the fixture `$47.03`.
+  `limits_mode_does_not_paint_limits_in_use_for_a_team_jwt_and_an_unread_meter_is_not_zero_percent`
+  still forbids `limits 0%`, `limits 1%`, `Using limits`, and an unread
+  meter painted as zero.
+  `clicking_the_header_credits_chip_switches_the_next_request_to_included_period_limits_and_still_opens_the_card`
+  stays. That click fixture does not seed a SuperGrok dollar-credits
+  remaining, so the words `Limits and Credits` remain its click target.
+
+**Transcript message colors (pinned 2026-10-07).** These sentences say what the transcript must paint. They are not a claim that the tests already pass. Do not reshape the asserts to match today's paint. The owed paint is the message bodies. Rails stay the roles they already use.
+
+- The Operator's own message text, which sits on the left of the transcript, is Operator green. That role is `accent_user`. On DOGE, `accent_user` is `Rgb(0, 255, 0)`. That text is not the default body color (`text_primary`). The composer caret and the operator rails stay Operator green. The mid-draft letter under the caret still uses `text_primary` on the empty blink half. Do not paint the caret magenta. Do not change that blink rule. Named test: `operator_message_text_on_the_left_is_green`. `doge_accent_user_is_pure_green_for_human` stays the palette proof that `accent_user` is pure green.
+- Chain of thought text is cyan. On DOGE the cyan role is `accent_system` (`Rgb(0, 255, 255)`). That is the same token `doge_accent_system_is_pure_cyan_for_system_limits_credits` already proves. `accent_thinking` stays magenta (`Rgb(255, 0, 255)`) and is the thinking chrome (the rail), not the chain-of-thought body. No new theme key was added. Named test: `chain_of_thought_text_is_cyan`.
+- The Agent's actual response text is magenta. That role is `accent_running`. On DOGE, `accent_running` is `Rgb(255, 0, 255)`. That text is not `text_primary` and not `md_text`. Named test: `agent_response_text_is_magenta`.
+
 **Rules (not product class numbers):**
 
 - **`FORK_PATHS` restore is docs and scripts only.** Product seams inside

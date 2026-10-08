@@ -414,3 +414,13 @@ Each theme defines the following color slots that are used throughout the TUI:
 **Markdown:** heading colors (`md_heading_h1`-`md_heading_h6`), `md_code`, `md_code_bg`, `md_text`, `md_muted`, `md_task_checked`, `md_task_unchecked`, `link_fg`
 
 The theme system manages these slots internally and quantizes them automatically for your terminal.
+
+## Transcript message colors
+
+These sentences say what the transcript must paint. They are not a claim that the tests already pass.
+
+The Operator's own message text, which sits on the left of the transcript, is Operator green. That role is `accent_user`. On DOGE, `accent_user` is pure green (`#00FF00`). That text is not the default body color (`text_primary`). The composer caret and the operator rails stay Operator green. The mid-draft letter under the caret still uses `text_primary` on the empty blink half. The named test is `operator_message_text_on_the_left_is_green`.
+
+Chain of thought text is cyan. On DOGE the cyan role is `accent_system` (`#00FFFF`). `accent_thinking` stays magenta and is the thinking chrome, not the chain of thought body. The named test is `chain_of_thought_text_is_cyan`.
+
+The Agent's actual response text is magenta. That role is `accent_running`. On DOGE, `accent_running` is pure magenta (`#FF00FF`). That text is not `text_primary` and not `md_text`. The named test is `agent_response_text_is_magenta`.

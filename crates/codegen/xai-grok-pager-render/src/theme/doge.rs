@@ -17,10 +17,10 @@
 //! **Grok OSS application semantic roles** (on top of the pure palette;
 //! normative palette SoT: https://github.com/SurmountSystems/specs/blob/main/0001_DOGE.md
 //! Clause 8 MAY define app roles):
-//! - **Green** — Human (prompt pointer, left rail, OSC 12 cursor, success)
-//! - **Magenta** — Agent (activity, model label, assistant/thinking chrome)
+//! - **Green** — Operator (`accent_user`: message text, prompt pointer, left rail, OSC 12 cursor, success)
+//! - **Magenta** — Agent (`accent_running`: response text and activity; `accent_thinking` is thinking chrome, not the chain-of-thought body)
 //! - **Yellow** — Dates, times, other useful context / secondary chrome
-//! - **Cyan** — System tags, limits, credits, path/meta
+//! - **Cyan** — Chain of thought body (`accent_system`), system tags, limits, credits, path/meta
 //! - **Red / Blue** — Avoid unless contextually useful (errors stay red)
 //! - **Gray / alpha** — Forbidden as theme palette colours
 //!
@@ -228,17 +228,18 @@ impl Theme {
             bg_hover: BLACK,
             bg_terminal: BLACK,
 
-            // Human chrome: prompt pointer, left rail, OSC 12 cursor → green.
+            // Operator message text, prompt pointer, left rail, OSC 12 cursor → green.
             accent_user: GREEN,
             accent_assistant: MAGENTA,
+            // Thinking chrome (rail). Chain of thought body text uses accent_system.
             accent_thinking: MAGENTA,
             accent_tool: WHITE,
-            // System tags / limits / credits family → cyan (free green for Human).
+            // Chain of thought body, system tags, limits, and credits → cyan.
             accent_system: CYAN,
             accent_error: RED,
             // Success checkmarks stay green (same primary as Human).
             accent_success: GREEN,
-            // Agent activity + subagent throbber / tool running accent → magenta.
+            // Agent response text and activity → magenta.
             accent_running: MAGENTA,
             // Slash skills + skill tool accent → green (affordance family).
             accent_skill: GREEN,

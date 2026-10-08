@@ -272,88 +272,81 @@ fn status_row_paints_included_period_limits_chip(
         && xai_grok_shell::auth::limits_pins::next_request_draws_included_period_limits()
 }
 
-/// `$GROK_HOME` on each call. `grok_home()` is a OnceLock and misses the
-/// test home the fixture writes.
-fn limits_grok_home() -> std::path::PathBuf {
-    match std::env::var("GROK_HOME") {
-        Ok(home) => std::path::PathBuf::from(home),
-        Err(_) => xai_grok_shell::util::grok_home::grok_home(),
-    }
-}
-
-/// Team id on a live Team JWT. Hard-expired rows and the personal slot
-/// are not this id. That id is what the postpaid cache was seeded with.
-fn live_team_jwt_team_id() -> Option<String> {
-    let map = xai_grok_shell::auth::read_auth_json(&limits_grok_home().join("auth.json")).ok()?;
-    for (scope, auth) in &map {
-        if scope.contains("::personal") {
-            continue;
-        }
-        if !xai_grok_shell::auth::is_supergrok_session_mode(auth.auth_mode) {
-            continue;
-        }
-        if auth.key.trim().is_empty() || !auth.is_team_principal() {
-            continue;
-        }
-        if auth.expires_at.is_some_and(|end| chrono::Utc::now() >= end) {
-            continue;
-        }
-        if let Some(id) = auth
-            .team_id
-            .as_deref()
-            .map(str::trim)
-            .filter(|id| !id.is_empty())
-        {
-            return Some(id.to_owned());
-        }
-    }
-    None
-}
-
-/// Whole dollars as `$N`, otherwise `$N.NN`. A different cent balance
-/// paints a different string. Do not hardcode one amount.
-fn format_remaining_cents_as_dollars(cents: i64) -> String {
-    let negative = cents < 0;
-    let abs_cents = cents.unsigned_abs();
-    let dollars = abs_cents / 100;
-    let frac = abs_cents % 100;
-    let body = if frac == 0 {
-        format!("${dollars}")
-    } else {
-        format!("${dollars}.{frac:02}")
-    };
-    if negative { format!("-{body}") } else { body }
-}
-
-/// Team postpaid Billing Credits remaining from the process cache.
-/// Not included SuperGrok period limits, not SuperGrok dollar credits,
-/// and not console team prepaid.
+/// Team postpaid Billing Credits remaining. The Limits card uses this
+/// same reading. A Management API team id and a Team JWT team id are
+/// not the same lookup.
 fn team_postpaid_billing_credits_remaining_label() -> Option<String> {
-    let team_id = live_team_jwt_team_id()?;
-    let cents = xai_grok_shell::auth::cached_console_team_postpaid(&team_id)?
-        .billing_credits_remaining_cents?;
-    Some(format_remaining_cents_as_dollars(cents))
+    crate::views::limits_modal::team_postpaid_billing_credits_remaining_dollars()
+}
+
+/// `$GROK_HOME` on each call. The process grok home OnceLock misses a
+/// fixture home written after the lock.
+fn header_reading_grok_home() -> std::path::PathBuf {
+    match std::env::var("GROK_HOME") {
+        Ok(home) if !home.is_empty() => std::path::PathBuf::from(home),
+        _ => xai_grok_shell::util::grok_home::grok_home(),
+    }
+}
+
+/// SuperGrok dollar credits remaining for the active session, from the
+/// credits-poll cache. `None` was not read. This is not team postpaid
+/// Billing Credits and not console team prepaid. It does not invent `$0`.
+fn supergrok_dollar_credits_remaining_label() -> Option<String> {
+    let home = header_reading_grok_home();
+    let identity = xai_grok_shell::auth::active_supergrok_identity_id(&home)?;
+    let cents = xai_grok_shell::auth::included_billing_fields_snapshot()
+        .get(&identity)?
+        .prepaid_balance_cents?;
+    Some(crate::views::limits_modal::format_remaining_cents_as_dollars(cents.abs()))
+}
+
+/// Console team prepaid / console API credits remaining. The snapshot
+/// file is the same reading that decides a console pin is not included
+/// SuperGrok period limits. The process cache covers an inference-key
+/// read that has not been written to that file yet. `None` was not read.
+/// This does not invent `$0`.
+fn console_team_prepaid_remaining_cents() -> Option<i64> {
+    let home = header_reading_grok_home();
+    if let Some(doc) = xai_grok_shell::auth::read_limits_snapshot_file(&home)
+        && let Some(cents) = doc.management.and_then(|mgmt| mgmt.prepaid_cents)
+    {
+        return Some(cents);
+    }
+    xai_grok_shell::auth::cached_console_team_prepaid_cents_any()
+}
+
+fn console_team_prepaid_remaining_label() -> Option<String> {
+    let cents = console_team_prepaid_remaining_cents()?;
+    Some(crate::views::limits_modal::format_remaining_cents_as_dollars(cents.abs()))
 }
 
 /// Header text when the next request does not draw included SuperGrok
-/// period limits. A live Team JWT with a cached Billing Credits reading
-/// paints that remaining. Dollar-credits and console pins do not.
-/// Without the reading the chip stays `Limits and Credits`.
+/// period limits. A dollar-credits pin shows that meter's remaining.
+/// A console pin or `use_console` shows console team prepaid remaining.
+/// `use_console` wins when both are set, because that flag is what the
+/// next request spends. Those pins do not show team postpaid Billing
+/// Credits. A team-only JWT with no such pin shows team postpaid Billing
+/// Credits when that cache was read. Without the reading the chip stays
+/// `Limits and Credits`.
 fn credits_label_when_included_period_is_not_next_request() -> String {
     let pins = xai_grok_shell::auth::limits_pins::load_limits_pins();
-    let pinned_other_meter = pins.use_console
+    let console_meter = pins.use_console
         || matches!(
             pins.meter_source,
-            Some(
-                xai_grok_shell::auth::limits_pins::MeterSource::DollarCredits
-                    | xai_grok_shell::auth::limits_pins::MeterSource::Console
-            )
+            Some(xai_grok_shell::auth::limits_pins::MeterSource::Console)
         );
-    if pinned_other_meter {
-        return "Limits and Credits".to_owned();
+    let dollar_meter = matches!(
+        pins.meter_source,
+        Some(xai_grok_shell::auth::limits_pins::MeterSource::DollarCredits)
+    );
+    let unread = || "Limits and Credits".to_owned();
+    if console_meter {
+        return console_team_prepaid_remaining_label().unwrap_or_else(unread);
     }
-    team_postpaid_billing_credits_remaining_label()
-        .unwrap_or_else(|| "Limits and Credits".to_owned())
+    if dollar_meter {
+        return supergrok_dollar_credits_remaining_label().unwrap_or_else(unread);
+    }
+    team_postpaid_billing_credits_remaining_label().unwrap_or_else(unread)
 }
 
 /// AppView-owned per-frame inputs to [`AgentView::draw`]: state the agent view cannot see itself (voice pipeline, Esc ownership, status row).
@@ -1750,8 +1743,9 @@ impl AgentView {
         }
         // Short status chip only. Do not use the verbose SuperGrok period helper.
         // `limits N%` only when the next request draws included SuperGrok
-        // period limits. When it does not, a live Team JWT paints team
-        // postpaid Billing Credits remaining from the process cache.
+        // period limits. A dollar-credits pin shows that meter's remaining.
+        // A console pin or use_console shows console team prepaid remaining.
+        // Otherwise the chip paints team postpaid Billing Credits remaining.
         // Without that reading the chip stays `Limits and Credits`.
         // That control is not `limits 0%` and not `limits N%`.
         if let Some(balance) = self.credit_balance.as_ref()

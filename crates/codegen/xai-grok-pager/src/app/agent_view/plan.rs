@@ -1262,6 +1262,27 @@ impl AgentView {
         self.finish_approve_plan(false)
     }
 
+    /// The side pane still paints `approve | comment | revise | exit` after
+    /// Plan Exit, when `plan_approval_view` is gone. A left click on the
+    /// painted word Approve starts implement. A second click after Approve
+    /// already started implement stays quiet, so view-plan does not send
+    /// another implement turn.
+    pub(crate) fn approve_unmounted_plan_footer(&mut self) -> InputOutcome {
+        if self.plan_approved_implement || self.plan_feedback_in_flight.is_some() {
+            return InputOutcome::Changed;
+        }
+        self.record_explicit_plan_choice(
+            crate::views::file_search::line_viewer::RecordedPlanChoice::Approve,
+        );
+        self.plan_decision_resolved = true;
+        self.plan_approved_implement = true;
+        self.persist_plan_decision_resolved_flag(true);
+        self.close_plan_review_and_forget(PlanReviewOutcome::Approved);
+        self.cancel_line_viewer();
+        let implement = crate::views::plan_approval_view::PLAN_APPROVED_IMPLEMENT_MESSAGE;
+        InputOutcome::Action(Action::SendPrompt(implement.to_string()))
+    }
+
     /// Enter Approve. Notes in the Operator box interject with the review
     /// lead. Preview line comments with an empty composer stay Changed.
     /// Empty Enter does not reach this function.
@@ -4820,6 +4841,175 @@ mod plan_approval_optimistic_mode_tests {
         );
         assert!(agent.line_viewer.is_some(), "view-plan pane stays open");
     }
+
+    /// Plan Exit leaves the side pane up. The footer is
+    /// `approve | comment | revise | exit` and the review is gone.
+    /// A left click on the painted word `approve` approves the plan.
+    /// Comment, revise, and exit stay their own actions.
+    #[test]
+    fn clicking_approve_in_the_plan_footer_approves_the_plan() {
+        let _pin = crate::theme::cache::pin_theme();
+        crate::theme::cache::set(crate::theme::ThemeKind::Doge);
+        let body = "# Plan\n\nApprove this plan.\n";
+
+        let mut agent = plan_footer_after_exit(body);
+        let buf = draw_agent_hits(&mut agent, 100, 40);
+        let (col, row) = painted_footer_word(&buf, "approve").expect("painted approve");
+        let hit = agent
+            .line_viewer
+            .as_ref()
+            .and_then(|viewer| viewer.plan_ref())
+            .and_then(|plan| plan.approve_button_area)
+            .expect("approve hit rect");
+        assert!(
+            hit.contains((col, row).into()),
+            "approve click ({col}, {row}) must sit in hit rect x={} y={} width={} height={}",
+            hit.x,
+            hit.y,
+            hit.width,
+            hit.height
+        );
+        let outcome = left_click(&mut agent, col, row);
+        match outcome {
+            InputOutcome::Action(Action::SendPrompt(text)) => {
+                assert!(
+                    text.contains(
+                        crate::views::plan_approval_view::PLAN_APPROVED_IMPLEMENT_MESSAGE
+                    ),
+                    "approve click must send the implement sentence; got {text}"
+                );
+            }
+            other => panic!("approve click must approve the plan; got {other:?}"),
+        }
+        assert!(agent.plan_approved_implement);
+        assert!(
+            agent.plan_approval_view.is_none(),
+            "approve must not invent a new park"
+        );
+
+        let mut exit_agent = plan_footer_after_exit(body);
+        let exit_buf = draw_agent_hits(&mut exit_agent, 100, 40);
+        let (exit_col, exit_row) = painted_footer_word(&exit_buf, "exit").expect("painted exit");
+        let exit_hit = exit_agent
+            .line_viewer
+            .as_ref()
+            .and_then(|viewer| viewer.plan_ref())
+            .and_then(|plan| plan.abandon_button_area)
+            .expect("exit hit rect");
+        assert!(
+            exit_hit.contains((exit_col, exit_row).into()),
+            "exit click must sit in the exit hit rect"
+        );
+        let exit_outcome = left_click(&mut exit_agent, exit_col, exit_row);
+        assert!(
+            !exit_agent.plan_approved_implement,
+            "a click on exit must not approve"
+        );
+        assert!(
+            !sends_implement(&exit_outcome),
+            "a click on exit must not send the implement sentence; got {exit_outcome:?}"
+        );
+
+        let mut comment_agent = plan_footer_after_exit(body);
+        let comment_buf = draw_agent_hits(&mut comment_agent, 100, 40);
+        let (comment_col, comment_row) =
+            painted_footer_word(&comment_buf, "comment").expect("painted comment");
+        let comment_outcome = left_click(&mut comment_agent, comment_col, comment_row);
+        assert!(!comment_agent.plan_approved_implement);
+        assert!(!sends_implement(&comment_outcome));
+
+        let mut revise_agent = plan_footer_after_exit(body);
+        let revise_buf = draw_agent_hits(&mut revise_agent, 100, 40);
+        let (revise_col, revise_row) =
+            painted_footer_word(&revise_buf, "revise").expect("painted revise");
+        let revise_outcome = left_click(&mut revise_agent, revise_col, revise_row);
+        assert!(!revise_agent.plan_approved_implement);
+        assert!(!sends_implement(&revise_outcome));
+    }
+
+    fn plan_footer_after_exit(body: &str) -> AgentView {
+        let mut agent = make_agent();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let request = crate::views::plan_approval_view::ExitPlanModeExtRequest {
+            session_id: "test-session".into(),
+            tool_call_id: "call-plan-exit".into(),
+            plan_content: Some(body.into()),
+        };
+        agent.plan_approval_view = Some(PlanApprovalViewState::new(
+            request,
+            agent.prompt.stash(),
+            tx,
+        ));
+        agent.plan_mode_active = true;
+        let _ = agent.abandon_plan();
+        drop(rx);
+        assert!(agent.plan_approval_view.is_none());
+        assert!(!agent.plan_approved_implement);
+        assert!(agent.plan_decision_resolved);
+        agent.latest_inline_plan_content = Some(body.into());
+        agent.plan_mode_active = true;
+        agent.plan_mode_pending = None;
+        agent.open_plan_from_view_plan_or_status();
+        assert!(
+            agent.plan_approval_view.is_none(),
+            "the footer click is the screen after Plan Exit, with no mounted review"
+        );
+        assert!(agent.line_viewer.is_some(), "the plan pane stays up");
+        agent
+    }
+
+    fn painted_footer_word(buf: &ratatui::buffer::Buffer, word: &str) -> Option<(u16, u16)> {
+        let chars: Vec<char> = word.chars().collect();
+        let width = buf.area.width;
+        let height = buf.area.height;
+        for y in 0..height {
+            let mut text = String::new();
+            for x in 0..width {
+                text.push_str(buf[(x, y)].symbol());
+            }
+            let lower = text.to_ascii_lowercase();
+            if !(lower.contains("approve")
+                && lower.contains("comment")
+                && lower.contains("revise")
+                && lower.contains("exit"))
+            {
+                continue;
+            }
+            let word_len = u16::try_from(chars.len()).ok()?;
+            if width < word_len {
+                return None;
+            }
+            for x in 0..=width - word_len {
+                let matched = chars.iter().enumerate().all(|(i, ch)| {
+                    buf[(x + u16::try_from(i).expect("index"), y)].symbol() == ch.to_string()
+                });
+                if matched {
+                    return Some((x, y));
+                }
+            }
+        }
+        None
+    }
+
+    fn left_click(agent: &mut AgentView, column: u16, row: u16) -> InputOutcome {
+        let click = crossterm::event::Event::Mouse(crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column,
+            row,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        });
+        agent.handle_input(&click, &ActionRegistry::defaults())
+    }
+
+    fn sends_implement(outcome: &InputOutcome) -> bool {
+        match outcome {
+            InputOutcome::Action(Action::SendPrompt(text)) => {
+                text.contains(crate::views::plan_approval_view::PLAN_APPROVED_IMPLEMENT_MESSAGE)
+            }
+            _ => false,
+        }
+    }
+
     #[test]
     fn dismiss_in_turn_closes_a_held_ext_review() {
         let (mut agent, _rx) = agent_in_plan_mode_with_approval();

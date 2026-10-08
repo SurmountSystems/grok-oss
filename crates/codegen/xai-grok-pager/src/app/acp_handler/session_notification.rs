@@ -693,6 +693,13 @@ pub(super) fn handle_session_notification_with_origin(
             agent
                 .subagent_sessions
                 .insert(child_session_id.clone(), info);
+            if !meta.is_replay && !agent.session.loading_replay {
+                // Parent-channel spawn. A replay must not mint a second grok-oss ulid.
+                crate::app::agent_view::l2_token_tracking::on_nested_l2_spawn(
+                    &child_session_id,
+                    &description,
+                );
+            }
             if !had_prior_info
                 && let Some(ref sid) = agent.session.session_id
                 && let Some(info) = agent.subagent_sessions.get_mut(&child_session_id)
@@ -844,6 +851,12 @@ pub(super) fn handle_session_notification_with_origin(
                 info.attempt.error_count = Some(error_count);
                 info.attempt.last_progress_at = std::time::Instant::now();
             }
+            if !meta.is_replay && !agent.session.loading_replay {
+                crate::app::agent_view::l2_token_tracking::on_nested_l2_usage(
+                    &child_session_id,
+                    tokens_used,
+                );
+            }
             if let Some(child_view) = agent.subagent_views.get_mut(&child_session_id)
                 && context_window_tokens > 0
             {
@@ -982,6 +995,13 @@ pub(super) fn handle_session_notification_with_origin(
                     info.attempt.tokens_used = Some(tokens_used);
                 }
                 info.seal_current_attempt_tokens();
+                if !meta.is_replay && !agent.session.loading_replay {
+                    crate::app::agent_view::l2_token_tracking::on_nested_l2_usage(
+                        &child_session_id,
+                        tokens_used,
+                    );
+                    crate::app::agent_view::l2_token_tracking::on_nested_l2_exit(&child_session_id);
+                }
                 info.attempt.pending_kill = false;
                 info.attempt.kill_requested_at = None;
                 info.attempt.last_progress_at = std::time::Instant::now();

@@ -151,6 +151,10 @@ impl BlockContent for AgentMessageBlock {
         } else {
             self.rendered_output(ctx).0
         };
+        let response = crate::theme::Theme::current().accent_running;
+        for line in &mut out.lines {
+            super::markdown_content::repaint_default_body_role(&mut line.content, response);
+        }
         super::append_bubble_copy_button(&mut out.lines, ctx);
         out
     }
@@ -446,6 +450,58 @@ mod tests {
         crate::appearance::cache::set_render_mermaid(RenderMermaid::Auto);
         let raw = AgentMessageBlock::new(MERMAID_MD).output(&ctx(40, true));
         assert_eq!(non_selectable(&raw), 0, "raw mode shows the fence verbatim");
+    }
+
+    /// The Agent's response text is magenta (`accent_running` on DOGE).
+    /// That is the message body, not only the rail, and it is not the
+    /// default body color.
+    #[test]
+    fn agent_response_text_is_magenta() {
+        use ratatui::style::Color;
+
+        let _lock = crate::theme::cache::test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::theme::cache::reset_for_test();
+        crate::theme::cache::set(crate::theme::ThemeKind::Doge);
+
+        let theme = crate::theme::Theme::current();
+        let magenta = Color::Rgb(255, 0, 255);
+        assert_eq!(theme.accent_running, magenta, "DOGE Agent magenta");
+        assert_ne!(theme.accent_running, theme.text_primary);
+        assert_ne!(theme.accent_running, theme.md_text);
+        assert_ne!(theme.accent_running, theme.accent_user);
+        assert_ne!(theme.accent_running, theme.accent_system);
+
+        let block = AgentMessageBlock::new("the agent answer is here");
+        let out = block.output(&ctx(80, false));
+        let mut saw_body = false;
+        for line in &out.lines {
+            let plain: String = line
+                .content
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect();
+            if !plain.contains("agent answer") {
+                continue;
+            }
+            for span in &line.content.spans {
+                if !span.content.chars().any(|c| c.is_ascii_alphabetic()) {
+                    continue;
+                }
+                saw_body = true;
+                assert_eq!(
+                    span.style.fg,
+                    Some(magenta),
+                    "agent response text is magenta: {span:?}"
+                );
+                assert_eq!(span.style.fg, Some(theme.accent_running));
+                assert_ne!(span.style.fg, Some(theme.text_primary));
+                assert_ne!(span.style.fg, Some(theme.md_text));
+            }
+        }
+        assert!(saw_body, "agent response body was not painted");
     }
 
     #[test]

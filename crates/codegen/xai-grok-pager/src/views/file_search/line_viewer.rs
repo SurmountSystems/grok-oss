@@ -21,7 +21,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{StatefulWidget, Widget};
 use syntect::easy::HighlightLines;
 
-use crate::render::scrollbar::SCROLLBAR_TOTAL_COLS;
+use crate::render::scrollbar::{SCROLLBAR_TOTAL_COLS, render_scrollbar_styled};
 use crate::render::wrapping::word_wrap_line;
 use crate::scrollback::blocks::markdown_content::MarkdownContent;
 use crate::scrollback::blocks::mermaid_content::{MermaidDisplay, mermaid_display};
@@ -1821,9 +1821,20 @@ fn repair_soft_plan_dropped_left_edge(
                     .map(|p| crate::views::list_pane::line_display_width(&p))
                     .unwrap_or(0) as u16;
                 let text_x = content_area.x.saturating_add(prefix_w);
-                // The list item already paints in this content width. Subtracting
-                // the scrollbar again wraps `tokens.` past the last content row.
-                let text_w = content_area.width.saturating_sub(prefix_w).max(1);
+                // `content_area` is the unsplit list area. When a scrollbar is
+                // showing, its gap and track are the last two columns. Stop
+                // this rewrite before them. `room` still paints the continuation,
+                // so `tokens.` stays in the text columns.
+                let bar_cols = if viewer.list_state.scrollbar_area().is_some() {
+                    SCROLLBAR_TOTAL_COLS
+                } else {
+                    0
+                };
+                let text_w = content_area
+                    .width
+                    .saturating_sub(prefix_w)
+                    .saturating_sub(bar_cols)
+                    .max(1);
                 let style = Style::default().fg(theme.text_primary).bg(theme.bg_base);
                 let line = Line::from(Span::styled(expected, style));
                 let wrapped = word_wrap_line(&line, text_w as usize);
@@ -1847,6 +1858,47 @@ fn repair_soft_plan_dropped_left_edge(
         }
         row = row.saturating_add(rows);
     }
+}
+
+/// Paint the soft-plan scrollbar again after repair and the footer rule.
+///
+/// The list paints one track, then a repaired row can clear through that
+/// column. This restores one space-or-block column. The footer divider is
+/// the row after `content_area`, and this does not cover it.
+fn repaint_soft_plan_scrollbar(buf: &mut Buffer, viewer: &LineViewerState, content_area: Rect) {
+    let Some(mut track) = viewer.list_state.scrollbar_area() else {
+        return;
+    };
+    let stop = content_area.y.saturating_add(content_area.height);
+    if track.y >= stop {
+        return;
+    }
+    track.height = track.height.min(stop.saturating_sub(track.y));
+    if track.width == 0 || track.height == 0 {
+        return;
+    }
+    let pane_style = LineViewerState::list_pane_style();
+    let total_height = viewer.list_state.total_height();
+    let scale = if total_height > u16::MAX as usize {
+        (total_height / u16::MAX as usize) + 1
+    } else {
+        1
+    };
+    let scaled_total = (total_height / scale) as u16;
+    let scaled_offset = (viewer.list_state.scroll_offset() / scale) as u16;
+    let track_style = Style::default().bg(pane_style.scrollbar_bg);
+    let thumb_style = Style::default()
+        .fg(pane_style.scrollbar_fg)
+        .bg(pane_style.scrollbar_bg);
+    render_scrollbar_styled(
+        buf,
+        Some(track),
+        scaled_total,
+        content_area.height,
+        scaled_offset,
+        track_style,
+        thumb_style,
+    );
 }
 
 /// Render the line viewer popup. In normal mode, draws a 75% centered panel with dimmed background
@@ -2328,6 +2380,7 @@ pub fn render_line_viewer(
         // enlarge, and close stay.
         force_soft_plan_frame(buf, popup_area, frame_fg, theme.bg_base);
         paint_plan_header_controls(buf, popup_area, viewer, theme);
+        repaint_soft_plan_scrollbar(buf, viewer, content_area);
     }
 }
 
@@ -3705,6 +3758,188 @@ mod tests {
         assert_side_white(&buf, &bottom, "\u{2500}", "bottom");
         assert_side_white(&buf, &left, "\u{2502}", "left");
         assert_side_white(&buf, &right, "\u{2502}", "right");
+    }
+
+    /// The view-plan side pane (`PlanPreview`, fullscreen off) paints one
+    /// scrollbar column in the cell just inside the white frame. That column
+    /// is only spaces and one `█` run. A wrapped row must not clear a hole
+    /// through the thumb, and the gap must not grow a second bar. The frame
+    /// stays white on every side the outline test already checks. The footer
+    /// divider stays the muted canvas hairline.
+    #[test]
+    fn view_plan_scrollbar_is_one_continuous_column_inside_the_white_frame() {
+        let _pin = crate::theme::cache::pin_theme();
+        crate::theme::cache::set(crate::theme::ThemeKind::Doge);
+        let theme = crate::theme::Theme::doge();
+        let white = Color::Rgb(255, 255, 255);
+        let owed = "The user wants the status row to show two tokens.";
+        let mut body = format!("# Proposed plan.\n\nalpha\n{owed}\nbeta\n");
+        body.push_str("| Job | Estimate wall | Estimate nested tokens | Note |\n");
+        body.push_str("| --- | --- | --- | --- |\n");
+        body.push_str("| view-plan scrollbar | 25 minutes | 100.0k | one continuous column inside the white frame |\n");
+        body.push_str("gamma\n");
+        for n in 1..=28 {
+            body.push_str(&format!("line {n:02}\n"));
+        }
+
+        let mut viewer =
+            LineViewerState::open_markdown_content("plan.md", body, None).expect("open plan");
+        viewer.kind = LineViewerKind::PlanPreview;
+        viewer.fullscreen = false;
+        viewer.plan_mut().feedback_active = false;
+        viewer.plan_mut().show_action_buttons = true;
+
+        let full = Rect::new(0, 0, 100, 30);
+        let mut buf = Buffer::empty(full);
+        render_line_viewer(&mut buf, full, &mut viewer, Path::new("/tmp"), &theme, 0);
+
+        let pane_w = LineViewerState::soft_plan_pane_width(full.width);
+        let pane_x = full.width.saturating_sub(pane_w);
+        let right_x = pane_x + pane_w - 1;
+        let top_y = full.y;
+        let bottom_y = full.y + full.height - 1;
+        let track_x = right_x.saturating_sub(1);
+        let gap_x = track_x.saturating_sub(1);
+        let modal = viewer.last_modal_area.expect("soft plan pane");
+        let div_y = modal.y + modal.height.saturating_sub(2);
+        let track = viewer
+            .list_state
+            .scrollbar_area()
+            .expect("enough lines to paint a scrollbar");
+        assert_eq!(
+            track.x, track_x,
+            "the track is the column just inside the white frame"
+        );
+        assert_eq!(track.width, 1);
+        assert!(
+            track.y + track.height <= div_y,
+            "the track stops before the footer divider"
+        );
+
+        fn is_box_glyph(symbol: &str) -> bool {
+            let mut chars = symbol.chars();
+            matches!(
+                (chars.next(), chars.next()),
+                (Some(ch), None) if ('\u{2500}'..='\u{257F}').contains(&ch)
+            )
+        }
+        fn assert_side_white(buf: &Buffer, cells: &[(u16, u16)], straight: &str, side: &str) {
+            let white = Color::Rgb(255, 255, 255);
+            let mut box_glyphs = 0u32;
+            let mut straights = 0u32;
+            for &(x, y) in cells {
+                let cell = &buf[(x, y)];
+                let symbol = cell.symbol();
+                if !is_box_glyph(symbol) {
+                    continue;
+                }
+                box_glyphs += 1;
+                if symbol == straight {
+                    straights += 1;
+                }
+                assert_eq!(
+                    cell.style().fg,
+                    Some(white),
+                    "{side} box glyph {symbol:?} at ({x},{y}) must stay white"
+                );
+            }
+            assert!(
+                box_glyphs > 0 && straights > 0,
+                "{side} side stays a white frame"
+            );
+        }
+        let top: Vec<(u16, u16)> = (pane_x..=right_x).map(|x| (x, top_y)).collect();
+        let bottom: Vec<(u16, u16)> = (pane_x..=right_x).map(|x| (x, bottom_y)).collect();
+        let left: Vec<(u16, u16)> = (top_y..=bottom_y).map(|y| (pane_x, y)).collect();
+        let right: Vec<(u16, u16)> = (top_y..=bottom_y).map(|y| (right_x, y)).collect();
+        assert_side_white(&buf, &top, "\u{2500}", "top");
+        assert_side_white(&buf, &bottom, "\u{2500}", "bottom");
+        assert_side_white(&buf, &left, "\u{2502}", "left");
+        assert_side_white(&buf, &right, "\u{2502}", "right");
+
+        let mut runs = 0u32;
+        let mut in_run = false;
+        let mut thumb_cells = 0u32;
+        for y in modal.y..div_y {
+            let symbol = buf[(track_x, y)].symbol().to_string();
+            assert!(
+                symbol == " " || symbol == "\u{2588}",
+                "track cell at ({track_x},{y}) is {symbol:?}; a frame stroke or a text cell punched the scrollbar"
+            );
+            let frame = buf[(right_x, y)].symbol().to_string();
+            let frame_fg = buf[(right_x, y)].style().fg;
+            assert_eq!(
+                frame, "\u{2502}",
+                "right frame at ({right_x},{y}) stays │ beside the track"
+            );
+            assert_eq!(frame_fg, Some(white));
+            let gap = buf[(gap_x, y)].symbol().to_string();
+            assert!(
+                gap != "\u{2502}" && gap != "|" && gap != "\u{2588}",
+                "gap cell at ({gap_x},{y}) is {gap:?}; that is a second bar beside the track"
+            );
+            if symbol == "\u{2588}" {
+                thumb_cells += 1;
+                if !in_run {
+                    runs += 1;
+                    in_run = true;
+                }
+            } else {
+                in_run = false;
+            }
+        }
+        assert!(thumb_cells > 0, "the scrollbar thumb is painted");
+        assert_eq!(
+            runs, 1,
+            "the thumb is one continuous run; separated segments mean a row cleared a track cell"
+        );
+
+        let divider = &buf[(track_x, div_y)];
+        assert_eq!(
+            divider.symbol(),
+            "\u{2500}",
+            "the footer divider still crosses the track column"
+        );
+        assert_eq!(
+            divider.style().fg,
+            Some(theme.bg_base),
+            "the footer divider stays the muted canvas hairline"
+        );
+        assert_ne!(divider.symbol(), "\u{2588}");
+
+        let copy = viewer
+            .plan_ref()
+            .expect("plan extras")
+            .copy_button_area
+            .expect("copy stays a header control");
+        assert_eq!(buf[(copy.x, copy.y)].symbol(), "[");
+        assert_eq!(
+            buf[(copy.x, copy.y)].style().fg,
+            Some(theme.gray),
+            "header brackets stay theme.gray"
+        );
+
+        let mut squashed = String::new();
+        for y in 0..full.height {
+            for x in 0..full.width {
+                let Some(cell) = buf.cell((x, y)) else {
+                    continue;
+                };
+                for ch in cell.symbol().chars() {
+                    if ch.is_whitespace()
+                        || ('\u{2500}'..='\u{257F}').contains(&ch)
+                        || ('\u{2580}'..='\u{259F}').contains(&ch)
+                    {
+                        continue;
+                    }
+                    squashed.push(ch);
+                }
+            }
+        }
+        assert!(
+            squashed.contains("Theuserwantsthestatusrowtoshowtwotokens."),
+            "the owed sentence stays in the text columns"
+        );
     }
 
     /// File-backed plan approval sets `feedback_active()` true on the side

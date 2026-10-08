@@ -208,15 +208,17 @@ impl UserPromptBlock {
         }
     }
 
-    /// Prefix/body/skill styles. Bold only when `terminal_native` (minimal mode). Minimal keeps a Cyan pointer when
-    /// `accent_user` is Reset (its prompt rows have no band, so the pointer is the turn cue).
+    /// Prefix and message body use `accent_user` (Operator green on DOGE).
+    /// Skill tokens stay `accent_skill`. Bold only when `terminal_native`
+    /// (minimal mode). Minimal keeps a Cyan pointer when `accent_user` is
+    /// Reset (its prompt rows have no band, so the pointer is the turn cue).
     fn prompt_styles(theme: &Theme, terminal_native: bool) -> (Style, Style, Style) {
         let prefix_color = match theme.accent_user {
             ratatui::style::Color::Reset if terminal_native => ratatui::style::Color::Cyan,
             c => c,
         };
         let mut prefix_style = theme.fg(prefix_color);
-        let mut text_style = theme.fg(theme.text_primary);
+        let mut text_style = theme.fg(theme.accent_user);
         let mut skill_style = theme.fg(theme.accent_skill);
         if terminal_native {
             prefix_style = prefix_style.add_modifier(Modifier::BOLD);
@@ -688,7 +690,7 @@ mod tests {
             span_at(spans, 2).content.as_ref(),
             " create a ticket for this"
         );
-        assert_eq!(span_at(spans, 2).style.fg, Some(theme.text_primary));
+        assert_eq!(span_at(spans, 2).style.fg, Some(theme.accent_user));
     }
 
     #[test]
@@ -717,11 +719,11 @@ mod tests {
         assert_eq!(span_at(line0, 1).content.as_ref(), "/foo");
         assert_eq!(span_at(line0, 1).style.fg, Some(theme.accent_skill));
         assert_eq!(span_at(line0, 2).content.as_ref(), " bar");
-        assert_eq!(span_at(line0, 2).style.fg, Some(theme.text_primary));
+        assert_eq!(span_at(line0, 2).style.fg, Some(theme.accent_user));
 
         let line1 = &line_at(&lines, 1).content.spans;
         assert_eq!(span_at(line1, 1).content.as_ref(), "baz");
-        assert_eq!(span_at(line1, 1).style.fg, Some(theme.text_primary));
+        assert_eq!(span_at(line1, 1).style.fg, Some(theme.accent_user));
     }
 
     #[test]
@@ -736,11 +738,11 @@ mod tests {
         let spans = &line_at(&lines, 0).content.spans;
         assert_eq!(spans.len(), 4);
         assert_eq!(span_at(spans, 1).content.as_ref(), "great ");
-        assert_eq!(span_at(spans, 1).style.fg, Some(theme.text_primary));
+        assert_eq!(span_at(spans, 1).style.fg, Some(theme.accent_user));
         assert_eq!(span_at(spans, 2).content.as_ref(), "/pr-workflow");
         assert_eq!(span_at(spans, 2).style.fg, Some(theme.accent_skill));
         assert_eq!(span_at(spans, 3).content.as_ref(), " all good now");
-        assert_eq!(span_at(spans, 3).style.fg, Some(theme.text_primary));
+        assert_eq!(span_at(spans, 3).style.fg, Some(theme.accent_user));
     }
 
     #[test]
@@ -779,7 +781,7 @@ mod tests {
         );
         let line1 = &line_at(&lines, 1).content.spans;
         assert_eq!(span_at(line1, 1).content.as_ref(), "then ");
-        assert_eq!(span_at(line1, 1).style.fg, Some(theme.text_primary));
+        assert_eq!(span_at(line1, 1).style.fg, Some(theme.accent_user));
         assert_eq!(span_at(line1, 2).content.as_ref(), "/model");
         assert_eq!(span_at(line1, 2).style.fg, Some(theme.accent_skill));
         assert_eq!(span_at(line1, 3).content.as_ref(), " here");
@@ -822,7 +824,7 @@ mod tests {
         let theme = Theme::current();
         assert_eq!(
             span_at(&line_at(&lines, 0).content.spans, 1).style.fg,
-            Some(theme.text_primary)
+            Some(theme.accent_user)
         );
     }
 
@@ -871,7 +873,7 @@ mod tests {
         let body: String = last
             .spans
             .iter()
-            .filter(|s| s.style.fg == Some(theme.text_primary))
+            .filter(|s| s.style.fg == Some(theme.accent_user))
             .map(|s| s.content.as_ref())
             .collect();
         assert!(body.contains("more"), "args stay body-styled, got {body:?}");
@@ -1416,5 +1418,64 @@ mod tests {
         );
         assert_ne!(rail.fg, theme.accent_running);
         assert_ne!(rail.fg, Color::Rgb(255, 255, 255));
+    }
+
+    /// The Operator's own message text, on the left of the transcript, is
+    /// Operator green (`accent_user`). That is the message body, not only
+    /// the arrow or the rail, and it is not the default body color.
+    #[test]
+    fn operator_message_text_on_the_left_is_green() {
+        use ratatui::style::Color;
+
+        let _lock = crate::theme::cache::test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::theme::cache::reset_for_test();
+        crate::theme::cache::set(crate::theme::ThemeKind::Doge);
+
+        let theme = Theme::current();
+        let green = Color::Rgb(0, 255, 0);
+        assert_eq!(theme.accent_user, green, "DOGE Operator green");
+        assert_ne!(
+            theme.accent_user, theme.text_primary,
+            "operator message text is not the default body color"
+        );
+
+        let block = UserPromptBlock::new("hello from the operator\nstill the operator");
+        let lines = block.wrap_prompt_lines(80, None, true, false);
+        assert!(
+            lines.len() >= 2,
+            "the operator message keeps both lines on the left"
+        );
+
+        let first = &line_at(&lines, 0).content;
+        let first_text = line_text(first);
+        assert!(
+            first_text.starts_with(crate::glyphs::prompt_arrow()),
+            "the operator message sits on the left, got {first_text:?}"
+        );
+        let body = first
+            .spans
+            .iter()
+            .find(|span| span.content.contains("hello from the operator"))
+            .expect("operator message text");
+        assert_ne!(
+            first.spans.first().map(|span| span.content.as_ref()),
+            Some(body.content.as_ref()),
+            "the green body is the message text, not only the left arrow"
+        );
+        assert_eq!(body.style.fg, Some(green));
+        assert_eq!(body.style.fg, Some(theme.accent_user));
+        assert_ne!(body.style.fg, Some(theme.text_primary));
+
+        let second = &line_at(&lines, 1).content;
+        let continued = second
+            .spans
+            .iter()
+            .find(|span| span.content.contains("still the operator"))
+            .expect("continued operator message text");
+        assert_eq!(continued.style.fg, Some(green));
+        assert_eq!(continued.style.fg, Some(theme.accent_user));
+        assert_ne!(continued.style.fg, Some(theme.text_primary));
     }
 }
