@@ -386,7 +386,11 @@ fn repeated_block_survives_smear(tail: &str) -> bool {
     while i + SMEAR_BLOCK_CHARS <= n {
         if tail.is_char_boundary(i) && tail.is_char_boundary(i + SMEAR_BLOCK_CHARS) {
             let window = &tail[i..i + SMEAR_BLOCK_CHARS];
-            if window.contains(char::is_whitespace) && !smear_block_is_mostly_spaces(window) {
+            // A `|` is a markdown table row. Shared cells are not a smeared sentence.
+            if window.contains(char::is_whitespace)
+                && !window.contains('|')
+                && !smear_block_is_mostly_spaces(window)
+            {
                 starts.entry(window).or_default().push(i);
             }
         }
@@ -474,5 +478,34 @@ mod tests {
         assert_eq!(out[0].text_content(), "Keep Isolated Preview open");
         assert!(out[1].text_content().contains("dest.md"));
         assert_eq!(out[2].text_content(), REPETITIVE_ASSISTANT_OMITTED);
+    }
+
+    /// Same screenshot table as the live-stream breaker. A repeated short
+    /// cell is not a loop. Four copies of one prose sentence still are.
+    #[test]
+    fn status_table_repeating_no_sample_was_printed_is_not_a_repeating_sentence() {
+        let cell = "no sample was printed";
+        assert!(cell.len() < MIN_PHRASE_CHARS);
+        let shared = " minutes | 80.0k | not started | no sample was printed | still open |";
+        assert!(shared.len() >= SMEAR_BLOCK_CHARS);
+        let table = "\
+| Job | Estimate wall | Estimate nested tokens | Actual wall | Actual nested tokens | Under / over |
+| --- | --- | --- | --- | --- | --- |
+| How a credits click can switch to limits | 15 minutes | 80.0k | 4 minutes 3 seconds | no sample was printed | under on wall; tokens were not printed |
+| View-plan outline test | 15 minutes | 80.0k | not started | no sample was printed | still open |
+| Header click test | 20 minutes | 100.0k | not started | no sample was printed | still open |
+| Contract sentences | 10 minutes | 40.0k | not started | no sample was printed | still open |
+| Red compile | 32 minutes | 80.0k | not started | no sample was printed | still open |
+| White frame paint | 15 minutes | 80.0k | not started | no sample was printed | still open |
+";
+        assert!(table.matches(shared).count() >= MIN_LONG_REPEATS);
+        assert!(!is_repetitive_generation(table));
+        let sentence = "I am repeating this exact prose sentence. ";
+        assert!(!is_repetitive_generation(
+            &sentence.repeat(MIN_SHORT_REPEATS - 1)
+        ));
+        assert!(is_repetitive_generation(
+            &sentence.repeat(MIN_SHORT_REPEATS)
+        ));
     }
 }

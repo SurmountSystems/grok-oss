@@ -241,6 +241,21 @@ pub(crate) fn format_request_failure(
             wire,
         };
     }
+    // The sampler message is already "Stopped: the reply was repeating the
+    // same sentence." Do not prefix "Stopped: repeating sentence:" again.
+    if wire == WireErrorType::RepetitiveGeneration
+        && let Some(already) = extracted
+            .as_deref()
+            .map(str::trim)
+            .filter(|detail| detail.starts_with("Stopped:"))
+    {
+        return FormattedRequestFailure {
+            status,
+            headline: already.to_string(),
+            detail: String::new(),
+            wire,
+        };
+    }
     let class = classify(status, wire);
     let why = extracted
         .filter(|d| !is_server_fault(status, wire) && !is_headline_echo(d, &class.headline))
@@ -1312,6 +1327,27 @@ mod tests {
             msg.contains("repeating") || msg.contains("sentence"),
             "must name the repeating-sentence stop, got {msg}"
         );
+    }
+
+    /// Operator screenshot Wed Oct 7, 2026, 4:17 PM. The reason is already
+    /// `Stopped: the reply was repeating the same sentence.` Today's chrome
+    /// joins the headline on the front, so the line nests `Stopped:` twice.
+    #[test]
+    fn repeating_sentence_stop_does_not_prefix_stopped_twice() {
+        let reason = "Stopped: the reply was repeating the same sentence.";
+        let formatted =
+            format_request_failure(None, Some(WireErrorType::RepetitiveGeneration), reason);
+        let msg = formatted.message();
+        assert_eq!(
+            msg.matches("Stopped:").count(),
+            1,
+            "must not nest Stopped: twice, got {msg}"
+        );
+        assert!(
+            !msg.starts_with("Stopped: repeating sentence:"),
+            "must not prefix Stopped: repeating sentence: onto a reason that already says Stopped:, got {msg}"
+        );
+        assert_eq!(msg, reason);
     }
 
     #[test]

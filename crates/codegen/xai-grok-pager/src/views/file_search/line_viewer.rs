@@ -1581,27 +1581,12 @@ fn build_shortcut_button<'a>(
 /// One empty cell between plan-header bracket controls.
 const PLAN_HEADER_CONTROL_GAP: u16 = 1;
 
-/// Soft plan side-pane frame.
+/// View-plan side-pane frame: `prompt_border_active` (white on DOGE).
 ///
-/// The canvas hairline. White prompt strokes and neon cyan (`gray_dim` / path
-/// on DOGE) are not the frame. On DOGE the hairline is the black canvas.
+/// Not the black canvas (`bg_base`) and not neon `gray_dim`. The modal
+/// plan frame stays `gray_dim` on the non-side-pane path.
 pub(crate) fn soft_plan_frame_fg(theme: &Theme) -> Color {
-    let hairline = theme.panel_border_fg();
-    let neon = hairline == theme.gray_dim
-        || hairline == theme.path
-        || matches!(
-            hairline,
-            Color::Cyan | Color::LightCyan | Color::Rgb(0, 255, 255)
-        );
-    if is_bright_white_stroke(theme, hairline)
-        || neon
-        || hairline == theme.bg_base
-        || hairline == theme.bg_light
-    {
-        theme.bg_base
-    } else {
-        hairline
-    }
+    theme.prompt_border_active
 }
 
 fn is_soft_plan_frame_glyph(symbol: &str) -> bool {
@@ -1639,14 +1624,6 @@ fn force_soft_plan_frame(buf: &mut Buffer, area: Rect, fg: Color, bg: Color) {
             paint(right, y);
         }
     }
-}
-
-fn is_bright_white_stroke(theme: &Theme, color: Color) -> bool {
-    color == theme.prompt_border
-        || color == theme.prompt_border_active
-        || color == theme.selection_border
-        || color == theme.text_primary
-        || matches!(color, Color::White | Color::Rgb(255, 255, 255))
 }
 
 fn plan_header_control_style(theme: &Theme, hovered: bool) -> Style {
@@ -1931,8 +1908,8 @@ pub fn render_line_viewer(
         Style::default().fg(theme.text_primary).bg(theme.bg_base),
     );
 
-    // 3. Draw border. The soft plan side pane uses the muted frame, not
-    // gray_dim (neon cyan on DOGE) and not the white prompt stroke.
+    // 3. Draw border. The view-plan side pane uses `prompt_border_active`
+    // (white on DOGE). Modal and other viewers stay `gray_dim`.
     let frame_fg = if viewer.is_soft_plan_side_pane() {
         soft_plan_frame_fg(theme)
     } else {
@@ -1946,8 +1923,9 @@ pub fn render_line_viewer(
     let inner = border.inner(popup_area);
     border.render(popup_area, buf);
     if viewer.is_soft_plan_side_pane() {
-        // Block style merge can leave the popup's primary-white fg on the
-        // stroke. Force the muted frame after the glyphs are in place.
+        // Block style merge can leave another fg on the stroke. Force the
+        // side-pane frame color onto the glyphs. The cell background stays
+        // the canvas.
         force_soft_plan_frame(buf, popup_area, frame_fg, theme.bg_base);
     }
 
@@ -2185,10 +2163,11 @@ pub fn render_line_viewer(
     // plan-preview modes.
     if viewer.show_footer() && inner.height >= 2 {
         let div_y = inner.y + inner.height - 2;
-        // Soft plan's footer rule is the frame. `gray_dim` is neon cyan on
-        // DOGE. The side edges already use `soft_plan_frame_fg`.
+        // Outer box glyphs stay `prompt_border_active` (white on DOGE).
+        // This interior footer rule is the muted canvas hairline
+        // (`bg_base`, black on DOGE). Other viewers keep `gray_dim`.
         let div_fg = if viewer.is_soft_plan_side_pane() {
-            frame_fg
+            theme.bg_base
         } else {
             theme.gray_dim
         };
@@ -2343,10 +2322,10 @@ pub fn render_line_viewer(
     }
 
     if viewer.is_soft_plan_side_pane() {
-        // Content paint can leave a bright stroke on the perimeter. Restyle
-        // the frame glyphs, then put the bracket controls back so copy stays
-        // a bordered control with a one-cell gap. Search, enlarge, and close
-        // stay.
+        // Content paint can replace the perimeter. Restore the side-pane
+        // frame, then the bracket controls. Brackets stay `theme.gray`.
+        // Copy stays a bordered control with a one-cell gap. Search,
+        // enlarge, and close stay.
         force_soft_plan_frame(buf, popup_area, frame_fg, theme.bg_base);
         paint_plan_header_controls(buf, popup_area, viewer, theme);
     }
@@ -3476,9 +3455,10 @@ mod tests {
         assert_title_bar_search_left_of_copy(&buf, plan);
     }
 
-    /// The plan side panel frame is not a bright white stroke. Copy is a
-    /// bordered control. Search and copy use the same bracket size and the
-    /// same one-cell gap as enlarge and close.
+    /// The plan side panel keeps its frame glyphs. This test does not
+    /// require the black canvas and does not forbid `Rgb(255, 255, 255)`.
+    /// Copy is a bordered control. Search and copy use the same bracket
+    /// size and the same one-cell gap as enlarge and close.
     #[test]
     fn soft_plan_side_panel_uses_muted_frame_and_bracketed_header_controls() {
         let _pin = crate::theme::cache::pin_theme();
@@ -3509,37 +3489,13 @@ mod tests {
             "the side panel keeps a frame glyph; got {:?}",
             edge.symbol()
         );
-        assert_eq!(
-            fg,
-            Some(theme.bg_base),
-            "DOGE plan frame uses the canvas hairline, not a bright stroke"
-        );
-        assert_ne!(
-            fg,
-            Some(theme.prompt_border),
-            "plan frame is not the white prompt border"
-        );
-        assert_ne!(fg, Some(theme.prompt_border_active));
-        assert_ne!(fg, Some(theme.selection_border));
-        assert_ne!(
-            fg,
-            Some(theme.text_primary),
-            "plan frame is not primary white text"
-        );
         assert_ne!(
             fg,
             Some(theme.gray_dim),
             "plan frame is not the neon cyan gray_dim stroke"
         );
-        assert_ne!(fg, Some(Color::White));
-        assert_ne!(fg, Some(Color::Rgb(255, 255, 255)));
 
         let right = &buf[(pane_x + pane_w - 1, 4)];
-        assert_eq!(
-            right.style().fg,
-            Some(theme.bg_base),
-            "the right edge uses the same muted frame"
-        );
         assert!(
             right.symbol() == "│" || right.symbol() == "┃",
             "the right edge keeps a frame glyph; got {:?}",
@@ -3638,6 +3594,117 @@ mod tests {
             5,
             "plan text stays inset from the left frame"
         );
+    }
+
+    /// `/view-plan` draws the right-side plan pane (`PlanPreview`, fullscreen
+    /// off) through `render_line_viewer`. Every side of that rounded frame
+    /// is white `Rgb(255, 255, 255)`: top, bottom, left, and right box
+    /// glyphs. Header brackets stay out of this color check. They are
+    /// `theme.gray` on DOGE (yellow), and this test does not recolor them.
+    /// This is not the plan-mode prompt and not the plan-approval prompt.
+    #[test]
+    fn view_plan_screen_outline_is_white_on_every_side() {
+        let _pin = crate::theme::cache::pin_theme();
+        crate::theme::cache::set(crate::theme::ThemeKind::Doge);
+        let theme = crate::theme::Theme::doge();
+        let white = Color::Rgb(255, 255, 255);
+        assert_eq!(
+            theme.bg_base,
+            Color::Rgb(0, 0, 0),
+            "DOGE canvas is black, so a frame painted with theme.bg_base is not white"
+        );
+        assert_ne!(theme.bg_base, white);
+
+        let mut viewer = LineViewerState::open_markdown_content(
+            "plan.md",
+            "# Proposed plan.\n\nKeep the inset and the wrapping body.\n".to_owned(),
+            None,
+        )
+        .expect("open plan");
+        viewer.kind = LineViewerKind::PlanPreview;
+        viewer.fullscreen = false;
+        viewer.plan_mut().feedback_active = false;
+        viewer.plan_mut().show_action_buttons = true;
+
+        let full = Rect::new(0, 0, 100, 30);
+        let mut buf = Buffer::empty(full);
+        render_line_viewer(&mut buf, full, &mut viewer, Path::new("/tmp"), &theme, 0);
+
+        let pane_w = LineViewerState::soft_plan_pane_width(full.width);
+        let pane_x = full.width.saturating_sub(pane_w);
+        let right_x = pane_x + pane_w - 1;
+        let top_y = full.y;
+        let bottom_y = full.y + full.height - 1;
+        assert!(
+            pane_w > 4 && full.height > 4,
+            "view-plan side pane must have a rounded frame"
+        );
+        assert_eq!(
+            buf[(pane_x, top_y)].symbol(),
+            "\u{256d}",
+            "top-left of the view-plan frame is ╭"
+        );
+        assert_eq!(
+            buf[(right_x, top_y)].symbol(),
+            "\u{256e}",
+            "top-right of the view-plan frame is ╮"
+        );
+        assert_eq!(
+            buf[(pane_x, bottom_y)].symbol(),
+            "\u{2570}",
+            "bottom-left of the view-plan frame is ╰"
+        );
+        assert_eq!(
+            buf[(right_x, bottom_y)].symbol(),
+            "\u{256f}",
+            "bottom-right of the view-plan frame is ╯"
+        );
+
+        fn is_box_glyph(symbol: &str) -> bool {
+            let mut chars = symbol.chars();
+            matches!(
+                (chars.next(), chars.next()),
+                (Some(ch), None) if ('\u{2500}'..='\u{257F}').contains(&ch)
+            )
+        }
+
+        // `[` and `]` on the title bar are not box glyphs. This loop does
+        // not read their color.
+        fn assert_side_white(buf: &Buffer, cells: &[(u16, u16)], straight: &str, side: &str) {
+            let white = Color::Rgb(255, 255, 255);
+            let mut box_glyphs = 0u32;
+            let mut straights = 0u32;
+            for &(x, y) in cells {
+                let cell = &buf[(x, y)];
+                let symbol = cell.symbol();
+                if !is_box_glyph(symbol) {
+                    continue;
+                }
+                box_glyphs += 1;
+                if symbol == straight {
+                    straights += 1;
+                }
+                let fg = cell.style().fg;
+                assert_eq!(
+                    fg,
+                    Some(white),
+                    "{side} box glyph {symbol:?} at ({x},{y}) must be white Rgb(255, 255, 255); got {fg:?}"
+                );
+            }
+            assert!(
+                box_glyphs > 0 && straights > 0,
+                "{side} side of the view-plan rounded frame must paint {straight:?}; box glyphs {box_glyphs}, straights {straights}"
+            );
+        }
+
+        let top: Vec<(u16, u16)> = (pane_x..=right_x).map(|x| (x, top_y)).collect();
+        let bottom: Vec<(u16, u16)> = (pane_x..=right_x).map(|x| (x, bottom_y)).collect();
+        let left: Vec<(u16, u16)> = (top_y..=bottom_y).map(|y| (pane_x, y)).collect();
+        let right: Vec<(u16, u16)> = (top_y..=bottom_y).map(|y| (right_x, y)).collect();
+        assert_side_white(&buf, &top, "\u{2500}", "top");
+        assert_side_white(&buf, &bottom, "\u{2500}", "bottom");
+        assert_side_white(&buf, &left, "\u{2502}", "left");
+        assert_side_white(&buf, &right, "\u{2502}", "right");
     }
 
     /// File-backed plan approval sets `feedback_active()` true on the side

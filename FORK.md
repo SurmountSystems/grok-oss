@@ -2611,6 +2611,33 @@ SuperGrok is paid. Older pins above stay.
   meter painted as zero. When a live personal session draws included
   limits, the header still shows `limits 28%`.
 
+**View-plan outline and header credits click (pinned 2026-10-07).**
+These sentences say what those screens must do. They are not a claim
+that the tests already pass. Do not reshape the asserts to match today's
+paint. SuperGrok is paid. Older pins above stay.
+
+- The default view-plan screen is the right-side plan pane
+  (`LineViewerKind::PlanPreview`, fullscreen off). Its rounded frame is
+  white on every side, `prompt_border_active` (`Rgb(255, 255, 255)` on
+  DOGE). It does not use `theme.bg_base`. Named test:
+  `view_plan_screen_outline_is_white_on_every_side`. The older test
+  `soft_plan_side_panel_uses_muted_frame_and_bracketed_header_controls`
+  keeps its bracketed header controls. It no longer requires the frame
+  to stay off white. `plan_mode_prompt_input_keeps_a_white_outline` and
+  `plan_approval_prompt_stroke_is_white_on_every_side` draw the composer,
+  not this pane frame.
+- A left click on the header credits chip writes `MeterSource::Included`
+  and still opens the Limits card, Limits before Credits. On a session
+  that can draw included SuperGrok period limits, the next request draws
+  that meter and the chip shows percent used. On a team-only JWT, with
+  personal SuperGrok hard-expired, the chip stays on team postpaid
+  Billing Credits remaining and does not show `limits 0%` or
+  `limits N%`. Named test:
+  `clicking_the_header_credits_chip_switches_the_next_request_to_included_period_limits_and_still_opens_the_card`.
+  `closed_plan_header_opens_limits_and_credits_without_a_false_percent`
+  stays the team-only `$47.03` contract. Do not invent a hop to the
+  console API key.
+
 **Rules (not product class numbers):**
 
 - **`FORK_PATHS` restore is docs and scripts only.** Product seams inside

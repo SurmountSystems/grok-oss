@@ -8825,3 +8825,279 @@ fn closed_plan_header_opens_limits_and_credits_without_a_false_percent() {
         approval_at.expect("approval header"),
     );
 }
+
+/// A live personal SuperGrok session can draw included SuperGrok period
+/// limits. This fixture is not a team-only JWT. Personal SuperGrok is not
+/// hard-expired. The pin starts on SuperGrok dollar credits, so
+/// `next_request_draws_included_period_limits()` is false. SuperGrok is
+/// paid. That starting meter is not included SuperGrok period limits, not
+/// console team prepaid / console API credits, and not team postpaid
+/// Billing Credits.
+///
+/// A left click on the header credits chip still yields
+/// `Action::ShowLimits`. The card still opens with Limits before Credits.
+/// The same click writes `MeterSource::Included` and makes
+/// `next_request_draws_included_period_limits()` true. It does not hop to
+/// the console API key, and it does not paint `limits 0%` or `limits N%`
+/// on a team-only JWT. This fixture is not that JWT.
+///
+/// Fails today because the header click does not write the pin. The
+/// Included pin assert and the next-request assert fail. Do not skip them.
+#[test]
+#[serial_test::serial]
+fn clicking_the_header_credits_chip_switches_the_next_request_to_included_period_limits_and_still_opens_the_card()
+ {
+    use crate::actions::ActionRegistry;
+    use crate::app::actions::Action;
+    use crate::app::agent_view::test_fixtures::make_agent;
+    use crate::app::agent_view::{AppRenderParams, BannerSlotParams};
+    use crate::app::app_view::InputOutcome;
+    use crate::scrollback::render::ScratchBuffer;
+    use crate::theme::Theme;
+    use crate::views::credit_bar::{CreditBalance, SamplingIdentityKind};
+    use crate::views::limits_modal::LIMITS_TAB;
+    use chrono::{DateTime, Utc};
+    use ratatui::buffer::Buffer;
+    use ratatui::layout::Rect;
+    use xai_grok_shell::auth::limits_pins::{
+        LimitsPins, MeterSource, load_limits_pins, next_request_draws_included_period_limits,
+        save_limits_pins,
+    };
+    use xai_grok_shell::auth::{
+        AuthMode, GrokAuth, clear_console_team_postpaid_cache, read_auth_json,
+        upsert_supergrok_session,
+    };
+    use xai_grok_test_support::EnvGuard;
+
+    fn weekly_bal(pct: f64, reset_at: DateTime<Utc>) -> CreditBalance {
+        CreditBalance {
+            usage_pct: pct,
+            effective_usage_pct: pct,
+            period_end_display: Some(
+                reset_at
+                    .with_timezone(&chrono::Local)
+                    .format("%B %-d, %H:%M")
+                    .to_string(),
+            ),
+            period_end_at: Some(reset_at),
+            pay_as_you_go: false,
+            on_demand_cap_cents: None,
+            on_demand_used_cents: None,
+            prepaid_balance_cents: Some(1_250),
+            period_type: Some("USAGE_PERIOD_TYPE_WEEKLY".into()),
+            is_unified_billing_user: None,
+            grok_build_usage_pct: None,
+            included_usage_known: true,
+        }
+    }
+
+    fn paints_limits_percent(text: &str) -> bool {
+        for line in text.lines() {
+            let mut rest = line;
+            while let Some(idx) = rest.find("limits ") {
+                let after = &rest[idx + "limits ".len()..];
+                let digits = after.chars().take_while(|c| c.is_ascii_digit()).count();
+                if digits > 0 && after[digits..].starts_with('%') {
+                    return true;
+                }
+                rest = &rest[idx + "limits ".len()..];
+            }
+        }
+        false
+    }
+
+    fn screen_of(buf: &Buffer, area: Rect) -> String {
+        (0..area.height)
+            .map(|y| {
+                (0..area.width)
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn phrase_at(screen: &str, phrase: &str) -> Option<(u16, u16)> {
+        for (y, line) in screen.lines().enumerate() {
+            if let Some(byte) = line.find(phrase) {
+                let x = line[..byte].chars().count() as u16;
+                return Some((x, y as u16));
+            }
+        }
+        None
+    }
+
+    let home = tempfile::TempDir::new().expect("temp GROK_HOME");
+    let _env = EnvGuard::set("GROK_HOME", home.path());
+    std::fs::write(
+        home.path().join("config.toml"),
+        "[auth]\npreferred_method = \"oidc\"\nauto_use_included_limits = true\n",
+    )
+    .expect("preferred oidc");
+
+    struct ClearTeamPostpaidCache;
+    impl Drop for ClearTeamPostpaidCache {
+        fn drop(&mut self) {
+            clear_console_team_postpaid_cache();
+        }
+    }
+    let _clear_team_postpaid_cache = ClearTeamPostpaidCache;
+    clear_console_team_postpaid_cache();
+
+    let end = DateTime::parse_from_rfc3339("2026-10-12T06:59:00Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    let base = "https://auth.x.ai::header-chip-included-switch-fixture";
+    let live = chrono::Utc::now() + chrono::Duration::days(1);
+    let mut map = std::collections::BTreeMap::new();
+    upsert_supergrok_session(
+        &mut map,
+        base,
+        GrokAuth {
+            key: "tok-personal-included".into(),
+            auth_mode: AuthMode::Oidc,
+            user_id: "u-personal".into(),
+            principal_type: Some("User".to_string()),
+            principal_id: Some("u-personal".to_string()),
+            team_id: None,
+            expires_at: Some(live),
+            ..GrokAuth::default()
+        },
+    );
+    std::fs::write(
+        home.path().join("auth.json"),
+        serde_json::to_vec_pretty(&map).expect("auth json"),
+    )
+    .expect("write auth");
+    let stored = read_auth_json(&home.path().join("auth.json")).expect("read auth");
+    assert!(
+        stored.values().any(|auth| {
+            !auth.is_team_principal()
+                && auth
+                    .expires_at
+                    .is_some_and(|expires_at| chrono::Utc::now() < expires_at)
+                && !auth.key.trim().is_empty()
+        }),
+        "the fixture is a live personal SuperGrok session that can draw included SuperGrok period limits"
+    );
+    assert!(
+        stored.values().all(|auth| !auth.is_team_principal()),
+        "this fixture is not a team-only JWT"
+    );
+
+    save_limits_pins(&LimitsPins {
+        stay_supergrok: true,
+        use_console: false,
+        meter_source: Some(MeterSource::DollarCredits),
+        supergrok_identity: None,
+    })
+    .expect("dollar credits pin");
+    assert_eq!(
+        load_limits_pins().meter_source,
+        Some(MeterSource::DollarCredits),
+        "the next request starts on SuperGrok dollar credits"
+    );
+    assert!(
+        !next_request_draws_included_period_limits(),
+        "SuperGrok dollar credits are not included SuperGrok period limits"
+    );
+
+    let balance = weekly_bal(28.0, end);
+    let area = Rect::new(0, 0, 140, 40);
+    crate::appearance::cache::set_hide_header(false);
+    let mut agent = make_agent();
+    agent.plan_mode_active = false;
+    agent.plan_approval_view = None;
+    agent.sampling_identity = SamplingIdentityKind::SuperGrokSession;
+    agent.credit_balance = Some(balance.clone());
+    let mut buf = Buffer::empty(area);
+    let mut scratch = ScratchBuffer::new();
+    agent.draw(
+        area,
+        &mut buf,
+        &ActionRegistry::defaults(),
+        &mut scratch,
+        None,
+        false,
+        BannerSlotParams::none(),
+        false,
+        false,
+        &mut Vec::new(),
+        AppRenderParams::default(),
+    );
+    let screen = screen_of(&buf, area);
+    let phrase = "Limits and Credits";
+    assert!(
+        !screen.contains("limits 0%")
+            && !screen.contains("limits 28%")
+            && !paints_limits_percent(&screen),
+        "a personal session pinned to SuperGrok dollar credits must not paint limits 0% or limits N% before the click:\n{screen}"
+    );
+    let (x, y) = phrase_at(&screen, phrase).unwrap_or_else(|| {
+        panic!(
+            "the header credits chip is the Limits and Credits control while included period limits are not the next request:\n{screen}"
+        )
+    });
+    let width = phrase.chars().count() as u16;
+    for dx in 0..width {
+        assert!(
+            agent.hit_credits.contains(x + dx, y),
+            "hit_credits must cover the header credits chip"
+        );
+    }
+    let control: String = (0..width).map(|dx| buf[(x + dx, y)].symbol()).collect();
+    assert_eq!(control, phrase);
+
+    let outcome = agent.handle_input(
+        &Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: x,
+            row: y,
+            modifiers: KeyModifiers::empty(),
+        }),
+        &ActionRegistry::defaults(),
+    );
+    assert!(
+        matches!(outcome, InputOutcome::Action(Action::ShowLimits)),
+        "a left click on the header credits chip must still yield Action::ShowLimits, got {outcome:?}"
+    );
+
+    let mut app = test_app_with_agent();
+    app.credit_balance = Some(balance);
+    let _ = super::super::dispatch::dispatch(Action::ShowLimits, &mut app);
+    let opened = app.agents.values_mut().next().expect("agent");
+    let modal_area = Rect::new(0, 0, 100, 40);
+    let mut modal = Buffer::empty(modal_area);
+    opened.draw_active_modal(modal_area, &mut modal, Theme::default(), false);
+    let card = screen_of(&modal, modal_area);
+    let tab_line = card
+        .lines()
+        .find(|line| line.contains("Limits") && line.contains("Credits"))
+        .unwrap_or("");
+    let limits_at = tab_line.find("Limits").unwrap_or(usize::MAX);
+    let credits_at = tab_line.find("Credits").unwrap_or(0);
+    assert!(
+        limits_at < credits_at,
+        "the card still opens with Limits before Credits:\n{card}"
+    );
+    let Some(crate::views::modal::ActiveModal::Limits { state }) = opened.active_modal.as_ref()
+    else {
+        panic!("dispatch_show_limits must open the Limits card");
+    };
+    assert_eq!(state.window.active_tab, LIMITS_TAB);
+
+    let pins = load_limits_pins();
+    assert_eq!(
+        pins.meter_source,
+        Some(MeterSource::Included),
+        "a left click on the header credits chip must write MeterSource::Included. The header click does not write the pin today, so the pin stays SuperGrok dollar credits"
+    );
+    assert!(
+        !pins.use_console,
+        "writing Included must not hop the next request to the console API key"
+    );
+    assert!(
+        next_request_draws_included_period_limits(),
+        "on a live personal SuperGrok session, MeterSource::Included makes the next request draw included SuperGrok period limits. The header click does not write that pin today"
+    );
+}

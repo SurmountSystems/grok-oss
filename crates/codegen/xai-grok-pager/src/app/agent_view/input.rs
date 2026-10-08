@@ -17,6 +17,32 @@ use crossterm::event::{
     Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use std::time::Instant;
+
+/// A left click on the header credits chip is one-way.
+///
+/// It writes `MeterSource::Included` when that pin would make the next
+/// request draw included SuperGrok period limits. It does not toggle back
+/// to SuperGrok dollar credits or the console API key. An Included pin
+/// stays. A team-only JWT with personal SuperGrok hard-expired cannot
+/// draw that meter, so this click leaves the pin and the header stays on
+/// team postpaid Billing Credits remaining.
+fn pin_header_credits_click_to_included_period_limits() {
+    use xai_grok_shell::auth::limits_pins::{
+        MeterSource, apply_meter_source, load_limits_pins,
+        next_request_draws_included_period_limits_for,
+    };
+    let pins = load_limits_pins();
+    if pins.meter_source == Some(MeterSource::Included) {
+        return;
+    }
+    let mut probe = pins;
+    probe.meter_source = Some(MeterSource::Included);
+    if !next_request_draws_included_period_limits_for(&probe) {
+        return;
+    }
+    let _ = apply_meter_source(MeterSource::Included);
+}
+
 /// External-editor access to the ordinary composer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ExternalPromptEditorAccess {
@@ -359,12 +385,14 @@ impl AgentView {
         }
         // The status-row control sits outside the plan pane. The line viewer
         // and the plan-approval mouse path return Changed for that outside
-        // click. A left click on Limits and Credits opens the card instead,
-        // with plan mode closed and on the plan-approval screen.
+        // click. A left click writes Included when this session can draw
+        // included SuperGrok period limits, then opens the card. Plan mode
+        // closed and the plan-approval screen share this path.
         if let Event::Mouse(mouse) = ev
             && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
             && self.hit_credits.contains(mouse.column, mouse.row)
         {
+            pin_header_credits_click_to_included_period_limits();
             return InputOutcome::Action(Action::ShowLimits);
         }
         if let Some(outcome) = self.intercept_takeover_input(ev, registry, prompt_paging) {
