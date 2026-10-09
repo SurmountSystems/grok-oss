@@ -47,9 +47,25 @@ pub struct PlanModeTracker {
     /// While set, the model has NOT seen plan mode yet.
     /// A toggle-off withdraws it and rolls the activation back instead of deferring an exit the model never knew about.
     pending_activation: Option<PendingActivation>,
-    /// Lives inside the session directory:
-    /// `~/.grok/sessions/<cwd>/<session_id>/plan.md`
+    /// Session plan file. An existing `plan.md` stays, because the open
+    /// approval panel still reads it. A session directory with no `plan.md`
+    /// gets `plan-<ulid>.md` so a new plan does not replace an older one.
     plan_file_path: PathBuf,
+}
+/// `plan.md` when that file is already in `session_dir`, or when the
+/// directory is not on disk yet. Otherwise `plan-<ulid>.md` from the existing
+/// `ulid::mint` helper, which does not replace an older plan and is not the
+/// fixed name `secondary-plan.md`.
+fn plan_file_path_for(session_dir: &Path) -> PathBuf {
+    let legacy = session_dir.join("plan.md");
+    if legacy.is_file() || !session_dir.is_dir() {
+        return legacy;
+    }
+    let mut path = session_dir.join(format!("plan-{}.md", xai_grok_tools::util::ulid::mint()));
+    if path.exists() {
+        path = session_dir.join(format!("plan-{}.md", xai_grok_tools::util::ulid::mint()));
+    }
+    path
 }
 /// A buffered mid-turn activation reminder plus the state needed to roll the activation back if it is withdrawn before delivery.
 struct PendingActivation {
@@ -59,7 +75,10 @@ struct PendingActivation {
     prior_was_previously_active: bool,
 }
 /// Persisted to `plan_mode.json` in the session directory and restored on session reload/resume so plan mode survives process restarts.
-/// The `plan_file_path` is NOT persisted; it is recomputed from session metadata.
+/// The `plan_file_path` is NOT persisted; it is recomputed from the session
+/// directory. An existing `plan.md` is kept so an in-progress session can
+/// load. Otherwise a new plan gets `plan-<ulid>.md` when that directory is
+/// already on disk.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PlanModeSnapshot {
     pub state: PlanModeState,
@@ -87,7 +106,7 @@ impl PlanModeTracker {
             awaiting_plan_approval: false,
             plan_decision_resolved: false,
             pending_activation: None,
-            plan_file_path: session_dir.join("plan.md"),
+            plan_file_path: plan_file_path_for(&session_dir),
         }
     }
     /// `session_dir` is used to recompute `plan_file_path`.
@@ -112,7 +131,7 @@ impl PlanModeTracker {
             awaiting_plan_approval: snapshot.awaiting_plan_approval,
             plan_decision_resolved: snapshot.plan_decision_resolved,
             pending_activation: None,
-            plan_file_path: session_dir.join("plan.md"),
+            plan_file_path: plan_file_path_for(&session_dir),
         }
     }
     /// Mark that the client is waiting on plan approval (`exit_plan_mode` parked).
@@ -378,10 +397,26 @@ pub(crate) fn plan_mode_exit_reminder_template() -> &'static str {
     "\
 You have exited plan mode. You can now make edits, run tools, and take actions."
 }
+/// Session `plan.md` beside a tracker path. A thoughtful `plan-<ulid>.md`
+/// does not replace this file. When the tracker already points at `plan.md`,
+/// this is that same path.
+pub(crate) fn main_plan_file_path(plan_file: &Path) -> PathBuf {
+    if plan_file.file_name().and_then(|name| name.to_str()) == Some("plan.md") {
+        return plan_file.to_path_buf();
+    }
+    plan_file
+        .parent()
+        .map(|dir| dir.join("plan.md"))
+        .unwrap_or_else(|| plan_file.to_path_buf())
+}
 /// `target_path` is the absolute path the tool is trying to write to.
 /// `plan_file` is the absolute path from [`PlanModeTracker::plan_file_path`].
+/// The tracker path and `plan.md` in that same directory are both the plan
+/// file. A new session still uses `plan-<ulid>.md` when the directory has no
+/// `plan.md`. This does not put every new plan back on the single name
+/// `plan.md`.
 pub(crate) fn is_plan_file_write(target_path: &Path, plan_file: &Path) -> bool {
-    target_path == plan_file
+    target_path == plan_file || target_path == main_plan_file_path(plan_file)
 }
 
 /// A living document beside plan.md: the plan names this exact path, the
@@ -679,6 +714,91 @@ mod tests {
         assert_eq!(
             t.plan_file_path(),
             Path::new("/home/user/.grok/sessions/proj/abc-123/plan.md")
+        );
+    }
+    /// Owed outcome: a new plan uses a thoughtful filename and does not
+    /// replace an older plan. Two plans in one session must keep two files.
+    /// Neither name is `plan.md`. An in-progress session that already has
+    /// `plan.md` still loads that file. Surmount named tests are Operator
+    /// contracts. Do not fit this assert to a fixed `plan.md` path or to
+    /// SpaceXAI paint.
+    #[test]
+    fn a_new_plan_uses_a_thoughtful_filename_and_does_not_replace_an_older_plan() {
+        let skill_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../xai-grok-bundle/skills/plan/SKILL.md");
+        let skill = std::fs::read_to_string(&skill_path)
+            .unwrap_or_else(|err| panic!("plan skill {}: {err}", skill_path.display()));
+        assert!(
+            skill.contains("new plan uses a thoughtful filename"),
+            "the plan skill must say a new plan uses a thoughtful filename"
+        );
+        assert!(
+            skill.contains("does not replace an older plan"),
+            "the plan skill must say a new plan does not replace an older plan"
+        );
+        assert!(
+            skill.contains("existing Rust function"),
+            "the plan skill must say to call an existing Rust function"
+        );
+        assert!(
+            skill.contains("one-off Python or bash script"),
+            "the plan skill must forbid a one-off Python or bash script"
+        );
+        assert!(
+            skill.contains("Grok OSS vs SpaceXAI"),
+            "the plan skill must cite the FORK.md Grok OSS vs SpaceXAI rows"
+        );
+        assert!(
+            skill.contains("Do not fit a Surmount assert to upstream paint"),
+            "the plan skill must not tell an agent to fit a Surmount assert to upstream paint"
+        );
+
+        let session = tempfile::tempdir().expect("session dir");
+        let session_dir = session.path().to_path_buf();
+        let older = PlanModeTracker::new(session_dir.clone());
+        let older_path = older.plan_file_path().to_path_buf();
+        std::fs::write(&older_path, "# Older plan\nheader credits click\n").expect("write older");
+
+        let newer = PlanModeTracker::from_snapshot(session_dir, older.snapshot());
+        let newer_path = newer.plan_file_path().to_path_buf();
+        std::fs::write(&newer_path, "# Newer plan\nnamed plan files\n").expect("write newer");
+
+        let older_name = older_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("");
+        let newer_name = newer_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("");
+        assert_ne!(
+            older_path, newer_path,
+            "two plans in one session must keep two files; both still go to {older_name}"
+        );
+        assert_ne!(
+            older_name, "plan.md",
+            "a new plan uses a thoughtful filename, not plan.md (got {older_name})"
+        );
+        assert_ne!(
+            newer_name, "plan.md",
+            "a new plan uses a thoughtful filename, not plan.md (got {newer_name})"
+        );
+        assert_ne!(
+            older_name, "secondary-plan.md",
+            "a fixed secondary name is not a thoughtful filename (got {older_name})"
+        );
+        let kept = std::fs::read_to_string(&older_path).unwrap_or_default();
+        assert!(
+            kept.contains("header credits click"),
+            "the older plan must stay. plan.md overwrote it: {kept}"
+        );
+        let files: Vec<_> = std::fs::read_dir(session.path())
+            .expect("read session")
+            .map(|entry| entry.expect("entry").file_name())
+            .collect();
+        assert!(
+            files.len() >= 2,
+            "two plans in one session must keep two files, got {files:?}"
         );
     }
     #[test]
@@ -979,6 +1099,25 @@ mod tests {
         let plan = Path::new("/home/user/.grok/sessions/proj/abc/plan.md");
         let target = Path::new("/home/user/project/src/main.rs");
         assert!(!is_plan_file_write(target, plan));
+    }
+    /// A thoughtful `plan-<ulid>.md` stays the tracker path. `plan.md` in that
+    /// same directory is still the main plan file the edit gate must allow,
+    /// and the rejection must name that path.
+    #[test]
+    fn is_plan_file_write_accepts_plan_md_beside_a_thoughtful_name() {
+        let thoughtful = Path::new("/tmp/test-session/plan-01M4EQ09QMP7BG3MK6TNEKNT9P.md");
+        let main = Path::new("/tmp/test-session/plan.md");
+        assert!(is_plan_file_write(thoughtful, thoughtful));
+        assert!(
+            is_plan_file_write(main, thoughtful),
+            "plan.md beside the tracker path is the main plan file"
+        );
+        assert!(
+            !is_plan_file_write(Path::new("/tmp/src/main.rs"), thoughtful),
+            "a path outside the session plan file stays refused"
+        );
+        assert_eq!(main_plan_file_path(thoughtful), main);
+        assert_eq!(main_plan_file_path(main), main);
     }
     #[test]
     fn is_markdown_file_path_recognizes_extensions() {

@@ -11,6 +11,7 @@ use crate::session::SwitchContextWindow;
 use crate::session::acp_session::McpReminderMode;
 use crate::terminal::AsyncTerminalRunner;
 use crate::terminal::runner::{TerminalError, TerminalRunRequest, TerminalRunResult};
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::sync::atomic::Ordering::Relaxed;
 use tokio::sync::mpsc;
@@ -2515,4 +2516,542 @@ async fn coordinator_can_compact_a_specialist_near_200k_and_the_specialist_canno
             assert_eq!(info.context_window, 200_000);
         })
         .await;
+}
+
+const COORDINATOR_COMPACT_CALL: &str = "compact_specialist_initiated_by_coordinator(";
+
+/// Owed outcome: an L2 path calls `compact_specialist_initiated_by_coordinator`
+/// when that L2 chooses compact. The specialist turn loop does not call it.
+///
+/// The direct call in
+/// `coordinator_can_compact_a_specialist_near_200k_and_the_specialist_cannot_compact_itself`
+/// is the helper on the specialist session. It is not a live L2 caller.
+#[test]
+fn l2_chooses_compact_on_the_specialist_and_the_specialist_turn_does_not() {
+    let owed = "an L2 path calls compact_specialist_initiated_by_coordinator \
+                when that L2 chooses compact. The specialist turn loop does not call it";
+    let sources = shell_production_sources();
+    let mut saw_turn = false;
+    let mut saw_sampler = false;
+    for (path, src) in sources {
+        if is_specialist_turn_loop(path) {
+            let masked = mask_non_code(src);
+            let hidden = cfg_test_ranges(&masked);
+            assert!(
+                call_sites(&masked, &hidden).is_empty(),
+                "{owed}. {} is the specialist turn loop and must not call it",
+                path.display()
+            );
+            let lossy = path.to_string_lossy();
+            if lossy.ends_with("session/acp_session_impl/turn.rs") {
+                saw_turn = true;
+            }
+            if lossy.ends_with("session/acp_session_impl/sampler_turn.rs") {
+                saw_sampler = true;
+            }
+        }
+    }
+    assert!(
+        saw_turn && saw_sampler,
+        "{owed}. The specialist turn loop sources were not read"
+    );
+    let live = live_l2_compact_call_sites(sources);
+    assert!(
+        !live.is_empty(),
+        "{owed}. The test fails because there is no live L2 caller today"
+    );
+}
+
+/// Owed outcome: the fresh choice uses spawn or resume and does not call
+/// `run_compact_only`. No third database.
+///
+/// That choice is the other arm of the L2 decision that calls
+/// `compact_specialist_initiated_by_coordinator`. Ordinary spawn of every
+/// specialist is not this choice.
+#[test]
+fn l2_starts_a_fresh_l3_context_without_compacting_the_specialist() {
+    let owed = "the fresh choice uses spawn or resume and does not call \
+                run_compact_only. No third database";
+    let sources = shell_production_sources();
+    let found = sources.iter().any(|(path, src)| {
+        if is_specialist_turn_loop(path) {
+            return false;
+        }
+        fresh_l3_choice_in_file(src)
+    });
+    assert!(
+        found,
+        "{owed}. The test fails because that choice is missing"
+    );
+}
+
+fn shell_production_sources() -> &'static Vec<(PathBuf, String)> {
+    static SOURCES: OnceLock<Vec<(PathBuf, String)>> = OnceLock::new();
+    SOURCES.get_or_init(|| {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = Vec::new();
+        let mut stack = vec![root];
+        while let Some(dir) = stack.pop() {
+            let entries = match std::fs::read_dir(&dir) {
+                Ok(entries) => entries,
+                Err(_) => continue,
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    if path.file_name().and_then(|name| name.to_str()) == Some("tests") {
+                        continue;
+                    }
+                    stack.push(path);
+                    continue;
+                }
+                if path.extension().and_then(|ext| ext.to_str()) != Some("rs") {
+                    continue;
+                }
+                let name = path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("");
+                if name.ends_with("_tests.rs")
+                    || name == "compaction_inline_auto_compact_flow_tests.rs"
+                {
+                    continue;
+                }
+                if let Ok(text) = std::fs::read_to_string(&path) {
+                    files.push((path, text));
+                }
+            }
+        }
+        files
+    })
+}
+
+fn is_specialist_turn_loop(path: &Path) -> bool {
+    let lossy = path.to_string_lossy().replace('\\', "/");
+    lossy.ends_with("session/acp_session_impl/turn.rs")
+        || lossy.ends_with("session/acp_session_impl/sampler_turn.rs")
+}
+
+fn live_l2_compact_call_sites(sources: &[(PathBuf, String)]) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    for (path, src) in sources {
+        if is_specialist_turn_loop(path) {
+            continue;
+        }
+        let masked = mask_non_code(src);
+        let hidden = cfg_test_ranges(&masked);
+        if !call_sites(&masked, &hidden).is_empty() {
+            found.push(path.clone());
+        }
+    }
+    found
+}
+
+fn fresh_l3_choice_in_file(src: &str) -> bool {
+    let masked = mask_non_code(src);
+    let hidden = cfg_test_ranges(&masked);
+    let items = fn_items(&masked);
+    for item in &items {
+        if hidden.iter().any(|range| range.contains(&item.body.start)) {
+            continue;
+        }
+        let body = &masked[item.body.clone()];
+        if !body.contains(COORDINATOR_COMPACT_CALL) {
+            continue;
+        }
+        let remainder = strip_innermost_blocks_containing(body, COORDINATOR_COMPACT_CALL);
+        if fresh_arm_is_spawn_or_resume_without_compact_or_database(&remainder) {
+            return true;
+        }
+        if items.iter().any(|sibling| {
+            sibling.name != item.name
+                && !sibling.body_contains_call(&masked)
+                && hidden
+                    .iter()
+                    .all(|range| !range.contains(&sibling.body.start))
+                && contains_call(&remainder, &sibling.name)
+                && fresh_arm_is_spawn_or_resume_without_compact_or_database(
+                    &masked[sibling.body.clone()],
+                )
+        }) {
+            return true;
+        }
+    }
+    false
+}
+
+fn fresh_arm_is_spawn_or_resume_without_compact_or_database(text: &str) -> bool {
+    uses_spawn_or_resume(text) && !text.contains("run_compact_only") && !opens_a_database(text)
+}
+
+fn uses_spawn_or_resume(text: &str) -> bool {
+    text.contains("spawn_session_on_thread")
+        || text.contains("spawn_subagent")
+        || text.contains("resume_from")
+}
+
+fn opens_a_database(text: &str) -> bool {
+    text.contains("sqlite")
+        || text.contains("rusqlite")
+        || text.contains("redb::")
+        || text.contains("sled::")
+        || text.contains("Connection::open")
+}
+
+struct FnItem {
+    name: String,
+    body: std::ops::Range<usize>,
+}
+
+impl FnItem {
+    fn body_contains_call(&self, masked: &str) -> bool {
+        masked[self.body.clone()].contains(COORDINATOR_COMPACT_CALL)
+    }
+}
+
+fn call_sites(masked: &str, hidden: &[std::ops::Range<usize>]) -> Vec<usize> {
+    let needle = COORDINATOR_COMPACT_CALL;
+    let mut found = Vec::new();
+    let mut start = 0;
+    while let Some(rel) = masked[start..].find(needle) {
+        let idx = start + rel;
+        start = idx + needle.len();
+        if hidden.iter().any(|range| range.contains(&idx)) {
+            continue;
+        }
+        if preceding_word(masked, idx) == "fn" {
+            continue;
+        }
+        found.push(idx);
+    }
+    found
+}
+
+fn preceding_word(src: &str, name_idx: usize) -> &str {
+    let before = src[..name_idx].trim_end();
+    let end = before.len();
+    let start = before[..end]
+        .rfind(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_')
+        .map_or(0, |idx| idx + 1);
+    &before[start..]
+}
+
+fn fn_items(masked: &str) -> Vec<FnItem> {
+    let bytes = masked.as_bytes();
+    let mut items = Vec::new();
+    let mut index = 0;
+    let mut depth = 0i32;
+    while index < bytes.len() {
+        if bytes[index] == b'{' {
+            depth += 1;
+            index += 1;
+            continue;
+        }
+        if bytes[index] == b'}' {
+            depth -= 1;
+            index += 1;
+            continue;
+        }
+        if (depth == 0 || depth == 1) && is_word(bytes, index, b"fn") {
+            let name_start = skip_ascii_ws(bytes, index + 2);
+            let name_end = take_ident(bytes, name_start);
+            let name = masked[name_start..name_end].to_string();
+            if let Some(body) = next_brace_body(bytes, name_end) {
+                let end = body.end + 1;
+                items.push(FnItem { name, body });
+                index = end;
+                continue;
+            }
+        }
+        index += 1;
+    }
+    items
+}
+
+fn cfg_test_ranges(masked: &str) -> Vec<std::ops::Range<usize>> {
+    let bytes = masked.as_bytes();
+    let marker = b"#[cfg(test)]";
+    let mut ranges = Vec::new();
+    let mut index = 0;
+    while index + marker.len() <= bytes.len() {
+        if &bytes[index..index + marker.len()] != marker {
+            index += 1;
+            continue;
+        }
+        let attr_start = index;
+        index += marker.len();
+        index = skip_ws_and_attrs(bytes, index);
+        let kind = if is_word(bytes, index, b"mod") {
+            index + 3
+        } else if is_word(bytes, index, b"fn") {
+            index + 2
+        } else {
+            continue;
+        };
+        if let Some(body) = next_brace_body(bytes, kind) {
+            let end = body.end + 1;
+            ranges.push(attr_start..end);
+            index = end;
+        }
+    }
+    ranges
+}
+
+fn strip_innermost_blocks_containing(src: &str, needle: &str) -> String {
+    let blocks = brace_blocks(src);
+    let containing: Vec<(usize, usize)> = blocks
+        .into_iter()
+        .filter(|(start, end)| src[*start..=*end].contains(needle))
+        .collect();
+    let mut innermost: Vec<(usize, usize)> = containing
+        .iter()
+        .copied()
+        .filter(|&(start, end)| {
+            !containing
+                .iter()
+                .any(|&(inner_start, inner_end)| inner_start > start && inner_end < end)
+        })
+        .collect();
+    innermost.sort_by_key(|(start, _)| *start);
+    let mut out = src.to_string();
+    for (start, end) in innermost.into_iter().rev() {
+        out.replace_range(start..=end, "");
+    }
+    out
+}
+
+fn brace_blocks(src: &str) -> Vec<(usize, usize)> {
+    let bytes = src.as_bytes();
+    let mut stack = Vec::new();
+    let mut blocks = Vec::new();
+    for (index, &byte) in bytes.iter().enumerate() {
+        if byte == b'{' {
+            stack.push(index);
+        } else if byte == b'}'
+            && let Some(start) = stack.pop()
+        {
+            blocks.push((start, index));
+        }
+    }
+    blocks
+}
+
+fn contains_call(haystack: &str, name: &str) -> bool {
+    if name.is_empty() {
+        return false;
+    }
+    let bytes = haystack.as_bytes();
+    let needle = name.as_bytes();
+    let mut index = 0;
+    while index + needle.len() < bytes.len() {
+        if &bytes[index..index + needle.len()] == needle
+            && (index == 0 || !is_ident_byte(bytes[index - 1]))
+            && bytes[index + needle.len()] == b'('
+        {
+            return true;
+        }
+        index += 1;
+    }
+    false
+}
+
+fn next_brace_body(bytes: &[u8], from: usize) -> Option<std::ops::Range<usize>> {
+    let mut index = from;
+    let mut paren = 0i32;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'(' => paren += 1,
+            b')' => {
+                paren -= 1;
+            }
+            b'{' if paren == 0 => {
+                let start = index + 1;
+                let mut depth = 1i32;
+                index += 1;
+                while index < bytes.len() && depth > 0 {
+                    match bytes[index] {
+                        b'{' => depth += 1,
+                        b'}' => depth -= 1,
+                        _ => {}
+                    }
+                    index += 1;
+                }
+                if depth == 0 {
+                    return Some(start..index - 1);
+                }
+                return None;
+            }
+            b';' if paren == 0 => return None,
+            _ => {}
+        }
+        index += 1;
+    }
+    None
+}
+
+fn skip_ws_and_attrs(bytes: &[u8], mut index: usize) -> usize {
+    loop {
+        index = skip_ascii_ws(bytes, index);
+        if index + 1 < bytes.len() && bytes[index] == b'#' && bytes[index + 1] == b'[' {
+            let mut depth = 0i32;
+            while index < bytes.len() {
+                if bytes[index] == b'[' {
+                    depth += 1;
+                }
+                if bytes[index] == b']' {
+                    depth -= 1;
+                    index += 1;
+                    if depth == 0 {
+                        break;
+                    }
+                    continue;
+                }
+                index += 1;
+            }
+            continue;
+        }
+        return index;
+    }
+}
+
+fn skip_ascii_ws(bytes: &[u8], mut index: usize) -> usize {
+    while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+        index += 1;
+    }
+    index
+}
+
+fn take_ident(bytes: &[u8], mut index: usize) -> usize {
+    while index < bytes.len() && is_ident_byte(bytes[index]) {
+        index += 1;
+    }
+    index
+}
+
+fn is_word(bytes: &[u8], index: usize, word: &[u8]) -> bool {
+    let end = index + word.len();
+    if end > bytes.len() || &bytes[index..end] != word {
+        return false;
+    }
+    let prev_ok = index == 0 || !is_ident_byte(bytes[index - 1]);
+    let next_ok = end == bytes.len() || !is_ident_byte(bytes[end]);
+    prev_ok && next_ok
+}
+
+fn is_ident_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_'
+}
+
+fn mask_non_code(src: &str) -> String {
+    let bytes = src.as_bytes();
+    let mut out = vec![b' '; bytes.len()];
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'/' && index + 1 < bytes.len() && bytes[index + 1] == b'/' {
+            while index < bytes.len() && bytes[index] != b'\n' {
+                index += 1;
+            }
+            continue;
+        }
+        if bytes[index] == b'/' && index + 1 < bytes.len() && bytes[index + 1] == b'*' {
+            index += 2;
+            while index + 1 < bytes.len() && !(bytes[index] == b'*' && bytes[index + 1] == b'/') {
+                index += 1;
+            }
+            index = (index + 2).min(bytes.len());
+            continue;
+        }
+        if bytes[index] == b'r' && looks_like_raw_string(bytes, index) {
+            index = skip_raw_string(bytes, index);
+            continue;
+        }
+        if bytes[index] == b'"' {
+            index = skip_cooked_string(bytes, index);
+            continue;
+        }
+        if bytes[index] == b'\'' {
+            index = skip_char_or_copy_lifetime(bytes, &mut out, index);
+            continue;
+        }
+        out[index] = bytes[index];
+        index += 1;
+    }
+    String::from_utf8(out)
+        .unwrap_or_else(|err| String::from_utf8_lossy(err.as_bytes()).into_owned())
+}
+
+fn looks_like_raw_string(bytes: &[u8], index: usize) -> bool {
+    let mut cursor = index + 1;
+    while cursor < bytes.len() && bytes[cursor] == b'#' {
+        cursor += 1;
+    }
+    cursor < bytes.len() && bytes[cursor] == b'"'
+}
+
+fn skip_raw_string(bytes: &[u8], index: usize) -> usize {
+    let mut hashes = 0usize;
+    let mut cursor = index + 1;
+    while cursor < bytes.len() && bytes[cursor] == b'#' {
+        hashes += 1;
+        cursor += 1;
+    }
+    if cursor >= bytes.len() || bytes[cursor] != b'"' {
+        return index + 1;
+    }
+    cursor += 1;
+    while cursor < bytes.len() {
+        if bytes[cursor] == b'"' {
+            let mut seen = 0usize;
+            while seen < hashes
+                && cursor + 1 + seen < bytes.len()
+                && bytes[cursor + 1 + seen] == b'#'
+            {
+                seen += 1;
+            }
+            if seen == hashes {
+                return cursor + 1 + hashes;
+            }
+        }
+        cursor += 1;
+    }
+    bytes.len()
+}
+
+fn skip_cooked_string(bytes: &[u8], mut index: usize) -> usize {
+    index += 1;
+    while index < bytes.len() {
+        if bytes[index] == b'\\' {
+            index = (index + 2).min(bytes.len());
+            continue;
+        }
+        if bytes[index] == b'"' {
+            return index + 1;
+        }
+        index += 1;
+    }
+    bytes.len()
+}
+
+fn skip_char_or_copy_lifetime(bytes: &[u8], out: &mut [u8], index: usize) -> usize {
+    if index + 1 < bytes.len() && is_ident_byte(bytes[index + 1]) {
+        out[index] = bytes[index];
+        let mut cursor = index + 1;
+        while cursor < bytes.len() && is_ident_byte(bytes[cursor]) {
+            out[cursor] = bytes[cursor];
+            cursor += 1;
+        }
+        return cursor;
+    }
+    let mut cursor = index + 1;
+    while cursor < bytes.len() {
+        if bytes[cursor] == b'\\' {
+            cursor = (cursor + 2).min(bytes.len());
+            continue;
+        }
+        if bytes[cursor] == b'\'' {
+            return cursor + 1;
+        }
+        cursor += 1;
+    }
+    bytes.len()
 }

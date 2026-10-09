@@ -451,10 +451,13 @@ less than product code and tests. Do not invent long essays or git nags.
    never name that Anthropic assistant product. See the named subsection.
    Host dual-pin: `~/.grok/AGENTS.md` same heading.
    **Layers, not parent or child (pinned 2026-09-21):** Nested agents are
-   **L1**, **L2**, and **L3**. Coordinator and specialist are fine. Do not
+   **L1**, **L2**, and **L3**. Coordinator and specialist are fine when
+   the layer is right: the coordinator is the L2, and the specialist is
+   the L3. An L3 is not a coordinator. There is no L4. See § *Layers,
+   not parent or child* and § *An L3 is not a coordinator*. Do not
    call L1 a parent of L2, or L2 a child of L1, or L3 a child of L2. Do
-   not analogize nested agents to OS process trees. See § *Layers, not
-   parent or child*. Host dual-pin: `~/.grok/AGENTS.md` same heading.
+   not analogize nested agents to OS process trees. Host dual-pin:
+   `~/.grok/AGENTS.md` same heading.
    **ISA vs cores vs cargo targets (pinned 2026-08-23).** aarch64 versus
    x86_64 is instruction-set architecture (ISA), not "extra CPUs." CPU in
    that sentence reads as cores or VM size (GitHub `CI_LOW_MEM` versus
@@ -492,6 +495,7 @@ less than product code and tests. Do not invent long essays or git nags.
    `~/.grok/AGENTS.md` § *Self-improving feedback loop*, § *Operator
    speech is work*, § *Never ignore the Operator*, § *Take the Operator
    seriously*, § *Operator and Agent*, § *Layers, not parent or child*,
+   § *An L3 is not a coordinator*,
    § *Never name that Anthropic assistant*, § *Report finished nested
    work the same turn*.
    **Write that down (pinned 2026-08-22; L2 writes 2026-08-28):** when
@@ -1076,8 +1080,10 @@ line that left the composer named Human box.
 ## Layers, not parent or child (pinned 2026-09-21)
 
 Operator: use layer terminology, not parent or child. Nested agents are
-**L1**, **L2**, and **L3**. Coordinator and specialist are fine. Be
-thoughtful in this language always.
+**L1**, **L2**, and **L3**. Coordinator and specialist are fine when
+the layer is right: the coordinator is the L2, and the specialist is
+the L3. An L3 is not a coordinator. See § *An L3 is not a coordinator*.
+Be thoughtful in this language always.
 
 Do not call L1 a parent of L2, or L2 a child of L1, or L3 a child of L2,
 in chat, board titles, spawn descriptions, residual, plans, reports,
@@ -1104,6 +1110,14 @@ other coordinators. Be kind in those notes.
 
 This pin does not weaken § *Operator and Agent*. Dual-pin: this file
 (hard constraint 4) and host `~/.grok/AGENTS.md` same heading.
+
+## An L3 is not a coordinator (pinned 2026-10-08)
+
+Operator: "L3s cannot be coordinators because there's nothing for them to coordinate. There is no L4. They can be implementors, researchers, and reviewers."
+
+An L2 coordinates. An L3 implements, researches, or reviews. An L3 does not coordinate. There is no L4. Do not call an L3 a coordinator. Coordinator and specialist remain fine words when the layer is right: the coordinator is the L2, and the specialist is the L3. Implementor, researcher, and reviewer are the L3 roles.
+
+This pin does not weaken § *Layers, not parent or child* or § *Agent depth L1 / L2 / L3*. Dual-pin: host `~/.grok/AGENTS.md` same heading.
 
 ## Never name that Anthropic assistant (pinned 2026-09-09)
 
@@ -1197,7 +1211,7 @@ An L2 may compact a specialist it spawned when that specialist is near the 200k 
 - **Finished nested agents must stop (pinned 2026-08-22).** When the host says a nested agent has exited, L1 must not leave it painted as live. If the Subagents list still shows Responding and a running timer, kill that id the same turn. A finished L2 must not keep its context open. Compaction of a finished L2 is waste. Host dual-pin: `~/.grok/AGENTS.md` § Agent depth. Same turn, **report** that finished work to the operator (§ *Report finished nested work the same turn*). Killing the painted-live row is not the report. An early L2 exit is not a finished L2. See § *L1 resumes an early L2 exit*.
 - **L1** never does product work and never shows raw edits. Status, spawn L2, wait, short reports, board, Hierarchical fast path. L1 must not edit product code (see § *I hate seeing you edit code at L1*). L1 must not rewrite process-law files (see § *L1 must not rewrite process law*).
 - **L2** is the coordinator and reports back to the operator at L1. L2 decides whether to spawn L3s. Spawn L3 **only if the problem is actually hard**. Easy work can stay on L2. Easy documentation dual-pins stay on L2.
-- **L3** has about as much agency as L2 except no spawn (no L4).
+- **L3** has about as much agency as L2 except no spawn (no L4). An L3 implements, researches, or reviews. An L3 does not coordinate. Do not call an L3 a coordinator. See § *An L3 is not a coordinator*.
 - **No worktrees** on this tree (`allow_worktree = false`). Do not invent a worktree workflow.
 - Big already-named work runs as **parallel streams**. Explicit plan/implement is for tricky problems and new projects. After Approve, implement. Present is not Approve.
 
@@ -1209,7 +1223,7 @@ goes up. Do not go deeper than L3.
 |-------|------|----------|
 | **L1 main** | Status to the operator. Spawn L2. Wait. Read short reports. Board upsert. Hierarchical fast path. Modal-free operator chat: typing and chat must stay unobstructed; must not get stuck in plan soft-park or exclusive key capture. | Diagnose, implement, multi-file reads, CI logs, rewriting `AGENTS.md` / `FORK.md` / `RESIDUAL.md` / user-guide / remaining-work reports |
 | **L2 subagent** | Does the work. Parallelize. Decide whether to spawn L3 (only if the problem is actually hard). Stay token-efficient. Throw context away after a report goes up. Operator-facing nested view: operator questions and clarifications in that L2 overlay go to that L2. | Show raw edits to the operator as if they were L1. Do not inject operator text into a live L3. Spawn L4. |
-| **L3 specialist** | The hard slice, in parallel, when the L2 spawned it. Same agency as L2 except it cannot spawn. | Spawn L4 (**forbidden**). Do not add extra L3 hobbles (no "L3 may only grep", no weaker model unless product already requires it). |
+| **L3 specialist** | The hard slice, in parallel, when the L2 spawned it. Implementor, researcher, or reviewer. Same agency as L2 except it cannot spawn. | Coordinate, or be called a coordinator. Spawn L4 (**forbidden**). Do not add extra L3 hobbles (no "L3 may only grep", no weaker model unless product already requires it). |
 
 L3 is not a weaker agent. The hard cap is no L4. L2's unique extra versus L3 is spawning L3 plus being the nested view the operator talks to. An L3 does the hard slice when the L2 spawned it. Easy work can stay on L2.
 
@@ -1340,12 +1354,14 @@ Host: § *Hard stop* default loop.
 - **User-facing language** (mirror of host `~/.grok/AGENTS.md` § Language,
   2026-07-26; layers 2026-09-21): never bare **child/children** as a nickname
   for subagents (“Child finished green” is wrong). Nested agents are **L1**,
-  **L2**, and **L3**. Coordinator and specialist are fine. Do not call L1 a
-  parent of L2, or L2 a child of L1, or L3 a child of L2. Do not analogize
-  nested agents to OS process trees. Prefer **subagent**, **implementer**,
-  **explore agent**, **worker**, or a role name. Keep ban on “kids” + “cheap.”
-  “Child process” = OS process only, in technical docs. See § *Layers, not
-  parent or child*.
+  **L2**, and **L3**. Coordinator and specialist are fine when the layer is
+  right: the coordinator is the L2, and the specialist is the L3. An L3 is
+  not a coordinator. There is no L4. See § *An L3 is not a coordinator*.
+  Do not call L1 a parent of L2, or L2 a child of L1, or L3 a child of L2.
+  Do not analogize nested agents to OS process trees. Prefer **subagent**,
+  **implementer**, **explore agent**, **worker**, or a role name. Keep ban
+  on “kids” + “cheap.” “Child process” = OS process only, in technical
+  docs. See § *Layers, not parent or child*.
 - **CI fail, regression, multi-file diagnosis, non-trivial fix, skills-location
   claims:** L1’s first tool turn is `spawn_subagent`, not L1 `grep` / `gh`
   log pull / unnamed test-file reads / “I’ll check the docs.” The L2 does

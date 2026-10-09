@@ -5088,8 +5088,8 @@
 
         // ` my session ` is 12 cols: label at x 27..=38, corner at 39.
         assert_eq!(buf_text_at(&buf, 27, 39, 0), " my session ");
-        assert_eq!(buf.cell((0, 0)).unwrap().symbol(), "\u{256d}");
-        assert_eq!(buf.cell((39, 0)).unwrap().symbol(), "\u{256e}");
+        assert_eq!(buf.cell((0, 0)).unwrap().symbol(), "\u{250c}");
+        assert_eq!(buf.cell((39, 0)).unwrap().symbol(), "\u{2510}");
         assert_eq!(buf_text_at(&buf, 25, 27, 0), "\u{2500}\u{2500}");
 
         // Info-line treatment: dimmed secondary text on the prompt bg (same blend as `render_info_line`'s model name), no bold, no inverse
@@ -5106,7 +5106,7 @@
         assert!(!title_cell.add_modifier.contains(Modifier::REVERSED));
         let border = buf.cell((1, 0)).unwrap().style();
         assert_eq!(border.bg, title_cell.bg);
-        // Fg delta vs the border rule (like the bottom info line vs its ╰─╯ rule)
+        // Fg delta vs the border rule (like the bottom info line vs its └─┘ rule)
         // Only meaningful with color support, same guard as the slash-highlight test above (monochrome themes resolve to Reset)
         if theme.text_secondary != ratatui::style::Color::Reset {
             assert_ne!(border.fg, title_cell.fg);
@@ -5218,7 +5218,7 @@
         );
 
         let bottom_left = buf.cell((0, 3)).expect("bottom corner");
-        assert_eq!(bottom_left.symbol(), "\u{2570}");
+        assert_eq!(bottom_left.symbol(), "\u{2514}");
         assert_eq!(
             bottom_left.fg, white,
             "bottom rule must stay prompt_border, got {:?}",
@@ -5290,8 +5290,8 @@
     fn no_title_keeps_plain_top_border() {
         let buf = draw_bordered(40, &title_test_style(None));
 
-        assert_eq!(buf.cell((0, 0)).unwrap().symbol(), "\u{256d}");
-        assert_eq!(buf.cell((39, 0)).unwrap().symbol(), "\u{256e}");
+        assert_eq!(buf.cell((0, 0)).unwrap().symbol(), "\u{250c}");
+        assert_eq!(buf.cell((39, 0)).unwrap().symbol(), "\u{2510}");
         assert_eq!(buf_text_at(&buf, 1, 39, 0), "\u{2500}".repeat(38));
     }
 
@@ -5303,8 +5303,8 @@
         // max_w = 39 - 3 = 36: label spans x 3..=38 with a trailing ellipsis.
         let row = buf_text_at(&buf, 0, 40, 0);
         assert!(row.contains('\u{2026}'), "expected ellipsis in: {row}");
-        assert_eq!(buf.cell((0, 0)).unwrap().symbol(), "\u{256d}");
-        assert_eq!(buf.cell((39, 0)).unwrap().symbol(), "\u{256e}");
+        assert_eq!(buf.cell((0, 0)).unwrap().symbol(), "\u{250c}");
+        assert_eq!(buf.cell((39, 0)).unwrap().symbol(), "\u{2510}");
         assert_eq!(buf_text_at(&buf, 1, 3, 0), "\u{2500}\u{2500}");
         assert_eq!(buf_text_at(&buf, 37, 39, 0), "\u{2500}\u{2500}");
     }
@@ -5383,8 +5383,8 @@
 
         assert_eq!(buf_text_at(&buf, 26, 38, 0), " my session ");
         assert_eq!(buf_text_at(&buf, 30, 38, 3), " grok-3 ");
-        assert_eq!(buf_text_at(&buf, 38, 40, 0), "\u{2500}\u{256e}");
-        assert_eq!(buf_text_at(&buf, 38, 40, 3), "\u{2500}\u{256f}");
+        assert_eq!(buf_text_at(&buf, 38, 40, 0), "\u{2500}\u{2510}");
+        assert_eq!(buf_text_at(&buf, 38, 40, 3), "\u{2500}\u{2518}");
     }
 
     fn any_cell_with_bg(buf: &Buffer, bg: ratatui::style::Color) -> bool {

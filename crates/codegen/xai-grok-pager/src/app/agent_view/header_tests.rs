@@ -133,7 +133,7 @@ fn plain_session_header_has_path_and_dashboard_button_only() {
     let row = header_row(&agent, &buf);
     let y = agent.hit_dashboard.rect.unwrap().y;
     assert!(row.contains(PATH), "row = {row:?}");
-    assert!(row.contains("[Dashboard]"), "row = {row:?}");
+    assert!(row.contains("[L0]"), "row = {row:?}");
     assert!(
         !row.contains(crate::glyphs::chevron_left()) && !row.contains(crate::glyphs::chevron()),
         "no switcher in a plain session, row = {row:?}"
@@ -159,7 +159,7 @@ fn dashboard_button_follows_the_feature_gate_outside_the_overlay() {
     assert!(agent.hit_dashboard.rect.is_none());
     let screen: String = (0..buf.area.height).map(|y| row_text(&buf, y)).collect();
     assert!(
-        screen.contains(PATH) && !screen.contains("[Dashboard]"),
+        screen.contains(PATH) && !screen.contains("[L0]"),
         "the header row is painted, without the button"
     );
     draw(&mut agent, &registry, true, OverlayHeader::default());
@@ -391,7 +391,7 @@ fn long_link_preview_yields_to_the_switcher_and_dashboard_button() {
         row.contains(PATH),
         "the location keeps its floor next to the preview, row = {row:?}"
     );
-    assert_eq!(text_at(&buf, dash), "[Dashboard]");
+    assert_eq!(text_at(&buf, dash), "[L0]");
     let mut agent = agent_at(60);
     highlight(&mut agent);
     let buf = draw(&mut agent, &registry, true, header);
@@ -507,4 +507,35 @@ fn nested_subagent_keeps_the_parent_header_and_routes_like_it() {
         parent.handle_input(&click(dash.x, dash.y), &registry),
         InputOutcome::Action(Action::DashboardOverlayExit)
     ));
+}
+/// The existing dashboard control paints `[L0]`, not `[Dashboard]`.
+/// The same click still opens the dashboard.
+#[test]
+fn l0_header_control_is_labeled_l0() {
+    let _theme = crate::theme::cache::pin_theme();
+    let registry = ActionRegistry::defaults();
+    let mut agent = agent_at(120);
+    let buf = draw(&mut agent, &registry, false, OverlayHeader::default());
+    let dash = agent
+        .hit_dashboard
+        .rect
+        .expect("the dashboard control must stay a click target");
+    let label = text_at(&buf, dash);
+    let row = header_row(&agent, &buf);
+    assert_eq!(
+        label, "[L0]",
+        "owed: the existing dashboard control paints `[L0]`, not `[Dashboard]`. \
+         painted {label:?} on row {row:?}"
+    );
+    assert!(
+        !row.contains("[Dashboard]"),
+        "owed: the header control is `[L0]`, not `[Dashboard]`. row = {row:?}"
+    );
+    assert!(
+        matches!(
+            agent.handle_input(&click(dash.x, dash.y), &registry),
+            InputOutcome::Action(Action::OpenDashboard)
+        ),
+        "owed: the same click still opens the dashboard"
+    );
 }

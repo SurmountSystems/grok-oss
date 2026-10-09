@@ -338,16 +338,37 @@ impl AgentView {
             })
             .collect()
     }
-    /// Non-workflow subagents in dock display order: `(child_session_id, subagent_id, row)`.
+    /// Non-workflow L2 rows in dock display order: `(child_session_id, subagent_id, row)`.
+    ///
+    /// L3 specialists stay in the registry and are not their own rows. A live
+    /// count is appended to the L2 row (`1 specialist`, `N specialists`).
+    /// Running rows are not collapsed when descriptions match. Each L2 keeps
+    /// its own stop target and its own share of a revealed dock.
     pub(crate) fn dock_subagent_rows(&self) -> Vec<(String, String, crate::views::dock::DockRow)> {
         let show_done = self.tasks.show_done();
+        let child_ids: std::collections::HashSet<&str> = self
+            .subagent_sessions
+            .values()
+            .map(|info| info.child_session_id.as_ref())
+            .collect();
         let mut infos: Vec<&crate::app::subagent::SubagentInfo> = self
             .subagent_sessions
             .values()
             .filter(|info| info.attempt.workflow_run_id.is_none())
             .filter(|info| show_done || info.is_running())
+            .filter(|info| crate::app::subagent::is_l2_list_row(info, &child_ids))
             .collect();
-        infos.sort_by_key(|info| (!info.is_running(), info.attempt.started_at));
+        if show_done {
+            infos.sort_by_key(|info| (!info.is_running(), info.attempt.started_at));
+        } else {
+            // Equal `started_at` must not follow hash-map order.
+            infos.sort_by(|a, b| {
+                a.attempt
+                    .started_at
+                    .cmp(&b.attempt.started_at)
+                    .then_with(|| a.child_session_id.cmp(&b.child_session_id))
+            });
+        }
         infos
             .into_iter()
             .map(|info| {
@@ -361,6 +382,15 @@ impl AgentView {
                 meta.push_str(&crate::views::dock::fmt_elapsed(
                     info.display_elapsed().as_secs(),
                 ));
+                if let Some(count) =
+                    crate::app::subagent::format_live_l3_count(crate::app::subagent::live_l3_count(
+                        self.subagent_sessions.values(),
+                        info.child_session_id.as_ref(),
+                    ))
+                {
+                    meta.push(' ');
+                    meta.push_str(&count);
+                }
                 (
                     info.child_session_id.to_string(),
                     info.subagent_id.to_string(),

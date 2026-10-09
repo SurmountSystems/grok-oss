@@ -1771,11 +1771,45 @@ fn dropped_left_edge(painted: &str, expected: &str, clip: usize) -> bool {
     !tail.is_empty() && painted.contains(&tail)
 }
 
+/// Wrapped rows of the item at `screen_y` that sit above the viewport.
+///
+/// Zero when that row is the item's first wrapped row. A scroll of one row
+/// into a wrapped sentence returns 1.
+fn wrapped_rows_above_viewport(
+    viewer: &LineViewerState,
+    content_area: Rect,
+    screen_y: u16,
+) -> usize {
+    if screen_y < content_area.y || screen_y >= content_area.y.saturating_add(content_area.height) {
+        return 0;
+    }
+    let ry = (screen_y - content_area.y) as usize;
+    let vy = viewer.list_state.scroll_offset().saturating_add(ry);
+    let Some(vi) = viewer.list_state.layout().item_at_y(vy) else {
+        return 0;
+    };
+    vy.saturating_sub(viewer.list_state.layout().virtual_y(vi))
+}
+
+/// Text width used when the layout measured this item, capped so the
+/// rewrite still stops before the scrollbar.
+fn scrolled_wrap_width(viewer: &LineViewerState, prefix_w: u16, text_w: u16) -> u16 {
+    viewer
+        .list_state
+        .layout()
+        .cached_width()
+        .map(|width| width.saturating_sub(prefix_w).max(1))
+        .unwrap_or(text_w)
+        .min(text_w)
+}
+
 /// Repaint a soft-plan source item whose left edge or tail was sliced.
 ///
 /// The replacement is the full source line, word-wrapped into the text
 /// column after the line-number gutter. Every wrapped row is painted, so
-/// `tokens.` stays inside the content area.
+/// `tokens.` stays inside the content area. Rows already above the viewport
+/// stay there: the rewrite continues at the wrapped row on screen and does
+/// not paint the head back onto the first visible row.
 fn repair_soft_plan_dropped_left_edge(
     buf: &mut Buffer,
     content_area: Rect,
@@ -1835,23 +1869,48 @@ fn repair_soft_plan_dropped_left_edge(
                     .saturating_sub(prefix_w)
                     .saturating_sub(bar_cols)
                     .max(1);
+                // A scroll into this line leaves the head above the viewport.
+                // Wrapping at the layout width keeps that same row boundary.
+                // Painting from wrap 0 would put the head back on the first
+                // visible row, on the right-hand side of the pane.
+                let skip = wrapped_rows_above_viewport(viewer, content_area, y);
+                let paint_w = if skip == 0 {
+                    text_w
+                } else {
+                    scrolled_wrap_width(viewer, prefix_w, text_w)
+                };
                 let style = Style::default().fg(theme.text_primary).bg(theme.bg_base);
                 let line = Line::from(Span::styled(expected, style));
-                let wrapped = word_wrap_line(&line, text_w as usize);
+                let wrapped = word_wrap_line(&line, paint_w as usize);
                 let count = if wrapped.is_empty() { 1 } else { wrapped.len() };
-                // `rows` already includes later rows that still resolve to this
-                // source line. A one-row clip must not drop the continuation.
-                let room = (rows as usize).max(count).min(content_area.height as usize);
-                for i in 0..count.min(room) {
-                    let py = content_area.y.saturating_add(row.saturating_add(i as u16));
-                    if py >= content_area.y.saturating_add(content_area.height) {
-                        break;
+                if skip == 0 {
+                    // `rows` already includes later rows that still resolve to this
+                    // source line. A one-row clip must not drop the continuation.
+                    let room = (rows as usize).max(count).min(content_area.height as usize);
+                    for i in 0..count.min(room) {
+                        let py = content_area.y.saturating_add(row.saturating_add(i as u16));
+                        if py >= content_area.y.saturating_add(content_area.height) {
+                            break;
+                        }
+                        clear_soft_plan_text_row(buf, text_x, py, text_w, theme.bg_base);
+                        if wrapped.is_empty() {
+                            buf.set_line(text_x, py, &line, text_w);
+                        } else if let Some(wline) = wrapped.get(i) {
+                            buf.set_line(text_x, py, wline, text_w);
+                        }
                     }
-                    clear_soft_plan_text_row(buf, text_x, py, text_w, theme.bg_base);
-                    if wrapped.is_empty() {
-                        buf.set_line(text_x, py, &line, text_w);
-                    } else if let Some(wline) = wrapped.get(i) {
-                        buf.set_line(text_x, py, wline, text_w);
+                } else if skip < count {
+                    // Only the rows that still belong to this source line.
+                    // `skip` is the wrapped row already on screen.
+                    for i in 0..rows as usize {
+                        let py = content_area.y.saturating_add(row.saturating_add(i as u16));
+                        if py >= content_area.y.saturating_add(content_area.height) {
+                            break;
+                        }
+                        clear_soft_plan_text_row(buf, text_x, py, text_w, theme.bg_base);
+                        if let Some(wline) = wrapped.get(skip.saturating_add(i)) {
+                            buf.set_line(text_x, py, wline, text_w);
+                        }
                     }
                 }
             }
@@ -3939,6 +3998,151 @@ mod tests {
         assert!(
             squashed.contains("Theuserwantsthestatusrowtoshowtwotokens."),
             "the owed sentence stays in the text columns"
+        );
+    }
+
+    /// Owed outcome: "A source line longer than the pane wraps. After a
+    /// scroll, the right-hand cells of that sentence are still that
+    /// sentence, in order, and they are not the scrollbar glyph."
+    #[test]
+    fn plan_pane_scroll_keeps_each_wrapped_sentence_in_order() {
+        use crate::views::list_pane::{ListItem, line_display_width};
+
+        let _pin = crate::theme::cache::pin_theme();
+        crate::theme::cache::set(crate::theme::ThemeKind::Doge);
+        let theme = crate::theme::Theme::doge();
+        // One source line, longer than the plan pane, so it wraps. The
+        // first word sits on the first wrapped row. The last word sits on
+        // a later wrapped row.
+        let owed_words = [
+            "AlphaOne",
+            "BravoTwo",
+            "CharlieThree",
+            "DeltaFour",
+            "EchoFive",
+            "FoxtrotSix",
+            "GolfSeven",
+            "HotelEight",
+            "IndiaNine",
+            "JulietTen",
+            "KiloEleven",
+            "LimaTwelve",
+            "MikeThirteen",
+            "NovemberFourteen",
+            "OscarFifteen",
+            "PapaSixteen",
+            "QuebecSeventeen",
+            "RomeoEighteen",
+            "SierraNineteen",
+            "TangoTwenty",
+        ];
+        let sentence = format!("{}.", owed_words.join(" "));
+        let mut body = format!("# Proposed plan.\n\n{sentence}\n");
+        for n in 1..=40 {
+            body.push_str(&format!("line {n:02}\n"));
+        }
+
+        let mut viewer =
+            LineViewerState::open_markdown_content("plan.md", body, None).expect("open plan");
+        viewer.kind = LineViewerKind::PlanPreview;
+        viewer.fullscreen = false;
+        viewer.plan_mut().feedback_active = false;
+        viewer.plan_mut().show_action_buttons = true;
+
+        let full = Rect::new(0, 0, 100, 30);
+        let mut buf = Buffer::empty(full);
+        render_line_viewer(&mut buf, full, &mut viewer, Path::new("/tmp"), &theme, 0);
+
+        let sentence_idx = viewer
+            .lines
+            .iter()
+            .position(|item| {
+                matches!(
+                    item,
+                    PlanViewerItem::Source(source) if source.plain_text.contains("AlphaOne")
+                )
+            })
+            .expect("the long sentence is one source line");
+        let sentence_y = viewer.list_state.layout().virtual_y(sentence_idx);
+        let sentence_h = viewer.list_state.layout().item_height(sentence_idx);
+        assert!(
+            sentence_h >= 2,
+            "the source line is longer than the pane and must wrap; height was {sentence_h}"
+        );
+        viewer
+            .list_state
+            .set_scroll_offset(sentence_y.saturating_add(1));
+
+        let mut buf = Buffer::empty(full);
+        render_line_viewer(&mut buf, full, &mut viewer, Path::new("/tmp"), &theme, 0);
+
+        assert_eq!(
+            viewer.list_state.scroll_offset(),
+            sentence_y + 1,
+            "the scroll stays one row into the wrapped sentence"
+        );
+        assert_eq!(
+            viewer.list_state.first_item_skip_rows(),
+            1,
+            "the first visible row is the continuation of the wrapped sentence"
+        );
+
+        let content = viewer.last_popup_area.expect("plan text area");
+        let track = viewer
+            .list_state
+            .scrollbar_area()
+            .expect("scrolled plan paints a scrollbar");
+        let prefix_w = viewer
+            .lines
+            .get(sentence_idx)
+            .and_then(|item| item.prefix())
+            .map(|prefix| line_display_width(&prefix) as u16)
+            .unwrap_or(0);
+        let text_x = content.x.saturating_add(prefix_w);
+        assert!(
+            track.x > text_x,
+            "the sentence text sits left of the scrollbar"
+        );
+
+        // Owed outcome: a source line longer than the pane wraps. After a
+        // scroll, the right-hand cells of that sentence are still that
+        // sentence, in order, and they are not the scrollbar glyph.
+        let mut visible = String::new();
+        let mut sentence_rows = 0u16;
+        for y in content.y..content.y.saturating_add(content.height) {
+            let Some(PlanViewerItem::Source(source)) = viewer.item_at_screen_row(y, content) else {
+                continue;
+            };
+            if !source.plain_text.contains("AlphaOne") {
+                continue;
+            }
+            sentence_rows = sentence_rows.saturating_add(1);
+            for x in text_x..track.x {
+                let symbol = buf[(x, y)].symbol();
+                assert_ne!(
+                    symbol, "\u{2588}",
+                    "right-hand cell at ({x},{y}) is the scrollbar glyph, not the sentence"
+                );
+                visible.push_str(symbol);
+            }
+        }
+        assert!(
+            sentence_rows > 0,
+            "the wrapped sentence stays on screen after the scroll"
+        );
+        let sentence_flat: String = sentence.chars().filter(|ch| !ch.is_whitespace()).collect();
+        let flat: String = visible.chars().filter(|ch| !ch.is_whitespace()).collect();
+        assert!(
+            !flat.contains("AlphaOne"),
+            "after the scroll the head is painted on the visible rows, so the right-hand cells are not that sentence in order; visible={flat:?}"
+        );
+        assert!(
+            flat.contains("TangoTwenty"),
+            "the tail of the wrapped sentence is missing after the scroll; visible={flat:?}"
+        );
+        assert!(
+            sentence_flat.contains(&flat),
+            "the right-hand cells are not that sentence in order; visible={flat:?}"
         );
     }
 

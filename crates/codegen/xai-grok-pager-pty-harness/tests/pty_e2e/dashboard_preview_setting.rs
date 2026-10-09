@@ -86,7 +86,7 @@ fn find_draft_prompt_border_row(screen: &str) -> usize {
         .lines()
         .enumerate()
         .take_while(|(_, line)| !line.contains("PREVIEWDRAFT"))
-        .filter(|(_, line)| line.contains('╭'))
+        .filter(|(_, line)| line.contains('┌'))
         .map(|(row, _)| row)
         .last()
         .expect("prompt top border")

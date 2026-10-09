@@ -264,7 +264,9 @@ fn use_console_api_credits_after_real_supergrok_http_402(
 /// A Console meter pin selects console API credits when snapshot team prepaid
 /// remaining is available, even when that stock key is set, and does not set
 /// `use_console`. An Included meter pin, or no meter pin, selects the
-/// included period session. While that
+/// included period session. When both a live personal SuperGrok session and
+/// a Team JWT are stored, that choice sends the personal session. A
+/// hard-expired personal session is not that choice. While that
 /// choice is on, a real SuperGrok HTTP 402 and available console API credits
 /// select the console key for the next request. A client 100% printout does
 /// not. A missing console balance keeps the included session and does not
@@ -286,6 +288,10 @@ pub fn apply_limits_pins_to_sampler_config(config: &mut xai_grok_sampler::Sample
         if use_console_api_credits_after_real_supergrok_http_402(config) {
             return;
         }
+        // `prefer_supergrok_identity_for_stay_pin` returns early when `api_key`
+        // is already `session_identity_key`. A Team JWT in both fields would
+        // stay. Point those fields at the live personal session first.
+        install_live_personal_session_for_included_limits(config);
         xai_grok_sampler::prefer_supergrok_identity_for_stay_pin(config);
         return;
     }
@@ -348,6 +354,34 @@ pub fn apply_limits_pins_to_sampler_config(config: &mut xai_grok_sampler::Sample
         inject_stored_console_keys_into_failover(config);
         xai_grok_sampler::prefer_console_identity_for_use_console_pin(config);
     }
+}
+
+/// Using limits spends included SuperGrok period limits on the personal
+/// session. Install that live token as `api_key` and `session_identity_key`
+/// so a Team JWT already in both fields is not kept. A hard-expired personal
+/// session is not installed. This does not set `use_console`.
+fn install_live_personal_session_for_included_limits(config: &mut xai_grok_sampler::SamplerConfig) {
+    let home = grok_home_path();
+    let candidates = super::load_supergrok_session_candidates(&home);
+    let Some(chosen) = candidates.iter().find(|candidate| {
+        !candidate.hard_expired
+            && candidate.headroom.role == SupergrokAccountRole::Personal
+            && !candidate.access_token.trim().is_empty()
+    }) else {
+        return;
+    };
+    let token = chosen.access_token.trim().to_owned();
+    let active = config.api_key.as_deref().unwrap_or("").trim().to_owned();
+    config.session_identity_key = Some(token.clone());
+    if active == token {
+        return;
+    }
+    config.failover_api_keys.retain(|key| key.trim() != token);
+    if !active.is_empty() {
+        config.failover_api_keys.retain(|key| key.trim() != active);
+        config.failover_api_keys.insert(0, active);
+    }
+    config.api_key = Some(token);
 }
 
 fn apply_supergrok_identity_pin_to_sampler_config(
@@ -1396,6 +1430,120 @@ preferred_method = "api_key"
             again.base_url.contains("cli-chat-proxy"),
             "Using limits stays on the SuperGrok session host: {}",
             again.base_url
+        );
+    }
+
+    /// Owed outcome: both sessions are present. After the Included choice,
+    /// the next request authorization is the personal session. The test
+    /// fails while the selector still keeps the Team JWT. A hard-expired
+    /// printout is not success. SuperGrok is paid.
+    #[test]
+    #[serial_test::serial]
+    fn using_limits_sends_the_personal_supergrok_session_not_the_team_jwt() {
+        use crate::auth::{AuthMode, GrokAuth, SupergrokAccountRole, upsert_supergrok_session};
+
+        let home = TempDir::new().expect("temp grok home");
+        let _env = EnvGuard::set("GROK_HOME", home.path());
+        let live = chrono::Utc::now() + chrono::Duration::days(7);
+        let base = "https://auth.x.ai::included-choice-personal";
+        let personal = "tok-personal-live";
+        let team = "tok-team-jwt";
+        let mut map = std::collections::BTreeMap::new();
+        upsert_supergrok_session(
+            &mut map,
+            base,
+            GrokAuth {
+                key: personal.into(),
+                auth_mode: AuthMode::Oidc,
+                user_id: "u-personal-live".into(),
+                principal_type: Some("User".into()),
+                principal_id: Some("u-personal-live".into()),
+                team_id: None,
+                expires_at: Some(live),
+                ..GrokAuth::default()
+            },
+        );
+        upsert_supergrok_session(
+            &mut map,
+            base,
+            GrokAuth {
+                key: team.into(),
+                auth_mode: AuthMode::Oidc,
+                user_id: "u-team-live".into(),
+                principal_type: Some("Team".into()),
+                principal_id: Some("team-included-choice".into()),
+                team_id: Some("team-included-choice".into()),
+                expires_at: Some(live),
+                ..GrokAuth::default()
+            },
+        );
+        fs::write(
+            home.path().join("auth.json"),
+            serde_json::to_vec_pretty(&map).expect("auth.json"),
+        )
+        .expect("write auth.json");
+
+        let candidates = crate::auth::load_supergrok_session_candidates(home.path());
+        let personal_session = candidates
+            .iter()
+            .find(|candidate| candidate.access_token == personal)
+            .expect("personal SuperGrok session is stored");
+        let team_session = candidates
+            .iter()
+            .find(|candidate| candidate.access_token == team)
+            .expect("Team JWT is stored");
+        assert!(
+            !personal_session.hard_expired && !team_session.hard_expired,
+            "both sessions are live; a hard-expired printout is not this fixture"
+        );
+        assert_eq!(
+            personal_session.headroom.role,
+            SupergrokAccountRole::Personal
+        );
+        assert_eq!(team_session.headroom.role, SupergrokAccountRole::Business);
+        assert_ne!(
+            personal_session.headroom.identity_id, team_session.headroom.identity_id,
+            "the personal session and the Team JWT are different logins"
+        );
+
+        save_limits_pins(&LimitsPins {
+            stay_supergrok: false,
+            use_console: false,
+            meter_source: Some(MeterSource::Included),
+            supergrok_identity: None,
+        })
+        .expect("Included choice");
+
+        let mut config = dual_auth_sampler(team, "console-not-this-request");
+        config.api_key = Some(team.into());
+        config.session_identity_key = Some(team.into());
+        config.failover_api_keys = vec![personal.into()];
+        config.bearer_resolver = None;
+        assert_eq!(config.api_key.as_deref(), Some(team));
+        apply_limits_pins_to_sampler_config(&mut config);
+
+        let pins = load_limits_pins();
+        assert!(!pins.use_console);
+        assert_eq!(pins.meter_source, Some(MeterSource::Included));
+        assert_eq!(
+            config.api_key.as_deref(),
+            Some(personal),
+            "after the Included choice, the next request authorization is the personal SuperGrok session"
+        );
+        assert_ne!(
+            config.api_key.as_deref(),
+            Some(team),
+            "the Included choice does not keep the Team JWT"
+        );
+        assert!(
+            config.bearer_resolver.is_none()
+                || config
+                    .bearer_resolver
+                    .as_ref()
+                    .and_then(|resolver| resolver.current_bearer())
+                    .as_deref()
+                    == Some(personal),
+            "a Team JWT bearer is not the personal session authorization"
         );
     }
 

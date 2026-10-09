@@ -113,6 +113,8 @@ impl AgentView {
         use crate::app::subagent::{format_context_badge, format_subagent_label};
         use ratatui::style::Modifier;
         use unicode_width::UnicodeWidthStr;
+        self.hit_overlay_nested_status.clear();
+        self.overlay_nested_status_child_sid = None;
         let appearance = self.scrollback.appearance().clone();
         let layout_cfg = &appearance.scrollback.layout;
         let compact = appearance.prompt.compact;
@@ -387,8 +389,38 @@ impl AgentView {
             child_cursor = cursor;
             child_post_flush = post_flush;
         }
+        self.record_overlay_specialist_status_hit(buf, area, child_sid);
         self.drop_mirrored_overlay_specialists(child_sid, &borrowed_specialists);
         (child_cursor, child_post_flush)
+    }
+
+    /// The specialist status the L2 overlay just painted is a click target.
+    /// A left click opens that L3 session view.
+    fn record_overlay_specialist_status_hit(&mut self, buf: &Buffer, area: Rect, child_sid: &str) {
+        let mut specialists: Vec<(String, String, std::time::Instant)> = self
+            .subagent_sessions
+            .iter()
+            .filter(|(_, info)| {
+                info.is_running() && info.attempt.parent_session_id.as_deref() == Some(child_sid)
+            })
+            .filter_map(|(id, info)| {
+                let phrase = info.description.trim();
+                if phrase.is_empty() {
+                    None
+                } else {
+                    Some((id.clone(), phrase.to_string(), info.attempt.started_at))
+                }
+            })
+            .collect();
+        specialists.sort_by_key(|(_, _, started)| *started);
+        for (id, phrase, _) in specialists {
+            let Some(rect) = painted_phrase_rect(buf, area, &phrase) else {
+                continue;
+            };
+            self.hit_overlay_nested_status.set(Some(rect));
+            self.overlay_nested_status_child_sid = Some(id);
+            return;
+        }
     }
 
     /// Parent-registry L3 rows are invisible to the L2 view's wait chrome.
@@ -445,7 +477,7 @@ impl AgentView {
     }
     /// `None` when no takeover is open, so the caller continues its normal routing. Otherwise all input goes to the
     /// child view; `q`/`Esc` from bare scrollback closes the view and Ctrl+Q always bubbles to the global quit.
-    /// Rung order is fixed: Ctrl+Q, `[✗]` click, hover, bare-scrollback close, idle-quote, forward + filter.
+    /// Rung order is fixed: Ctrl+Q, `[✗]` click, specialist status click, hover, bare-scrollback close, idle-quote, forward + filter.
     pub(super) fn intercept_takeover_input(
         &mut self,
         ev: &Event,
@@ -477,6 +509,17 @@ impl AgentView {
             if let Some(id) = kill_id {
                 return Some(InputOutcome::Action(Action::KillSubagent(id)));
             }
+            return Some(InputOutcome::Changed);
+        }
+        if let Event::Mouse(mouse) = ev
+            && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+            && self
+                .hit_overlay_nested_status
+                .contains(mouse.column, mouse.row)
+            && let Some(sid) = self.overlay_nested_status_child_sid.clone()
+            && self.subagent_views.contains_key(&sid)
+        {
+            self.open_subagent_fullscreen(sid);
             return Some(InputOutcome::Changed);
         }
         if let Event::Mouse(mouse) = ev
@@ -520,6 +563,37 @@ impl AgentView {
         Some(filter_child_outcome(outcome))
     }
 }
+
+/// First one-row run of `phrase` inside `area`. One cell per glyph, so the
+/// rect's origin is the cell a left click on that status hits.
+fn painted_phrase_rect(buf: &Buffer, area: Rect, phrase: &str) -> Option<Rect> {
+    let glyphs: Vec<String> = phrase.chars().map(|ch| ch.to_string()).collect();
+    if glyphs.is_empty() || area.width == 0 || area.height == 0 {
+        return None;
+    }
+    let bottom = area.y.saturating_add(area.height);
+    let right = area.x.saturating_add(area.width);
+    for y in area.y..bottom {
+        let symbols: Vec<String> = (area.x..right)
+            .filter_map(|x| buf.cell((x, y)).map(|cell| cell.symbol().to_owned()))
+            .collect();
+        if symbols.len() < glyphs.len() {
+            continue;
+        }
+        for start in 0..=symbols.len() - glyphs.len() {
+            let end = start + glyphs.len();
+            if symbols.get(start..end) == Some(glyphs.as_slice()) {
+                let width = u16::try_from(glyphs.len()).unwrap_or(u16::MAX);
+                let x = area
+                    .x
+                    .saturating_add(u16::try_from(start).unwrap_or(u16::MAX));
+                return Some(Rect::new(x, y, width, 1));
+            }
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 #[path = "subagent_takeover_tests.rs"]
 mod tests;

@@ -2,7 +2,7 @@
 use super::state::{DashboardRowId, Filter, RowState};
 use crate::app::agent::AgentId;
 use crate::app::agent_view::AgentView;
-use crate::app::roster::{RosterActivity, RosterEntry};
+use crate::app::roster::{RosterActivity, RosterEntry, RosterOrigin};
 use crate::views::dashboard::row_activity::{
     has_live_parent_activity, live_work_badges, top_level_activity, top_level_secondary_line,
 };
@@ -280,6 +280,52 @@ pub fn roster_activity_to_state(activity: RosterActivity) -> RowState {
         RosterActivity::Dead => RowState::Failed,
     }
 }
+/// Dashboard rows for grok-oss contexts already read from `active_sessions.json`.
+///
+/// `host` is `None` for this machine. `Some("surmount-1")` is the remote builder.
+/// The host is not written back onto the local registry row.
+pub(crate) fn l0_roster_from_active_sessions(
+    sessions: &[xai_grok_active_sessions::ActiveSession],
+    host: Option<&str>,
+) -> Vec<RosterEntry> {
+    let host = host
+        .map(str::trim)
+        .filter(|host| !host.is_empty())
+        .map(str::to_string);
+    let kind = if host.is_some() { "remote" } else { "local" };
+    sessions
+        .iter()
+        .map(|session| {
+            let session_id = session.session_id.0.to_string();
+            RosterEntry {
+                session_id: session_id.clone(),
+                title: Some(session_id),
+                cwd: session.cwd.clone(),
+                is_worktree: false,
+                session_kind: None,
+                model_id: None,
+                yolo: false,
+                activity: l0_roster_activity(session.activity),
+                last_turn_summary: None,
+                resident: true,
+                last_change_unix_ms: session.opened_at.timestamp_millis(),
+                origin: RosterOrigin {
+                    kind: kind.to_string(),
+                    host: host.clone(),
+                },
+            }
+        })
+        .collect()
+}
+
+fn l0_roster_activity(activity: xai_grok_active_sessions::SessionActivity) -> RosterActivity {
+    match activity {
+        xai_grok_active_sessions::SessionActivity::Working => RosterActivity::Working,
+        xai_grok_active_sessions::SessionActivity::Idle
+        | xai_grok_active_sessions::SessionActivity::Unknown => RosterActivity::Idle,
+    }
+}
+
 /// Append "roster-only" rows for leader sessions not represented by a local `AgentView`.
 /// Skips any roster entry whose `session_id` already matches a locally-attached agent (those carry richer data via [`build_local_rows`]).
 fn append_roster_rows(
@@ -344,7 +390,14 @@ fn append_roster_rows(
         }
         let cwd_display = super::state::compact_cwd(&cwd, home);
         let is_pinned = pinned.contains(&id);
-        let subtitle = None;
+        // Remote-builder contexts carry the host (`surmount-1`) here. Local rows leave it unset.
+        let subtitle = entry
+            .origin
+            .host
+            .as_deref()
+            .map(str::trim)
+            .filter(|host| !host.is_empty())
+            .map(sanitize);
         rows.push(DashboardRow {
             id,
             session_id: Some(entry.session_id.clone()),

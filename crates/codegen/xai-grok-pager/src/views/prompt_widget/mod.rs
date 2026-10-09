@@ -165,7 +165,7 @@ pub struct PromptStyle {
     /// Override the accent line color.
     /// When `Some`, uses this color instead of the default `accent_user` / `gray_dim`. Used for plan mode (golden).
     pub accent_color_override: Option<ratatui::style::Color>,
-    /// Override the border color (╭─╮│╰─╯).
+    /// Override the border color (┌─┐│└─┘).
     /// When `Some`, uses this color instead of `prompt_border_active` / `prompt_border`. Used for plan mode.
     pub border_color_override: Option<ratatui::style::Color>,
     /// Override the prefix character and its color.
@@ -187,7 +187,7 @@ pub struct PromptStyle {
     /// Show the accent line (`┃`) on the left edge of the chrome.
     /// When false the line is hidden and its column reclaimed for content.
     pub show_accent_line: bool,
-    /// Draw the prompt's border box (top `╭─╮` divider, side `│` borders, and bottom info divider).
+    /// Draw the prompt's border box (top `┌─┐` divider, side `│` borders, and bottom info divider).
     /// Only consulted when `chrome` is true.
     /// Defaults to `true` (the full-TUI boxed prompt); minimal mode sets it `false` for a cleaner, border-less input that still keeps the chrome padding.
     pub show_borders: bool,
@@ -3146,7 +3146,7 @@ impl PromptWidget {
             };
         };
 
-        // Top divider: ╭──────────╮
+        // Top divider: ┌──────────┐
         if vpad_top > 0 && style.chrome && style.show_borders {
             // Session title uses chrome-caption (0.6 blend). On DOGE that
             // solid-step stays `text_secondary` (white), same as the focused
@@ -3180,9 +3180,9 @@ impl PromptWidget {
             for x in area.x..area.x + area.width {
                 if let Some(cell) = buf.cell_mut((x, div_y)) {
                     let ch = if x == left_x {
-                        '\u{256d}' // ╭
+                        '\u{250c}' // ┌
                     } else if x == right_x {
-                        '\u{256e}' // ╮
+                        '\u{2510}' // ┐
                     } else {
                         '\u{2500}' // ─
                     };
@@ -3540,7 +3540,7 @@ impl PromptWidget {
             }
         }
 
-        // Bottom divider: ╰──────────grok-3 · flags──╯
+        // Bottom divider: └──────────grok-3 · flags──┘
         // Guard on actual allocated height, not requested `info_block`
         // During resize the layout may squeeze the info block to 0 rows, leaving chunks[2].y past the buffer boundary
         if info_block > 0
@@ -3556,9 +3556,9 @@ impl PromptWidget {
             for x in area.x..area.x + area.width {
                 if let Some(cell) = buf.cell_mut((x, div_y)) {
                     let ch = if x == left_x {
-                        '\u{2570}' // ╰
+                        '\u{2514}' // └
                     } else if x == right_x {
-                        '\u{256f}' // ╯
+                        '\u{2518}' // ┘
                     } else {
                         '\u{2500}' // ─
                     };
@@ -3727,7 +3727,7 @@ impl PromptWidget {
         }
     }
 
-    /// Caption style for text embedded in the prompt's border chrome (the info line's model name on `╰─╯` and the session title on `╭─╮`).
+    /// Caption style for text embedded in the prompt's border chrome (the info line's model name on `└─┘` and the session title on `┌─┐`).
     /// Dimmed secondary text over the prompt bg, fading further when unfocused, so both borders read as one chrome.
     fn chrome_caption_style(bg: ratatui::style::Color, theme: &Theme, focused: bool) -> Style {
         let opacity = if focused { 0.6 } else { 0.4 };
@@ -3785,7 +3785,7 @@ impl PromptWidget {
         let flag_style = theme.muted().bg(bg);
 
         // Left side: model name and flags. Wrap with leading/trailing spaces so the cells adjacent to the
-        // corner borders (╰ / ╯) are blanked out. They would otherwise show the underlying `─` glyphs from
+        // corner borders (└ / ┘) are blanked out. They would otherwise show the underlying `─` glyphs from
         // the bottom-border fill. That gives 1 cell of visual padding on each side.
         let pad_style = Style::default().bg(bg);
         let mut left_spans = vec![Span::styled(" ", pad_style)];
@@ -3849,7 +3849,7 @@ impl PromptWidget {
         }
 
         if !right_spans.is_empty() {
-            // Pad the right side so it doesn't sit flush against the ╯ corner.
+            // Pad the right side so it doesn't sit flush against the ┘ corner.
             right_spans.push(Span::styled(" ", pad_style));
             let right_line = Line::from(right_spans);
             let right_w = right_line.width() as u16;

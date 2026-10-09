@@ -182,6 +182,15 @@ impl SessionActor {
         self.startup_hints.is_subagent && self.tool_context.subagent_depth >= 2
     }
 
+    /// Ordinary L2 coordinator: a subagent at depth 1 that is not a once-run
+    /// nested role. This is not [`Self::never_auto_compact`]. An ordinary L2
+    /// still AUTO compacts itself at 95 percent of the nested 200k window.
+    pub(crate) fn is_ordinary_l2_coordinator(&self) -> bool {
+        self.startup_hints.is_subagent
+            && !self.startup_hints.once_run
+            && self.tool_context.subagent_depth == 1
+    }
+
     /// Goal Plan Writer and other disposable once-run nested roles. Forked
     /// from L1 they are still L2 depth; they must not compact-and-continue.
     pub(crate) fn is_once_run_nested(&self) -> bool {
@@ -630,6 +639,41 @@ fn project_preserved_reseed_tokens(
     let ratio = tokens_before as f64 / full_conv_estimate.max(1) as f64;
     ((preserved_estimate as f64 * ratio).round() as u64).min(tokens_before)
 }
+
+/// What an ordinary L2 does with a specialist near the nested window.
+pub(crate) enum L2SpecialistContextChoice<F> {
+    /// Compact that specialist. The specialist turn loop does not choose this.
+    Compact,
+    /// Do not compact. Start a fresh L3 context instead.
+    Fresh(FreshL3Start<F>),
+}
+
+/// The fresh arm. `resume_from` is a completed specialist id when the new
+/// context continues that id, and `None` when the context is new.
+/// `spawn_session_on_thread` is the call that starts the new session.
+/// This arm does not compact and does not open a database.
+pub(crate) struct FreshL3Start<F> {
+    pub resume_from: Option<String>,
+    pub spawn_session_on_thread: F,
+}
+
+pub(crate) type FreshL3Session = (super::SessionInitResult, super::SessionThread);
+
+async fn start_fresh_l3_context<F, Fut>(
+    fresh: FreshL3Start<F>,
+) -> Result<FreshL3Session, acp::Error>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<FreshL3Session, acp::Error>>,
+{
+    let resume_from = fresh.resume_from;
+    tracing::info!(
+        resume_from = resume_from.as_deref().unwrap_or(""),
+        "L2 started a fresh L3 context"
+    );
+    (fresh.spawn_session_on_thread)().await
+}
+
 impl SessionActor {
     /// Where the transcript would be, without asking the filesystem: callers on a hot path do the `exists()` themselves, off the actor's thread.
     pub(crate) fn transcript_path(&self) -> std::path::PathBuf {
@@ -2385,6 +2429,38 @@ impl SessionActor {
             percentage,
             reason_override: None,
         })
+    }
+
+    /// An ordinary L2 chooses one arm for a specialist it spawned.
+    /// Compact calls `compact_specialist_initiated_by_coordinator` and then
+    /// compacts that specialist. Fresh does not compact. It starts a new L3
+    /// context. The specialist turn loop must not call this.
+    pub(crate) async fn l2_compact_or_fresh_l3<F, Fut>(
+        &self,
+        specialist: &Arc<Self>,
+        choice: L2SpecialistContextChoice<F>,
+    ) -> Result<Option<FreshL3Session>, acp::Error>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<FreshL3Session, acp::Error>>,
+    {
+        if !self.is_ordinary_l2_coordinator() {
+            return Ok(None);
+        }
+        match choice {
+            L2SpecialistContextChoice::Compact => {
+                if let Some(trigger) = specialist
+                    .compact_specialist_initiated_by_coordinator()
+                    .await
+                {
+                    Box::pin(specialist.run_compact_only(trigger, false)).await?;
+                }
+                Ok(None)
+            }
+            L2SpecialistContextChoice::Fresh(fresh) => {
+                Ok(Some(start_fresh_l3_context(fresh).await?))
+            }
+        }
     }
 
     /// Pre-sampling compaction check. Uses `get_estimated_total_tokens()`

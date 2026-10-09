@@ -22,7 +22,7 @@ fn dock_lines(screen: &str) -> Vec<&str> {
     let end = lines
         .iter()
         .skip(start)
-        .position(|line| line.contains('╭'))
+        .position(|line| line.contains('┌'))
         .map_or(lines.len(), |offset| start + offset);
     let mut dock = lines[start..end].to_vec();
     while dock.last().is_some_and(|line| line.trim().is_empty()) {

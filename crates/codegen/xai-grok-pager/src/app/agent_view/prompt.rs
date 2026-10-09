@@ -22,8 +22,11 @@ fn composer_cursor_at_end_of_last_line(prompt: &PromptWidget) -> bool {
 }
 
 impl AgentView {
-    /// Shift-Enter, the four bare arrows, and Ctrl-Backspace on a plan prompt
-    /// use the same composer path as the main Human box.
+    /// Shift-Enter, the four bare arrows, Ctrl-Left, Ctrl-Right, and
+    /// Ctrl-Backspace on a plan prompt use the same composer path as the
+    /// main composer. Bare Left and Right stay one cell. Control on those
+    /// two keys is word motion. Up and Down stay bare, so a modified
+    /// vertical arrow still belongs to the plan list.
     pub(super) fn plan_prompt_key_reaches_main_composer(key: &KeyEvent) -> bool {
         if crate::input::is_mod_enter(key) {
             return true;
@@ -33,6 +36,11 @@ impl AgentView {
             KeyCode::Up | KeyCode::Down | KeyCode::Left | KeyCode::Right
         ) && key.modifiers.is_empty();
         if bare_arrow {
+            return true;
+        }
+        let word_arrow = matches!(key.code, KeyCode::Left | KeyCode::Right)
+            && key.modifiers == KeyModifiers::CONTROL;
+        if word_arrow {
             return true;
         }
         key.code == KeyCode::Backspace && key.modifiers == KeyModifiers::CONTROL
@@ -3120,6 +3128,75 @@ mod shared_prompt_key_tests {
         assert!(
             misses.is_empty(),
             "prompt keys must match AgentView::handle_prompt_key:\n{}",
+            misses.join("\n")
+        );
+    }
+
+    /// Ctrl-Left and Ctrl-Right move by a word on the main composer, the
+    /// plan-approval prompt, Ask, and comment. Plain Left and Right still
+    /// move one cell. The caret starts inside a word on a multi-word line.
+    /// `plan_prompt_key_reaches_main_composer` forwards Ctrl-Left and
+    /// Ctrl-Right so the plan-approval prompt uses that same word motion.
+    #[test]
+    fn ctrl_left_and_ctrl_right_move_by_word_on_every_prompt() {
+        crate::appearance::cache::set_composer_multiline(true);
+        let word_start = SEED.find("second").expect("second");
+        let word_end = word_start + "second".len();
+        let origin = caret();
+        assert!(
+            origin > word_start + 1 && origin + 1 < word_end,
+            "caret must sit inside the word, not on an edge"
+        );
+        let cases = [
+            (
+                "Left",
+                KeyEvent::new(KeyCode::Left, KeyModifiers::NONE),
+                origin - 1,
+            ),
+            (
+                "Right",
+                KeyEvent::new(KeyCode::Right, KeyModifiers::NONE),
+                origin + 1,
+            ),
+            (
+                "Ctrl-Left",
+                KeyEvent::new(KeyCode::Left, KeyModifiers::CONTROL),
+                word_start,
+            ),
+            (
+                "Ctrl-Right",
+                KeyEvent::new(KeyCode::Right, KeyModifiers::CONTROL),
+                word_end,
+            ),
+        ];
+        let mut misses = Vec::new();
+        for (name, key, want_cursor) in cases {
+            let mut main = test_fixtures::make_agent();
+            seed(&mut main);
+            let _ = main.handle_prompt_key_for_test(&key);
+            let (text, cursor) = composer(&main);
+            if text != SEED || cursor != want_cursor {
+                misses.push(format!(
+                    "main composer {name}: text {text:?} cursor {cursor}, want cursor {want_cursor}"
+                ));
+            }
+            let surfaces: [(&str, super::AgentView); 3] = [
+                ("plan approval", plan_approval_screen()),
+                ("Ask", ask_prompt()),
+                ("comment", comment_prompt()),
+            ];
+            for (surface, mut agent) in surfaces {
+                let (text, cursor) = press_screen(&mut agent, &key);
+                if text != SEED || cursor != want_cursor {
+                    misses.push(format!(
+                        "{surface} {name}: text {text:?} cursor {cursor}, want cursor {want_cursor}"
+                    ));
+                }
+            }
+        }
+        assert!(
+            misses.is_empty(),
+            "Ctrl-Left and Ctrl-Right must move by a word, and plain Left and Right must move one cell:\n{}",
             misses.join("\n")
         );
     }

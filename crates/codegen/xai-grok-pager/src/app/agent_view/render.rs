@@ -158,8 +158,8 @@ fn paint_inset_composer_copy(buf: &mut Buffer, area: Rect, theme: &Theme) -> Opt
 }
 
 /// Plan approval draws the model caption on the bottom rule. Repaint that
-/// row so the rule is `─` through the left cell and meets `╯` on the right.
-/// The foreground is the prompt stroke color (white on DOGE).
+/// row so the left cell is `└`, the right cell is `┘`, and the rule between
+/// them is `─`. The foreground is the prompt stroke color (white on DOGE).
 fn seal_prompt_bottom_rule(
     buf: &mut Buffer,
     area: Rect,
@@ -176,7 +176,13 @@ fn seal_prompt_bottom_rule(
     let mut x = left;
     while x <= right {
         if let Some(cell) = buf.cell_mut((x, y)) {
-            let ch = if x == right { '\u{256f}' } else { '\u{2500}' };
+            let ch = if x == left {
+                '\u{2514}'
+            } else if x == right {
+                '\u{2518}'
+            } else {
+                '\u{2500}'
+            };
             cell.set_char(ch);
             cell.set_style(style);
         }
@@ -1676,6 +1682,62 @@ impl AgentView {
             // Context figure only. The 15-minute and 24-hour windows stay on `/uptime`.
             status.push("context", ctx_line);
         }
+        let hover_or = |hovered: bool, resting: Style| {
+            if hovered {
+                bg.fg(theme.text_primary)
+            } else {
+                resting
+            }
+        };
+        // Short status chip, immediately to the right of the context figure.
+        // Nested L2 and L3 views (`child_link` set) do not paint it.
+        // The main session (`AgentRole::Root`, no child link) keeps it.
+        // `limits N%` only when the next request draws included SuperGrok
+        // period limits. A dollar-credits pin shows that meter's remaining.
+        // A console pin or use_console shows console team prepaid remaining.
+        // Otherwise the chip paints team postpaid Billing Credits remaining.
+        // Without that reading the chip stays `Limits and Credits`.
+        // That control is not `limits 0%` and not `limits N%`.
+        if self.child_link().is_none() {
+            if let Some(balance) = self.credit_balance.as_ref()
+                && let Some(label) = both_refused_status_chip_label(balance)
+            {
+                let mut chip_style = Style::default().fg(theme.accent_error).bg(theme.bg_base);
+                if self.hit_credits.hovered {
+                    chip_style = chip_style.add_modifier(ratatui::style::Modifier::BOLD);
+                }
+                status.push("credits", Line::from(Span::styled(label, chip_style)));
+            } else if let Some(balance) = self.credit_balance.as_ref()
+                && status_row_paints_included_period_limits_chip(self.sampling_identity, balance)
+            {
+                let used = balance.usage_pct.round().clamp(0.0, 100.0) as u8;
+                let label = if self.hit_credits.hovered {
+                    format!("{}% left", 100u8.saturating_sub(used))
+                } else {
+                    format!("limits {used}%")
+                };
+                let color = if used >= 100 {
+                    theme.accent_error
+                } else if used >= 80 {
+                    theme.warning
+                } else {
+                    theme.accent_success
+                };
+                let mut chip_style = Style::default().fg(color).bg(theme.bg_base);
+                if self.hit_credits.hovered {
+                    chip_style = chip_style.add_modifier(ratatui::style::Modifier::BOLD);
+                }
+                status.push("credits", Line::from(Span::styled(label, chip_style)));
+            } else if !xai_grok_shell::auth::limits_pins::next_request_draws_included_period_limits(
+            ) {
+                let label = credits_label_when_included_period_is_not_next_request();
+                let chip_style = hover_or(
+                    self.hit_credits.hovered,
+                    Style::default().fg(theme.text_secondary).bg(theme.bg_base),
+                );
+                status.push("credits", Line::from(Span::styled(label, chip_style)));
+            }
+        }
         let todo_counts = self.todo.counts();
         let todo_total = todo_counts.total();
         if todo_total > 0 {
@@ -1688,15 +1750,6 @@ impl AgentView {
                 )),
             );
         }
-        // No SuperGrok period chip on this header. `/limits` still names that meter.
-        // The short `limits N%` chip below is not that verbose period helper.
-        let hover_or = |hovered: bool, resting: Style| {
-            if hovered {
-                bg.fg(theme.text_primary)
-            } else {
-                resting
-            }
-        };
         if let Some((cur, total)) = overlay_header.cycle_position() {
             status.push(
                 "switcher",
@@ -1724,14 +1777,17 @@ impl AgentView {
             status.push(
                 "dashboard",
                 Line::from(Span::styled(
-                    "[Dashboard]",
+                    "[L0]",
                     hover_or(self.hit_dashboard.hovered, bg.fg(theme.gray)),
                 )),
             );
         }
         if let Some(url) = self.highlighted_link_url() {
             const LOCATION_FLOOR: u16 = 24;
-            const LINK_MIN: u16 = 12;
+            // A shortened preview must still keep `https://example.com/segment/`
+            // (28 columns) plus the ellipsis column. Narrower than that, skip
+            // the preview so the location, switcher, and `[L0]` stay put.
+            const LINK_MIN: u16 = 29;
             let max_len = status
                 .room_for_front(layout.status_bar.width)
                 .saturating_sub(LOCATION_FLOOR);
@@ -1740,50 +1796,6 @@ impl AgentView {
                 let link_style = Style::default().fg(theme.link_fg).bg(theme.bg_base);
                 status.push_front("link_url", Line::from(Span::styled(display, link_style)));
             }
-        }
-        // Short status chip only. Do not use the verbose SuperGrok period helper.
-        // `limits N%` only when the next request draws included SuperGrok
-        // period limits. A dollar-credits pin shows that meter's remaining.
-        // A console pin or use_console shows console team prepaid remaining.
-        // Otherwise the chip paints team postpaid Billing Credits remaining.
-        // Without that reading the chip stays `Limits and Credits`.
-        // That control is not `limits 0%` and not `limits N%`.
-        if let Some(balance) = self.credit_balance.as_ref()
-            && let Some(label) = both_refused_status_chip_label(balance)
-        {
-            let mut chip_style = Style::default().fg(theme.accent_error).bg(theme.bg_base);
-            if self.hit_credits.hovered {
-                chip_style = chip_style.add_modifier(ratatui::style::Modifier::BOLD);
-            }
-            status.push("credits", Line::from(Span::styled(label, chip_style)));
-        } else if let Some(balance) = self.credit_balance.as_ref()
-            && status_row_paints_included_period_limits_chip(self.sampling_identity, balance)
-        {
-            let used = balance.usage_pct.round().clamp(0.0, 100.0) as u8;
-            let label = if self.hit_credits.hovered {
-                format!("{}% left", 100u8.saturating_sub(used))
-            } else {
-                format!("limits {used}%")
-            };
-            let color = if used >= 100 {
-                theme.accent_error
-            } else if used >= 80 {
-                theme.warning
-            } else {
-                theme.accent_success
-            };
-            let mut chip_style = Style::default().fg(color).bg(theme.bg_base);
-            if self.hit_credits.hovered {
-                chip_style = chip_style.add_modifier(ratatui::style::Modifier::BOLD);
-            }
-            status.push("credits", Line::from(Span::styled(label, chip_style)));
-        } else if !xai_grok_shell::auth::limits_pins::next_request_draws_included_period_limits() {
-            let label = credits_label_when_included_period_is_not_next_request();
-            let chip_style = hover_or(
-                self.hit_credits.hovered,
-                Style::default().fg(theme.text_secondary).bg(theme.bg_base),
-            );
-            status.push("credits", Line::from(Span::styled(label, chip_style)));
         }
         let areas = status.render(buf, layout.status_bar);
         self.hit_bg_status.rect = areas.get("bg_tasks").copied();
@@ -1912,7 +1924,7 @@ impl AgentView {
                 fork_prefix.push(Span::styled(" ", gap));
                 fork_width += 1;
             }
-            let dash = "[Dashboard]";
+            let dash = "[L0]";
             let dash_w = dash.width() as u16;
             header_dash_x = Some((fork_width, dash_w));
             fork_prefix.push(Span::styled(dash, chip(self.hit_header_dashboard.hovered)));
@@ -4057,6 +4069,7 @@ impl AgentView {
             }
             let soft_plan_side_pane = viewer.is_soft_plan_side_pane();
             let offer_limits_and_credits = soft_plan_side_pane
+                && self.child_link().is_none()
                 && !xai_grok_shell::auth::limits_pins::next_request_draws_included_period_limits()
                 && self
                     .credit_balance
@@ -5979,8 +5992,8 @@ mod plan_approval_draw_contract_tests {
         let top_left = buf.cell((prompt.x, prompt.y)).expect("top-left frame");
         assert_eq!(
             top_left.symbol(),
-            "\u{256d}",
-            "plan prompt top-left must be ╭; got {:?}",
+            "\u{250c}",
+            "plan prompt top-left must be ┌; got {:?}",
             top_left.symbol()
         );
         assert_eq!(
@@ -5998,7 +6011,7 @@ mod plan_approval_draw_contract_tests {
     }
 
     /// While plan mode is open, the prompt input keeps a white outline.
-    /// Ask mode keeps that same white stroke. The frame glyph is `╭` or
+    /// Ask mode keeps that same white stroke. The frame glyph is `┌` or
     /// `─`, its foreground is `Rgb(255, 255, 255)`, and that foreground is
     /// not `theme.bg_base`. This is the prompt input, not the plan side panel.
     #[test]
@@ -6049,7 +6062,7 @@ mod plan_approval_draw_contract_tests {
                     let Some(cell) = buf.cell((x, y)) else {
                         continue;
                     };
-                    if cell.symbol() == "\u{256d}" {
+                    if cell.symbol() == "\u{250c}" {
                         corner = Some(cell.fg);
                         break;
                     }
@@ -6062,7 +6075,7 @@ mod plan_approval_draw_contract_tests {
                 }
             }
             corner.or(rule).unwrap_or_else(|| {
-                panic!("{label}: prompt input must paint ╭ or ─");
+                panic!("{label}: prompt input must paint ┌ or ─");
             })
         }
 
@@ -6129,14 +6142,14 @@ mod plan_approval_draw_contract_tests {
         bottom: u16,
     }
 
-    /// Top-left `╭`, top-right `╮`, and bottom-left `╰` of the prompt box.
+    /// Top-left `┌`, top-right `┐`, and bottom-left `└` of the prompt box.
     fn prompt_stroke(buf: &Buffer, prompt: Rect) -> PromptStroke {
         let mut top_left = None;
         for y in prompt.y..prompt.y.saturating_add(prompt.height) {
             for x in prompt.x..prompt.x.saturating_add(prompt.width) {
                 if buf
                     .cell((x, y))
-                    .is_some_and(|cell| cell.symbol() == "\u{256d}")
+                    .is_some_and(|cell| cell.symbol() == "\u{250c}")
                 {
                     top_left = Some((x, y));
                     break;
@@ -6151,14 +6164,14 @@ mod plan_approval_draw_contract_tests {
             .rev()
             .find(|&x| {
                 buf.cell((x, top))
-                    .is_some_and(|cell| cell.symbol() == "\u{256e}")
+                    .is_some_and(|cell| cell.symbol() == "\u{2510}")
             })
             .expect("prompt input must paint a top-right stroke");
         let bottom = (top + 1..prompt.y.saturating_add(prompt.height))
             .rev()
             .find(|&y| {
                 buf.cell((left, y))
-                    .is_some_and(|cell| cell.symbol() == "\u{2570}")
+                    .is_some_and(|cell| cell.symbol() == "\u{2514}")
             })
             .unwrap_or(prompt.y.saturating_add(prompt.height).saturating_sub(1));
         PromptStroke {
@@ -6374,12 +6387,12 @@ mod plan_approval_draw_contract_tests {
         let top_left = buf
             .cell((stroke.left, stroke.top))
             .expect("top-left stroke");
-        assert_eq!(top_left.symbol(), "\u{256d}");
+        assert_eq!(top_left.symbol(), "\u{250c}");
         assert_eq!(top_left.fg, white, "top stroke is white");
         let top_right = buf
             .cell((stroke.right, stroke.top))
             .expect("top-right stroke");
-        assert_eq!(top_right.symbol(), "\u{256e}");
+        assert_eq!(top_right.symbol(), "\u{2510}");
         assert_eq!(top_right.fg, white, "top-right stroke is white");
         let left_y = (stroke.top + 1..stroke.bottom)
             .find(|&y| {
@@ -6393,9 +6406,14 @@ mod plan_approval_draw_contract_tests {
         assert_eq!(right_side.symbol(), "\u{2502}");
         assert_eq!(right_side.fg, white, "right stroke is white");
 
+        let lower_left = buf.cell((stroke.left, stroke.bottom));
+        assert!(
+            lower_left.is_some_and(|cell| cell.symbol() == "\u{2514}" && cell.fg == white),
+            "the approval prompt's lower-left cell is └ and white"
+        );
         let mut broken = None;
         let mut x = stroke.right;
-        while x > stroke.left {
+        while x > stroke.left.saturating_add(1) {
             x -= 1;
             let Some(cell) = buf.cell((x, stroke.bottom)) else {
                 broken = Some((x, "?".to_string(), Color::Reset));
@@ -6408,7 +6426,7 @@ mod plan_approval_draw_contract_tests {
         }
         let corner = buf.cell((stroke.right, stroke.bottom));
         let corner_white =
-            corner.is_some_and(|cell| cell.symbol() == "\u{256f}" && cell.fg == white);
+            corner.is_some_and(|cell| cell.symbol() == "\u{2518}" && cell.fg == white);
         assert!(
             broken.is_none() && corner_white,
             "the bottom rule does not meet the bottom-right corner because the status row sits on it (Grok 4.7 (high) · plan approval · always-approve); every side of the prompt stroke must be Rgb(255, 255, 255). first break at {broken:?}"
@@ -7607,7 +7625,7 @@ mod forked_session_status_header_tests {
             .find(|line| line.chars().any(|c| !c.is_whitespace()))
             .unwrap_or("");
         assert!(
-            header.contains("[Dashboard]"),
+            header.contains("[L0]"),
             "forked-session status header must paint the dashboard control; \
              the 11:10 screenshot only had git plus cwd:\n{header}\nfull:\n{text}"
         );
@@ -7679,7 +7697,7 @@ mod forked_session_status_header_tests {
         );
     }
 
-    /// A lone fork (parent gone, no siblings) still paints `[Dashboard]`
+    /// A lone fork (parent gone, no siblings) still paints `[L0]`
     /// on the upper-left status header. Cycle chips are only for a family
     /// of more than one.
     #[test]
@@ -7693,7 +7711,7 @@ mod forked_session_status_header_tests {
             .find(|line| line.chars().any(|c| !c.is_whitespace()))
             .unwrap_or("");
         assert!(
-            header.contains("[Dashboard]"),
+            header.contains("[L0]"),
             "a lone fork must still paint the dashboard control on the status header:\n{header}\nfull:\n{text}"
         );
         assert!(
@@ -9202,7 +9220,7 @@ mod status_line_draw_tests {
             "a fifth row could only come out of the prompt\n{screen}"
         );
         assert!(
-            find(&buf, "\u{2570}").is_some(),
+            find(&buf, "\u{2514}").is_some(),
             "the prompt keeps its bottom rule\n{screen}"
         );
         assert!(
@@ -9287,5 +9305,304 @@ mod prompt_box_height_tests {
     fn prompt_taller_than_the_window_scrolls_and_does_not_grow_past_the_window() {
         assert_eq!(laid_out_prompt_height(true, 40, 20), 20);
         assert_eq!(laid_out_prompt_height(false, 40, 20), 20);
+    }
+}
+
+/// Red contracts for the status-row credits chip and the prompt corners.
+/// These asserts describe the owed paint. They are red on today's draw.
+#[cfg(test)]
+mod red_status_corners_tests {
+    use super::super::test_fixtures::make_agent;
+    use crate::actions::ActionRegistry;
+    use crate::app::bundle::BundleState;
+    use crate::scrollback::render::ScratchBuffer;
+    use crate::views::credit_bar::{CreditBalance, SamplingIdentityKind};
+    use agent_client_protocol as acp;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use ratatui::buffer::Buffer;
+    use ratatui::layout::Rect;
+    use xai_grok_shell::session::ContextInfo;
+    use xai_grok_shell::tools::{TodoItem, TodoPriority, TodoStatus};
+
+    fn draw_buf(agent: &mut super::AgentView) -> (Buffer, String) {
+        crate::appearance::cache::set_hide_header(false);
+        let area = Rect::new(0, 0, 200, 40);
+        let mut buf = Buffer::empty(area);
+        let mut scratch = ScratchBuffer::new();
+        agent.draw(
+            area,
+            &mut buf,
+            &ActionRegistry::defaults(),
+            &mut scratch,
+            None,
+            false,
+            crate::app::agent_view::BannerSlotParams::none(),
+            false,
+            false,
+            &mut Vec::new(),
+            super::AppRenderParams::default(),
+        );
+        let text = (0..area.height)
+            .map(|y| {
+                (0..area.width)
+                    .filter_map(|x| buf.cell((x, y)).map(|cell| cell.symbol().to_string()))
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        (buf, text)
+    }
+
+    fn arm_credits(agent: &mut super::AgentView) {
+        agent.sampling_identity = SamplingIdentityKind::SuperGrokSession;
+        agent.credit_balance = Some(CreditBalance {
+            usage_pct: 28.0,
+            effective_usage_pct: 28.0,
+            included_usage_known: true,
+            ..CreditBalance::default()
+        });
+    }
+
+    fn row_symbols(buf: &Buffer, y: u16) -> Vec<String> {
+        (0..buf.area.width)
+            .filter_map(|x| buf.cell((x, y)).map(|cell| cell.symbol().to_string()))
+            .collect()
+    }
+
+    fn find_on_row(symbols: &[String], label: &str) -> Option<u16> {
+        let needle: Vec<char> = label.chars().collect();
+        let flat: Vec<char> = symbols.iter().flat_map(|symbol| symbol.chars()).collect();
+        flat.windows(needle.len())
+            .position(|window| window == needle.as_slice())
+            .map(|index| index as u16)
+    }
+
+    fn has_limits_percent(text: &str) -> bool {
+        text.match_indices("limits ").any(|(index, _)| {
+            let rest = &text[index + "limits ".len()..];
+            let digits = rest.chars().take_while(|ch| ch.is_ascii_digit()).count();
+            digits > 0 && rest[digits..].starts_with('%')
+        })
+    }
+
+    fn has_header_dollar_figure(text: &str) -> bool {
+        text.lines().any(|line| {
+            line.as_bytes()
+                .windows(2)
+                .any(|pair| pair[0] == b'$' && pair[1].is_ascii_digit())
+        })
+    }
+
+    fn paints_credits_chip(text: &str) -> bool {
+        text.contains("Limits and Credits")
+            || has_limits_percent(text)
+            || has_header_dollar_figure(text)
+    }
+
+    /// AgentStatusBar draws left to right in push order. The credits rect
+    /// must start immediately to the right of the context rect, and the
+    /// tasks rect must start immediately to the right of credits. The only
+    /// gap is the three-column status separator. Today the push order is
+    /// context, then tasks, then the switcher, then `[Dashboard]`, then credits.
+    #[test]
+    fn l1_status_row_puts_the_credits_chip_between_the_context_figure_and_tasks() {
+        let _theme = crate::theme::cache::pin_theme();
+        let theme = crate::theme::Theme::current();
+        let sep = crate::views::agent_status::separator(&theme).width() as u16;
+        let mut agent = make_agent();
+        arm_credits(&mut agent);
+        agent.session.models.override_context_window(500_000);
+        agent.session_sampling_window = Some(500_000);
+        agent.context_state = Some(ContextInfo {
+            used: 120_000,
+            ..ContextInfo::default()
+        });
+        agent.todo.update_todos(vec![TodoItem {
+            content: "one task".into(),
+            priority: TodoPriority::default(),
+            status: TodoStatus::Pending,
+            meta: None,
+            size: None,
+        }]);
+
+        let (buf, text) = draw_buf(&mut agent);
+        let context = agent
+            .hit_context
+            .rect
+            .expect("owed: the L1 status row paints the context figure before the credits chip");
+        let credits = agent
+            .hit_credits
+            .rect
+            .expect("owed: the L1 status row paints the credits chip");
+        let symbols = row_symbols(&buf, context.y);
+        let tasks_label = "tasks 0/1";
+        let tasks_x = find_on_row(&symbols, tasks_label).unwrap_or_else(|| {
+            panic!("owed: the tasks rect is on the status row. row missing {tasks_label:?}\n{text}")
+        });
+        assert_eq!(
+            credits.y, context.y,
+            "owed: the credits chip sits on the same status row as the context figure"
+        );
+        assert_eq!(
+            credits.x,
+            context.x + context.width + sep,
+            "owed: the credits rect starts immediately to the right of the context rect, \
+             with only the three-column status separator between them. \
+             Today the push order is context, then tasks, then the switcher, \
+             then [Dashboard], then credits. \
+             context.x={} context.width={} credits.x={} tasks_x={tasks_x} sep={sep}",
+            context.x,
+            context.width,
+            credits.x
+        );
+        assert_eq!(
+            tasks_x,
+            credits.x + credits.width + sep,
+            "owed: the tasks rect starts immediately to the right of credits, \
+             with only the three-column status separator between them. \
+             credits.x={} credits.width={} tasks_x={tasks_x} sep={sep}",
+            credits.x,
+            credits.width
+        );
+    }
+
+    /// An L2 draw and an L3 draw, with child_link set, must not contain
+    /// `Limits and Credits`, `limits N%`, or a header dollar figure.
+    /// The main session still paints the chip.
+    #[test]
+    fn nested_l2_and_l3_views_omit_the_header_credits_chip() {
+        let _theme = crate::theme::cache::pin_theme();
+        let mut l3 = make_agent();
+        arm_credits(&mut l3);
+        l3.session.cwd = std::path::PathBuf::from("/grok-l3-header");
+        let mut l2 = make_agent();
+        arm_credits(&mut l2);
+        l2.session.cwd = std::path::PathBuf::from("/grok-l2-header");
+        l2.session.session_id = Some(acp::SessionId::new("sess-l2"));
+        l2.insert_test_child("l3".into(), Box::new(l3));
+        let mut main = make_agent();
+        arm_credits(&mut main);
+        main.session.cwd = std::path::PathBuf::from("/grok-l1-header");
+        main.session.session_id = Some(acp::SessionId::new("sess-l1"));
+        main.insert_test_child("l2".into(), Box::new(l2));
+        assert!(
+            main.child_link().is_none(),
+            "the main session is L1 and has no child_link"
+        );
+
+        let (_, main_text) = draw_buf(&mut main);
+        assert!(
+            main.hit_credits.rect.is_some() && paints_credits_chip(&main_text),
+            "owed: the main session still paints the credits chip \
+             (`Limits and Credits`, `limits N%`, or a header dollar figure).\n{main_text}"
+        );
+
+        {
+            let l2 = main.subagent_view_mut("l2").expect("L2 view");
+            assert!(
+                l2.child_link().is_some(),
+                "owed: the L2 draw has child_link set"
+            );
+            let (_, l2_text) = draw_buf(l2);
+            assert!(
+                l2.hit_credits.rect.is_none() && !paints_credits_chip(&l2_text),
+                "owed: an L2 draw with child_link set must not contain \
+                 `Limits and Credits`, `limits N%`, or a header dollar figure. \
+                 Today draw pushes credits for nested views too.\n{l2_text}"
+            );
+        }
+        {
+            let l2 = main.subagent_view_mut("l2").expect("L2 view");
+            let l3 = l2.subagent_view_mut("l3").expect("L3 view");
+            assert!(
+                l3.child_link().is_some(),
+                "owed: the L3 draw has child_link set"
+            );
+            let (_, l3_text) = draw_buf(l3);
+            assert!(
+                l3.hit_credits.rect.is_none() && !paints_credits_chip(&l3_text),
+                "owed: an L3 draw with child_link set must not contain \
+                 `Limits and Credits`, `limits N%`, or a header dollar figure. \
+                 Today draw pushes credits for nested views too.\n{l3_text}"
+            );
+        }
+    }
+
+    /// After the character Y, the prompt's lower-left cell is `└` and the
+    /// row is intact. The prompt does not paint `╭`, `╮`, `╰`, or `╯`.
+    /// Scope is the prompt input, not the view-plan pane.
+    #[test]
+    fn typing_capital_y_keeps_a_straight_lower_left_prompt_corner() {
+        let _theme = crate::theme::cache::pin_theme();
+        let mut agent = make_agent();
+        agent.plan_mode_active = false;
+        agent.line_viewer = None;
+        let _ = agent
+            .prompt
+            .handle_key(&KeyEvent::new(KeyCode::Char('Y'), KeyModifiers::NONE));
+        assert_eq!(
+            agent.prompt.text(),
+            "Y",
+            "owed: the character Y is in the prompt input"
+        );
+
+        let (buf, _text) = draw_buf(&mut agent);
+        let prompt = agent.pane_areas.prompt;
+        assert!(
+            agent.line_viewer.is_none(),
+            "owed: scope is the prompt input, not the view-plan pane"
+        );
+        assert!(
+            prompt.width > 4 && prompt.height > 2,
+            "owed: the prompt input is open; got {prompt:?}"
+        );
+
+        let rounded = ["\u{256d}", "\u{256e}", "\u{2570}", "\u{256f}"];
+        let mut painted_rounded = Vec::new();
+        for y in prompt.y..prompt.y.saturating_add(prompt.height) {
+            for x in prompt.x..prompt.x.saturating_add(prompt.width) {
+                if let Some(cell) = buf.cell((x, y))
+                    && rounded.contains(&cell.symbol())
+                {
+                    painted_rounded.push(cell.symbol().to_string());
+                }
+            }
+        }
+        assert!(
+            painted_rounded.is_empty(),
+            "owed: after the character Y, the prompt input does not paint \
+             ╭, ╮, ╰, or ╯. The lower-left cell is └ and the row is intact. \
+             Scope is the prompt input, not the view-plan pane. \
+             This draw still paints rounded corners {painted_rounded:?} \
+             because BorderType::Rounded still paints ╭."
+        );
+
+        let bottom = prompt.y.saturating_add(prompt.height).saturating_sub(1);
+        let lower_left = buf
+            .cell((prompt.x, bottom))
+            .map(|cell| cell.symbol().to_string())
+            .unwrap_or_default();
+        assert_eq!(
+            lower_left, "\u{2514}",
+            "owed: after the character Y, the prompt's lower-left cell is └"
+        );
+        let bottom_row: Vec<String> = (prompt.x..prompt.x.saturating_add(prompt.width))
+            .filter_map(|x| buf.cell((x, bottom)).map(|cell| cell.symbol().to_string()))
+            .collect();
+        assert_eq!(
+            bottom_row.len(),
+            prompt.width as usize,
+            "owed: the prompt's lower border row is intact after Y"
+        );
+        assert_eq!(
+            bottom_row.get(1).map(String::as_str),
+            Some("\u{2500}"),
+            "owed: the lower border row stays intact after Y, got {bottom_row:?}"
+        );
+        assert!(
+            !bottom_row.iter().any(|symbol| symbol == "Y"),
+            "owed: Y stays in the prompt text and does not break the lower border row, \
+             got {bottom_row:?}"
+        );
     }
 }

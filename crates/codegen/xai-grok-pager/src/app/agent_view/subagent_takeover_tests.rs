@@ -1,7 +1,7 @@
 use crate::actions::ActionRegistry;
 use crate::app::actions::Action;
 use crate::app::agent_view::test_fixtures::{
-    add_running_execute, ctrl, key, make_agent, parent_with_child,
+    add_running_execute, ctrl, key, make_agent, parent_with_child, running_subagent_info,
 };
 use crate::app::agent_view::{AgentPane, AgentView, InputMode, ViewSurface};
 use crate::app::app_view::InputOutcome;
@@ -14,7 +14,9 @@ use crate::scrollback::blocks::tool::{
 use crate::scrollback::render::ScratchBuffer;
 use crate::scrollback::types::DisplayMode;
 use crate::views::shortcuts_bar::PendingHint;
-use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{
+    Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use std::sync::Arc;
@@ -271,7 +273,7 @@ fn takeover_draw_forwards_pending_hint_and_child_cursor() {
             .height
     );
 }
-/// A child view paints no `[Dashboard]` button, even when its own registry could dispatch `/dashboard`.
+/// A child view paints no `[L0]` button, even when its own registry could dispatch `/dashboard`.
 /// Inside the dashboard overlay the button stays as the way back.
 #[test]
 fn takeover_shows_dashboard_button_only_inside_the_overlay() {
@@ -302,7 +304,7 @@ fn takeover_shows_dashboard_button_only_inside_the_overlay() {
         let text = buffer_text(&buf, area);
         assert_eq!(
             expect_button,
-            text.contains("[Dashboard]"),
+            text.contains("[L0]"),
             "in_overlay={in_overlay}: {text}"
         );
         let child = parent.subagent_view("child").expect("child view");
@@ -419,4 +421,100 @@ fn child_ctrl_r_keeps_scrollback_precedence() {
     let child = parent.subagent_view("child").expect("child view");
     assert!(child.active_modal.is_none());
     assert!(child.is_bare_scrollback());
+}
+
+const OWED_OVERLAY_CLICK: &str =
+    "A left click on the specialist status in the L2 overlay opens that L3 takeover.";
+
+/// First cell of `phrase` on one row. Each ASCII glyph is one cell.
+fn specialist_status_cell(buf: &Buffer, area: Rect, phrase: &str) -> Option<(u16, u16)> {
+    let glyphs: Vec<String> = phrase.chars().map(|ch| ch.to_string()).collect();
+    if glyphs.is_empty() {
+        return None;
+    }
+    for y in area.y..area.y + area.height {
+        let symbols: Vec<String> = (area.x..area.x + area.width)
+            .filter_map(|x| buf.cell((x, y)).map(|cell| cell.symbol().to_owned()))
+            .collect();
+        if symbols.len() < glyphs.len() {
+            continue;
+        }
+        for start in 0..=symbols.len() - glyphs.len() {
+            if symbols[start..start + glyphs.len()] == glyphs[..] {
+                return Some((area.x + start as u16, y));
+            }
+        }
+    }
+    None
+}
+
+/// A left click on the specialist status in the L2 overlay opens that L3 takeover.
+/// The status is on screen. `hit_overlay_nested_status` stays empty because nothing paints it, and the click is never read.
+#[test]
+fn overlay_nested_status_click_opens_l3_session_view() {
+    const L2: &str = "l2-coord";
+    const L3: &str = "l3-open";
+    const SPECIALIST: &str = "Open the specialist view";
+    let registry = ActionRegistry::defaults();
+    let mut l1 = make_agent();
+    let mut l2 = make_agent();
+    l2.session.state = crate::app::agent::AgentState::TurnRunning;
+    let mut l2_info = running_subagent_info(L2);
+    l2_info.description = Arc::from("Coordinate the overlay");
+    l2_info.attempt.depth = Some(1);
+    l1.subagent_sessions.insert(L2.to_owned(), l2_info);
+    l1.subagent_views.insert(L2.to_owned(), Box::new(l2));
+    let mut specialist = running_subagent_info(L3);
+    specialist.description = Arc::from(SPECIALIST);
+    specialist.attempt.is_background = true;
+    specialist.attempt.depth = Some(2);
+    specialist.attempt.parent_session_id = Some(Arc::from(L2));
+    l1.subagent_sessions.insert(L3.to_owned(), specialist);
+    l1.insert_test_child(L3.to_owned(), Box::new(make_agent()));
+    l1.active_subagent = Some(L2.to_owned());
+
+    let area = Rect::new(0, 0, 120, 30);
+    let mut buf = Buffer::empty(area);
+    let mut scratch = ScratchBuffer::new();
+    let _ = l1.draw(
+        area,
+        &mut buf,
+        &registry,
+        &mut scratch,
+        None,
+        false,
+        crate::app::agent_view::BannerSlotParams::none(),
+        true,
+        false,
+        &mut Vec::new(),
+        crate::app::agent_view::AppRenderParams::default(),
+    );
+    let painted = buffer_text(&buf, area);
+    let status = specialist_status_cell(&buf, area, SPECIALIST).unwrap_or_else(|| {
+        panic!("{OWED_OVERLAY_CLICK} The specialist status must be on screen so the click has a target:\n{painted}")
+    });
+    assert!(
+        l1.hit_overlay_nested_status.contains(status.0, status.1),
+        "{OWED_OVERLAY_CLICK} The specialist status is at ({}, {}) and hit_overlay_nested_status is never painted: {:?}",
+        status.0,
+        status.1,
+        l1.hit_overlay_nested_status.rect
+    );
+    assert_eq!(
+        l1.overlay_nested_status_child_sid.as_deref(),
+        Some(L3),
+        "{OWED_OVERLAY_CLICK}"
+    );
+    let click = Event::Mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: status.0,
+        row: status.1,
+        modifiers: KeyModifiers::NONE,
+    });
+    let _ = l1.handle_input(&click, &registry);
+    assert_eq!(
+        l1.active_subagent.as_deref(),
+        Some(L3),
+        "{OWED_OVERLAY_CLICK} The click is never read."
+    );
 }

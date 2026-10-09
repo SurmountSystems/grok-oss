@@ -543,6 +543,11 @@ fn persist_other_spend_choice(state: &LimitsModalState) -> std::io::Result<()> {
         if console_api_credits_balance_available(state) {
             pins.meter_source = Some(MeterSource::Console);
             pins.stay_supergrok = false;
+        } else if pins.meter_source == Some(MeterSource::Included) {
+            // No console balance. Clear Included. Do not write Console.
+            // A team-only login does not hop to the console API key.
+            pins.meter_source = None;
+            pins.stay_supergrok = false;
         } else if pins.meter_source == Some(MeterSource::DollarCredits) {
             pins.meter_source = Some(MeterSource::Included);
         }
@@ -3034,6 +3039,204 @@ mod tests {
         assert!(
             !personal_screen.contains("limits 0%") && !personal_screen.contains("$0"),
             "the personal header does not invent limits 0% or $0:\n{personal_screen}"
+        );
+        clear_console_team_postpaid_cache();
+    }
+
+    /// Owed outcome: start from `MeterSource::Included` beside a Team JWT.
+    /// Click the credits control. The footer paints `Using credits`.
+    /// `use_console` stays false. The pin is not `MeterSource::Console`.
+    /// The click switches the next request off included SuperGrok period
+    /// limits. SuperGrok is paid.
+    #[test]
+    #[serial_test::serial]
+    fn clicking_using_credits_while_using_limits_is_selected_switches_off_included_period_limits_and_paints_using_credits()
+     {
+        use crate::actions::ActionRegistry;
+        use crate::app::agent_view::test_fixtures::make_agent;
+        use crate::app::agent_view::{AppRenderParams, BannerSlotParams};
+        use crate::app::app_view::InputOutcome;
+        use crate::scrollback::render::ScratchBuffer;
+        use crossterm::event::{Event, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+        use xai_grok_shell::auth::limits_pins::{
+            LimitsPins, MeterSource, load_limits_pins, next_request_draws_included_period_limits,
+            save_limits_pins,
+        };
+        use xai_grok_shell::auth::{
+            AuthMode, GrokAuth, clear_console_team_postpaid_cache, upsert_supergrok_session,
+        };
+
+        fn screen_of(buf: &Buffer, area: Rect) -> String {
+            (0..area.height)
+                .map(|y| {
+                    (0..area.width)
+                        .map(|x| buf[(x, y)].symbol())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
+
+        let home = tempfile::TempDir::new().expect("temp GROK_HOME");
+        let _env = xai_grok_test_support::EnvGuard::set("GROK_HOME", home.path());
+        clear_console_team_postpaid_cache();
+        std::fs::write(
+            home.path().join("config.toml"),
+            "[auth]\npreferred_method = \"oidc\"\nauto_use_included_limits = true\n",
+        )
+        .expect("preferred oidc");
+
+        let end = DateTime::parse_from_rfc3339("2026-10-12T06:59:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let base = "https://auth.x.ai::using-credits-click";
+        let live = chrono::Utc::now() + chrono::Duration::days(1);
+        let expired = chrono::Utc::now() - chrono::Duration::days(1);
+        let session = |key: &str, user_id: &str, team_id: Option<&str>, expires_at| GrokAuth {
+            key: key.into(),
+            auth_mode: AuthMode::Oidc,
+            user_id: user_id.into(),
+            principal_type: if team_id.is_some() {
+                Some("Team".into())
+            } else {
+                Some("User".into())
+            },
+            principal_id: Some(user_id.into()),
+            team_id: team_id.map(str::to_string),
+            expires_at: Some(expires_at),
+            ..GrokAuth::default()
+        };
+        let mut team_map = std::collections::BTreeMap::new();
+        upsert_supergrok_session(
+            &mut team_map,
+            base,
+            session("tok-personal-expired", "u-personal-expired", None, expired),
+        );
+        team_map
+            .get_mut(&format!("{base}::personal"))
+            .expect("expired personal slot")
+            .team_id = Some("stale-team".into());
+        upsert_supergrok_session(
+            &mut team_map,
+            base,
+            session(
+                "tok-team-only",
+                "u-team",
+                Some("team-using-credits-click"),
+                live,
+            ),
+        );
+        std::fs::write(
+            home.path().join("auth.json"),
+            serde_json::to_vec_pretty(&team_map).expect("auth json"),
+        )
+        .expect("write auth");
+        save_limits_pins(&LimitsPins {
+            stay_supergrok: false,
+            use_console: false,
+            meter_source: Some(MeterSource::Included),
+            supergrok_identity: None,
+        })
+        .expect("Included pin");
+        assert!(
+            next_request_draws_included_period_limits(),
+            "Using limits is already selected beside the Team JWT"
+        );
+        assert!(!load_limits_pins().use_console);
+
+        let registry = ActionRegistry::defaults();
+        let area = Rect::new(0, 0, 140, 40);
+        crate::appearance::cache::set_hide_header(false);
+        let mut agent = make_agent();
+        let mut bal = weekly_bal(28.0, end);
+        bal.included_usage_known = true;
+        agent.plan_mode_active = false;
+        agent.plan_approval_view = None;
+        agent.sampling_identity = SamplingIdentityKind::SuperGrokSession;
+        agent.credit_balance = Some(bal.clone());
+        let snap =
+            LimitsSnapshot::from_billing(Some(&bal), None, SamplingIdentityKind::SuperGrokSession);
+        assert!(
+            snap.console.balance_cents.is_none(),
+            "this click has no console team prepaid balance"
+        );
+        agent.active_modal = Some(crate::views::modal::ActiveModal::Limits {
+            state: Box::new(LimitsModalState::new(snap)),
+        });
+        let mut buf = Buffer::empty(area);
+        let mut scratch = ScratchBuffer::new();
+        agent.draw(
+            area,
+            &mut buf,
+            &registry,
+            &mut scratch,
+            None,
+            false,
+            BannerSlotParams::none(),
+            false,
+            false,
+            &mut Vec::new(),
+            AppRenderParams::default(),
+        );
+        let before = screen_of(&buf, area);
+        assert!(
+            before.contains("Using limits") && before.contains("Use credits"),
+            "Using limits is selected, so the credits control is Use credits:\n{before}"
+        );
+        assert!(
+            !before.contains("Using credits"),
+            "the credits choice is not already accepted:\n{before}"
+        );
+        let (column, row) = recorded_spend_point(&buf, &agent, "Use credits");
+        agent.hit_credits.rect = Some(Rect {
+            x: column,
+            y: row,
+            width: 1,
+            height: 1,
+        });
+        let outcome = agent.handle_input(
+            &Event::Mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column,
+                row,
+                modifiers: KeyModifiers::NONE,
+            }),
+            &registry,
+        );
+        assert!(
+            matches!(outcome, InputOutcome::Changed),
+            "a left click on Use credits is handled, got {outcome:?}"
+        );
+        let pins = load_limits_pins();
+        assert!(!pins.use_console, "Using credits keeps use_console false");
+        assert_ne!(
+            pins.meter_source,
+            Some(MeterSource::Console),
+            "Using credits does not pin console team prepaid / console API credits"
+        );
+        assert!(
+            !next_request_draws_included_period_limits(),
+            "Using credits switches the next request off included SuperGrok period limits"
+        );
+        let mut buf = Buffer::empty(area);
+        let mut scratch = ScratchBuffer::new();
+        agent.draw(
+            area,
+            &mut buf,
+            &registry,
+            &mut scratch,
+            None,
+            false,
+            BannerSlotParams::none(),
+            false,
+            false,
+            &mut Vec::new(),
+            AppRenderParams::default(),
+        );
+        let after = screen_of(&buf, area);
+        assert!(
+            after.contains("Using credits"),
+            "the footer paints Using credits:\n{after}"
         );
         clear_console_team_postpaid_cache();
     }

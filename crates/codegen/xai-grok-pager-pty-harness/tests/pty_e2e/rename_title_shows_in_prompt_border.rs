@@ -5,12 +5,12 @@ use super::common::*;
 /// Title used for the manual `/rename`; unique so screen scans are unambiguous.
 const RENAME_TITLE: &str = "PTYRENAMETITLE";
 
-/// The prompt-box top-border row carrying the inline title: the line holding both the title and the `╮` corner.
+/// The prompt-box top-border row carrying the inline title: the line holding both the title and the `┐` corner.
 /// It works on whole lines on purpose: byte-slicing box-drawing rows panics on char boundaries.
 fn title_border_row(screen: &str, title: &str) -> Option<String> {
     screen
         .lines()
-        .find(|line| line.contains(title) && line.contains('\u{256e}'))
+        .find(|line| line.contains(title) && line.contains('\u{2510}'))
         .map(str::to_string)
 }
 
@@ -29,24 +29,24 @@ fn wait_for_title_row(harness: &mut PtyHarness, title: &str, timeout: Duration) 
     }
 }
 
-/// The top-border row of the live prompt box: the `╮` row whose successor is the prompt's text row (`│ ❯ …`, side border and/or prefix).
+/// The top-border row of the live prompt box: the `┐` row whose successor is the prompt's text row (`│ ❯ …`, side border and/or prefix).
 /// Anchoring to the prompt keeps the negative (no-title) assert honest even if some other widget ever draws a plain top border.
 fn prompt_top_border_row(screen: &str) -> Option<String> {
     let lines: Vec<&str> = screen.lines().collect();
     lines.windows(2).find_map(|pair| {
-        (pair[0].contains('\u{256e}')
+        (pair[0].contains('\u{2510}')
             && (pair[1].trim_start().starts_with('\u{2502}') || pair[1].contains('\u{276f}')))
         .then(|| pair[0].to_string())
     })
 }
 
-/// Whether `row` is a fully plain `╭──…──╮` border (i.e. no inline title).
+/// Whether `row` is a fully plain `┌──…──┐` border (i.e. no inline title).
 fn is_plain_border_row(row: &str) -> bool {
     let trimmed = row.trim();
     let mut chars = trimmed.chars();
     trimmed.chars().count() > 2
-        && chars.next() == Some('\u{256d}')
-        && chars.next_back() == Some('\u{256e}')
+        && chars.next() == Some('\u{250c}')
+        && chars.next_back() == Some('\u{2510}')
         && chars.all(|c| c == '\u{2500}')
 }
 
@@ -59,7 +59,7 @@ fn assert_title_styled(harness: &mut PtyHarness, title: &str) {
         .iter()
         .find(|line| {
             let text: String = line.runs.iter().map(|run| run.text.as_str()).collect();
-            text.contains(title) && text.contains('\u{256e}')
+            text.contains(title) && text.contains('\u{2510}')
         })
         .unwrap_or_else(|| {
             panic!(
@@ -149,7 +149,7 @@ fn submit_rename(harness: &mut PtyHarness, title: &str) {
 }
 
 /// A manual `/rename` renders the session title inline on the prompt box's top border (info-line dim text treatment).
-/// It is right-aligned before the `╮` corner.
+/// It is right-aligned before the `┐` corner.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "PTY e2e; run the owning pty_e2e_* Cargo test with --ignored (see Cargo.toml)"]
 async fn rename_title_shows_in_prompt_border() {

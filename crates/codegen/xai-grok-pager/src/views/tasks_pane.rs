@@ -15,7 +15,7 @@ use crate::app::agent_view::l2_token_tracking::{
 };
 use crate::app::subagent::{
     SubagentInfo, format_context_badge, format_live_l3_count, format_subagent_label,
-    subagent_list_row_usage,
+    is_l2_list_row, live_l3_count, subagent_list_row_usage,
 };
 use crate::appearance::LayoutConfig;
 use crate::scrollback::layout::HorizontalLayout;
@@ -982,8 +982,34 @@ impl TasksPane {
             }
         }
         let listed: Vec<&SubagentInfo> = subagents.values().collect();
-        let skip_duplicate_running = duplicate_running_description_ids(&listed);
-        for info in &listed {
+        let child_ids: std::collections::HashSet<&str> = listed
+            .iter()
+            .map(|info| info.child_session_id.as_ref())
+            .collect();
+        // The main-thread list is L2 rows. L3 specialists stay in the
+        // registry so the L2 row can show how many it is using.
+        // A nested overlay child's registry has those specialists and no
+        // L2 row. Name them there. Do not list them beside an L2 row.
+        let l2_rows: Vec<&SubagentInfo> = listed
+            .iter()
+            .copied()
+            .filter(|info| is_l2_list_row(info, &child_ids))
+            .collect();
+        let list_rows: Vec<&SubagentInfo> = if l2_rows.is_empty() {
+            listed
+                .iter()
+                .copied()
+                .filter(|info| {
+                    info.is_running()
+                        && info.attempt.workflow_run_id.is_none()
+                        && info.attempt.parent_session_id.is_some()
+                })
+                .collect()
+        } else {
+            l2_rows
+        };
+        let skip_duplicate_running = duplicate_running_description_ids(&list_rows);
+        for info in &list_rows {
             if info.attempt.workflow_run_id.is_some() {
                 continue;
             }
@@ -991,8 +1017,16 @@ impl TasksPane {
                 continue;
             }
             if self.show_done || info.is_running() {
-                self.items
-                    .push(TaskEntry::from_subagent_with_l3_count(info, 0, &listed));
+                let specialists = if info.is_running() {
+                    live_l3_count(listed.iter().copied(), info.child_session_id.as_ref())
+                } else {
+                    0
+                };
+                self.items.push(TaskEntry::from_subagent_with_l3_count(
+                    info,
+                    specialists,
+                    &listed,
+                ));
             }
         }
         let now = Utc::now();
@@ -3775,6 +3809,97 @@ mod tests {
         assert!(
             left.contains("167.0k (estimate)"),
             "167.0k stays an estimate, left of the chips: {row}"
+        );
+    }
+
+    /// The tasks pane and the dock list L2 rows plus a specialist count, matching `live_subagent_list`.
+    /// Listing an L3 name is a failure. `sync` still pushes every running row with a specialist count of 0, and the dock lists every running row.
+    #[test]
+    fn tasks_pane_and_dock_list_l2_rows_and_a_specialist_count() {
+        const OWED: &str = "The tasks pane and the dock list L2 rows plus a specialist count, matching live_subagent_list.";
+        const L2_NAME: &str = "Coordinate the gate";
+        const L3_NAME: &str = "Prove the specialist name";
+        let mut l2 = make_info();
+        l2.subagent_id = Arc::from("sa-l2");
+        l2.child_session_id = Arc::from("l2-coord");
+        l2.description = Arc::from(L2_NAME);
+        l2.attempt.depth = Some(1);
+        let mut l3 = make_info();
+        l3.subagent_id = Arc::from("sa-l3");
+        l3.child_session_id = Arc::from("l3-spec");
+        l3.description = Arc::from(L3_NAME);
+        l3.attempt.depth = Some(2);
+        l3.attempt.parent_session_id = Some(Arc::from("l2-coord"));
+        let mut sessions = HashMap::new();
+        sessions.insert("l2-coord".to_owned(), l2);
+        sessions.insert("l3-spec".to_owned(), l3);
+        let live_ids: Vec<String> = crate::app::subagent::live_subagent_list(sessions.values())
+            .into_iter()
+            .map(|info| info.child_session_id.to_string())
+            .collect();
+        assert_eq!(
+            live_ids,
+            vec!["l2-coord".to_owned()],
+            "{OWED} The registry list for this fixture is the L2 row alone."
+        );
+
+        let mut pane = TasksPane::new();
+        pane.sync(&BTreeMap::new(), &sessions, &HashMap::new(), &[]);
+        let pane_rows: Vec<(String, String)> = pane
+            .items
+            .iter()
+            .filter_map(|entry| match entry {
+                TaskEntry::Agent {
+                    child_session_id,
+                    label,
+                    ..
+                } => Some((child_session_id.clone(), label.clone())),
+                _ => None,
+            })
+            .collect();
+        let pane_ids: Vec<String> = pane_rows
+            .iter()
+            .map(|(session_id, _)| session_id.clone())
+            .collect();
+        assert!(
+            pane_rows.iter().all(|(_, label)| !label.contains(L3_NAME)),
+            "{OWED} The tasks pane still lists the L3 name. Rows: {pane_rows:?}"
+        );
+        assert_eq!(pane_ids, live_ids, "{OWED} Tasks pane rows: {pane_rows:?}");
+        assert!(
+            pane_rows
+                .iter()
+                .any(|(_, label)| label.contains(L2_NAME) && label.contains("1 specialist")),
+            "{OWED} The L2 row needs a specialist count. Rows: {pane_rows:?}"
+        );
+
+        let mut l1 = crate::app::agent_view::test_fixtures::make_agent();
+        l1.subagent_sessions = sessions;
+        let dock_rows = l1.dock_subagent_rows();
+        let dock_text: Vec<String> = dock_rows
+            .iter()
+            .map(|(session_id, _, row)| {
+                format!(
+                    "{session_id} {} {} {} {}",
+                    row.kind,
+                    row.description,
+                    row.activity.as_deref().unwrap_or(""),
+                    row.meta
+                )
+            })
+            .collect();
+        let dock_ids: Vec<String> = dock_rows
+            .iter()
+            .map(|(session_id, _, _)| session_id.clone())
+            .collect();
+        assert!(
+            dock_text.iter().all(|line| !line.contains(L3_NAME)),
+            "{OWED} The dock still lists the L3 name. Rows: {dock_text:?}"
+        );
+        assert_eq!(dock_ids, live_ids, "{OWED} Dock rows: {dock_text:?}");
+        assert!(
+            dock_text.iter().any(|line| line.contains("1 specialist")),
+            "{OWED} The dock L2 row needs a specialist count. Rows: {dock_text:?}"
         );
     }
 }

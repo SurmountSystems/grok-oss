@@ -1899,6 +1899,18 @@ fn apply_nested_subagent_update(agent: &mut AgentView, update: XaiSessionUpdate)
             };
             let now = std::time::Instant::now();
             let prior_info = agent.subagent_sessions.remove(&child_session_id);
+            // This notification is addressed to an L2 session. The row it
+            // registers on the L1 session is an L3. Depth 2 is what keeps
+            // operator text off that specialist. A parent depth, when the
+            // L2 row has one, still wins so a deeper spawn stays deeper.
+            let depth = Some(
+                agent
+                    .subagent_sessions
+                    .get(parent_session_id.as_str())
+                    .and_then(|parent| parent.attempt.depth)
+                    .map(|parent_depth| parent_depth.saturating_add(1))
+                    .unwrap_or(2),
+            );
             let lifecycle = match SubagentLifecycleState::default().reduce(
                 SubagentLifecycleTransition::Spawned,
                 attempt_id.as_deref(),
@@ -1926,7 +1938,7 @@ fn apply_nested_subagent_update(agent: &mut AgentView, update: XaiSessionUpdate)
                 context_normalized,
                 parent_prompt_id: parent_prompt_id.map(Arc::from),
                 parent_session_id: Some(Arc::from(parent_session_id)),
-                depth: None,
+                depth,
                 started_at: now,
                 last_progress_at: now,
                 status: None,
@@ -2624,5 +2636,57 @@ mod memory_capture_privacy_tests {
         let message = memory_capture_system_message(untrusted, 2, 4, 3);
         assert_eq!(message, "Memory capture updated for turns 2-4 (attempt 3)");
         assert!(!message.contains(untrusted));
+    }
+}
+
+#[cfg(test)]
+mod live_l3_depth_tests {
+    use super::super::handle;
+    use super::super::tests::{
+        make_app_with_agent, make_ext_session_notification, test_subagent_spawned,
+    };
+    use crate::app::agent::AgentId;
+
+    /// A live SubagentSpawned for an L3 writes depth 2.
+    /// The notification is addressed to the L2 session, which is the live path that registers the L3 on the L1 registry.
+    /// That path leaves `SubagentAttemptInfo.depth` as `None`.
+    #[test]
+    fn live_spawn_marks_l3_depth_so_the_overlay_stays_unaddressable() {
+        const OWED: &str = "A live SubagentSpawned for an L3 writes depth 2.";
+        let mut app = make_app_with_agent("l1-sess");
+        assert!(handle(
+            make_ext_session_notification("l1-sess", test_subagent_spawned("l1-sess", "l2-coord"),),
+            &mut app,
+        ));
+        {
+            let l1 = app.agents.get(&AgentId(0)).expect("L1 session");
+            assert!(
+                l1.subagent_view("l2-coord").is_some(),
+                "{OWED} The L2 session view must exist before the L3 spawn is delivered to that session."
+            );
+        }
+        let _ = handle(
+            make_ext_session_notification("l2-coord", test_subagent_spawned("l2-coord", "l3-spec")),
+            &mut app,
+        );
+        let l1 = app.agents.get(&AgentId(0)).expect("L1 session");
+        let attempt = &l1
+            .subagent_sessions
+            .get("l3-spec")
+            .expect("the live L3 spawn must register a row on the L1 session")
+            .attempt;
+        assert_eq!(
+            attempt.depth,
+            Some(2),
+            "{OWED} This path leaves depth as {:?}.",
+            attempt.depth
+        );
+        assert!(
+            !crate::app::subagent::overlay_child_is_l2_coordinator(
+                &l1.subagent_sessions,
+                "l3-spec",
+            ),
+            "{OWED} Depth 2 keeps the L3 overlay unaddressable."
+        );
     }
 }

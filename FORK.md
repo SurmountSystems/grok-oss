@@ -1969,7 +1969,10 @@ composer named Human box.
   main:** status, spawn L2, wait, read short reports, board upsert,
   Hierarchical fast path. **L2:** parallelize, spawn L3s, throw context away
   after a report. **L3:** all actual tools and work. Same agency as L2 except
-  no L4. Operator clarify stays in the L2 nested view. L3 stays unbothered.
+  no L4. An L3 implements, researches, or reviews. An L3 does not
+  coordinate. Do not call an L3 a coordinator. The coordinator is
+  the L2, and the specialist is the L3. Implementor, researcher,
+  and reviewer are the L3 roles. Operator clarify stays in the L2 nested view. L3 stays unbothered.
   Additive asks onto the same live L2 use parent follow-up (not kill, not
   respawn). Disjoint work still spawns another L2. `resume_from` after exit
   stays. L3 stays unbothered unless the Operator targeted that specialist.

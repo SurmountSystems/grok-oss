@@ -33,7 +33,7 @@ async fn assert_waiting_alignment(rows: u16) {
     let welcome_prompt_x = welcome_screen
         .lines()
         .rev()
-        .find(|line| line.trim_start().starts_with('╭'))
+        .find(|line| line.trim_start().starts_with('┌'))
         .map(|line| line.len() - line.trim_start().len())
         .expect("welcome prompt border");
 
@@ -59,7 +59,7 @@ async fn assert_waiting_alignment(rows: u16) {
     let prompt_border = screen
         .lines()
         .rev()
-        .find(|line| line.trim_start().starts_with('╭'))
+        .find(|line| line.trim_start().starts_with('┌'))
         .expect("prompt border");
     let waiting_x = waiting.len() - waiting.trim_start().len();
     let prompt_x = prompt_border.len() - prompt_border.trim_start().len();

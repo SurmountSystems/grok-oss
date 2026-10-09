@@ -3719,7 +3719,10 @@ impl SessionActor {
     /// Model-facing rejection for a non-plan-file edit while plan mode is active.
     /// Rendered via the session's `TemplateRenderer` so `${{ plan_path }}` resolves; falls back if rendering fails.
     pub(super) async fn plan_mode_edit_rejected_message(&self) -> String {
-        let plan_path = self.plan_mode.lock().plan_file_path().to_path_buf();
+        let tracked = self.plan_mode.lock().plan_file_path().to_path_buf();
+        // Name `plan.md` in the session directory. A thoughtful
+        // `plan-<ulid>.md` is also editable, and it does not replace this path.
+        let plan_path = crate::session::plan_mode::main_plan_file_path(&tracked);
         self.render_plan_template(
             crate::session::plan_mode::plan_mode_edit_rejected_template(),
             &plan_path,
