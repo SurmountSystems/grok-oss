@@ -266,16 +266,28 @@ fn both_refused_status_chip_label(
     Some(format!("{days}d {hours}h {mins}m"))
 }
 
-/// The short `limits N%` chip is only for included SuperGrok period limits.
-/// SuperGrok dollar credits and console API credits must not wear that label.
-fn status_row_paints_included_period_limits_chip(
+/// Included percent the L1 chip paints, when the next request draws that
+/// meter. A set identity pin uses that row. An unset pin keeps the view
+/// balance. A missing reading is `None`, not `limits 0%`.
+fn included_chip_usage_pct(
     identity: crate::views::credit_bar::SamplingIdentityKind,
-    balance: &crate::views::credit_bar::CreditBalance,
-) -> bool {
-    identity == crate::views::credit_bar::SamplingIdentityKind::SuperGrokSession
-        && balance.included_usage_known
-        && balance.usage_pct.is_finite()
-        && xai_grok_shell::auth::limits_pins::next_request_draws_included_period_limits()
+    balance: Option<&crate::views::credit_bar::CreditBalance>,
+) -> Option<f64> {
+    if identity != crate::views::credit_bar::SamplingIdentityKind::SuperGrokSession {
+        return None;
+    }
+    if !xai_grok_shell::auth::limits_pins::next_request_draws_included_period_limits() {
+        return None;
+    }
+    if let Some(row) = xai_grok_shell::auth::limits_pins::pinned_supergrok_row() {
+        return row.usage_pct.filter(|pct| pct.is_finite());
+    }
+    let balance = balance?;
+    if balance.included_usage_known && balance.usage_pct.is_finite() {
+        Some(balance.usage_pct)
+    } else {
+        None
+    }
 }
 
 /// Team postpaid Billing Credits remaining. The Limits card uses this
@@ -294,15 +306,23 @@ fn header_reading_grok_home() -> std::path::PathBuf {
     }
 }
 
-/// SuperGrok dollar credits remaining for the active session, from the
-/// credits-poll cache. `None` was not read. This is not team postpaid
-/// Billing Credits and not console team prepaid. It does not invent `$0`.
+/// SuperGrok dollar credits remaining for the identity the pin selected.
+///
+/// When the pin is unset, this is the active session. The snapshot row
+/// wins for a selected identity. The process cache covers a poll that
+/// has not been written yet. `None` was not read. This is not team
+/// postpaid Billing Credits and not console team prepaid. It does not
+/// invent `$0`.
 fn supergrok_dollar_credits_remaining_label() -> Option<String> {
-    let home = header_reading_grok_home();
-    let identity = xai_grok_shell::auth::active_supergrok_identity_id(&home)?;
-    let cents = xai_grok_shell::auth::included_billing_fields_snapshot()
-        .get(&identity)?
-        .prepaid_balance_cents?;
+    let cents = if let Some(row) = xai_grok_shell::auth::limits_pins::pinned_supergrok_row() {
+        row.dollar_credits_cents
+    } else {
+        let home = header_reading_grok_home();
+        let identity = xai_grok_shell::auth::active_supergrok_identity_id(&home)?;
+        xai_grok_shell::auth::included_billing_fields_snapshot()
+            .get(&identity)?
+            .prepaid_balance_cents
+    }?;
     Some(crate::views::limits_modal::format_remaining_cents_as_dollars(cents.abs()))
 }
 
@@ -357,11 +377,13 @@ fn credits_label_when_included_period_is_not_next_request() -> String {
 
 /// Text of the L1 credits chip. Nested views do not call this.
 /// A known included SuperGrok period reading paints `limits N%`
-/// (hover paints percent left). When that reading is missing and the
-/// next request still draws included SuperGrok period limits, the chip
-/// stays `Limits and Credits`. It does not become `limits 0%` or `$0`.
-/// When the next request does not draw that meter, the chip is the
-/// remaining for the meter that request spends.
+/// (hover paints percent left). When an identity pin is set, that
+/// percent is the selected row, not the other session's balance.
+/// When that reading is missing and the next request still draws
+/// included SuperGrok period limits, the chip stays `Limits and Credits`.
+/// It does not become `limits 0%` or `$0`. When the next request does
+/// not draw that meter, the chip is the remaining for the meter that
+/// request spends.
 fn l1_credits_chip_label(
     identity: crate::views::credit_bar::SamplingIdentityKind,
     balance: Option<&crate::views::credit_bar::CreditBalance>,
@@ -372,10 +394,8 @@ fn l1_credits_chip_label(
     {
         return label;
     }
-    if let Some(balance) = balance
-        && status_row_paints_included_period_limits_chip(identity, balance)
-    {
-        let used = balance.usage_pct.round().clamp(0.0, 100.0) as u8;
+    if let Some(pct) = included_chip_usage_pct(identity, balance) {
+        let used = pct.round().clamp(0.0, 100.0) as u8;
         if hovered {
             return format!("{}% left", 100u8.saturating_sub(used));
         }
@@ -1738,9 +1758,7 @@ impl AgentView {
         if self.child_link().is_none() && !in_dashboard_overlay {
             let balance = self.credit_balance.as_ref();
             let both_refused = balance.and_then(both_refused_status_chip_label);
-            let paints_included = balance.is_some_and(|balance| {
-                status_row_paints_included_period_limits_chip(self.sampling_identity, balance)
-            });
+            let included_pct = included_chip_usage_pct(self.sampling_identity, balance);
             let label =
                 l1_credits_chip_label(self.sampling_identity, balance, self.hit_credits.hovered);
             let chip_style = if both_refused.is_some() {
@@ -1749,10 +1767,8 @@ impl AgentView {
                     chip_style = chip_style.add_modifier(ratatui::style::Modifier::BOLD);
                 }
                 chip_style
-            } else if paints_included {
-                let used = balance
-                    .map(|balance| balance.usage_pct.round().clamp(0.0, 100.0) as u8)
-                    .unwrap_or(0);
+            } else if let Some(pct) = included_pct {
+                let used = pct.round().clamp(0.0, 100.0) as u8;
                 let color = if used >= 100 {
                     theme.accent_error
                 } else if used >= 80 {
@@ -7323,6 +7339,254 @@ mod status_credits_meter_tests {
         );
         forbid(&row, "status row");
         forbid(&hover, "hover");
+    }
+
+    const CELL_PERSONAL_TOKEN: &str = "tok-personal-cell";
+    const CELL_TEAM_TOKEN: &str = "tok-team-cell";
+    const CELL_PERSONAL_ID: &str = "u-personal-cell";
+    const CELL_BUSINESS_ID: &str = "team-cell";
+    const CELL_PERSONAL_PCT: f64 = 28.0;
+    const CELL_BUSINESS_PCT: f64 = 41.0;
+    const CELL_PERSONAL_CENTS: i64 = 8_765;
+    const CELL_BUSINESS_CENTS: i64 = 2_199;
+    const CELL_CONSOLE_CENTS: i64 = 15_420;
+    const CELL_POSTPAID_CENTS: i64 = 4_703;
+    const CELL_POSTPAID_CACHE_CENTS: i64 = 44_297;
+
+    /// Process caches are crate-global. Drop clears the decoys these tests
+    /// seed so a later serial test does not read them as a live meter.
+    struct FourMeterCellCacheGuard;
+
+    impl Drop for FourMeterCellCacheGuard {
+        fn drop(&mut self) {
+            xai_grok_shell::auth::clear_included_billing_cache();
+            xai_grok_shell::auth::clear_console_team_prepaid_cache();
+            xai_grok_shell::auth::clear_console_team_postpaid_cache();
+        }
+    }
+
+    fn seed_four_meter_cells(home: &std::path::Path) -> FourMeterCellCacheGuard {
+        xai_grok_shell::auth::clear_included_billing_cache();
+        xai_grok_shell::auth::clear_console_team_prepaid_cache();
+        xai_grok_shell::auth::clear_console_team_postpaid_cache();
+        let live = chrono::Utc::now() + chrono::Duration::days(7);
+        let base = "https://auth.x.ai::four-meter-chip";
+        let mut map = std::collections::BTreeMap::new();
+        xai_grok_shell::auth::upsert_supergrok_session(
+            &mut map,
+            base,
+            xai_grok_shell::auth::GrokAuth {
+                key: CELL_PERSONAL_TOKEN.into(),
+                auth_mode: xai_grok_shell::auth::AuthMode::Oidc,
+                user_id: CELL_PERSONAL_ID.into(),
+                principal_type: Some("User".into()),
+                principal_id: Some(CELL_PERSONAL_ID.into()),
+                team_id: None,
+                expires_at: Some(live),
+                ..xai_grok_shell::auth::GrokAuth::default()
+            },
+        );
+        xai_grok_shell::auth::upsert_supergrok_session(
+            &mut map,
+            base,
+            xai_grok_shell::auth::GrokAuth {
+                key: CELL_TEAM_TOKEN.into(),
+                auth_mode: xai_grok_shell::auth::AuthMode::Oidc,
+                user_id: "u-team-cell".into(),
+                principal_type: Some("Team".into()),
+                principal_id: Some(CELL_BUSINESS_ID.into()),
+                team_id: Some(CELL_BUSINESS_ID.into()),
+                expires_at: Some(live),
+                ..xai_grok_shell::auth::GrokAuth::default()
+            },
+        );
+        std::fs::write(
+            home.join("auth.json"),
+            serde_json::to_vec_pretty(&map).expect("auth.json"),
+        )
+        .expect("write auth.json");
+        let identity = |identity_id: &str, usage_pct: f64, cents: i64| {
+            xai_grok_shell::auth::LimitsSnapshotIdentity {
+                identity_id: identity_id.to_owned(),
+                usage_pct: Some(usage_pct),
+                period_end: None,
+                period_type: None,
+                dollar_credits_cents: Some(cents),
+                grok_build_usage_pct: None,
+                is_unified_billing_user: None,
+                poll_outcome: xai_grok_shell::auth::POLL_OUTCOME_OK.to_owned(),
+            }
+        };
+        let mut doc = xai_grok_shell::auth::LimitsSnapshotDocument::empty(1_700_000_000_000);
+        doc.identities.push(identity(
+            CELL_PERSONAL_ID,
+            CELL_PERSONAL_PCT,
+            CELL_PERSONAL_CENTS,
+        ));
+        doc.identities.push(identity(
+            CELL_BUSINESS_ID,
+            CELL_BUSINESS_PCT,
+            CELL_BUSINESS_CENTS,
+        ));
+        doc.management = Some(xai_grok_shell::auth::LimitsSnapshotManagement {
+            team_id: Some("mgmt-cell-decoy".into()),
+            prepaid_cents: Some(CELL_CONSOLE_CENTS),
+            billing_credits_cents: Some(CELL_POSTPAID_CENTS),
+            ..Default::default()
+        });
+        xai_grok_shell::auth::write_limits_snapshot_file(home, &doc).expect("snapshot");
+        xai_grok_shell::auth::remember_supergrok_dollar_credits(
+            CELL_BUSINESS_ID,
+            CELL_CONSOLE_CENTS,
+        );
+        xai_grok_shell::auth::seed_console_team_prepaid_cache(
+            "mgmt-cell-decoy",
+            CELL_CONSOLE_CENTS,
+        );
+        FourMeterCellCacheGuard
+    }
+
+    fn assert_four_snapshot_values_still_stored(home: &std::path::Path) {
+        let doc = xai_grok_shell::auth::read_limits_snapshot_file(home).expect("snapshot stored");
+        let personal = doc
+            .identities
+            .iter()
+            .find(|row| row.identity_id == CELL_PERSONAL_ID)
+            .expect("personal row");
+        let business = doc
+            .identities
+            .iter()
+            .find(|row| row.identity_id == CELL_BUSINESS_ID)
+            .expect("business row");
+        assert_eq!(personal.usage_pct, Some(CELL_PERSONAL_PCT));
+        assert_eq!(personal.dollar_credits_cents, Some(CELL_PERSONAL_CENTS));
+        assert_eq!(business.usage_pct, Some(CELL_BUSINESS_PCT));
+        assert_eq!(business.dollar_credits_cents, Some(CELL_BUSINESS_CENTS));
+        let management = doc.management.expect("management meters stay stored");
+        assert_eq!(management.prepaid_cents, Some(CELL_CONSOLE_CENTS));
+        assert_eq!(management.billing_credits_cents, Some(CELL_POSTPAID_CENTS));
+    }
+
+    fn chip_label(balance_pct: f64) -> String {
+        use crate::views::credit_bar::SamplingIdentityKind;
+        let balance = CreditBalance {
+            usage_pct: balance_pct,
+            effective_usage_pct: balance_pct,
+            included_usage_known: true,
+            prepaid_balance_cents: Some(1_250),
+            ..CreditBalance::default()
+        };
+        super::l1_credits_chip_label(
+            SamplingIdentityKind::SuperGrokSession,
+            Some(&balance),
+            false,
+        )
+    }
+
+    /// Personal limits paint that row's percent, not the other balance.
+    #[test]
+    #[serial_test::serial]
+    fn personal_limits_chip_paints_that_rows_percent() {
+        let home = tempfile::TempDir::new().expect("temp GROK_HOME");
+        let _env = xai_grok_test_support::EnvGuard::set("GROK_HOME", home.path());
+        let _caches = seed_four_meter_cells(home.path());
+        xai_grok_shell::auth::limits_pins::select_supergrok_meter_cell(
+            xai_grok_shell::auth::limits_pins::SupergrokMeterCell::PersonalLimits,
+        )
+        .expect("personal limits");
+        let label = chip_label(99.0);
+        assert_eq!(label, "limits 28%");
+        assert!(!label.contains("limits 99%"));
+        assert!(!label.contains("limits 41%"));
+        assert!(!xai_grok_shell::auth::limits_pins::load_limits_pins().use_console);
+        assert_four_snapshot_values_still_stored(home.path());
+    }
+
+    /// Personal credits paint that row's dollar cents and leave `use_console` false.
+    #[test]
+    #[serial_test::serial]
+    fn personal_credits_chip_paints_that_rows_dollar_cents_and_leaves_use_console_false() {
+        let home = tempfile::TempDir::new().expect("temp GROK_HOME");
+        let _env = xai_grok_test_support::EnvGuard::set("GROK_HOME", home.path());
+        let _caches = seed_four_meter_cells(home.path());
+        xai_grok_shell::auth::limits_pins::select_supergrok_meter_cell(
+            xai_grok_shell::auth::limits_pins::SupergrokMeterCell::PersonalCredits,
+        )
+        .expect("personal credits");
+        let label = chip_label(28.0);
+        assert_eq!(label, "$87.65");
+        assert!(!label.contains("$21.99"));
+        assert!(!label.contains("$154.20"));
+        assert!(!label.contains("$47.03"));
+        assert!(!label.contains("$442.97"));
+        assert!(!label.contains("limits "));
+        let pins = xai_grok_shell::auth::limits_pins::load_limits_pins();
+        assert!(!pins.use_console);
+        assert_eq!(
+            pins.meter_source,
+            Some(xai_grok_shell::auth::limits_pins::MeterSource::DollarCredits)
+        );
+        assert_four_snapshot_values_still_stored(home.path());
+    }
+
+    /// Business limits paint that row's percent when a live personal session exists.
+    #[test]
+    #[serial_test::serial]
+    fn business_limits_chip_paints_that_rows_percent_when_a_live_personal_session_exists() {
+        let home = tempfile::TempDir::new().expect("temp GROK_HOME");
+        let _env = xai_grok_test_support::EnvGuard::set("GROK_HOME", home.path());
+        let _caches = seed_four_meter_cells(home.path());
+        xai_grok_shell::auth::limits_pins::select_supergrok_meter_cell(
+            xai_grok_shell::auth::limits_pins::SupergrokMeterCell::BusinessLimits,
+        )
+        .expect("business limits");
+        let label = chip_label(28.0);
+        assert_eq!(label, "limits 41%");
+        assert!(!label.contains("limits 28%"));
+        assert!(!label.contains("$47.03"));
+        assert!(!label.contains("$442.97"));
+        assert!(!xai_grok_shell::auth::limits_pins::load_limits_pins().use_console);
+        assert!(
+            xai_grok_shell::auth::limits_pins::next_request_draws_included_period_limits(),
+            "Included plus Business still draws included SuperGrok period limits"
+        );
+        assert_four_snapshot_values_still_stored(home.path());
+    }
+
+    /// Business credits paint that row's dollar cents, not team postpaid or console prepaid.
+    #[test]
+    #[serial_test::serial]
+    fn business_credits_chip_paints_that_rows_dollar_cents_not_team_postpaid_or_console_prepaid() {
+        let home = tempfile::TempDir::new().expect("temp GROK_HOME");
+        let _env = xai_grok_test_support::EnvGuard::set("GROK_HOME", home.path());
+        let _caches = seed_four_meter_cells(home.path());
+        xai_grok_shell::auth::seed_console_team_postpaid_cache(
+            xai_grok_shell::auth::ConsoleTeamPostpaidPreview {
+                team_id: "mgmt-cell-decoy".into(),
+                period_total_cents: 82_371,
+                oauth_class_cents: 0,
+                api_class_cents: 0,
+                other_class_cents: 0,
+                default_credits_cents: None,
+                default_credits_issued_cents: None,
+                billing_cycle_year: None,
+                billing_cycle_month: None,
+                billing_credits_remaining_cents: Some(CELL_POSTPAID_CACHE_CENTS),
+            },
+        );
+        xai_grok_shell::auth::limits_pins::select_supergrok_meter_cell(
+            xai_grok_shell::auth::limits_pins::SupergrokMeterCell::BusinessCredits,
+        )
+        .expect("business credits");
+        let label = chip_label(28.0);
+        assert_eq!(label, "$21.99");
+        assert!(!label.contains("$87.65"));
+        assert!(!label.contains("$154.20"));
+        assert!(!label.contains("$47.03"));
+        assert!(!label.contains("$442.97"));
+        assert!(!label.contains("limits "));
+        assert!(!xai_grok_shell::auth::limits_pins::load_limits_pins().use_console);
+        assert_four_snapshot_values_still_stored(home.path());
     }
 }
 

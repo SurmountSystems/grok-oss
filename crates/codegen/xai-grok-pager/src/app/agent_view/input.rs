@@ -740,6 +740,9 @@ impl AgentView {
                         if self.plan_approval_view.is_some()
                             && self.route_plan_prompt_mouse_drag(mouse, in_prompt)
                         {
+                            if self.left_click_on_composer_copy_button(mouse) {
+                                return InputOutcome::Changed;
+                            }
                             self.prompt.handle_mouse(mouse);
                             return InputOutcome::Changed;
                         }
@@ -784,6 +787,9 @@ impl AgentView {
                         .prompt
                         .contains((mouse.column, mouse.row).into());
                     if self.route_plan_prompt_mouse_drag(mouse, in_prompt) {
+                        if self.left_click_on_composer_copy_button(mouse) {
+                            return InputOutcome::Changed;
+                        }
                         self.prompt.handle_mouse(mouse);
                         InputOutcome::Changed
                     } else if self.route_plan_scrollback_mouse(mouse) {
@@ -1014,6 +1020,9 @@ impl AgentView {
                         .prompt
                         .contains((mouse.column, mouse.row).into());
                     if self.route_plan_prompt_mouse_drag(mouse, in_prompt) {
+                        if self.left_click_on_composer_copy_button(mouse) {
+                            return InputOutcome::Changed;
+                        }
                         self.prompt.handle_mouse(mouse);
                         return InputOutcome::Changed;
                     }

@@ -734,6 +734,36 @@ pub fn format_subagent_backgrounded_on_turn_end(
     )
 }
 
+fn finished_output_tokens_map() -> &'static std::sync::Mutex<std::collections::HashMap<String, u64>>
+{
+    static MAP: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, u64>>> =
+        std::sync::OnceLock::new();
+    MAP.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// Remember the finished output-token integer for one subagent id.
+/// A missing report is not published, so the meta line stays without a figure.
+pub fn publish_finished_output_tokens(subagent_id: &str, output_tokens: u64) {
+    if subagent_id.is_empty() {
+        return;
+    }
+    let mut map = finished_output_tokens_map()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    map.insert(subagent_id.to_string(), output_tokens);
+}
+
+/// `, output_tokens=N` when a finish published N. Empty when nothing was published.
+pub fn finished_output_tokens_meta_suffix(subagent_id: &str) -> String {
+    let map = finished_output_tokens_map()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    match map.get(subagent_id) {
+        Some(output_tokens) => format!(", output_tokens={output_tokens}"),
+        None => String::new(),
+    }
+}
+
 /// Render the full model-facing completion block for a finished subagent:
 /// the answer text, a `<subagent_meta>` line carrying run stats, and the
 /// `<subagent_result>` resume footer.
@@ -748,9 +778,10 @@ pub fn format_subagent_completed(
     let footer = format_resume_footer(subagent_id, persona);
     let duration =
         xai_tty_utils::format_human_duration(std::time::Duration::from_millis(duration_ms));
+    let suffix = finished_output_tokens_meta_suffix(subagent_id);
     format!(
         "{output}\n\n<subagent_meta>id={subagent_id}, \
-         tool_calls={tool_calls}, turns={turns}, duration={duration}</subagent_meta>\n\n\
+         tool_calls={tool_calls}, turns={turns}, duration={duration}{suffix}</subagent_meta>\n\n\
          {footer}"
     )
 }

@@ -223,6 +223,23 @@ fn raise_nested_l2_total_if_higher(
     Ok(())
 }
 
+/// Finish write for one nested row. Sets output and reasoning only.
+/// Does not insert a row and does not change `total_tokens`.
+pub fn set_nested_l2_finish_output(
+    store: &GrokOssStore,
+    event_ulid: &str,
+    output_tokens: i64,
+    reasoning_tokens: i64,
+) -> Result<usize, rusqlite::Error> {
+    store.connection().execute(
+        "UPDATE local_usage_event
+         SET output_tokens = ?1, reasoning_tokens = ?2
+         WHERE event_ulid = ?3
+           AND lower(agent_kind) IN ('l2', 'nested_l2')",
+        rusqlite::params![output_tokens, reasoning_tokens, event_ulid],
+    )
+}
+
 /// Insert one local event. Idempotent on `event_ulid`. Fail-open: errors returned.
 ///
 /// One nested row. The same L2 `event_ulid` refreshes its total upward and

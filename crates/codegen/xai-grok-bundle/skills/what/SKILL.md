@@ -73,6 +73,19 @@ Painted chrome and user-guide call the composer the Operator box.
   reports, and this restatement: probe this turn if stating which
   binary this window is. Do not reuse a leftover Grok Build version as
   grok-oss.
+- For a finished job's actual nested tokens, call the Rust function
+  `local_usage_events_for_session` in
+  `crates/codegen/xai-grok-shell/src/token_economy/ledger.rs`.
+  Do not use Python. Do not use bash. Do not use a `sqlite3` one-liner.
+  The reconcile cell is that row's `output_tokens`, not `total_tokens`,
+  and not the standing estimate.
+  Chain of thought is `reasoning_tokens` and is not added again.
+  When `output_tokens` is present, print that
+  integer. Do not write `not_fetched` when `output_tokens` is present.
+  A null `output_tokens` is not printed as `0` and is not copied from
+  the estimate. Omit the figure, or say the output total was not stored.
+  Leave the Billing Credits card wire `not_fetched` alone. That is a
+  different meter.
 - When the operator asks to revise a skill in grok-oss, edit
   `crates/codegen/xai-grok-bundle/skills/`, not only a host overlay
   and not repo `.agents/skills/`.

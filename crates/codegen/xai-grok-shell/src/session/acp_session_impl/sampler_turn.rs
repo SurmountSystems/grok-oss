@@ -2339,6 +2339,11 @@ impl SessionActor {
             );
             self.signals_handle()
                 .record_token_usage(u.completion_tokens, u.reasoning_tokens);
+            crate::session::nested_output::record_own_model_response(
+                self.session_info.id.0.as_ref(),
+                u64::from(u.completion_tokens),
+                u64::from(u.reasoning_tokens),
+            );
             let identity = if self.startup_hints.is_subagent {
                 crate::session::usage_log::UsageIdentity::agent_turn(
                     self.startup_hints.subagent_type.clone().unwrap_or_default(),

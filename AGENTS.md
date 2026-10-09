@@ -324,6 +324,16 @@ less than product code and tests. Do not invent long essays or git nags.
    pad a guess. Name which meter and which workspace. SuperGrok Heavy
    is a distinct weekly pool from standard SuperGrok. Dual-pin: host
    `~/.grok/AGENTS.md` § *Limits and credits vocabulary*.
+   **Finished job output tokens (pinned 2026-10-09).** When
+   `local_usage_events_for_session` returns `output_tokens`, print that
+   integer. When it returns null, omit the figure or say the output total
+   was not stored. Do not copy the estimate. Do not print `0`. Do not
+   write `not_fetched` for that cell. Leave the Billing Credits card wire
+   alone. That wire's `not_fetched` is a different meter. The reconcile
+   cell is that row's `output_tokens`, not `total_tokens`, and not the
+   standing estimate. Chain of thought is `reasoning_tokens` and is not
+   added again. Dual-pin: host `~/.grok/AGENTS.md` § *Comprehensive
+   estimate and reconcile*.
    **grok-oss limits printout is not xAI billing truth (pinned 2026-08-19).**
    grok-oss limits JSON and compact chrome are a client printout, not xAI
    billing truth. Distinguish "the CLI printed X" from "the account is X."

@@ -2314,6 +2314,8 @@ user-guide [`08-skills.md`](crates/codegen/xai-grok-pager/docs/user-guide/08-ski
 | `[skills].paths` / server inject / plugins | Config and managed dirs |
 | `~/.grok/bundled/skills` | Platform cache from network bundle sync plus installed Grok OSS defaults |
 
+`what_and_subagent_skills_read_output_tokens_not_a_null_zero` requires `/what` and `/subagent` to call `local_usage_events_for_session` and to use that row's `output_tokens` as the reconcile cell.
+
 **Process pins that must survive recon** (import / onto): document in **FORK +
 AGENTS + product user-guide** when product-facing; **dual-pin** host skills
 (`~/.agents`) when operator-only. Host skill git alone does not ride product

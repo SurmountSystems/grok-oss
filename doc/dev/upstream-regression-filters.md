@@ -1750,6 +1750,7 @@ with FORK pointers.
 |------------|----------|
 | `xai-grok-pager` `what_instruction_prefers_operator_and_agent_speaker_labels` | Surmount. `/what` instruction and the in-tree what skill prefer Operator and Agent, name the Operator box, and forbid You or Human / Me or Grok as speaker labels. FORK `/what` restatement. |
 | `xai-grok-pager` `what_skill_does_not_mix_grok_build_version_with_grok_oss` | Surmount. `/what` skill never mixes Grok Build `grok --version` with grok-oss `grok-oss --version`. Isolated Preview and plan chrome are grok-oss unless launched as `grok`. Probe this turn. Do not reuse leftover Grok Build 1.0.13 as grok-oss. FORK `/what` restatement. |
+| `xai-grok-pager` `what_and_subagent_skills_read_output_tokens_not_a_null_zero` | Surmount. `/what` and `/subagent` call `local_usage_events_for_session`. The reconcile cell is that row's `output_tokens`, not `total_tokens`, and not the standing estimate. A null `output_tokens` is not printed as `0`. Chain of thought is `reasoning_tokens` and is not added again. Do not write `not_fetched` when `output_tokens` is present. The Billing Credits card wire `not_fetched` stays a different meter. |
 | `xai-grok-pager` `user_guide_what_does_not_mix_grok_build_version_with_grok_oss` | Surmount. User-guide `/what` keeps grok-oss and Grok Build versions distinct. Isolated Preview chrome is grok-oss unless launched as `grok`. Probe this turn. FORK user-guide table `04-slash-commands`. |
 | `xai-grok-pager` `user_guide_operator_agent_speaker_labels_not_human_user_grok` | Surmount. User-guide theming and composer copy paint Operator, not Human/User/Grok as speaker. Keep Isolated Preview leftover-present, Comment then Approve, `/plan` extra text, empty Enter never Approves. FORK user-guide table `06-theming`. |
 | `xai-grok-pager` `waiting_chrome_does_not_paint_human_user_or_grok_as_speaker` | Surmount. Waiting chrome names the model request and does not paint Human, User, or Grok as a speaker. FORK `/what` restatement. |
@@ -1760,6 +1761,7 @@ with FORK pointers.
 cargo test -p xai-grok-pager --lib -- \
   what_instruction_prefers_operator_and_agent_speaker_labels \
   what_skill_does_not_mix_grok_build_version_with_grok_oss \
+  what_and_subagent_skills_read_output_tokens_not_a_null_zero \
   user_guide_what_does_not_mix_grok_build_version_with_grok_oss \
   user_guide_operator_agent_speaker_labels_not_human_user_grok \
   waiting_chrome_does_not_paint_human_user_or_grok_as_speaker \

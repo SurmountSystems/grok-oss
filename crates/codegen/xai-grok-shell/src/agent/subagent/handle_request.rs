@@ -1081,6 +1081,12 @@ async fn run_shell_child_body(
         request.owner.is_workflow(),
     )
     .map(str::to_owned);
+    let child_key = child_session_id.0.to_string();
+    crate::session::nested_output::note_descendant_if_parent_nested(
+        &ctx.parent_session_id,
+        &child_key,
+    );
+    crate::session::nested_output::mark_nested_session(&child_key);
     let spawned = SessionUpdate::SubagentSpawned {
         subagent_id: subagent_id.clone(),
         attempt_id: attempt_id.clone(),

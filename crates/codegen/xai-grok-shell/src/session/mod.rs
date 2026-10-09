@@ -597,3 +597,189 @@ pub(crate) mod workflow;
 pub mod worktree;
 pub(crate) mod worktree_cleanup;
 pub mod worktree_pool;
+
+pub mod nested_output {
+    //! Session-owned output tokens for a nested agent.
+    //!
+    //! Each model response adds `completion_tokens - reasoning_tokens` to that
+    //! session only. The live total walks descendants once. Chain of thought
+    //! stays in the reasoning sum. A session with no reported usage contributes
+    //! nothing, and the total stays unset instead of becoming 0.
+
+    use std::collections::{HashMap, HashSet};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::{Mutex, OnceLock};
+
+    use xai_grok_tools::implementations::grok_build::task::types::SubagentResult;
+
+    struct Atoms {
+        response_tokens: AtomicU64,
+        reasoning_tokens: AtomicU64,
+        reported: AtomicBool,
+    }
+
+    impl Default for Atoms {
+        fn default() -> Self {
+            Self {
+                response_tokens: AtomicU64::new(0),
+                reasoning_tokens: AtomicU64::new(0),
+                reported: AtomicBool::new(false),
+            }
+        }
+    }
+
+    struct Registry {
+        atoms: HashMap<String, Atoms>,
+        children: HashMap<String, Vec<String>>,
+        parent_of: HashMap<String, String>,
+        nested: HashSet<String>,
+    }
+
+    fn registry() -> &'static Mutex<Registry> {
+        static REGISTRY: OnceLock<Mutex<Registry>> = OnceLock::new();
+        REGISTRY.get_or_init(|| {
+            Mutex::new(Registry {
+                atoms: HashMap::new(),
+                children: HashMap::new(),
+                parent_of: HashMap::new(),
+                nested: HashSet::new(),
+            })
+        })
+    }
+
+    /// One session's own model responses. Not the folded ledger, and not context size.
+    pub fn record_own_model_response(
+        session_id: &str,
+        completion_tokens: u64,
+        reasoning_tokens: u64,
+    ) {
+        if session_id.is_empty() {
+            return;
+        }
+        let response_tokens = completion_tokens.saturating_sub(reasoning_tokens);
+        let mut guard = registry()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let atoms = guard.atoms.entry(session_id.to_string()).or_default();
+        atoms
+            .response_tokens
+            .fetch_add(response_tokens, Ordering::Relaxed);
+        atoms
+            .reasoning_tokens
+            .fetch_add(reasoning_tokens, Ordering::Relaxed);
+        atoms.reported.store(true, Ordering::Relaxed);
+    }
+
+    /// This session is a nested agent. An L1 id is not marked.
+    pub fn mark_nested_session(session_id: &str) {
+        if session_id.is_empty() {
+            return;
+        }
+        let mut guard = registry()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        guard.nested.insert(session_id.to_string());
+    }
+
+    /// Link `child` under `parent` only when `parent` is already a nested session.
+    /// An L1 spawn does not hide the L2 row. A second parent does not replace the first.
+    pub fn note_descendant_if_parent_nested(parent: &str, child: &str) {
+        if parent.is_empty() || child.is_empty() || parent == child {
+            return;
+        }
+        let mut guard = registry()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !guard.nested.contains(parent) || guard.parent_of.contains_key(child) {
+            return;
+        }
+        guard
+            .parent_of
+            .insert(child.to_string(), parent.to_string());
+        guard
+            .children
+            .entry(parent.to_string())
+            .or_default()
+            .push(child.to_string());
+    }
+
+    /// True when this session's output is already inside an ancestor total.
+    pub fn output_is_inside_ancestor(session_id: &str) -> bool {
+        let guard = registry()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        guard.parent_of.contains_key(session_id)
+    }
+
+    /// Own response tokens plus each descendant once. `None` when nobody reported usage.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct LiveOutputTotal {
+        pub output_tokens: u64,
+        pub reasoning_tokens: u64,
+    }
+
+    pub fn live_output_total(session_id: &str) -> Option<LiveOutputTotal> {
+        if session_id.is_empty() {
+            return None;
+        }
+        let guard = registry()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut stack = vec![session_id.to_string()];
+        let mut seen = HashSet::new();
+        let mut output_tokens = 0u64;
+        let mut reasoning_tokens = 0u64;
+        let mut any_reported = false;
+        while let Some(id) = stack.pop() {
+            if !seen.insert(id.clone()) {
+                continue;
+            }
+            if let Some(atoms) = guard.atoms.get(&id) {
+                if atoms.reported.load(Ordering::Relaxed) {
+                    any_reported = true;
+                    output_tokens =
+                        output_tokens.saturating_add(atoms.response_tokens.load(Ordering::Relaxed));
+                    reasoning_tokens = reasoning_tokens
+                        .saturating_add(atoms.reasoning_tokens.load(Ordering::Relaxed));
+                }
+            }
+            if let Some(children) = guard.children.get(&id) {
+                for child in children {
+                    stack.push(child.clone());
+                }
+            }
+        }
+        any_reported.then_some(LiveOutputTotal {
+            output_tokens,
+            reasoning_tokens,
+        })
+    }
+
+    /// Write the live total onto `result`. A missing report sets the incomplete flag
+    /// and does not copy the folded ledger or a task-budget counter.
+    pub fn assign_subagent_output_tokens(result: &mut SubagentResult) -> bool {
+        let session = if result.child_session_id.is_empty() {
+            result.subagent_id.as_str()
+        } else {
+            result.child_session_id.as_str()
+        };
+        let Some(total) = live_output_total(session) else {
+            result.output_usage_incomplete = true;
+            return false;
+        };
+        result.output_tokens_used = total.output_tokens;
+        if !result.subagent_id.is_empty() {
+            xai_tool_types::publish_finished_output_tokens(
+                &result.subagent_id,
+                total.output_tokens,
+            );
+        }
+        if !result.child_session_id.is_empty() && result.child_session_id != result.subagent_id {
+            xai_tool_types::publish_finished_output_tokens(
+                &result.child_session_id,
+                total.output_tokens,
+            );
+        }
+        true
+    }
+}

@@ -144,6 +144,9 @@ fn peek_process_tracker<R>(f: impl FnOnce(&L2TokenTracker) -> R) -> R {
 /// Also calls `insert_local_usage_event`. A zero total is not stored.
 pub fn on_nested_l2_spawn(nested_session_id: &str, description: &str) {
     with_process_tracker(|t| t.record_spawn(nested_session_id, description));
+    if xai_grok_shell::session::nested_output::output_is_inside_ancestor(nested_session_id) {
+        return;
+    }
     if let Some((store, event)) = nested_l2_sqlite_pair(nested_session_id) {
         let _ = xai_grok_shell::token_economy::insert_local_usage_event(&store, &event);
     }
@@ -161,17 +164,30 @@ pub fn on_nested_l2_usage(nested_session_id: &str, measured_tokens: u64) {
             row.store_current(measured_tokens);
         }
     });
+    if xai_grok_shell::session::nested_output::output_is_inside_ancestor(nested_session_id) {
+        return;
+    }
     if let Some((store, event)) = nested_l2_sqlite_pair(nested_session_id) {
         let _ = xai_grok_shell::token_economy::insert_local_usage_event(&store, &event);
     }
 }
 
 /// Production L2-exit hook. Keeps the last measured count and writes
-/// the same ULID row into grok-oss sqlite.
+/// the same ULID row into grok-oss sqlite. Output tokens are filled on that
+/// row when a model response reported usage. A missing report stays null.
 pub fn on_nested_l2_exit(nested_session_id: &str) {
     with_process_tracker(|t| t.record_exit(nested_session_id));
+    if let Some(total) =
+        xai_grok_shell::session::nested_output::live_output_total(nested_session_id)
+    {
+        xai_tool_types::publish_finished_output_tokens(nested_session_id, total.output_tokens);
+    }
+    if xai_grok_shell::session::nested_output::output_is_inside_ancestor(nested_session_id) {
+        return;
+    }
     if let Some((store, event)) = nested_l2_sqlite_pair(nested_session_id) {
         let _ = xai_grok_shell::token_economy::insert_local_usage_event(&store, &event);
+        write_nested_l2_finish_output(&store, &event.event_ulid, nested_session_id);
     }
 }
 
@@ -214,6 +230,27 @@ fn nested_l2_sqlite_pair(
     }
     let store = xai_grok_shell::grok_oss::try_open_from_token_economy_config(&cfg)?;
     Some((store, event))
+}
+
+/// Sets `output_tokens` and `reasoning_tokens` on the existing row.
+/// No reported usage leaves both columns null. Does not insert a row.
+fn write_nested_l2_finish_output(
+    store: &xai_grok_shell::grok_oss::GrokOssStore,
+    event_ulid: &str,
+    nested_session_id: &str,
+) {
+    let Some(total) = xai_grok_shell::session::nested_output::live_output_total(nested_session_id)
+    else {
+        return;
+    };
+    let output_tokens = i64::try_from(total.output_tokens).unwrap_or(i64::MAX);
+    let reasoning_tokens = i64::try_from(total.reasoning_tokens).unwrap_or(i64::MAX);
+    let _ = xai_grok_shell::token_economy::ledger::set_nested_l2_finish_output(
+        store,
+        event_ulid,
+        output_tokens,
+        reasoning_tokens,
+    );
 }
 
 impl L2TokenTracker {
@@ -1235,6 +1272,161 @@ mod tests {
             "\npub(crate) fn session_usage_block_text",
         );
         assert_paint_calls_formatter("/tasks block", block_fn, CONTRACT);
+    }
+
+    /// A finished L2 stores output tokens as its own completion tokens minus
+    /// chain of thought, plus each descendant once. Reasoning stays in
+    /// `reasoning_tokens`. `total_tokens` stays the context high-water.
+    /// A progress tick leaves `output_tokens` null. A missing usage report
+    /// is not stored as 0. No second row, and no row for a descendant whose
+    /// output is already inside that total.
+    #[test]
+    #[serial_test::serial(TOKEN_ECONOMY_LIVE)]
+    fn finished_l2_output_tokens_exclude_chain_of_thought_and_include_each_l3_once() {
+        let dir = std::env::temp_dir().join(format!(
+            "grok-l2-output-tokens-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).expect("temp dir");
+        let db_path = dir.join("grok_oss.db");
+        let cfg = xai_grok_shell::token_economy::TokenEconomyConfig {
+            grok_oss_database_path: Some(db_path.clone()),
+            ..xai_grok_shell::token_economy::TokenEconomyConfig::default()
+        };
+        xai_grok_shell::token_economy::set_token_economy_live(cfg);
+        struct ResetLiveTokenEconomy;
+        impl Drop for ResetLiveTokenEconomy {
+            fn drop(&mut self) {
+                xai_grok_shell::token_economy::reset_token_economy_live_to_defaults();
+            }
+        }
+        let _reset_live_token_economy = ResetLiveTokenEconomy;
+
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let l2 = format!("nested-output-l2-{}-{stamp}", std::process::id());
+        let l3 = format!("nested-output-l3-{}-{stamp}", std::process::id());
+        let grandchild = format!("nested-output-gc-{}-{stamp}", std::process::id());
+        let missing = format!("nested-output-missing-{}-{stamp}", std::process::id());
+
+        xai_grok_shell::session::nested_output::mark_nested_session(&l2);
+        xai_grok_shell::session::nested_output::note_descendant_if_parent_nested(&l2, &l3);
+        xai_grok_shell::session::nested_output::mark_nested_session(&l3);
+        xai_grok_shell::session::nested_output::note_descendant_if_parent_nested(&l3, &grandchild);
+        xai_grok_shell::session::nested_output::mark_nested_session(&grandchild);
+
+        // Own calls, then each descendant once. Recorded before the progress tick.
+        xai_grok_shell::session::nested_output::record_own_model_response(&l2, 1000, 400);
+        xai_grok_shell::session::nested_output::record_own_model_response(&l2, 80, 0);
+        xai_grok_shell::session::nested_output::record_own_model_response(&l3, 200, 50);
+        xai_grok_shell::session::nested_output::record_own_model_response(&grandchild, 80, 30);
+
+        on_nested_l2_spawn(&l2, "output token writer");
+        on_nested_l2_usage(&l2, 180_000);
+
+        let store = xai_grok_shell::grok_oss::open_at(&db_path).expect("grok_oss.db");
+        let progress =
+            xai_grok_shell::token_economy::ledger::local_usage_events_for_session(&store, &l2)
+                .expect("progress rows");
+        assert_eq!(progress.len(), 1, "one row after the progress tick");
+        assert_eq!(progress[0].output_tokens, None);
+        assert_eq!(progress[0].reasoning_tokens, None);
+        assert_eq!(progress[0].total_tokens, Some(180_000));
+        assert!(progress[0].cost_missing);
+        let event_ulid = progress[0].event_ulid.clone();
+
+        on_nested_l2_spawn(&l3, "descendant");
+        on_nested_l2_usage(&l3, 50_000);
+        on_nested_l2_exit(&l3);
+        on_nested_l2_spawn(&grandchild, "grandchild");
+        on_nested_l2_usage(&grandchild, 20_000);
+        on_nested_l2_exit(&grandchild);
+
+        let after_descendants =
+            xai_grok_shell::token_economy::ledger::local_usage_events_for_session(&store, &l2)
+                .expect("l2 rows after descendants");
+        assert_eq!(after_descendants.len(), 1);
+        assert_eq!(after_descendants[0].event_ulid, event_ulid);
+        assert_eq!(
+            after_descendants[0].output_tokens, None,
+            "a descendant exit does not fill the L2 output column"
+        );
+        assert_eq!(after_descendants[0].total_tokens, Some(180_000));
+        let l3_rows =
+            xai_grok_shell::token_economy::ledger::local_usage_events_for_session(&store, &l3)
+                .expect("l3 rows");
+        let grandchild_rows =
+            xai_grok_shell::token_economy::ledger::local_usage_events_for_session(
+                &store,
+                &grandchild,
+            )
+            .expect("grandchild rows");
+        assert!(
+            l3_rows.is_empty() && grandchild_rows.is_empty(),
+            "no second row for a descendant already inside the L2 output total"
+        );
+
+        on_nested_l2_exit(&l2);
+        let finished =
+            xai_grok_shell::token_economy::ledger::local_usage_events_for_session(&store, &l2)
+                .expect("finished rows");
+        assert_eq!(finished.len(), 1, "finish does not insert a second row");
+        assert_eq!(finished[0].event_ulid, event_ulid);
+        assert_eq!(finished[0].agent_kind, "l2");
+        assert_eq!(
+            finished[0].output_tokens,
+            Some(880),
+            "own completion minus chain of thought, plus each descendant once"
+        );
+        assert_eq!(finished[0].reasoning_tokens, Some(480));
+        assert_ne!(finished[0].output_tokens, Some(880 + 480));
+        assert_ne!(finished[0].output_tokens, Some(1360));
+        assert_ne!(finished[0].output_tokens, Some(930));
+        assert_eq!(
+            finished[0].total_tokens,
+            Some(180_000),
+            "total_tokens stays the context high-water"
+        );
+        assert!(finished[0].cost_missing);
+
+        xai_grok_shell::session::nested_output::mark_nested_session(&missing);
+        on_nested_l2_spawn(&missing, "no usage report");
+        on_nested_l2_usage(&missing, 12_000);
+        on_nested_l2_exit(&missing);
+        let unread =
+            xai_grok_shell::token_economy::ledger::local_usage_events_for_session(&store, &missing)
+                .expect("missing-usage rows");
+        assert_eq!(unread.len(), 1);
+        assert_eq!(unread[0].output_tokens, None);
+        assert_eq!(unread[0].reasoning_tokens, None);
+        assert_ne!(unread[0].output_tokens, Some(0));
+        assert_eq!(unread[0].total_tokens, Some(12_000));
+
+        let mut result = xai_grok_tools::implementations::grok_build::task::types::SubagentResult {
+            subagent_id: l2.clone(),
+            child_session_id: l2.clone(),
+            output_tokens_used: 1360,
+            ..xai_grok_tools::implementations::grok_build::task::types::SubagentResult::default()
+        };
+        assert!(xai_grok_shell::session::nested_output::assign_subagent_output_tokens(&mut result));
+        assert_eq!(result.output_tokens_used, 880);
+        assert_ne!(result.output_tokens_used, 1360);
+
+        let text = xai_tool_types::format_subagent_completed("done", &l2, 1, 1, 1, None);
+        assert!(
+            text.contains("output_tokens=880"),
+            "finished tool text must show the same integer, got {text:?}"
+        );
+        assert!(!text.contains("1360"));
+        assert!(!text.contains("not_fetched"));
+
+        let _ = fs::remove_dir_all(&dir);
     }
 
     fn fn_body<'a>(src: &'a str, start_needle: &str, end_needle: &str) -> &'a str {

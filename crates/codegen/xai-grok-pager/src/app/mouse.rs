@@ -768,6 +768,9 @@ impl AgentView {
                         InputOutcome::Changed
                     }
                     Some(AgentPane::Prompt) => {
+                        if self.left_click_on_composer_copy_button(mouse) {
+                            return InputOutcome::Changed;
+                        }
                         let was_collapsed = false;
                         self.set_active_pane(AgentPane::Prompt, false);
                         self.btw_focused = false;

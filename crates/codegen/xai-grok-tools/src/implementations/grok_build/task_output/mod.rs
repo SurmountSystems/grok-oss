@@ -773,9 +773,10 @@ fn terminal_subagent_result_capped(snap: &SubagentSnapshot, cap: bool) -> TaskOu
         } => {
             let duration =
                 xai_tty_utils::format_human_duration(Duration::from_millis(snap.duration_ms));
+            let suffix = xai_tool_types::finished_output_tokens_meta_suffix(&snap.subagent_id);
             let mut output = format!(
                 "{output}\n\n<subagent_meta>id={}, tool_calls={tool_calls}, \
-                 turns={turns}, duration={duration}</subagent_meta>",
+                 turns={turns}, duration={duration}{suffix}</subagent_meta>",
                 snap.subagent_id,
             );
             if let Some(wt) = &worktree_path {
