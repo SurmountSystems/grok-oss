@@ -355,6 +355,38 @@ fn credits_label_when_included_period_is_not_next_request() -> String {
     team_postpaid_billing_credits_remaining_label().unwrap_or_else(unread)
 }
 
+/// Text of the L1 credits chip. Nested views do not call this.
+/// A known included SuperGrok period reading paints `limits N%`
+/// (hover paints percent left). When that reading is missing and the
+/// next request still draws included SuperGrok period limits, the chip
+/// stays `Limits and Credits`. It does not become `limits 0%` or `$0`.
+/// When the next request does not draw that meter, the chip is the
+/// remaining for the meter that request spends.
+fn l1_credits_chip_label(
+    identity: crate::views::credit_bar::SamplingIdentityKind,
+    balance: Option<&crate::views::credit_bar::CreditBalance>,
+    hovered: bool,
+) -> String {
+    if let Some(balance) = balance
+        && let Some(label) = both_refused_status_chip_label(balance)
+    {
+        return label;
+    }
+    if let Some(balance) = balance
+        && status_row_paints_included_period_limits_chip(identity, balance)
+    {
+        let used = balance.usage_pct.round().clamp(0.0, 100.0) as u8;
+        if hovered {
+            return format!("{}% left", 100u8.saturating_sub(used));
+        }
+        return format!("limits {used}%");
+    }
+    if xai_grok_shell::auth::limits_pins::next_request_draws_included_period_limits() {
+        return "Limits and Credits".to_owned();
+    }
+    credits_label_when_included_period_is_not_next_request()
+}
+
 /// AppView-owned per-frame inputs to [`AgentView::draw`]: state the agent view cannot see itself (voice pipeline, Esc ownership, status row).
 /// Grouped (mirroring `WelcomeRenderParams`) so the next app-level render fact extends this struct instead of every `draw` call site.
 /// Tests take `Default` and override only what they exercise.
@@ -1691,31 +1723,36 @@ impl AgentView {
         };
         // Short status chip, immediately to the right of the context figure.
         // Nested L2 and L3 views (`child_link` set) do not paint it.
-        // The main session (`AgentRole::Root`, no child link) keeps it.
-        // `limits N%` only when the next request draws included SuperGrok
-        // period limits. A dollar-credits pin shows that meter's remaining.
-        // A console pin or use_console shows console team prepaid remaining.
-        // Otherwise the chip paints team postpaid Billing Credits remaining.
-        // Without that reading the chip stays `Limits and Credits`.
-        // That control is not `limits 0%` and not `limits N%`.
-        if self.child_link().is_none() {
-            if let Some(balance) = self.credit_balance.as_ref()
-                && let Some(label) = both_refused_status_chip_label(balance)
-            {
+        // The dashboard session-overlay header does not paint it either.
+        // That header is the title, the location, and the switcher, not
+        // the main L1 status row. The main session (`AgentRole::Root`,
+        // no child link, outside that overlay) keeps the chip.
+        // A task on this row does not hide it. `limits N%` only when the
+        // next request draws included SuperGrok period limits and that
+        // usage reading is known. A missing included reading still paints
+        // `Limits and Credits`, not `limits 0%` and not `$0`. A
+        // dollar-credits pin shows that meter's remaining. A console pin
+        // or use_console shows console team prepaid remaining. Otherwise
+        // the chip paints team postpaid Billing Credits remaining, or
+        // `Limits and Credits` when that reading is missing.
+        if self.child_link().is_none() && !in_dashboard_overlay {
+            let balance = self.credit_balance.as_ref();
+            let both_refused = balance.and_then(both_refused_status_chip_label);
+            let paints_included = balance.is_some_and(|balance| {
+                status_row_paints_included_period_limits_chip(self.sampling_identity, balance)
+            });
+            let label =
+                l1_credits_chip_label(self.sampling_identity, balance, self.hit_credits.hovered);
+            let chip_style = if both_refused.is_some() {
                 let mut chip_style = Style::default().fg(theme.accent_error).bg(theme.bg_base);
                 if self.hit_credits.hovered {
                     chip_style = chip_style.add_modifier(ratatui::style::Modifier::BOLD);
                 }
-                status.push("credits", Line::from(Span::styled(label, chip_style)));
-            } else if let Some(balance) = self.credit_balance.as_ref()
-                && status_row_paints_included_period_limits_chip(self.sampling_identity, balance)
-            {
-                let used = balance.usage_pct.round().clamp(0.0, 100.0) as u8;
-                let label = if self.hit_credits.hovered {
-                    format!("{}% left", 100u8.saturating_sub(used))
-                } else {
-                    format!("limits {used}%")
-                };
+                chip_style
+            } else if paints_included {
+                let used = balance
+                    .map(|balance| balance.usage_pct.round().clamp(0.0, 100.0) as u8)
+                    .unwrap_or(0);
                 let color = if used >= 100 {
                     theme.accent_error
                 } else if used >= 80 {
@@ -1727,16 +1764,14 @@ impl AgentView {
                 if self.hit_credits.hovered {
                     chip_style = chip_style.add_modifier(ratatui::style::Modifier::BOLD);
                 }
-                status.push("credits", Line::from(Span::styled(label, chip_style)));
-            } else if !xai_grok_shell::auth::limits_pins::next_request_draws_included_period_limits(
-            ) {
-                let label = credits_label_when_included_period_is_not_next_request();
-                let chip_style = hover_or(
+                chip_style
+            } else {
+                hover_or(
                     self.hit_credits.hovered,
                     Style::default().fg(theme.text_secondary).bg(theme.bg_base),
-                );
-                status.push("credits", Line::from(Span::styled(label, chip_style)));
-            }
+                )
+            };
+            status.push("credits", Line::from(Span::styled(label, chip_style)));
         }
         let todo_counts = self.todo.counts();
         let todo_total = todo_counts.total();
@@ -4068,17 +4103,17 @@ impl AgentView {
                 }
             }
             let soft_plan_side_pane = viewer.is_soft_plan_side_pane();
-            let offer_limits_and_credits = soft_plan_side_pane
-                && self.child_link().is_none()
-                && !xai_grok_shell::auth::limits_pins::next_request_draws_included_period_limits()
-                && self
-                    .credit_balance
-                    .as_ref()
-                    .and_then(both_refused_status_chip_label)
-                    .is_none();
-            if offer_limits_and_credits {
+            // The pane clears a right-aligned chip that it covers. L1 keeps
+            // the chip, with the same label the status row used, including
+            // when the next request draws included SuperGrok period limits.
+            // Nested views stay omitted.
+            if soft_plan_side_pane && self.child_link().is_none() {
                 let existing = self.hit_credits.rect;
-                let label = credits_label_when_included_period_is_not_next_request();
+                let label = l1_credits_chip_label(
+                    self.sampling_identity,
+                    self.credit_balance.as_ref(),
+                    self.hit_credits.hovered,
+                );
                 if let Some(rect) = paint_limits_and_credits_left_of_soft_plan(
                     buf,
                     area,
@@ -9460,6 +9495,126 @@ mod red_status_corners_tests {
             credits.x + credits.width + sep,
             "owed: the tasks rect starts immediately to the right of credits, \
              with only the three-column status separator between them. \
+             credits.x={} credits.width={} tasks_x={tasks_x} sep={sep}",
+            credits.x,
+            credits.width
+        );
+    }
+
+    /// The older order test arms a known included reading (`limits 28%`).
+    /// This fixture does not. The main session is `AgentRole::Root`, a task
+    /// is on the row, the next request draws included SuperGrok period
+    /// limits, and `credit_balance` is still unset. The owed outcome: the
+    /// main session keeps the credits chip between the context figure and
+    /// tasks even when a task is present and the included usage reading is
+    /// missing. The chip text is `Limits and Credits`, not `limits 0%` and
+    /// not `$0`. `use_console` stays false.
+    #[test]
+    #[serial_test::serial]
+    fn l1_with_a_task_and_a_missing_included_reading_still_paints_the_credits_chip_between_context_and_tasks()
+     {
+        let home = tempfile::tempdir().expect("temp GROK_HOME");
+        let _env = xai_grok_test_support::EnvGuard::set("GROK_HOME", home.path());
+        xai_grok_shell::auth::limits_pins::save_limits_pins(
+            &xai_grok_shell::auth::limits_pins::LimitsPins {
+                stay_supergrok: false,
+                use_console: false,
+                meter_source: Some(xai_grok_shell::auth::limits_pins::MeterSource::Included),
+                supergrok_identity: None,
+            },
+        )
+        .expect("included pin");
+        let pins = xai_grok_shell::auth::limits_pins::load_limits_pins();
+        assert!(
+            !pins.use_console,
+            "owed: use_console stays false unless the Operator chose console"
+        );
+        assert!(
+            xai_grok_shell::auth::limits_pins::next_request_draws_included_period_limits(),
+            "owed: this fixture's next request draws included SuperGrok period limits"
+        );
+
+        let _theme = crate::theme::cache::pin_theme();
+        let theme = crate::theme::Theme::current();
+        let sep = crate::views::agent_status::separator(&theme).width() as u16;
+        let mut agent = make_agent();
+        assert!(
+            agent.child_link().is_none(),
+            "owed: the main session is AgentRole::Root"
+        );
+        assert!(
+            agent.credit_balance.is_none(),
+            "owed: the included usage reading is missing on this main session"
+        );
+        agent.session.models.override_context_window(500_000);
+        agent.session_sampling_window = Some(500_000);
+        agent.context_state = Some(ContextInfo {
+            used: 120_000,
+            ..ContextInfo::default()
+        });
+        agent.todo.update_todos(vec![TodoItem {
+            content: "one task".into(),
+            priority: TodoPriority::default(),
+            status: TodoStatus::Pending,
+            meta: None,
+            size: None,
+        }]);
+
+        let (buf, text) = draw_buf(&mut agent);
+        let context = agent.hit_context.rect.expect(
+            "owed: the main session keeps the credits chip between the context figure and tasks \
+             even when a task is present and the included usage reading is missing",
+        );
+        let credits = agent.hit_credits.rect.expect(
+            "owed: the main session keeps the credits chip between the context figure and tasks \
+             even when a task is present and the included usage reading is missing. \
+             The chip text is `Limits and Credits`, not `limits 0%` and not `$0`.",
+        );
+        let symbols = row_symbols(&buf, context.y);
+        let row = symbols.concat();
+        let credits_label = "Limits and Credits";
+        let credits_x = find_on_row(&symbols, credits_label).unwrap_or_else(|| {
+            panic!(
+                "owed: the main session keeps the credits chip between the context figure and \
+                 tasks even when a task is present and the included usage reading is missing. \
+                 The chip text is `Limits and Credits`, not `limits 0%` and not `$0`.\n{row}\n{text}"
+            )
+        });
+        let tasks_label = "tasks 0/1";
+        let tasks_x = find_on_row(&symbols, tasks_label).unwrap_or_else(|| {
+            panic!(
+                "owed: a task is present on the main-session status row. row missing \
+                 {tasks_label:?}\n{row}"
+            )
+        });
+        assert!(
+            !row.contains("limits 0%") && !row.contains("$0") && !has_limits_percent(&row),
+            "owed: a missing included reading is the words `Limits and Credits`, \
+             not `limits 0%` and not `$0`.\n{row}"
+        );
+        assert_eq!(
+            credits_x, credits.x,
+            "owed: the painted words `Limits and Credits` are the credits chip"
+        );
+        assert_eq!(
+            credits.y, context.y,
+            "owed: the credits chip sits on the same status row as the context figure"
+        );
+        assert_eq!(
+            credits.x,
+            context.x + context.width + sep,
+            "owed: the main session keeps the credits chip between the context figure and tasks \
+             even when a task is present and the included usage reading is missing. \
+             context.x={} context.width={} credits.x={} tasks_x={tasks_x} sep={sep}",
+            context.x,
+            context.width,
+            credits.x
+        );
+        assert_eq!(
+            tasks_x,
+            credits.x + credits.width + sep,
+            "owed: the tasks rect starts immediately to the right of the credits chip. \
+             A task on the main session is not a reason to hide the chip. \
              credits.x={} credits.width={} tasks_x={tasks_x} sep={sep}",
             credits.x,
             credits.width
