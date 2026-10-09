@@ -453,11 +453,12 @@ fn install_live_personal_session_for_included_limits(config: &mut xai_grok_sampl
 
 /// Included percent and SuperGrok dollar cents for the identity pin.
 ///
-/// `None` when the pin is unset, so the chip keeps the active session.
-/// When the pin is set and that live session is missing, both readings
-/// stay `None`. The snapshot row wins when that field is stored. The
-/// process cache fills a poll that has not been written yet. This does
-/// not read team postpaid Billing Credits or console team prepaid.
+/// `None` when the pin is unset. The chip then asks
+/// [`included_usage_pct_of_sending_session`] for the session the next
+/// request sends. When the pin is set and that live session is missing,
+/// both readings stay `None`. The snapshot row wins when that field is
+/// stored. The process cache fills a poll that has not been written yet.
+/// This does not read team postpaid Billing Credits or console team prepaid.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PinnedSupergrokRow {
     pub usage_pct: Option<f64>,
@@ -511,6 +512,81 @@ fn stored_pinned_row(home: &Path, identity_id: &str) -> PinnedSupergrokRow {
         usage_pct,
         dollar_credits_cents,
     }
+}
+
+/// Included SuperGrok period percent of the session the next request
+/// sends when the identity pin is unset.
+///
+/// `None` means no live sending session was found. `Some(None)` means
+/// that session was identified and its percent was not stored. The chip
+/// may then use a known view balance percent. A stored percent returned
+/// here wins over that view balance, so a personal view percent is not
+/// substituted for a Team bearer that already stored its own percent.
+/// Do not substitute another session's stored percent. Do not invent
+/// `limits 0%`.
+///
+/// The active base session is the bearer. A Team base uses that business
+/// row's `usage_pct`. A personal base uses the personal row. A live
+/// personal multi-slot does not replace a live Team base. Snapshot, then
+/// the process cache. When both lack the percent, a finite
+/// `creditUsagePercent` already stored by the billing read is copied into
+/// the process cache. This does not add a URL, rewrite the snapshot, or
+/// read team postpaid Billing Credits or console team prepaid.
+pub fn included_usage_pct_of_sending_session() -> Option<Option<f64>> {
+    if load_limits_pins().supergrok_identity.is_some() {
+        return None;
+    }
+    let home = grok_home_path();
+    let identity_id = sending_session_identity_id(&home)?;
+    let mut usage_pct = stored_pinned_row(&home, &identity_id)
+        .usage_pct
+        .filter(|pct| pct.is_finite());
+    if usage_pct.is_none()
+        && let Some(pct) = finite_poll_history_usage_pct(&identity_id)
+    {
+        super::remember_supergrok_included_billing(&identity_id, pct, None, None);
+        usage_pct = Some(pct);
+    }
+    Some(usage_pct)
+}
+
+fn candidate_is_live(candidate: &SupergrokSessionCandidate) -> bool {
+    !candidate.hard_expired && !candidate.access_token.trim().is_empty()
+}
+
+/// Identity of the live session the next request sends when the identity
+/// pin is unset. The active base wins. A missing or hard-expired base
+/// falls back to a live personal session, then a live Team session.
+fn sending_session_identity_id(home: &Path) -> Option<String> {
+    let candidates = super::load_supergrok_session_candidates(home);
+    if let Some(active) = super::active_supergrok_identity_id(home) {
+        let active_is_live = candidates.iter().any(|candidate| {
+            candidate_is_live(candidate) && candidate.headroom.identity_id == active
+        });
+        if active_is_live {
+            return Some(active);
+        }
+    }
+    if let Some(personal) = candidates.iter().find(|candidate| {
+        candidate_is_live(candidate) && candidate.headroom.role == SupergrokAccountRole::Personal
+    }) {
+        return Some(personal.headroom.identity_id.clone());
+    }
+    candidates
+        .iter()
+        .find(|candidate| {
+            candidate_is_live(candidate)
+                && candidate.headroom.role == SupergrokAccountRole::Business
+        })
+        .map(|candidate| candidate.headroom.identity_id.clone())
+}
+
+/// Latest finite `creditUsagePercent` already stored for this identity.
+/// A missing sample or a non-finite field stays absent.
+fn finite_poll_history_usage_pct(identity_id: &str) -> Option<f64> {
+    let history = super::included_poll_history_for(identity_id);
+    let pct = history.last()?.credit_usage_percent;
+    pct.is_finite().then_some(pct)
 }
 
 fn apply_supergrok_identity_pin_to_sampler_config(

@@ -226,3 +226,14 @@ fn shorten_location_path_unc_host_without_share_unchanged() {
     );
     assert_eq!(shorten_location_path("//host/").as_ref(), "//host/");
 }
+
+#[test]
+fn fit_keeps_projects_when_the_measured_budget_fits() {
+    let path = "~/Projects/surmount/grok-build";
+    assert_eq!(fit_location_path_to_budget(path, 40).as_ref(), path);
+    assert_eq!(
+        fit_location_path_to_budget(path, 22).as_ref(),
+        "~/P/surmount/grok-build"
+    );
+    assert_eq!(shorten_location_component("Documents"), "D");
+}

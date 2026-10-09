@@ -267,8 +267,13 @@ fn both_refused_status_chip_label(
 }
 
 /// Included percent the L1 chip paints, when the next request draws that
-/// meter. A set identity pin uses that row. An unset pin keeps the view
-/// balance. A missing reading is `None`, not `limits 0%`.
+/// meter. A set identity pin uses that row and does not substitute the
+/// view balance. An unset pin uses the stored percent of the session the
+/// next request sends. A Team bearer uses that business row. A personal
+/// bearer uses the personal row. When that stored percent is absent, or
+/// there is no sending session, a known view `CreditBalance` percent is
+/// the reading. An unread view balance stays missing. A missing reading
+/// is `None`, not `limits 0%`.
 fn included_chip_usage_pct(
     identity: crate::views::credit_bar::SamplingIdentityKind,
     balance: Option<&crate::views::credit_bar::CreditBalance>,
@@ -281,6 +286,11 @@ fn included_chip_usage_pct(
     }
     if let Some(row) = xai_grok_shell::auth::limits_pins::pinned_supergrok_row() {
         return row.usage_pct.filter(|pct| pct.is_finite());
+    }
+    if let Some(pct) = xai_grok_shell::auth::limits_pins::included_usage_pct_of_sending_session()
+        && let Some(value) = pct.filter(|value| value.is_finite())
+    {
+        return Some(value);
     }
     let balance = balance?;
     if balance.included_usage_known && balance.usage_pct.is_finite() {
@@ -379,8 +389,11 @@ fn credits_label_when_included_period_is_not_next_request() -> String {
 /// A known included SuperGrok period reading paints `limits N%`
 /// (hover paints percent left). When an identity pin is set, that
 /// percent is the selected row, not the other session's balance.
-/// When that reading is missing and the next request still draws
-/// included SuperGrok period limits, the chip stays `Limits and Credits`.
+/// When the pin is unset, a stored percent on the session the next
+/// request sends wins. When that session stored no percent, a known view
+/// balance percent is the reading. When that reading is missing and the
+/// next request still draws included SuperGrok period limits, the chip
+/// stays `Limits and Credits`.
 /// It does not become `limits 0%` or `$0`. When the next request does
 /// not draw that meter, the chip is the remaining for the meter that
 /// request spends.
@@ -1868,10 +1881,12 @@ impl AgentView {
             }),
             dropdown_open,
         );
-        let location_path = self.location_path().to_string_lossy();
+        // Own the path so the header hit clears do not overlap a borrow of `self`.
+        let location_path = self.location_path().to_string_lossy().into_owned();
         let location_path = crate::views::session_title::sanitize_display_text(&location_path);
-        let short =
-            crate::util::display_location_path(std::path::Path::new(location_path.as_ref()));
+        // Abbreviate only. Measure the columns left of the chips before any
+        // one-letter shorten. `display_location_path` always shortens.
+        let abbreviated = crate::util::abbreviate_path(location_path.as_ref());
         let left_budget = areas
             .values()
             .map(|r| r.x)
@@ -1912,11 +1927,11 @@ impl AgentView {
             ));
         }
         let prefix_width: u16 = location.iter().map(|s| s.width() as u16).sum();
-        let path_width = short.width() as u16;
+        let abbreviated_width = abbreviated.width() as u16;
         let title = overlay_header.title.and_then(|title| {
             const PATH_MIN: u16 = 12;
             let sep_width = crate::views::agent_status::separator(&theme).width() as u16;
-            let location_min = prefix_width + path_width.min(PATH_MIN) + sep_width;
+            let location_min = prefix_width + abbreviated_width.min(PATH_MIN) + sep_width;
             let title_cap = (location_budget / 2).min(location_budget.saturating_sub(location_min));
             let title = crate::util::truncate_to_width(title, title_cap as usize);
             (!title.is_empty()).then(|| title.into_owned())
@@ -1929,7 +1944,6 @@ impl AgentView {
                 bg.fg(theme.text_secondary)
             },
         );
-        location.push(Span::styled(short, path_style));
         self.hit_header_dashboard.clear();
         self.hit_header_prev.clear();
         self.hit_header_next.clear();
@@ -1983,6 +1997,21 @@ impl AgentView {
             fork_prefix.push(Span::styled("  ", gap));
             fork_width += 2;
         }
+        let sep_width = crate::views::agent_status::separator(&theme).width() as u16;
+        let title_reserve = title
+            .as_ref()
+            .map(|title| (title.width() as u16).saturating_add(sep_width))
+            .unwrap_or(0);
+        let path_budget = location_budget
+            .saturating_sub(fork_width)
+            .saturating_sub(title_reserve)
+            .saturating_sub(prefix_width);
+        let fitted = xai_grok_pager_render::location_path::fit_location_path_to_budget(
+            abbreviated.as_ref(),
+            usize::from(path_budget),
+        );
+        let path_width = fitted.width() as u16;
+        location.push(Span::styled(fitted.into_owned(), path_style));
         let mut parts: Vec<Span> = fork_prefix;
         let mut path_offset: u16 = fork_width + prefix_width;
         if let Some(title) = title {
@@ -9883,6 +9912,242 @@ mod red_status_corners_tests {
             credits.x,
             credits.width
         );
+    }
+
+    /// A wide L1 status row, with room between the path and the context
+    /// figure, paints `~/Projects/surmount/grok-build`. It does not paint
+    /// `~/P/surmount/grok-build`. The helper that turns `Documents` into `D`
+    /// does not draw this row.
+    #[test]
+    #[serial_test::serial]
+    fn wide_status_row_keeps_the_projects_folder_when_columns_remain() {
+        let home = tempfile::tempdir().expect("temp HOME");
+        let _env = xai_grok_test_support::EnvGuard::set("HOME", home.path());
+        let _theme = crate::theme::cache::pin_theme();
+        let mut agent = make_agent();
+        agent.session.cwd = home
+            .path()
+            .join("Projects")
+            .join("surmount")
+            .join("grok-build");
+        agent.session.models.override_context_window(500_000);
+        agent.session_sampling_window = Some(500_000);
+        agent.context_state = Some(ContextInfo {
+            used: 120_000,
+            ..ContextInfo::default()
+        });
+        assert!(
+            agent.child_link().is_none(),
+            "owed: this is the L1 status row"
+        );
+
+        let (buf, text) = draw_buf(&mut agent);
+        let context = agent.hit_context.rect.expect(
+            "owed: a wide L1 status row paints the context figure to the right of the path",
+        );
+        let symbols = row_symbols(&buf, context.y);
+        let row = symbols.concat();
+        let full = "~/Projects/surmount/grok-build";
+        let shortened = "~/P/surmount/grok-build";
+        let path_x = find_on_row(&symbols, full).unwrap_or_else(|| {
+            panic!(
+                "owed: a wide L1 status row, with room between the path and the context figure, \
+                 paints `{full}`. It does not paint `{shortened}`.\n{row}\n{text}"
+            )
+        });
+        assert!(
+            !row.contains(shortened),
+            "owed: a wide row with columns remaining does not paint `{shortened}`.\n{row}"
+        );
+        let context_label = "120K / 500K";
+        let context_label_x = find_on_row(&symbols, context_label).unwrap_or_else(|| {
+            panic!(
+                "owed: the context figure is on the status row, with room after the path. \
+                 row missing {context_label:?}\n{row}"
+            )
+        });
+        let path_end = path_x + full.chars().count() as u16;
+        assert!(
+            path_end < context_label_x,
+            "owed: columns remain between `{full}` and the context figure. \
+             path_end={path_end} context_x={context_label_x}\n{row}"
+        );
+        assert!(
+            context.x > path_end,
+            "owed: the context figure sits to the right of the full path. \
+             path_end={path_end} context.x={}",
+            context.x
+        );
+    }
+
+    /// An Included pin with no identity, a Team session as the bearer the
+    /// next request sends, and a stored business `usage_pct` of 41, paints
+    /// `limits 41%` on the L1 header. The words `Limits and Credits` are
+    /// absent. The personal percent is not substituted. This draws the
+    /// status row.
+    #[test]
+    #[serial_test::serial]
+    fn header_paints_the_business_percent_when_the_identity_pin_is_unset_and_the_team_session_sends()
+     {
+        let home = tempfile::tempdir().expect("temp GROK_HOME");
+        let _env = xai_grok_test_support::EnvGuard::set("GROK_HOME", home.path());
+        xai_grok_shell::auth::clear_included_billing_cache();
+        xai_grok_shell::auth::clear_process_included_poll_history_only();
+
+        let live = chrono::Utc::now() + chrono::Duration::days(7);
+        let base = "https://auth.x.ai::header-team-bearer";
+        let personal_id = "u-personal-header-decoy";
+        let business_id = "team-header-bearer";
+        let mut map = std::collections::BTreeMap::new();
+        xai_grok_shell::auth::upsert_supergrok_session(
+            &mut map,
+            base,
+            xai_grok_shell::auth::GrokAuth {
+                key: "tok-personal-header-decoy".into(),
+                auth_mode: xai_grok_shell::auth::AuthMode::Oidc,
+                user_id: personal_id.into(),
+                principal_type: Some("User".into()),
+                principal_id: Some(personal_id.into()),
+                team_id: None,
+                expires_at: Some(live),
+                ..xai_grok_shell::auth::GrokAuth::default()
+            },
+        );
+        xai_grok_shell::auth::upsert_supergrok_session(
+            &mut map,
+            base,
+            xai_grok_shell::auth::GrokAuth {
+                key: "tok-team-header-bearer".into(),
+                auth_mode: xai_grok_shell::auth::AuthMode::Oidc,
+                user_id: "u-team-header-bearer".into(),
+                principal_type: Some("Team".into()),
+                principal_id: Some(business_id.into()),
+                team_id: Some(business_id.into()),
+                expires_at: Some(live),
+                ..xai_grok_shell::auth::GrokAuth::default()
+            },
+        );
+        std::fs::write(
+            home.path().join("auth.json"),
+            serde_json::to_vec_pretty(&map).expect("auth json"),
+        )
+        .expect("write auth.json");
+
+        let mut doc = xai_grok_shell::auth::LimitsSnapshotDocument::empty(1_700_000_000_000);
+        doc.identities
+            .push(header_identity(personal_id, 28.0, 8_765));
+        doc.identities
+            .push(header_identity(business_id, 41.0, 2_199));
+        doc.management = Some(xai_grok_shell::auth::LimitsSnapshotManagement {
+            team_id: Some("mgmt-header-decoy".into()),
+            prepaid_cents: Some(15_420),
+            billing_credits_cents: Some(4_703),
+            ..Default::default()
+        });
+        xai_grok_shell::auth::write_limits_snapshot_file(home.path(), &doc)
+            .expect("write business percent");
+
+        xai_grok_shell::auth::limits_pins::save_limits_pins(
+            &xai_grok_shell::auth::limits_pins::LimitsPins {
+                stay_supergrok: true,
+                use_console: false,
+                meter_source: Some(xai_grok_shell::auth::limits_pins::MeterSource::Included),
+                supergrok_identity: None,
+            },
+        )
+        .expect("included pin with no identity");
+        let pins = xai_grok_shell::auth::limits_pins::load_limits_pins();
+        assert!(pins.supergrok_identity.is_none());
+        assert!(
+            !pins.use_console,
+            "owed: use_console stays false unless the Operator chose console"
+        );
+        assert!(
+            xai_grok_shell::auth::limits_pins::next_request_draws_included_period_limits(),
+            "owed: an Included pin draws included SuperGrok period limits"
+        );
+        assert_eq!(
+            xai_grok_shell::auth::active_supergrok_identity_id(home.path()).as_deref(),
+            Some(business_id),
+            "owed: the Team session is the bearer the next request sends"
+        );
+
+        let _theme = crate::theme::cache::pin_theme();
+        let mut agent = make_agent();
+        agent.sampling_identity = SamplingIdentityKind::SuperGrokSession;
+        agent.credit_balance = Some(CreditBalance {
+            usage_pct: 28.0,
+            effective_usage_pct: 28.0,
+            included_usage_known: true,
+            ..CreditBalance::default()
+        });
+        agent.session.models.override_context_window(500_000);
+        agent.session_sampling_window = Some(500_000);
+        agent.context_state = Some(ContextInfo {
+            used: 120_000,
+            ..ContextInfo::default()
+        });
+        assert!(agent.child_link().is_none());
+
+        let (buf, text) = draw_buf(&mut agent);
+        let context = agent.hit_context.rect.expect("owed: the L1 status row");
+        let credits = agent
+            .hit_credits
+            .rect
+            .expect("owed: the L1 header paints the included percent");
+        let symbols = row_symbols(&buf, credits.y);
+        let row = symbols.concat();
+        assert_eq!(credits.y, context.y);
+        let label = "limits 41%";
+        let label_x = find_on_row(&symbols, label).unwrap_or_else(|| {
+            panic!(
+                "owed: an Included pin with no identity, a Team session as the bearer, \
+                 and a stored business usage percent of 41, paints `{label}` on the L1 header. \
+                 The words `Limits and Credits` are absent. The personal percent is not \
+                 substituted.\n{row}\n{text}"
+            )
+        });
+        assert_eq!(label_x, credits.x, "owed: `limits 41%` is the credits chip");
+        assert!(
+            !row.contains("Limits and Credits"),
+            "owed: a known business percent is `limits 41%`, not the words `Limits and Credits`.\n{row}"
+        );
+        assert!(
+            !row.contains("limits 28%"),
+            "owed: the personal percent is not substituted for the Team bearer.\n{row}"
+        );
+        assert!(
+            !row.contains("limits 0%") && !row.contains("$0"),
+            "owed: a stored percent does not become `limits 0%` or `$0`.\n{row}"
+        );
+        for decoy in ["$87.65", "$154.20", "$47.03", "$442.97"] {
+            assert!(
+                !row.contains(decoy),
+                "owed: the included slot does not paint {decoy}. \
+                 That figure is another meter.\n{row}"
+            );
+        }
+        assert!(
+            !xai_grok_shell::auth::limits_pins::load_limits_pins().use_console,
+            "owed: use_console stays false unless the Operator chose console"
+        );
+    }
+
+    fn header_identity(
+        identity_id: &str,
+        usage_pct: f64,
+        dollar_credits_cents: i64,
+    ) -> xai_grok_shell::auth::LimitsSnapshotIdentity {
+        xai_grok_shell::auth::LimitsSnapshotIdentity {
+            identity_id: identity_id.to_owned(),
+            usage_pct: Some(usage_pct),
+            period_end: None,
+            period_type: None,
+            dollar_credits_cents: Some(dollar_credits_cents),
+            grok_build_usage_pct: None,
+            is_unified_billing_user: None,
+            poll_outcome: xai_grok_shell::auth::POLL_OUTCOME_OK.to_owned(),
+        }
     }
 
     /// An L2 draw and an L3 draw, with child_link set, must not contain

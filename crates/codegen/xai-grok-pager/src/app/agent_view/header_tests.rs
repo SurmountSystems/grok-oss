@@ -103,7 +103,7 @@ fn worktree_session_header_keeps_badge_and_omits_main_repo_suffix() {
         "no leftover main-repo suffix, row = {row:?}"
     );
 }
-/// Deep cwds are always middle-shortened (last two components stay full), not only when the row is tight.
+/// Issue 186: a wide status row keeps the path when columns remain, and shortens only when the measured budget does not fit.
 #[test]
 fn session_header_always_shortens_deep_cwd() {
     let _theme = crate::theme::cache::pin_theme();
@@ -113,12 +113,12 @@ fn session_header_always_shortens_deep_cwd() {
     let buf = draw(&mut agent, &registry, false, OverlayHeader::default());
     let row = header_row(&agent, &buf);
     assert!(
-        row.contains("/d/a/b/charlie/delta"),
-        "always last-two shortening, row = {row:?}"
+        row.contains("/deep/alpha/bravo/charlie/delta"),
+        "a wide status row keeps the full path when columns remain, row = {row:?}"
     );
     assert!(
-        !row.contains("/deep/alpha"),
-        "middle components must not stay full, row = {row:?}"
+        !row.contains("/d/a/b/charlie/delta"),
+        "a wide row does not shorten while columns remain, row = {row:?}"
     );
 }
 /// Frame 5: a plain session shows `path … [Dashboard]` on one row with no title and no switcher, the path in `text_secondary`.

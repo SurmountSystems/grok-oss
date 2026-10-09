@@ -1,5 +1,7 @@
 use std::borrow::Cow;
 
+use unicode_width::UnicodeWidthStr;
+
 /// Display-only middle-component shortener for already-abbreviated location paths.
 ///
 /// After a `~` / `$GROK_HOME` prefix (or a leading `/` / drive letter / UNC
@@ -8,9 +10,63 @@ use std::borrow::Cow;
 /// kept plus the first non-dot character (`.grok` → `.g`, `..cache` → `..c`).
 /// Literal `.` / `..` stay as-is. Drive-relative `C:foo\bar` does not gain a
 /// root separator; rooted `\foo\bar` keeps one. Paths with 0–2 components
-/// after the prefix are unchanged.
+/// after the prefix are unchanged. Callers that have not measured a column
+/// budget still shorten every earlier component.
 pub(crate) fn shorten_location_path(path: &str) -> Cow<'_, str> {
-    const KEEP_FULL: usize = 2;
+    let Some(parsed) = parse_location_for_shortening(path) else {
+        return Cow::Borrowed(path);
+    };
+    Cow::Owned(render_shortened(&parsed, |index| {
+        index >= parsed.keep_unc_root && index + KEEP_FULL < parsed.parts.len()
+    }))
+}
+
+/// Keep `path` when its display width fits `budget` columns. Otherwise
+/// shorten the earliest eligible component, then the next, until the
+/// result fits. The last two components stay full. A result that is still
+/// wider than `budget` is the fully shortened path. The caller may ellipsis.
+pub fn fit_location_path_to_budget(path: &str, budget: usize) -> Cow<'_, str> {
+    if path.width() <= budget {
+        return Cow::Borrowed(path);
+    }
+    let Some(parsed) = parse_location_for_shortening(path) else {
+        return Cow::Borrowed(path);
+    };
+    let eligible: Vec<usize> = parsed
+        .parts
+        .iter()
+        .enumerate()
+        .filter_map(|(index, _)| {
+            (index >= parsed.keep_unc_root && index + KEEP_FULL < parsed.parts.len())
+                .then_some(index)
+        })
+        .collect();
+    for count in 1..=eligible.len() {
+        let out = render_shortened(&parsed, |index| {
+            eligible.iter().take(count).any(|item| *item == index)
+        });
+        if out.width() <= budget {
+            return Cow::Owned(out);
+        }
+    }
+    Cow::Owned(render_shortened(&parsed, |index| eligible.contains(&index)))
+}
+
+const KEEP_FULL: usize = 2;
+
+struct ParsedLocation<'a> {
+    prefix: Cow<'a, str>,
+    parts: Vec<&'a str>,
+    sep: char,
+    restore_root: bool,
+    unc_style: bool,
+    drive_relative: bool,
+    keep_unc_root: usize,
+}
+
+/// `None` when the path has 0–2 components after the prefix. Those stay
+/// the original string, including a trailing separator.
+fn parse_location_for_shortening(path: &str) -> Option<ParsedLocation<'_>> {
     const GROK_HOME_PREFIX: &str = "$GROK_HOME";
     const VERBATIM_UNC_PREFIX: &str = r"\\?\UNC\";
 
@@ -101,29 +157,47 @@ pub(crate) fn shorten_location_path(path: &str) -> Cow<'_, str> {
         .filter(|part| !part.is_empty())
         .collect();
     if parts.len() <= KEEP_FULL {
-        return Cow::Borrowed(path);
+        return None;
     }
 
     // UNC: first two components are `server\share` and stay full in the same loop.
     let keep_unc_root = if unc_style { 2 } else { 0 };
+    Some(ParsedLocation {
+        prefix,
+        parts,
+        sep,
+        restore_root,
+        unc_style,
+        drive_relative,
+        keep_unc_root,
+    })
+}
 
-    let mut out = String::with_capacity(path.len());
-    if !prefix.is_empty() {
-        out.push_str(prefix.as_ref());
+fn render_shortened(parsed: &ParsedLocation<'_>, shorten: impl Fn(usize) -> bool) -> String {
+    let mut out = String::with_capacity(
+        parsed.prefix.len()
+            + parsed
+                .parts
+                .iter()
+                .map(|part| part.len() + 1)
+                .sum::<usize>(),
+    );
+    if !parsed.prefix.is_empty() {
+        out.push_str(parsed.prefix.as_ref());
     }
-    for (index, part) in parts.iter().enumerate() {
+    for (index, part) in parsed.parts.iter().enumerate() {
         // Drive-relative `C:foo` and UNC `\\server` attach the first name to the prefix.
-        let attach_without_sep = (unc_style || drive_relative) && index == 0;
-        if restore_root || (!out.is_empty() && !attach_without_sep) {
-            out.push(sep);
+        let attach_without_sep = (parsed.unc_style || parsed.drive_relative) && index == 0;
+        if parsed.restore_root || (!out.is_empty() && !attach_without_sep) {
+            out.push(parsed.sep);
         }
-        if index < keep_unc_root || index + KEEP_FULL >= parts.len() {
-            out.push_str(part);
-        } else {
+        if shorten(index) {
             out.push_str(shorten_location_component(part));
+        } else {
+            out.push_str(part);
         }
     }
-    Cow::Owned(out)
+    out
 }
 
 fn shorten_location_component(component: &str) -> &str {
