@@ -193,19 +193,24 @@ fn seal_prompt_bottom_rule(
     }
 }
 
-/// Credits meter on the status row, ending at the soft plan pane.
-/// The pane clears the right-aligned chip. `label` is the same text the
-/// chip painted. Returns the painted hit rect.
-fn paint_limits_and_credits_left_of_soft_plan(
+/// Status chips the soft plan pane cleared.
+///
+/// The context figure ends at the pane. The unread placeholder
+/// `Limits and Credits` is not painted into that slot. A real meter
+/// label stays to the left of the context figure. `None` means both
+/// chips were already left of the pane. The pair is
+/// `(credits hit, context hit)`.
+fn restore_status_row_left_of_soft_plan(
     buf: &mut Buffer,
     full_area: Rect,
     status_bar: Rect,
-    existing: Option<Rect>,
+    existing_credits: Option<Rect>,
+    existing_context: Option<Rect>,
     theme: &Theme,
-    label: &str,
-) -> Option<Rect> {
-    let width = label.chars().count() as u16;
-    if status_bar.height == 0 || width == 0 || full_area.width == 0 {
+    credits_label: &str,
+    context_text: Option<&str>,
+) -> Option<(Option<Rect>, Option<Rect>)> {
+    if status_bar.height == 0 || full_area.width == 0 {
         return None;
     }
     let pane_w = crate::views::file_search::line_viewer::LineViewerState::soft_plan_pane_width(
@@ -214,22 +219,109 @@ fn paint_limits_and_credits_left_of_soft_plan(
     let pane_x = full_area
         .x
         .saturating_add(full_area.width.saturating_sub(pane_w));
-    if let Some(hit) = existing
-        && hit.y == status_bar.y
-        && hit.width >= width
-        && hit.x.saturating_add(hit.width) <= pane_x
-    {
-        return None;
-    }
     let y = status_bar.y;
     if y < full_area.y || y >= full_area.y.saturating_add(full_area.height) {
         return None;
     }
-    let x = pane_x.saturating_sub(width);
-    if x < full_area.x || x.saturating_add(width) > pane_x {
+    let on_row = |hit: Rect| hit.y == y && hit.width > 0;
+    let covered = |hit: Rect| on_row(hit) && hit.x.saturating_add(hit.width) > pane_x;
+    let context_covered = existing_context.is_some_and(covered);
+    let credits_width = credits_label.chars().count() as u16;
+    let credits_fully_left = existing_credits.is_some_and(|hit| {
+        on_row(hit)
+            && credits_width > 0
+            && hit.width >= credits_width
+            && hit.x.saturating_add(hit.width) <= pane_x
+    });
+    if !context_covered && credits_fully_left {
         return None;
     }
-    let style = Style::default().fg(theme.text_secondary).bg(theme.bg_base);
+    let credits_style = Style::default().fg(theme.text_secondary).bg(theme.bg_base);
+    let context_style = Style::default().fg(theme.text_primary).bg(theme.bg_base);
+    if context_covered {
+        if let Some(context_text) = context_text.filter(|text| !text.is_empty()) {
+            return paint_context_figure_left_of_pane(
+                buf,
+                full_area.x,
+                pane_x,
+                y,
+                credits_label,
+                credits_width,
+                credits_style,
+                context_text,
+                context_style,
+            );
+        }
+    }
+    paint_credits_label_left_of_pane(buf, full_area.x, pane_x, y, credits_label, credits_style)
+        .map(|rect| (Some(rect), None))
+}
+
+/// Context figure ending at the pane. Skip the unread placeholder.
+fn paint_context_figure_left_of_pane(
+    buf: &mut Buffer,
+    area_x: u16,
+    pane_x: u16,
+    y: u16,
+    credits_label: &str,
+    credits_width: u16,
+    credits_style: Style,
+    context_text: &str,
+    context_style: Style,
+) -> Option<(Option<Rect>, Option<Rect>)> {
+    let context_width = context_text.chars().count() as u16;
+    if context_width == 0 || pane_x <= area_x {
+        return None;
+    }
+    let unread = credits_label == "Limits and Credits";
+    let show_credits = !unread && credits_width > 0;
+    let sep = if show_credits { 3 } else { 0 };
+    let group = credits_width
+        .saturating_mul(u16::from(show_credits))
+        .saturating_add(sep)
+        .saturating_add(context_width);
+    let x = pane_x.saturating_sub(group).max(area_x);
+    let mut credits_hit = None;
+    let mut context_x = pane_x.saturating_sub(context_width);
+    if show_credits {
+        let room = pane_x.saturating_sub(x);
+        let need = credits_width
+            .saturating_add(sep)
+            .saturating_add(context_width);
+        if need <= room {
+            buf.set_string_safe(x, y, credits_label, credits_style);
+            credits_hit = Some(Rect::new(x, y, credits_width, 1));
+            let gap_x = x.saturating_add(credits_width);
+            buf.set_string_safe(gap_x, y, "   ", credits_style);
+            context_x = gap_x.saturating_add(sep);
+        }
+    }
+    if context_x < area_x || context_x.saturating_add(context_width) > pane_x {
+        context_x = pane_x.saturating_sub(context_width);
+    }
+    if context_x < area_x {
+        return credits_hit.map(|rect| (Some(rect), None));
+    }
+    buf.set_string_safe(context_x, y, context_text, context_style);
+    Some((credits_hit, Some(Rect::new(context_x, y, context_width, 1))))
+}
+
+fn paint_credits_label_left_of_pane(
+    buf: &mut Buffer,
+    area_x: u16,
+    pane_x: u16,
+    y: u16,
+    label: &str,
+    style: Style,
+) -> Option<Rect> {
+    let width = label.chars().count() as u16;
+    if width == 0 {
+        return None;
+    }
+    let x = pane_x.saturating_sub(width);
+    if x < area_x || x.saturating_add(width) > pane_x {
+        return None;
+    }
     buf.set_string_safe(x, y, label, style);
     Some(Rect::new(x, y, width, 1))
 }
@@ -4153,42 +4245,56 @@ impl AgentView {
             // when the next request draws included SuperGrok period limits.
             // Nested views stay omitted.
             if soft_plan_side_pane && self.child_link().is_none() {
-                let existing = self.hit_credits.rect;
+                let existing_credits = self.hit_credits.rect;
+                let existing_context = self.hit_context.rect;
                 let label = l1_credits_chip_label(
                     self.sampling_identity,
                     self.credit_balance.as_ref(),
                     self.hit_credits.hovered,
                 );
-                if let Some(rect) = paint_limits_and_credits_left_of_soft_plan(
+                let context_text = ctx_used.and_then(|used| {
+                    context_bar::context_chip_token_text(used, sampling_window, catalog_window)
+                });
+                if let Some((credits_hit, context_hit)) = restore_status_row_left_of_soft_plan(
                     buf,
                     area,
                     layout.status_bar,
-                    existing,
+                    existing_credits,
+                    existing_context,
                     &theme,
                     &label,
+                    context_text.as_deref(),
                 ) {
-                    if self
-                        .hit_bg_status
-                        .rect
-                        .is_some_and(|hit| hit.intersects(rect))
-                    {
-                        self.hit_bg_status.rect = None;
+                    if let Some(rect) = credits_hit {
+                        if self
+                            .hit_bg_status
+                            .rect
+                            .is_some_and(|hit| hit.intersects(rect))
+                        {
+                            self.hit_bg_status.rect = None;
+                        }
+                        if self
+                            .hit_goal_status
+                            .rect
+                            .is_some_and(|hit| hit.intersects(rect))
+                        {
+                            self.hit_goal_status.rect = None;
+                        }
+                        if context_hit.is_none()
+                            && self
+                                .hit_context
+                                .rect
+                                .is_some_and(|hit| hit.intersects(rect))
+                        {
+                            self.hit_context.rect = None;
+                        }
+                        self.hit_credits.rect = Some(rect);
+                    } else if context_hit.is_some() {
+                        self.hit_credits.rect = None;
                     }
-                    if self
-                        .hit_goal_status
-                        .rect
-                        .is_some_and(|hit| hit.intersects(rect))
-                    {
-                        self.hit_goal_status.rect = None;
+                    if let Some(rect) = context_hit {
+                        self.hit_context.rect = Some(rect);
                     }
-                    if self
-                        .hit_context
-                        .rect
-                        .is_some_and(|hit| hit.intersects(rect))
-                    {
-                        self.hit_context.rect = None;
-                    }
-                    self.hit_credits.rect = Some(rect);
                 }
             }
             return (viewer_cursor, prompt_post_flush);
@@ -6398,6 +6504,102 @@ mod plan_approval_draw_contract_tests {
         assert!(
             !yellow_copy,
             "the bottom right still shows the six-column yellow word `[Copy]` next to `{caption}`. AgentView::draw paints COMPOSER_COPY_LABEL (`[Copy]`) in theme.gray (yellow) at the bottom right of the main composer, next to the mode caption. yellow `[Copy]` on that row: {yellow_copy}; bottom row: {bottom_row}"
+        );
+    }
+
+    /// `[`, copy glyph, `]` on one stroke row, inset from both corners.
+    fn bracketed_copy_on_stroke_row(buf: &Buffer, stroke: &PromptStroke, y: u16) -> bool {
+        let glyph = crate::glyphs::copy_icon();
+        let last = stroke.right.saturating_sub(2);
+        let mut x = stroke.left.saturating_add(2);
+        while x.saturating_add(2) <= last {
+            let symbols = ["[", glyph, "]"];
+            let visible = symbols.iter().enumerate().all(|(i, symbol)| {
+                buf.cell((x + i as u16, y))
+                    .is_some_and(|cell| cell.symbol() == *symbol)
+            });
+            if visible {
+                return true;
+            }
+            x = x.saturating_add(1);
+        }
+        false
+    }
+
+    /// Main composer on DOGE. Served model Grok 4.7, reasoning high,
+    /// always-approve on, plan mode off. The bottom row contains
+    /// `Grok 4.7 (high) · always-approve`. That bottom row contains no
+    /// six-column `[Copy]` and no three-column `[`, copy glyph, `]`.
+    /// The copy control is three columns, `[`, the copy glyph, `]`,
+    /// inset from the white stroke on the top of the Operator box,
+    /// fully visible.
+    #[test]
+    fn main_composer_copy_control_is_on_the_top_stroke_and_the_bottom_row_keeps_the_caption() {
+        use crate::theme::{Theme, cache};
+        use ratatui::style::Color;
+
+        let _pin = cache::pin_theme();
+        cache::set(crate::theme::ThemeKind::Doge);
+        let theme = Theme::current();
+        let white = Color::Rgb(255, 255, 255);
+        let yellow = Color::Rgb(255, 255, 0);
+        assert_eq!(
+            theme.prompt_border_active, white,
+            "DOGE prompt stroke is white"
+        );
+        assert_eq!(theme.gray, yellow, "DOGE theme.gray is yellow");
+
+        let mut agent = make_agent();
+        agent.plan_mode_active = false;
+        agent.plan_mode_pending = None;
+        agent.session_mode_pending = None;
+        agent
+            .session
+            .models
+            .set_served_model_name(Some("Grok 4.7".to_string()));
+        agent.session.models.reasoning_effort =
+            Some(xai_grok_shell::sampling::types::ReasoningEffort::High);
+        agent.session.set_yolo_mode_for_test(true);
+
+        let (buf, text) = draw_buf(&mut agent);
+        let prompt = agent.pane_areas.prompt;
+        assert!(
+            prompt.width > 8 && prompt.height > 2,
+            "main composer must be open; got {prompt:?}"
+        );
+        let stroke = prompt_stroke(&buf, prompt);
+        let top_right = buf
+            .cell((stroke.right, stroke.top))
+            .expect("top-right prompt stroke");
+        assert_eq!(
+            top_right.symbol(),
+            "\u{2510}",
+            "the copy control stays inset from the white stroke; the top-right corner stays the stroke"
+        );
+        assert_eq!(top_right.fg, white, "Operator box stroke is white");
+
+        let owed = "the copy control is three columns, `[`, the copy glyph, `]`, inset from the white stroke on the top of the Operator box, fully visible. The bottom row contains `Grok 4.7 (high) · always-approve` and contains no six-column `[Copy]` and no three-column copy control";
+        let on_top = bracketed_copy_on_stroke_row(&buf, &stroke, stroke.top);
+        assert!(
+            on_top,
+            "owed: {owed}. The top stroke does not show that inset control.\n{text}"
+        );
+        let bottom_row: String = (stroke.left..=stroke.right)
+            .filter_map(|x| {
+                buf.cell((x, stroke.bottom))
+                    .map(|cell| cell.symbol().to_string())
+            })
+            .collect();
+        let caption = "Grok 4.7 (high) · always-approve";
+        assert!(
+            bottom_row.contains(caption),
+            "owed: {owed}. Bottom row: {bottom_row}\n{text}"
+        );
+        let yellow_copy = yellow_copy_on_row(&buf, prompt, stroke.bottom, theme.gray);
+        let on_bottom = bracketed_copy_on_stroke_row(&buf, &stroke, stroke.bottom);
+        assert!(
+            !yellow_copy && !on_bottom,
+            "owed: {owed}. yellow `[Copy]` on the bottom row: {yellow_copy}; three-column copy control on the bottom row: {on_bottom}; bottom row: {bottom_row}"
         );
     }
 

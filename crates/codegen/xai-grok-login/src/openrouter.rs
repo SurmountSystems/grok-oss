@@ -430,4 +430,40 @@ mod tests {
         clear_openrouter_api_key(&store).unwrap();
         assert!(load_openrouter_api_key(&store).unwrap().is_none());
     }
+
+    /// An OpenRouter request uses the secret-store key. The process environment
+    /// is not the store: `OPENROUTER_API_KEY` stays unset, and the bearer is the
+    /// key written through the secure fallback (mock stand-in, no D-Bus).
+    #[test]
+    #[serial]
+    fn openrouter_request_uses_secret_store_key_not_process_env() {
+        let dir = TempDir::new().unwrap();
+        let store = CredentialsStore::at_path_prefer_keyring(dir.path().join("creds.json"));
+        let _hooks =
+            super::super::credentials_store::test_hooks::simulate_primary_error_with_mock_fallback(
+                "secret service unavailable",
+            );
+        let _env = EnvGuard::unset(OPENROUTER_API_KEY_ENV);
+        let _keys = EnvGuard::unset(OPENROUTER_API_KEYS_ENV);
+        let zed_empty = dir.path().join("no-zed");
+        let _zed = EnvGuard::set(
+            harness_secrets::GROK_ZED_CONFIG_DIR_ENV,
+            zed_empty.to_str().unwrap(),
+        );
+        let _no_shared = EnvGuard::set(harness_secrets::DISABLE_SHARED_HARNESS_ENV, "1");
+
+        store_openrouter_api_key(&store, "sk-or-store-not-env").unwrap();
+        assert!(
+            super::super::credentials_store::test_hooks::mock_fallback_has(
+                OPENROUTER_API_URL,
+                "sk-or-store-not-env",
+            )
+        );
+        let key = load_openrouter_api_key(&store).unwrap().unwrap();
+        assert_eq!(key, "sk-or-store-not-env");
+        let authorization = format!("Bearer {key}");
+        assert_eq!(authorization, "Bearer sk-or-store-not-env");
+        assert!(std::env::var(OPENROUTER_API_KEY_ENV).is_err());
+        assert!(std::env::var(OPENROUTER_API_KEYS_ENV).is_err());
+    }
 }

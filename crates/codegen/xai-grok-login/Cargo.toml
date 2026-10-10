@@ -77,6 +77,13 @@ loom = { workspace = true, optional = true }
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true }
 
+# Kernel keyutils fallback when Secret Service times out or the login
+# collection is locked. No D-Bus Unlock or Prompt. Secrets stay in the
+# kernel keyring for the process/session, not in the process environment.
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring-core = "1"
+linux-keyutils-keyring-store = "1"
+
 [dev-dependencies]
 tempfile = { workspace = true }
 serial_test = { workspace = true }

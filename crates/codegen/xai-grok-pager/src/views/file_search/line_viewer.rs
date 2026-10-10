@@ -4146,6 +4146,212 @@ mod tests {
         );
     }
 
+    /// Half-width plan pane (`PlanPreview`, fullscreen off). The title and
+    /// the body phrase wrap inside the visible content column. The
+    /// line-number gutter, `SOFT_PLAN_TEXT_INSET` (5), and the scrollbar
+    /// stay inside the frame and leave every letter of those strings in
+    /// that column.
+    #[test]
+    fn half_width_plan_pane_wraps_the_title_and_the_bottom_right_phrase_inside_the_content_column()
+    {
+        use crate::views::list_pane::{ListItem, line_display_width};
+
+        let _pin = crate::theme::cache::pin_theme();
+        crate::theme::cache::set(crate::theme::ThemeKind::Doge);
+        let theme = crate::theme::Theme::doge();
+        let white = Color::Rgb(255, 255, 255);
+        let title =
+            "Move the copy control, fix the wide status row, and choose one of the four cells";
+        let phrase = "from that bottom-right corner";
+        let sentence = format!("The copy control moves away from that {phrase}.");
+        let mut body = format!("# {title}\n\nProposed plan.\n\n{sentence}\n");
+        for n in 1..=40 {
+            body.push_str(&format!("line {n:02}\n"));
+        }
+
+        let mut viewer =
+            LineViewerState::open_markdown_content("plan.md", body, None).expect("open plan");
+        viewer.kind = LineViewerKind::PlanPreview;
+        viewer.fullscreen = false;
+        viewer.plan_mut().feedback_active = false;
+        viewer.plan_mut().show_action_buttons = true;
+
+        let full = Rect::new(0, 0, 100, 30);
+        let mut buf = Buffer::empty(full);
+        render_line_viewer(&mut buf, full, &mut viewer, Path::new("/tmp"), &theme, 0);
+
+        let pane_w = LineViewerState::soft_plan_pane_width(full.width);
+        let pane_x = full.width.saturating_sub(pane_w);
+        let right_x = pane_x + pane_w - 1;
+        let top_y = full.y;
+        let bottom_y = full.y + full.height - 1;
+        assert_eq!(pane_w, 50, "a 100-column draw keeps a half-width plan pane");
+        assert_eq!(LineViewerState::SOFT_PLAN_TEXT_INSET, 5);
+
+        for (x, y, glyph) in [
+            (pane_x, top_y, "\u{256d}"),
+            (right_x, top_y, "\u{256e}"),
+            (pane_x, bottom_y, "\u{2570}"),
+            (right_x, bottom_y, "\u{256f}"),
+        ] {
+            let cell = &buf[(x, y)];
+            assert_eq!(cell.symbol(), glyph, "view-plan frame corner at ({x},{y})");
+            assert_eq!(
+                cell.style().fg,
+                Some(white),
+                "view-plan frame corner at ({x},{y}) stays white"
+            );
+        }
+
+        let header = row_text(&buf, top_y);
+        assert!(
+            header.contains("plan.md"),
+            "the header stays plan.md; row={header:?}"
+        );
+        let plan = viewer.plan_ref().expect("plan extras");
+        for area in [
+            plan.search_button_area
+                .expect("search stays a header control"),
+            plan.copy_button_area.expect("copy stays a header control"),
+            viewer
+                .fullscreen_button_area
+                .expect("enlarge stays a header control"),
+            viewer
+                .close_button_area
+                .expect("close stays a header control"),
+        ] {
+            assert_eq!(buf[(area.x, area.y)].symbol(), "[");
+            assert_eq!(buf[(area.x + 2, area.y)].symbol(), "]");
+        }
+
+        let modal = viewer.last_modal_area.expect("soft plan pane");
+        let footer_y = modal.y + modal.height.saturating_sub(1);
+        let footer = row_text(&buf, footer_y).to_ascii_lowercase();
+        for needle in ["approve", "comment", "revise", "exit"] {
+            assert!(
+                footer.contains(needle),
+                "footer stays approve | comment | revise | exit; missing {needle} in {footer:?}"
+            );
+        }
+
+        let content = viewer.last_popup_area.expect("plan text area");
+        assert_eq!(
+            content.x,
+            pane_x + 1 + LineViewerState::SOFT_PLAN_TEXT_INSET,
+            "the 5-column inset sits inside the frame"
+        );
+        let track = viewer
+            .list_state
+            .scrollbar_area()
+            .expect("enough lines to paint a scrollbar");
+        assert_eq!(track.width, 1, "the scrollbar is one column");
+        assert!(
+            track.x + track.width <= right_x,
+            "the scrollbar stays inside the white frame"
+        );
+        let text_end = track.x.saturating_sub(SCROLLBAR_TOTAL_COLS - track.width);
+        assert!(
+            text_end < track.x,
+            "the gap column sits between the words and the scrollbar"
+        );
+
+        let title_idx = viewer
+            .lines
+            .iter()
+            .position(|item| {
+                matches!(
+                    item,
+                    PlanViewerItem::Source(source) if source.plain_text.contains(title)
+                )
+            })
+            .expect("the title is one source line");
+        let prefix_w = viewer
+            .lines
+            .get(title_idx)
+            .and_then(|item| item.prefix())
+            .map(|prefix| line_display_width(&prefix) as u16)
+            .unwrap_or(0);
+        assert!(prefix_w >= 2, "the line-number gutter is inside the frame");
+        let text_x = content.x.saturating_add(prefix_w);
+        assert!(text_x > content.x, "the gutter sits left of the words");
+        assert!(
+            text_end > text_x,
+            "the gutter, the inset, and the scrollbar leave a content column"
+        );
+        let column_w = text_end - text_x;
+        assert!(
+            (column_w as usize) < title.chars().count(),
+            "the title is longer than the {column_w}-column content width, so it wraps"
+        );
+        assert!(
+            (column_w as usize) < sentence.chars().count(),
+            "the body line is longer than the {column_w}-column content width, so it wraps"
+        );
+        assert!(
+            viewer.list_state.layout().item_height(title_idx) >= 2,
+            "the title wraps onto a second row inside the content column"
+        );
+        let sentence_idx = viewer
+            .lines
+            .iter()
+            .position(|item| {
+                matches!(
+                    item,
+                    PlanViewerItem::Source(source) if source.plain_text.contains(phrase)
+                )
+            })
+            .expect("the body phrase is one source line");
+        assert!(
+            viewer.list_state.layout().item_height(sentence_idx) >= 2,
+            "the body line wraps onto a second row inside the content column"
+        );
+
+        let squash_source = |needle: &str| -> String {
+            let mut visible = String::new();
+            for y in content.y..content.y.saturating_add(content.height) {
+                let Some(PlanViewerItem::Source(source)) = viewer.item_at_screen_row(y, content)
+                else {
+                    continue;
+                };
+                if !source.plain_text.contains(needle) {
+                    continue;
+                }
+                for x in text_x..text_end {
+                    visible.push_str(buf[(x, y)].symbol());
+                }
+            }
+            visible.chars().filter(|ch| !ch.is_whitespace()).collect()
+        };
+        let title_flat = squash_source(title);
+        let title_owed: String = title.chars().filter(|ch| !ch.is_whitespace()).collect();
+        assert!(
+            title_flat.contains(&title_owed),
+            "the content column must contain the whole title, with every letter left of the scrollbar; visible={title_flat:?}"
+        );
+        let phrase_flat = squash_source(phrase);
+        let phrase_owed: String = phrase.chars().filter(|ch| !ch.is_whitespace()).collect();
+        assert!(
+            phrase_flat.contains(&phrase_owed),
+            "the content column must contain the whole phrase `from that bottom-right corner`, with every letter left of the scrollbar; visible={phrase_flat:?}"
+        );
+        let proposed_flat = squash_source("Proposed plan.");
+        assert!(
+            proposed_flat.contains("Proposedplan."),
+            "SOFT_PLAN_TEXT_INSET stays padding and keeps Proposed plan.; visible={proposed_flat:?}"
+        );
+
+        for y in content.y..content.y.saturating_add(content.height) {
+            for x in text_end..track.x.saturating_add(track.width) {
+                let symbol = buf[(x, y)].symbol();
+                let covers_a_letter = symbol.chars().any(|ch| ch.is_alphanumeric() || ch == '-');
+                assert!(
+                    !covers_a_letter,
+                    "column {x} at row {y} holds {symbol:?}; the scrollbar and its gap must leave that letter in the content column"
+                );
+            }
+        }
+    }
+
     /// File-backed plan approval sets `feedback_active()` true on the side
     /// panel whose footer is `approve | comment | revise | exit`. That footer
     /// is not the feedback composer. The header must still include `[✗]`.

@@ -599,19 +599,60 @@ fn fallback_delete(url: &str) -> Result<(), CredentialsStoreError> {
 }
 
 #[cfg(target_os = "linux")]
+fn keyutils_store()
+-> Result<std::sync::Arc<linux_keyutils_keyring_store::Store>, CredentialsStoreError> {
+    use std::sync::OnceLock;
+    static STORE: OnceLock<Result<std::sync::Arc<linux_keyutils_keyring_store::Store>, String>> =
+        OnceLock::new();
+    match STORE
+        .get_or_init(|| linux_keyutils_keyring_store::Store::new().map_err(|e| e.to_string()))
+    {
+        Ok(s) => Ok(std::sync::Arc::clone(s)),
+        Err(msg) => Err(CredentialsStoreError::Keyring(format!(
+            "linux keyutils store unavailable: {msg}"
+        ))),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn keyutils_entry(url: &str) -> Result<keyring_core::Entry, CredentialsStoreError> {
+    use keyring_core::api::CredentialStoreApi;
+    let store = keyutils_store()?;
+    store
+        .build(SERVICE_NAME, url, None)
+        .map_err(|e| CredentialsStoreError::Keyring(e.to_string()))
+}
+
+/// Kernel keyutils. No D-Bus, no Secret Service Unlock, and no Prompt.
+/// A locked login collection stays a credentials-store miss on the primary
+/// backend; this fallback does not ask the operator to unlock it.
+#[cfg(target_os = "linux")]
 fn fallback_get_os(url: &str) -> Result<Option<(String, String)>, CredentialsStoreError> {
-    // Same `keyring::Entry` path as the primary store. This crate has no second backend.
-    primary_get(url)
+    let entry = keyutils_entry(url)?;
+    match entry.get_password() {
+        Ok(secret) if !secret.is_empty() => Ok(Some((BEARER_USERNAME.to_owned(), secret))),
+        Ok(_) => Ok(None),
+        Err(keyring_core::Error::NoEntry) => Ok(None),
+        Err(e) => Err(CredentialsStoreError::Keyring(e.to_string())),
+    }
 }
 
 #[cfg(target_os = "linux")]
 fn fallback_set_os(url: &str, secret: &str) -> Result<(), CredentialsStoreError> {
-    primary_set(url, secret)
+    let entry = keyutils_entry(url)?;
+    entry
+        .set_password(secret)
+        .map_err(|e| CredentialsStoreError::Keyring(e.to_string()))
 }
 
 #[cfg(target_os = "linux")]
 fn fallback_delete_os(url: &str) -> Result<(), CredentialsStoreError> {
-    primary_delete(url)
+    let entry = keyutils_entry(url)?;
+    match entry.delete_credential() {
+        Ok(()) => Ok(()),
+        Err(keyring_core::Error::NoEntry) => Ok(()),
+        Err(e) => Err(CredentialsStoreError::Keyring(e.to_string())),
+    }
 }
 
 #[cfg(not(target_os = "linux"))]

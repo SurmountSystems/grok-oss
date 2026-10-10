@@ -42,6 +42,9 @@ pub struct LimitsModalState {
     /// Painted `Use limits` control from the last render. Absent when that
     /// button is not on screen.
     pub use_limits_hit: Option<Rect>,
+    /// Painted hits for Personal limits, Personal credits, Business limits,
+    /// and Business credits. Empty until that phrase is on screen.
+    pub supergrok_meter_cell_hits: [Option<Rect>; 4],
 }
 
 impl LimitsModalState {
@@ -53,6 +56,7 @@ impl LimitsModalState {
             zero_refresh_sent: false,
             last_updated_at: Utc::now(),
             use_limits_hit: None,
+            supergrok_meter_cell_hits: [None; 4],
         }
     }
 
@@ -449,6 +453,63 @@ fn credits_tab_meter_line(raw: &str) -> String {
 /// Footer id for the other spend choice. Esc close stays id 1.
 pub(crate) const SPEND_OTHER_CHOICE_ID: usize = 7;
 
+/// Hit index for Personal limits.
+const CELL_HIT_PERSONAL_LIMITS: usize = 0;
+/// Hit index for Personal credits.
+const CELL_HIT_PERSONAL_CREDITS: usize = 1;
+/// Hit index for Business limits.
+const CELL_HIT_BUSINESS_LIMITS: usize = 2;
+/// Hit index for Business credits.
+const CELL_HIT_BUSINESS_CREDITS: usize = 3;
+
+const METER_CELL_PHRASES: [(&str, usize); 4] = [
+    ("Personal limits", CELL_HIT_PERSONAL_LIMITS),
+    ("Personal credits", CELL_HIT_PERSONAL_CREDITS),
+    ("Business limits", CELL_HIT_BUSINESS_LIMITS),
+    ("Business credits", CELL_HIT_BUSINESS_CREDITS),
+];
+
+/// Record a painted meter phrase. The first column of the phrase is the hit.
+fn record_supergrok_meter_cell_hit(
+    hits: &mut [Option<Rect>; 4],
+    content_x: u16,
+    y: u16,
+    text: &str,
+) {
+    for (phrase, index) in METER_CELL_PHRASES {
+        let Some(slot) = hits.get_mut(index) else {
+            continue;
+        };
+        if slot.is_some() {
+            continue;
+        }
+        let Some(byte) = text.find(phrase) else {
+            continue;
+        };
+        let x_off = text[..byte].chars().count() as u16;
+        let width = phrase.chars().count() as u16;
+        *slot = Some(Rect::new(content_x.saturating_add(x_off), y, width, 1));
+    }
+}
+
+fn meter_cell_at_point(
+    hits: &[Option<Rect>; 4],
+    column: u16,
+    row: u16,
+) -> Option<xai_grok_shell::auth::limits_pins::SupergrokMeterCell> {
+    use xai_grok_shell::auth::limits_pins::SupergrokMeterCell;
+    const CELLS: [SupergrokMeterCell; 4] = [
+        SupergrokMeterCell::PersonalLimits,
+        SupergrokMeterCell::PersonalCredits,
+        SupergrokMeterCell::BusinessLimits,
+        SupergrokMeterCell::BusinessCredits,
+    ];
+    let point = (column, row).into();
+    hits.iter()
+        .zip(CELLS)
+        .find_map(|(hit, cell)| hit.is_some_and(|rect| rect.contains(point)).then_some(cell))
+}
+
 fn console_api_credits_balance_available(state: &LimitsModalState) -> bool {
     matches!(state.snapshot.console.balance_cents, Some(cents) if cents > 0)
 }
@@ -630,6 +691,18 @@ pub fn handle_limits_mouse(
             LimitsModalOutcome::Unchanged
         };
     }
+    // One click on a painted cell writes both pins. This does not go
+    // through apply_use_business, so preferred_method api_key does not
+    // block it. use_console stays false.
+    if left_down
+        && let Some(cell) = meter_cell_at_point(&state.supergrok_meter_cell_hits, column, row)
+    {
+        return if xai_grok_shell::auth::limits_pins::select_supergrok_meter_cell(cell).is_ok() {
+            LimitsModalOutcome::Changed
+        } else {
+            LimitsModalOutcome::Unchanged
+        };
+    }
     match modal_window::handle_modal_mouse(&mut state.window, kind, column, row) {
         ModalWindowOutcome::CloseRequested => LimitsModalOutcome::Close,
         ModalWindowOutcome::ShortcutActivated(id) if id == SPEND_OTHER_CHOICE_ID => {
@@ -653,6 +726,7 @@ pub fn render_limits_modal(
     compact: bool,
     now: DateTime<Utc>,
 ) {
+    state.supergrok_meter_cell_hits = [None; 4];
     let shortcuts = spend_shortcuts(state);
     // 0.70 keeps the 57-column not-drawn sentence on one line in a
     // 100-column terminal. At 0.55 that sentence wraps across the border,
@@ -716,6 +790,14 @@ pub fn render_limits_modal(
     } else {
         limits_tab_lines(state, now, draws_included)
     };
+    // Personal limits, Business limits, and Business credits are on the
+    // Limits tab. Personal credits stays the Credits tab line. The Credits
+    // tab does not gain a Business credits field.
+    if !on_credits_tab {
+        body.insert(0, "  Personal limits".to_string());
+        body.insert(1, "  Business limits".to_string());
+        body.insert(2, "  Business credits".to_string());
+    }
     // Both tabs carry the sentence when the next request does not draw
     // included SuperGrok period limits.
     if !draws_included {
@@ -782,6 +864,7 @@ pub fn render_limits_modal(
         let style = line_style(text, theme);
         let line = Line::from(Span::styled(text.clone(), style));
         buf.set_line(content.x, y, &line, content.width);
+        record_supergrok_meter_cell_hit(&mut state.supergrok_meter_cell_hits, content.x, y, text);
         y = y.saturating_add(1);
     }
 }
@@ -4786,5 +4869,564 @@ mod tests {
             "opening the control shows Limits before Credits:\n{tab_line}"
         );
         assert_eq!(state.window.active_tab, LIMITS_TAB);
+    }
+
+    const CELL_PERSONAL_TOKEN: &str = "tok-personal-cell";
+    const CELL_TEAM_TOKEN: &str = "tok-team-cell";
+    const CELL_PERSONAL_ID: &str = "u-personal-cell";
+    const CELL_BUSINESS_ID: &str = "team-cell";
+    const CELL_PERSONAL_PCT: f64 = 28.0;
+    const CELL_BUSINESS_PCT: f64 = 41.0;
+    const CELL_PERSONAL_CENTS: i64 = 8_765;
+    const CELL_BUSINESS_CENTS: i64 = 2_199;
+    const CELL_CONSOLE_CENTS: i64 = 15_420;
+    const CELL_POSTPAID_CENTS: i64 = 4_703;
+    const CELL_POSTPAID_DECOY_CENTS: i64 = 44_297;
+
+    struct SeededHome {
+        home: tempfile::TempDir,
+        _env: xai_grok_test_support::EnvGuard,
+    }
+
+    fn seed_four_cells_for_card_click(config_toml: Option<&str>) -> SeededHome {
+        use xai_grok_shell::auth::{
+            AuthMode, GrokAuth, LimitsSnapshotDocument, LimitsSnapshotIdentity,
+            LimitsSnapshotManagement, POLL_OUTCOME_OK, clear_console_team_postpaid_cache,
+            clear_included_billing_cache, upsert_supergrok_session, write_limits_snapshot_file,
+        };
+
+        let home = tempfile::TempDir::new().expect("temp GROK_HOME");
+        let env = xai_grok_test_support::EnvGuard::set("GROK_HOME", home.path());
+        clear_included_billing_cache();
+        clear_console_team_postpaid_cache();
+        if let Some(body) = config_toml {
+            std::fs::write(home.path().join("config.toml"), body).expect("config.toml");
+        }
+        let live = chrono::Utc::now() + chrono::Duration::days(7);
+        let base = "https://auth.x.ai::four-cell-click";
+        let mut map = std::collections::BTreeMap::new();
+        upsert_supergrok_session(
+            &mut map,
+            base,
+            GrokAuth {
+                key: CELL_PERSONAL_TOKEN.into(),
+                auth_mode: AuthMode::Oidc,
+                user_id: CELL_PERSONAL_ID.into(),
+                principal_type: Some("User".into()),
+                principal_id: Some(CELL_PERSONAL_ID.into()),
+                team_id: None,
+                expires_at: Some(live),
+                ..GrokAuth::default()
+            },
+        );
+        upsert_supergrok_session(
+            &mut map,
+            base,
+            GrokAuth {
+                key: CELL_TEAM_TOKEN.into(),
+                auth_mode: AuthMode::Oidc,
+                user_id: "u-team-cell".into(),
+                principal_type: Some("Team".into()),
+                principal_id: Some(CELL_BUSINESS_ID.into()),
+                team_id: Some(CELL_BUSINESS_ID.into()),
+                expires_at: Some(live),
+                ..GrokAuth::default()
+            },
+        );
+        std::fs::write(
+            home.path().join("auth.json"),
+            serde_json::to_vec_pretty(&map).expect("auth.json"),
+        )
+        .expect("write auth.json");
+        let identity = |identity_id: &str, usage_pct: f64, cents: i64| LimitsSnapshotIdentity {
+            identity_id: identity_id.to_owned(),
+            usage_pct: Some(usage_pct),
+            period_end: None,
+            period_type: None,
+            dollar_credits_cents: Some(cents),
+            grok_build_usage_pct: None,
+            is_unified_billing_user: None,
+            poll_outcome: POLL_OUTCOME_OK.to_owned(),
+        };
+        let mut doc = LimitsSnapshotDocument::empty(1_700_000_000_000);
+        doc.identities.push(identity(
+            CELL_PERSONAL_ID,
+            CELL_PERSONAL_PCT,
+            CELL_PERSONAL_CENTS,
+        ));
+        doc.identities.push(identity(
+            CELL_BUSINESS_ID,
+            CELL_BUSINESS_PCT,
+            CELL_BUSINESS_CENTS,
+        ));
+        doc.management = Some(LimitsSnapshotManagement {
+            team_id: Some("mgmt-cell-decoy".into()),
+            prepaid_cents: Some(CELL_CONSOLE_CENTS),
+            billing_credits_cents: Some(CELL_POSTPAID_CENTS),
+            ..Default::default()
+        });
+        write_limits_snapshot_file(home.path(), &doc).expect("four meter rows");
+        SeededHome { home, _env: env }
+    }
+
+    fn find_phrase(buf: &Buffer, area: Rect, phrase: &str) -> Option<(u16, u16)> {
+        for y in area.y..area.y.saturating_add(area.height) {
+            let mut row = String::new();
+            for x in area.x..area.x.saturating_add(area.width) {
+                row.push_str(buf[(x, y)].symbol());
+            }
+            if let Some(byte) = row.find(phrase) {
+                let x_off = row[..byte].chars().count() as u16;
+                return Some((area.x.saturating_add(x_off), y));
+            }
+        }
+        None
+    }
+
+    /// Left click on one painted cell, through `handle_input`.
+    ///
+    /// This does not call `select_supergrok_meter_cell`. The view balance is
+    /// a decoy percent so a painted header cannot satisfy the pin figure.
+    fn left_click_meter_cell(owed: &str, phrase: &str, config_toml: Option<&str>) -> SeededHome {
+        use crate::app::agent_view::test_fixtures::make_agent;
+        use crate::app::agent_view::{AppRenderParams, BannerSlotParams};
+        use crate::scrollback::render::ScratchBuffer;
+        use crossterm::event::{Event, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+
+        let seeded = seed_four_cells_for_card_click(config_toml);
+        let registry = crate::actions::ActionRegistry::defaults();
+        let area = Rect::new(0, 0, 140, 40);
+        let _theme = crate::theme::cache::pin_theme();
+        crate::appearance::cache::set_hide_header(false);
+        let mut agent = make_agent();
+        let end = DateTime::parse_from_rfc3339("2026-10-12T06:59:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let mut bal = weekly_bal(99.0, end);
+        bal.included_usage_known = true;
+        agent.credit_balance = Some(bal.clone());
+        let snap =
+            LimitsSnapshot::from_billing(Some(&bal), None, SamplingIdentityKind::SuperGrokSession);
+        agent.active_modal = Some(crate::views::modal::ActiveModal::Limits {
+            state: Box::new(LimitsModalState::new(snap)),
+        });
+        let draw = |agent: &mut crate::app::agent_view::AgentView| -> Buffer {
+            let mut buf = Buffer::empty(area);
+            let mut scratch = ScratchBuffer::new();
+            agent.draw(
+                area,
+                &mut buf,
+                &registry,
+                &mut scratch,
+                None,
+                false,
+                BannerSlotParams::none(),
+                false,
+                false,
+                &mut Vec::new(),
+                AppRenderParams::default(),
+            );
+            buf
+        };
+        let click_at = |agent: &mut crate::app::agent_view::AgentView, column: u16, row: u16| {
+            agent.handle_input(
+                &Event::Mouse(MouseEvent {
+                    kind: MouseEventKind::Down(MouseButton::Left),
+                    column,
+                    row,
+                    modifiers: KeyModifiers::NONE,
+                }),
+                &registry,
+            );
+        };
+        let mut buf = draw(&mut agent);
+        if find_phrase(&buf, area, phrase).is_none() {
+            let tab = match agent.active_modal.as_ref() {
+                Some(crate::views::modal::ActiveModal::Limits { state }) => {
+                    state.window.tab_rects[CREDITS_TAB]
+                }
+                _ => None,
+            };
+            if let Some(tab) = tab {
+                click_at(&mut agent, tab.x, tab.y);
+                buf = draw(&mut agent);
+            }
+            if find_phrase(&buf, area, phrase).is_none() {
+                let tab = match agent.active_modal.as_ref() {
+                    Some(crate::views::modal::ActiveModal::Limits { state }) => {
+                        state.window.tab_rects[LIMITS_TAB]
+                    }
+                    _ => None,
+                };
+                if let Some(tab) = tab {
+                    click_at(&mut agent, tab.x, tab.y);
+                    buf = draw(&mut agent);
+                }
+            }
+        }
+        let Some((column, row)) = find_phrase(&buf, area, phrase) else {
+            panic!(
+                "owed: {owed} The cell `{phrase}` is not clickable yet. A left click must write both pins through the card path. This test does not call select_supergrok_meter_cell."
+            );
+        };
+        click_at(&mut agent, column, row);
+        seeded
+    }
+
+    fn assert_other_three_snapshot_values(home: &std::path::Path) {
+        let doc = xai_grok_shell::auth::read_limits_snapshot_file(home).expect("snapshot stored");
+        let personal = doc
+            .identities
+            .iter()
+            .find(|row| row.identity_id == CELL_PERSONAL_ID)
+            .expect("personal row");
+        let business = doc
+            .identities
+            .iter()
+            .find(|row| row.identity_id == CELL_BUSINESS_ID)
+            .expect("business row");
+        assert_eq!(personal.usage_pct, Some(CELL_PERSONAL_PCT));
+        assert_eq!(personal.dollar_credits_cents, Some(CELL_PERSONAL_CENTS));
+        assert_eq!(business.usage_pct, Some(CELL_BUSINESS_PCT));
+        assert_eq!(business.dollar_credits_cents, Some(CELL_BUSINESS_CENTS));
+        let management = doc.management.expect("management meters stay stored");
+        assert_eq!(management.prepaid_cents, Some(CELL_CONSOLE_CENTS));
+        assert_eq!(management.billing_credits_cents, Some(CELL_POSTPAID_CENTS));
+    }
+
+    fn sampler_starting_on(token: &str) -> xai_grok_shell::sampling::SamplerConfig {
+        use xai_grok_shell::sampling::SamplerConfig;
+        SamplerConfig {
+            api_key: Some(token.into()),
+            failover_api_keys: vec![
+                CELL_PERSONAL_TOKEN.into(),
+                CELL_TEAM_TOKEN.into(),
+                "console-not-this-cell".into(),
+            ],
+            base_url: "https://cli-chat-proxy.grok.com/v1".into(),
+            model: "grok-4".into(),
+            session_identity_key: Some(token.into()),
+            failover_base_url: Some("https://api.x.ai/v1".into()),
+            session_base_url: Some("https://cli-chat-proxy.grok.com/v1".into()),
+            ..Default::default()
+        }
+    }
+
+    /// A left click on Personal limits writes both pins through the card.
+    #[test]
+    #[serial_test::serial]
+    fn clicking_personal_limits_writes_the_personal_included_pin() {
+        use xai_grok_shell::auth::SupergrokIdentityPin;
+        use xai_grok_shell::auth::limits_pins::{
+            MeterSource, apply_limits_pins_to_sampler_config, load_limits_pins,
+            next_request_draws_included_period_limits, pinned_supergrok_row,
+        };
+
+        let owed = "A left click on Personal limits selects included SuperGrok period limits for the personal session. The header can paint limits 28% from that session's creditUsagePercent. The next request sends the personal session. use_console is false.";
+        let seeded = left_click_meter_cell(owed, "Personal limits", None);
+        let pins = load_limits_pins();
+        assert!(
+            seeded.home.path().join("limits_pins.json").exists(),
+            "owed: {owed}"
+        );
+        assert_eq!(
+            pins.meter_source,
+            Some(MeterSource::Included),
+            "owed: {owed}"
+        );
+        assert_eq!(
+            pins.supergrok_identity,
+            Some(SupergrokIdentityPin::Personal),
+            "owed: {owed}"
+        );
+        assert!(!pins.use_console, "owed: {owed}");
+        assert!(pins.stay_supergrok, "owed: {owed}");
+        assert!(next_request_draws_included_period_limits(), "owed: {owed}");
+        let mut config = sampler_starting_on(CELL_TEAM_TOKEN);
+        apply_limits_pins_to_sampler_config(&mut config);
+        assert_eq!(
+            config.api_key.as_deref(),
+            Some(CELL_PERSONAL_TOKEN),
+            "owed: {owed}"
+        );
+        assert_ne!(config.api_key.as_deref(), Some("console-not-this-cell"));
+        assert!(
+            config.base_url.contains("cli-chat-proxy"),
+            "owed: {owed} base_url={}",
+            config.base_url
+        );
+        assert!(
+            !config.base_url.contains("api.x.ai"),
+            "owed: {owed} The click does not hop to the console API key. base_url={}",
+            config.base_url
+        );
+        let row = pinned_supergrok_row().unwrap_or_else(|| panic!("owed: {owed}"));
+        assert_eq!(row.usage_pct, Some(CELL_PERSONAL_PCT), "owed: {owed}");
+        assert_ne!(row.usage_pct, Some(99.0), "owed: {owed}");
+        assert_ne!(row.usage_pct, Some(CELL_BUSINESS_PCT), "owed: {owed}");
+        assert_other_three_snapshot_values(seeded.home.path());
+    }
+
+    /// A left click on Personal credits writes both pins through the card.
+    #[test]
+    #[serial_test::serial]
+    fn clicking_personal_credits_writes_the_personal_dollar_pin() {
+        use xai_grok_shell::auth::SupergrokIdentityPin;
+        use xai_grok_shell::auth::limits_pins::{
+            MeterSource, apply_limits_pins_to_sampler_config, load_limits_pins,
+            next_request_draws_included_period_limits, pinned_supergrok_row,
+        };
+
+        let owed = "A left click on Personal credits selects that session's SuperGrok dollar credits (prepaidBalance.val). The fixture figure is $87.65. That is not console team prepaid and not team postpaid Billing Credits. use_console is false.";
+        let seeded = left_click_meter_cell(owed, "Personal credits", None);
+        let pins = load_limits_pins();
+        assert_eq!(
+            pins.meter_source,
+            Some(MeterSource::DollarCredits),
+            "owed: {owed}"
+        );
+        assert_ne!(
+            pins.meter_source,
+            Some(MeterSource::Console),
+            "owed: {owed}"
+        );
+        assert_eq!(
+            pins.supergrok_identity,
+            Some(SupergrokIdentityPin::Personal),
+            "owed: {owed}"
+        );
+        assert!(!pins.use_console, "owed: {owed}");
+        assert!(pins.stay_supergrok, "owed: {owed}");
+        assert!(!next_request_draws_included_period_limits(), "owed: {owed}");
+        let mut config = sampler_starting_on(CELL_TEAM_TOKEN);
+        apply_limits_pins_to_sampler_config(&mut config);
+        assert_eq!(
+            config.api_key.as_deref(),
+            Some(CELL_PERSONAL_TOKEN),
+            "owed: {owed}"
+        );
+        assert_ne!(config.api_key.as_deref(), Some("console-not-this-cell"));
+        assert!(
+            config.base_url.contains("cli-chat-proxy"),
+            "owed: {owed} base_url={}",
+            config.base_url
+        );
+        let row = pinned_supergrok_row().unwrap_or_else(|| panic!("owed: {owed}"));
+        assert_eq!(
+            row.dollar_credits_cents,
+            Some(CELL_PERSONAL_CENTS),
+            "owed: {owed} The fixture figure is $87.65."
+        );
+        assert_ne!(
+            row.dollar_credits_cents,
+            Some(CELL_CONSOLE_CENTS),
+            "owed: {owed}"
+        );
+        assert_ne!(
+            row.dollar_credits_cents,
+            Some(CELL_POSTPAID_CENTS),
+            "owed: {owed}"
+        );
+        assert_ne!(
+            row.dollar_credits_cents,
+            Some(CELL_POSTPAID_DECOY_CENTS),
+            "owed: {owed}"
+        );
+        assert_ne!(
+            row.dollar_credits_cents,
+            Some(CELL_BUSINESS_CENTS),
+            "owed: {owed}"
+        );
+        assert_other_three_snapshot_values(seeded.home.path());
+    }
+
+    /// A left click on Business limits writes both pins through the card.
+    #[test]
+    #[serial_test::serial]
+    fn clicking_business_limits_writes_the_team_included_pin() {
+        use xai_grok_shell::auth::SupergrokIdentityPin;
+        use xai_grok_shell::auth::limits_pins::{
+            MeterSource, apply_limits_pins_to_sampler_config, load_limits_pins,
+            next_request_draws_included_period_limits, pinned_supergrok_row,
+        };
+
+        let owed = "A left click on Business limits selects the Team session's included SuperGrok period limits. The fixture figure is limits 41%. The next request sends the Team session. use_console is false. The click does not hop to the console API key.";
+        let seeded = left_click_meter_cell(owed, "Business limits", None);
+        let pins = load_limits_pins();
+        assert_eq!(
+            pins.meter_source,
+            Some(MeterSource::Included),
+            "owed: {owed}"
+        );
+        assert_eq!(
+            pins.supergrok_identity,
+            Some(SupergrokIdentityPin::Business),
+            "owed: {owed}"
+        );
+        assert!(!pins.use_console, "owed: {owed}");
+        assert!(pins.stay_supergrok, "owed: {owed}");
+        assert!(next_request_draws_included_period_limits(), "owed: {owed}");
+        let mut config = sampler_starting_on(CELL_PERSONAL_TOKEN);
+        apply_limits_pins_to_sampler_config(&mut config);
+        assert_eq!(
+            config.api_key.as_deref(),
+            Some(CELL_TEAM_TOKEN),
+            "owed: {owed}"
+        );
+        assert_ne!(
+            config.api_key.as_deref(),
+            Some(CELL_PERSONAL_TOKEN),
+            "owed: {owed}"
+        );
+        assert_ne!(config.api_key.as_deref(), Some("console-not-this-cell"));
+        assert!(
+            config.base_url.contains("cli-chat-proxy"),
+            "owed: {owed} base_url={}",
+            config.base_url
+        );
+        assert!(
+            !config.base_url.contains("api.x.ai"),
+            "owed: {owed} The click does not hop to the console API key."
+        );
+        let row = pinned_supergrok_row().unwrap_or_else(|| panic!("owed: {owed}"));
+        assert_eq!(row.usage_pct, Some(CELL_BUSINESS_PCT), "owed: {owed}");
+        assert_ne!(row.usage_pct, Some(CELL_PERSONAL_PCT), "owed: {owed}");
+        assert_ne!(row.usage_pct, Some(99.0), "owed: {owed}");
+        assert_other_three_snapshot_values(seeded.home.path());
+    }
+
+    /// A left click on Business credits writes both pins through the card.
+    #[test]
+    #[serial_test::serial]
+    fn clicking_business_credits_writes_the_team_dollar_pin() {
+        use xai_grok_shell::auth::SupergrokIdentityPin;
+        use xai_grok_shell::auth::limits_pins::{
+            MeterSource, apply_limits_pins_to_sampler_config, load_limits_pins,
+            next_request_draws_included_period_limits, pinned_supergrok_row,
+        };
+
+        let owed = "A left click on Business credits selects the Team session's SuperGrok dollar credits (prepaidBalance.val). The fixture figure is $21.99. That is not team postpaid Billing Credits $47.03 or $442.97 and not console team prepaid $154.20. use_console is false.";
+        let seeded = left_click_meter_cell(owed, "Business credits", None);
+        let pins = load_limits_pins();
+        assert_eq!(
+            pins.meter_source,
+            Some(MeterSource::DollarCredits),
+            "owed: {owed}"
+        );
+        assert_ne!(
+            pins.meter_source,
+            Some(MeterSource::Console),
+            "owed: {owed}"
+        );
+        assert_eq!(
+            pins.supergrok_identity,
+            Some(SupergrokIdentityPin::Business),
+            "owed: {owed}"
+        );
+        assert!(!pins.use_console, "owed: {owed}");
+        assert!(pins.stay_supergrok, "owed: {owed}");
+        assert!(!next_request_draws_included_period_limits(), "owed: {owed}");
+        let mut config = sampler_starting_on(CELL_PERSONAL_TOKEN);
+        apply_limits_pins_to_sampler_config(&mut config);
+        assert_eq!(
+            config.api_key.as_deref(),
+            Some(CELL_TEAM_TOKEN),
+            "owed: {owed}"
+        );
+        assert_ne!(
+            config.api_key.as_deref(),
+            Some(CELL_PERSONAL_TOKEN),
+            "owed: {owed}"
+        );
+        assert_ne!(config.api_key.as_deref(), Some("console-not-this-cell"));
+        assert!(
+            config.base_url.contains("cli-chat-proxy"),
+            "owed: {owed} base_url={}",
+            config.base_url
+        );
+        let row = pinned_supergrok_row().unwrap_or_else(|| panic!("owed: {owed}"));
+        assert_eq!(
+            row.dollar_credits_cents,
+            Some(CELL_BUSINESS_CENTS),
+            "owed: {owed} The fixture figure is $21.99."
+        );
+        assert_ne!(
+            row.dollar_credits_cents,
+            Some(CELL_PERSONAL_CENTS),
+            "owed: {owed}"
+        );
+        assert_ne!(
+            row.dollar_credits_cents,
+            Some(CELL_CONSOLE_CENTS),
+            "owed: {owed}"
+        );
+        assert_ne!(
+            row.dollar_credits_cents,
+            Some(CELL_POSTPAID_CENTS),
+            "owed: {owed}"
+        );
+        assert_ne!(
+            row.dollar_credits_cents,
+            Some(CELL_POSTPAID_DECOY_CENTS),
+            "owed: {owed}"
+        );
+        assert_other_three_snapshot_values(seeded.home.path());
+    }
+
+    /// preferred_method api_key still lets a Business limits click write both pins.
+    #[test]
+    #[serial_test::serial]
+    fn clicking_business_limits_writes_both_pins_when_preferred_method_is_api_key() {
+        use xai_grok_shell::auth::SupergrokIdentityPin;
+        use xai_grok_shell::auth::limits_pins::{
+            MeterSource, apply_limits_pins_to_sampler_config, load_limits_pins,
+            next_request_draws_included_period_limits, pinned_supergrok_row,
+        };
+
+        let owed = "preferred_method is api_key. A left click on Business limits still writes the meter pin and the identity pin. use_console stays false. The click is not blocked by preferred_method.";
+        let seeded = left_click_meter_cell(
+            owed,
+            "Business limits",
+            Some("[auth]\npreferred_method = \"api_key\"\n"),
+        );
+        let config_text = std::fs::read_to_string(seeded.home.path().join("config.toml"))
+            .expect("config.toml stays");
+        assert!(
+            config_text.contains("preferred_method = \"api_key\""),
+            "owed: {owed}"
+        );
+        let pins = load_limits_pins();
+        assert!(
+            seeded.home.path().join("limits_pins.json").exists(),
+            "owed: {owed} The click is not blocked by preferred_method."
+        );
+        assert_eq!(
+            pins.meter_source,
+            Some(MeterSource::Included),
+            "owed: {owed}"
+        );
+        assert_eq!(
+            pins.supergrok_identity,
+            Some(SupergrokIdentityPin::Business),
+            "owed: {owed}"
+        );
+        assert!(!pins.use_console, "owed: {owed}");
+        assert!(pins.stay_supergrok, "owed: {owed}");
+        assert!(next_request_draws_included_period_limits(), "owed: {owed}");
+        let mut config = sampler_starting_on(CELL_PERSONAL_TOKEN);
+        apply_limits_pins_to_sampler_config(&mut config);
+        assert_eq!(
+            config.api_key.as_deref(),
+            Some(CELL_TEAM_TOKEN),
+            "owed: {owed}"
+        );
+        assert_ne!(config.api_key.as_deref(), Some("console-not-this-cell"));
+        assert!(
+            config.base_url.contains("cli-chat-proxy"),
+            "owed: {owed} The click does not hop to the console API key."
+        );
+        let row = pinned_supergrok_row().unwrap_or_else(|| panic!("owed: {owed}"));
+        assert_eq!(row.usage_pct, Some(CELL_BUSINESS_PCT), "owed: {owed}");
+        assert_other_three_snapshot_values(seeded.home.path());
     }
 }

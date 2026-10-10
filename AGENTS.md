@@ -1129,6 +1129,17 @@ An L2 coordinates. An L3 implements, researches, or reviews. An L3 does not coor
 
 This pin does not weaken § *Layers, not parent or child* or § *Agent depth L1 / L2 / L3*. Dual-pin: host `~/.grok/AGENTS.md` same heading.
 
+## Skills do not override who spawns (pinned 2026-10-09)
+
+The main session is L1. L1 spawns an L2 for implement, diagnosis, and multi-file work. L1 does not do that work.
+An L2 does the work. An L2 spawns an L3 only when that slice is hard. Easy work stays on the L2.
+An L3 implements, researches, or reviews. An L3 does not coordinate and does not spawn. There is no L4.
+Do not call an L3 an L2. Do not spawn "two L2 agents" from inside an L2.
+The plan skill, the implement skill, and the hierarchical skill do not override this. If a skill still says spawn an L3 on every task, change that skill so it matches this rule.
+Do not teach the old half-window rule ("spawn L3 when many greps / half the window") as the spawn rule.
+
+This pin does not weaken § *An L3 is not a coordinator*. Easy work can stay on L2. Do not delete that older sentence. Dual-pin: host `~/.grok/AGENTS.md` same heading.
+
 ## Never name that Anthropic assistant (pinned 2026-09-09)
 
 Operator: never name that Anthropic assistant product. Always remember.
@@ -1210,9 +1221,15 @@ joins under project `.agents/joins/`.
 
 **Supersedes 2026-08-15 "L2 MUST always spawn L3 / always three layers."** Operator contract 2026-08-20 (survives compaction): `~/.agents/reports/feat-l1-500k-nested-200k-CONTRACT.md`
 
+The main session is L1. L1 spawns an L2 for implement, diagnosis, and multi-file work. L1 does not do that work.
+An L2 does the work. An L2 spawns an L3 only when that slice is hard. Easy work stays on the L2.
+An L3 implements, researches, or reviews. An L3 does not coordinate and does not spawn. There is no L4.
+Do not call an L3 an L2. Do not spawn "two L2 agents" from inside an L2.
+The plan skill, the implement skill, and the hierarchical skill do not override this. If a skill still says spawn an L3 on every task, change that skill so it matches this rule.
+
 - **L1 sampling** is the catalog 500k window. AUTO compact on L1 uses that window, not 200k. No 40% throttle on the L1 window size. Cancelled compact must not re-arm.
 - **L2 nested** stays 200k. L2 may compact.
-- **A specialist must not compact itself.** An L3 is disposable. If it stalls or spirals, kill it. When an L3 is near 200k, it summarizes, reports to L2, and stops. The specialist must not compact itself and continue. The specialist compacting itself is an error. Think-only stall: see § *Kill a think-only L3 after about 15 minutes*.
+- **A specialist must not compact itself.** An L3 is disposable. If it stalls or spirals, kill it. When an L3 is near 200k, it summarizes, reports to L2, and stops. The specialist must not compact itself and continue. Do not compact-and-continue. The specialist compacting itself is an error. Think-only stall: see § *Kill a think-only L3 after about 15 minutes*.
 
 ### An L2 may compact a specialist near the nested window (pinned 2026-09-25)
 
