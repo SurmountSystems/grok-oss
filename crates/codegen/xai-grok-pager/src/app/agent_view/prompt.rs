@@ -22,12 +22,25 @@ fn composer_cursor_at_end_of_last_line(prompt: &PromptWidget) -> bool {
 }
 
 impl AgentView {
-    /// Shift-Enter, the four bare arrows, Ctrl-Left, Ctrl-Right, and
-    /// Ctrl-Backspace on a plan prompt use the same composer path as the
-    /// main composer. Bare Left and Right stay one cell. Control on those
-    /// two keys is word motion. Up and Down stay bare, so a modified
-    /// vertical arrow still belongs to the plan list.
+    /// Shift-Enter, the four bare arrows, Ctrl-Left, Ctrl-Right,
+    /// Ctrl-Backspace, Y, and Shift+Y on a plan prompt use the same
+    /// composer path as the main composer. Y is text in that prompt. It
+    /// is not the plan-pane copy command. Lowercase y on an empty plan
+    /// preview still copies the plan. Bare Left and Right stay one cell.
+    /// Control on those two keys is word motion. Up and Down stay bare,
+    /// so a modified vertical arrow still belongs to the plan list.
     pub(super) fn plan_prompt_key_reaches_main_composer(key: &KeyEvent) -> bool {
+        // Char('Y'), Shift+Y, and Shift on an already-uppercase Y all insert Y.
+        let bare_or_shift = key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT;
+        if bare_or_shift
+            && match key.code {
+                KeyCode::Char('Y') => true,
+                KeyCode::Char('y') => key.modifiers == KeyModifiers::SHIFT,
+                _ => false,
+            }
+        {
+            return true;
+        }
         if crate::input::is_mod_enter(key) {
             return true;
         }
@@ -729,6 +742,21 @@ impl AgentView {
                         }
                     }
                     if let Some(text) = self.prompt.try_send() {
+                        // Plan mode sends the attached image with the notes.
+                        // SendPrompt is text only, so the planner would not see the chip.
+                        if self.plan_mode_active && !self.prompt.images.is_empty() {
+                            self.prompt_input_mode = PromptInputMode::Normal;
+                            if self.interjection_is_appropriate() {
+                                let images = self.prompt.drain_images();
+                                self.prompt.set_text("");
+                                self.note_draft_consumed();
+                                return InputOutcome::Action(Action::Interject {
+                                    text: text.trim().to_string(),
+                                    images,
+                                });
+                            }
+                            return InputOutcome::Action(self.send_now_action_from_composer());
+                        }
                         // Remember mode with slash_accepted_send: treat as normal SendPrompt (the slash path accepted a no-arg command)
                         let action_mode = if self.prompt_input_mode == PromptInputMode::Remember
                             && slash_accepted_send
@@ -3197,6 +3225,155 @@ mod shared_prompt_key_tests {
         assert!(
             misses.is_empty(),
             "Ctrl-Left and Ctrl-Right must move by a word, and plain Left and Right must move one cell:\n{}",
+            misses.join("\n")
+        );
+    }
+
+    fn empty_main_prompt() -> super::AgentView {
+        let mut agent = test_fixtures::make_agent();
+        agent.plan_mode_active = false;
+        agent.line_viewer = None;
+        agent.plan_approval_view = None;
+        agent.active_pane = super::AgentPane::Prompt;
+        agent
+    }
+
+    /// Plan mode with the plan pane open. Preview focus is where a copy
+    /// shortcut can take Y before the planning prompt inserts it.
+    fn empty_planning_prompt() -> super::AgentView {
+        let mut agent = test_fixtures::make_agent();
+        agent.plan_mode_active = true;
+        agent.active_pane = super::AgentPane::Prompt;
+        agent.plan_approval_view = Some(test_fixtures::make_plan_approval_view_state());
+        let Some(mut viewer) =
+            LineViewerState::open_markdown_content("plan.md", "# Plan\n\nStep\n".to_owned(), None)
+        else {
+            panic!("the planning prompt must open the plan pane");
+        };
+        viewer.kind = LineViewerKind::PlanPreview;
+        agent.line_viewer = Some(viewer);
+        assert!(
+            agent
+                .plan_approval_view
+                .as_ref()
+                .is_some_and(|pav| pav.focus == PlanApprovalFocus::Preview),
+            "the planning prompt starts on the plan pane"
+        );
+        assert!(
+            agent.prompt.text().is_empty(),
+            "the planning prompt starts empty so Y is an insert"
+        );
+        agent
+    }
+
+    fn press_char(agent: &mut super::AgentView, key: KeyEvent) {
+        let registry = ActionRegistry::non_vscode_for_test();
+        let _ = agent.handle_input(&Event::Key(key), &registry);
+    }
+
+    fn assert_straight_lower_left_after_y(agent: &mut super::AgentView, surface: &str) {
+        let _theme = crate::theme::cache::pin_theme();
+        let area = ratatui::layout::Rect::new(0, 0, 100, 40);
+        let mut buf = ratatui::buffer::Buffer::empty(area);
+        let mut scratch = crate::scrollback::render::ScratchBuffer::new();
+        let _ = agent.draw(
+            area,
+            &mut buf,
+            &ActionRegistry::defaults(),
+            &mut scratch,
+            None,
+            false,
+            crate::app::agent_view::BannerSlotParams::none(),
+            false,
+            false,
+            &mut Vec::new(),
+            crate::app::agent_view::AppRenderParams::default(),
+        );
+        let prompt = agent.pane_areas.prompt;
+        assert!(
+            prompt.width > 4 && prompt.height > 2,
+            "{surface}: the prompt input is open after Y; got {prompt:?}"
+        );
+        let rounded = ["\u{256d}", "\u{256e}", "\u{2570}", "\u{256f}"];
+        let mut painted_rounded = Vec::new();
+        for y in prompt.y..prompt.y.saturating_add(prompt.height) {
+            for x in prompt.x..prompt.x.saturating_add(prompt.width) {
+                if let Some(cell) = buf.cell((x, y))
+                    && rounded.contains(&cell.symbol())
+                {
+                    painted_rounded.push(cell.symbol().to_string());
+                }
+            }
+        }
+        assert!(
+            painted_rounded.is_empty(),
+            "{surface}: after Y, the prompt input keeps a straight lower-left corner └. \
+             This draw paints rounded corners {painted_rounded:?}"
+        );
+        let bottom = prompt.y.saturating_add(prompt.height).saturating_sub(1);
+        let lower_left = buf
+            .cell((prompt.x, bottom))
+            .map(|cell| cell.symbol().to_string())
+            .unwrap_or_default();
+        assert_eq!(
+            lower_left, "\u{2514}",
+            "{surface}: after Y, the prompt's lower-left cell is └"
+        );
+        let next = buf
+            .cell((prompt.x.saturating_add(1), bottom))
+            .map(|cell| cell.symbol().to_string())
+            .unwrap_or_default();
+        assert_eq!(
+            next, "\u{2500}",
+            "{surface}: after Y, the lower border row stays intact, got {next:?}"
+        );
+    }
+
+    /// The character Y and Shift+Y both insert Y in the main prompt and in
+    /// the planning prompt. The key is not swallowed by a shortcut. After Y,
+    /// the lower-left prompt corner stays └.
+    #[test]
+    fn character_y_and_shift_y_insert_y_in_the_main_prompt_and_the_planning_prompt() {
+        let keys = [
+            ("Y", KeyEvent::new(KeyCode::Char('Y'), KeyModifiers::NONE)),
+            (
+                "Shift+Y",
+                KeyEvent::new(KeyCode::Char('y'), KeyModifiers::SHIFT),
+            ),
+            (
+                "Shift+Y uppercase",
+                KeyEvent::new(KeyCode::Char('Y'), KeyModifiers::SHIFT),
+            ),
+        ];
+        let mut misses = Vec::new();
+        for (name, key) in keys {
+            let mut main = empty_main_prompt();
+            press_char(&mut main, key);
+            if main.prompt.text() != "Y" {
+                misses.push(format!(
+                    "main prompt {name} must insert Y, got {:?}",
+                    main.prompt.text()
+                ));
+            } else {
+                assert_straight_lower_left_after_y(&mut main, &format!("main prompt {name}"));
+            }
+            let mut planning = empty_planning_prompt();
+            press_char(&mut planning, key);
+            if planning.prompt.text() != "Y" {
+                misses.push(format!(
+                    "planning prompt {name} must insert Y and must not swallow the key, got {:?}",
+                    planning.prompt.text()
+                ));
+            } else {
+                assert_straight_lower_left_after_y(
+                    &mut planning,
+                    &format!("planning prompt {name}"),
+                );
+            }
+        }
+        assert!(
+            misses.is_empty(),
+            "Y and Shift+Y insert Y in the main prompt and in the planning prompt:\n{}",
             misses.join("\n")
         );
     }

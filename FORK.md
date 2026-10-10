@@ -2320,6 +2320,8 @@ user-guide [`08-skills.md`](crates/codegen/xai-grok-pager/docs/user-guide/08-ski
 
 `what_and_subagent_skills_read_output_tokens_not_a_null_zero` requires `/what` and `/subagent` to call `local_usage_events_for_session` and to use that row's `output_tokens` as the reconcile cell.
 
+The bundled plan skill and the plan-mode reminder start disjoint contracts together. Named test: `plan_instructions_start_disjoint_contracts_together`.
+
 **Process pins that must survive recon** (import / onto): document in **FORK +
 AGENTS + product user-guide** when product-facing; **dual-pin** host skills
 (`~/.agents`) when operator-only. Host skill git alone does not ride product

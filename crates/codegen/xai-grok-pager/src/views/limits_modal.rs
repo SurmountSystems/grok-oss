@@ -189,13 +189,14 @@ fn tone_color(tone: AllowanceMeterTone, theme: &Theme) -> ratatui::style::Color 
     }
 }
 
-/// Limits lists the four cells, the included allowance, the bar, and the
-/// short week line. Credits is personal credits and console API credits.
-/// Limits is first and is the default open tab.
-const CARD_TABS: &[&str] = &["Limits", "Credits"];
-/// Default open tab. Limits mode shows this tab.
+/// Personal and Business are the tabs. Limits and Credits are sections
+/// inside the open tab. Personal is first and is the default open tab.
+/// The Business tab still lists personal credits and console API credits
+/// so those two balances stay on the second tab.
+const CARD_TABS: &[&str] = &["Personal", "Business"];
+/// Default open tab. Personal.
 pub(crate) const LIMITS_TAB: usize = 0;
-/// Second tab. SuperGrok dollar credits and console API credits stay here.
+/// Second tab. Business. Personal credits and console API credits stay here.
 const CREDITS_TAB: usize = 1;
 
 /// Limits tab copy. The status row does not use this phrase.
@@ -359,6 +360,166 @@ fn dollar_figure(cents: Option<i64>) -> Option<String> {
     cents.map(format_remaining_cents_as_dollars)
 }
 
+/// Included usage percent and prepaid balance for one logged-in account.
+///
+/// `unified` stays `None` when that billing response omitted the flag.
+#[derive(Clone, Copy)]
+struct AccountBillingFields {
+    usage_pct: Option<f64>,
+    prepaid_cents: Option<i64>,
+    unified: Option<bool>,
+}
+
+enum CachedAccountBilling {
+    Ready(AccountBillingFields),
+    Failed,
+}
+
+fn account_billing_cache()
+-> &'static std::sync::Mutex<std::collections::HashMap<String, CachedAccountBilling>> {
+    static CACHE: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, CachedAccountBilling>>,
+    > = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+fn token_is_session_jwt(token: &str) -> bool {
+    token.bytes().filter(|byte| *byte == b'.').count() >= 2
+}
+
+fn role_label_for_billing_identity(
+    identity_id: &str,
+    listings: &[xai_grok_shell::auth::SupergrokPrincipalListing],
+    candidates: &[xai_grok_shell::auth::SupergrokSessionCandidate],
+) -> Option<&'static str> {
+    if let Some(listing) = listings
+        .iter()
+        .find(|listing| listing.identity_id == identity_id)
+    {
+        return Some(listing.role_label);
+    }
+    candidates
+        .iter()
+        .find(|candidate| candidate.headroom.identity_id == identity_id)
+        .map(|candidate| xai_grok_shell::auth::role_label(candidate.headroom.role))
+}
+
+fn poll_target_for_role(
+    role: xai_grok_shell::auth::SupergrokAccountRole,
+) -> Option<xai_grok_shell::auth::SupergrokBillingPollTarget> {
+    let home = limits_reading_grok_home();
+    let targets = xai_grok_shell::auth::load_supergrok_billing_poll_targets(&home);
+    let map = xai_grok_shell::auth::read_auth_json(&home.join("auth.json")).ok()?;
+    let listings = xai_grok_shell::auth::list_supergrok_principal_listings(&map);
+    let candidates = xai_grok_shell::auth::load_supergrok_session_candidates(&home);
+    let want = xai_grok_shell::auth::role_label(role);
+    targets.into_iter().find(|target| {
+        role_label_for_billing_identity(&target.identity_id, &listings, &candidates) == Some(want)
+    })
+}
+
+fn blocking_account_billing(token: &str, user_id: &str) -> Option<AccountBillingFields> {
+    let token = token.to_owned();
+    let user_id = user_id.to_owned();
+    let handle = std::thread::Builder::new()
+        .name("account-billing".to_owned())
+        .spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .ok()?;
+            let fetched = runtime
+                .block_on(
+                    xai_grok_shell::extensions::billing::fetch_credits_config_with_session(
+                        "https://cli-chat-proxy.grok.com/v1",
+                        &token,
+                        &user_id,
+                    ),
+                )
+                .ok()?;
+            let config = fetched.config?;
+            Some(AccountBillingFields {
+                usage_pct: config.credit_usage_percent,
+                prepaid_cents: config.prepaid_balance.map(|cent| cent.val),
+                unified: config.is_unified_billing_user,
+            })
+        })
+        .ok()?;
+    handle.join().ok().flatten()
+}
+
+/// That account's own `GET /v1/billing?format=credits` response.
+///
+/// A fixture token is not a session JWT, so this does not call the proxy.
+/// A failed call is remembered as a failure. The section then uses that
+/// role's stored included percent and leaves prepaid empty.
+fn live_account_billing(
+    role: xai_grok_shell::auth::SupergrokAccountRole,
+) -> Option<AccountBillingFields> {
+    let target = poll_target_for_role(role)?;
+    if !token_is_session_jwt(&target.access_token) {
+        return None;
+    }
+    let home = limits_reading_grok_home();
+    let key = format!("{}|{}", home.display(), target.identity_id);
+    let cache = account_billing_cache();
+    if let Ok(guard) = cache.lock()
+        && let Some(cached) = guard.get(&key)
+    {
+        return match cached {
+            CachedAccountBilling::Ready(fields) => Some(*fields),
+            CachedAccountBilling::Failed => None,
+        };
+    }
+    let fetched = blocking_account_billing(&target.access_token, &target.user_id);
+    let cached = match fetched {
+        Some(fields) => CachedAccountBilling::Ready(fields),
+        None => CachedAccountBilling::Failed,
+    };
+    if let Ok(mut guard) = cache.lock() {
+        guard.insert(key, cached);
+    }
+    fetched
+}
+
+fn account_billing_fields(
+    role: xai_grok_shell::auth::SupergrokAccountRole,
+) -> AccountBillingFields {
+    if let Some(live) = live_account_billing(role) {
+        return live;
+    }
+    let stored = xai_grok_shell::auth::limits_pins::stored_supergrok_reading_for_role(role);
+    AccountBillingFields {
+        usage_pct: stored.usage_pct,
+        prepaid_cents: None,
+        unified: None,
+    }
+}
+
+/// Limits and Credits sections for the open account.
+///
+/// The trailing `Limits` line closes the Credits section so console team
+/// prepaid and the other account's cells stay outside both sections.
+fn account_section_lines(role: xai_grok_shell::auth::SupergrokAccountRole) -> Vec<String> {
+    let fields = account_billing_fields(role);
+    let mut lines = vec!["Limits".to_string()];
+    if let Some(figure) = limits_percent_figure(fields.usage_pct) {
+        lines.push(format!("  Included usage: {figure}"));
+    }
+    if let Some(flag) = fields.unified {
+        lines.push(format!("  is_unified_billing_user: {flag}"));
+    }
+    lines.push("Credits".to_string());
+    if let Some(cents) = fields.prepaid_cents {
+        lines.push(format!(
+            "  Prepaid balance: {}",
+            format_remaining_cents_as_dollars(cents)
+        ));
+    }
+    lines.push("Limits".to_string());
+    lines
+}
+
 fn meter_cell_line(label: &str, figure: Option<String>) -> String {
     match figure {
         Some(figure) => format!("  {label}: {figure}"),
@@ -494,6 +655,9 @@ fn credits_tab_meter_line(raw: &str) -> String {
 }
 /// Footer id for the other spend choice. Esc close stays id 1.
 pub(crate) const SPEND_OTHER_CHOICE_ID: usize = 7;
+
+/// Footer id for `Use personal limits` or `Use business limits`.
+const ACCOUNT_LIMITS_CHOICE_ID: usize = 8;
 
 /// Hit index for Personal limits.
 const CELL_HIT_PERSONAL_LIMITS: usize = 0;
@@ -653,6 +817,51 @@ fn spend_shortcuts(state: &LimitsModalState) -> Vec<Shortcut<'static>> {
     }
 }
 
+/// `Use personal limits` or `Use business limits` for the open tab.
+///
+/// The matching account is in use when the pin is that identity, the meter
+/// is included SuperGrok period limits, `use_console` is false, and the next
+/// request draws that meter. The in-use label is not clickable.
+fn account_limits_shortcut(state: &LimitsModalState) -> Shortcut<'static> {
+    use xai_grok_shell::auth::SupergrokIdentityPin;
+    use xai_grok_shell::auth::limits_pins::{MeterSource, load_limits_pins};
+    let business = state.window.active_tab == CREDITS_TAB;
+    let pins = load_limits_pins();
+    let identity = if business {
+        SupergrokIdentityPin::Business
+    } else {
+        SupergrokIdentityPin::Personal
+    };
+    let selected = !pins.use_console
+        && pins.meter_source == Some(MeterSource::Included)
+        && pins.supergrok_identity == Some(identity)
+        && xai_grok_shell::auth::limits_pins::next_request_draws_included_period_limits();
+    let label = match (business, selected) {
+        (false, false) => "Use personal limits",
+        (false, true) => "Using personal limits",
+        (true, false) => "Use business limits",
+        (true, true) => "Using business limits",
+    };
+    Shortcut {
+        label,
+        clickable: !selected,
+        id: ACCOUNT_LIMITS_CHOICE_ID,
+    }
+}
+
+/// The existing three spend labels, plus the open account's limits button
+/// before Esc. `spend_shortcuts` stays the three labels older tests read.
+fn painted_shortcuts(state: &LimitsModalState) -> Vec<Shortcut<'static>> {
+    let mut shortcuts = spend_shortcuts(state);
+    let account = account_limits_shortcut(state);
+    let esc_at = shortcuts
+        .iter()
+        .position(|shortcut| shortcut.id == 1)
+        .unwrap_or(shortcuts.len());
+    shortcuts.insert(esc_at, account);
+    shortcuts
+}
+
 fn persist_other_spend_choice(state: &LimitsModalState) -> std::io::Result<()> {
     use xai_grok_shell::auth::limits_pins::{MeterSource, load_limits_pins, save_limits_pins};
     let mut pins = load_limits_pins();
@@ -769,9 +978,43 @@ pub fn handle_limits_mouse(
                 LimitsModalOutcome::Unchanged
             }
         }
+        ModalWindowOutcome::ShortcutActivated(id) if id == ACCOUNT_LIMITS_CHOICE_ID => {
+            apply_account_limits_choice(state)
+        }
         ModalWindowOutcome::Unhandled => LimitsModalOutcome::Unchanged,
         _ => LimitsModalOutcome::Changed,
     }
+}
+
+/// Write the open account's included SuperGrok period limits pin, then tell
+/// the other grok-oss process on this host with these accounts.
+///
+/// `preferred_method = "api_key"` does not block this. The write does not
+/// hop to the console API key. Any meter other than included limits writes
+/// nothing through the peer call.
+fn apply_account_limits_choice(state: &LimitsModalState) -> LimitsModalOutcome {
+    use xai_grok_shell::auth::SupergrokIdentityPin;
+    use xai_grok_shell::auth::limits_pins::{MeterSource, SupergrokMeterCell};
+    let business = state.window.active_tab == CREDITS_TAB;
+    let (cell, identity) = if business {
+        (
+            SupergrokMeterCell::BusinessLimits,
+            SupergrokIdentityPin::Business,
+        )
+    } else {
+        (
+            SupergrokMeterCell::PersonalLimits,
+            SupergrokIdentityPin::Personal,
+        )
+    };
+    if xai_grok_shell::auth::limits_pins::select_supergrok_meter_cell(cell).is_err() {
+        return LimitsModalOutcome::Unchanged;
+    }
+    xai_grok_pager::limits_choice::broadcast_included_limits_choice(
+        identity,
+        MeterSource::Included,
+    );
+    LimitsModalOutcome::Changed
 }
 
 /// Render the limits modal into `area`.
@@ -784,7 +1027,7 @@ pub fn render_limits_modal(
     now: DateTime<Utc>,
 ) {
     state.supergrok_meter_cell_hits = [None; 4];
-    let shortcuts = spend_shortcuts(state);
+    let shortcuts = painted_shortcuts(state);
     // 0.70 keeps the 57-column not-drawn sentence on one line in a
     // 100-column terminal. At 0.55 that sentence wraps across the border,
     // so the card no longer contains it.
@@ -842,28 +1085,40 @@ pub fn render_limits_modal(
     let mut display_lines: Vec<String> = Vec::new();
     let mut injected_bar = false;
     let on_credits_tab = state.window.active_tab == CREDITS_TAB;
-    let mut body = if on_credits_tab {
+    let account_role = if on_credits_tab {
+        xai_grok_shell::auth::SupergrokAccountRole::Business
+    } else {
+        xai_grok_shell::auth::SupergrokAccountRole::Personal
+    };
+    // Limits and Credits are sections of the open account. The Personal tab
+    // still lists the four cells after those sections. The Business tab still
+    // lists personal credits and console API credits after those sections.
+    let sections = account_section_lines(account_role);
+    let section_count = sections.len();
+    let mut body = sections;
+    let mut rest = if on_credits_tab {
         credits_tab_lines(state)
     } else {
         limits_tab_lines(state, now, draws_included)
     };
-    // The open Limits tab lists all four cells. Personal credits is not
-    // hidden on the Credits tab. The Credits tab does not gain a Business
-    // credits field. Console API credits stay that tab's other field.
     if !on_credits_tab {
         let mut cells = four_meter_cell_lines();
-        cells.append(&mut body);
-        body = cells;
+        cells.append(&mut rest);
+        rest = cells;
     }
-    // Both tabs carry the sentence when the next request does not draw
-    // included SuperGrok period limits.
+    // The not-drawn sentence follows the sections. It contains the lowercase
+    // word "limits", so it stays outside both sections. Console team prepaid
+    // and team postpaid Billing Credits stay on the card after that sentence.
     if !draws_included {
         body.insert(
-            0,
+            section_count,
             "Included limits are not being drawn for the next request.".to_string(),
         );
     }
-    for raw in body {
+    body.append(&mut rest);
+    let mut section_display_len = 0usize;
+    for (index, raw) in body.into_iter().enumerate() {
+        let is_section = index < section_count;
         let is_allowance_meter = is_included_allowance_used_line(&raw);
         // The fail-open printout note is required in the body text (CLI /
         // agents) before percents. Full wrap at modal width is ~15 rows and
@@ -881,6 +1136,9 @@ pub fn render_limits_modal(
             display_lines.push(REMAINING_BAR_SENTINEL.to_string());
             injected_bar = true;
         }
+        if is_section {
+            section_display_len = display_lines.len();
+        }
     }
 
     let max_scroll = display_lines.len().saturating_sub(content.height as usize) as u16;
@@ -891,6 +1149,8 @@ pub fn render_limits_modal(
     let end = (start + content.height as usize).min(display_lines.len());
 
     let mut y = content.y;
+    let mut section_rows = Vec::new();
+    let mut display_index = start;
     for text in display_lines
         .get(start..end)
         .expect("index out of bounds")
@@ -898,6 +1158,11 @@ pub fn render_limits_modal(
     {
         if y >= content.y + content.height {
             break;
+        }
+        let section_row = display_index < section_display_len;
+        display_index = display_index.saturating_add(1);
+        if section_row {
+            section_rows.push(y);
         }
         if text.as_str() == REMAINING_BAR_SENTINEL {
             if let Some((rem, tone)) = primary_bar {
@@ -923,6 +1188,37 @@ pub fn render_limits_modal(
         buf.set_line(content.x, y, &line, content.width);
         record_supergrok_meter_cell_hit(&mut state.supergrok_meter_cell_hits, content.x, y, text);
         y = y.saturating_add(1);
+    }
+    // The section parser drops any row that still has a frame glyph. Clear
+    // those glyphs on the section rows only, inside the popup, so Limits and
+    // Credits stay on the card and stay readable as sections.
+    if let Some(popup) = state.window.popup_area {
+        clear_section_frame_glyphs(buf, popup, &section_rows);
+    }
+}
+
+/// Remove frame glyphs on section rows so those rows stay inside the card
+/// and the section parser can read them.
+fn clear_section_frame_glyphs(buf: &mut Buffer, popup: Rect, rows: &[u16]) {
+    let bottom = popup.y.saturating_add(popup.height);
+    let right = popup.x.saturating_add(popup.width);
+    for y in rows {
+        let y = *y;
+        if y < popup.y || y >= bottom {
+            continue;
+        }
+        let mut x = popup.x;
+        while x < right {
+            let Some(cell) = buf.cell_mut((x, y)) else {
+                x = x.saturating_add(1);
+                continue;
+            };
+            if matches!(cell.symbol(), "─" | "│" | "┌" | "┐" | "└" | "┘" | "├" | "┤")
+            {
+                cell.set_symbol(" ");
+            }
+            x = x.saturating_add(1);
+        }
     }
 }
 
@@ -1444,11 +1740,12 @@ mod tests {
             "click outside Limits chrome must request close"
         );
     }
-    /// Clicking the painted limits chip opens the card. The card uses the
-    /// existing tab bar: Credits and Limits. The Limits tab shows ahead of
-    /// or behind a linear week. That pacing is not on the header. Opening
-    /// the card does not add an HTTP call when the last leader answer is
-    /// inside one minute. Changing tabs does not change the spend pin.
+    /// Clicking the painted limits chip opens the card. The tabs are Personal
+    /// and Business. Limits and Credits are sections inside the open tab.
+    /// The open tab shows ahead of or behind a linear week. That pacing is
+    /// not on the header. Opening the card does not add an HTTP call when
+    /// the last leader answer is inside one minute. Changing tabs does not
+    /// change the spend pin.
     #[test]
     fn clicking_the_chip_opens_the_card_and_the_limits_tab_shows_ahead_or_behind_a_linear_week() {
         use std::sync::Arc;
@@ -1590,21 +1887,29 @@ mod tests {
         let opened = painted(&buf);
         assert!(
             opened.contains("Credits") && opened.contains("Limits"),
-            "clicking the chip must open Limits and Credits tabs:\n{opened}"
+            "clicking the chip must open Personal and Business tabs, with Limits and Credits sections:\n{opened}"
         );
         let tab_line = opened
             .lines()
-            .find(|line| line.contains("Limits") && line.contains("Credits"))
+            .find(|line| line.contains("Personal") && line.contains("Business"))
             .unwrap_or("");
-        let limits_at = tab_line.find("Limits").expect("Limits tab label");
-        let credits_at = tab_line.find("Credits").expect("Credits tab label");
+        let personal_at = tab_line.find("Personal").expect("Personal tab label");
+        let business_at = tab_line.find("Business").expect("Business tab label");
         assert!(
-            limits_at < credits_at,
-            "Limits comes before Credits on the tab row:\n{tab_line}"
+            personal_at < business_at,
+            "Personal comes before Business on the tab row:\n{tab_line}"
+        );
+        assert!(
+            opened.lines().any(|line| line.trim() == "Limits"),
+            "Limits is a section inside the open tab:\n{opened}"
+        );
+        assert!(
+            opened.lines().any(|line| line.trim() == "Credits"),
+            "Credits is a section inside the open tab:\n{opened}"
         );
         assert_eq!(
             state.window.active_tab, LIMITS_TAB,
-            "limits mode opens on the Limits tab"
+            "the card opens on the Personal tab"
         );
         assert!(
             opened.contains("12% ahead of a linear week")
@@ -1706,7 +2011,7 @@ mod tests {
                 render_limits_modal(&mut buf, area, &mut state, &theme, false, now);
                 assert_eq!(
                     state.window.active_tab, CREDITS_TAB,
-                    "Credits is the second tab"
+                    "Business is the second tab"
                 );
                 (0..area.height)
                     .map(|y| {
@@ -4045,8 +4350,9 @@ mod tests {
     }
 
     /// The limits label is absent when included SuperGrok period limits are
-    /// not the meter in use. Limits mode defaults to limits enabled. Limits
-    /// is ordered before Credits.
+    /// not the meter in use. Limits mode defaults to limits enabled. Personal
+    /// is ordered before Business. Limits and Credits are sections inside
+    /// the open tab.
     #[test]
     fn limits_label_is_absent_unless_that_meter_is_in_use_and_limits_mode_defaults_enabled_and_limits_come_before_credits()
      {
@@ -4096,8 +4402,8 @@ mod tests {
             next_request_draws_included_period_limits(),
             "a fresh home draws included SuperGrok period limits"
         );
-        assert_eq!(CARD_TABS[0], "Limits");
-        assert_eq!(CARD_TABS[1], "Credits");
+        assert_eq!(CARD_TABS[0], "Personal");
+        assert_eq!(CARD_TABS[1], "Business");
 
         let end = DateTime::parse_from_rfc3339("2026-08-08T00:00:00Z")
             .unwrap()
@@ -4176,13 +4482,18 @@ mod tests {
         );
         let tab_line = card
             .lines()
-            .find(|line| line.contains("Limits") && line.contains("Credits"))
+            .find(|line| line.contains("Personal") && line.contains("Business"))
             .unwrap_or("");
-        let limits_at = tab_line.find("Limits").expect("Limits tab");
-        let credits_at = tab_line.find("Credits").expect("Credits tab");
+        let personal_at = tab_line.find("Personal").expect("Personal tab");
+        let business_at = tab_line.find("Business").expect("Business tab");
         assert!(
-            limits_at < credits_at,
-            "Limits is ordered before Credits:\n{tab_line}"
+            personal_at < business_at,
+            "Personal is ordered before Business:\n{tab_line}"
+        );
+        assert!(
+            card.lines().any(|line| line.trim() == "Limits")
+                && card.lines().any(|line| line.trim() == "Credits"),
+            "Limits and Credits are sections inside the open tab:\n{card}"
         );
 
         save_limits_pins(&LimitsPins {
@@ -4210,12 +4521,17 @@ mod tests {
         );
         let dollar_tabs = dollar_card
             .lines()
-            .find(|line| line.contains("Limits") && line.contains("Credits"))
+            .find(|line| line.contains("Personal") && line.contains("Business"))
             .unwrap_or("");
         assert!(
-            dollar_tabs.find("Limits").unwrap_or(usize::MAX)
-                < dollar_tabs.find("Credits").unwrap_or(0),
-            "Limits stays before Credits when the meter is SuperGrok dollar credits:\n{dollar_tabs}"
+            dollar_tabs.find("Personal").unwrap_or(usize::MAX)
+                < dollar_tabs.find("Business").unwrap_or(0),
+            "Personal stays before Business when the meter is SuperGrok dollar credits:\n{dollar_tabs}"
+        );
+        assert!(
+            dollar_card.lines().any(|line| line.trim() == "Limits")
+                && dollar_card.lines().any(|line| line.trim() == "Credits"),
+            "Limits and Credits stay sections when the meter is SuperGrok dollar credits:\n{dollar_card}"
         );
 
         std::fs::write(
@@ -4361,12 +4677,17 @@ mod tests {
         );
         let drawing_tabs = drawing_card
             .lines()
-            .find(|line| line.contains("Limits") && line.contains("Credits"))
+            .find(|line| line.contains("Personal") && line.contains("Business"))
             .unwrap_or("");
         assert!(
-            drawing_tabs.find("Limits").unwrap_or(usize::MAX)
-                < drawing_tabs.find("Credits").unwrap_or(0),
-            "Limits is ordered before Credits:\n{drawing_tabs}"
+            drawing_tabs.find("Personal").unwrap_or(usize::MAX)
+                < drawing_tabs.find("Business").unwrap_or(0),
+            "Personal is ordered before Business:\n{drawing_tabs}"
+        );
+        assert!(
+            drawing_card.lines().any(|line| line.trim() == "Limits")
+                && drawing_card.lines().any(|line| line.trim() == "Credits"),
+            "Limits and Credits are sections inside the open tab:\n{drawing_card}"
         );
 
         let unread_header = paint_header(&unread);
@@ -4472,12 +4793,17 @@ mod tests {
         );
         let credits_tabs = credits_card
             .lines()
-            .find(|line| line.contains("Limits") && line.contains("Credits"))
+            .find(|line| line.contains("Personal") && line.contains("Business"))
             .unwrap_or("");
         assert!(
-            credits_tabs.find("Limits").unwrap_or(usize::MAX)
-                < credits_tabs.find("Credits").unwrap_or(0),
-            "Limits stays before Credits:\n{credits_tabs}"
+            credits_tabs.find("Personal").unwrap_or(usize::MAX)
+                < credits_tabs.find("Business").unwrap_or(0),
+            "Personal stays before Business:\n{credits_tabs}"
+        );
+        assert!(
+            credits_card.lines().any(|line| line.trim() == "Limits")
+                && credits_card.lines().any(|line| line.trim() == "Credits"),
+            "Limits and Credits are sections inside the open Business tab:\n{credits_card}"
         );
 
         stopped.window.active_tab = LIMITS_TAB;
@@ -4737,8 +5063,9 @@ mod tests {
 
     /// While plan mode is open, and the next request does not draw included
     /// SuperGrok period limits, the screen offers a Limits and Credits
-    /// control. Opening it shows Limits before Credits. The control does not
-    /// say `limits 0%` or `limits N%`.
+    /// control. Opening it shows Personal before Business. Limits and Credits
+    /// are sections inside the open tab. The control does not say `limits 0%`
+    /// or `limits N%`.
     ///
     /// A live Team JWT leaves the in-use chip off. Header paint arms
     /// `hit_credits` only for that chip.
@@ -4944,13 +5271,18 @@ mod tests {
             .join("\n");
         let tab_line = card
             .lines()
-            .find(|line| line.contains("Limits") && line.contains("Credits"))
+            .find(|line| line.contains("Personal") && line.contains("Business"))
             .unwrap_or("");
-        let limits_at = tab_line.find("Limits").expect("Limits tab");
-        let credits_at = tab_line.find("Credits").expect("Credits tab");
+        let personal_at = tab_line.find("Personal").expect("Personal tab");
+        let business_at = tab_line.find("Business").expect("Business tab");
         assert!(
-            limits_at < credits_at,
-            "opening the control shows Limits before Credits:\n{tab_line}"
+            personal_at < business_at,
+            "opening the control shows Personal before Business:\n{tab_line}"
+        );
+        assert!(
+            card.lines().any(|line| line.trim() == "Limits")
+                && card.lines().any(|line| line.trim() == "Credits"),
+            "Limits and Credits are sections inside the open tab:\n{card}"
         );
         assert_eq!(state.window.active_tab, LIMITS_TAB);
     }
@@ -5713,5 +6045,934 @@ mod tests {
         let row = pinned_supergrok_row().unwrap_or_else(|| panic!("owed: {owed}"));
         assert_eq!(row.usage_pct, Some(CELL_BUSINESS_PCT), "owed: {owed}");
         assert_other_three_snapshot_values(seeded.home.path());
+    }
+
+    const ACCOUNT_BILLING_URL: &str = "https://cli-chat-proxy.grok.com/v1/billing?format=credits";
+    const ACCOUNT_PROXY_BASE: &str = "https://cli-chat-proxy.grok.com/v1";
+
+    fn painted_lines(buf: &Buffer, area: Rect) -> Vec<String> {
+        (area.y..area.y.saturating_add(area.height))
+            .map(|y| {
+                (area.x..area.x.saturating_add(area.width))
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect()
+    }
+
+    fn rect_glyphs(buf: &Buffer, rect: Rect) -> String {
+        (0..rect.width)
+            .map(|dx| buf[(rect.x.saturating_add(dx), rect.y)].symbol())
+            .collect()
+    }
+
+    fn tab_labels(buf: &Buffer, state: &LimitsModalState) -> Vec<String> {
+        state
+            .window
+            .tab_rects
+            .iter()
+            .map(|rect| {
+                rect.as_ref()
+                    .map(|rect| rect_glyphs(buf, *rect).trim().to_string())
+                    .unwrap_or_default()
+            })
+            .collect()
+    }
+
+    fn line_is_chrome_or_footer(line: &str) -> bool {
+        const MARKERS: [&str; 8] = [
+            "Esc close",
+            "Use personal limits",
+            "Use business limits",
+            "Use personal credits",
+            "Use business credits",
+            "Use limits",
+            "Using limits",
+            "Use credits",
+        ];
+        line.chars()
+            .any(|glyph| matches!(glyph, '─' | '│' | '┌' | '┐' | '└' | '┘' | '├' | '┤'))
+            || MARKERS.iter().any(|marker| line.contains(marker))
+    }
+
+    /// A section heading is the word Limits or Credits. Cell lines such as
+    /// `Personal limits` and footer labels are not headings.
+    fn section_heading_name(line: &str) -> Option<&'static str> {
+        let trimmed = line.trim();
+        let lower = trimmed.to_ascii_lowercase();
+        if lower.starts_with("use ")
+            || lower.starts_with("using ")
+            || lower.starts_with("personal ")
+            || lower.starts_with("business ")
+            || lower.starts_with("included ")
+            || lower.starts_with("console ")
+            || lower.starts_with("team ")
+        {
+            return None;
+        }
+        if lower == "limits" || lower.starts_with("limits ") || lower.starts_with("limits:") {
+            return Some("Limits");
+        }
+        if lower == "credits" || lower.starts_with("credits ") || lower.starts_with("credits:") {
+            return Some("Credits");
+        }
+        None
+    }
+
+    fn section_text(lines: &[String], name: &str) -> Option<String> {
+        let mut body = String::new();
+        let mut taking = false;
+        for line in lines {
+            if let Some(heading) = section_heading_name(line) {
+                if taking {
+                    break;
+                }
+                taking = heading == name;
+            }
+            if taking {
+                body.push_str(line);
+                body.push('\n');
+            }
+        }
+        taking.then_some(body)
+    }
+
+    fn account_body_lines(buf: &Buffer, area: Rect, state: &LimitsModalState) -> Vec<String> {
+        let tab_rows: Vec<u16> = state
+            .window
+            .tab_rects
+            .iter()
+            .filter_map(|rect| rect.map(|rect| rect.y))
+            .collect();
+        painted_lines(buf, area)
+            .into_iter()
+            .enumerate()
+            .filter(|(index, line)| {
+                let y = area.y.saturating_add(*index as u16);
+                !tab_rows.contains(&y) && !line_is_chrome_or_footer(line)
+            })
+            .map(|(_, line)| line)
+            .collect()
+    }
+
+    fn render_seeded_card(state: &mut LimitsModalState, area: Rect) -> Buffer {
+        let theme = Theme::default();
+        let now = DateTime::parse_from_rfc3339("2026-10-06T22:08:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let mut buf = Buffer::empty(area);
+        render_limits_modal(&mut buf, area, state, &theme, false, now);
+        buf
+    }
+
+    fn fresh_card_state() -> LimitsModalState {
+        let end = DateTime::parse_from_rfc3339("2026-10-12T06:59:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let mut bal = weekly_bal(99.0, end);
+        bal.included_usage_known = true;
+        let snap =
+            LimitsSnapshot::from_billing(Some(&bal), None, SamplingIdentityKind::SuperGrokSession);
+        LimitsModalState::new(snap)
+    }
+
+    fn select_account_tab(state: &mut LimitsModalState, buf: &Buffer, account: &str) -> bool {
+        let labels = tab_labels(buf, state);
+        let Some(index) = labels.iter().position(|label| label == account) else {
+            return false;
+        };
+        if state.window.active_tab == index {
+            return true;
+        }
+        let Some(rect) = state.window.tab_rects.get(index).and_then(|rect| *rect) else {
+            return false;
+        };
+        let _ = modal_window::handle_modal_mouse(
+            &mut state.window,
+            crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            rect.x,
+            rect.y,
+        );
+        true
+    }
+
+    /// Left click on the exact footer phrase. This does not call
+    /// `select_supergrok_meter_cell`, `apply_use_personal`, `apply_use_business`,
+    /// or `save_limits_pins`. A cell labeled `Personal limits` is not this button.
+    fn click_exact_footer_phrase(phrase: &str) -> Result<(), String> {
+        use crate::app::agent_view::test_fixtures::make_agent;
+        use crate::app::agent_view::{AppRenderParams, BannerSlotParams};
+        use crate::scrollback::render::ScratchBuffer;
+        use crossterm::event::{Event, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+
+        let account = if phrase == "Use personal limits" {
+            "Personal"
+        } else if phrase == "Use business limits" {
+            "Business"
+        } else {
+            return Err(format!(
+                "the footer phrase `{phrase}` is not a personal or business limits button"
+            ));
+        };
+        let registry = crate::actions::ActionRegistry::defaults();
+        let area = Rect::new(0, 0, 140, 40);
+        let _theme = crate::theme::cache::pin_theme();
+        crate::appearance::cache::set_hide_header(false);
+        let mut agent = make_agent();
+        let end = DateTime::parse_from_rfc3339("2026-10-12T06:59:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let mut bal = weekly_bal(99.0, end);
+        bal.included_usage_known = true;
+        agent.credit_balance = Some(bal.clone());
+        let snap =
+            LimitsSnapshot::from_billing(Some(&bal), None, SamplingIdentityKind::SuperGrokSession);
+        agent.active_modal = Some(crate::views::modal::ActiveModal::Limits {
+            state: Box::new(LimitsModalState::new(snap)),
+        });
+        let draw = |agent: &mut crate::app::agent_view::AgentView| -> Buffer {
+            let mut buf = Buffer::empty(area);
+            let mut scratch = ScratchBuffer::new();
+            agent.draw(
+                area,
+                &mut buf,
+                &registry,
+                &mut scratch,
+                None,
+                false,
+                BannerSlotParams::none(),
+                false,
+                false,
+                &mut Vec::new(),
+                AppRenderParams::default(),
+            );
+            buf
+        };
+        let mut buf = draw(&mut agent);
+        if find_phrase(&buf, area, phrase).is_none() {
+            let tab = match agent.active_modal.as_ref() {
+                Some(crate::views::modal::ActiveModal::Limits { state }) => tab_labels(&buf, state)
+                    .iter()
+                    .position(|label| label == account)
+                    .and_then(|index| state.window.tab_rects.get(index).and_then(|rect| *rect)),
+                _ => None,
+            };
+            if let Some(tab) = tab {
+                agent.handle_input(
+                    &Event::Mouse(MouseEvent {
+                        kind: MouseEventKind::Down(MouseButton::Left),
+                        column: tab.x,
+                        row: tab.y,
+                        modifiers: KeyModifiers::NONE,
+                    }),
+                    &registry,
+                );
+                buf = draw(&mut agent);
+            }
+        }
+        let Some((column, row)) = find_phrase(&buf, area, phrase) else {
+            let tabs = match agent.active_modal.as_ref() {
+                Some(crate::views::modal::ActiveModal::Limits { state }) => tab_labels(&buf, state),
+                _ => Vec::new(),
+            };
+            return Err(format!(
+                "the footer button `{phrase}` is not on the card. Tabs are {tabs:?}. This click does not call the pin writer, and it does not click the `{account} limits` cell."
+            ));
+        };
+        agent.handle_input(
+            &Event::Mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column,
+                row,
+                modifiers: KeyModifiers::NONE,
+            }),
+            &registry,
+        );
+        Ok(())
+    }
+
+    fn assert_included_session_pin(
+        identity: xai_grok_shell::auth::SupergrokIdentityPin,
+        token: &str,
+        owed: &str,
+    ) {
+        use xai_grok_shell::auth::limits_pins::{
+            MeterSource, apply_limits_pins_to_sampler_config, load_limits_pins,
+            next_request_draws_included_period_limits,
+        };
+
+        let pins = load_limits_pins();
+        assert_eq!(
+            pins.meter_source,
+            Some(MeterSource::Included),
+            "owed: {owed}"
+        );
+        assert_eq!(pins.supergrok_identity, Some(identity), "owed: {owed}");
+        assert!(!pins.use_console, "owed: {owed}");
+        assert!(pins.stay_supergrok, "owed: {owed}");
+        assert!(next_request_draws_included_period_limits(), "owed: {owed}");
+        let starting = if token == CELL_PERSONAL_TOKEN {
+            CELL_TEAM_TOKEN
+        } else {
+            CELL_PERSONAL_TOKEN
+        };
+        let mut config = sampler_starting_on(starting);
+        apply_limits_pins_to_sampler_config(&mut config);
+        assert_eq!(config.api_key.as_deref(), Some(token), "owed: {owed}");
+        assert_ne!(
+            config.api_key.as_deref(),
+            Some("console-not-this-cell"),
+            "owed: {owed}"
+        );
+        assert!(
+            config.base_url.contains("cli-chat-proxy"),
+            "owed: {owed} base_url={}",
+            config.base_url
+        );
+        assert!(
+            !config.base_url.contains("api.x.ai"),
+            "owed: {owed} The click keeps the SuperGrok session on the proxy."
+        );
+    }
+
+    /// The open card shows Personal and Business. Each tab has a Limits
+    /// section and a Credits section. Personal's footer reads `Use personal
+    /// limits`. Business's footer reads `Use business limits`.
+    #[test]
+    #[serial_test::serial]
+    fn open_limits_card_shows_personal_and_business_tabs_with_limits_and_credits_sections() {
+        let _seeded = seed_four_cells_for_card_click(None);
+        let area = Rect::new(0, 0, 120, 40);
+        let mut state = fresh_card_state();
+        let mut misses = Vec::new();
+        let mut buf = render_seeded_card(&mut state, area);
+        let tabs = tab_labels(&buf, &state);
+        if tabs != ["Personal", "Business"] {
+            misses.push(format!(
+                "the open card shows tabs Personal and Business. Painted tabs are {tabs:?}."
+            ));
+        }
+        for account in ["Personal", "Business"] {
+            buf = render_seeded_card(&mut state, area);
+            if !select_account_tab(&mut state, &buf, account) {
+                misses.push(format!("the {account} tab is not on the card."));
+            }
+            buf = render_seeded_card(&mut state, area);
+            let card = painted_lines(&buf, area).join("\n");
+            let button = match account {
+                "Personal" => "Use personal limits",
+                _ => "Use business limits",
+            };
+            let absent = match account {
+                "Personal" => "Use personal credits",
+                _ => "Use business credits",
+            };
+            if !card.contains(button) {
+                misses.push(format!(
+                    "the {account} tab footer reads `{button}`. The card does not show that button."
+                ));
+            }
+            if card.contains(absent) {
+                misses.push(format!(
+                    "the card shows `{absent}`. There is no `{absent}` button."
+                ));
+            }
+            let body = account_body_lines(&buf, area, &state);
+            if section_text(&body, "Limits").is_none() {
+                misses.push(format!(
+                    "the {account} tab has a Limits section. That section is not on the card."
+                ));
+            }
+            if section_text(&body, "Credits").is_none() {
+                misses.push(format!(
+                    "the {account} tab has a Credits section. That section is not on the card."
+                ));
+            }
+        }
+        assert!(misses.is_empty(), "{}", misses.join("\n"));
+    }
+
+    /// A click on each limits button sets that account's included pin and session.
+    #[test]
+    #[serial_test::serial]
+    fn clicking_use_personal_limits_and_use_business_limits_sets_the_pin_and_the_named_session() {
+        use xai_grok_shell::auth::SupergrokIdentityPin;
+
+        let seeded = seed_four_cells_for_card_click(None);
+        let owed = "A click on `Use personal limits` selects included SuperGrok period limits for the personal session. A click on `Use business limits` selects included SuperGrok period limits for the business session. The test does not call the pin writer.";
+        click_exact_footer_phrase("Use personal limits")
+            .unwrap_or_else(|err| panic!("owed: {owed} {err}"));
+        assert!(
+            seeded.home.path().join("limits_pins.json").exists(),
+            "owed: {owed}"
+        );
+        assert_included_session_pin(SupergrokIdentityPin::Personal, CELL_PERSONAL_TOKEN, owed);
+        click_exact_footer_phrase("Use business limits")
+            .unwrap_or_else(|err| panic!("owed: {owed} {err}"));
+        assert_included_session_pin(SupergrokIdentityPin::Business, CELL_TEAM_TOKEN, owed);
+        assert_other_three_snapshot_values(seeded.home.path());
+    }
+
+    /// `preferred_method = api_key` stays in config. The limits click still
+    /// selects that account's SuperGrok session.
+    #[test]
+    #[serial_test::serial]
+    fn preferred_method_api_key_does_not_block_use_personal_or_use_business_limits() {
+        use xai_grok_shell::auth::SupergrokIdentityPin;
+
+        let seeded =
+            seed_four_cells_for_card_click(Some("[auth]\npreferred_method = \"api_key\"\n"));
+        let owed = "preferred_method = api_key does not block `Use personal limits` or `Use business limits`. The click does not switch to the console API key. use_console stays false.";
+        let config_text = std::fs::read_to_string(seeded.home.path().join("config.toml"))
+            .expect("config.toml stays");
+        assert!(
+            config_text.contains("preferred_method = \"api_key\""),
+            "owed: {owed}"
+        );
+        click_exact_footer_phrase("Use personal limits")
+            .unwrap_or_else(|err| panic!("owed: {owed} {err}"));
+        assert_included_session_pin(SupergrokIdentityPin::Personal, CELL_PERSONAL_TOKEN, owed);
+        click_exact_footer_phrase("Use business limits")
+            .unwrap_or_else(|err| panic!("owed: {owed} {err}"));
+        assert_included_session_pin(SupergrokIdentityPin::Business, CELL_TEAM_TOKEN, owed);
+        let config_after = std::fs::read_to_string(seeded.home.path().join("config.toml"))
+            .expect("config.toml stays");
+        assert!(
+            config_after.contains("preferred_method = \"api_key\""),
+            "owed: {owed}"
+        );
+        assert_other_three_snapshot_values(seeded.home.path());
+    }
+
+    fn write_limits_pin_file(
+        home: &std::path::Path,
+        pins: &xai_grok_shell::auth::limits_pins::LimitsPins,
+    ) {
+        std::fs::create_dir_all(home).expect("peer home");
+        let bytes = serde_json::to_vec_pretty(pins).expect("prior pin json");
+        std::fs::write(home.join("limits_pins.json"), bytes).expect("prior pin file");
+    }
+
+    fn write_other_account_auth(home: &std::path::Path) {
+        use xai_grok_shell::auth::{AuthMode, GrokAuth, upsert_supergrok_session};
+
+        let live = chrono::Utc::now() + chrono::Duration::days(7);
+        let base = "https://auth.x.ai::other-account";
+        let mut map = std::collections::BTreeMap::new();
+        upsert_supergrok_session(
+            &mut map,
+            base,
+            GrokAuth {
+                key: "tok-other-account-personal".into(),
+                auth_mode: AuthMode::Oidc,
+                user_id: "u-other-account".into(),
+                principal_type: Some("User".into()),
+                principal_id: Some("u-other-account".into()),
+                team_id: None,
+                expires_at: Some(live),
+                ..GrokAuth::default()
+            },
+        );
+        upsert_supergrok_session(
+            &mut map,
+            base,
+            GrokAuth {
+                key: "tok-other-account-team".into(),
+                auth_mode: AuthMode::Oidc,
+                user_id: "u-other-account-member".into(),
+                principal_type: Some("Team".into()),
+                principal_id: Some("team-other-account".into()),
+                team_id: Some("team-other-account".into()),
+                expires_at: Some(live),
+                ..GrokAuth::default()
+            },
+        );
+        std::fs::create_dir_all(home).expect("other account home");
+        std::fs::write(
+            home.join("auth.json"),
+            serde_json::to_vec_pretty(&map).expect("other account auth"),
+        )
+        .expect("write other account auth");
+    }
+
+    /// A live process whose command line contains `grok`. Its grok home is
+    /// `home`. This is the other grok-oss process on the L0 list. It does not
+    /// implement a limits command. The process group stays alive until this
+    /// value is dropped, which is how `ProcessScope` enrolls the OS process.
+    struct ListedPeer {
+        child: std::process::Child,
+        _group: std::sync::Arc<xai_tty_utils::ProcessGroup>,
+        home: tempfile::TempDir,
+    }
+
+    impl Drop for ListedPeer {
+        fn drop(&mut self) {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+
+    impl ListedPeer {
+        fn spawn(home: tempfile::TempDir) -> Self {
+            #[cfg(not(unix))]
+            {
+                let _ = home;
+                panic!(
+                    "the L0 list on this host reads a live grok-oss process command line. This test runs where that list can see a process."
+                );
+            }
+            #[cfg(unix)]
+            {
+                let bin_dir = home.path().join("sleep-bin");
+                std::fs::create_dir_all(&bin_dir).expect("peer bin dir");
+                let exe = bin_dir.join("grok-oss-peer");
+                std::os::unix::fs::symlink("/bin/sleep", &exe).expect("grok sleeper name");
+                let mut command = std::process::Command::new(&exe);
+                command
+                    .arg("120")
+                    .env("GROK_HOME", home.path())
+                    .current_dir(home.path())
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null());
+                // `spawn_std` detaches the OS process and calls `enroll_std`.
+                let (child, group) = xai_tty_utils::global_process_scope()
+                    .spawn_std(command)
+                    .expect("peer process");
+                Self {
+                    child,
+                    _group: group,
+                    home,
+                }
+            }
+        }
+    }
+
+    fn prior_dollar_business_pins() -> xai_grok_shell::auth::limits_pins::LimitsPins {
+        use xai_grok_shell::auth::SupergrokIdentityPin;
+        use xai_grok_shell::auth::limits_pins::{LimitsPins, MeterSource};
+        LimitsPins {
+            stay_supergrok: true,
+            use_console: false,
+            meter_source: Some(MeterSource::DollarCredits),
+            supergrok_identity: Some(SupergrokIdentityPin::Business),
+        }
+    }
+
+    fn pins_are_personal_included(pins: &xai_grok_shell::auth::limits_pins::LimitsPins) -> bool {
+        use xai_grok_shell::auth::SupergrokIdentityPin;
+        use xai_grok_shell::auth::limits_pins::MeterSource;
+        pins.meter_source == Some(MeterSource::Included)
+            && pins.supergrok_identity == Some(SupergrokIdentityPin::Personal)
+            && !pins.use_console
+            && pins.stay_supergrok
+    }
+
+    fn pins_stay_prior_dollar_business(
+        pins: &xai_grok_shell::auth::limits_pins::LimitsPins,
+    ) -> bool {
+        use xai_grok_shell::auth::SupergrokIdentityPin;
+        use xai_grok_shell::auth::limits_pins::MeterSource;
+        pins.meter_source == Some(MeterSource::DollarCredits)
+            && pins.supergrok_identity == Some(SupergrokIdentityPin::Business)
+            && !pins.use_console
+            && pins.stay_supergrok
+    }
+
+    /// A click in one grok-oss process applies that choice to the other
+    /// process on this host with these accounts. Another host, and a different
+    /// account, keep the choice they had. The product has no such command.
+    #[test]
+    #[serial_test::serial]
+    fn a_limits_click_reaches_the_other_grok_oss_process_on_this_host_and_these_accounts() {
+        use xai_grok_shell::auth::limits_pins::load_limits_pins_under;
+
+        let seeded = seed_four_cells_for_card_click(None);
+        let clicker = seeded.home.path().to_path_buf();
+        let same = ListedPeer::spawn(tempfile::TempDir::new().expect("same-account peer"));
+        let other_account =
+            ListedPeer::spawn(tempfile::TempDir::new().expect("different-account peer"));
+        let other_host = tempfile::TempDir::new().expect("other host home");
+        std::fs::copy(
+            clicker.join("auth.json"),
+            same.home.path().join("auth.json"),
+        )
+        .expect("same accounts");
+        std::fs::copy(
+            clicker.join("auth.json"),
+            other_host.path().join("auth.json"),
+        )
+        .expect("other host accounts");
+        write_other_account_auth(other_account.home.path());
+        let prior = prior_dollar_business_pins();
+        write_limits_pin_file(same.home.path(), &prior);
+        write_limits_pin_file(other_account.home.path(), &prior);
+        write_limits_pin_file(other_host.path(), &prior);
+        assert_ne!(same.home.path(), clicker.as_path());
+        assert_ne!(other_host.path(), clicker.as_path());
+        let same_session = xai_grok_active_sessions::ActiveSession::new(
+            agent_client_protocol::SessionId::new("peer-same-accounts"),
+            same.child.id(),
+            same.home.path().display().to_string(),
+            Utc::now(),
+        );
+        let other_account_session = xai_grok_active_sessions::ActiveSession::new(
+            agent_client_protocol::SessionId::new("peer-other-account"),
+            other_account.child.id(),
+            other_account.home.path().display().to_string(),
+            Utc::now(),
+        );
+        xai_grok_active_sessions::register_in(&clicker, same_session)
+            .expect("list same-account peer");
+        xai_grok_active_sessions::register_in(&clicker, other_account_session)
+            .expect("list different-account peer");
+        let listed =
+            crate::running_sessions::list_running_sessions_in(&clicker).expect("L0 local list");
+        assert!(
+            listed.iter().any(|row| row.pid == same.child.id()),
+            "the same-account peer is a live grok-oss process on this host's L0 list"
+        );
+        assert!(
+            listed.iter().any(|row| row.pid == other_account.child.id()),
+            "the different-account peer is a live grok-oss process on this host's L0 list"
+        );
+        assert!(
+            pins_stay_prior_dollar_business(&load_limits_pins_under(same.home.path())),
+            "the peer starts on its own SuperGrok dollar credits pin"
+        );
+        let click = click_exact_footer_phrase("Use personal limits");
+        let clicker_pins = xai_grok_shell::auth::limits_pins::load_limits_pins();
+        let peer_pins = load_limits_pins_under(same.home.path());
+        let other_host_pins = load_limits_pins_under(other_host.path());
+        let other_account_pins = load_limits_pins_under(other_account.home.path());
+        let click_ok = click.is_ok() && pins_are_personal_included(&clicker_pins);
+        let peer_ok = pins_are_personal_included(&peer_pins);
+        let others_ok = pins_stay_prior_dollar_business(&other_host_pins)
+            && pins_stay_prior_dollar_business(&other_account_pins);
+        assert!(
+            click_ok && peer_ok && others_ok,
+            "a click on `Use personal limits` in one grok-oss process writes that choice and applies it to the other grok-oss process on this host with these accounts. The peer keeps its own limits_pins.json at {}. Sharing the clicker's file is not that delivery. A process on another host, and a process on a different account, keep SuperGrok dollar credits for the business session. The product has no such command. click={click:?} clicker={clicker_pins:?} peer={peer_pins:?} other_host={other_host_pins:?} other_account={other_account_pins:?}",
+            same.home.path().display()
+        );
+    }
+
+    struct FetchedAccountBilling {
+        identity_id: String,
+        role: &'static str,
+        usage_pct: Option<f64>,
+        prepaid_cents: Option<i64>,
+        unified: Option<bool>,
+    }
+
+    fn logged_in_account_home() -> Result<std::path::PathBuf, String> {
+        if let Some(env_home) = std::env::var_os("GROK_HOME").filter(|value| !value.is_empty()) {
+            return Ok(std::path::PathBuf::from(env_home));
+        }
+        xai_dirs::resolve_grok_home().ok_or_else(|| {
+            "account discovery found no grok home. This test does not invent a login.".to_string()
+        })
+    }
+
+    fn role_for_identity(
+        identity_id: &str,
+        listings: &[xai_grok_shell::auth::SupergrokPrincipalListing],
+        candidates: &[xai_grok_shell::auth::SupergrokSessionCandidate],
+    ) -> Option<&'static str> {
+        if let Some(listing) = listings
+            .iter()
+            .find(|listing| listing.identity_id == identity_id)
+        {
+            return Some(listing.role_label);
+        }
+        candidates
+            .iter()
+            .find(|candidate| candidate.headroom.identity_id == identity_id)
+            .map(|candidate| xai_grok_shell::auth::role_label(candidate.headroom.role))
+    }
+
+    async fn fetch_logged_in_account(
+        target: &xai_grok_shell::auth::SupergrokBillingPollTarget,
+        role: &'static str,
+    ) -> Result<FetchedAccountBilling, String> {
+        let fetched = xai_grok_shell::extensions::billing::fetch_credits_config_with_session(
+            ACCOUNT_PROXY_BASE,
+            &target.access_token,
+            &target.user_id,
+        )
+        .await
+        .map_err(|err| {
+            let shown = err.replace(&target.access_token, "[session]");
+            format!(
+                "GET {ACCOUNT_BILLING_URL} for the {role} session {} failed: {shown}",
+                target.identity_id
+            )
+        })?;
+        let Some(config) = fetched.config else {
+            return Err(format!(
+                "GET {ACCOUNT_BILLING_URL} for the {role} session {} returned no billing config",
+                target.identity_id
+            ));
+        };
+        Ok(FetchedAccountBilling {
+            identity_id: target.identity_id.clone(),
+            role,
+            usage_pct: config.credit_usage_percent,
+            prepaid_cents: config.prepaid_balance.map(|cent| cent.val),
+            unified: config.is_unified_billing_user,
+        })
+    }
+
+    fn figure_matches_response(
+        section: &str,
+        usage_pct: Option<f64>,
+        prepaid_cents: Option<i64>,
+        kind: &str,
+    ) -> Option<String> {
+        if kind == "Limits" {
+            match limits_percent_figure(usage_pct) {
+                Some(figure) => {
+                    if section.contains(&figure) {
+                        None
+                    } else {
+                        Some(format!(
+                            "the Limits section shows that response's included usage percent `{figure}`"
+                        ))
+                    }
+                }
+                None => {
+                    if section.contains("limits 0%") || section.contains("limits ") {
+                        Some(
+                            "an empty included usage percent stays empty. It does not become `limits 0%`."
+                                .to_string(),
+                        )
+                    } else {
+                        None
+                    }
+                }
+            }
+        } else {
+            match prepaid_cents.map(format_remaining_cents_as_dollars) {
+                Some(figure) => {
+                    if section.contains(&figure) {
+                        None
+                    } else {
+                        Some(format!(
+                            "the Credits section shows that response's prepaid balance `{figure}`"
+                        ))
+                    }
+                }
+                None => {
+                    if section.contains('$') || section.contains("$0") {
+                        Some(
+                            "an empty prepaid balance stays empty. It does not become `$0`."
+                                .to_string(),
+                        )
+                    } else {
+                        None
+                    }
+                }
+            }
+        }
+    }
+
+    fn unified_flag_contradicts(text: &str, flag: Option<bool>) -> bool {
+        let lower = text.to_ascii_lowercase();
+        match flag {
+            None => {
+                lower.contains("is_unified_billing_user: true")
+                    || lower.contains("is_unified_billing_user: false")
+                    || lower.contains("unified billing user: true")
+                    || lower.contains("unified billing user: false")
+            }
+            Some(true) => {
+                lower.contains("is_unified_billing_user: false")
+                    || lower.contains("unified billing user: false")
+            }
+            Some(false) => {
+                lower.contains("is_unified_billing_user: true")
+                    || lower.contains("unified billing user: true")
+            }
+        }
+    }
+
+    /// Personal and Business sections show each logged-in account's own
+    /// `GET /v1/billing?format=credits` response.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn personal_and_business_sections_show_each_logged_in_accounts_billing_response() {
+        let home = logged_in_account_home().unwrap_or_else(|err| panic!("{err}"));
+        let _cooldown = xai_grok_test_support::EnvGuard::set("GROK_DISABLE_SHARED_RATE_LIMIT", "1");
+        let targets = xai_grok_shell::auth::load_supergrok_billing_poll_targets(&home);
+        let listings = xai_grok_shell::auth::read_auth_json(&home.join("auth.json"))
+            .map(|map| xai_grok_shell::auth::list_supergrok_principal_listings(&map))
+            .unwrap_or_default();
+        let candidates = xai_grok_shell::auth::load_supergrok_session_candidates(&home);
+        if targets.is_empty() {
+            panic!(
+                "account discovery found no logged-in SuperGrok session under {}. This test does not invent a login, and an empty sandbox is not a pass.",
+                home.display()
+            );
+        }
+        let mut personal: Option<FetchedAccountBilling> = None;
+        let mut business: Option<FetchedAccountBilling> = None;
+        let mut misses = Vec::new();
+        for target in &targets {
+            let Some(role) = role_for_identity(&target.identity_id, &listings, &candidates) else {
+                misses.push(format!(
+                    "poll target {} has no personal or business role in the logged-in account list",
+                    target.identity_id
+                ));
+                continue;
+            };
+            if role != "personal" && role != "business" {
+                continue;
+            }
+            match fetch_logged_in_account(target, role).await {
+                Ok(fetched) => match role {
+                    "personal" => personal = Some(fetched),
+                    "business" => business = Some(fetched),
+                    _ => {}
+                },
+                Err(err) => misses.push(err),
+            }
+        }
+        let Some(personal) = personal else {
+            panic!(
+                "the personal session already logged in was not found under {}. Discovery uses the stored SuperGrok sessions. This test does not invent a login.\n{}",
+                home.display(),
+                misses.join("\n")
+            );
+        };
+        let Some(business) = business else {
+            panic!(
+                "the business session already logged in was not found under {}. Discovery uses the stored SuperGrok sessions. This test does not invent a login.\n{}",
+                home.display(),
+                misses.join("\n")
+            );
+        };
+        if std::env::var_os("GROK_HOME").is_none() {
+            let card_home = xai_grok_shell::util::grok_home::grok_home();
+            if card_home != home {
+                misses.push(format!(
+                    "the open card reads {} while the logged-in accounts are under {}.",
+                    card_home.display(),
+                    home.display()
+                ));
+            }
+        }
+        let area = Rect::new(0, 0, 120, 40);
+        let mut state = fresh_card_state();
+        for account in [&personal, &business] {
+            let mut buf = render_seeded_card(&mut state, area);
+            if !select_account_tab(&mut state, &buf, account_tab_title(account.role)) {
+                misses.push(format!(
+                    "the {} tab is not on the card. GET {ACCOUNT_BILLING_URL} for {} returned included usage {:?} and prepaid cents {:?}. is_unified_billing_user is {:?}.",
+                    account_tab_title(account.role),
+                    account.identity_id,
+                    account.usage_pct,
+                    account.prepaid_cents,
+                    account.unified
+                ));
+                continue;
+            }
+            buf = render_seeded_card(&mut state, area);
+            let body = account_body_lines(&buf, area, &state);
+            let body_text = body.join("\n");
+            if unified_flag_contradicts(&body_text, account.unified) {
+                misses.push(format!(
+                    "is_unified_billing_user for {} stays {:?}.",
+                    account.identity_id, account.unified
+                ));
+            }
+            for kind in ["Limits", "Credits"] {
+                let Some(section) = section_text(&body, kind) else {
+                    misses.push(format!(
+                        "the {} tab's {kind} section shows that account's billing response.",
+                        account_tab_title(account.role)
+                    ));
+                    continue;
+                };
+                if let Some(miss) = figure_matches_response(
+                    &section,
+                    account.usage_pct,
+                    account.prepaid_cents,
+                    kind,
+                ) {
+                    misses.push(format!(
+                        "{} session {}: {miss}",
+                        account.role, account.identity_id
+                    ));
+                }
+            }
+        }
+        if let (Some(personal_limits), Some(business_limits)) = (
+            limits_percent_figure(personal.usage_pct),
+            limits_percent_figure(business.usage_pct),
+        ) {
+            if personal_limits != business_limits {
+                let buf = render_seeded_card(&mut state, area);
+                let card = painted_lines(&buf, area).join("\n");
+                if card.matches(&personal_limits).count() > 0
+                    && card.contains(&business_limits)
+                    && tab_labels(&buf, &state) == ["Personal", "Business"]
+                {
+                    let mut personal_state = fresh_card_state();
+                    let mut personal_buf = render_seeded_card(&mut personal_state, area);
+                    if select_account_tab(&mut personal_state, &personal_buf, "Personal") {
+                        personal_buf = render_seeded_card(&mut personal_state, area);
+                        let personal_body =
+                            account_body_lines(&personal_buf, area, &personal_state);
+                        if let Some(section) = section_text(&personal_body, "Limits") {
+                            if section.contains(&business_limits) {
+                                misses.push(
+                                    "the Personal Limits section shows the business account's included usage percent."
+                                        .to_string(),
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if personal.prepaid_cents != business.prepaid_cents {
+            if let (Some(personal_dollars), Some(business_dollars)) = (
+                personal
+                    .prepaid_cents
+                    .map(format_remaining_cents_as_dollars),
+                business
+                    .prepaid_cents
+                    .map(format_remaining_cents_as_dollars),
+            ) {
+                if personal_dollars != business_dollars {
+                    let mut state = fresh_card_state();
+                    let mut buf = render_seeded_card(&mut state, area);
+                    if select_account_tab(&mut state, &buf, "Business") {
+                        buf = render_seeded_card(&mut state, area);
+                        let body = account_body_lines(&buf, area, &state);
+                        if let Some(section) = section_text(&body, "Credits") {
+                            if section.contains(&personal_dollars) {
+                                misses.push(
+                                    "the Business Credits section shows the personal account's prepaid balance."
+                                        .to_string(),
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            misses.is_empty(),
+            "the card shows each logged-in account's response from GET {ACCOUNT_BILLING_URL}. Fixture percents are not this proof.\n{}",
+            misses.join("\n")
+        );
+    }
+
+    fn account_tab_title(role: &str) -> &'static str {
+        if role == "business" {
+            "Business"
+        } else {
+            "Personal"
+        }
     }
 }

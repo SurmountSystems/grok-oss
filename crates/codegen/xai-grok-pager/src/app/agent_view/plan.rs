@@ -2219,6 +2219,12 @@ impl AgentView {
                 let panel_open = self.line_viewer.is_some();
                 if is_commenting {
                     if panel_open {
+                        // A line comment still saves and keeps the chip.
+                        // Comment intent sends the notes and the image so
+                        // the planner sees the paste.
+                        if self.planning_comment_sends_attached_image() {
+                            return self.send_planning_comment_with_attached_image();
+                        }
                         return self.save_plan_comment();
                     }
                     // Line-comment save needs the pane. Shut panel: send
@@ -2432,6 +2438,38 @@ impl AgentView {
         }
         InputOutcome::Changed
     }
+
+    /// Comment hub with a pasted image. Line-comment save (Revise intent)
+    /// stays on [`Self::save_plan_comment`] and keeps the chip.
+    fn planning_comment_sends_attached_image(&self) -> bool {
+        self.plan_approval_view
+            .as_ref()
+            .is_some_and(|pav| pav.prompt_intent == PlanPromptIntent::Comment)
+            && !self.prompt.images.is_empty()
+    }
+
+    /// Send the comment notes with the attached image. The planner sees
+    /// that image. A text-only line comment does not take this path.
+    fn send_planning_comment_with_attached_image(&mut self) -> InputOutcome {
+        let notes = self.prompt.text_without_image_chips();
+        let text = notes.trim().to_string();
+        if text.is_empty() || self.prompt.images.is_empty() {
+            return self.save_plan_comment();
+        }
+        let post_turn = self
+            .plan_approval_view
+            .as_ref()
+            .is_some_and(|pav| pav.is_after_turn() && !pav.is_local_idle_decision);
+        let images = self.prompt.drain_images();
+        self.prompt.set_text("");
+        self.note_draft_consumed();
+        if post_turn {
+            InputOutcome::Action(Action::RevisePlan { text, images })
+        } else {
+            InputOutcome::Action(Action::Interject { text, images })
+        }
+    }
+
     /// The `x` key in both plan approval and the casual plan preview.
     pub(super) fn delete_plan_comment_at_cursor(&mut self) -> InputOutcome {
         let comment_id = match self

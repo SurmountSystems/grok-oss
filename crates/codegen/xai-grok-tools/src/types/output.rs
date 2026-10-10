@@ -935,7 +935,8 @@ impl ToolOutput {
                      4. Write your plan to the plan file above. Put open questions as plain \
                      bullets in the plan file or freeform chat; do not use {ask} multi-choice \
                      questionnaires for plan clarifications\n\
-                     5. When ready, use {exit} to present your plan to the user."
+                     5. When ready, use {exit} to present your plan to the user.\n\n\
+                     When the work has more than one contract and those contracts do not share a file, the plan starts them together. Do not number them so one waits until the previous one finishes. Do not write that a product fix runs after a failing check. A check is the one builder job. The writers do not wait for it. The green check runs once, after those writers have landed."
                 )
             }
             ToolOutput::ExitPlanMode(exit) => match exit {

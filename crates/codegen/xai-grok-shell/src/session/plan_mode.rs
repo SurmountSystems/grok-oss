@@ -361,7 +361,9 @@ plan.md stays the main plan file. You may also write or update a living document
 Put open questions as plain bullets in the plan file or freeform chat. \
 Do not use ${{ tools.by_kind.ask_user }} multi-choice questionnaires for plan \
 clarifications. When the plan is ready, end your turn with ${{ tools.by_kind.exit_plan }} \
-to present it for approval."
+to present it for approval.
+
+When the work has more than one contract and those contracts do not share a file, the plan starts them together. Do not number them so one waits until the previous one finishes. Do not write that a product fix runs after a failing check. A check is the one builder job. The writers do not wait for it. The green check runs once, after those writers have landed."
 }
 /// Static string for alternating turns (when `reminder_count` is odd) to save tokens.
 /// No MiniJinja placeholders: plan path and tool names are only in the full reminder.
@@ -380,7 +382,9 @@ A plan file exists at ${{ plan_path }} from your previous planning session.
 Put open questions as plain bullets in the plan file or freeform chat. \
 Do not use ${{ tools.by_kind.ask_user }} multi-choice questionnaires for plan \
 clarifications. When the plan is ready, end your turn with ${{ tools.by_kind.exit_plan }} \
-to present it for approval."
+to present it for approval.
+
+When the work has more than one contract and those contracts do not share a file, the plan starts them together. Do not number them so one waits until the previous one finishes. Do not write that a product fix runs after a failing check. A check is the one builder job. The writers do not wait for it. The green check runs once, after those writers have landed."
 }
 /// Rejection message for an edit plan mode refuses. plan.md stays the main
 /// plan file. A living document the plan names under `.agents/reports/` may
@@ -1019,6 +1023,83 @@ mod tests {
         assert!(text.contains("Do not use ask_user_question multi-choice questionnaires"));
         assert!(!text.contains("to clarify requirements"));
         assert!(!text.contains("${{"));
+    }
+    /// Owed outcome: when the work has more than one contract and those
+    /// contracts do not share a file, the plan starts them together.
+    /// A check is the one builder job. The writers do not wait for it.
+    #[test]
+    fn plan_instructions_start_disjoint_contracts_together() {
+        const START_TOGETHER: &str = "When the work has more than one contract and those contracts do not share a file, the plan starts them together. Do not number them so one waits until the previous one finishes. Do not write that a product fix runs after a failing check. A check is the one builder job. The writers do not wait for it. The green check runs once, after those writers have landed.";
+        const SERIAL_ASSUMPTION: &str = "the product fix runs after the failing check";
+        let renderer = test_renderer();
+        let full = render(
+            &renderer,
+            plan_mode_reminder_full_template(),
+            "/tmp/session/plan.md",
+            false,
+        );
+        let reentry = render(
+            &renderer,
+            plan_mode_reentry_reminder_template(),
+            "/tmp/session/plan.md",
+            false,
+        );
+        let skill_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../xai-grok-bundle/skills/plan/SKILL.md");
+        let skill = std::fs::read_to_string(&skill_path)
+            .unwrap_or_else(|err| panic!("plan skill {}: {err}", skill_path.display()));
+        let entered = xai_grok_tools::types::output::ToolOutput::EnterPlanMode(
+            xai_grok_tools::types::output::EnterPlanModeOutput::Entered {
+                message: "entered-msg-token".into(),
+                plan_file_path: "/tmp/session/plan.md".into(),
+                tool_hints: xai_grok_tools::types::output::EnterPlanModeToolHints::default(),
+                plan_file_seed: xai_grok_tools::types::output::PlanFileSeedStatus::Empty,
+            },
+        )
+        .to_prompt_format();
+        for (which, loaded) in [
+            ("plan-mode reminder", full.as_str()),
+            ("plan-mode reentry reminder", reentry.as_str()),
+            ("bundled plan skill", skill.as_str()),
+            ("enter_plan_mode prompt", entered.as_str()),
+        ] {
+            assert!(
+                loaded.contains(START_TOGETHER),
+                "{which} must start disjoint contracts together. Owed outcome: when the work has more than one contract and those contracts do not share a file, the plan starts them together. Got: {loaded}"
+            );
+            assert!(
+                !loaded.contains(SERIAL_ASSUMPTION),
+                "{which} must not say the product fix runs after the failing check. Got: {loaded}"
+            );
+        }
+        assert!(
+            full.contains("Do not use ask_user_question multi-choice questionnaires"),
+            "plan-mode reminder must still ban the questionnaire modal"
+        );
+        assert!(
+            full.contains("to present it for approval"),
+            "plan-mode reminder must still present the plan for approval"
+        );
+        assert!(
+            skill.contains("Present is not Approve"),
+            "the plan skill must still say present is not Approve"
+        );
+        assert!(
+            skill.contains("Empty Enter does not approve"),
+            "the plan skill must still say empty Enter does not approve"
+        );
+        assert!(
+            skill.contains("Approve, Comment, Revise, and Exit"),
+            "the plan skill must still name Approve, Comment, Revise, and Exit"
+        );
+        assert!(
+            skill.contains("Do not use a questionnaire modal"),
+            "the plan skill must still ban the questionnaire modal"
+        );
+        assert!(
+            skill.contains("The Operator's words are the spec"),
+            "the plan skill must still say the Operator's words are the spec"
+        );
     }
     #[test]
     fn reentry_reminder_with_custom_names() {

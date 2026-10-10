@@ -58,3 +58,9 @@ FORK.md **Named tests are contracts** says the same thing in plain
 words: do not fit the test to the code. Tests are Surmount contracts.
 Keep the stronger assert. That section is reconciled with AGENTS.md
 hard constraint 15 and § *The operator's words are the spec*.
+
+## Start disjoint contracts together
+
+When the work has more than one contract and those contracts do not share a file, the plan starts them together. Do not number them so one waits until the previous one finishes. Do not write that a product fix runs after a failing check. A check is the one builder job. The writers do not wait for it. The green check runs once, after those writers have landed.
+
+Present is not Approve. Empty Enter does not approve. The idle choices stay Approve, Comment, Revise, and Exit. Do not use a questionnaire modal. The Operator's words are the spec.

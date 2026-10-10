@@ -6,7 +6,9 @@
 //! Same words on TUI `/limits` and CLI `grok-oss limits`. Stock
 //! `preferred_method = "api_key"` still wins over stay-supergrok and
 //! use-personal / use-business. It does not keep the console key when the
-//! card is Using limits. A Console meter pin still spends console API
+//! card is Using limits. An already-chosen included-limits pin
+//! ([`apply_included_limits_choice`]) still writes when `preferred_method`
+//! is `api_key`, and it leaves `use_console` false. A Console meter pin still spends console API
 //! credits when that balance is available. A client 100% / remaining 0 /
 //! $0 printout must not mark SuperGrok used up. Sampler
 //! reconstruct honors `stay_supergrok` / `use_console` from this sidecar.
@@ -219,6 +221,32 @@ pub fn select_supergrok_meter_cell(cell: SupergrokMeterCell) -> Result<(), std::
     pins.use_console = false;
     pins.stay_supergrok = true;
     save_limits_pins(&pins)
+}
+
+/// Write the included SuperGrok period limits pin for `account` under the live grok home.
+///
+/// Reads `GROK_HOME` on this call. The click already chose this account.
+pub fn apply_included_limits_choice(account: SupergrokIdentityPin) -> std::io::Result<()> {
+    apply_included_limits_choice_under(&grok_home_path(), account)
+}
+
+/// Write the included SuperGrok period limits pin for `account` under `grok_home`.
+///
+/// The click already chose included limits for this account. The write sets
+/// `meter_source` to included, `supergrok_identity` to `account`,
+/// `use_console` to false, and `stay_supergrok` to true. `config.toml`
+/// `preferred_method` stays as it is, including `api_key`. The console API
+/// key stays unused because `use_console` stays false.
+pub fn apply_included_limits_choice_under(
+    grok_home: &Path,
+    account: SupergrokIdentityPin,
+) -> std::io::Result<()> {
+    let mut pins = load_limits_pins_under(grok_home);
+    pins.meter_source = Some(MeterSource::Included);
+    pins.supergrok_identity = Some(account);
+    pins.use_console = false;
+    pins.stay_supergrok = true;
+    save_limits_pins_under(grok_home, &pins)
 }
 
 /// Outcome of [`apply_use_personal`] / [`apply_use_business`].
@@ -1684,6 +1712,49 @@ preferred_method = "api_key"
             "Using limits stays on the SuperGrok session host: {}",
             again.base_url
         );
+    }
+
+    /// The included-limits choice writes the named account even when stock
+    /// `preferred_method = "api_key"` is in config.toml. That file stays.
+    /// `use_console` stays false.
+    #[test]
+    fn included_limits_choice_keeps_preferred_method_and_skips_the_console_key() {
+        let home = TempDir::new().expect("temp grok home");
+        let config_path = home.path().join("config.toml");
+        let config_text = "[auth]\npreferred_method = \"api_key\"\n";
+        fs::write(&config_path, config_text).expect("write stock preferred_method");
+        save_limits_pins_under(
+            home.path(),
+            &LimitsPins {
+                stay_supergrok: true,
+                use_console: false,
+                meter_source: Some(MeterSource::DollarCredits),
+                supergrok_identity: Some(SupergrokIdentityPin::Business),
+            },
+        )
+        .expect("prior pin");
+        apply_included_limits_choice_under(home.path(), SupergrokIdentityPin::Personal)
+            .expect("personal included pin");
+        let personal = load_limits_pins_under(home.path());
+        assert_eq!(personal.meter_source, Some(MeterSource::Included));
+        assert_eq!(
+            personal.supergrok_identity,
+            Some(SupergrokIdentityPin::Personal)
+        );
+        assert!(personal.stay_supergrok);
+        assert!(!personal.use_console);
+        apply_included_limits_choice_under(home.path(), SupergrokIdentityPin::Business)
+            .expect("business included pin");
+        let business = load_limits_pins_under(home.path());
+        assert_eq!(business.meter_source, Some(MeterSource::Included));
+        assert_eq!(
+            business.supergrok_identity,
+            Some(SupergrokIdentityPin::Business)
+        );
+        assert!(business.stay_supergrok);
+        assert!(!business.use_console);
+        let config_after = fs::read_to_string(&config_path).expect("config stays");
+        assert_eq!(config_after, config_text);
     }
 
     /// Owed outcome: both sessions are present. After the Included choice,

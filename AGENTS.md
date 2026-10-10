@@ -1038,6 +1038,16 @@ Dual-pin: this file and host `~/.grok/AGENTS.md` same heading.
 
 Operator: remember to work on everything with parallel L2s. When a job has more than one contract, start one L2 per disjoint write set in the same turn. Do not put independent tests on a single L2. A shared file stays with one L2. One runner still owns `just check-remote`. Do not serialize independent work. Dual-pin: host `~/.grok/AGENTS.md` same heading. This does not replace the older implementor-cap pins.
 
+## Plans do not queue disjoint work (pinned 2026-10-10)
+
+Operator: the plan kept assuming the work should run serially. That assumption is the mistake.
+
+When a plan has more than one contract, and the write sets do not share a file, the plan starts those contracts together. It does not number them so that one waits until the previous one finishes. A sentence such as "the product fix runs after the failing check" is that serial assumption. Do not write it.
+
+A live `just check-remote` is the one builder job. It does not freeze the other write sets. When the tests for a contract are in the tree, start one L2 per disjoint write set in that same turn. One check at a time. Implementors do not start that recipe. The green check runs once, when those writers have landed, because a second check on a half-written tree is another wait. The writers do not wait for `CHECK_EXIT`.
+
+This does not weaken red-then-green. The tests stay. Do not weaken them to match the code.
+
 ## Take the Operator seriously (pinned 2026-09-09)
 
 Take the Operator seriously. Their words are the spec. A live grok-oss

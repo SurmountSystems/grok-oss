@@ -11,8 +11,8 @@ const LEADER_VERSION: &str = match option_env!("VERSION_WITH_COMMIT") {
 };
 use super::protocol::{
     ClientCapabilities, ClientId, ClientMessage, ClientMode, ControlCommand, ControlPayload,
-    FrameReader, InternalMethod, LEADER_PROTOCOL_VERSION, LeaderCapabilities, ProtocolError,
-    ServerMessage, internal_notification, write_message,
+    FrameReader, IncludedLimitsAccount, InternalMethod, LEADER_PROTOCOL_VERSION,
+    LeaderCapabilities, ProtocolError, ServerMessage, internal_notification, write_message,
 };
 use super::transport::{LeaderListener, LeaderStream};
 use crate::agent::activity::AgentActivity;
@@ -1365,7 +1365,32 @@ fn handle_control_command(
         ControlCommand::RelaunchForUpdate { .. } => {
             unreachable!("RelaunchForUpdate must be handled asynchronously")
         }
+        ControlCommand::ApplyIncludedLimits { account } => {
+            apply_included_limits_choice_here(account)
+        }
     }
+}
+
+/// Write the included SuperGrok period limits pin on this leader's grok home.
+///
+/// The account is the one the click already chose. `preferred_method = "api_key"`
+/// stays in config.toml. `use_console` stays false, so the next request keeps
+/// the console API key unused.
+fn apply_included_limits_choice_here(
+    account: IncludedLimitsAccount,
+) -> Result<ControlPayload, ControlError> {
+    let identity = match account {
+        IncludedLimitsAccount::Personal => crate::auth::SupergrokIdentityPin::Personal,
+        IncludedLimitsAccount::Business => crate::auth::SupergrokIdentityPin::Business,
+    };
+    crate::auth::limits_pins::apply_included_limits_choice(identity).map_err(|error| {
+        ControlError {
+            code: ControlErrorCode::InternalError,
+            message: "included SuperGrok period limits pin was not written".to_string(),
+            details: Some(serde_json::json!({ "error": error.to_string() })),
+        }
+    })?;
+    Ok(ControlPayload::IncludedLimitsApplied { account })
 }
 async fn handle_stop_cpu_profile(
     control_state: LeaderServerControlState,
