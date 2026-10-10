@@ -20,7 +20,9 @@ The card has two tabs: Limits, then Credits. Limits is the default tab. When the
 
 The Limits tab shows how far ahead of a linear week the included usage is, or how far behind. That pacing stays on the Limits tab. It is not on the header.
 
-The Credits tab has two fields: `Personal credits` and `Console API credits`. The amounts are separate. Console API credits are the business credits. That is the console team prepaid balance. There is not a third field named Business credits.
+The open Limits tab lists four cells: Personal limits, Personal credits, Business limits, and Business credits. Personal limits are that personal session's included SuperGrok period limits. Business limits are that Team session's included SuperGrok period limits. Personal credits are that personal session's SuperGrok dollar credits. Business credits are that Team session's SuperGrok dollar credits. A missing poll leaves that cell without a figure. One session's percent is not copied onto the other cell.
+
+The Credits tab has two fields: `Personal credits` and `Console API credits`. The amounts are separate. Console API credits are console team prepaid. They are not Business credits. The Credits tab does not add a Business credits field.
 
 Personal credits are the personal account's SuperGrok dollar credits. The card shows them. The automatic path does not spend them.
 

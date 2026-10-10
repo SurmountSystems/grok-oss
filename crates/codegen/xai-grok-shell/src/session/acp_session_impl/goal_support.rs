@@ -1562,8 +1562,15 @@ impl SessionActor {
         self.chat_state_handle.flush_harness_trace_turn();
 
         let planner_state = self.goal_tracker.lock().take_planner_run();
+        // Steering replans only when this attempt left no plan. A non-empty
+        // `{PLAN_FILE}` already counted inside `run_goal_planner` must not be
+        // dropped so the staged file can be deleted on the retry.
         if let Some(state) = planner_state
             && !state.steering.is_empty()
+            && !matches!(
+                outcome,
+                crate::session::goal_planner::GoalPlannerOutcome::Planned { .. }
+            )
         {
             return PlannerAttemptStep::Steered(state.steering);
         }

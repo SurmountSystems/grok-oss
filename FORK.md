@@ -1239,8 +1239,12 @@ User-guide [`06-theming`](crates/codegen/xai-grok-pager/docs/user-guide/06-themi
 - [x] **Weekly limits chip**: at 28% of this week's included SuperGrok
   period limits used, the status chip is `limits 28%` and hover is
   `72% left`. Click opens Credits and Limits. The Limits tab shows ahead
-  of a linear week, or behind. Credits fields are `Personal credits` and
-  `Console API credits`. Console API credits are the business credits.
+  of a linear week, or behind. The Credits tab fields are `Personal credits` and
+  `Console API credits`. Console API credits are console team prepaid.
+  The Limits tab lists Personal limits, Personal credits, Business limits,
+  and Business credits. Business credits are that Team session's SuperGrok
+  dollar credits. They are not console team prepaid and they are not team
+  postpaid Billing Credits.
   `Use credits` changes the next request to console API credits while
   included limits remain, and does not spend personal credits. A real
   SuperGrok HTTP 402 fails over when console API credits are available.

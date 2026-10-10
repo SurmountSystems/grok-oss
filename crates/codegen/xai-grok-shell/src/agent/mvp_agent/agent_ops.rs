@@ -2110,12 +2110,20 @@ impl MvpAgent {
             preferred,
             auto_use_included_limits,
         );
-        if prefers_oidc && !model.has_own_credentials()
+        let keep_openrouter_key =
+            crate::agent::config::openrouter_request_keeps_resolved_api_key(
+                &model.info().base_url,
+                credentials.api_key.as_deref(),
+            );
+        if prefers_oidc
+            && !keep_openrouter_key
+            && !model.has_own_credentials()
             && credentials.auth_type == xai_chat_state::AuthType::ApiKey
             && credentials.failover_api_keys.is_empty()
         {
             // OIDC pin with only a static key and no dual-auth failover:
             // force session identity (historical exclusive behavior).
+            // A resolved OpenRouter key stays. That host does not take an xAI session.
             credentials.api_key = None;
             credentials.auth_type = xai_chat_state::AuthType::SessionToken;
         }
@@ -2124,8 +2132,11 @@ impl MvpAgent {
             self.cfg.borrow().grok_com_config.api_key_auth_disabled(),
             session.as_ref().map(|a| a.key.as_str()),
         );
-        if !has_session_key && credentials.auth_type == xai_chat_state::AuthType::ApiKey
-            && !model.has_own_credentials() && is_session_based_auth
+        if !has_session_key
+            && credentials.auth_type == xai_chat_state::AuthType::ApiKey
+            && !model.has_own_credentials()
+            && !keep_openrouter_key
+            && is_session_based_auth
         {
             tracing::info!(
                 model = model.info().model.as_str(),

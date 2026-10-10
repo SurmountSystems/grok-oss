@@ -417,7 +417,20 @@ pub(crate) async fn run_goal_planner(
                 emit_event,
             );
         }
-        Err(SpawnError::Interrupted) => return GoalPlannerOutcome::Interrupted,
+        Err(SpawnError::Interrupted) => {
+            // A finished writer shares this token with `finish_child`, which cancels it
+            // when the writer stops sampling. The select can report Interrupted after
+            // `{PLAN_FILE}` is already on disk. A non-empty file counts; a missing file
+            // is a real interrupt and the caller may replan.
+            if non_empty_plan_file(inputs.plan_file).await {
+                tracing::info!(
+                    plan_file = %plan_file_str,
+                    "goal planner: interrupted after the plan file was written; accepting it",
+                );
+                return planned_outcome(inputs.plan_file, inputs.attempt, started, emit_event);
+            }
+            return GoalPlannerOutcome::Interrupted;
+        }
         Err(SpawnError::Runtime { message, cancelled }) => {
             let reason = if cancelled {
                 GoalPlannerFailClosedReason::Aborted
@@ -433,12 +446,7 @@ pub(crate) async fn run_goal_planner(
         }
     };
 
-    let plan_present = match tokio::fs::metadata(inputs.plan_file).await {
-        Ok(meta) => meta.is_file() && meta.len() > 0,
-        Err(_) => false,
-    };
-
-    if !plan_present {
+    if !non_empty_plan_file(inputs.plan_file).await {
         tracing::info!(
             plan_file = %plan_file_str,
             terminal_token_ok = parse_terminal_response(&response),
@@ -453,13 +461,30 @@ pub(crate) async fn run_goal_planner(
         );
     }
 
+    planned_outcome(inputs.plan_file, inputs.attempt, started, emit_event)
+}
+
+/// A plan counts only when `{PLAN_FILE}` is a non-empty file. An empty stub does not.
+async fn non_empty_plan_file(path: &Path) -> bool {
+    match tokio::fs::metadata(path).await {
+        Ok(meta) => meta.is_file() && meta.len() > 0,
+        Err(_) => false,
+    }
+}
+
+fn planned_outcome(
+    plan_file: &Path,
+    attempt: u32,
+    started: std::time::Instant,
+    emit_event: &dyn Fn(Event),
+) -> GoalPlannerOutcome {
     let latency_ms = started.elapsed().as_millis() as u64;
     emit_event(Event::GoalPlannerCompleted {
-        attempt: inputs.attempt,
+        attempt,
         latency_ms,
     });
     GoalPlannerOutcome::Planned {
-        plan_file: inputs.plan_file.to_path_buf(),
+        plan_file: plan_file.to_path_buf(),
         latency_ms,
     }
 }
@@ -749,6 +774,47 @@ mod tests {
         ));
         let log = log.lock().unwrap();
         assert!(log.iter().any(|t| t == "fail_closed:missing_plan_file"));
+    }
+
+    #[tokio::test]
+    async fn when_a_goal_plan_writer_finishes_and_the_plan_file_is_present_the_goal_does_not_pause_with_no_plan_was_produced()
+     {
+        let plan_file = tmp_plan_file("finished-writer");
+        let spawner = Arc::new(MockSpawner {
+            response: Err(SpawnError::Interrupted),
+            write_plan: true,
+            plan_body: b"# Plan: vendor KeyOS\n\n## Goal kind\ncode-change\n".to_vec(),
+            plan_file_target: plan_file.clone(),
+            last_prompt: Mutex::new(None),
+        });
+        let (log, emit) = collect_events();
+
+        let outcome = run_goal_planner(
+            spawner,
+            GoalPlannerInputs {
+                objective: "vendor KeyOS dependencies",
+                context: "",
+                plan_file: &plan_file,
+                attempt: 5,
+                model_id: "grok-test",
+                tool_names: &RoleToolNames::inherit_defaults(),
+                inherit_tool_names: &RoleToolNames::inherit_defaults(),
+            },
+            &emit,
+        )
+        .await;
+
+        assert!(
+            matches!(outcome, GoalPlannerOutcome::Planned { .. }),
+            "when a goal plan writer finishes and the plan file is present, the goal does not pause with \"No plan was produced.\" outcome={outcome:?}",
+        );
+        let log = log.lock().unwrap();
+        assert!(
+            !log.iter().any(|tag| tag.starts_with("fail_closed")),
+            "a plan on disk must not fail closed: {log:?}",
+        );
+        assert_eq!(log.as_slice(), ["fired", "completed"]);
+        let _ = std::fs::remove_file(&plan_file);
     }
 
     #[tokio::test]

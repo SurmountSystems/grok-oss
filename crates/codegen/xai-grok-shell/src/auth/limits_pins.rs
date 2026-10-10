@@ -487,6 +487,52 @@ pub fn pinned_supergrok_row() -> Option<PinnedSupergrokRow> {
     Some(stored_pinned_row(&home, &chosen.headroom.identity_id))
 }
 
+/// Stored included percent and SuperGrok dollar cents for one role.
+///
+/// A missing live session, a missing poll, or a failed poll leaves both
+/// readings absent. This does not copy the other role's numbers. This
+/// does not read team postpaid Billing Credits or console team prepaid.
+/// SuperGrok is paid.
+pub fn stored_supergrok_reading_for_role(role: SupergrokAccountRole) -> PinnedSupergrokRow {
+    let home = grok_home_path();
+    let candidates = super::load_supergrok_session_candidates(&home);
+    let Some(chosen) = candidates.iter().find(|candidate| {
+        !candidate.hard_expired
+            && candidate.headroom.role == role
+            && !candidate.access_token.trim().is_empty()
+    }) else {
+        return PinnedSupergrokRow {
+            usage_pct: None,
+            dollar_credits_cents: None,
+        };
+    };
+    if snapshot_poll_failed(&home, &chosen.headroom.identity_id) {
+        return PinnedSupergrokRow {
+            usage_pct: None,
+            dollar_credits_cents: None,
+        };
+    }
+    stored_pinned_row(&home, &chosen.headroom.identity_id)
+}
+
+/// A failed poll is not a figure. `ok` and `never` are not this.
+fn snapshot_poll_failed(home: &Path, identity_id: &str) -> bool {
+    let Some(doc) = super::limits_snapshot_hub::read_limits_snapshot_file(home) else {
+        return false;
+    };
+    let Some(row) = doc
+        .identities
+        .iter()
+        .find(|row| row.identity_id == identity_id)
+    else {
+        return false;
+    };
+    matches!(
+        row.poll_outcome.as_str(),
+        super::POLL_OUTCOME_AUTH | super::POLL_OUTCOME_NETWORK | super::POLL_OUTCOME_OTHER
+    )
+}
+
 fn stored_pinned_row(home: &Path, identity_id: &str) -> PinnedSupergrokRow {
     let mut usage_pct = None;
     let mut dollar_credits_cents = None;

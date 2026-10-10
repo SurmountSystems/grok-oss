@@ -1720,6 +1720,23 @@ fn has_own_credentials_guards_session_vs_external_key() {
     );
     assert!(config_model.has_own_credentials());
 }
+#[test]
+fn oidc_pin_keeps_an_already_resolved_openrouter_api_key() {
+    let openrouter = crate::auth::openrouter::OPENROUTER_API_URL;
+    assert!(openrouter_request_keeps_resolved_api_key(
+        openrouter,
+        Some("sk-or-store"),
+    ));
+    assert!(!openrouter_request_keeps_resolved_api_key(openrouter, None));
+    assert!(!openrouter_request_keeps_resolved_api_key(
+        openrouter,
+        Some("   "),
+    ));
+    assert!(!openrouter_request_keeps_resolved_api_key(
+        "https://api.x.ai/v1",
+        Some("xai-static"),
+    ));
+}
 /// The `ConfigUnavailable → Unknown` arm matters for safety.
 /// A transient config failure must not read as a definite `NotByok`, which would drive the live resolver and could overwrite a per-model BYOK key.
 #[test]

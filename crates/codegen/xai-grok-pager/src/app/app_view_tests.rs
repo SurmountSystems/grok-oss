@@ -9172,7 +9172,7 @@ fn header_credits_slot_matches_the_team_postpaid_dollars_the_limits_card_shows()
         !unread_card.contains("$0")
             && !unread_card.contains(&remaining)
             && !unread_card.contains("limits 0%")
-            && unread_card.contains("Using credits"),
+            && unread_card.contains("Using team postpaid Billing Credits"),
         "the card does not invent $0 when team postpaid Billing Credits were not read:\n{unread_card}"
     );
 }
@@ -9315,7 +9315,7 @@ fn header_shows_the_same_team_postpaid_figure_the_open_card_shows() {
             && !screen.contains("$0")
             && !screen.contains("limits 0%")
             && !header_paints_limits_percent(&screen)
-            && screen.contains("Using credits")
+            && screen.contains("Using team postpaid Billing Credits")
             && !screen.contains("Using limits"),
         "the fetched card is team postpaid Billing Credits, not prepaid dollars or limits N%:\n{screen}"
     );

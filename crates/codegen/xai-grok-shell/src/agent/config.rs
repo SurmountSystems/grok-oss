@@ -4991,6 +4991,17 @@ fn resolve_credentials_ranked(
         session_identity_key,
     }
 }
+/// An OpenRouter request that already resolved an API key keeps that key.
+/// An OIDC pin must not replace it with an xAI session token. OpenRouter
+/// does not accept that session.
+pub(crate) fn openrouter_request_keeps_resolved_api_key(
+    base_url: &str,
+    api_key: Option<&str>,
+) -> bool {
+    crate::auth::openrouter::is_openrouter_base_url(base_url)
+        && api_key.is_some_and(|key| !key.trim().is_empty())
+}
+
 /// `disable_api_key_auth` at the credential seam: swap a first-party xAI API key for the IdP session.
 /// When no session is available the request fails and forces a login.
 /// BYOK (non-xAI `base_url`) is untouched; no-op when the switch is off.

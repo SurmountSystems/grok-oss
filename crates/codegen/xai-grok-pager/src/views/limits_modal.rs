@@ -189,9 +189,9 @@ fn tone_color(tone: AllowanceMeterTone, theme: &Theme) -> ratatui::style::Color 
     }
 }
 
-/// Limits is the included allowance, the bar, and the short week line.
-/// Credits is personal credits and console API credits. Limits is first
-/// and is the default open tab.
+/// Limits lists the four cells, the included allowance, the bar, and the
+/// short week line. Credits is personal credits and console API credits.
+/// Limits is first and is the default open tab.
 const CARD_TABS: &[&str] = &["Limits", "Credits"];
 /// Default open tab. Limits mode shows this tab.
 pub(crate) const LIMITS_TAB: usize = 0;
@@ -345,6 +345,48 @@ fn limits_tab_lines(
         lines.push(format!("  Team postpaid Billing Credits: {dollars} left"));
     }
     lines
+}
+
+/// `limits N%` from that session's own percent. A missing percent is not
+/// `limits 0%` and not the other session's percent.
+fn limits_percent_figure(pct: Option<f64>) -> Option<String> {
+    let pct = pct.filter(|pct| pct.is_finite())?;
+    let used = pct.round().clamp(0.0, 100.0) as u8;
+    Some(format!("limits {used}%"))
+}
+
+fn dollar_figure(cents: Option<i64>) -> Option<String> {
+    cents.map(format_remaining_cents_as_dollars)
+}
+
+fn meter_cell_line(label: &str, figure: Option<String>) -> String {
+    match figure {
+        Some(figure) => format!("  {label}: {figure}"),
+        None => format!("  {label}"),
+    }
+}
+
+/// Four cells on the Limits tab. Each figure is that session's own poll.
+/// Personal credits is that personal session's SuperGrok dollar credits.
+/// Business credits is that Team session's SuperGrok dollar credits. Neither
+/// is team postpaid Billing Credits or console team prepaid.
+fn four_meter_cell_lines() -> Vec<String> {
+    use xai_grok_shell::auth::SupergrokAccountRole;
+    use xai_grok_shell::auth::limits_pins::stored_supergrok_reading_for_role;
+    let personal = stored_supergrok_reading_for_role(SupergrokAccountRole::Personal);
+    let business = stored_supergrok_reading_for_role(SupergrokAccountRole::Business);
+    vec![
+        meter_cell_line("Personal limits", limits_percent_figure(personal.usage_pct)),
+        meter_cell_line(
+            "Personal credits",
+            dollar_figure(personal.dollar_credits_cents),
+        ),
+        meter_cell_line("Business limits", limits_percent_figure(business.usage_pct)),
+        meter_cell_line(
+            "Business credits",
+            dollar_figure(business.dollar_credits_cents),
+        ),
+    ]
 }
 
 fn short_week_line(
@@ -543,6 +585,21 @@ fn included_limits_were_requested_but_are_not_drawn() -> bool {
         && !xai_grok_shell::auth::limits_pins::next_request_draws_included_period_limits()
 }
 
+/// Name the credit meter. Bare `Using credits` does not say whether the
+/// next request spends SuperGrok dollar credits, console team prepaid, or
+/// team postpaid Billing Credits.
+fn accepted_credit_meter_status() -> &'static str {
+    use xai_grok_shell::auth::limits_pins::{MeterSource, load_limits_pins};
+    let pins = load_limits_pins();
+    if pins.use_console || pins.meter_source == Some(MeterSource::Console) {
+        "Using console team prepaid"
+    } else if pins.meter_source == Some(MeterSource::DollarCredits) {
+        "Using SuperGrok dollar credits"
+    } else {
+        "Using team postpaid Billing Credits"
+    }
+}
+
 /// Limits label on the left, Credits label on the right.
 ///
 /// The labels are `'static`. The signature must say so. Eliding the
@@ -573,7 +630,7 @@ fn spend_shortcuts(state: &LimitsModalState) -> Vec<Shortcut<'static>> {
         // claim a meter this request does not draw.
         vec![
             Shortcut {
-                label: "Using credits",
+                label: accepted_credit_meter_status(),
                 clickable: false,
                 id: 0,
             },
@@ -587,7 +644,7 @@ fn spend_shortcuts(state: &LimitsModalState) -> Vec<Shortcut<'static>> {
                 id: SPEND_OTHER_CHOICE_ID,
             },
             Shortcut {
-                label: "Using credits",
+                label: accepted_credit_meter_status(),
                 clickable: false,
                 id: 0,
             },
@@ -790,13 +847,13 @@ pub fn render_limits_modal(
     } else {
         limits_tab_lines(state, now, draws_included)
     };
-    // Personal limits, Business limits, and Business credits are on the
-    // Limits tab. Personal credits stays the Credits tab line. The Credits
-    // tab does not gain a Business credits field.
+    // The open Limits tab lists all four cells. Personal credits is not
+    // hidden on the Credits tab. The Credits tab does not gain a Business
+    // credits field. Console API credits stay that tab's other field.
     if !on_credits_tab {
-        body.insert(0, "  Personal limits".to_string());
-        body.insert(1, "  Business limits".to_string());
-        body.insert(2, "  Business credits".to_string());
+        let mut cells = four_meter_cell_lines();
+        cells.append(&mut body);
+        body = cells;
     }
     // Both tabs carry the sentence when the next request does not draw
     // included SuperGrok period limits.
@@ -1198,7 +1255,10 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn limits_tab_shows_the_allowance_and_the_bar_and_credits_tab_shows_only_the_two_balances() {
+        let home = tempfile::TempDir::new().expect("temp GROK_HOME");
+        let _env = xai_grok_test_support::EnvGuard::set("GROK_HOME", home.path());
         let reset = DateTime::parse_from_rfc3339("2026-08-08T00:00:00Z")
             .unwrap()
             .with_timezone(&Utc);
@@ -1247,9 +1307,24 @@ mod tests {
             row.contains('[') && row.contains(']') && (row.contains('█') || row.contains('░'))
         });
         assert!(saw_bar, "Limits tab bar:\n{limits}");
+        for label in [
+            "Personal limits",
+            "Personal credits",
+            "Business limits",
+            "Business credits",
+        ] {
+            assert!(
+                limits.contains(label),
+                "the open Limits tab lists {label}:\n{limits}"
+            );
+        }
+        let personal_credits_line = limits
+            .lines()
+            .find(|line| line.contains("Personal credits"))
+            .unwrap_or("");
         assert!(
-            !limits.contains("Personal credits"),
-            "Limits tab must not show personal credits:\n{limits}"
+            !personal_credits_line.contains('$'),
+            "a missing personal poll does not invent a dollar figure on Personal credits:\n{personal_credits_line}"
         );
         assert!(
             !limits.contains("behind linear burn"),
@@ -1899,7 +1974,10 @@ mod tests {
         assert_ne!(next.api_key.as_deref(), Some(session_key));
 
         let using_credits = paint(&mut state);
-        assert!(using_credits.contains("Using credits"), "{using_credits}");
+        assert!(
+            using_credits.contains("Using console team prepaid"),
+            "{using_credits}"
+        );
         assert!(using_credits.contains("Use limits"), "{using_credits}");
         assert!(!using_credits.contains("Using limits"), "{using_credits}");
         assert!(!using_credits.contains("Use credits"), "{using_credits}");
@@ -2735,7 +2813,10 @@ mod tests {
 
         let buf = paint(&mut agent);
         let using_credits = card_text(&buf, area);
-        assert!(using_credits.contains("Using credits"), "{using_credits}");
+        assert!(
+            using_credits.contains("Using console team prepaid"),
+            "{using_credits}"
+        );
         assert!(using_credits.contains("Use limits"), "{using_credits}");
         let (column, row) = recorded_spend_point(&buf, &agent, "Use limits");
         deliver(&mut agent, column, row);
@@ -2965,8 +3046,8 @@ mod tests {
         let buf = draw(&mut agent);
         let screen = screen_of(&buf, area);
         assert!(
-            screen.contains("Use limits") && screen.contains("Using credits"),
-            "the team-only card offers Use limits:\n{screen}"
+            screen.contains("Use limits") && screen.contains("Using SuperGrok dollar credits"),
+            "the team-only card offers Use limits and names SuperGrok dollar credits:\n{screen}"
         );
         assert!(
             !screen.contains("Using limits") && !paints_limits_percent(&screen),
@@ -3127,10 +3208,10 @@ mod tests {
     }
 
     /// Owed outcome: start from `MeterSource::Included` beside a Team JWT.
-    /// Click the credits control. The footer paints `Using credits`.
-    /// `use_console` stays false. The pin is not `MeterSource::Console`.
-    /// The click switches the next request off included SuperGrok period
-    /// limits. SuperGrok is paid.
+    /// Click the credits control. The footer names team postpaid Billing
+    /// Credits. Bare `Using credits` does not name that meter. `use_console`
+    /// stays false. The pin is not `MeterSource::Console`. The click switches
+    /// the next request off included SuperGrok period limits. SuperGrok is paid.
     #[test]
     #[serial_test::serial]
     fn clicking_using_credits_while_using_limits_is_selected_switches_off_included_period_limits_and_paints_using_credits()
@@ -3291,15 +3372,18 @@ mod tests {
             "a left click on Use credits is handled, got {outcome:?}"
         );
         let pins = load_limits_pins();
-        assert!(!pins.use_console, "Using credits keeps use_console false");
+        assert!(
+            !pins.use_console,
+            "the credits control keeps use_console false"
+        );
         assert_ne!(
             pins.meter_source,
             Some(MeterSource::Console),
-            "Using credits does not pin console team prepaid / console API credits"
+            "the credits control does not pin console team prepaid / console API credits"
         );
         assert!(
             !next_request_draws_included_period_limits(),
-            "Using credits switches the next request off included SuperGrok period limits"
+            "the credits control switches the next request off included SuperGrok period limits"
         );
         let mut buf = Buffer::empty(area);
         let mut scratch = ScratchBuffer::new();
@@ -3318,8 +3402,8 @@ mod tests {
         );
         let after = screen_of(&buf, area);
         assert!(
-            after.contains("Using credits"),
-            "the footer paints Using credits:\n{after}"
+            after.contains("Using team postpaid Billing Credits"),
+            "the footer names team postpaid Billing Credits:\n{after}"
         );
         clear_console_team_postpaid_cache();
     }
@@ -4358,7 +4442,7 @@ mod tests {
         let stopped_shortcuts = spend_shortcuts(&stopped);
         assert_eq!(stopped_shortcuts.len(), 3);
         assert_eq!(stopped_shortcuts[0].label, "Use limits");
-        assert_eq!(stopped_shortcuts[1].label, "Using credits");
+        assert_eq!(stopped_shortcuts[1].label, "Using SuperGrok dollar credits");
         assert_eq!(stopped_shortcuts[2].label, "Esc close");
         let credits_card = paint_card(&mut stopped);
         assert_eq!(stopped.window.active_tab, CREDITS_TAB);
@@ -5110,6 +5194,207 @@ mod tests {
             session_base_url: Some("https://cli-chat-proxy.grok.com/v1".into()),
             ..Default::default()
         }
+    }
+
+    /// Owed outcome: the Limits card the Operator opened lists four cells on
+    /// that tab, including Personal credits. Personal limits show that
+    /// personal session's included SuperGrok period limits, fixture
+    /// `limits 28%`. Personal credits show that session's SuperGrok dollar
+    /// credits, fixture `$87.65`. Business limits show that Team session's
+    /// percent, fixture `limits 41%`. Business credits show that Team
+    /// session's SuperGrok dollar credits, fixture `$21.99`. The same percent
+    /// is not copied onto both limits cells. Team postpaid Billing Credits
+    /// `$442.97` are not labeled Business credits. A failed poll on the Team
+    /// session leaves Business limits and Business credits without a figure
+    /// and does not borrow the personal percent. The card does not paint
+    /// `approve | comment | revise | exit`. SuperGrok is paid.
+    #[test]
+    #[serial_test::serial]
+    fn limits_card_lists_four_cells_and_does_not_copy_one_sessions_reading_onto_the_other() {
+        use xai_grok_shell::auth::{
+            POLL_OUTCOME_NETWORK, POLL_OUTCOME_OK, read_limits_snapshot_file,
+            remember_supergrok_dollar_credits, remember_supergrok_included_billing,
+            write_limits_snapshot_file,
+        };
+
+        struct ClearBillingCache;
+        impl Drop for ClearBillingCache {
+            fn drop(&mut self) {
+                xai_grok_shell::auth::clear_included_billing_cache();
+                xai_grok_shell::auth::clear_console_team_postpaid_cache();
+            }
+        }
+
+        let _clear = ClearBillingCache;
+        let seeded = seed_four_cells_for_card_click(None);
+        let mut doc = read_limits_snapshot_file(seeded.home.path()).expect("four meter rows");
+        let management = doc.management.as_mut().expect("management meters");
+        management.billing_credits_cents = Some(CELL_POSTPAID_DECOY_CENTS);
+        management.billing_credits_card = serde_json::from_value(serde_json::json!("fetched"))
+            .expect("fetched Billing Credits card");
+        write_limits_snapshot_file(seeded.home.path(), &doc).expect("fetched postpaid card");
+
+        let end = DateTime::parse_from_rfc3339("2026-10-12T06:59:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let now = DateTime::parse_from_rfc3339("2026-10-06T22:08:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let mut bal = weekly_bal(99.0, end);
+        bal.prepaid_balance_cents = Some(1_250);
+        let snap =
+            LimitsSnapshot::from_billing(Some(&bal), None, SamplingIdentityKind::SuperGrokSession);
+        let mut state = LimitsModalState::new(snap);
+        let theme = Theme::default();
+        let area = Rect::new(0, 0, 120, 40);
+        let paint = |state: &mut LimitsModalState| -> String {
+            let mut buf = Buffer::empty(area);
+            render_limits_modal(&mut buf, area, state, &theme, false, now);
+            (0..area.height)
+                .map(|y| {
+                    (0..area.width)
+                        .map(|x| buf[(x, y)].symbol())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let line_with = |card: &str, label: &str| -> String {
+            card.lines()
+                .find(|line| line.contains(label))
+                .unwrap_or("")
+                .to_string()
+        };
+        let paints_limits_percent = |text: &str| -> bool {
+            for line in text.lines() {
+                let mut rest = line;
+                while let Some(idx) = rest.find("limits ") {
+                    let after = &rest[idx + "limits ".len()..];
+                    let digits = after.chars().take_while(|c| c.is_ascii_digit()).count();
+                    if digits > 0 && after[digits..].starts_with('%') {
+                        return true;
+                    }
+                    rest = &rest[idx + "limits ".len()..];
+                }
+            }
+            false
+        };
+
+        assert_eq!(state.window.active_tab, LIMITS_TAB);
+        let card = paint(&mut state);
+        assert!(
+            !card.contains("approve | comment | revise | exit"),
+            "the plan-approval footer is not this card:\n{card}"
+        );
+        assert!(card.contains("Esc close"), "the card footer stays:\n{card}");
+        for label in [
+            "Personal limits",
+            "Personal credits",
+            "Business limits",
+            "Business credits",
+        ] {
+            assert!(
+                card.contains(label),
+                "the open Limits tab lists {label}:\n{card}"
+            );
+        }
+        let personal_limits = line_with(&card, "Personal limits");
+        let personal_credits = line_with(&card, "Personal credits");
+        let business_limits = line_with(&card, "Business limits");
+        let business_credits = line_with(&card, "Business credits");
+        assert!(
+            personal_limits.contains("limits 28%")
+                && !personal_limits.contains("limits 41%")
+                && !personal_limits.contains("limits 99%")
+                && !personal_limits.contains("limits 24%"),
+            "Personal limits are that session's creditUsagePercent:\n{personal_limits}"
+        );
+        assert!(
+            business_limits.contains("limits 41%")
+                && !business_limits.contains("limits 28%")
+                && !business_limits.contains("limits 99%")
+                && !business_limits.contains("limits 24%"),
+            "Business limits are that Team session's creditUsagePercent:\n{business_limits}"
+        );
+        assert!(
+            personal_credits.contains("$87.65")
+                && !personal_credits.contains("$21.99")
+                && !personal_credits.contains("$12.50")
+                && !personal_credits.contains("$154.20")
+                && !personal_credits.contains("$47.03")
+                && !personal_credits.contains("$442.97"),
+            "Personal credits are that session's SuperGrok dollar credits:\n{personal_credits}"
+        );
+        assert!(
+            business_credits.contains("$21.99")
+                && !business_credits.contains("$442.97")
+                && !business_credits.contains("$47.03")
+                && !business_credits.contains("$154.20")
+                && !business_credits.contains("$87.65")
+                && !business_credits.contains("$12.50"),
+            "Business credits are that Team session's SuperGrok dollar credits:\n{business_credits}"
+        );
+        assert!(
+            card.contains("Team postpaid Billing Credits: $442.97 left"),
+            "team postpaid Billing Credits stay on their own line:\n{card}"
+        );
+        assert!(
+            !card.contains("limits 0%") && !card.contains("$0"),
+            "a stored reading is not rewritten as limits 0% or $0:\n{card}"
+        );
+
+        let mut copied = read_limits_snapshot_file(seeded.home.path()).expect("rows stay stored");
+        for row in &mut copied.identities {
+            if row.identity_id == CELL_PERSONAL_ID {
+                row.usage_pct = Some(24.0);
+                row.dollar_credits_cents = Some(CELL_PERSONAL_CENTS);
+                row.poll_outcome = POLL_OUTCOME_OK.to_owned();
+            }
+            if row.identity_id == CELL_BUSINESS_ID {
+                row.usage_pct = Some(24.0);
+                row.dollar_credits_cents = Some(CELL_BUSINESS_CENTS);
+                row.poll_outcome = POLL_OUTCOME_NETWORK.to_owned();
+            }
+        }
+        write_limits_snapshot_file(seeded.home.path(), &copied).expect("failed business poll");
+        remember_supergrok_included_billing(CELL_PERSONAL_ID, 41.0, None, None);
+        remember_supergrok_dollar_credits(CELL_PERSONAL_ID, CELL_BUSINESS_CENTS);
+        remember_supergrok_included_billing(CELL_BUSINESS_ID, 24.0, None, None);
+        remember_supergrok_dollar_credits(CELL_BUSINESS_ID, CELL_BUSINESS_CENTS);
+
+        let failed = paint(&mut state);
+        let personal_limits = line_with(&failed, "Personal limits");
+        let personal_credits = line_with(&failed, "Personal credits");
+        let business_limits = line_with(&failed, "Business limits");
+        let business_credits = line_with(&failed, "Business credits");
+        assert!(
+            personal_limits.contains("limits 24%")
+                && !personal_limits.contains("limits 41%")
+                && !personal_limits.contains("limits 28%")
+                && !personal_limits.contains("limits 99%"),
+            "Personal limits stay that session's own percent after the other poll fails:\n{personal_limits}"
+        );
+        assert!(
+            !paints_limits_percent(&business_limits),
+            "a failed Team poll does not copy the personal percent onto Business limits:\n{business_limits}"
+        );
+        assert_eq!(
+            failed.matches("limits 24%").count(),
+            1,
+            "limits 24% is only the personal cell:\n{failed}"
+        );
+        assert!(
+            personal_credits.contains("$87.65") && !personal_credits.contains("$21.99"),
+            "Personal credits stay that session's SuperGrok dollar credits:\n{personal_credits}"
+        );
+        assert!(
+            !business_credits.contains('$'),
+            "a failed Team poll leaves Business credits without a figure:\n{business_credits}"
+        );
+        assert!(
+            !failed.contains("limits 0%") && !failed.contains("$0"),
+            "a failed poll does not invent limits 0% or $0:\n{failed}"
+        );
     }
 
     /// A left click on Personal limits writes both pins through the card.
