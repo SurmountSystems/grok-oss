@@ -1,15 +1,9 @@
-//! Binds the `xai-grok-session-search` index to this crate's JSONL session
-//! store: a process-wide manager plus the two entry points the rest of the
-//! shell calls.
-//!
-//! Everything below the seam (the SQLite FTS5 cache, the cross-process
-//! bootstrap lease, the debounced upsert worker) lives in the crate; this
-//! module supplies the store binding and re-exports the request/response
-//! types at their original paths.
+//! Binds the `xai-grok-session-search` index to this crate's JSONL session store.
+//! A process that keeps no index holds no manager, so these entry points take the handle rather than reach for a global.
 
 use std::io;
 use std::path::Path;
-use std::sync::LazyLock;
+use std::sync::{Arc, OnceLock};
 
 use agent_client_protocol as acp;
 
@@ -17,24 +11,131 @@ use super::StorageAdapter;
 use super::jsonl::JsonlStorageAdapter;
 use crate::session::info::Info;
 use crate::session::persistence::Summary;
-use xai_grok_session_search::{IndexableSession, SearchIndexManager, SessionSource};
+use xai_grok_session_search::{IndexableSession, SessionSource};
 
-pub use xai_grok_session_search::{SearchIndexStatus, SessionSearchRequest, SessionSearchResponse};
+pub use xai_grok_session_search::{
+    SearchIndexManager, SearchIndexStatus, SessionSearchRequest, SessionSearchResponse,
+};
 
-/// Global singleton — lazily started on first use.
-///
-/// Requires an active tokio runtime on first access (spawns tasks).
-pub static SEARCH_INDEX_MANAGER: LazyLock<SearchIndexManager> = LazyLock::new(|| {
+/// Private on purpose: [`start_if_enabled`] is the only way to a manager, so the feature cannot be bypassed.
+/// One live manager per grok home, at most.
+fn start_search_index() -> SearchIndexManager {
     SearchIndexManager::start(
         |root| -> Box<dyn SessionSource> {
             Box::new(JsonlSessionSource(JsonlStorageAdapter::with_root(root)))
         },
         super::search_content::collect_all_indexable_content_single_pass,
     )
-});
+}
 
-/// Projects the JSONL store's `Summary` down to the handful of fields the
-/// index reads, so the index never sees the full session record.
+/// The index this process keeps, or the sentence naming what turned it off.
+pub enum SearchIndex {
+    Started(SearchIndexManager),
+    Off { reason: String },
+}
+
+impl SearchIndex {
+    pub fn index(&self) -> Option<&SearchIndexManager> {
+        match self {
+            Self::Started(index) => Some(index),
+            Self::Off { .. } => None,
+        }
+    }
+
+    pub fn started(self) -> Option<SearchIndexManager> {
+        match self {
+            Self::Started(index) => Some(index),
+            Self::Off { .. } => None,
+        }
+    }
+
+    pub fn off_reason(&self) -> Option<&str> {
+        match self {
+            Self::Started(_) => None,
+            Self::Off { reason } => Some(reason),
+        }
+    }
+}
+
+/// The process's one index decision, shared rather than copied.
+/// Sharing means a session created while the remote settings are in flight reads the answer that lands later.
+/// `OnceLock` not `OnceCell`: the persistence actor's clone is `Send`.
+#[derive(Clone, Default)]
+pub struct SharedSearchIndex(Arc<OnceLock<Option<Arc<SearchIndexManager>>>>);
+
+/// Three states, because collapsing the first two is a bug a reader cannot see: an empty answer from `Pending` is not final, and one from `Off` is.
+#[derive(Clone, Copy)]
+pub enum IndexDecision<'a> {
+    Pending,
+    Off,
+    On(&'a SearchIndexManager),
+}
+
+impl std::fmt::Debug for IndexDecision<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Pending => f.write_str("Pending"),
+            Self::Off => f.write_str("Off"),
+            Self::On(_) => f.debug_tuple("On").finish_non_exhaustive(),
+        }
+    }
+}
+
+impl<'a> IndexDecision<'a> {
+    /// The manager to write through.
+    /// Treats `Pending` and `Off` alike on purpose: it skips, and the bootstrap after the decision backfills what was missed.
+    /// A read must not, which is why this is not `decision`.
+    pub fn writer(self) -> Option<&'a SearchIndexManager> {
+        match self {
+            Self::On(index) => Some(index),
+            Self::Pending | Self::Off => None,
+        }
+    }
+
+    /// For a caller with no pending window, as a CLI has.
+    /// Takes the resolution, not its contents, which would let a pending `writer()` read back as `Off`.
+    pub fn settled(index: &'a SearchIndex) -> Self {
+        match index {
+            SearchIndex::Started(index) => Self::On(index),
+            SearchIndex::Off { .. } => Self::Off,
+        }
+    }
+}
+
+impl SharedSearchIndex {
+    /// Call at use time, never store: the snapshot is what this type avoids.
+    pub fn decision(&self) -> IndexDecision<'_> {
+        match self.0.get() {
+            None => IndexDecision::Pending,
+            Some(None) => IndexDecision::Off,
+            Some(Some(index)) => IndexDecision::On(index),
+        }
+    }
+
+    pub(crate) fn decide(&self, index: impl FnOnce() -> Option<Arc<SearchIndexManager>>) {
+        self.0.get_or_init(index);
+    }
+
+    /// For a session that must never reach an index, whatever the process decides.
+    pub(crate) fn never_indexed() -> Self {
+        let cell = OnceLock::new();
+        let _ = cell.set(None);
+        Self(Arc::new(cell))
+    }
+}
+
+pub fn start_if_enabled(cfg: &crate::agent::config::Config) -> SearchIndex {
+    if let Some(reason) = cfg.feature_off_reason(crate::agent::config::Feature::SessionSearch) {
+        tracing::info!(
+            reason = %reason,
+            "session search index turned off for this process"
+        );
+        return SearchIndex::Off { reason };
+    }
+    SearchIndex::Started(start_search_index())
+}
+
+/// Projects the JSONL store's `Summary` down to the handful of fields the index reads, so the index never sees the full session record.
 struct JsonlSessionSource(JsonlStorageAdapter);
 
 impl JsonlSessionSource {
@@ -67,26 +168,38 @@ impl SessionSource for JsonlSessionSource {
         };
         match self.0.load_summary(&info).await {
             Ok(summary) => Ok(Some(self.to_indexable(&summary))),
-            // A missing session is a delete, not a failure: the index drops
-            // its row. Every other error leaves the row alone.
+            // A missing session is a delete, not a failure: the index drops its row
+            // Every other error leaves the row alone
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(e),
         }
     }
 }
 
-/// Trigger indexing for a session that was just saved or updated.
-pub fn notify_session_updated(session_id: &str, cwd: &str) {
+pub fn notify_session_updated(index: Option<&SearchIndexManager>, session_id: &str, cwd: &str) {
+    let Some(index) = index else {
+        return;
+    };
     let root = crate::util::grok_home::grok_home();
-    SEARCH_INDEX_MANAGER.enqueue(root, session_id.to_string(), cwd.to_string());
+    index.enqueue(root, session_id.to_string(), cwd.to_string());
 }
 
-/// Execute a session search query against the shared index.
+/// Remove one session from an index built earlier, whether or not this process still indexes.
+pub(crate) async fn evict_session(root_dir: &Path, session_id: &str) {
+    xai_grok_session_search::evict_session(root_dir, session_id).await;
+}
+
 pub async fn execute_search(
+    decision: IndexDecision<'_>,
     root_dir: &Path,
     req: &SessionSearchRequest,
 ) -> io::Result<SessionSearchResponse> {
-    xai_grok_session_search::execute_search(&SEARCH_INDEX_MANAGER, root_dir, req).await
+    let index = match decision {
+        IndexDecision::Pending => return Ok(SessionSearchResponse::still_settling()),
+        IndexDecision::Off => None,
+        IndexDecision::On(index) => Some(index),
+    };
+    xai_grok_session_search::execute_search(index, root_dir, req).await
 }
 
 #[cfg(test)]
@@ -103,8 +216,7 @@ mod tests {
         .to_indexable(summary)
     }
 
-    /// The index stores one title; the store decides which one, and a
-    /// generated title outranks the session summary.
+    /// The index stores one title; the store decides which one, and a generated title outranks the session summary.
     #[test]
     fn indexable_prefers_generated_title() {
         let mut summary = test_summary("s1", "/workspace", "session summary");
@@ -122,5 +234,77 @@ mod tests {
         assert_eq!(session.session_id, "s1");
         assert_eq!(session.cwd, "/workspace");
         assert_eq!(session.updated_at_unix, summary.updated_at.timestamp());
+    }
+
+    fn env_disables_session_search(env_value: Option<&str>) -> bool {
+        let Some(value) = env_value else {
+            return false;
+        };
+        let trimmed = value.trim();
+        trimmed == "0" || trimmed.eq_ignore_ascii_case("false")
+    }
+
+    /// Config turns session search off only when `[features] session_search` is the bool `false`.
+    fn config_value_disables_session_search(value: &toml::Value) -> bool {
+        value
+            .get("features")
+            .and_then(|features| features.get("session_search"))
+            .and_then(toml::Value::as_bool)
+            == Some(false)
+    }
+
+    fn empty_session_search_response() -> SessionSearchResponse {
+        SessionSearchResponse {
+            results: Vec::new(),
+            next_offset: None,
+            total_estimate: Some(0),
+            bootstrapping: false,
+        }
+    }
+
+    fn enabled(env_value: Option<&str>, config_off: bool) -> bool {
+        !env_disables_session_search(env_value) && !config_off
+    }
+
+    #[test]
+    fn session_search_stays_on_when_env_and_config_are_absent() {
+        assert!(enabled(None, false));
+    }
+
+    #[test]
+    fn session_search_env_zero_or_false_turns_the_index_off() {
+        for value in ["0", "false", "FALSE", "False", "  false  "] {
+            assert!(!enabled(Some(value), false), "{value}");
+        }
+    }
+
+    #[test]
+    fn session_search_other_env_values_stay_on() {
+        for value in ["1", "true", "TRUE", "yes", ""] {
+            assert!(enabled(Some(value), false), "{value}");
+        }
+    }
+
+    #[test]
+    fn session_search_config_false_wins_even_when_env_is_on() {
+        assert!(!enabled(None, true));
+        assert!(!enabled(Some("true"), true));
+        assert!(!enabled(Some("0"), false));
+    }
+
+    #[test]
+    fn session_search_config_false_is_the_bool_only() {
+        let off: toml::Value = toml::from_str("[features]\nsession_search = false\n").unwrap();
+        assert!(config_value_disables_session_search(&off));
+        let on: toml::Value = toml::from_str("[features]\nsession_search = true\n").unwrap();
+        assert!(!config_value_disables_session_search(&on));
+        assert!(!config_value_disables_session_search(&toml::Value::Table(
+            Default::default()
+        )));
+        let empty = empty_session_search_response();
+        assert!(empty.results.is_empty());
+        assert_eq!(empty.total_estimate, Some(0));
+        assert!(!empty.bootstrapping);
+        assert!(empty.next_offset.is_none());
     }
 }

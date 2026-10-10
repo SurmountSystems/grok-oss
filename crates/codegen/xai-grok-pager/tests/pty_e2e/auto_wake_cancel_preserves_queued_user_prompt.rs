@@ -114,7 +114,7 @@ pub(crate) async fn run_wake_cancel_scenario(gesture: WakeCancelGesture, cast_pr
     // The runtime task id (a UUID minted by the terminal actor, NOT the
     // scripted tool_call_id) rides in the tool result of turn 1's follow-up
     // request, inside a <task-id>…</task-id> envelope.
-    let task_id = poll_for(Duration::from_secs(10), || {
+    let task_id: String = poll_for::<String>(Duration::from_secs(10), || {
         content
             .request_bodies()
             .iter()
@@ -389,7 +389,7 @@ async fn cancel_before_task_completion_defers_auto_wake_until_user_prompt() {
         .inject_keys(format!("{PROMPT}\r").as_bytes())
         .expect("submit prompt");
 
-    let task_id = poll_for(Duration::from_secs(30), || {
+    let task_id: String = poll_for::<String>(Duration::from_secs(30), || {
         content
             .request_bodies()
             .iter()

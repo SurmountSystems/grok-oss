@@ -4,8 +4,11 @@
 //! directory. Missing or unreadable file is fail-open (no stay pin, no
 //! meter-source pin). Not `[auth]`, not `[token_economy]`, not `grok_oss.db`.
 //! Same words on TUI `/limits` and CLI `grok-oss limits`. Stock
-//! `preferred_method = "api_key"` still pins console. A client 100% /
-//! remaining 0 / $0 printout must not mark SuperGrok used up. Sampler
+//! `preferred_method = "api_key"` still wins over stay-supergrok and
+//! use-personal / use-business. It does not keep the console key when the
+//! card is Using limits. A Console meter pin still spends console API
+//! credits when that balance is available. A client 100% / remaining 0 /
+//! $0 printout must not mark SuperGrok used up. Sampler
 //! reconstruct honors `stay_supergrok` / `use_console` from this sidecar.
 
 use std::fs::{self, File, OpenOptions};
@@ -68,8 +71,7 @@ fn grok_home_path() -> PathBuf {
     if let Ok(v) = std::env::var("GROK_HOME") {
         return PathBuf::from(v);
     }
-    #[allow(deprecated)]
-    let home = std::env::home_dir().unwrap_or_else(|| PathBuf::from("."));
+    let home = xai_dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
     home.join(".grok")
 }
 
@@ -164,6 +166,61 @@ pub fn apply_use_business() -> Result<IdentityPinApply, std::io::Error> {
     Ok(IdentityPinApply::Applied)
 }
 
+/// One of the four stored SuperGrok meter cells.
+///
+/// Personal and business included SuperGrok period limits are separate
+/// weekly pools. Personal and business SuperGrok dollar credits are that
+/// session's prepaid balance. Team postpaid Billing Credits and console
+/// team prepaid are not these cells. SuperGrok is paid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SupergrokMeterCell {
+    /// Included SuperGrok period limits on the personal session.
+    PersonalLimits,
+    /// SuperGrok dollar credits on the personal session.
+    PersonalCredits,
+    /// Included SuperGrok period limits on the business session.
+    BusinessLimits,
+    /// SuperGrok dollar credits on the business session.
+    BusinessCredits,
+}
+
+/// Write the pin for one meter cell.
+///
+/// The write sets `meter_source`, `supergrok_identity`, `use_console`
+/// false, and `stay_supergrok`. It does not clear the other snapshot
+/// rows. It does not set `use_console`. A business cell fails when
+/// `auth.json` has no Team login. This does not write
+/// `[auth] preferred_method`.
+pub fn select_supergrok_meter_cell(cell: SupergrokMeterCell) -> Result<(), std::io::Error> {
+    let business = matches!(
+        cell,
+        SupergrokMeterCell::BusinessLimits | SupergrokMeterCell::BusinessCredits
+    );
+    if business && !stored_team_login_present() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "No Team login in auth.json. Log in to SuperGrok Business / Team, then retry use-business.",
+        ));
+    }
+    let mut pins = load_limits_pins();
+    pins.meter_source = Some(match cell {
+        SupergrokMeterCell::PersonalLimits | SupergrokMeterCell::BusinessLimits => {
+            MeterSource::Included
+        }
+        SupergrokMeterCell::PersonalCredits | SupergrokMeterCell::BusinessCredits => {
+            MeterSource::DollarCredits
+        }
+    });
+    pins.supergrok_identity = Some(if business {
+        SupergrokIdentityPin::Business
+    } else {
+        SupergrokIdentityPin::Personal
+    });
+    pins.use_console = false;
+    pins.stay_supergrok = true;
+    save_limits_pins(&pins)
+}
+
 /// Outcome of [`apply_use_personal`] / [`apply_use_business`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IdentityPinApply {
@@ -193,17 +250,161 @@ pub fn apply_use_console() -> Result<(), std::io::Error> {
     save_limits_pins(&pins)
 }
 
+fn console_team_prepaid_available() -> bool {
+    let Some(doc) = super::limits_snapshot_hub::read_limits_snapshot_file(grok_home_path()) else {
+        return false;
+    };
+    matches!(
+        doc.management.as_ref().and_then(|mgmt| mgmt.prepaid_cents),
+        Some(cents) if cents > 0
+    )
+}
+
+/// True when this config's SuperGrok session has a real HTTP 402 memo.
+/// A client 100% printout does not write that memo.
+fn supergrok_session_marked_by_real_http_402(config: &xai_grok_sampler::SamplerConfig) -> bool {
+    let session = config
+        .session_identity_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|secret| !secret.is_empty());
+    if let Some(session_key) = session {
+        if xai_grok_sampler::is_credential_exhausted(session_key) {
+            return true;
+        }
+    }
+    let active = config.api_key.as_deref().unwrap_or("").trim();
+    if active.is_empty() {
+        return false;
+    }
+    let active_is_session = session.map(|token| token == active).unwrap_or(true);
+    active_is_session && xai_grok_sampler::is_credential_exhausted(active)
+}
+
+/// Use limits is on, a real SuperGrok HTTP 402 is memoized, and console API
+/// credits are available: the next request uses the console key. Does not set
+/// `use_console`. Does not select SuperGrok dollar credits. A missing console
+/// balance returns false so the caller stays on included period limits.
+fn use_console_api_credits_after_real_supergrok_http_402(
+    config: &mut xai_grok_sampler::SamplerConfig,
+) -> bool {
+    if !console_team_prepaid_available() {
+        return false;
+    }
+    if !supergrok_session_marked_by_real_http_402(config) {
+        return false;
+    }
+    inject_stored_console_keys_into_failover(config);
+    xai_grok_sampler::prefer_console_identity_for_use_console_pin(config);
+    let active = config.api_key.as_deref().unwrap_or("").trim();
+    let session = config
+        .session_identity_key
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or("");
+    !session.is_empty()
+        && !active.is_empty()
+        && active != session
+        && config.bearer_resolver.is_none()
+}
+
 /// Honor sidecar `stay_supergrok` / `use_console` / SuperGrok identity pin on
 /// a reconstructed sampler config. Does not write `[auth] preferred_method`.
-/// Stock `preferred_method = "api_key"` still pins console and wins over stay
-/// and `use-personal` / `use-business`. `use-console` switches live identity
+/// Stock `preferred_method = "api_key"` still wins over stay and
+/// `use-personal` / `use-business`. It does not beat Using limits. An
+/// Included pin, or no meter pin, selects the included period session before
+/// that stock key returns. `use-console` switches live identity
 /// without that stock key. A stored console key is enough even when it is not
 /// already in live failover.
+/// A Console meter pin selects console API credits when snapshot team prepaid
+/// remaining is available, even when that stock key is set, and does not set
+/// `use_console`. An Included meter pin, or no meter pin, selects the
+/// included period session. When the identity pin is Business, that session
+/// is the Team session, including when a live personal session is also
+/// stored. Otherwise, when both a live personal SuperGrok session and a
+/// Team JWT are stored, that choice sends the personal session. A
+/// hard-expired personal session is not that choice. While that
+/// choice is on, a real SuperGrok HTTP 402 and available console API credits
+/// select the console key for the next request. A client 100% printout does
+/// not. A missing console balance keeps the included session and does not
+/// spend SuperGrok dollar credits. This path does not set `use_console`.
+/// When that session and every other key on the config are both refused, the
+/// next request is withheld. Personal cents stay put. A 100% printout does not
+/// withhold.
 pub fn apply_limits_pins_to_sampler_config(config: &mut xai_grok_sampler::SamplerConfig) {
-    if disk_preferred_is_console_primary() {
+    if xai_grok_sampler::withhold_model_request_when_both_refused(config) {
         return;
     }
     let pins = load_limits_pins();
+    let using_included_limits = pins.meter_source == Some(MeterSource::Included)
+        || (pins.meter_source.is_none()
+            && !pins.use_console
+            && !pins.stay_supergrok
+            && pins.supergrok_identity.is_none());
+    if using_included_limits {
+        if use_console_api_credits_after_real_supergrok_http_402(config) {
+            return;
+        }
+        // An Included pin with a Business identity pin sends the Team
+        // session. Installing the personal session first would drop that pin.
+        if pins.supergrok_identity == Some(SupergrokIdentityPin::Business) {
+            apply_supergrok_identity_pin_to_sampler_config(config, SupergrokIdentityPin::Business);
+            return;
+        }
+        // `prefer_supergrok_identity_for_stay_pin` returns early when `api_key`
+        // is already `session_identity_key`. A Team JWT in both fields would
+        // stay. Point those fields at the live personal session first.
+        install_live_personal_session_for_included_limits(config);
+        xai_grok_sampler::prefer_supergrok_identity_for_stay_pin(config);
+        return;
+    }
+    if pins.meter_source == Some(MeterSource::Console) {
+        if console_team_prepaid_available() {
+            inject_stored_console_keys_into_failover(config);
+            xai_grok_sampler::prefer_console_identity_for_use_console_pin(config);
+        }
+        return;
+    }
+    if disk_preferred_is_console_primary() {
+        return;
+    }
+    match pins.meter_source {
+        Some(MeterSource::Console) => {
+            if console_team_prepaid_available() {
+                inject_stored_console_keys_into_failover(config);
+                xai_grok_sampler::prefer_console_identity_for_use_console_pin(config);
+            }
+            return;
+        }
+        Some(MeterSource::Included) => {
+            if use_console_api_credits_after_real_supergrok_http_402(config) {
+                return;
+            }
+            xai_grok_sampler::prefer_supergrok_identity_for_stay_pin(config);
+            return;
+        }
+        Some(MeterSource::DollarCredits) => {
+            // The identity pin below selects the personal session or the
+            // Team session. `use_console` stays false unless the operator
+            // chose console.
+        }
+        Some(MeterSource::Combined) => {
+            if use_console_api_credits_after_real_supergrok_http_402(config) {
+                return;
+            }
+        }
+        None => {
+            if use_console_api_credits_after_real_supergrok_http_402(config) {
+                return;
+            }
+            // Missing meter pin selects included period limits. Do not write
+            // the pin file, and do not clear a pin that is already set.
+            if !pins.use_console && !pins.stay_supergrok && pins.supergrok_identity.is_none() {
+                xai_grok_sampler::prefer_supergrok_identity_for_stay_pin(config);
+                return;
+            }
+        }
+    }
     if pins.use_console && pins.supergrok_identity.is_none() && !pins.stay_supergrok {
         inject_stored_console_keys_into_failover(config);
         xai_grok_sampler::prefer_console_identity_for_use_console_pin(config);
@@ -220,6 +421,172 @@ pub fn apply_limits_pins_to_sampler_config(config: &mut xai_grok_sampler::Sample
         inject_stored_console_keys_into_failover(config);
         xai_grok_sampler::prefer_console_identity_for_use_console_pin(config);
     }
+}
+
+/// Using limits spends included SuperGrok period limits on the personal
+/// session. Install that live token as `api_key` and `session_identity_key`
+/// so a Team JWT already in both fields is not kept. A hard-expired personal
+/// session is not installed. This does not set `use_console`.
+fn install_live_personal_session_for_included_limits(config: &mut xai_grok_sampler::SamplerConfig) {
+    let home = grok_home_path();
+    let candidates = super::load_supergrok_session_candidates(&home);
+    let Some(chosen) = candidates.iter().find(|candidate| {
+        !candidate.hard_expired
+            && candidate.headroom.role == SupergrokAccountRole::Personal
+            && !candidate.access_token.trim().is_empty()
+    }) else {
+        return;
+    };
+    let token = chosen.access_token.trim().to_owned();
+    let active = config.api_key.as_deref().unwrap_or("").trim().to_owned();
+    config.session_identity_key = Some(token.clone());
+    if active == token {
+        return;
+    }
+    config.failover_api_keys.retain(|key| key.trim() != token);
+    if !active.is_empty() {
+        config.failover_api_keys.retain(|key| key.trim() != active);
+        config.failover_api_keys.insert(0, active);
+    }
+    config.api_key = Some(token);
+}
+
+/// Included percent and SuperGrok dollar cents for the identity pin.
+///
+/// `None` when the pin is unset. The chip then asks
+/// [`included_usage_pct_of_sending_session`] for the session the next
+/// request sends. When the pin is set and that live session is missing,
+/// both readings stay `None`. The snapshot row wins when that field is
+/// stored. The process cache fills a poll that has not been written yet.
+/// This does not read team postpaid Billing Credits or console team prepaid.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PinnedSupergrokRow {
+    pub usage_pct: Option<f64>,
+    pub dollar_credits_cents: Option<i64>,
+}
+
+/// Stored meters for the SuperGrok identity the pin selected.
+pub fn pinned_supergrok_row() -> Option<PinnedSupergrokRow> {
+    let role = match load_limits_pins().supergrok_identity {
+        Some(SupergrokIdentityPin::Personal) => SupergrokAccountRole::Personal,
+        Some(SupergrokIdentityPin::Business) => SupergrokAccountRole::Business,
+        None => return None,
+    };
+    let home = grok_home_path();
+    let candidates = super::load_supergrok_session_candidates(&home);
+    let Some(chosen) = candidates.iter().find(|candidate| {
+        !candidate.hard_expired
+            && candidate.headroom.role == role
+            && !candidate.access_token.trim().is_empty()
+    }) else {
+        return Some(PinnedSupergrokRow {
+            usage_pct: None,
+            dollar_credits_cents: None,
+        });
+    };
+    Some(stored_pinned_row(&home, &chosen.headroom.identity_id))
+}
+
+fn stored_pinned_row(home: &Path, identity_id: &str) -> PinnedSupergrokRow {
+    let mut usage_pct = None;
+    let mut dollar_credits_cents = None;
+    if let Some(doc) = super::limits_snapshot_hub::read_limits_snapshot_file(home) {
+        if let Some(row) = doc
+            .identities
+            .iter()
+            .find(|row| row.identity_id == identity_id)
+        {
+            usage_pct = row.usage_pct.filter(|pct| pct.is_finite());
+            dollar_credits_cents = row.dollar_credits_cents;
+        }
+    }
+    if let Some(fields) = super::included_billing_fields_snapshot().get(identity_id) {
+        if usage_pct.is_none() {
+            usage_pct = fields.usage_pct.filter(|pct| pct.is_finite());
+        }
+        if dollar_credits_cents.is_none() {
+            dollar_credits_cents = fields.prepaid_balance_cents;
+        }
+    }
+    PinnedSupergrokRow {
+        usage_pct,
+        dollar_credits_cents,
+    }
+}
+
+/// Included SuperGrok period percent of the session the next request
+/// sends when the identity pin is unset.
+///
+/// `None` means no live sending session was found. `Some(None)` means
+/// that session was identified and its percent was not stored. The chip
+/// may then use a known view balance percent. A stored percent returned
+/// here wins over that view balance, so a personal view percent is not
+/// substituted for a Team bearer that already stored its own percent.
+/// Do not substitute another session's stored percent. Do not invent
+/// `limits 0%`.
+///
+/// The active base session is the bearer. A Team base uses that business
+/// row's `usage_pct`. A personal base uses the personal row. A live
+/// personal multi-slot does not replace a live Team base. Snapshot, then
+/// the process cache. When both lack the percent, a finite
+/// `creditUsagePercent` already stored by the billing read is copied into
+/// the process cache. This does not add a URL, rewrite the snapshot, or
+/// read team postpaid Billing Credits or console team prepaid.
+pub fn included_usage_pct_of_sending_session() -> Option<Option<f64>> {
+    if load_limits_pins().supergrok_identity.is_some() {
+        return None;
+    }
+    let home = grok_home_path();
+    let identity_id = sending_session_identity_id(&home)?;
+    let mut usage_pct = stored_pinned_row(&home, &identity_id)
+        .usage_pct
+        .filter(|pct| pct.is_finite());
+    if usage_pct.is_none()
+        && let Some(pct) = finite_poll_history_usage_pct(&identity_id)
+    {
+        super::remember_supergrok_included_billing(&identity_id, pct, None, None);
+        usage_pct = Some(pct);
+    }
+    Some(usage_pct)
+}
+
+fn candidate_is_live(candidate: &SupergrokSessionCandidate) -> bool {
+    !candidate.hard_expired && !candidate.access_token.trim().is_empty()
+}
+
+/// Identity of the live session the next request sends when the identity
+/// pin is unset. The active base wins. A missing or hard-expired base
+/// falls back to a live personal session, then a live Team session.
+fn sending_session_identity_id(home: &Path) -> Option<String> {
+    let candidates = super::load_supergrok_session_candidates(home);
+    if let Some(active) = super::active_supergrok_identity_id(home) {
+        let active_is_live = candidates.iter().any(|candidate| {
+            candidate_is_live(candidate) && candidate.headroom.identity_id == active
+        });
+        if active_is_live {
+            return Some(active);
+        }
+    }
+    if let Some(personal) = candidates.iter().find(|candidate| {
+        candidate_is_live(candidate) && candidate.headroom.role == SupergrokAccountRole::Personal
+    }) {
+        return Some(personal.headroom.identity_id.clone());
+    }
+    candidates
+        .iter()
+        .find(|candidate| {
+            candidate_is_live(candidate)
+                && candidate.headroom.role == SupergrokAccountRole::Business
+        })
+        .map(|candidate| candidate.headroom.identity_id.clone())
+}
+
+/// Latest finite `creditUsagePercent` already stored for this identity.
+/// A missing sample or a non-finite field stays absent.
+fn finite_poll_history_usage_pct(identity_id: &str) -> Option<f64> {
+    let history = super::included_poll_history_for(identity_id);
+    let pct = history.last()?.credit_usage_percent;
+    pct.is_finite().then_some(pct)
 }
 
 fn apply_supergrok_identity_pin_to_sampler_config(
@@ -248,6 +615,44 @@ fn apply_supergrok_identity_pin_to_sampler_config(
     config.api_key = Some(token.clone());
     config.session_identity_key = Some(token);
     xai_grok_sampler::prefer_supergrok_identity_for_stay_pin(config);
+}
+
+/// True when the stored included-period session and the stored console API
+/// key each have a real refusal memo. A client 100% printout does not write
+/// that memo, so this stays false.
+pub fn included_period_and_console_api_credits_both_refused() -> bool {
+    let home = grok_home_path();
+    let Some(session) = stored_included_period_session_key(&home) else {
+        return false;
+    };
+    let Some(console) = super::read_api_key(&home) else {
+        return false;
+    };
+    let session = session.trim();
+    let console = console.trim();
+    if session.is_empty() || console.is_empty() || session == console {
+        return false;
+    }
+    xai_grok_sampler::is_credential_exhausted(session)
+        && xai_grok_sampler::is_credential_exhausted(console)
+}
+
+fn stored_included_period_session_key(home: &Path) -> Option<String> {
+    let map = super::read_auth_json(&home.join("auth.json")).ok()?;
+    map.iter().find_map(|(scope, auth)| {
+        if scope.as_str() == super::model::API_KEY_SCOPE {
+            return None;
+        }
+        if !super::model::is_supergrok_session_mode(auth.auth_mode) {
+            return None;
+        }
+        let key = auth.key.trim();
+        if key.is_empty() {
+            None
+        } else {
+            Some(key.to_owned())
+        }
+    })
 }
 
 /// True when `auth.json` holds a SuperGrok Team / Business login.
@@ -347,6 +752,102 @@ pub fn apply_meter_source(source: MeterSource) -> Result<(), std::io::Error> {
     let mut pins = load_limits_pins();
     pins.meter_source = Some(source);
     save_limits_pins(&pins)
+}
+
+/// A live SuperGrok session JWT. Hard-expired rows are not live.
+fn auth_is_live_supergrok_session(auth: &super::model::GrokAuth) -> bool {
+    super::model::is_supergrok_session_mode(auth.auth_mode)
+        && !auth.key.trim().is_empty()
+        && !super::model::is_expired_with_buffer(auth, chrono::Duration::zero())
+}
+
+/// `(personal, team)` from `auth.json`. Read-only. An unread meter is not a percent.
+fn live_personal_and_team_session_flags() -> (bool, bool) {
+    let path = grok_home_path().join("auth.json");
+    let Ok(map) = super::read_auth_json(&path) else {
+        return (false, false);
+    };
+    let mut personal = false;
+    let mut team = false;
+    for auth in map.values() {
+        if !auth_is_live_supergrok_session(auth) {
+            continue;
+        }
+        if auth.is_team_principal() {
+            team = true;
+        } else {
+            personal = true;
+        }
+    }
+    (personal, team)
+}
+
+/// True when a live Team JWT would be the next request and that request
+/// is not the included-period choice. The Included meter pin returns
+/// before this, including when the identity pin is Business. Included
+/// plus Business is that business row's included percent, not team
+/// postpaid Billing Credits.
+fn next_request_sends_team_jwt_not_included_period(pins: &LimitsPins) -> bool {
+    let (personal, team) = live_personal_and_team_session_flags();
+    if !team {
+        return false;
+    }
+    if pins.supergrok_identity == Some(SupergrokIdentityPin::Business) {
+        return true;
+    }
+    if pins.supergrok_identity == Some(SupergrokIdentityPin::Personal) && personal {
+        return false;
+    }
+    !personal
+}
+
+/// Whether the next request draws included SuperGrok period limits.
+///
+/// The status chip and the limits card must use this. Do not paint a limits
+/// label when this is false. A DollarCredits pin is SuperGrok dollar credits.
+/// A Console pin with team prepaid remaining is console API credits. Neither
+/// is included SuperGrok period limits. `use_console` is not that meter.
+/// An explicit Included pin is that meter, including beside a Team JWT.
+/// Without that pin, a live Team JWT with no live personal SuperGrok session
+/// does not draw included SuperGrok period limits, so an unread meter must
+/// not paint `limits 0%`.
+pub fn next_request_draws_included_period_limits() -> bool {
+    next_request_draws_included_period_limits_for(&load_limits_pins())
+}
+
+/// Same rule as [`next_request_draws_included_period_limits`] for a pins value.
+pub fn next_request_draws_included_period_limits_for(pins: &LimitsPins) -> bool {
+    if pins.use_console {
+        return false;
+    }
+    let pins_allow = match pins.meter_source {
+        // The operator chose included SuperGrok period limits. A Team JWT
+        // does not veto that choice, and this does not set `use_console`.
+        Some(MeterSource::Included) => return true,
+        Some(MeterSource::DollarCredits) => false,
+        Some(MeterSource::Console) => !console_team_prepaid_available(),
+        None | Some(MeterSource::Combined) => {
+            let console_primary_blocks_default = disk_preferred_is_console_primary()
+                && (pins.stay_supergrok || pins.supergrok_identity.is_some());
+            !console_primary_blocks_default
+        }
+    };
+    pins_allow && !next_request_sends_team_jwt_not_included_period(pins)
+}
+
+/// Limits mode is the default. Included SuperGrok period limits are enabled.
+///
+/// Default pins have no meter pin, `use_console` false, and `stay_supergrok`
+/// false. `[auth] auto_use_included_limits` defaults on. That is limits mode,
+/// and the next request draws included SuperGrok period limits.
+pub fn limits_mode_enables_included_period_limits_by_default() -> bool {
+    let pins = LimitsPins::default();
+    super::default_auto_use_included_limits()
+        && pins.meter_source.is_none()
+        && !pins.use_console
+        && !pins.stay_supergrok
+        && pins.supergrok_identity.is_none()
+        && next_request_draws_included_period_limits_for(&pins)
 }
 
 /// Stock `[auth] preferred_method = "api_key"` under `$GROK_HOME/config.toml`.
@@ -1074,5 +1575,643 @@ preferred_method = "api_key"
             load_limits_pins().supergrok_identity.is_none(),
             "must not persist a Business pin when no Team login is stored"
         );
+    }
+
+    /// Named contract: an Included pin, or no pin so the card says Using
+    /// limits, puts the SuperGrok session key on the sampler even when stock
+    /// `[auth] preferred_method = "api_key"` would keep the console key.
+    #[test]
+    #[serial_test::serial]
+    fn included_limits_beat_preferred_method_api_key() {
+        let home = TempDir::new().expect("temp grok home");
+        let _env = EnvGuard::set("GROK_HOME", home.path());
+        fs::write(
+            home.path().join("config.toml"),
+            "[auth]\npreferred_method = \"api_key\"\n",
+        )
+        .expect("write stock preferred_method");
+
+        let session = "included-period-session-token";
+        let console = "console-inference-key";
+        save_limits_pins(&LimitsPins {
+            stay_supergrok: false,
+            use_console: false,
+            meter_source: Some(MeterSource::Included),
+            supergrok_identity: None,
+        })
+        .expect("Included pin");
+
+        let mut config = dual_auth_sampler(session, console);
+        config.api_key = Some(console.into());
+        config.failover_api_keys = vec![session.into()];
+        config.base_url = "https://api.x.ai/v1".into();
+        config.bearer_resolver = None;
+        apply_limits_pins_to_sampler_config(&mut config);
+        assert_eq!(
+            config.api_key.as_deref(),
+            Some(session),
+            "Included limits must beat preferred_method=api_key"
+        );
+        assert_ne!(config.api_key.as_deref(), Some(console));
+        assert!(
+            config.base_url.contains("cli-chat-proxy"),
+            "Included limits stay on the SuperGrok session host: {}",
+            config.base_url
+        );
+
+        fs::remove_file(home.path().join(LIMITS_PINS_FILE)).expect("clear pin");
+        assert_eq!(load_limits_pins().meter_source, None);
+        let mut again = dual_auth_sampler(session, console);
+        again.api_key = Some(console.into());
+        again.failover_api_keys = vec![session.into()];
+        again.base_url = "https://api.x.ai/v1".into();
+        again.bearer_resolver = None;
+        apply_limits_pins_to_sampler_config(&mut again);
+        assert_eq!(
+            again.api_key.as_deref(),
+            Some(session),
+            "no meter pin (Using limits) must beat preferred_method=api_key"
+        );
+        assert_ne!(again.api_key.as_deref(), Some(console));
+        assert!(
+            again.base_url.contains("cli-chat-proxy"),
+            "Using limits stays on the SuperGrok session host: {}",
+            again.base_url
+        );
+    }
+
+    /// Owed outcome: both sessions are present. After the Included choice,
+    /// the next request authorization is the personal session. The test
+    /// fails while the selector still keeps the Team JWT. A hard-expired
+    /// printout is not success. SuperGrok is paid.
+    #[test]
+    #[serial_test::serial]
+    fn using_limits_sends_the_personal_supergrok_session_not_the_team_jwt() {
+        use crate::auth::{AuthMode, GrokAuth, SupergrokAccountRole, upsert_supergrok_session};
+
+        let home = TempDir::new().expect("temp grok home");
+        let _env = EnvGuard::set("GROK_HOME", home.path());
+        let live = chrono::Utc::now() + chrono::Duration::days(7);
+        let base = "https://auth.x.ai::included-choice-personal";
+        let personal = "tok-personal-live";
+        let team = "tok-team-jwt";
+        let mut map = std::collections::BTreeMap::new();
+        upsert_supergrok_session(
+            &mut map,
+            base,
+            GrokAuth {
+                key: personal.into(),
+                auth_mode: AuthMode::Oidc,
+                user_id: "u-personal-live".into(),
+                principal_type: Some("User".into()),
+                principal_id: Some("u-personal-live".into()),
+                team_id: None,
+                expires_at: Some(live),
+                ..GrokAuth::default()
+            },
+        );
+        upsert_supergrok_session(
+            &mut map,
+            base,
+            GrokAuth {
+                key: team.into(),
+                auth_mode: AuthMode::Oidc,
+                user_id: "u-team-live".into(),
+                principal_type: Some("Team".into()),
+                principal_id: Some("team-included-choice".into()),
+                team_id: Some("team-included-choice".into()),
+                expires_at: Some(live),
+                ..GrokAuth::default()
+            },
+        );
+        fs::write(
+            home.path().join("auth.json"),
+            serde_json::to_vec_pretty(&map).expect("auth.json"),
+        )
+        .expect("write auth.json");
+
+        let candidates = crate::auth::load_supergrok_session_candidates(home.path());
+        let personal_session = candidates
+            .iter()
+            .find(|candidate| candidate.access_token == personal)
+            .expect("personal SuperGrok session is stored");
+        let team_session = candidates
+            .iter()
+            .find(|candidate| candidate.access_token == team)
+            .expect("Team JWT is stored");
+        assert!(
+            !personal_session.hard_expired && !team_session.hard_expired,
+            "both sessions are live; a hard-expired printout is not this fixture"
+        );
+        assert_eq!(
+            personal_session.headroom.role,
+            SupergrokAccountRole::Personal
+        );
+        assert_eq!(team_session.headroom.role, SupergrokAccountRole::Business);
+        assert_ne!(
+            personal_session.headroom.identity_id, team_session.headroom.identity_id,
+            "the personal session and the Team JWT are different logins"
+        );
+
+        save_limits_pins(&LimitsPins {
+            stay_supergrok: false,
+            use_console: false,
+            meter_source: Some(MeterSource::Included),
+            supergrok_identity: None,
+        })
+        .expect("Included choice");
+
+        let mut config = dual_auth_sampler(team, "console-not-this-request");
+        config.api_key = Some(team.into());
+        config.session_identity_key = Some(team.into());
+        config.failover_api_keys = vec![personal.into()];
+        config.bearer_resolver = None;
+        assert_eq!(config.api_key.as_deref(), Some(team));
+        apply_limits_pins_to_sampler_config(&mut config);
+
+        let pins = load_limits_pins();
+        assert!(!pins.use_console);
+        assert_eq!(pins.meter_source, Some(MeterSource::Included));
+        assert_eq!(
+            config.api_key.as_deref(),
+            Some(personal),
+            "after the Included choice, the next request authorization is the personal SuperGrok session"
+        );
+        assert_ne!(
+            config.api_key.as_deref(),
+            Some(team),
+            "the Included choice does not keep the Team JWT"
+        );
+        assert!(
+            config.bearer_resolver.is_none()
+                || config
+                    .bearer_resolver
+                    .as_ref()
+                    .and_then(|resolver| resolver.current_bearer())
+                    .as_deref()
+                    == Some(personal),
+            "a Team JWT bearer is not the personal session authorization"
+        );
+    }
+
+    /// Named contract: Use credits, then Use limits, with
+    /// `preferred_method = api_key` puts the SuperGrok session key back.
+    #[test]
+    #[serial_test::serial]
+    fn use_limits_after_console_credits_returns_to_the_supergrok_session_despite_api_key() {
+        let home = TempDir::new().expect("temp grok home");
+        let _env = EnvGuard::set("GROK_HOME", home.path());
+        fs::write(
+            home.path().join("config.toml"),
+            "[auth]\npreferred_method = \"api_key\"\n",
+        )
+        .expect("write stock preferred_method");
+
+        let session = "included-period-session-token";
+        let console = "console-inference-key";
+        let mut doc = crate::auth::LimitsSnapshotDocument::empty(1);
+        doc.management = Some(crate::auth::LimitsSnapshotManagement {
+            prepaid_cents: Some(90035),
+            ..Default::default()
+        });
+        crate::auth::write_limits_snapshot_file(home.path(), &doc).expect("prepaid snapshot");
+
+        save_limits_pins(&LimitsPins {
+            stay_supergrok: false,
+            use_console: false,
+            meter_source: Some(MeterSource::Console),
+            supergrok_identity: None,
+        })
+        .expect("Use credits pin");
+
+        let mut config = dual_auth_sampler(session, console);
+        apply_limits_pins_to_sampler_config(&mut config);
+        assert_eq!(
+            config.api_key.as_deref(),
+            Some(console),
+            "Use credits must spend the console inference key despite preferred_method=api_key"
+        );
+        assert!(config.base_url.contains("api.x.ai"), "{}", config.base_url);
+
+        save_limits_pins(&LimitsPins {
+            stay_supergrok: false,
+            use_console: false,
+            meter_source: Some(MeterSource::Included),
+            supergrok_identity: None,
+        })
+        .expect("Use limits pin");
+        apply_limits_pins_to_sampler_config(&mut config);
+        assert_eq!(
+            config.api_key.as_deref(),
+            Some(session),
+            "Use limits must return the SuperGrok session key despite preferred_method=api_key"
+        );
+        assert_ne!(config.api_key.as_deref(), Some(console));
+        assert!(
+            config.base_url.contains("cli-chat-proxy"),
+            "{}",
+            config.base_url
+        );
+        assert!(!load_limits_pins().use_console);
+        assert_eq!(load_limits_pins().meter_source, Some(MeterSource::Included));
+    }
+
+    fn write_live_session(
+        map: &mut std::collections::BTreeMap<String, crate::auth::GrokAuth>,
+        base: &str,
+        key: &str,
+        user_id: &str,
+        team: bool,
+        expires_at: chrono::DateTime<chrono::Utc>,
+    ) {
+        use crate::auth::{AuthMode, GrokAuth, upsert_supergrok_session};
+        upsert_supergrok_session(
+            map,
+            base,
+            GrokAuth {
+                key: key.into(),
+                auth_mode: AuthMode::Oidc,
+                user_id: user_id.into(),
+                principal_type: team.then(|| "Team".to_string()),
+                principal_id: team.then(|| "team-fixture".to_string()),
+                team_id: team.then(|| "team-fixture".to_string()),
+                expires_at: Some(expires_at),
+                ..Default::default()
+            },
+        );
+    }
+
+    /// When limits mode is on, the next model request draws included SuperGrok
+    /// period limits, and an unread meter does not paint `limits 0%`.
+    /// A live Team JWT with no live personal SuperGrok session does not draw
+    /// included SuperGrok period limits until the operator chooses that meter.
+    /// An Included pin is that choice, even beside a Team JWT. A live personal
+    /// session still draws that meter with no pin.
+    #[test]
+    #[serial_test::serial]
+    fn limits_mode_draws_included_period_limits_unless_the_bearer_is_a_team_jwt() {
+        let home = TempDir::new().expect("temp grok home");
+        let _env = EnvGuard::set("GROK_HOME", home.path());
+        fs::write(
+            home.path().join("config.toml"),
+            "[auth]\npreferred_method = \"oidc\"\nauto_use_included_limits = true\n",
+        )
+        .expect("preferred oidc");
+        save_limits_pins(&LimitsPins {
+            stay_supergrok: true,
+            use_console: false,
+            meter_source: None,
+            supergrok_identity: None,
+        })
+        .expect("stay pin");
+        assert!(
+            next_request_draws_included_period_limits(),
+            "a home with no session still draws included SuperGrok period limits in limits mode"
+        );
+
+        let base = "https://auth.x.ai::limits-meter-fixture";
+        let live = chrono::Utc::now() + chrono::Duration::days(1);
+        let mut map = std::collections::BTreeMap::new();
+        write_live_session(&mut map, base, "tok-team-only", "u-team", true, live);
+        fs::write(
+            home.path().join("auth.json"),
+            serde_json::to_vec_pretty(&map).expect("auth json"),
+        )
+        .expect("write team session");
+        assert!(
+            !next_request_draws_included_period_limits(),
+            "limits mode with only a live Team JWT does not draw included SuperGrok period limits"
+        );
+        assert!(
+            next_request_draws_included_period_limits_for(&LimitsPins {
+                meter_source: Some(MeterSource::Included),
+                ..LimitsPins::default()
+            }),
+            "an Included pin makes the next request draw included SuperGrok period limits even beside a Team JWT"
+        );
+
+        write_live_session(
+            &mut map,
+            base,
+            "tok-personal-included",
+            "u-personal",
+            false,
+            live,
+        );
+        fs::write(
+            home.path().join("auth.json"),
+            serde_json::to_vec_pretty(&map).expect("auth json"),
+        )
+        .expect("write personal session");
+        save_limits_pins(&LimitsPins {
+            stay_supergrok: true,
+            use_console: false,
+            meter_source: None,
+            supergrok_identity: None,
+        })
+        .expect("stay pin still limits mode");
+        assert!(
+            next_request_draws_included_period_limits(),
+            "when limits mode is on and a live personal SuperGrok session exists, the next model request draws included SuperGrok period limits"
+        );
+    }
+
+    const CELL_PERSONAL_TOKEN: &str = "tok-personal-cell";
+    const CELL_TEAM_TOKEN: &str = "tok-team-cell";
+    const CELL_PERSONAL_ID: &str = "u-personal-cell";
+    const CELL_BUSINESS_ID: &str = "team-cell";
+    const CELL_PERSONAL_PCT: f64 = 28.0;
+    const CELL_BUSINESS_PCT: f64 = 41.0;
+    const CELL_PERSONAL_CENTS: i64 = 8_765;
+    const CELL_BUSINESS_CENTS: i64 = 2_199;
+    const CELL_CONSOLE_CENTS: i64 = 15_420;
+    const CELL_POSTPAID_CENTS: i64 = 4_703;
+
+    fn seed_four_meter_cells(home: &std::path::Path) {
+        use crate::auth::{AuthMode, GrokAuth, upsert_supergrok_session};
+
+        crate::auth::clear_included_billing_cache();
+        let live = chrono::Utc::now() + chrono::Duration::days(7);
+        let base = "https://auth.x.ai::four-meter-cells";
+        let mut map = std::collections::BTreeMap::new();
+        upsert_supergrok_session(
+            &mut map,
+            base,
+            GrokAuth {
+                key: CELL_PERSONAL_TOKEN.into(),
+                auth_mode: AuthMode::Oidc,
+                user_id: CELL_PERSONAL_ID.into(),
+                principal_type: Some("User".into()),
+                principal_id: Some(CELL_PERSONAL_ID.into()),
+                team_id: None,
+                expires_at: Some(live),
+                ..GrokAuth::default()
+            },
+        );
+        upsert_supergrok_session(
+            &mut map,
+            base,
+            GrokAuth {
+                key: CELL_TEAM_TOKEN.into(),
+                auth_mode: AuthMode::Oidc,
+                user_id: "u-team-cell".into(),
+                principal_type: Some("Team".into()),
+                principal_id: Some(CELL_BUSINESS_ID.into()),
+                team_id: Some(CELL_BUSINESS_ID.into()),
+                expires_at: Some(live),
+                ..GrokAuth::default()
+            },
+        );
+        fs::write(
+            home.join("auth.json"),
+            serde_json::to_vec_pretty(&map).expect("auth.json"),
+        )
+        .expect("write auth.json");
+
+        let mut doc = crate::auth::LimitsSnapshotDocument::empty(1_700_000_000_000);
+        doc.identities.push(cell_identity(
+            CELL_PERSONAL_ID,
+            CELL_PERSONAL_PCT,
+            CELL_PERSONAL_CENTS,
+        ));
+        doc.identities.push(cell_identity(
+            CELL_BUSINESS_ID,
+            CELL_BUSINESS_PCT,
+            CELL_BUSINESS_CENTS,
+        ));
+        doc.management = Some(crate::auth::LimitsSnapshotManagement {
+            team_id: Some("mgmt-cell-decoy".into()),
+            prepaid_cents: Some(CELL_CONSOLE_CENTS),
+            billing_credits_cents: Some(CELL_POSTPAID_CENTS),
+            ..Default::default()
+        });
+        crate::auth::write_limits_snapshot_file(home, &doc).expect("write four meter rows");
+    }
+
+    fn cell_identity(
+        identity_id: &str,
+        usage_pct: f64,
+        dollar_credits_cents: i64,
+    ) -> crate::auth::LimitsSnapshotIdentity {
+        crate::auth::LimitsSnapshotIdentity {
+            identity_id: identity_id.to_owned(),
+            usage_pct: Some(usage_pct),
+            period_end: None,
+            period_type: None,
+            dollar_credits_cents: Some(dollar_credits_cents),
+            grok_build_usage_pct: None,
+            is_unified_billing_user: None,
+            poll_outcome: crate::auth::POLL_OUTCOME_OK.to_owned(),
+        }
+    }
+
+    fn assert_four_snapshot_values_still_stored(home: &std::path::Path) {
+        let doc = crate::auth::read_limits_snapshot_file(home).expect("snapshot still stored");
+        let personal = doc
+            .identities
+            .iter()
+            .find(|row| row.identity_id == CELL_PERSONAL_ID)
+            .expect("personal row stays stored");
+        let business = doc
+            .identities
+            .iter()
+            .find(|row| row.identity_id == CELL_BUSINESS_ID)
+            .expect("business row stays stored");
+        assert_eq!(personal.usage_pct, Some(CELL_PERSONAL_PCT));
+        assert_eq!(personal.dollar_credits_cents, Some(CELL_PERSONAL_CENTS));
+        assert_eq!(business.usage_pct, Some(CELL_BUSINESS_PCT));
+        assert_eq!(business.dollar_credits_cents, Some(CELL_BUSINESS_CENTS));
+        let management = doc.management.expect("management meters stay stored");
+        assert_eq!(management.prepaid_cents, Some(CELL_CONSOLE_CENTS));
+        assert_eq!(management.billing_credits_cents, Some(CELL_POSTPAID_CENTS));
+    }
+
+    fn sampler_starting_on(token: &str) -> xai_grok_sampler::SamplerConfig {
+        let mut config = dual_auth_sampler(token, "console-not-this-cell");
+        config.api_key = Some(token.into());
+        config.session_identity_key = Some(token.into());
+        config.failover_api_keys = vec![CELL_PERSONAL_TOKEN.into(), CELL_TEAM_TOKEN.into()];
+        config.bearer_resolver = None;
+        config
+    }
+
+    /// Personal limits send the personal session. The other three stored
+    /// values stay on the snapshot. SuperGrok is paid.
+    #[test]
+    #[serial_test::serial]
+    fn personal_limits_sends_the_personal_session() {
+        let home = TempDir::new().expect("temp grok home");
+        let _env = EnvGuard::set("GROK_HOME", home.path());
+        seed_four_meter_cells(home.path());
+        select_supergrok_meter_cell(SupergrokMeterCell::PersonalLimits).expect("personal limits");
+        let pins = load_limits_pins();
+        assert_eq!(pins.meter_source, Some(MeterSource::Included));
+        assert_eq!(
+            pins.supergrok_identity,
+            Some(SupergrokIdentityPin::Personal)
+        );
+        assert!(!pins.use_console);
+        assert!(pins.stay_supergrok);
+        let mut config = sampler_starting_on(CELL_TEAM_TOKEN);
+        apply_limits_pins_to_sampler_config(&mut config);
+        assert_eq!(config.api_key.as_deref(), Some(CELL_PERSONAL_TOKEN));
+        assert_ne!(config.api_key.as_deref(), Some(CELL_TEAM_TOKEN));
+        assert!(!load_limits_pins().use_console);
+        let row = pinned_supergrok_row().expect("personal pin selects a row");
+        assert_eq!(row.usage_pct, Some(CELL_PERSONAL_PCT));
+        assert_four_snapshot_values_still_stored(home.path());
+    }
+
+    /// Personal credits stay on the personal session and leave `use_console`
+    /// false. The chip reading is that row's dollar cents, not team postpaid
+    /// and not console prepaid.
+    #[test]
+    #[serial_test::serial]
+    fn personal_credits_keep_the_personal_session_and_leave_use_console_false() {
+        let home = TempDir::new().expect("temp grok home");
+        let _env = EnvGuard::set("GROK_HOME", home.path());
+        seed_four_meter_cells(home.path());
+        select_supergrok_meter_cell(SupergrokMeterCell::PersonalCredits).expect("personal credits");
+        let pins = load_limits_pins();
+        assert_eq!(pins.meter_source, Some(MeterSource::DollarCredits));
+        assert_eq!(
+            pins.supergrok_identity,
+            Some(SupergrokIdentityPin::Personal)
+        );
+        assert!(!pins.use_console);
+        let mut config = sampler_starting_on(CELL_TEAM_TOKEN);
+        apply_limits_pins_to_sampler_config(&mut config);
+        assert_eq!(config.api_key.as_deref(), Some(CELL_PERSONAL_TOKEN));
+        assert!(!load_limits_pins().use_console);
+        let row = pinned_supergrok_row().expect("personal pin selects a row");
+        assert_eq!(row.dollar_credits_cents, Some(CELL_PERSONAL_CENTS));
+        assert_ne!(row.dollar_credits_cents, Some(CELL_BUSINESS_CENTS));
+        assert_ne!(row.dollar_credits_cents, Some(CELL_CONSOLE_CENTS));
+        assert_ne!(row.dollar_credits_cents, Some(CELL_POSTPAID_CENTS));
+        assert_four_snapshot_values_still_stored(home.path());
+    }
+
+    /// Business limits send the Team session even when a live personal
+    /// session exists. The reading is that business row's percent, not
+    /// team postpaid.
+    #[test]
+    #[serial_test::serial]
+    fn business_limits_sends_the_team_session_when_a_live_personal_session_exists() {
+        let home = TempDir::new().expect("temp grok home");
+        let _env = EnvGuard::set("GROK_HOME", home.path());
+        seed_four_meter_cells(home.path());
+        let candidates = crate::auth::load_supergrok_session_candidates(home.path());
+        assert!(
+            candidates.iter().any(|candidate| {
+                candidate.access_token == CELL_PERSONAL_TOKEN && !candidate.hard_expired
+            }),
+            "a live personal session is stored beside the Team session"
+        );
+        select_supergrok_meter_cell(SupergrokMeterCell::BusinessLimits).expect("business limits");
+        let pins = load_limits_pins();
+        assert_eq!(pins.meter_source, Some(MeterSource::Included));
+        assert_eq!(
+            pins.supergrok_identity,
+            Some(SupergrokIdentityPin::Business)
+        );
+        assert!(!pins.use_console);
+        assert!(pins.stay_supergrok);
+        assert!(next_request_draws_included_period_limits());
+        let mut config = sampler_starting_on(CELL_PERSONAL_TOKEN);
+        apply_limits_pins_to_sampler_config(&mut config);
+        assert_eq!(
+            config.api_key.as_deref(),
+            Some(CELL_TEAM_TOKEN),
+            "business limits send the Team session, not the live personal session"
+        );
+        assert_ne!(config.api_key.as_deref(), Some(CELL_PERSONAL_TOKEN));
+        assert!(!load_limits_pins().use_console);
+        let row = pinned_supergrok_row().expect("business pin selects a row");
+        assert_eq!(row.usage_pct, Some(CELL_BUSINESS_PCT));
+        assert_ne!(row.usage_pct, Some(CELL_PERSONAL_PCT));
+        assert_four_snapshot_values_still_stored(home.path());
+    }
+
+    /// Business credits send the Team session and read that row's dollar
+    /// cents. They do not read team postpaid or console prepaid, and they
+    /// do not set `use_console`.
+    #[test]
+    #[serial_test::serial]
+    fn business_credits_send_the_team_session_and_that_rows_dollar_cents() {
+        let home = TempDir::new().expect("temp grok home");
+        let _env = EnvGuard::set("GROK_HOME", home.path());
+        seed_four_meter_cells(home.path());
+        select_supergrok_meter_cell(SupergrokMeterCell::BusinessCredits).expect("business credits");
+        let pins = load_limits_pins();
+        assert_eq!(pins.meter_source, Some(MeterSource::DollarCredits));
+        assert_eq!(
+            pins.supergrok_identity,
+            Some(SupergrokIdentityPin::Business)
+        );
+        assert!(!pins.use_console);
+        assert!(!next_request_draws_included_period_limits());
+        let mut config = sampler_starting_on(CELL_PERSONAL_TOKEN);
+        apply_limits_pins_to_sampler_config(&mut config);
+        assert_eq!(config.api_key.as_deref(), Some(CELL_TEAM_TOKEN));
+        assert_ne!(config.api_key.as_deref(), Some(CELL_PERSONAL_TOKEN));
+        assert!(!load_limits_pins().use_console);
+        let row = pinned_supergrok_row().expect("business pin selects a row");
+        assert_eq!(row.dollar_credits_cents, Some(CELL_BUSINESS_CENTS));
+        assert_ne!(row.dollar_credits_cents, Some(CELL_PERSONAL_CENTS));
+        assert_ne!(row.dollar_credits_cents, Some(CELL_CONSOLE_CENTS));
+        assert_ne!(row.dollar_credits_cents, Some(CELL_POSTPAID_CENTS));
+        assert_four_snapshot_values_still_stored(home.path());
+    }
+
+    /// Each selection writes pins and the session token. The other three
+    /// snapshot values stay stored. Team postpaid and console prepaid stay
+    /// the meters they already are.
+    #[test]
+    #[serial_test::serial]
+    fn each_meter_cell_selection_keeps_the_other_three_snapshot_values() {
+        let home = TempDir::new().expect("temp grok home");
+        let _env = EnvGuard::set("GROK_HOME", home.path());
+        seed_four_meter_cells(home.path());
+        let cells = [
+            (
+                SupergrokMeterCell::PersonalLimits,
+                CELL_PERSONAL_TOKEN,
+                MeterSource::Included,
+                SupergrokIdentityPin::Personal,
+            ),
+            (
+                SupergrokMeterCell::PersonalCredits,
+                CELL_PERSONAL_TOKEN,
+                MeterSource::DollarCredits,
+                SupergrokIdentityPin::Personal,
+            ),
+            (
+                SupergrokMeterCell::BusinessLimits,
+                CELL_TEAM_TOKEN,
+                MeterSource::Included,
+                SupergrokIdentityPin::Business,
+            ),
+            (
+                SupergrokMeterCell::BusinessCredits,
+                CELL_TEAM_TOKEN,
+                MeterSource::DollarCredits,
+                SupergrokIdentityPin::Business,
+            ),
+        ];
+        for (cell, token, meter, identity) in cells {
+            select_supergrok_meter_cell(cell).expect("select cell");
+            let mut config = sampler_starting_on(if token == CELL_PERSONAL_TOKEN {
+                CELL_TEAM_TOKEN
+            } else {
+                CELL_PERSONAL_TOKEN
+            });
+            apply_limits_pins_to_sampler_config(&mut config);
+            assert_eq!(config.api_key.as_deref(), Some(token));
+            let pins = load_limits_pins();
+            assert_eq!(pins.meter_source, Some(meter));
+            assert_eq!(pins.supergrok_identity, Some(identity));
+            assert!(!pins.use_console);
+            assert_four_snapshot_values_still_stored(home.path());
+        }
     }
 }

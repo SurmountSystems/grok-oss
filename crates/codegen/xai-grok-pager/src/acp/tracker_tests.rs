@@ -1,7 +1,7 @@
 use super::*;
+use crate::scrollback::blocks::tool::VerbGroupKind;
 use std::sync::Arc;
-/// Default meta with no timestamps (simulates old grok-shell or tests that
-/// don't care about timing).
+/// Default meta with no timestamps (simulates old grok-shell or tests that don't care about timing).
 fn meta() -> NotificationMeta {
     NotificationMeta::default()
 }
@@ -14,6 +14,12 @@ fn thought_chunk(text: &str) -> acp::SessionUpdate {
     acp::SessionUpdate::AgentThoughtChunk(acp::ContentChunk::new(acp::ContentBlock::Text(
         acp::TextContent::new(text.to_string()),
     )))
+}
+fn batch(event_name: &str, tool_name: Option<&str>) -> HookBatchId {
+    HookBatchId {
+        event_name: event_name.into(),
+        tool_name: tool_name.map(str::to_string),
+    }
 }
 #[test]
 fn workflow_suppression_keeps_authoring_calls_visible() {
@@ -458,13 +464,6 @@ fn finish_turn_clears_state() {
     );
 }
 #[test]
-fn user_message_replay() {
-    let mut sb = ScrollbackState::new();
-    let mut tracker = AcpUpdateTracker::new();
-    tracker.handle_update(user_message("What is Rust?"), &meta(), &mut sb);
-    assert_eq!(sb.len(), 1);
-}
-#[test]
 fn empty_chunks_ignored() {
     let mut sb = ScrollbackState::new();
     let mut tracker = AcpUpdateTracker::new();
@@ -473,10 +472,8 @@ fn empty_chunks_ignored() {
     assert_eq!(sb.len(), 0);
 }
 /// Regression test: two turns should create separate agent message entries.
-///
-/// Previously, handle_user_message() didn't reset current_agent_msg,
-/// so the second turn's agent message chunks got appended to the first
-/// turn's entry, producing concatenated text.
+/// Previously, handle_user_message() didn't reset current_agent_msg.
+/// The second turn's agent message chunks then got appended to the first turn's entry, producing concatenated text.
 #[test]
 fn two_turns_separate_agent_messages() {
     crate::appearance::cache::set_show_thinking_blocks(true);
@@ -525,17 +522,9 @@ fn user_message_resets_tracking() {
         "user_message should reset current_thinking"
     );
 }
-/// Regression test: exact real-world flow where send_prompt adds user entry
-/// directly to scrollback (bypassing tracker), then tracker receives echo + response.
-///
-/// This matches what actually happens in the app:
-/// 1. send_prompt() pushes user entry + calls expect_user_echo()
-/// 2. ACP echoes user_message_chunk → tracker skips it (no duplicate)
-/// 3. ACP streams thought_chunk, agent_message_chunk
-/// 4. User sends second prompt via send_prompt
-/// 5. ACP echoes + streams second turn
-///
-/// The critical invariant: exactly 1 user entry per turn, 2 separate agent messages.
+/// Regression test: the exact real-world flow where send_prompt adds the user entry directly to scrollback
+/// (bypassing the tracker), then the tracker receives the echo and the response. The critical invariant: exactly 1
+/// user entry per turn, 2 separate agent messages.
 #[test]
 fn real_flow_two_turns_via_send_prompt() {
     let mut sb = ScrollbackState::new();
@@ -589,9 +578,8 @@ fn real_flow_two_turns_via_send_prompt() {
         "exactly 2 user entries (no duplicates from echo)"
     );
 }
-/// Test: two turns where finish_turn() is called between them
-/// (simulating send_prompt calling finish_turn before new turn).
-/// No echo user_message_chunk — just direct scrollback manipulation + tracker.
+/// Test: two turns where finish_turn() is called between them (simulating send_prompt calling finish_turn before new turn).
+/// No echo user_message_chunk, just direct scrollback manipulation and the tracker.
 #[test]
 fn two_turns_with_finish_turn_between() {
     let mut sb = ScrollbackState::new();
@@ -626,10 +614,9 @@ fn expect_user_echo_skips_one() {
     assert!(tracker.handle_update(user_message("world"), &meta(), &mut sb));
     assert_eq!(sb.len(), 2, "second message should be added normally");
 }
-/// The echoed promptIndex belongs to the turn-starting prompt: an
-/// interjection that lands between the local push and the echo (laggy
-/// link) must not steal the backfilled index — the shell never numbers
-/// interjections.
+/// The echoed promptIndex belongs to the turn-starting prompt.
+/// An interjection that lands between the local push and the echo (laggy link) must not steal the backfilled index.
+/// The shell never numbers interjections.
 #[test]
 fn echo_prompt_index_backfill_skips_interjections() {
     let mut sb = ScrollbackState::new();
@@ -722,7 +709,7 @@ fn skill_replay_no_args() {
     assert!(!tracker.handle_update(user_message("Deploy instructions"), &meta(), &mut sb,));
     assert_eq!(sb.len(), 1);
 }
-/// Live execution: echo-skip + skill body skip work together.
+/// Live execution: echo-skip and skill body skip work together.
 #[test]
 fn skill_echo_skips_both_chunks() {
     let mut sb = ScrollbackState::new();
@@ -949,7 +936,7 @@ fn tool_update_completed_bash(id: &str, output_bytes: &[u8], exit_code: i32) -> 
             .raw_output(serde_json::to_value(ToolOutput::Bash(bash)).ok()),
     ))
 }
-/// Helper: create a ToolCall with raw_input containing command + description.
+/// Helper: create a ToolCall with raw_input containing command and description.
 fn tool_call_execute_with_desc(id: &str, command: &str, description: &str) -> acp::SessionUpdate {
     acp::SessionUpdate::ToolCall(
         acp::ToolCall::new(
@@ -1098,8 +1085,7 @@ fn in_progress_update_ignored_for_non_execute() {
         "InProgress with bash output should be ignored for Read blocks"
     );
 }
-/// Output is passed through without modification (no-color mode means
-/// the shell sends clean output without ANSI codes).
+/// Output is passed through without modification (no-color mode means the shell sends clean output without ANSI codes).
 #[test]
 fn streaming_execute_passes_output_through() {
     let mut sb = ScrollbackState::new();
@@ -1127,9 +1113,8 @@ fn streaming_execute_passes_output_through() {
     }
 }
 /// Verify ToolOutput::Bash round-trips through serde_json::Value correctly.
-/// This mimics the exact path: streaming_local_terminal serializes with
-/// serde_json::to_value(ToolOutput::Bash(...)), and tracker deserializes with
-/// serde_json::from_value::<ToolOutput>(...).
+/// This mimics the exact path: streaming_local_terminal serializes with serde_json::to_value(ToolOutput::Bash(...)).
+/// The tracker deserializes with serde_json::from_value::<ToolOutput>(...).
 #[test]
 fn tool_output_bash_serde_roundtrip() {
     use xai_grok_tools::types::output::{BashOutput, ToolOutput};
@@ -1164,12 +1149,9 @@ fn tool_output_bash_serde_roundtrip() {
         _ => panic!("Expected ToolOutput::Bash"),
     }
 }
-/// End-to-end test mimicking the exact production notification sequence:
-/// 1. ToolCall (Pending) with raw_input containing BashTool
-/// 2. InProgress ToolCallUpdate with raw_output containing ToolOutput::Bash
-///    (sent by notification_bridge from LocalTerminalBackend)
-/// 3. Completed ToolCallUpdate with raw_output containing final ToolOutput::Bash
-/// 4. Second Completed ToolCallUpdate (from acp_session completion handler)
+/// End-to-end test mimicking the exact production notification sequence. ToolCall (Pending) with raw_input
+/// containing BashTool. Completed ToolCallUpdate with raw_output containing final ToolOutput::Bash. Second
+/// Completed ToolCallUpdate (from acp_session completion handler).
 #[test]
 fn production_execute_sequence() {
     use serde_json::json;
@@ -1356,13 +1338,8 @@ fn utf8_decoder_multiple_feeds() {
     assert_eq!(dec.decode("héllo\n".as_bytes()), "héllo\n");
     assert!(dec.buffer.is_empty());
 }
-/// Reproduce the exact ACP message flow for a grep search tool call:
-/// 1. ToolCall with kind=Other, title="grep" (initial, no metadata)
-/// 2. ToolCallUpdate in-progress with kind=search, title="fn main", rawInput
-/// 3. ToolCallUpdate completed with rawOutput containing GrepSearchOutput
-///
-/// This was broken: kind from in-progress update was lost, so the completed
-/// block rendered as "Other" with no search results.
+/// Reproduce the exact ACP message flow for a grep search tool call. This was broken: kind from in-progress update
+/// was lost, so the completed block rendered as "Other" with no search results.
 #[test]
 fn test_search_tool_call_flow() {
     use xai_grok_tools::types::output::{GrepFileMatch, GrepLineMatch, GrepSearchOutput};
@@ -1428,17 +1405,15 @@ fn test_search_tool_call_flow() {
     if let RenderBlock::ToolCall(ToolCallBlock::Search(search)) = &entry.block {
         assert_eq!(search.pattern, "fn main");
         assert_eq!(search.match_count, 1);
-        assert_eq!(search.file_matches.len(), 1);
-        assert_eq!(
-            search.file_matches[0].path,
-            "/Users/alice/dev/rust/foo/src/main.rs"
-        );
-        assert_eq!(search.file_matches[0].matches.len(), 1);
-        assert_eq!(search.file_matches[0].matches[0].line_number, 54);
-        assert_eq!(
-            search.file_matches[0].matches[0].content,
-            "fn main() -> Result<()> {"
-        );
+        let [file_match] = search.file_matches.as_slice() else {
+            panic!("expected 1 file match: {:?}", search.file_matches);
+        };
+        assert_eq!(file_match.path, "/Users/alice/dev/rust/foo/src/main.rs");
+        let [m] = file_match.matches.as_slice() else {
+            panic!("expected 1 match: {:?}", file_match.matches);
+        };
+        assert_eq!(m.line_number, 54);
+        assert_eq!(m.content, "fn main() -> Result<()> {");
     } else {
         panic!(
             "Expected Search block after completion, got: {:?}",
@@ -1446,8 +1421,7 @@ fn test_search_tool_call_flow() {
         );
     }
 }
-/// ScrollbackState with an explicit `expanded_by_default` shape override
-/// (flag-independent: the `Some` beats the `collapsed_edit_blocks` cache).
+/// Scrollback with pager.toml `expanded_by_default` set. Does not touch the flag cache.
 fn edit_config_scrollback(expanded_by_default: bool) -> ScrollbackState {
     use crate::appearance::AppearanceConfig;
     let mut sb = ScrollbackState::new();
@@ -1469,21 +1443,19 @@ fn pending_other_tool_call(tc_id: &Arc<str>) -> acp::SessionUpdate {
         .locations(vec![]),
     )
 }
-/// Regression test for #199720 follow-up: when an Other(Pending) entry is
-/// upgraded in-place to an Edit block, the entry's `display_mode` must be
-/// reset to the materialize policy's default — Collapsed by default,
-/// Expanded when `expanded_by_default` is set — rather than left at
-/// Other's default.
-///
-/// Also covers the fast-path Pending→Completed (no in-progress refinement)
-/// where Edit's `finished_display_mode()` returns `None` and `finish_running`
-/// would otherwise leave a stale mode in place.
+/// Regression test: upgrading an Other(Pending) entry in-place to an Edit block must reset the entry's
+/// `display_mode`. There Edit's `finished_display_mode()` returns `None`, and `finish_running` would otherwise
+/// leave a stale mode in place.
 #[test]
 fn edit_tool_upgrade_resets_display_mode_to_default() {
+    std::thread::spawn(edit_tool_upgrade_resets_display_mode_to_default_body)
+        .join()
+        .unwrap();
+}
+fn edit_tool_upgrade_resets_display_mode_to_default_body() {
     use crate::scrollback::types::DisplayMode;
-    /// Drive Pending(Other) → InProgress(Edit) → Completed and return the
-    /// display mode observed after the InProgress upgrade and after
-    /// completion.
+    /// Drive Pending(Other) through InProgress(Edit) to Completed.
+    /// Returns the display mode observed after the InProgress upgrade and after completion.
     fn upgrade_path(tc: &str, expanded_by_default: bool) -> (DisplayMode, DisplayMode) {
         let mut tracker = AcpUpdateTracker::new();
         let mut sb = edit_config_scrollback(expanded_by_default);
@@ -1508,8 +1480,7 @@ fn edit_tool_upgrade_resets_display_mode_to_default() {
         tracker.handle_update(tool_update_completed(&tc_id), &meta(), &mut sb);
         (after_upgrade, sb.get(0).unwrap().display_mode)
     }
-    /// Drive the fast path Pending(Other) → Completed(Edit) with no
-    /// in-progress refinement and return the final display mode.
+    /// Drive the fast path Pending(Other) straight to Completed(Edit) with no in-progress refinement and return the final display mode.
     fn fast_path(tc: &str, expanded_by_default: bool) -> DisplayMode {
         let mut tracker = AcpUpdateTracker::new();
         let mut sb = edit_config_scrollback(expanded_by_default);
@@ -1532,6 +1503,7 @@ fn edit_tool_upgrade_resets_display_mode_to_default() {
         );
         entry.display_mode
     }
+    crate::appearance::cache::set_collapsed_edit_blocks(false);
     let (upgraded, completed) = upgrade_path("toolu_edit_001", false);
     assert_eq!(
         upgraded,
@@ -1566,10 +1538,9 @@ fn edit_tool_upgrade_resets_display_mode_to_default() {
         "config on: fast Pending→Completed Edit must end up Expanded"
     );
 }
-/// A manual expand of the collapsed one-liner must survive completion:
-/// once the entry is an Edit, the Edit-to-Edit completion swap preserves
-/// the current mode instead of snapping back to the configured default
-/// (no `respect_manual_folds` pinning required).
+/// A manual expand of the collapsed one-liner must survive completion.
+/// Once the entry is an Edit, the Edit-to-Edit completion swap preserves the current mode instead of snapping back to the configured default.
+/// No `respect_manual_folds` pinning is required.
 #[test]
 fn edit_manual_expand_survives_completion() {
     use crate::scrollback::types::DisplayMode;
@@ -1600,10 +1571,110 @@ fn edit_manual_expand_survives_completion() {
         "completion must not snap a user-expanded Edit back to Collapsed"
     );
 }
-/// Multi-file (apply_patch shape: several Diff items) and title-fallback
-/// Edits can't be summarized by the one-liner: they materialize Expanded
-/// with the summary marked untrusted, config-independent. Each case
-/// isolates one untrusted signal.
+/// A mid-run expand of an agent Execute must survive stdout progress (`replace_tool_block` then
+/// `set_execute_output`). It must also survive completion (`replace_tool_block` then `finish_running`). No pin /
+/// `respect_manual_folds` is required: this is the same-kind preserve, not the fold-pin system.
+#[test]
+fn execute_manual_expand_survives_progress_and_completion() {
+    use crate::scrollback::types::DisplayMode;
+    let mut tracker = AcpUpdateTracker::new();
+    let mut sb = ScrollbackState::new();
+    let tc_id = "toolu_exec_gesture";
+    tracker.handle_update(
+        tool_call(tc_id, acp::ToolKind::Other, "pending"),
+        &meta(),
+        &mut sb,
+    );
+    assert!(
+        matches!(
+            &sb.get(0).unwrap().block,
+            RenderBlock::ToolCall(ToolCallBlock::Other(_))
+        ),
+        "eager pending should land as Other"
+    );
+    sb.get_by_id_mut(sb.get(0).unwrap().id)
+        .unwrap()
+        .set_display_mode(DisplayMode::Expanded);
+    let refine = acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
+        acp::ToolCallId::new(Arc::from(tc_id)),
+        acp::ToolCallUpdateFields::new()
+            .kind(Some(acp::ToolKind::Execute))
+            .title(Some("Execute `cargo build`".to_string()))
+            .raw_input(Some(serde_json::json!({ "command": "cargo build" }))),
+    ));
+    tracker.handle_update(refine, &meta(), &mut sb);
+    let entry = sb.get(0).expect("entry exists");
+    assert!(
+        matches!(
+            &entry.block,
+            RenderBlock::ToolCall(ToolCallBlock::Execute(_))
+        ),
+        "Other→Execute must upgrade the block kind"
+    );
+    assert_eq!(
+        entry.display_mode,
+        DisplayMode::Collapsed,
+        "Other→Execute must reset even if the placeholder was expanded"
+    );
+    tracker.handle_update(
+        tool_update_in_progress(tc_id, b"Compiling\n"),
+        &meta(),
+        &mut sb,
+    );
+    assert_eq!(
+        sb.get(0).unwrap().display_mode,
+        DisplayMode::Collapsed,
+        "progress must not auto-open a collapsed Execute"
+    );
+    sb.get_by_id_mut(sb.get(0).unwrap().id)
+        .unwrap()
+        .set_display_mode(DisplayMode::Expanded);
+    assert!(
+        !sb.get(0).unwrap().display_mode_pinned,
+        "→ expand without respect_manual_folds must not pin"
+    );
+    tracker.handle_update(
+        tool_update_in_progress(tc_id, b"Compiling\n"),
+        &meta(),
+        &mut sb,
+    );
+    assert_eq!(
+        sb.get(0).unwrap().display_mode,
+        DisplayMode::Expanded,
+        "progress must not snap a user-expanded Execute shut"
+    );
+    match &sb.get(0).unwrap().block {
+        RenderBlock::ToolCall(ToolCallBlock::Execute(exec)) => {
+            assert_eq!(exec.output.as_deref(), Some("Compiling\n"));
+        }
+        other => panic!("Expected Execute after progress, got {other:?}"),
+    }
+    tracker.handle_update(
+        tool_update_in_progress(tc_id, b"Compiling\nFinished\n"),
+        &meta(),
+        &mut sb,
+    );
+    assert_eq!(
+        sb.get(0).unwrap().display_mode,
+        DisplayMode::Expanded,
+        "later progress ticks must keep the expand"
+    );
+    tracker.handle_update(
+        tool_update_completed_bash(tc_id, b"Compiling\nFinished\n", 0),
+        &meta(),
+        &mut sb,
+    );
+    let entry = sb.get(0).unwrap();
+    assert!(!entry.is_running);
+    assert_eq!(
+        entry.display_mode,
+        DisplayMode::Expanded,
+        "completion must not snap a user-expanded Execute shut"
+    );
+}
+/// Multi-file (apply_patch shape: several Diff items) and title-fallback Edits can't be summarized by the one-liner.
+/// They materialize Expanded with the summary marked untrusted, config-independent.
+/// Each case isolates one untrusted signal.
 #[test]
 fn multi_diff_and_title_fallback_edits_default_expanded() {
     use crate::scrollback::types::DisplayMode;
@@ -1658,8 +1729,7 @@ fn multi_diff_and_title_fallback_edits_default_expanded() {
 fn edit_tool_start(id: &str) -> acp::SessionUpdate {
     tool_call(id, acp::ToolKind::Edit, "search_replace")
 }
-/// Diff content replacing one line at `line`, so each scripted edit
-/// yields exactly one `+1/-1` hunk at a distinct position.
+/// Diff content replacing one line at `line`, so each scripted edit yields exactly one `+1/-1` hunk at a distinct position.
 fn edit_diff_content(path: &str, line: usize) -> acp::ToolCallContent {
     acp::ToolCallContent::Diff(
         acp::Diff::new(path, format!("new_{line}"))
@@ -1683,7 +1753,7 @@ fn edit_tool_complete(id: &str, path: &str, line: usize) -> acp::SessionUpdate {
             .status(Some(acp::ToolCallStatus::Completed)),
     ))
 }
-/// Full Pending → Completed lifecycle for one scripted edit.
+/// Full Pending to Completed lifecycle for one scripted edit.
 fn run_edit(
     tracker: &mut AcpUpdateTracker,
     sb: &mut ScrollbackState,
@@ -1694,8 +1764,7 @@ fn run_edit(
     tracker.handle_update(edit_tool_start(id), &meta(), sb);
     tracker.handle_update(edit_tool_complete(id, path, line), &meta(), sb);
 }
-/// Pre-completed ToolCall (replay / session-load shape) with the same
-/// one-hunk diff as [`edit_tool_complete`].
+/// Pre-completed ToolCall (replay / session-load shape) with the same one-hunk diff as [`edit_tool_complete`].
 fn edit_tool_precompleted(id: &str, path: &str, line: usize) -> acp::SessionUpdate {
     acp::SessionUpdate::ToolCall(
         acp::ToolCall::new(acp::ToolCallId::new(Arc::from(id)), path.to_string())
@@ -1764,8 +1833,10 @@ fn overlapping_adjacent_edits_stitch_into_single_hunk() {
             edit.edit_count, 5,
             "the (N edits) fallback counts merged calls, not stitched hunks"
         );
-        let rows: Vec<(similar::ChangeTag, usize)> =
-            edit.hunks[0].iter().map(|l| (l.tag, l.ln)).collect();
+        let Some(hunk) = edit.hunks.first() else {
+            panic!("expected a hunk");
+        };
+        let rows: Vec<(similar::ChangeTag, usize)> = hunk.iter().map(|l| (l.tag, l.ln)).collect();
         let expected: Vec<(similar::ChangeTag, usize)> = (5..=9)
             .flat_map(|ln| {
                 [
@@ -2120,11 +2191,9 @@ fn meta_stream(stream_start: i64) -> NotificationMeta {
         ..Default::default()
     }
 }
-/// Regression test: agent message (stream A) → thinking (stream B) → agent message (stream B).
-///
-/// Without stream_start_ms boundary detection, stream B's agent message
-/// chunks were appended to stream A's entry because handle_thought_chunk
-/// never resets current_agent_msg.
+/// Regression test: agent message (stream A), then thinking (stream B), then agent message (stream B).
+/// Without stream_start_ms boundary detection, stream B's agent message chunks were appended to stream A's entry.
+/// The cause: handle_thought_chunk never resets current_agent_msg.
 #[test]
 fn stream_start_breaks_agent_msg_across_streams() {
     crate::appearance::cache::set_show_thinking_blocks(true);
@@ -2146,12 +2215,12 @@ fn stream_start_breaks_agent_msg_across_streams() {
         2,
         "Should have 2 separate agent message entries"
     );
-    assert_ne!(
-        sb.get(agent_indices[0]).unwrap().id,
-        sb.get(agent_indices[1]).unwrap().id,
-    );
+    let [i0, i1] = agent_indices.as_slice() else {
+        panic!("expected 2 agent indices: {agent_indices:?}");
+    };
+    assert_ne!(sb.get(*i0).unwrap().id, sb.get(*i1).unwrap().id,);
 }
-/// Same stream_start_ms should NOT break messages — chunks append normally.
+/// Same stream_start_ms should NOT break messages: chunks append normally.
 #[test]
 fn same_stream_start_appends_normally() {
     let mut sb = ScrollbackState::new();
@@ -2273,8 +2342,8 @@ fn activity_tool_running_when_tool_pending() {
         })
     );
 }
-/// Foreground execute tools often carry a human `description` in raw_input
-/// (e.g. sleep with "Wait 5 seconds…"). Surface it for the spinner.
+/// Foreground execute tools often carry a human `description` in raw_input (e.g. sleep with "Wait 5 seconds…").
+/// Surface it for the spinner.
 #[test]
 fn activity_tool_running_prefers_description_from_raw_input() {
     let mut sb = ScrollbackState::new();
@@ -2305,9 +2374,8 @@ fn activity_tool_running_prefers_description_from_raw_input() {
         })
     );
 }
-/// The initial ToolCall registers with kind=Other and title=tool_id
-/// (e.g. "Shell"). When raw_input carries a `command` field, activity()
-/// should show the command instead of the bare tool name.
+/// The initial ToolCall registers with kind=Other and title=tool_id (e.g. "Shell").
+/// When raw_input carries a `command` field, activity() should show the command instead of the bare tool name.
 #[test]
 fn activity_extracts_command_from_raw_input_regardless_of_kind() {
     let mut sb = ScrollbackState::new();
@@ -2395,7 +2463,11 @@ fn execute_block_keeps_full_command_sets_header_display_when_peeled() {
             serde_json::json!({ "command": "cd /proj && echo hi" }),
         ))
         .locations(vec![]);
-    let block = tool_call_to_block(&tc, Some(Path::new("/proj")));
+    let block = tool_call_to_block(
+        &tc,
+        Some(Path::new("/proj")),
+        &SubagentLabelRegistry::default(),
+    );
     match &block {
         RenderBlock::ToolCall(ToolCallBlock::Execute(exec)) => {
             assert_eq!(exec.command, "cd /proj && echo hi");
@@ -2408,6 +2480,135 @@ fn execute_block_keeps_full_command_sets_header_display_when_peeled() {
     assert!(
         searchable.contains("cd /proj && echo hi"),
         "searchable_text must retain full command: {searchable}"
+    );
+}
+#[test]
+fn read_text_content_becomes_numbered_lines_with_the_sent_range() {
+    const TEXT: &str = "fn main() {}\nfn run() {}\n";
+    let range = || Some(LineRange::new(10, 11));
+    let counts = serde_json::json!({ "totalLines": 40, "range": { "start": 10, "end": 11 } });
+    let read = |raw_output: Option<serde_json::Value>, content: Vec<acp::ToolCallContent>| {
+        let call = acp::ToolCall::new(
+            acp::ToolCallId::new(Arc::from("read-1")),
+            "src/main.rs".to_string(),
+        )
+        .kind(acp::ToolKind::Read)
+        .status(acp::ToolCallStatus::Completed)
+        .raw_input(Some(serde_json::json!({ "path": "src/main.rs" })))
+        .raw_output(raw_output)
+        .content(content)
+        .locations(vec![]);
+        match tool_call_to_block(&call, None, &SubagentLabelRegistry::default()) {
+            RenderBlock::ToolCall(ToolCallBlock::Read(block)) => {
+                (block.content, block.total_lines, block.line_range)
+            }
+            other => panic!("expected read block, got {other:?}"),
+        }
+    };
+    assert_eq!(
+        read(Some(counts.clone()), vec![TEXT.into()]),
+        (Some(TEXT.to_owned()), Some(40), range())
+    );
+    assert_eq!(
+        read(None, vec![TEXT.into()]),
+        (Some(TEXT.to_owned()), Some(2), None)
+    );
+    assert_eq!(
+        read(
+            Some(serde_json::json!({ "type": "Text", "text": "**File:** rust.md\n1 | # Rust\n" })),
+            vec![TEXT.into()],
+        ),
+        (None, None, None)
+    );
+    assert_eq!(read(Some(counts), vec![]), (None, Some(40), range()));
+}
+#[test]
+fn memory_v2_metadata_groups_ordinary_file_activity_without_losing_details() {
+    let memory_meta = Some(
+        serde_json::json!({ "memory_v2_activity": true })
+            .as_object()
+            .unwrap()
+            .clone(),
+    );
+    let make_call = |id: &'static str, kind, title: &str, raw_input| {
+        acp::ToolCall::new(acp::ToolCallId::new(Arc::from(id)), title.to_string())
+            .kind(kind)
+            .status(acp::ToolCallStatus::Pending)
+            .raw_input(Some(raw_input))
+            .meta(memory_meta.clone())
+            .content(vec![])
+            .locations(vec![])
+    };
+    let read = make_call(
+        "memory-read",
+        acp::ToolKind::Read,
+        "Read memory",
+        serde_json::json!({ "path": "/memory-v2/global/topics/rust.md" }),
+    );
+    let RenderBlock::ToolCall(ToolCallBlock::Read(read)) =
+        tool_call_to_block(&read, None, &SubagentLabelRegistry::default())
+    else {
+        panic!("expected read block");
+    };
+    assert_eq!(read.path, "/memory-v2/global/topics/rust.md");
+    assert_eq!(
+        ToolCallBlock::Read(read).verb_group_kind(),
+        Some(VerbGroupKind::MemorySearch)
+    );
+    let edit = make_call(
+        "memory-edit",
+        acp::ToolKind::Edit,
+        "Edit memory",
+        serde_json::json!({
+            "path": "/memory-v2/global/topics/rust.md",
+            "old_string": "old",
+            "new_string": "new"
+        }),
+    );
+    let RenderBlock::ToolCall(ToolCallBlock::Edit(edit)) =
+        tool_call_to_block(&edit, None, &SubagentLabelRegistry::default())
+    else {
+        panic!("expected edit block");
+    };
+    assert_eq!(edit.path, "/memory-v2/global/topics/rust.md");
+    assert_eq!(
+        ToolCallBlock::Edit(edit).verb_group_kind(),
+        Some(VerbGroupKind::MemorySearch)
+    );
+    let search = make_call(
+        "memory-search",
+        acp::ToolKind::Search,
+        "Search memory",
+        serde_json::json!({
+            "pattern": "Rust",
+            "path": "/memory-v2/global/topics"
+        }),
+    );
+    let RenderBlock::ToolCall(ToolCallBlock::Search(search)) =
+        tool_call_to_block(&search, None, &SubagentLabelRegistry::default())
+    else {
+        panic!("expected search block");
+    };
+    assert_eq!(search.pattern, "Rust");
+    assert_eq!(
+        ToolCallBlock::Search(search).verb_group_kind(),
+        Some(VerbGroupKind::MemorySearch)
+    );
+    let list = make_call(
+        "memory-list",
+        acp::ToolKind::Other,
+        "List memory",
+        serde_json::json!({ "target_directory": "/memory-v2/global/topics" }),
+    );
+    let RenderBlock::ToolCall(ToolCallBlock::ListDir(list)) =
+        tool_call_to_block(&list, None, &SubagentLabelRegistry::default())
+    else {
+        panic!("expected list block");
+    };
+    assert!(list.path.contains("/memory-v2/global/topics"));
+    assert_eq!(
+        ToolCallBlock::ListDir(list).verb_group_kind(),
+        Some(VerbGroupKind::MemorySearch)
     );
 }
 #[test]
@@ -2430,7 +2631,7 @@ fn activity_compaction_overrides_other_state() {
     tracker.finish_turn(&mut sb);
     assert_eq!(tracker.activity(), None);
 }
-/// Nameless start → named upgrade; only visible label changes redraw.
+/// Nameless start, then a named upgrade; only visible label changes redraw.
 #[test]
 fn activity_writing_tool_call_labels_and_redraws() {
     let mut tracker = AcpUpdateTracker::new();
@@ -2443,12 +2644,65 @@ fn activity_writing_tool_call_labels_and_redraws() {
     let Some(TurnActivity::WritingToolCall(writing)) = tracker.activity() else {
         panic!("expected WritingToolCall activity");
     };
-    assert_eq!(writing.label(), "Preparing write…");
+    assert_eq!(writing.label(), "Writing file…");
     assert!(!tracker.note_tool_call_arguments_delta(None, 0));
     assert!(!tracker.note_tool_call_arguments_delta(Some("write"), 0));
 }
-/// A silent delta stream expires from the spinner but stays visible to
-/// lost-response recovery as a dead-stream signal; a new delta re-reveals.
+/// First-party tools with long argument streams read as friendly phrases (wire spellings pinned per toolset).
+/// Tiny-payload read-style tools keep the raw-name fallback.
+#[test]
+fn activity_writing_tool_call_labels_first_party_writing_tools() {
+    for (name, expected) in [
+        ("write", "Writing file…"),
+        ("search_replace", "Writing edit…"),
+        ("edit", "Writing edit…"),
+        ("hashline_edit", "Writing edit…"),
+        ("apply_patch", "Writing edit…"),
+        ("run_terminal_command", "Writing command…"),
+        ("run_terminal_cmd", "Writing command…"),
+        ("bash", "Writing command…"),
+        ("todo_write", "Updating todo list…"),
+        ("todowrite", "Updating todo list…"),
+        ("workflow", "Writing workflow…"),
+        ("image_gen", "Writing image prompt…"),
+        ("image_edit", "Writing image prompt…"),
+        ("image_to_video", "Writing video prompt…"),
+        ("reference_to_video", "Writing video prompt…"),
+        ("ask_user_question", "Preparing question…"),
+        ("read_file", "Preparing read_file…"),
+    ] {
+        let mut tracker = AcpUpdateTracker::new();
+        tracker.note_tool_call_arguments_delta(Some(name), 0);
+        let Some(TurnActivity::WritingToolCall(writing)) = tracker.activity() else {
+            panic!("expected WritingToolCall activity for {name:?}");
+        };
+        assert_eq!(writing.label(), expected, "label for {name:?}");
+    }
+    let mut tracker = AcpUpdateTracker::new();
+    tracker.note_tool_call_arguments_delta(Some("search_replace"), 0);
+    tracker.note_tool_call_arguments_delta(Some("search_replace"), 1);
+    let Some(TurnActivity::WritingToolCall(writing)) = tracker.activity() else {
+        panic!("expected WritingToolCall activity");
+    };
+    assert_eq!(writing.label(), "Writing edit (2)…");
+}
+/// Every taxonomy-mapped spelling must have copy here: a spelling whose kind misses the copy match would silently keep the raw-name fallback.
+#[test]
+fn activity_writing_tool_call_copy_covers_taxonomy_map() {
+    for (name, _) in xai_grok_tools::tool_taxonomy::WRITING_TOOL_WIRE_NAMES {
+        let mut tracker = AcpUpdateTracker::new();
+        tracker.note_tool_call_arguments_delta(Some(name), 0);
+        let Some(TurnActivity::WritingToolCall(writing)) = tracker.activity() else {
+            panic!("expected WritingToolCall activity for {name:?}");
+        };
+        assert_ne!(
+            writing.label(),
+            format!("Preparing {name}…"),
+            "mapped spelling {name:?} fell back to the raw name"
+        );
+    }
+}
+/// A silent delta stream expires from the spinner but stays visible to lost-response recovery as a signal that the stream died; a new delta re-reveals.
 #[test]
 fn activity_writing_tool_call_expires_when_deltas_go_stale() {
     let mut tracker = AcpUpdateTracker::new();
@@ -2506,6 +2760,27 @@ fn activity_writing_tool_call_prettifies_qualified_mcp_names() {
         panic!("expected WritingToolCall activity");
     };
     assert_eq!(writing.label(), "Preparing (Linear) List Issues…");
+}
+/// The MCP dispatch/discovery wire names read as friendly phrases, not raw ids.
+#[test]
+fn activity_writing_tool_call_names_mcp_dispatch_tools() {
+    let mut tracker = AcpUpdateTracker::new();
+    tracker.note_tool_call_arguments_delta(Some("use_tool"), 0);
+    let Some(TurnActivity::WritingToolCall(writing)) = tracker.activity() else {
+        panic!("expected WritingToolCall activity");
+    };
+    assert_eq!(writing.label(), "Preparing MCP tool…");
+    tracker.note_tool_call_arguments_delta(Some("use_tool"), 1);
+    let Some(TurnActivity::WritingToolCall(writing)) = tracker.activity() else {
+        panic!("expected WritingToolCall activity");
+    };
+    assert_eq!(writing.label(), "Preparing MCP tool (2)…");
+    let mut tracker = AcpUpdateTracker::new();
+    tracker.note_tool_call_arguments_delta(Some("search_tool"), 0);
+    let Some(TurnActivity::WritingToolCall(writing)) = tracker.activity() else {
+        panic!("expected WritingToolCall activity");
+    };
+    assert_eq!(writing.label(), "Searching MCP tools…");
 }
 #[test]
 fn activity_writing_subagent_prompt_for_task_tools() {
@@ -2587,6 +2862,7 @@ fn writing_tool_call_delta_clears_retry_activity() {
         attempt: 2,
         max_retries: 5,
         reason: "overloaded".into(),
+        error_type: None,
     };
     let mut tracker = AcpUpdateTracker::new();
     tracker.set_retry_activity(Some(retrying.clone()));
@@ -2638,7 +2914,7 @@ fn writing_tool_call_ordinal_counts_parallel_calls() {
         &mut sb,
     );
     assert!(tracker.note_tool_call_arguments_delta(Some("write"), 0));
-    assert_eq!(label(&tracker), "Preparing write…");
+    assert_eq!(label(&tracker), "Writing file…");
 }
 #[test]
 fn waiting_payload_and_writing_churn_are_not_phase_transitions() {
@@ -2648,12 +2924,12 @@ fn waiting_payload_and_writing_churn_are_not_phase_transitions() {
         }))
     };
     assert!(!is_phase_transition(
-        wait(Some("scan src/: Thinking")).as_ref(),
-        wait(Some("scan src/: Running: cargo test")).as_ref(),
+        wait(Some("Waiting for subagent")).as_ref(),
+        wait(Some("Waiting for 2 subagents")).as_ref(),
     ));
     assert!(!is_phase_transition(
         wait(None).as_ref(),
-        wait(Some("scan src/: Thinking")).as_ref(),
+        wait(Some("Waiting for subagent")).as_ref(),
     ));
     let task_wait = |task_ids: &[&str], subject: Option<&str>| {
         Some(TurnActivity::Waiting(WaitingReason::TaskOutput {
@@ -2676,7 +2952,7 @@ fn waiting_payload_and_writing_churn_are_not_phase_transitions() {
     ));
     assert!(is_phase_transition(None, wait(None).as_ref()));
     assert!(is_phase_transition(
-        wait(Some("scan src/: Thinking")).as_ref(),
+        wait(Some("Waiting for subagent")).as_ref(),
         Some(&TurnActivity::Responding),
     ));
     let tool = |title: &str| {
@@ -2716,8 +2992,7 @@ fn waiting_payload_and_writing_churn_are_not_phase_transitions() {
         wait(None).as_ref(),
     ));
 }
-/// A stream that is not zero-based still counts from the first observed
-/// call — no "(4)" with no predecessors.
+/// A stream that is not zero-based still counts from the first observed call: no "(4)" with no predecessors.
 #[test]
 fn writing_tool_call_ordinal_ranks_observed_indexes() {
     let mut tracker = AcpUpdateTracker::new();
@@ -2728,13 +3003,12 @@ fn writing_tool_call_ordinal_ranks_observed_indexes() {
         writing.label()
     };
     tracker.note_tool_call_arguments_delta(Some("write"), 3);
-    assert_eq!(label(&tracker), "Preparing write…");
+    assert_eq!(label(&tracker), "Writing file…");
     tracker.note_tool_call_arguments_delta(Some("read_file"), 7);
     assert_eq!(label(&tracker), "Preparing read_file (2)…");
 }
-/// Streams may emit id/args chunks before `function.name`. A nameless
-/// first chunk must still mark its index as observed, so a later sibling
-/// ranks after it instead of colliding on the same ordinal.
+/// Streams may emit id/args chunks before `function.name`.
+/// A nameless first chunk must still mark its index as observed, so a later sibling ranks after it instead of colliding on the same ordinal.
 #[test]
 fn writing_tool_call_nameless_delta_still_ranks() {
     let mut tracker = AcpUpdateTracker::new();
@@ -2763,11 +3037,11 @@ fn writing_tool_call_interleaved_indexes_restore_names() {
         writing.label()
     };
     assert!(tracker.note_tool_call_arguments_delta(Some("write"), 0));
-    assert_eq!(label(&tracker), "Preparing write…");
+    assert_eq!(label(&tracker), "Writing file…");
     assert!(tracker.note_tool_call_arguments_delta(Some("read_file"), 1));
     assert_eq!(label(&tracker), "Preparing read_file (2)…");
     assert!(tracker.note_tool_call_arguments_delta(None, 0));
-    assert_eq!(label(&tracker), "Preparing write…");
+    assert_eq!(label(&tracker), "Writing file…");
     assert!(!tracker.note_tool_call_arguments_delta(None, 0));
     assert!(!tracker.note_tool_call_arguments_delta(Some("write"), 0));
     assert!(tracker.note_tool_call_arguments_delta(None, 1));
@@ -2788,10 +3062,9 @@ fn writing_tool_call_cleared_on_finish_turn() {
     tracker.finish_turn(&mut sb);
     assert_eq!(tracker.activity(), None);
 }
-/// A backgrounded tool keeps streaming stdout `ToolCallUpdate`s that the
-/// tracker drops as no-ops (`bg_deferred_tools`). Those must not strip the
-/// writing label of the NEXT call's args stream — only the tool's own
-/// canonical `ToolCall` or a new text/thought chunk ends that window.
+/// A backgrounded tool keeps streaming stdout `ToolCallUpdate`s that the tracker drops as no-ops (`bg_deferred_tools`).
+/// Those must not strip the writing label of the NEXT call's args stream.
+/// Only the tool's own canonical `ToolCall` or a new text/thought chunk ends that window.
 #[test]
 fn writing_tool_call_survives_bg_deferred_stdout_update() {
     let mut sb = ScrollbackState::new();
@@ -2822,11 +3095,9 @@ fn writing_tool_call_survives_bg_deferred_stdout_update() {
         "a deferred bg stdout update must not strip the writing label"
     );
 }
-/// The blocking bg-plumbing tools are kept out of scrollback but the turn
-/// IS blocked on them — `activity()` must name the wait instead of the old
-/// generic `None` (→ "Waiting…"). Task-output tools only advertise once
-/// raw_input proves them blocking (`timeout_ms > 0`); before that the
-/// wait is not shown (display mirrors interject eligibility).
+/// The blocking bg-plumbing tools are kept out of scrollback but the turn IS blocked on them. `activity()` must
+/// name the wait instead of the old generic `None` (which rendered as "Waiting…"). Task-output tools only advertise
+/// once raw_input proves them blocking (`timeout_ms > 0`).
 #[test]
 fn activity_waiting_for_blocking_bg_plumbing_tools() {
     let cases = [
@@ -2890,6 +3161,7 @@ fn activity_known_blocking_wait_outranks_retry() {
         attempt: 1,
         max_retries: 3,
         reason: "reconnecting".into(),
+        error_type: None,
     }));
     assert_eq!(
         tracker.activity(),
@@ -2923,7 +3195,7 @@ fn activity_known_blocking_wait_outranks_thinking() {
         "known-blocking wait must beat Thinking for the status spinner"
     );
 }
-/// Thought chunks on the same stream must not erase an in-flight wait.
+/// Thought chunks on the same stream must not erase an active wait.
 #[test]
 fn thought_chunk_does_not_clear_active_blocking_wait() {
     crate::appearance::cache::set_show_thinking_blocks(true);
@@ -2975,8 +3247,7 @@ fn stream_start_does_not_pre_create_thinking_during_blocking_wait() {
         Some(TurnActivity::Waiting(WaitingReason::task_output()))
     );
 }
-/// Regression: a resumed thought with no `stream_start_ms` must clear a
-/// stale wait (show Thinking, not a stuck wait spinner).
+/// Regression: a resumed thought with no `stream_start_ms` must clear a stale wait (show Thinking, not a stuck wait spinner).
 #[test]
 fn resumed_thought_without_stream_start_clears_stale_wait() {
     crate::appearance::cache::set_show_thinking_blocks(true);
@@ -3005,8 +3276,7 @@ fn resumed_thought_without_stream_start_clears_stale_wait() {
         "resumed-round thought (no stream_start) must clear the stale wait"
     );
 }
-/// ToolCallUpdate carrying a `timeout_ms` raw_input (the shape the shell
-/// sends on the first InProgress update).
+/// ToolCallUpdate carrying a `timeout_ms` raw_input (the shape the shell sends on the first InProgress update).
 fn timeout_update(id: &str, timeout_ms: u64) -> acp::SessionUpdate {
     acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
         acp::ToolCallId::new(Arc::from(id)),
@@ -3014,8 +3284,7 @@ fn timeout_update(id: &str, timeout_ms: u64) -> acp::SessionUpdate {
             .raw_input(Some(serde_json::json!({ "timeout_ms": timeout_ms }))),
     ))
 }
-/// A blocking-wait reason is dropped when the suppressed tool completes, so
-/// the spinner stops showing it.
+/// A blocking-wait reason is dropped when the suppressed tool completes, so the spinner stops showing it.
 #[test]
 fn blocking_wait_cleared_on_tool_completion() {
     let mut sb = ScrollbackState::new();
@@ -3050,7 +3319,7 @@ fn blocking_wait_cleared_by_finish_turn() {
     tracker.finish_turn(&mut sb);
     assert_eq!(tracker.activity(), None);
 }
-/// `kill_*` is suppressed but doesn't block the turn — no waiting reason.
+/// `kill_*` is suppressed but doesn't block the turn: no waiting reason.
 #[test]
 fn kill_tool_is_not_a_blocking_wait() {
     let mut sb = ScrollbackState::new();
@@ -3122,8 +3391,7 @@ fn same_stream_thought_after_wait_tool_keeps_blocking_wait() {
         "same-stream thought must not clear an active task-output wait"
     );
 }
-/// raw_input with task_ids on the first update populates the wait reason so
-/// the view can resolve a display subject from live bg task state.
+/// raw_input with task_ids on the first update populates the wait reason so the view can resolve a display subject from live bg task state.
 #[test]
 fn task_output_wait_captures_task_ids_from_raw_input_update() {
     let mut sb = ScrollbackState::new();
@@ -3154,8 +3422,7 @@ fn task_output_wait_captures_task_ids_from_raw_input_update() {
         }))
     );
 }
-/// `waits` derives from raw_input `timeout_ms`: 0/missing are instant
-/// polls (not interject-eligible); only >0 marks a blocking wait.
+/// `waits` derives from raw_input `timeout_ms`: 0/missing are instant polls (not interject-eligible); only >0 marks a blocking wait.
 #[test]
 fn task_output_waits_tracks_timeout_ms() {
     let tc = |raw: Option<serde_json::Value>| {
@@ -3240,8 +3507,7 @@ fn task_call_with_bg(id: &str, background: bool) -> acp::SessionUpdate {
             )),
     )
 }
-/// Shell-stamped foreground (`subagentBackground=false`): the subagent wait
-/// surfaces from frame 1 — no "Waiting for the model…" flash.
+/// Shell-stamped foreground (`subagentBackground=false`): the subagent wait surfaces from frame 1, no "Waiting for response…" flash.
 #[test]
 fn foreground_stamp_waits_on_subagent_from_frame_one() {
     let mut sb = ScrollbackState::new();
@@ -3253,9 +3519,8 @@ fn foreground_stamp_waits_on_subagent_from_frame_one() {
         "a foreground-stamped subagent spawn surfaces the wait immediately"
     );
 }
-/// Shell-stamped background (`subagentBackground=true`, the default): the
-/// model keeps working, so no subagent wait surfaces — not even a one-frame
-/// flash.
+/// Shell-stamped background (`subagentBackground=true`, the default): the model keeps working.
+/// No subagent wait surfaces, not even a one-frame flash.
 #[test]
 fn background_stamp_never_surfaces_subagent_wait() {
     let mut sb = ScrollbackState::new();
@@ -3267,9 +3532,8 @@ fn background_stamp_never_surfaces_subagent_wait() {
         "a background-stamped subagent spawn must not surface any wait"
     );
 }
-/// Older shell with no `subagentBackground` stamp: fall back to the
-/// provisional foreground assumption (the refinement update still drops it
-/// for a background spawn).
+/// Older shell with no `subagentBackground` stamp: fall back to the provisional foreground assumption.
+/// The refinement update still drops it for a background spawn.
 #[test]
 fn foreground_task_waits_on_subagent_immediately() {
     let mut sb = ScrollbackState::new();
@@ -3286,8 +3550,7 @@ fn foreground_task_waits_on_subagent_immediately() {
     tracker.finish_turn(&mut sb);
     assert_eq!(tracker.activity(), None);
 }
-/// A background subagent doesn't block the parent: once an update reveals
-/// `run_in_background`, the provisional subagent wait is dropped.
+/// A background subagent doesn't block the parent: once an update reveals `run_in_background`, the provisional subagent wait is dropped.
 #[test]
 fn background_task_clears_subagent_wait() {
     let mut sb = ScrollbackState::new();
@@ -3334,9 +3597,11 @@ fn tracker_captures_available_commands_update() {
     let cmds = tracker
         .take_pending_acp_commands()
         .expect("should have pending");
-    assert_eq!(cmds.len(), 2);
-    assert_eq!(cmds[0].name, "flush");
-    assert_eq!(cmds[1].name, "compact");
+    let [flush, compact] = cmds.as_slice() else {
+        panic!("expected 2 commands: {cmds:?}");
+    };
+    assert_eq!(flush.name, "flush");
+    assert_eq!(compact.name, "compact");
 }
 #[test]
 fn tracker_single_drain_clears_pending() {
@@ -3359,9 +3624,11 @@ fn tracker_latest_update_replaces_pending() {
     let cmds = tracker
         .take_pending_acp_commands()
         .expect("should have pending");
-    assert_eq!(cmds.len(), 2);
-    assert_eq!(cmds[0].name, "new_a");
-    assert_eq!(cmds[1].name, "new_b");
+    let [a, b] = cmds.as_slice() else {
+        panic!("expected 2 commands: {cmds:?}");
+    };
+    assert_eq!(a.name, "new_a");
+    assert_eq!(b.name, "new_b");
 }
 #[test]
 fn parse_search_tool_results_grouped_format() {
@@ -3403,15 +3670,17 @@ fn parse_search_tool_results_grouped_format() {
     });
     let content = serde_json::to_string_pretty(&json).unwrap();
     let results = parse_search_tool_results(&content);
-    assert_eq!(results.len(), 3);
-    assert_eq!(results[0].name, "linear__save_issue");
-    assert_eq!(results[0].server, "linear");
-    assert_eq!(results[0].description, "Create an issue");
-    assert!((results[0].score - 0.8).abs() < f64::EPSILON);
-    assert_eq!(results[1].name, "linear__list_issues");
-    assert_eq!(results[1].server, "linear");
-    assert_eq!(results[2].name, "slack__send_message");
-    assert_eq!(results[2].server, "slack");
+    let [linear_save, linear_list, slack] = results.as_slice() else {
+        panic!("expected 3 results: {results:?}");
+    };
+    assert_eq!(linear_save.name, "linear__save_issue");
+    assert_eq!(linear_save.server, "linear");
+    assert_eq!(linear_save.description, "Create an issue");
+    assert!((linear_save.score - 0.8).abs() < f64::EPSILON);
+    assert_eq!(linear_list.name, "linear__list_issues");
+    assert_eq!(linear_list.server, "linear");
+    assert_eq!(slack.name, "slack__send_message");
+    assert_eq!(slack.server, "slack");
 }
 #[test]
 fn parse_search_tool_results_old_flat_format_returns_empty() {
@@ -3588,9 +3857,8 @@ fn tracker_meta_less_update_preserves_prior_pending_acp_tools() {
         .expect("prior pending tools should be preserved");
     assert_eq!(tools, vec!["scheduler_create"]);
 }
-/// Build a `ToolCall` that mimics the initial ACP register-early payload
-/// emitted by `acp_session.rs`: title comes from the model's function
-/// name, raw_input is None.
+/// Build a `ToolCall` that mimics the initial ACP register-early payload emitted by `acp_session.rs`.
+/// The title comes from the model's function name; raw_input is None.
 fn initial_tool_call(id: &str, function_name: &str) -> acp::ToolCall {
     acp::ToolCall::new(
         acp::ToolCallId::new(Arc::from(id)),
@@ -3668,12 +3936,213 @@ fn pascal_case_task_tool_call_is_suppressed_from_scrollback() {
         &mut sb,
     );
     assert_eq!(sb.len(), 0, "PascalCase Task tool must be suppressed");
-    assert!(tracker.suppressed_tools.contains("tc1"));
+    assert!(tracker.suppressed_tools.contains_key("tc1"));
     tracker.handle_update(tool_update_completed("tc1"), &meta(), &mut sb);
     assert_eq!(
         sb.len(),
         0,
         "PascalCase Task updates must also be suppressed"
+    );
+}
+#[test]
+fn failed_task_tool_renders_despite_suppression() {
+    let mut sb = ScrollbackState::new();
+    let mut tracker = AcpUpdateTracker::new();
+    tracker.handle_update(
+        tool_call("tc1", acp::ToolKind::Other, "spawn_subagent"),
+        &meta(),
+        &mut sb,
+    );
+    assert_eq!(sb.len(), 0, "running spawn stays suppressed");
+    let failed = acp::SessionUpdate::ToolCallUpdate(
+        acp::ToolCallUpdate::new(
+            acp::ToolCallId::new(Arc::from("tc1")),
+            acp::ToolCallUpdateFields::new()
+                .status(Some(acp::ToolCallStatus::Failed))
+                .content(
+                    Some(
+                        vec![acp::ToolCallContent::from(
+                acp::ContentBlock::Text(acp::TextContent::new(
+                    "Cannot validate subagent type 'explore': the subagent coordinator did not respond."
+                        .to_string(),
+                )),
+            )],
+                    ),
+                ),
+        ),
+    );
+    assert!(tracker.handle_update(failed, &meta(), &mut sb));
+    assert_eq!(sb.len(), 1, "failed spawn must render in scrollback");
+    assert!(
+        !tracker.suppressed_tools.contains_key("tc1"),
+        "failure consumes the suppression stash"
+    );
+    assert!(
+        tracker.blocking_waits.is_empty(),
+        "failed spawn must not leave a Subagent wait behind"
+    );
+}
+#[test]
+fn failed_bg_plumbing_tool_stays_hidden() {
+    let mut sb = ScrollbackState::new();
+    let mut tracker = AcpUpdateTracker::new();
+    tracker.handle_update(
+        tool_call(
+            "tc1",
+            acp::ToolKind::Other,
+            "get_command_or_subagent_output",
+        ),
+        &meta(),
+        &mut sb,
+    );
+    let failed = acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
+        acp::ToolCallId::new(Arc::from("tc1")),
+        acp::ToolCallUpdateFields::new().status(Some(acp::ToolCallStatus::Failed)),
+    ));
+    assert!(!tracker.handle_update(failed, &meta(), &mut sb));
+    assert_eq!(sb.len(), 0, "failed bg poll must stay suppressed");
+    assert!(
+        !tracker.suppressed_tools.contains_key("tc1"),
+        "terminal status must still clear the stash"
+    );
+    let pre_failed = acp::SessionUpdate::ToolCall(
+        acp::ToolCall::new(
+            acp::ToolCallId::new(Arc::from("tc2")),
+            "wait_tasks".to_string(),
+        )
+        .kind(acp::ToolKind::Other)
+        .status(acp::ToolCallStatus::Failed),
+    );
+    assert!(!tracker.handle_update(pre_failed, &meta(), &mut sb));
+    assert_eq!(sb.len(), 0, "pre-failed bg poll must stay suppressed");
+}
+#[test]
+fn pre_failed_task_tool_renders_despite_suppression() {
+    let mut sb = ScrollbackState::new();
+    let mut tracker = AcpUpdateTracker::new();
+    let failed_call = acp::SessionUpdate::ToolCall(
+        acp::ToolCall::new(
+            acp::ToolCallId::new(Arc::from("tc1")),
+            "spawn_subagent".to_string(),
+        )
+        .kind(acp::ToolKind::Other)
+        .status(acp::ToolCallStatus::Failed),
+    );
+    assert!(tracker.handle_update(failed_call, &meta(), &mut sb));
+    assert_eq!(sb.len(), 1, "pre-failed spawn must render in scrollback");
+    assert!(
+        !tracker.suppressed_tools.contains_key("tc1"),
+        "pre-failed spawn is never stashed"
+    );
+    assert!(
+        tracker.blocking_waits.is_empty(),
+        "pre-failed spawn must not register a Subagent wait"
+    );
+}
+#[test]
+fn failed_update_racing_ahead_of_suppressed_call_renders() {
+    let mut sb = ScrollbackState::new();
+    let mut tracker = AcpUpdateTracker::new();
+    let failed = acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
+        acp::ToolCallId::new(Arc::from("tc1")),
+        acp::ToolCallUpdateFields::new()
+            .status(Some(acp::ToolCallStatus::Failed))
+            .content(Some(vec![acp::ToolCallContent::from(
+                acp::ContentBlock::Text(acp::TextContent::new(
+                    "the subagent coordinator did not respond".to_string(),
+                )),
+            )])),
+    ));
+    assert!(!tracker.handle_update(failed, &meta(), &mut sb));
+    assert_eq!(sb.len(), 0, "orphan update alone renders nothing");
+    assert!(tracker.handle_update(
+        tool_call("tc1", acp::ToolKind::Other, "spawn_subagent"),
+        &meta(),
+        &mut sb,
+    ));
+    assert_eq!(sb.len(), 1, "orphan-merged failed spawn must render");
+    assert!(
+        tracker.orphan_updates.is_empty(),
+        "the orphan must be consumed"
+    );
+    assert!(
+        !tracker.suppressed_tools.contains_key("tc1"),
+        "an already-failed spawn is never stashed"
+    );
+    assert!(
+        tracker.blocking_waits.is_empty(),
+        "an already-failed spawn must not register a Subagent wait"
+    );
+}
+#[test]
+fn completed_update_racing_ahead_of_suppressed_call_stays_hidden() {
+    let mut sb = ScrollbackState::new();
+    let mut tracker = AcpUpdateTracker::new();
+    tracker.handle_update(tool_update_completed("tc1"), &meta(), &mut sb);
+    assert!(!tracker.handle_update(
+        tool_call("tc1", acp::ToolKind::Other, "spawn_subagent"),
+        &meta(),
+        &mut sb,
+    ));
+    assert_eq!(sb.len(), 0, "completed spawn stays suppressed");
+    assert!(
+        tracker.orphan_updates.is_empty(),
+        "the orphan must be consumed"
+    );
+    assert!(
+        !tracker.suppressed_tools.contains_key("tc1"),
+        "a terminal call is never stashed"
+    );
+    assert!(
+        tracker.blocking_waits.is_empty(),
+        "a completed spawn must not register a Subagent wait"
+    );
+}
+#[test]
+fn failed_task_tool_render_carries_stashed_title_and_final_error() {
+    let mut sb = ScrollbackState::new();
+    let mut tracker = AcpUpdateTracker::new();
+    tracker.handle_update(
+        tool_call("tc1", acp::ToolKind::Other, "spawn_subagent"),
+        &meta(),
+        &mut sb,
+    );
+    let in_progress = acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
+        acp::ToolCallId::new(Arc::from("tc1")),
+        acp::ToolCallUpdateFields::new()
+            .status(Some(acp::ToolCallStatus::InProgress))
+            .raw_input(Some(serde_json::json!({
+                "variant": "Task",
+                "subagent_type": "explore",
+                "run_in_background": false,
+            }))),
+    ));
+    assert!(!tracker.handle_update(in_progress, &meta(), &mut sb));
+    assert_eq!(sb.len(), 0, "InProgress update stays suppressed");
+    let failed = acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
+        acp::ToolCallId::new(Arc::from("tc1")),
+        acp::ToolCallUpdateFields::new()
+            .status(Some(acp::ToolCallStatus::Failed))
+            .content(Some(vec![acp::ToolCallContent::from(
+                acp::ContentBlock::Text(acp::TextContent::new(
+                    "the subagent coordinator did not respond".to_string(),
+                )),
+            )])),
+    ));
+    assert!(tracker.handle_update(failed, &meta(), &mut sb));
+    assert_eq!(sb.len(), 1, "failed spawn must render in scrollback");
+    let entry = sb.entry(0).expect("rendered entry");
+    let RenderBlock::ToolCall(tool_block) = &entry.block else {
+        panic!("expected a tool-call block, got {:?}", entry.block);
+    };
+    let rendered = format!("{tool_block:?}");
+    assert!(
+        rendered.contains("spawn_subagent"),
+        "render must keep the stashed title: {rendered}"
+    );
+    assert!(
+        rendered.contains("coordinator did not respond"),
+        "render must carry the error content from the Failed update: {rendered}"
     );
 }
 #[test]
@@ -3729,8 +4198,76 @@ fn tool_update_in_progress_bg(id: &str, output_bytes: &[u8]) -> acp::SessionUpda
             }))),
     ))
 }
-/// Regression: is_bg_tool() detected on first InProgress defers the tool
-/// before any scrollback entry is created.
+/// Helper: returns whether the tracker defers an Execute tool as background when its first InProgress update carries `input` as raw_input.
+fn bg_deferred_for_input(id: &str, input: serde_json::Value) -> bool {
+    let update = acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
+        acp::ToolCallId::new(Arc::from(id)),
+        acp::ToolCallUpdateFields::new()
+            .status(Some(acp::ToolCallStatus::InProgress))
+            .raw_input(Some(input)),
+    ));
+    let mut sb = ScrollbackState::new();
+    let mut tracker = AcpUpdateTracker::new();
+    tracker.handle_update(
+        tool_call(id, acp::ToolKind::Execute, "Execute `sleep 9999`"),
+        &meta(),
+        &mut sb,
+    );
+    tracker.handle_update(update, &meta(), &mut sb);
+    tracker.bg_deferred_tools.contains_key(id)
+}
+/// The tracker defers `block_until_ms: 0` the same way as `is_background: true`.
+/// A positive `block_until_ms` stays a foreground call.
+#[test]
+fn bg_tool_detected_from_block_until_ms_zero() {
+    assert!(
+        bg_deferred_for_input(
+            "tc-zero",
+            serde_json::json!({"command": "sleep 9999", "block_until_ms": 0})
+        ),
+        "block_until_ms: 0 must defer like is_background: true"
+    );
+    assert!(
+        !bg_deferred_for_input(
+            "tc-wait",
+            serde_json::json!({"command": "sleep 9999", "block_until_ms": 30_000})
+        ),
+        "a positive block is a foreground call"
+    );
+}
+/// The tracker reads the input the same way as `BashTool::resolve_block_until_ms`.
+#[test]
+fn bg_tool_follows_bash_block_precedence() {
+    assert!(
+        bg_deferred_for_input(
+            "tc-str",
+            serde_json::json!({"command": "sleep 9999", "block_until_ms": "0"})
+        ),
+        "a string-encoded zero block backgrounds"
+    );
+    assert!(
+        !bg_deferred_for_input(
+            "tc-mixed",
+            serde_json::json!({"command": "sleep 9999", "block_until_ms": 30_000, "is_background": true})
+        ),
+        "an explicit positive block wins over a leftover is_background flag"
+    );
+    assert!(
+        bg_deferred_for_input(
+            "tc-timeout",
+            serde_json::json!({"command": "sleep 9999", "timeout": 0})
+        ),
+        "a legacy timeout: 0 backgrounds under the single-knob contract"
+    );
+    assert!(
+        !bg_deferred_for_input(
+            "tc-timeout-pos",
+            serde_json::json!({"command": "sleep 9999", "timeout": 5000})
+        ),
+        "a positive legacy timeout is a foreground call"
+    );
+}
+/// Regression: is_bg_tool() detected on first InProgress defers the tool before any scrollback entry is created.
 #[test]
 fn bg_tool_detected_at_first_update_defers_to_bg() {
     let mut sb = ScrollbackState::new();
@@ -3771,8 +4308,7 @@ fn bg_tool_detected_at_first_update_defers_to_bg() {
         "description should be extracted from raw_input"
     );
 }
-/// Regression: a bg-tool deferral (here dropping the placeholder row) must
-/// not bump `agent_output_epoch` — it is not visible agent output.
+/// Regression: a bg-tool deferral (here dropping the placeholder row) must not bump `agent_output_epoch`; it is not visible agent output.
 #[test]
 fn bg_tool_deferral_does_not_bump_agent_output_epoch() {
     let mut sb = ScrollbackState::new();
@@ -3834,8 +4370,7 @@ fn eager_execute_function_name_is_loading_placeholder_not_label() {
     assert!(tracker.bg_deferred_tools.contains_key("tc1"));
     assert!(tracker.pending_tools.contains_key("tc1"));
 }
-/// `raw_input.command: ""` must still map Other+function-name to loading Execute
-/// (not leave a bold `run_terminal_command` Other label).
+/// `raw_input.command: ""` must still map Other+function-name to loading Execute (not leave a bold `run_terminal_command` Other label).
 #[test]
 fn empty_command_key_still_maps_function_name_to_loading_execute() {
     let mut sb = ScrollbackState::new();
@@ -3894,9 +4429,8 @@ fn real_bash_command_is_not_dropped_on_bg_deferral() {
     assert!(tracker.pending_tools.contains_key("tc1"));
     assert!(tracker.bg_deferred_tools.contains_key("tc1"));
 }
-/// A completed function-name `Other` tool call that still carries BashOutput
-/// must preserve the command output + exit-code error (mirror of the Execute
-/// arm), not drop it when the kind was never refined to Execute.
+/// A completed function-name `Other` tool call that still carries BashOutput must preserve the command output and exit-code error.
+/// This mirrors the Execute arm; the output must not be dropped when the kind was never refined to Execute.
 #[test]
 fn completed_other_function_name_preserves_bash_output() {
     use xai_grok_tools::types::output::{BashOutput, ToolOutput};
@@ -3925,7 +4459,7 @@ fn completed_other_function_name_preserves_bash_output() {
     .raw_input(Some(serde_json::json!({ "command": "echo hi" })))
     .raw_output(serde_json::to_value(ToolOutput::Bash(bash)).ok())
     .locations(vec![]);
-    match tool_call_to_block(&tc, None) {
+    match tool_call_to_block(&tc, None, &SubagentLabelRegistry::default()) {
         RenderBlock::ToolCall(ToolCallBlock::Execute(ex)) => {
             assert_eq!(ex.command, "echo hi");
             assert_eq!(ex.output.as_deref(), Some("hello from bg\n"));
@@ -3934,10 +4468,8 @@ fn completed_other_function_name_preserves_bash_output() {
         other => panic!("expected Execute with output, got {other:?}"),
     }
 }
-/// Regression: when raw_input with is_background=true arrives after the
-/// Execute block was already created (late detection), the tool must still
-/// be moved to bg_deferred_tools so the task_backgrounded handler can
-/// demote the existing entry.
+/// Regression: raw_input with is_background=true can arrive after the Execute block was already created (late detection).
+/// The tool must still be moved to bg_deferred_tools so the task_backgrounded handler can demote the existing entry.
 #[test]
 fn bg_tool_late_detection_defers_existing_entry() {
     let mut sb = ScrollbackState::new();
@@ -4004,8 +4536,8 @@ fn non_bg_execute_unaffected_by_late_detection() {
         "should not defer non-bg tool"
     );
 }
-/// Regression: handle_user_message must finish_running on pending tool entries
-/// before clearing them, otherwise Execute blocks are orphaned as "running".
+/// Regression: handle_user_message must finish_running on pending tool entries before clearing them.
+/// Otherwise Execute blocks are orphaned as "running".
 #[test]
 fn handle_user_message_finishes_pending_tool_entries() {
     let mut sb = ScrollbackState::new();
@@ -4037,9 +4569,37 @@ fn handle_user_message_finishes_pending_tool_entries() {
         "no entries should be animating after user message",
     );
 }
-/// Regression: finish_turn must call finish_running even for tools that are
-/// in bg_deferred_tools. The turn is over — the original Execute block must
-/// not stay orphaned as "running".
+/// A send-now interrupt must not finalize the freshly set page-flip pin.
+#[test]
+fn handle_user_message_does_not_finalize_fresh_pin() {
+    let mut sb = ScrollbackState::new();
+    let mut tracker = AcpUpdateTracker::new();
+    for i in 0..30 {
+        sb.push_block(RenderBlock::agent_message(format!("history {i}")));
+    }
+    sb.push_block(RenderBlock::user_prompt("new question"));
+    let prompt_idx = sb.len() - 1;
+    sb.prepare_layout(80, 8);
+    sb.follow_new_turn(Some(prompt_idx), true);
+    sb.prepare_layout(80, 8);
+    assert!(sb.is_pin_reserve_active(), "pin armed for the new turn");
+    assert!(
+        !sb.is_pin_reserve_after_turn(),
+        "fresh pin is not finalized"
+    );
+    tracker.handle_update(agent_chunk("responding..."), &meta(), &mut sb);
+    tracker.handle_update(user_message("interrupt"), &meta(), &mut sb);
+    assert!(
+        sb.is_pin_reserve_active(),
+        "the interrupt must not drop the pin"
+    );
+    assert!(
+        !sb.is_pin_reserve_after_turn(),
+        "a send-now must not finalize the fresh pin (that blocks the overflow chase)"
+    );
+}
+/// Regression: finish_turn must call finish_running even for tools that are in bg_deferred_tools.
+/// The turn is over; the original Execute block must not stay orphaned as "running".
 #[test]
 fn finish_turn_finishes_bg_deferred_tool_entries() {
     let mut sb = ScrollbackState::new();
@@ -4106,8 +4666,7 @@ fn user_message_with_display_text(
             .meta(serde_json::Value::Object(meta_map).as_object().cloned()),
     )))
 }
-/// Replay with displayText in content meta shows clean display text
-/// instead of raw skill instructions.
+/// Replay with displayText in content meta shows clean display text instead of raw skill instructions.
 #[test]
 fn replay_display_text_override() {
     let mut sb = ScrollbackState::new();
@@ -4227,8 +4786,26 @@ fn meta_with_prompt_id(prompt_id: &str) -> NotificationMeta {
     m.prompt_id = Some(prompt_id.to_string());
     m
 }
-/// Scrollback hide is type-driven: chunk meta `hideFromScrollback` or
-/// notification `promptId` → [`PromptOrigin::hide_user_echo_from_scrollback`].
+#[test]
+fn hidden_user_message_keeps_the_pending_echo_skip() {
+    let mut sb = ScrollbackState::new();
+    let mut tracker = AcpUpdateTracker::new();
+    tracker.expect_user_echo();
+    let mut hide_meta = acp::Meta::new();
+    hide_meta.insert("hideFromScrollback".into(), serde_json::json!(true));
+    assert!(!tracker.handle_update(
+        user_message_with_chunk_meta(
+            "<timestamp>Wed</timestamp>\n<system_notification>done</system_notification>",
+            hide_meta,
+        ),
+        &meta(),
+        &mut sb,
+    ));
+    assert!(!tracker.handle_update(user_message("Reply with SECOND"), &meta(), &mut sb));
+    assert!(!tracker.expects_user_echo());
+}
+/// Scrollback hide is type-driven.
+/// Chunk meta `hideFromScrollback` or notification `promptId` routes to [`PromptOrigin::hide_user_echo_from_scrollback`].
 #[test]
 fn replay_hides_user_echo_by_origin_type() {
     let mut sb = ScrollbackState::new();
@@ -4317,8 +4894,7 @@ fn user_message_with_token_ranges(text: &str, ranges: serde_json::Value) -> acp:
         acp::TextContent::new(text.to_string()).meta(Some(meta_map)),
     )))
 }
-/// `skillTokenRanges` meta round-trips into a token-styled block: same
-/// text, same ranges.
+/// `skillTokenRanges` meta round-trips into a token-styled block: same text, same ranges.
 #[test]
 fn replay_skill_token_ranges_styles_block() {
     let mut sb = ScrollbackState::new();
@@ -4340,9 +4916,9 @@ fn replay_skill_token_ranges_styles_block() {
         other => panic!("expected UserPrompt, got {:?}", other),
     }
 }
-/// `skillTokenRanges` index the wire text, so a `displayText` override (a
-/// different coordinate space) IGNORES them — `displayAsSkill` keeps
-/// owning that branch. No first-party producer stamps both.
+/// `skillTokenRanges` index the wire text, so a `displayText` override (a different coordinate space) IGNORES them.
+/// `displayAsSkill` keeps owning that branch.
+/// No first-party producer stamps both.
 #[test]
 fn replay_display_text_ignores_skill_token_ranges() {
     let mut sb = ScrollbackState::new();
@@ -4373,8 +4949,7 @@ fn replay_display_text_ignores_skill_token_ranges() {
         other => panic!("expected UserPrompt, got {:?}", other),
     }
 }
-/// Malformed/out-of-bounds ranges never panic; the block degrades to a
-/// plain prompt (missing meta keeps the legacy fallbacks — pinned above).
+/// Malformed/out-of-bounds ranges never panic; the block degrades to a plain prompt (missing meta keeps the legacy fallbacks, pinned above).
 #[test]
 fn replay_malformed_skill_token_ranges_degrade_to_plain() {
     let mut sb = ScrollbackState::new();
@@ -4395,6 +4970,67 @@ fn replay_malformed_skill_token_ranges_degrade_to_plain() {
         other => panic!("expected UserPrompt, got {:?}", other),
     }
 }
+/// A persisted interjection chunk as the shell writes it: the model-facing frame as text,
+/// the typed text in `displayText`, and the `interjection` chunk flag.
+fn interjection_user_message(typed: &str) -> acp::SessionUpdate {
+    let mut chunk_meta = serde_json::Map::new();
+    chunk_meta.insert("modelId".into(), serde_json::json!("test-model"));
+    chunk_meta.insert("interjection".into(), serde_json::Value::Bool(true));
+    let mut text_meta = serde_json::Map::new();
+    text_meta.insert("displayText".into(), serde_json::json!(typed));
+    let framed = xai_interjection_core::format_interjection(typed.to_string());
+    acp::SessionUpdate::UserMessageChunk(
+        acp::ContentChunk::new(acp::ContentBlock::Text(
+            acp::TextContent::new(framed).meta(Some(text_meta)),
+        ))
+        .meta(Some(chunk_meta)),
+    )
+}
+#[test]
+fn replay_interjection_chunk_renders_as_interjection_block() {
+    let mut sb = ScrollbackState::new();
+    let mut tracker = AcpUpdateTracker::new();
+    let replay = NotificationMeta {
+        is_replay: true,
+        ..Default::default()
+    };
+    assert!(tracker.handle_update(
+        interjection_user_message("ok run the stop for me"),
+        &replay,
+        &mut sb
+    ));
+    assert_eq!(sb.len(), 1);
+    match &sb.get(0).unwrap().block {
+        RenderBlock::UserPrompt(block) => {
+            assert_eq!(block.text, "ok run the stop for me");
+            assert!(
+                block.is_interjection,
+                "replayed interjection keeps interjection bookkeeping"
+            );
+            assert_eq!(
+                block.prompt_index, None,
+                "the shell never numbers interjections"
+            );
+            assert!(!block.is_cron && !block.is_bash);
+        }
+        other => panic!("expected UserPrompt, got {:?}", other),
+    }
+}
+/// A `/skill` sent mid-turn stays a plain interjection row, as live, not a skill prompt.
+#[test]
+fn replay_interjection_flag_outranks_slash_skill_fallback() {
+    let mut sb = ScrollbackState::new();
+    let mut tracker = AcpUpdateTracker::new();
+    assert!(tracker.handle_update(interjection_user_message("/commit now"), &meta(), &mut sb));
+    match &sb.get(0).unwrap().block {
+        RenderBlock::UserPrompt(block) => {
+            assert_eq!(block.text, "/commit now");
+            assert!(block.is_interjection);
+            assert!(block.skill_token_ranges.is_empty());
+        }
+        other => panic!("expected UserPrompt, got {:?}", other),
+    }
+}
 #[test]
 fn call_mcp_tool_coerced_to_use_tool_renders_block() {
     let tc = acp::ToolCall::new(acp::ToolCallId::new(Arc::from("mcp1")), "grafana__search")
@@ -4406,11 +5042,140 @@ fn call_mcp_tool_coerced_to_use_tool_renders_block() {
             "tool_input" : { "query" : "alerts" } }
         )))
         .locations(vec![]);
-    let block = tool_call_to_block(&tc, None);
+    let block = tool_call_to_block(&tc, None, &SubagentLabelRegistry::default());
     let RenderBlock::ToolCall(ToolCallBlock::UseTool(ut)) = block else {
         panic!("expected UseTool block, got {block:?}");
     };
     assert_eq!(ut.tool_name, "grafana__search");
+}
+#[test]
+fn a_failed_tool_search_shows_its_output_text_as_the_error() {
+    let tc = acp::ToolCall::new(
+        acp::ToolCallId::new(Arc::from("mcp2")),
+        "Search tools slack",
+    )
+    .kind(acp::ToolKind::Other)
+    .status(acp::ToolCallStatus::Failed)
+    .content(vec![])
+    .raw_input(Some(
+        serde_json::json!({ "variant": "SearchTool", "query": "slack" }),
+    ))
+    .raw_output(Some(serde_json::json!({
+        "type": "SearchTool",
+        "result_count": 0,
+        "content": "no such server: slack"
+    })))
+    .locations(vec![]);
+    let block = tool_call_to_block(&tc, None, &SubagentLabelRegistry::default());
+    let RenderBlock::ToolCall(ToolCallBlock::IntegrationSearch(st)) = block else {
+        panic!("expected IntegrationSearch block, got {block:?}");
+    };
+    assert_eq!(st.error.as_deref(), Some("no such server: slack"));
+}
+#[test]
+fn directly_listed_mcp_tool_renders_like_a_use_tool_call() {
+    let mcp = xai_grok_tools::types::output::MCPOutput::errored(
+        "computer_check_permissions".into(),
+        "computer_use".into(),
+        "Failed to call computer_check_permissions: the helper did not answer within 15s".into(),
+    );
+    let input = xai_grok_tools::types::tool_io::ToolInput::MCPTool(
+        xai_grok_tools::types::tool_io::MCPToolInput {
+            tool_name: "computer_use__computer_check_permissions".into(),
+            tool_input: serde_json::json!({"x": 1}),
+        },
+    );
+    let tc = acp::ToolCall::new(
+        acp::ToolCallId::new(Arc::from("mcp2")),
+        "computer_use__computer_check_permissions",
+    )
+    .kind(acp::ToolKind::Other)
+    .status(acp::ToolCallStatus::Failed)
+    .content(vec![])
+    .raw_input(serde_json::to_value(input).ok())
+    .raw_output(serde_json::to_value(ToolOutput::MCP(mcp)).ok())
+    .locations(vec![]);
+    let block = tool_call_to_block(&tc, None, &SubagentLabelRegistry::default());
+    let RenderBlock::ToolCall(ToolCallBlock::UseTool(ut)) = block else {
+        panic!("expected UseTool block, got {block:?}");
+    };
+    assert_eq!("computer_use__computer_check_permissions", ut.tool_name);
+    assert_eq!(vec![("x".to_owned(), "1".to_owned())], ut.input_args);
+    assert_eq!(
+        Some("Failed to call computer_check_permissions: the helper did not answer within 15s"),
+        ut.error.as_deref()
+    );
+}
+#[test]
+fn generic_failed_tool_call_takes_its_error_from_raw_output() {
+    let output = ToolOutput::Text(xai_grok_tools::types::output::TextOutput::from(
+        "no task with id t1",
+    ));
+    let tc = acp::ToolCall::new(acp::ToolCallId::new(Arc::from("kill1")), "kill_task")
+        .kind(acp::ToolKind::Other)
+        .status(acp::ToolCallStatus::Failed)
+        .content(vec![])
+        .raw_input(Some(serde_json::json!({
+            "variant": "KillTask",
+            "task_id": "t1"
+        })))
+        .raw_output(serde_json::to_value(output).ok())
+        .locations(vec![]);
+    let block = tool_call_to_block(&tc, None, &SubagentLabelRegistry::default());
+    let RenderBlock::ToolCall(ToolCallBlock::Other(other)) = block else {
+        panic!("expected Other block, got {block:?}");
+    };
+    assert_eq!(Some("no task with id t1"), other.error.as_deref());
+    assert_eq!(
+        None, other.output,
+        "a failure carries its text as the error only"
+    );
+}
+#[test]
+fn send_feedback_update_renders_feedback_drafted() {
+    let tool_call_id = acp::ToolCallId::new(Arc::from("feedback-draft"));
+    let tool_meta = serde_json::json!({
+        "version": 1,
+        "name": "send_feedback",
+        "kind": "feedback",
+        "namespace": "grok_build",
+        "label": "Feedback",
+        "read_only": false,
+    });
+    let pending = acp::ToolCall::new(tool_call_id.clone(), "send_feedback".to_owned())
+        .kind(acp::ToolKind::Other)
+        .status(acp::ToolCallStatus::Pending)
+        .meta(
+            serde_json::json!({xai_grok_tools::tool_taxonomy::TOOL_META_KEY: tool_meta})
+                .as_object()
+                .cloned(),
+        );
+    let completed = acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
+        tool_call_id,
+        acp::ToolCallUpdateFields::new()
+            .title(Some("Dynamic tool call".to_owned()))
+            .status(Some(acp::ToolCallStatus::Completed))
+            .raw_input(Some(serde_json::json!({"title": "Draft"}))),
+    ));
+    let mut tracker = AcpUpdateTracker::new();
+    let mut scrollback = ScrollbackState::new();
+    tracker.handle_update(
+        acp::SessionUpdate::ToolCall(pending),
+        &meta(),
+        &mut scrollback,
+    );
+    tracker.handle_update(completed, &meta(), &mut scrollback);
+    let block = &scrollback.get(0).expect("feedback block").block;
+    let RenderBlock::ToolCall(ToolCallBlock::Other(other)) = block else {
+        panic!("expected Other block, got {block:?}");
+    };
+    assert_eq!(other.name, "Feedback drafted");
+    assert!(
+        !block
+            .searchable_text()
+            .unwrap()
+            .contains("Dynamic tool call")
+    );
 }
 #[test]
 fn call_mcp_tool_no_raw_input_does_not_panic() {
@@ -4422,7 +5187,7 @@ fn call_mcp_tool_no_raw_input_does_not_panic() {
     .status(acp::ToolCallStatus::Pending)
     .content(vec![])
     .locations(vec![]);
-    let _block = tool_call_to_block(&tc, None);
+    let _block = tool_call_to_block(&tc, None, &SubagentLabelRegistry::default());
 }
 #[test]
 fn cursor_todo_write_suppressed_by_title() {
@@ -4454,9 +5219,8 @@ fn pascal_case_todo_write_suppressed_from_scrollback() {
         );
     }
 }
-/// Every video ToolInput variant must route through `media_gen_block` so
-/// `[Open Video]` uses the typed `MediaGenOutput.path` (not a regex scrape
-/// of the JSON prompt text — fragile on Windows with %-encoded session dirs).
+/// Every video ToolInput variant must route through `media_gen_block` so `[Open Video]` uses the typed `MediaGenOutput.path`.
+/// A regex scrape of the JSON prompt text is fragile on Windows with %-encoded session dirs.
 #[test]
 fn video_tool_variants_use_typed_path_not_generic_scrape() {
     use crate::scrollback::block::BlockContent;
@@ -4488,7 +5252,7 @@ fn video_tool_variants_use_typed_path_not_generic_scrape() {
         .raw_input(Some(serde_json::json!({ "variant" : variant })))
         .raw_output(serde_json::to_value(output).ok())
         .locations(vec![]);
-        let block = tool_call_to_block(&tc, None);
+        let block = tool_call_to_block(&tc, None, &SubagentLabelRegistry::default());
         let open_path = block
             .inline_open_button()
             .map(|(p, is_video)| {
@@ -4523,10 +5287,9 @@ fn media_gen_ref_skips_uploaded_only_video() {
         "uploaded_url-only media must not claim a local open path"
     );
 }
-/// A tier-restricted (free / X Basic) imagine call short-circuits with the
-/// SuperGrok upsell as `ToolOutput::Text` on a `Completed` status. The media
-/// renderer has no file to open, so it must surface the upsell text in the
-/// card body (not a bare title) and must NOT mark the card as an error.
+/// A tier-restricted (free / X Basic) imagine call short-circuits with the SuperGrok upsell as `ToolOutput::Text` on a `Completed` status.
+/// The media renderer has no file to open, so it must surface the upsell text in the card body (not a bare title).
+/// It must NOT mark the card as an error.
 #[test]
 fn tier_restricted_media_shows_upsell_text_not_error() {
     let upsell = "Image generation is a SuperGrok feature. Upgrade at \
@@ -4544,7 +5307,9 @@ fn tier_restricted_media_shows_upsell_text_not_error() {
     .raw_input(Some(serde_json::json!({ "variant": "ImageGen" })))
     .raw_output(serde_json::to_value(output).ok())
     .locations(vec![]);
-    let RenderBlock::ToolCall(ToolCallBlock::Other(block)) = tool_call_to_block(&tc, None) else {
+    let RenderBlock::ToolCall(ToolCallBlock::Other(block)) =
+        tool_call_to_block(&tc, None, &SubagentLabelRegistry::default())
+    else {
         panic!("expected an Other tool-call block");
     };
     assert!(
@@ -4561,190 +5326,266 @@ fn tier_restricted_media_shows_upsell_text_not_error() {
         block.output
     );
 }
-
-const ABORTED_REASONING: &str =
-    "The user is asking me to acknowledge them - they sent a screenshot of the session.";
-const ABORTED_DRAFT: &str = "Hey, sorry about that -- I see the screenshot and the weird state you're in. Looks like the resume pulled up a session where the prompt is stuck in both the";
-
-fn thinking_texts(sb: &ScrollbackState) -> Vec<String> {
-    (0..sb.len())
-        .filter_map(|i| match sb.get(i).map(|e| &e.block) {
-            Some(RenderBlock::Thinking(t)) => Some(t.text()),
-            _ => None,
-        })
-        .collect()
+/// The daemon client hand-builds the media card's JSON (it cannot depend on `MediaGenOutput`); this pins that the
+/// exact shape it sends — `type` + `path` only — renders as a media ref for both spellings, and that the fuller
+/// shape the built-in tools send does too.
+#[test]
+fn daemon_generate_image_output_shape_renders_as_a_media_ref() {
+    let outputs = [
+        (
+            "ImageGen",
+            serde_json::json!({ "type": "ImageGen", "path": "/work/proj/assets/cat.png" }),
+        ),
+        (
+            "ImageEdit",
+            serde_json::json!({ "type": "ImageEdit", "path": "/work/proj/assets/cat.png" }),
+        ),
+        (
+            "ImageGen",
+            serde_json::json!({
+                "type": "ImageGen",
+                "path": "/work/proj/assets/cat.png",
+                "filename": "cat.png",
+                "session_folder": "assets",
+            }),
+        ),
+    ];
+    for (variant, output) in outputs {
+        let tc = acp::ToolCall::new(
+            acp::ToolCallId::new(Arc::from("daemon-image")),
+            "Generate image: \"a cat\"",
+        )
+        .kind(acp::ToolKind::Other)
+        .status(acp::ToolCallStatus::Completed)
+        .raw_input(Some(serde_json::json!({
+            "variant": variant, "prompt": "a cat", "aspect_ratio": "16:9",
+        })))
+        .raw_output(Some(output.clone()))
+        .locations(vec![]);
+        assert_eq!(
+            media_gen_ref(&tc),
+            Some((std::path::PathBuf::from("/work/proj/assets/cat.png"), false)),
+            "{output}"
+        );
+        let RenderBlock::ToolCall(ToolCallBlock::Other(block)) =
+            tool_call_to_block(&tc, None, &SubagentLabelRegistry::default())
+        else {
+            panic!("expected an Other tool-call block for {output}");
+        };
+        assert!(block.is_success(), "{output}");
+    }
+}
+/// A refused generation (the server's access error) fails the card with the reason, and draws no image.
+#[test]
+fn daemon_generate_image_refusal_is_a_failed_card_with_the_reason() {
+    let reason = "Developer, Sand, or training access required";
+    let tc = acp::ToolCall::new(
+        acp::ToolCallId::new(Arc::from("daemon-image")),
+        "Generate image: \"a cat\"",
+    )
+    .kind(acp::ToolKind::Other)
+    .status(acp::ToolCallStatus::Failed)
+    .raw_input(Some(serde_json::json!({
+        "variant": "ImageGen", "prompt": "a cat", "aspect_ratio": "auto",
+    })))
+    .content(vec![acp::ToolCallContent::from(acp::ContentBlock::Text(
+        acp::TextContent::new(reason.to_string()),
+    ))])
+    .locations(vec![]);
+    assert_eq!(media_gen_ref(&tc), None);
+    let RenderBlock::ToolCall(ToolCallBlock::Other(block)) =
+        tool_call_to_block(&tc, None, &SubagentLabelRegistry::default())
+    else {
+        panic!("expected an Other tool-call block");
+    };
+    assert!(!block.is_success());
+    assert_eq!(block.error.as_deref(), Some(reason));
+}
+/// A hook batch younger than the reveal delay is invisible; once it outlives the delay it outranks the phase it blocks.
+#[test]
+fn hooks_running_reveals_only_after_delay_and_outranks_thinking() {
+    crate::appearance::cache::set_show_thinking_blocks(true);
+    let mut sb = ScrollbackState::new();
+    let mut tracker = AcpUpdateTracker::new();
+    tracker.handle_update(thought_chunk("planning"), &meta(), &mut sb);
+    assert_eq!(tracker.activity(), Some(TurnActivity::Thinking));
+    tracker.set_hooks_running(batch("pre_tool_use", None), 1, None);
+    assert_eq!(
+        tracker.activity(),
+        Some(TurnActivity::Thinking),
+        "a fresh batch must not flash into the spinner"
+    );
+    assert!(
+        !tracker.clear_hooks_running(&batch("pre_tool_use", None)),
+        "ending an unrevealed batch changes nothing on screen"
+    );
+    let revealed = std::time::Instant::now() - HOOK_REVEAL_DELAY;
+    tracker.set_hooks_running_since(batch("pre_tool_use", None), 1, revealed, None);
+    assert_eq!(
+        tracker.activity(),
+        Some(TurnActivity::Waiting(WaitingReason::Hooks {
+            event_name: "pre_tool_use".into(),
+            count: 1,
+        })),
+        "a batch past the reveal delay names what the turn is blocked on"
+    );
+    assert!(
+        tracker.clear_hooks_running(&batch("pre_tool_use", None)),
+        "ending a revealed batch must request a redraw"
+    );
+    assert_eq!(tracker.activity(), Some(TurnActivity::Thinking));
+}
+/// Streaming data after the batch means it finished even if its `HookExecution` was dropped or deferred.
+#[test]
+fn hooks_running_auto_clears_on_streaming_data_and_turn_end() {
+    let mut sb = ScrollbackState::new();
+    let mut tracker = AcpUpdateTracker::new();
+    let revealed = std::time::Instant::now() - HOOK_REVEAL_DELAY;
+    tracker.set_hooks_running_since(batch("user_prompt_submit", None), 2, revealed, None);
+    assert!(matches!(
+        tracker.activity(),
+        Some(TurnActivity::Waiting(WaitingReason::Hooks { .. }))
+    ));
+    tracker.handle_update(agent_chunk("hello"), &meta(), &mut sb);
+    assert_eq!(
+        tracker.activity(),
+        Some(TurnActivity::Responding),
+        "the first chunk after the gate clears the hook phase"
+    );
+    tracker.set_hooks_running_since(batch("stop", None), 1, revealed, None);
+    tracker.finish_turn(&mut sb);
+    assert_eq!(tracker.activity(), None, "finish_turn drops the phase");
+}
+/// The spinner copy: singular for one hook, a count otherwise; never the handler's config path.
+#[test]
+fn hooks_waiting_label_counts_hooks() {
+    let one = WaitingReason::Hooks {
+        event_name: "pre_tool_use".into(),
+        count: 1,
+    };
+    let many = WaitingReason::Hooks {
+        event_name: "stop".into(),
+        count: 3,
+    };
+    assert_eq!(one.label(), "Running pre_tool_use hook…");
+    assert_eq!(many.label(), "Running 3 stop hooks…");
+    assert_eq!(one.as_telemetry_label(), "waiting_hooks");
+}
+/// The gated tool's Pending row, its late args delta, sibling progress and mode/commands refreshes leave the phase alone; the batch's outcome or model output ends it.
+#[test]
+fn hook_gate_survives_tool_rows_and_ends_on_its_outcome() {
+    let mut sb = ScrollbackState::new();
+    let mut tracker = AcpUpdateTracker::new();
+    let revealed = std::time::Instant::now() - HOOK_REVEAL_DELAY;
+    let gate = TurnActivity::Waiting(WaitingReason::Hooks {
+        event_name: "pre_tool_use".into(),
+        count: 2,
+    });
+    tracker.handle_update(
+        tool_call("bg", acp::ToolKind::Execute, "bash"),
+        &meta(),
+        &mut sb,
+    );
+    tracker.set_hooks_running_since(batch("pre_tool_use", None), 2, revealed, None);
+    tracker.note_tool_call_arguments_delta(Some("list_dir"), 0);
+    tracker.handle_update(
+        tool_call("t1", acp::ToolKind::Read, "list_dir"),
+        &meta(),
+        &mut sb,
+    );
+    assert_eq!(
+        tracker.activity(),
+        Some(gate.clone()),
+        "the gate outranks the tool it is gating and its late args delta"
+    );
+    tracker.handle_update(tool_update_completed("bg"), &meta(), &mut sb);
+    assert_eq!(
+        tracker.activity(),
+        Some(gate.clone()),
+        "another tool's progress says nothing about the gate"
+    );
+    tracker.handle_update(
+        acp::SessionUpdate::CurrentModeUpdate(acp::CurrentModeUpdate::new(
+            acp::SessionModeId::new("plan"),
+        )),
+        &meta(),
+        &mut sb,
+    );
+    tracker.handle_update(available_commands_update(&["help"]), &meta(), &mut sb);
+    assert_eq!(
+        tracker.activity(),
+        Some(gate),
+        "a mode toggle or commands refresh says nothing about the gate"
+    );
+    assert!(
+        !tracker.clear_hooks_running(&batch("session_start", None)),
+        "another batch's outcome says nothing about this gate"
+    );
+    assert!(
+        tracker.clear_hooks_running(&batch("pre_tool_use", None)),
+        "the batch outcome ends it"
+    );
+    assert!(!matches!(
+        tracker.activity(),
+        Some(TurnActivity::Waiting(WaitingReason::Hooks { .. }))
+    ));
+    tracker.set_hooks_running_since(batch("post_tool_use", None), 1, revealed, None);
+    tracker.handle_update(agent_chunk("done"), &meta(), &mut sb);
+    assert!(
+        !matches!(
+            tracker.activity(),
+            Some(TurnActivity::Waiting(WaitingReason::Hooks { .. }))
+        ),
+        "model output means the shell moved past the gate"
+    );
+}
+/// A text chunk stamped at or before the batch start is a buffered straggler and must not end the phase; a later one does.
+#[test]
+fn hook_gate_survives_a_text_chunk_stamped_before_the_batch() {
+    let mut sb = ScrollbackState::new();
+    let mut tracker = AcpUpdateTracker::new();
+    let revealed = std::time::Instant::now() - HOOK_REVEAL_DELAY;
+    let gate = TurnActivity::Waiting(WaitingReason::Hooks {
+        event_name: "stop".into(),
+        count: 1,
+    });
+    let stamped = |ms: i64| NotificationMeta {
+        agent_timestamp_ms: Some(ms),
+        ..meta()
+    };
+    tracker.set_hooks_running_since(batch("stop", None), 1, revealed, Some(1_000));
+    tracker.handle_update(agent_chunk("final words"), &stamped(1_000), &mut sb);
+    tracker.handle_update(thought_chunk("trailing"), &stamped(998), &mut sb);
+    assert_eq!(
+        tracker.activity(),
+        Some(gate),
+        "text stamped at or before the batch start was already queued when the gate opened"
+    );
+    tracker.handle_update(agent_chunk("after"), &stamped(1_001), &mut sb);
+    assert!(
+        !matches!(
+            tracker.activity(),
+            Some(TurnActivity::Waiting(WaitingReason::Hooks { .. }))
+        ),
+        "text stamped after the batch start means the shell moved past the gate"
+    );
+    tracker.set_hooks_running_since(batch("stop", None), 1, revealed, None);
+    tracker.handle_update(agent_chunk("x"), &stamped(1), &mut sb);
+    assert!(!matches!(
+        tracker.activity(),
+        Some(TurnActivity::Waiting(WaitingReason::Hooks { .. }))
+    ));
 }
 
 fn thinking_count(sb: &ScrollbackState) -> usize {
     (0..sb.len())
-        .filter(|&i| matches!(sb.get(i).map(|e| &e.block), Some(RenderBlock::Thinking(_))))
+        .filter(|&i| {
+            matches!(
+                sb.get(i).map(|entry| &entry.block),
+                Some(RenderBlock::Thinking(_))
+            )
+        })
         .count()
-}
-
-/// Contract A: thinking chrome must not present an aborted user-facing draft
-/// as the live turn. Pause or truncate leaves the thought incomplete or
-/// collapsed, not a half-apology stuck on screen.
-#[test]
-fn abort_turn_does_not_present_aborted_user_facing_draft_as_the_live_turn() {
-    crate::appearance::cache::set_show_thinking_blocks(true);
-    let mut sb = ScrollbackState::new();
-    let mut tracker = AcpUpdateTracker::new();
-    let mixed = format!("{ABORTED_REASONING}\n{ABORTED_DRAFT}");
-    tracker.handle_update(thought_chunk(&mixed), &meta(), &mut sb);
-    tracker.abort_turn(&mut sb);
-    let texts = thinking_texts(&sb);
-    for body in &texts {
-        assert!(
-            !body.contains("Hey, sorry about that"),
-            "aborted user-facing draft must not stay in thinking chrome, got {body:?}"
-        );
-    }
-    let agent_bodies: Vec<String> = (0..sb.len())
-        .filter_map(|i| match sb.get(i).map(|e| &e.block) {
-            Some(RenderBlock::AgentMessage(m)) => Some(m.text()),
-            _ => None,
-        })
-        .collect();
-    for body in &agent_bodies {
-        assert!(
-            !body.contains("Hey, sorry about that"),
-            "aborted draft must not become the assistant message either, got {body:?}"
-        );
-    }
-}
-
-/// Contract B: Thought for 0.0s must not paint as a real thought block
-/// (omit or merge). Instant empty pre-created leftovers are omitted.
-#[test]
-fn abort_turn_omits_instant_empty_thinking_so_thought_for_zero_does_not_paint() {
-    crate::appearance::cache::set_show_thinking_blocks(true);
-    let mut sb = ScrollbackState::new();
-    let mut tracker = AcpUpdateTracker::new();
-    tracker.pre_create_thinking(&mut sb);
-    assert_eq!(
-        thinking_count(&sb),
-        1,
-        "precondition: empty thinking exists"
-    );
-    tracker.abort_turn(&mut sb);
-    assert_eq!(
-        thinking_count(&sb),
-        0,
-        "empty instant thinking must be omitted so Thought for 0.0s cannot paint"
-    );
-    tracker.pre_create_thinking(&mut sb);
-    tracker.finish_turn(&mut sb);
-    assert_eq!(
-        thinking_count(&sb),
-        0,
-        "finish_turn must also omit empty instant thinking"
-    );
-}
-
-/// Contract C: after pause with no [stop], do not leave a truncated assistant
-/// draft inside an expanded thought as if it were the reply.
-#[test]
-fn abort_turn_collapses_truncated_draft_out_of_expanded_thinking() {
-    use crate::scrollback::types::DisplayMode;
-    std::thread::spawn(|| {
-        crate::appearance::cache::set_show_thinking_blocks(true);
-        crate::appearance::cache::set_always_expand_thinking(true);
-        struct ResetAlwaysExpand;
-        impl Drop for ResetAlwaysExpand {
-            fn drop(&mut self) {
-                crate::appearance::cache::set_always_expand_thinking(false);
-            }
-        }
-        let _reset = ResetAlwaysExpand;
-        let mut sb = ScrollbackState::new();
-        let mut tracker = AcpUpdateTracker::new();
-        let mixed = format!("{ABORTED_REASONING}\n{ABORTED_DRAFT}");
-        tracker.handle_update(thought_chunk(&mixed), &meta(), &mut sb);
-        tracker.abort_turn(&mut sb);
-        assert_eq!(thinking_count(&sb), 1, "reasoning thought should remain");
-        let entry = sb.get(0).expect("thinking entry");
-        assert_eq!(
-            entry.display_mode,
-            DisplayMode::Collapsed,
-            "paused thinking must collapse even when always_expand_thinking is on"
-        );
-        match &entry.block {
-            RenderBlock::Thinking(t) => {
-                assert!(
-                    t.is_aborted(),
-                    "paused thought must be marked aborted so expand cannot restick the draft"
-                );
-                assert!(
-                    !t.text().contains("Hey, sorry about that"),
-                    "truncated draft must not remain in the collapsed thought, got {:?}",
-                    t.text()
-                );
-            }
-            other => panic!("expected thinking, got {other:?}"),
-        }
-    })
-    .join()
-    .unwrap();
-}
-
-/// Contract D: distinguish model reasoning from the assistant message.
-/// Internal "the user is asking me..." must not leak as the answer.
-#[test]
-fn abort_turn_keeps_internal_reasoning_out_of_the_assistant_answer() {
-    crate::appearance::cache::set_show_thinking_blocks(true);
-    let mut sb = ScrollbackState::new();
-    let mut tracker = AcpUpdateTracker::new();
-    let mixed = format!("{ABORTED_REASONING}\n{ABORTED_DRAFT}");
-    tracker.handle_update(thought_chunk(&mixed), &meta(), &mut sb);
-    tracker.abort_turn(&mut sb);
-    let texts = thinking_texts(&sb);
-    assert!(
-        texts.iter().any(|b| b.contains("The user is asking me")),
-        "internal reasoning may stay in thinking chrome, got {texts:?}"
-    );
-    let agent_bodies: Vec<String> = (0..sb.len())
-        .filter_map(|i| match sb.get(i).map(|e| &e.block) {
-            Some(RenderBlock::AgentMessage(m)) => Some(m.text()),
-            _ => None,
-        })
-        .collect();
-    for body in &agent_bodies {
-        assert!(
-            !body.contains("The user is asking me"),
-            "internal reasoning must not leak as the assistant answer, got {body:?}"
-        );
-        assert!(
-            !body.contains("Hey, sorry about that"),
-            "truncated draft must not leak as the assistant answer, got {body:?}"
-        );
-    }
-}
-
-/// Live thought chunks that switch into a user-facing draft must peel the
-/// draft before pause can freeze it as expanded thinking.
-#[test]
-fn thought_chunk_peels_trailing_user_facing_draft_while_streaming() {
-    crate::appearance::cache::set_show_thinking_blocks(true);
-    let mut sb = ScrollbackState::new();
-    let mut tracker = AcpUpdateTracker::new();
-    tracker.handle_update(thought_chunk(ABORTED_REASONING), &meta(), &mut sb);
-    tracker.handle_update(
-        thought_chunk(&format!("\n{ABORTED_DRAFT}")),
-        &meta(),
-        &mut sb,
-    );
-    let texts = thinking_texts(&sb);
-    assert_eq!(texts.len(), 1);
-    assert!(
-        texts[0].contains("The user is asking me"),
-        "reasoning must stay while streaming, got {:?}",
-        texts[0]
-    );
-    assert!(
-        !texts[0].contains("Hey, sorry about that"),
-        "trailing draft must not stay in live thinking chrome, got {:?}",
-        texts[0]
-    );
 }
 
 /// Operator contract: grok-oss stopped responding after a cancelled turn,

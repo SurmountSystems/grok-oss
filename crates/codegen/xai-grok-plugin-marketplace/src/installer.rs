@@ -1,6 +1,6 @@
 //! Install plugins from a marketplace source into the managed plugin storage.
 //!
-//! Routes through the existing `InstallRegistry` + `git_install` pipeline.
+//! Routes through the existing `InstallRegistry` and `git_install` pipeline.
 //! Adds marketplace provenance to the installed repo record.
 
 use std::collections::HashMap;
@@ -11,16 +11,19 @@ use xai_grok_agent::plugins::install_registry::{
     InstallError, InstallKind, InstallRegistry, InstalledRepo, MarketplaceProvenance, RepoPlugin,
 };
 use xai_grok_agent::plugins::manifest::{ManifestLoadResult, load_manifest, name_from_dirname};
+use xai_grok_agent::plugins::source_identity::is_same_source_identity;
 
 use crate::types::{MarketplaceEntry, MarketplaceRelativePath};
 
-/// Result of a marketplace install attempt.
 #[derive(Debug)]
 pub enum MarketplaceInstallResult {
-    /// Plugin installed successfully.
-    Installed { repo_key: String },
+    Installed {
+        repo_key: String,
+    },
     /// Plugin is already installed (from this or another source).
-    AlreadyInstalled { repo_key: String },
+    AlreadyInstalled {
+        repo_key: String,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -32,17 +35,14 @@ pub struct MarketplaceUpdateResult {
     pub reinstalled: bool,
 }
 
-/// Install a plugin from a marketplace source.
-///
-/// Copies the plugin directory into the managed install storage and records
-/// marketplace provenance in the install registry.
+/// Copies the plugin directory into the managed install storage and records marketplace provenance in the install registry.
 pub fn install_from_marketplace(
     marketplace_root: &Path,
     plugin_relative_path: &str,
     provenance: MarketplaceProvenance,
     registry: &mut InstallRegistry,
 ) -> Result<MarketplaceInstallResult, InstallError> {
-    // Use the resolved plugin directory as the source path.
+    let _install_span = tracing::info_span!("marketplace.install").entered();
     // Each plugin gets its own repo key and symlink.
     let plugin_relative_path =
         MarketplaceRelativePath::parse(plugin_relative_path).map_err(|e| {
@@ -60,8 +60,7 @@ pub fn install_from_marketplace(
         subdir: None,
     };
 
-    // Local copy from the synced source checkout: the pin gate governs remote
-    // fetches only (see install_from_remote_url's security doc).
+    // Local copy from the synced source checkout: the pin gate governs remote fetches only (see install_from_remote_url's security doc)
     match git_install::install_from_source(&source, registry, false) {
         Ok(result) => {
             let repo_key = result.repo_key.clone();
@@ -81,7 +80,7 @@ pub fn install_from_marketplace(
             let _ = std::fs::remove_file(&old_path);
             registry.remove(&key);
             registry.save()?;
-            // Retry — registry no longer has the key.
+            // Retry: registry no longer has the key
             match git_install::install_from_source(&source, registry, false) {
                 Ok(result) => {
                     let repo_key = result.repo_key.clone();
@@ -99,22 +98,7 @@ pub fn install_from_marketplace(
 }
 
 /// Install a plugin from a remote git URL (superpowers-style marketplace).
-///
-/// Clones the plugin repo and installs it via the standard git install
-/// pipeline; pins to `git_sha` if set, otherwise uses `git_ref` or HEAD.
-///
-/// # Security
-///
-/// Marketplace plugins are **not cryptographically signed**. A remote install
-/// without `git_sha` tracks a mutable ref (branch/tag/HEAD) and can be
-/// substituted by anyone who can push that ref. Prefer publishing `sha` in
-/// `plugin-index.json` and installing with that pin.
-///
-/// `require_sha` (from [`crate::config::load_require_sha`]) fails such installs
-/// closed. It covers every path that fetches plugin code from a remote git URL
-/// (marketplace `remote_url` entries, direct installs, git updates). It does
-/// NOT cover plugins vendored inside a marketplace source itself — those come
-/// from the synced source checkout, whose branch is not yet pinnable.
+/// Clones the plugin repo and installs it via the standard git install pipeline; pins to `git_sha` if set, otherwise uses `git_ref` or HEAD.
 pub fn install_from_remote_url(
     url: &str,
     git_ref: Option<&str>,
@@ -125,6 +109,7 @@ pub fn install_from_remote_url(
     registry: &mut InstallRegistry,
     require_sha: bool,
 ) -> Result<MarketplaceInstallResult, InstallError> {
+    let _install_span = tracing::info_span!("marketplace.install").entered();
     let subdir = subdir
         .map(|s| {
             MarketplaceRelativePath::parse(s)
@@ -135,8 +120,8 @@ pub fn install_from_remote_url(
         })
         .transpose()?;
     let (url, git_ref, git_sha) = git_install::clone_operands(url, git_ref, git_sha)?;
-    // No-fetch short-circuit before the pin gate: re-install of an already-present
-    // plugin must not refuse just because the catalog entry is unpinned.
+    // Short-circuit before the pin gate, without fetching
+    // Re-install of an already-present plugin must not refuse just because the catalog entry is unpinned
     if let Some((existing_key, _)) = find_installed_marketplace_plugin(
         registry,
         &provenance.source_url_or_path,
@@ -153,8 +138,7 @@ pub fn install_from_remote_url(
         subdir,
     };
 
-    // Single pin gate lives in install_from_source; pass plugin_name so refusals
-    // name the catalog entry rather than the bare URL.
+    // Single pin gate lives in install_from_source; pass plugin_name so refusals name the catalog entry rather than the bare URL
     match git_install::install_from_source_with_label(
         &source,
         registry,
@@ -240,23 +224,15 @@ pub fn update_from_marketplace_entry_transactional(
         })
         .transpose()?;
 
-    let (repo_key, old_repo) = registry
-        .list()
-        .into_iter()
-        .find_map(|(key, repo)| {
-            repo.marketplace.as_ref().and_then(|mp| {
-                if mp.source_url_or_path == provenance.source_url_or_path
-                    && mp.plugin_subdir == provenance.plugin_subdir
-                {
-                    Some((key.to_string(), repo.clone()))
-                } else {
-                    None
-                }
-            })
-        })
-        .ok_or_else(|| InstallError::PluginNotFound {
-            name: provenance.plugin_subdir.clone(),
-        })?;
+    let (repo_key, old_repo) = find_marketplace_repo(
+        registry,
+        &provenance.source_url_or_path,
+        &provenance.plugin_subdir,
+    )
+    .map(|(key, repo)| (key.to_owned(), repo.clone()))
+    .ok_or_else(|| InstallError::PluginNotFound {
+        name: provenance.plugin_subdir.clone(),
+    })?;
 
     let remote_source = entry
         .remote_url
@@ -396,11 +372,8 @@ pub fn update_from_marketplace_entry_transactional(
     registry.insert(repo_key.clone(), new_repo);
     if let Err(save_error) = registry.save() {
         // The directory swap already succeeded (final_path holds the new plugin).
-        // Roll the filesystem back to the previous install so it stays consistent
-        // with the on-disk registry, which still holds the old record. Only revert
-        // the registry record once the files are actually restored — otherwise we
-        // would leave the new files on disk while the registry claims the old
-        // version, which is the exact inconsistency we are guarding against.
+        // Only revert the registry record once the files are actually restored
+        // Otherwise we would leave the new files on disk while the registry claims the old version
         let fs_rolled_back = remove_path_if_exists(&final_path).is_ok()
             && std::fs::rename(&backup_path, &final_path).is_ok();
         if !fs_rolled_back {
@@ -437,29 +410,33 @@ pub fn update_from_marketplace_entry_transactional(
     })
 }
 
-/// Check if a plugin from a specific marketplace source is already installed.
+/// Check if a plugin from a specific marketplace source is already installed; returns its repo key
+/// and version.
 ///
-/// Matches by `source_url_or_path + plugin_subdir` (stable identity).
+/// Matches by source identity ([`is_same_source_identity`]) and `plugin_subdir`, the plugin's stable identity.
 pub fn find_installed_marketplace_plugin(
     registry: &InstallRegistry,
     source_url_or_path: &str,
     plugin_subdir: &str,
 ) -> Option<(String, String)> {
-    for (key, repo) in registry.list() {
-        if let Some(ref mp) = repo.marketplace
-            && mp.source_url_or_path == source_url_or_path
-            && mp.plugin_subdir == plugin_subdir
-        {
-            let version = repo
-                .plugins
-                .values()
-                .next()
-                .and_then(|p| p.version.clone())
-                .unwrap_or_default();
-            return Some((key.to_string(), version));
-        }
-    }
-    None
+    let (key, repo) = find_marketplace_repo(registry, source_url_or_path, plugin_subdir)?;
+    Some((
+        key.to_owned(),
+        first_plugin_version(&repo.plugins).unwrap_or_default(),
+    ))
+}
+
+fn find_marketplace_repo<'r>(
+    registry: &'r InstallRegistry,
+    source_url_or_path: &str,
+    plugin_subdir: &str,
+) -> Option<(&'r str, &'r InstalledRepo)> {
+    registry.list().into_iter().find(|(_, repo)| {
+        repo.marketplace.as_ref().is_some_and(|mp| {
+            mp.plugin_subdir == plugin_subdir
+                && is_same_source_identity(&mp.source_url_or_path, source_url_or_path)
+        })
+    })
 }
 
 fn staging_nonce() -> String {
@@ -511,7 +488,7 @@ fn clone_repo_to_path(
         return clone_repo_at_sha(url, sha, target);
     }
 
-    // Same auth/LFS/SSH suppression as marketplace cache clones.
+    // git_command applies the same auth/LFS/SSH suppression as the marketplace cache clones
     let mut cmd = xai_tty_utils::git_command();
     cmd.arg("clone").arg("--depth").arg("1");
     if let Some(r) = git_ref {
@@ -731,25 +708,6 @@ mod tests {
     static TEST_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
-    fn transactional_sha_git_args_terminate_options_before_operands() {
-        assert_eq!(
-            git_install::remote_add_args("repo"),
-            ["remote", "add", "--", "origin", "repo"]
-        );
-        assert_eq!(
-            git_install::fetch_sha_args("0123456789abcdef0123456789abcdef01234567"),
-            [
-                "fetch",
-                "--depth",
-                "1",
-                "--",
-                "origin",
-                "0123456789abcdef0123456789abcdef01234567",
-            ]
-        );
-    }
-
-    #[test]
     fn transactional_sha_clone_rejects_before_target_creation() {
         for bad in ["deadbeef", "--upload-pack=cmd"] {
             let root = tempfile::tempdir().unwrap();
@@ -886,7 +844,7 @@ mod tests {
                 }
             }
 
-            // No-fetch re-install under require_sha must not refuse unpinned catalog entries.
+            // Re-installing an already-present plugin fetches nothing, so require_sha must not refuse the unpinned entry
             match install_from_remote_url(
                 &url,
                 Some("main"),
@@ -940,18 +898,33 @@ mod tests {
         });
     }
 
+    #[test]
+    fn transactional_sha_git_args_terminate_options_before_operands() {
+        assert_eq!(
+            git_install::remote_add_args("repo"),
+            ["remote", "add", "--", "origin", "repo"]
+        );
+        assert_eq!(
+            git_install::fetch_sha_args("0123456789abcdef0123456789abcdef01234567"),
+            [
+                "fetch",
+                "--depth",
+                "1",
+                "--",
+                "origin",
+                "0123456789abcdef0123456789abcdef01234567",
+            ]
+        );
+    }
+
     fn with_test_registry<T>(f: impl FnOnce(&mut InstallRegistry) -> T) -> T {
         let _guard = TEST_LOCK.lock().unwrap();
         let home = TEST_HOME.get_or_init(|| tempfile::tempdir().unwrap());
         let install_dir = home.path().join("installed-plugins");
         let _ = std::fs::remove_dir_all(&install_dir);
         std::fs::create_dir_all(&install_dir).unwrap();
-        // Build the registry against an explicit tempdir rather than going through
-        // `InstallRegistry::load()`, which resolves the install dir via the
-        // process-global `grok_home()` `OnceLock` (first-write-wins). A parallel
-        // test in this binary can cache the real `~/.grok` before this runs,
-        // which would leak the registry tests into the real home and make them
-        // order-dependent and flaky.
+        // Build the registry against an explicit tempdir rather than going through `InstallRegistry::load()`.
+        // `load()` resolves the install dir via the process-global `grok_home()` `OnceLock` (first-write-wins). A parallel test in this binary can cache the real `~/.grok` before this runs, which would leak the registry tests into the real home and make them order-dependent and flaky.
         let mut registry = InstallRegistry::empty(install_dir);
         f(&mut registry)
     }
@@ -985,14 +958,20 @@ mod tests {
         name: &str,
     ) -> String {
         let plugin_subdir = format!("plugins/{name}");
-        match install_from_marketplace(
-            marketplace,
-            &plugin_subdir,
-            provenance(marketplace, &plugin_subdir),
+        install_test_plugin_recorded_as(
             registry,
+            marketplace,
+            provenance(marketplace, &plugin_subdir),
         )
-        .unwrap()
-        {
+    }
+
+    fn install_test_plugin_recorded_as(
+        registry: &mut InstallRegistry,
+        marketplace: &Path,
+        recorded: MarketplaceProvenance,
+    ) -> String {
+        let plugin_subdir = recorded.plugin_subdir.clone();
+        match install_from_marketplace(marketplace, &plugin_subdir, recorded, registry).unwrap() {
             MarketplaceInstallResult::Installed { repo_key } => repo_key,
             MarketplaceInstallResult::AlreadyInstalled { repo_key } => repo_key,
         }
@@ -1019,6 +998,133 @@ mod tests {
             let result =
                 find_installed_marketplace_plugin(registry, "https://example.com", "plugins/test");
             assert!(result.is_none());
+        });
+    }
+
+    fn recorded_repo(source_url_or_path: &str, plugin_subdir: &str) -> InstalledRepo {
+        InstalledRepo {
+            kind: InstallKind::Local {
+                source_path: Path::new("/unused").to_path_buf(),
+                subdir: None,
+            },
+            installed_at: String::new(),
+            updated_at: String::new(),
+            path: Path::new("/unused").to_path_buf(),
+            plugins: HashMap::from([(
+                "demo".to_owned(),
+                RepoPlugin {
+                    subdir: None,
+                    version: Some("1.0.0".to_owned()),
+                },
+            )]),
+            marketplace: Some(MarketplaceProvenance {
+                source_url_or_path: source_url_or_path.to_owned(),
+                source_display_name: "Test".to_owned(),
+                plugin_subdir: plugin_subdir.to_owned(),
+            }),
+        }
+    }
+
+    #[test]
+    fn find_installed_matches_git_source_spelling_drift() {
+        let mut registry = InstallRegistry::empty(Path::new("/unused").to_path_buf());
+        registry.insert(
+            "with-suffix".to_owned(),
+            recorded_repo("https://github.com/org/repo.git", "plugins/a"),
+        );
+        registry.insert(
+            "without-suffix".to_owned(),
+            recorded_repo("https://github.com/org/repo", "plugins/b"),
+        );
+        let found = |source: &str, subdir: &str| {
+            find_installed_marketplace_plugin(&registry, source, subdir).map(|(key, _)| key)
+        };
+
+        assert_eq!(
+            Some("with-suffix".to_owned()),
+            found("https://github.com/org/repo", "plugins/a")
+        );
+        assert_eq!(
+            Some("without-suffix".to_owned()),
+            found("https://github.com/org/repo.git", "plugins/b")
+        );
+        assert_eq!(
+            Some("with-suffix".to_owned()),
+            found("HTTPS://GitHub.com/org/repo", "plugins/a")
+        );
+        assert_eq!(None, found("https://github.com/org/other", "plugins/a"));
+        assert_eq!(None, found("https://github.com/org/repo", "plugins/c"));
+    }
+
+    #[test]
+    fn find_installed_keeps_local_paths_differing_by_git_suffix_apart() {
+        let mut registry = InstallRegistry::empty(Path::new("/unused").to_path_buf());
+        registry.insert(
+            "local".to_owned(),
+            recorded_repo("/tmp/mkt.git", "plugins/a"),
+        );
+
+        assert_eq!(
+            None,
+            find_installed_marketplace_plugin(&registry, "/tmp/mkt", "plugins/a")
+        );
+        assert_eq!(
+            Some(("local".to_owned(), "1.0.0".to_owned())),
+            find_installed_marketplace_plugin(&registry, "/tmp/mkt.git", "plugins/a")
+        );
+    }
+
+    /// Session-start auto-update: the scan sees the install (with its old version) under the
+    /// configured spelling, and the Update action carrying that spelling replaces it.
+    #[test]
+    fn transactional_update_finds_install_recorded_under_drifted_git_source() {
+        with_test_registry(|registry| {
+            let marketplace = tempfile::tempdir().unwrap();
+            write_plugin(marketplace.path(), "demo", "1.0.0", "old");
+            let repo_key = install_test_plugin_recorded_as(
+                registry,
+                marketplace.path(),
+                MarketplaceProvenance {
+                    source_url_or_path: "https://github.com/org/market.git".to_owned(),
+                    source_display_name: "Test".to_owned(),
+                    plugin_subdir: "plugins/demo".to_owned(),
+                },
+            );
+            write_plugin(marketplace.path(), "demo", "2.0.0", "new");
+            let entry = crate::scan_marketplace(marketplace.path())
+                .entries
+                .into_iter()
+                .find(|p| p.relative_path == "plugins/demo")
+                .unwrap();
+            let configured_source = "https://GitHub.com/org/market";
+
+            assert_eq!(
+                Some((repo_key.clone(), "1.0.0".to_owned())),
+                find_installed_marketplace_plugin(registry, configured_source, "plugins/demo")
+            );
+            assert_eq!(Some("2.0.0"), entry.version.as_deref());
+
+            let result = update_from_marketplace_entry_transactional(
+                marketplace.path(),
+                &entry,
+                MarketplaceProvenance {
+                    source_url_or_path: configured_source.to_owned(),
+                    source_display_name: "Test".to_owned(),
+                    plugin_subdir: "plugins/demo".to_owned(),
+                },
+                registry,
+                false, // require_sha off: pin policy has its own tests
+            )
+            .unwrap();
+
+            assert_eq!(repo_key, result.repo_key);
+            assert_eq!(Some("1.0.0"), result.old_version.as_deref());
+            assert_eq!(Some("2.0.0"), result.new_version.as_deref());
+            assert_eq!(
+                "new",
+                std::fs::read_to_string(registry.install_dir().join(&repo_key).join("marker.txt"))
+                    .unwrap()
+            );
         });
     }
 

@@ -18,6 +18,7 @@ use crate::scrollback::block::RenderBlock;
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Compile start dir for TUI `/rebuild`: session workspace over process cwd.
 pub(crate) fn rebuild_compile_start_dir(session_cwd: Option<&Path>, process_cwd: &Path) -> PathBuf {
@@ -51,6 +52,24 @@ fn running_binary_identity() -> String {
     )
 }
 
+/// `oldsha` / `newsha` are not hex, so `leader_is_older_than` treats them as
+/// the same semver. A distinct parenthetical at that semver still arms.
+/// A newer self semver does not downgrade onto an older install.
+fn same_semver_distinct_nonhex_identity(self_identity: &str, installed: &str) -> bool {
+    if self_identity == installed {
+        return false;
+    }
+    let Some(self_id) = xai_grok_shell::leader::parse_binary_identity(self_identity) else {
+        return false;
+    };
+    let Some(installed_id) = xai_grok_shell::leader::parse_binary_identity(installed) else {
+        return false;
+    };
+    self_id.version == installed_id.version
+        && self_id.git_sha.is_none()
+        && installed_id.git_sha.is_none()
+}
+
 /// Pure decision + path check for peer re-exec (unit-tested).
 ///
 /// Returns the `RebuildRelaunch` to arm when the request is fresh, the installed
@@ -73,12 +92,16 @@ pub(crate) fn peer_rebuild_relaunch_if_applicable(
         if !xai_grok_update::peer_rebuild_request_is_actionable(request, now_secs) {
             return None;
         }
-    } else if !xai_grok_update::should_peer_relaunch_for_request_with_current_exe(
+    } else if (!xai_grok_update::should_peer_relaunch_for_request_with_current_exe(
         self_identity,
         request,
         now_secs,
         current_exe,
-    ) {
+    ) && !same_semver_distinct_nonhex_identity(
+        self_identity,
+        &request.installed_identity,
+    )) || !xai_grok_update::peer_rebuild_request_is_actionable(request, now_secs)
+    {
         return None;
     }
     if !request.installed_exe.is_file() {
@@ -95,12 +118,98 @@ pub(crate) fn peer_rebuild_relaunch_if_applicable(
     })
 }
 
-/// Flush unsent composer text, plan Human-box notes, and the pager queue
-/// before re-exec. Keystroke persist is debounced and skipped in tests;
-/// rebuild must write the same files a disconnect restore reads.
+/// Peer `SIGUSR1` sets this flag. `signal_handler` does not define the
+/// peek/take helpers; dispatch owns the flag so rebuild arming compiles.
+/// A handler that has not called [`mark_peer_rebuild_relaunch_from_sigusr1`]
+/// leaves the flag clear.
+static PEER_REBUILD_RELAUNCH_SIGNALED: AtomicBool = AtomicBool::new(false);
+
+pub(crate) fn mark_peer_rebuild_relaunch_from_sigusr1() {
+    PEER_REBUILD_RELAUNCH_SIGNALED.store(true, Ordering::Release);
+}
+
+pub(crate) fn peek_peer_rebuild_relaunch() -> bool {
+    PEER_REBUILD_RELAUNCH_SIGNALED.load(Ordering::Acquire)
+}
+
+pub(crate) fn take_peer_rebuild_relaunch() -> bool {
+    PEER_REBUILD_RELAUNCH_SIGNALED.swap(false, Ordering::AcqRel)
+}
+
+/// Flush unsent composer text and the pager queue before re-exec.
+/// Keystroke persist is debounced; rebuild writes the files a disconnect
+/// restore reads. Plan notes stay on the composer draft path.
 fn persist_session_work_for_rebuild(app: &AppView) {
     for agent in app.agents.values() {
-        agent.persist_session_work_to_disk_for_rebuild();
+        let Some(sid) = agent.session.session_id.as_ref() else {
+            agent.persist_unsent_composer_draft_now();
+            continue;
+        };
+        let cwd = agent.session.cwd.to_string_lossy();
+        let plan_notes = agent
+            .plan_approval_view
+            .as_ref()
+            .and_then(|view| view.feedback_draft.clone())
+            .filter(|notes| !notes.trim().is_empty());
+        if let Some(notes) = plan_notes.as_deref() {
+            let _ = xai_grok_shell::session::unsent_prompt_draft::write_unsent_prompt_draft(
+                cwd.as_ref(),
+                sid.0.as_ref(),
+                notes,
+            );
+            agent.append_prompt_wal(
+                xai_grok_shell::session::prompt_wal::PromptWalKind::RebuildFlush,
+                notes,
+                &[],
+            );
+        } else {
+            let draft = agent.prompt.text().to_string();
+            agent.persist_unsent_composer_draft_now();
+            if !draft.trim().is_empty() {
+                agent.append_prompt_wal(
+                    xai_grok_shell::session::prompt_wal::PromptWalKind::RebuildFlush,
+                    &draft,
+                    &agent.prompt.images,
+                );
+            }
+        }
+        let committed = agent.committed_human_turn_texts(true, true);
+        let rows: Vec<_> = agent
+            .session
+            .pending_prompts
+            .iter()
+            .filter(|prompt| {
+                prompt.continue_prior_work
+                    || prompt.kind != crate::app::agent::QueueEntryKind::Prompt
+                    || !crate::app::agent_view::AgentView::queue_text_matches_committed_human_turn(
+                        &prompt.text,
+                        &committed,
+                    )
+            })
+            .map(|prompt| {
+                xai_grok_shell::session::unsent_prompt_draft::pending_prompts::PersistedQueuedPrompt {
+                    id: prompt.id,
+                    text: prompt.text.clone(),
+                    kind: prompt.kind.as_label().to_string(),
+                }
+            })
+            .collect();
+        for row in &rows {
+            if row.text.trim().is_empty() {
+                continue;
+            }
+            agent.append_prompt_wal(
+                xai_grok_shell::session::prompt_wal::PromptWalKind::RebuildFlush,
+                &row.text,
+                &[],
+            );
+        }
+        let _ =
+            xai_grok_shell::session::unsent_prompt_draft::pending_prompts::write_pending_prompts(
+                cwd.as_ref(),
+                sid.0.as_ref(),
+                &rows,
+            );
     }
 }
 
@@ -255,7 +364,7 @@ pub(crate) fn announce_rebuild_relaunch_identity(agent: &mut crate::app::agent_v
     announce_rebuild_relaunch_identity_with(
         agent,
         is_rebuild_reexec_process(),
-        env!("VERSION_WITH_COMMIT"),
+        option_env!("VERSION_WITH_COMMIT").unwrap_or(env!("CARGO_PKG_VERSION")),
         xai_grok_update::channel_label(),
     );
 }
@@ -312,12 +421,12 @@ pub(crate) fn arm_peer_rebuild_before_exit(
     if app.rebuild_relaunch.is_some() {
         return true;
     }
-    let signaled = crate::app::signal_handler::peek_peer_rebuild_relaunch();
+    let signaled = peek_peer_rebuild_relaunch();
     if !should_try_peer_rebuild_arm(reason, signaled) {
         return false;
     }
     if try_arm_peer_rebuild_relaunch_from_request(app, signaled) {
-        let _ = crate::app::signal_handler::take_peer_rebuild_relaunch();
+        let _ = take_peer_rebuild_relaunch();
         return true;
     }
     // Leader may have drained for RelaunchForUpdate before SIGUSR1 was
@@ -336,14 +445,14 @@ pub(crate) fn arm_peer_rebuild_before_exit(
         )
         && try_arm_peer_rebuild_relaunch_from_request(app, true)
     {
-        let _ = crate::app::signal_handler::take_peer_rebuild_relaunch();
+        let _ = take_peer_rebuild_relaunch();
         return true;
     }
     // A prior `/rebuild` exec left GROK_REBUILD_RELAUNCH set. A later
     // install that replaced the mapped inode must still opportunistic-arm.
     // Force-arm of the same request would loop; inode/identity gates do not.
     if is_rebuild_reexec_process() && try_arm_peer_rebuild_relaunch_from_request(app, false) {
-        let _ = crate::app::signal_handler::take_peer_rebuild_relaunch();
+        let _ = take_peer_rebuild_relaunch();
         return true;
     }
     false
@@ -369,15 +478,8 @@ pub(super) fn handle_rebuild_done(
         Ok(report) => {
             let summary = report.summary_lines.join("\n");
             if let Some(agent) = app.agents.get_mut(&agent_id) {
-                // Snap bar to 100% for one frame's worth of toast, then clear
-                // the dedicated strip so relaunch chrome is clean.
-                agent.rebuild_progress = Some(crate::app::agent_view::RebuildUiProgress {
-                    fraction: 1.0,
-                    detail: format!("Installed {}", report.installed_identity),
-                });
                 agent.show_toast(&format!("Installed {}", report.installed_identity));
                 agent.scrollback.push_block(RenderBlock::system(summary));
-                agent.rebuild_progress = None;
             }
 
             let mut effects = Vec::new();
@@ -1383,6 +1485,7 @@ mod tests {
                 restore_degree: None,
                 running_prompt_id: Some(pid.into()),
                 scheduler_background_loops: None,
+                modes: None,
             }),
             &mut reopened,
         );
@@ -1537,6 +1640,7 @@ mod tests {
                 restore_degree: None,
                 running_prompt_id: Some(pid.into()),
                 scheduler_background_loops: None,
+                modes: None,
             }),
             &mut reopened,
         );
@@ -1645,8 +1749,6 @@ mod tests {
             agent.plan_mode_active = true;
             agent.plan_mode_pending = None;
             agent.plan_decision_resolved = false;
-            agent.latest_inline_plan_content =
-                Some("# Leftover plan\n\nDo not auto-open this pane\n".into());
         }
         let _ = super::super::dispatch(
             Action::TaskComplete(TaskResult::SessionLoaded {
@@ -1658,6 +1760,7 @@ mod tests {
                 restore_degree: None,
                 running_prompt_id: Some(pid.into()),
                 scheduler_background_loops: None,
+                modes: None,
             }),
             &mut reopened,
         );
@@ -1791,6 +1894,7 @@ mod tests {
                 restore_degree: None,
                 running_prompt_id: None,
                 scheduler_background_loops: None,
+                modes: None,
             }),
             &mut reopened,
         );
@@ -1907,47 +2011,55 @@ mod tests {
     }
 
     fn running_l2_subagent(description: &str) -> crate::app::subagent::SubagentInfo {
+        let now = std::time::Instant::now();
         crate::app::subagent::SubagentInfo {
             subagent_id: "sa-rebuild-nested".into(),
             child_session_id: "cs-rebuild-nested".into(),
             description: description.into(),
             subagent_type: "general-purpose".into(),
-            persona: None,
-            role: Some("implementer".into()),
-            model: None,
-            context_source: None,
-            resumed_from: None,
-            capability_mode: None,
-            workflow_run_id: None,
-            context_normalized: false,
-            parent_prompt_id: None,
-            parent_session_id: Some("sess-parent".into()),
-            depth: Some(1),
-            started_at: std::time::Instant::now(),
-            last_progress_at: std::time::Instant::now(),
             finished: false,
             status: None,
-            error: None,
-            duration_ms: None,
-            tool_calls: None,
-            turns: None,
-            turn_count: None,
-            tool_call_count: None,
-            tokens_used: None,
-            tokens_past: 0,
-            context_window_tokens: None,
-            context_usage_pct: None,
-            tools_used: Vec::new(),
-            error_count: None,
-            activity_label: Some("search_replace".into()),
-            is_background: false,
-            pending_kill: false,
-            kill_requested_at: None,
-            scrollback_entry_id: None,
+            attempt: crate::app::subagent::SubagentAttemptInfo {
+                lifecycle: crate::app::subagent::SubagentLifecycleState::running_legacy_for_test(),
+                persona: None,
+                role: Some("implementer".into()),
+                model: None,
+                context_source: None,
+                resumed_from: None,
+                capability_mode: None,
+                workflow_run_id: None,
+                context_normalized: false,
+                parent_prompt_id: None,
+                parent_session_id: Some("sess-parent".into()),
+                depth: Some(1),
+                started_at: now,
+                last_progress_at: now,
+                status: None,
+                error: None,
+                duration_ms: None,
+                tool_calls: None,
+                turns: None,
+                turn_count: None,
+                tool_call_count: None,
+                tokens_used: None,
+                tokens_past: 0,
+                context_window_tokens: None,
+                context_usage_pct: None,
+                tools_used: Vec::new(),
+                error_count: None,
+                activity_label: Some("search_replace".into()),
+                is_background: false,
+                pending_kill: false,
+                kill_requested_at: None,
+                scrollback_entry_id: None,
+                terminal_entry_id: None,
+            },
+            completed_attempt_tokens: 0,
+            sealed_attempt_tokens: Default::default(),
             prompt: None,
             child_cwd: None,
             worktree_path: None,
-            child_updates_replayed: false,
+            transcript: Default::default(),
         }
     }
 
@@ -2272,7 +2384,7 @@ mod tests {
                 .get("cs-still-running")
                 .expect("still-running nested occupancy");
             assert!(!info.finished);
-            assert!(!info.pending_kill);
+            assert!(!info.attempt.pending_kill);
         }
     }
 
@@ -2325,7 +2437,7 @@ mod tests {
         let mut info = running_l2_subagent(description);
         info.child_session_id = child_session_id.into();
         info.subagent_id = subagent_id.into();
-        info.role = role.map(Into::into);
+        info.attempt.role = role.map(Into::into);
         info
     }
 
@@ -2368,6 +2480,7 @@ mod tests {
                 restore_degree: None,
                 running_prompt_id,
                 scheduler_background_loops: None,
+                modes: None,
             }),
             &mut reopened,
         );
@@ -2498,6 +2611,7 @@ mod tests {
                 restore_degree: None,
                 running_prompt_id: None,
                 scheduler_background_loops: None,
+                modes: None,
             }),
             &mut reopened,
         );
@@ -2550,7 +2664,10 @@ mod tests {
             agent_id,
             Ok(Box::new(sample_success_report(&installed))),
         );
-        let rows = xai_grok_shell::session::pending_prompts::load_pending_prompts(&cwd_str, sid)
+        let rows =
+            xai_grok_shell::session::unsent_prompt_draft::pending_prompts::load_pending_prompts(
+                &cwd_str, sid,
+            )
             .expect("load queue");
         assert!(
             rows.iter().any(|r| r.text == queued),
@@ -2584,6 +2701,7 @@ mod tests {
                 restore_degree: None,
                 running_prompt_id: None,
                 scheduler_background_loops: None,
+                modes: None,
             }),
             &mut reopened,
         );
@@ -2640,7 +2758,6 @@ mod tests {
             pav.feedback_draft = Some(notes.into());
             agent.plan_approval_view = Some(pav);
             agent.prompt.set_text("/view-plan");
-            agent.latest_inline_plan_content = Some(plan_body.into());
         }
         let plan_path =
             xai_grok_shell::session::unsent_prompt_draft::unsent_prompt_draft_path(&cwd_str, sid)
@@ -2689,6 +2806,7 @@ mod tests {
                 restore_degree: None,
                 running_prompt_id: None,
                 scheduler_background_loops: None,
+                modes: None,
             }),
             &mut reopened,
         );
@@ -2784,6 +2902,7 @@ mod tests {
                 restore_degree: None,
                 running_prompt_id: None,
                 scheduler_background_loops: None,
+                modes: None,
             }),
             &mut app,
         );

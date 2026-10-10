@@ -134,7 +134,7 @@ fn bump_or_append(
 ) -> bool {
     let norm = normalize(&description);
     if let Some(&idx) = lookup.get(&norm) {
-        entries[idx].count += 1;
+        entries.get_mut(idx).expect("index out of bounds").count += 1;
         return true;
     }
     let idx = entries.len();

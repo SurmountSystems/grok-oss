@@ -1,8 +1,9 @@
 //! Diff hunk construction for the Grok Build TUI.
 //!
-//! Turns edit-tool output (structured `SearchReplaceEditDetail` records, ACP
-//! `ToolCall` payloads, or plain before/after text) into line-tagged
-//! [`DiffHunk`]s that the pager renders, and back into unified-diff text.
+//! Turns edit-tool output into line-tagged [`DiffHunk`]s for the pager to render, and back into unified-diff text.
+//! The input is structured `SearchReplaceEditDetail` records, ACP `ToolCall` payloads, or plain before/after text.
+
+#![deny(clippy::indexing_slicing)]
 
 use similar::{ChangeTag, TextDiff};
 use xai_grok_tools::types::output::SearchReplaceEditDetail;
@@ -17,8 +18,13 @@ pub struct DiffLine {
 
 pub type DiffHunk = Vec<DiffLine>;
 
+/// Unchanged lines kept on each side of a change
+const MAX_CONTEXT: usize = 3;
+
+/// Whole-file diffs run on the render thread; past this `similar` returns a coarser but still correct diff
+const WHOLE_FILE_DIFF_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
+
 pub fn build_diff_hunks(details: &[SearchReplaceEditDetail]) -> Vec<DiffHunk> {
-    const MAX_CONTEXT: usize = 3;
     let mut hunks: Vec<DiffHunk> = Vec::new();
 
     for edit in details {
@@ -33,7 +39,7 @@ pub fn build_diff_hunks(details: &[SearchReplaceEditDetail]) -> Vec<DiffHunk> {
         };
         let n_before = before_lines.len();
         for (i, line_text) in before_lines.into_iter().enumerate() {
-            // +1 because context_before ends just before edit.old_line/new_line
+            // The last context_before line sits just above edit.old_line/new_line, hence the +1
             let from_end = n_before.saturating_sub(i + 1);
             let lo = edit.old_line.saturating_sub(from_end + 1);
             let ln = edit.new_line.saturating_sub(from_end + 1);
@@ -50,17 +56,14 @@ pub fn build_diff_hunks(details: &[SearchReplaceEditDetail]) -> Vec<DiffHunk> {
         let new_text: &str = if empty_to_empty && mid_file {
             // Blank-line insertion: both sides empty but a line was inserted.
             // Represent the blank line so TextDiff can see the insertion.
-            // Context-free empty-to-empty (an empty file write) must NOT
-            // fabricate a +1 insertion — it produces no diff lines at all.
+            // Empty-to-empty with no context is an empty file write and must produce no diff lines, not a fabricated one-line insertion
             "\n"
         } else {
             &edit.new_string
         };
-        // When old_string/new_string start mid-line (after indentation),
-        // the diff lines are missing the leading whitespace that context lines
-        // have. Prepend `line_prefix` to each change on the first file line.
-        // Once a change contains a newline, subsequent lines are full file
-        // lines and don't need the prefix.
+        // When old_string/new_string start mid-line (after indentation), the diff lines are missing the leading whitespace that context lines have
+        // Prepend `line_prefix` to each change on the first file line
+        // Once a change contains a newline, subsequent lines are full file lines and don't need the prefix
         let prefix = &edit.line_prefix;
         let has_prefix = !prefix.is_empty();
         let mut prefix_applied_delete = false;
@@ -115,7 +118,7 @@ pub fn build_diff_hunks(details: &[SearchReplaceEditDetail]) -> Vec<DiffHunk> {
         let mut start;
         let mut end = total_len;
         if diff_lines.iter().all(|entry| entry.tag == ChangeTag::Equal) {
-            start = end; // empty slice
+            start = end; // The slice becomes empty, so no hunk is pushed
         } else {
             let equal_before = diff_lines
                 .iter()
@@ -131,7 +134,9 @@ pub fn build_diff_hunks(details: &[SearchReplaceEditDetail]) -> Vec<DiffHunk> {
         }
 
         while start < end {
-            let entry = &diff_lines[start];
+            let Some(entry) = diff_lines.get(start) else {
+                break;
+            };
             if entry.tag == ChangeTag::Equal && entry.text.trim_ascii().is_empty() {
                 start += 1;
             } else {
@@ -139,7 +144,9 @@ pub fn build_diff_hunks(details: &[SearchReplaceEditDetail]) -> Vec<DiffHunk> {
             }
         }
         while start < end {
-            let entry = &diff_lines[end - 1];
+            let Some(entry) = end.checked_sub(1).and_then(|i| diff_lines.get(i)) else {
+                break;
+            };
             if entry.tag == ChangeTag::Equal && entry.text.trim_ascii().is_empty() {
                 end -= 1;
             } else {
@@ -147,53 +154,56 @@ pub fn build_diff_hunks(details: &[SearchReplaceEditDetail]) -> Vec<DiffHunk> {
             }
         }
 
-        if start < end {
-            hunks.push(diff_lines[start..end].to_vec());
+        if start < end
+            && let Some(slice) = diff_lines.get(start..end)
+        {
+            hunks.push(slice.to_vec());
         }
     }
     hunks
 }
 
-/// Build diff hunks from full old/new text strings.
-///
-/// Simpler alternative to `build_diff_hunks` when you don't have structured
-/// `SearchReplaceEditDetail` data — just the full before/after text.
-/// Used for ACP `ToolCallContent::Diff` fallback (pre-execution previews).
+/// Builds diff hunks from before/after text alone, with no structured `SearchReplaceEditDetail`.
+/// The ACP `ToolCallContent::Diff` fallback uses this for pre-execution previews and for backends that send whole files.
+/// Changes more than twice `MAX_CONTEXT` unchanged lines apart go into separate hunks, so a whole-file diff never shows the unchanged middle.
 pub fn diff_hunks_from_strings(old_text: &str, new_text: &str, start_line: usize) -> Vec<DiffHunk> {
-    let detail = SearchReplaceEditDetail {
-        old_string: old_text.to_owned(),
-        old_line: start_line,
-        new_string: new_text.to_owned(),
-        new_line: start_line,
-        context_before: String::new(),
-        context_after: String::new(),
-        line_prefix: String::new(),
-    };
-    build_diff_hunks(&[detail])
+    let diff = TextDiff::configure()
+        .timeout(WHOLE_FILE_DIFF_TIMEOUT)
+        .diff_lines(old_text, new_text);
+
+    diff.grouped_ops(MAX_CONTEXT)
+        .iter()
+        .map(|group| {
+            let mut hunk = DiffHunk::new();
+            for op in group {
+                let mut lo = op.old_range().start.saturating_add(start_line);
+                let mut ln = op.new_range().start.saturating_add(start_line);
+                for change in diff.iter_changes(op) {
+                    let tag = change.tag();
+                    hunk.push(DiffLine {
+                        text: change.value().to_owned(),
+                        lo,
+                        ln,
+                        tag,
+                    });
+                    match tag {
+                        ChangeTag::Equal => {
+                            lo = lo.saturating_add(1);
+                            ln = ln.saturating_add(1);
+                        }
+                        ChangeTag::Delete => lo = lo.saturating_add(1),
+                        ChangeTag::Insert => ln = ln.saturating_add(1),
+                    }
+                }
+            }
+            hunk
+        })
+        .collect()
 }
 
-/// Stitch overlapping/adjacent hunks from coalesced same-file edits into
-/// unified hunks.
-///
-/// Consecutive edits to nearby lines each carry ±context from their own file
-/// snapshot, so a merged block's concatenated hunks repeat context lines and
-/// re-show intermediate file states. Folding each hunk into the accumulated
-/// previous one in `ln` (post-state) coordinates:
-///
-/// - a later edit of a shown context line swaps that Equal row for its
-///   `-`/`+` pair;
-/// - a line edited twice collapses to `-original +final` (no intermediate);
-/// - repeated context is dropped; new trailing rows extend the hunk.
-///
-/// Anything the shared `ln` coordinates cannot describe truthfully bails to
-/// the separate-hunk fallback (today's gap-marker rendering): non-monotonic
-/// or non-adjacent pairs, text disagreement at a shared `ln` (line-count
-/// drift between snapshots makes coordinates lie), and line-count-changing
-/// shapes inside the covered range (pure deletes, unpaired inserts,
-/// multi-line replacement runs). Never render wrong content.
-///
-/// Kept rows retain the `lo` of their own snapshot — the same convention the
-/// unmerged per-hunk display already uses for its old-file column.
+/// Fold consecutive edits of the same file in post-state `ln` coordinates so merged hunks don't repeat context or show intermediate states.
+/// A later edit of a shown context line replaces that Equal row; a line edited twice collapses to `-original +final`.
+/// If shared `ln` coordinates cannot describe the pair truthfully, keep separate hunks — the bail exists so the pager never renders wrong content.
 pub fn stitch_overlapping_hunks(hunks: Vec<DiffHunk>) -> Vec<DiffHunk> {
     let mut out: Vec<DiffHunk> = Vec::with_capacity(hunks.len());
     for hunk in hunks {
@@ -208,7 +218,7 @@ pub fn stitch_overlapping_hunks(hunks: Vec<DiffHunk>) -> Vec<DiffHunk> {
     out
 }
 
-/// Post-state (`ln`) coverage of a hunk's rendered rows (Equal/Insert).
+/// Returns the post-state (`ln`) range that a hunk's rendered (Equal and Insert) rows cover.
 fn render_range(hunk: &DiffHunk) -> Option<(usize, usize)> {
     let mut range: Option<(usize, usize)> = None;
     for line in hunk {
@@ -223,7 +233,7 @@ fn render_range(hunk: &DiffHunk) -> Option<(usize, usize)> {
     range
 }
 
-/// Row index in `hunk` rendering post-state line `ln` (Equal or Insert).
+/// Returns the index of the row in `hunk` that renders post-state line `ln` (Equal or Insert).
 fn render_pos(hunk: &DiffHunk, ln: usize) -> Option<usize> {
     hunk.iter()
         .position(|l| l.tag != ChangeTag::Delete && l.ln == ln)
@@ -233,8 +243,7 @@ fn trimmed(text: &str) -> &str {
     text.trim_end_matches(['\r', '\n'])
 }
 
-/// Fold `b` into `a` when both describe one contiguous post-state region;
-/// `None` keeps the pair as separate hunks.
+/// Folds `b` into `a` when both describe one contiguous post-state region; `None` keeps the pair as separate hunks.
 fn stitch_hunk_pair(a: &DiffHunk, b: &DiffHunk) -> Option<DiffHunk> {
     let (a_min, a_max) = render_range(a)?;
     let (b_min, _) = render_range(b)?;
@@ -246,12 +255,12 @@ fn stitch_hunk_pair(a: &DiffHunk, b: &DiffHunk) -> Option<DiffHunk> {
     let mut max_ln = a_max;
     let mut i = 0;
     while i < b.len() {
-        let row = &b[i];
+        let Some(row) = b.get(i) else { break };
         if row.ln > max_ln {
-            // Past the stitched coverage: `b` is the sole source for this
-            // tail, so splice its remaining rows in verbatim (rendered rows
-            // must stay contiguous).
-            for rest in &b[i..] {
+            // Past the stitched coverage, `b` is the sole source for this tail, so splice its remaining rows in verbatim
+            // Rendered rows must stay contiguous
+            let tail = b.get(i..)?;
+            for rest in tail {
                 if rest.tag != ChangeTag::Delete {
                     if rest.ln != max_ln + 1 {
                         return None;
@@ -265,55 +274,48 @@ fn stitch_hunk_pair(a: &DiffHunk, b: &DiffHunk) -> Option<DiffHunk> {
         match row.tag {
             ChangeTag::Equal => {
                 let pos = render_pos(&out, row.ln)?;
-                if trimmed(&out[pos].text) != trimmed(&row.text) {
+                if trimmed(&out.get(pos)?.text) != trimmed(&row.text) {
                     return None;
                 }
                 i += 1;
             }
             ChangeTag::Delete => {
-                // Only single-line replacement pairs keep line counts (and
-                // therefore every later `ln`) truthful.
+                // Only single-line replacement pairs keep line counts (and therefore every later `ln`) truthful
                 let next = b.get(i + 1)?;
                 if next.tag != ChangeTag::Insert || next.ln != row.ln {
                     return None;
                 }
                 let pos = render_pos(&out, row.ln)?;
-                if trimmed(&out[pos].text) != trimmed(&row.text) {
+                if trimmed(&out.get(pos)?.text) != trimmed(&row.text) {
                     return None;
                 }
-                match out[pos].tag {
+                match out.get(pos)?.tag {
                     // A context line the later call edited: show its -/+ pair.
                     ChangeTag::Equal => {
-                        out[pos] = row.clone();
+                        if let Some(slot) = out.get_mut(pos) {
+                            *slot = row.clone();
+                        }
                         out.insert(pos + 1, next.clone());
                     }
-                    // Same line edited twice: keep the earlier delete (if
-                    // any), drop the intermediate text, keep the final insert.
+                    // Same line edited twice: keep the earlier delete (if any), drop the intermediate text, keep the final insert
                     ChangeTag::Insert => {
-                        out[pos] = next.clone();
+                        if let Some(slot) = out.get_mut(pos) {
+                            *slot = next.clone();
+                        }
                     }
                     ChangeTag::Delete => unreachable!("render_pos skips deletes"),
                 }
                 i += 2;
             }
-            // Unpaired insert inside the covered range: line-count growth.
+            // An unpaired insert inside the covered range grows the line count
             ChangeTag::Insert => return None,
         }
     }
     Some(out)
 }
 
-/// Extract diff hunks from an ACP ToolCall's raw_output or content.
-///
-/// Tries three strategies in order:
-/// 1. Parse `raw_output` as `SearchReplaceOutput::EditsApplied` for structured
-///    per-edit hunks with context lines and accurate line numbers.
-/// 2. Parse `Diff.meta` as `SearchReplaceEditContextInformation` for structured
-///    edit details embedded in the Diff content block (set by acp_conversion).
-/// 3. Fall back to `ToolCallContent::Diff` old_text/new_text for full-text diff,
-///    using line numbers from `meta` when available (pre-execution previews).
-///
-/// Returns `(hunks, edit_count)`.
+/// Extract diff hunks from an ACP ToolCall's raw_output or content. Fall back to `ToolCallContent::Diff`
+/// old_text/new_text for a full-text diff. Line numbers come from `meta` when available (pre-execution previews).
 pub fn extract_edit_hunks(tc: &agent_client_protocol::ToolCall) -> (Vec<DiffHunk>, usize) {
     use xai_grok_tools::types::output::{
         SearchReplaceEditContextInformation, SearchReplaceOutput, ToolOutput,
@@ -341,7 +343,7 @@ pub fn extract_edit_hunks(tc: &agent_client_protocol::ToolCall) -> (Vec<DiffHunk
         }
     }
 
-    // Strategy 2 & 3: ACP Diff content
+    // Strategies 2 and 3: ACP Diff content
     for content in &tc.content {
         if let agent_client_protocol::ToolCallContent::Diff(diff) = content {
             // Strategy 2: structured edit details from Diff.meta
@@ -358,8 +360,7 @@ pub fn extract_edit_hunks(tc: &agent_client_protocol::ToolCall) -> (Vec<DiffHunk
             }
 
             // Strategy 3: full-text diff from old_text / new_text.
-            // Use line numbers from meta (pre-execution preview) when available,
-            // otherwise default to 1.
+            // Use line numbers from meta (pre-execution preview) when available, otherwise default to 1
             let start_line = diff
                 .meta
                 .as_ref()
@@ -378,16 +379,7 @@ pub fn extract_edit_hunks(tc: &agent_client_protocol::ToolCall) -> (Vec<DiffHunk
 }
 
 /// Generate a unified diff patch string from diff hunks.
-///
 /// Produces output suitable for `git apply` or clipboard sharing:
-/// ```text
-/// --- a/path/to/file
-/// +++ b/path/to/file
-/// @@ -old_start,old_count +new_start,new_count @@
-///  context line
-/// +added line
-/// -removed line
-/// ```
 pub fn diff_hunks_to_patch(path: &str, hunks: &[DiffHunk]) -> String {
     if hunks.is_empty() {
         return String::new();
@@ -443,6 +435,13 @@ mod tests {
     use super::*;
     use similar::ChangeTag;
 
+    fn only_hunk(hunks: &[DiffHunk]) -> &DiffHunk {
+        let Some(hunk) = hunks.first() else {
+            panic!("expected a hunk, have {}", hunks.len());
+        };
+        hunk
+    }
+
     #[test]
     fn simple_replacement() {
         let details = vec![SearchReplaceEditDetail {
@@ -458,8 +457,10 @@ mod tests {
         let hunks = build_diff_hunks(&details);
         assert_eq!(hunks.len(), 1);
 
-        let hunk = &hunks[0];
-        // Should have: context_before + delete + insert + context_after
+        let Some(hunk) = hunks.first() else {
+            panic!("expected a hunk: {hunks:?}");
+        };
+        // The hunk holds context_before, the delete, the insert, then context_after
         assert!(hunk.len() >= 3, "got {} lines", hunk.len());
 
         // Find the delete and insert lines
@@ -467,8 +468,16 @@ mod tests {
         let inserts: Vec<_> = hunk.iter().filter(|l| l.tag == ChangeTag::Insert).collect();
         assert_eq!(deletes.len(), 1);
         assert_eq!(inserts.len(), 1);
-        assert!(deletes[0].text.contains("let x = 1;"));
-        assert!(inserts[0].text.contains("let x = 2;"));
+        assert!(
+            deletes
+                .first()
+                .is_some_and(|l| l.text.contains("let x = 1;"))
+        );
+        assert!(
+            inserts
+                .first()
+                .is_some_and(|l| l.text.contains("let x = 2;"))
+        );
     }
 
     #[test]
@@ -529,9 +538,11 @@ mod tests {
         let hunks = build_diff_hunks(&details);
         assert_eq!(hunks.len(), 1);
 
-        let hunk = &hunks[0];
+        let Some(hunk) = hunks.first() else {
+            panic!("expected a hunk: {hunks:?}");
+        };
         let equal_lines: Vec<_> = hunk.iter().filter(|l| l.tag == ChangeTag::Equal).collect();
-        // Should have context lines (before + after)
+        // Equal lines come from both context_before and context_after
         assert!(
             equal_lines.len() >= 2,
             "expected context lines, got {}",
@@ -552,7 +563,9 @@ mod tests {
         }];
 
         let hunks = build_diff_hunks(&details);
-        let hunk = &hunks[0];
+        let Some(hunk) = hunks.first() else {
+            panic!("expected a hunk: {hunks:?}");
+        };
         let delete = hunk.iter().find(|l| l.tag == ChangeTag::Delete).unwrap();
         assert_eq!(delete.lo, 10);
         let insert = hunk.iter().find(|l| l.tag == ChangeTag::Insert).unwrap();
@@ -573,11 +586,16 @@ mod tests {
         }];
 
         let hunks = build_diff_hunks(&details);
-        let hunk = &hunks[0];
+        let Some(hunk) = hunks.first() else {
+            panic!("expected a hunk: {hunks:?}");
+        };
         let ctx: Vec<_> = hunk.iter().filter(|l| l.tag == ChangeTag::Equal).collect();
         assert_eq!(ctx.len(), 2);
-        assert_eq!(ctx[0].lo, 3); // old_line - 2
-        assert_eq!(ctx[1].lo, 4); // old_line - 1
+        let [c0, c1] = ctx.as_slice() else {
+            panic!("expected 2 context lines: {ctx:?}");
+        };
+        assert_eq!(c0.lo, 3);
+        assert_eq!(c1.lo, 4);
     }
 
     #[test]
@@ -596,7 +614,9 @@ mod tests {
 
         let hunks = build_diff_hunks(&details);
         assert_eq!(hunks.len(), 1);
-        let hunk = &hunks[0];
+        let Some(hunk) = hunks.first() else {
+            panic!("expected a hunk: {hunks:?}");
+        };
 
         // Collect all `ln` values that appear in the "new" column.
         let new_column: Vec<usize> = hunk
@@ -606,25 +626,28 @@ mod tests {
             .collect();
 
         // No new-column line number should repeat.
-        for i in 1..new_column.len() {
+        for (i, w) in new_column.windows(2).enumerate() {
+            let [prev, next] = w else { continue };
             assert_ne!(
-                new_column[i - 1],
-                new_column[i],
-                "duplicate new-line number {} at positions {} and {}",
-                new_column[i],
-                i - 1,
-                i,
+                prev,
+                next,
+                "duplicate new-line number {next} at positions {i} and {}",
+                i + 1,
             );
         }
 
         // Context_before "anchor line" should be at ln = 4 (old_line - 1).
         let ctx: Vec<_> = hunk.iter().filter(|l| l.tag == ChangeTag::Equal).collect();
-        assert_eq!(ctx[0].ln, 4, "context_before should be at new_line - 1");
+        assert_eq!(
+            ctx.first().map(|l| l.ln),
+            Some(4),
+            "context_before should be at new_line - 1"
+        );
 
         // Insert should be at ln = 5 (new_line).
         let ins: Vec<_> = hunk.iter().filter(|l| l.tag == ChangeTag::Insert).collect();
         assert_eq!(ins.len(), 1);
-        assert_eq!(ins[0].ln, 5);
+        assert_eq!(ins.first().map(|l| l.ln), Some(5));
     }
 
     #[test]
@@ -643,15 +666,12 @@ mod tests {
 
         let hunks = build_diff_hunks(&details);
         assert_eq!(hunks.len(), 1);
-        let hunk = &hunks[0];
+        let Some(hunk) = hunks.first() else {
+            panic!("expected a hunk: {hunks:?}");
+        };
 
-        // Expected layout:
-        //   3 3  fn main() {       (context_before)
-        //   4 4      // setup      (context_before)
-        //   5        let x = 1;    (delete)
-        //     5      let x = 42;   (insert)
-        //   6 6      let y = x + 1; (context_after)
-        //   7 7  }                 (context_after)
+        // Expected layout: 3 3 fn main() { (context_before). 4 4 // setup (context_before). 5 let x = 1; (delete). 5 let x
+        // = 42; (insert). 6 6 let y = x + 1; (context_after). 7 7 } (context_after).
 
         // Context before: lines 3, 4 (old_line - 2, old_line - 1)
         let ctx_before: Vec<_> = hunk
@@ -659,22 +679,25 @@ mod tests {
             .take_while(|l| l.tag == ChangeTag::Equal)
             .collect();
         assert_eq!(ctx_before.len(), 2);
-        assert_eq!(ctx_before[0].lo, 3);
-        assert_eq!(ctx_before[0].ln, 3);
-        assert_eq!(ctx_before[1].lo, 4);
-        assert_eq!(ctx_before[1].ln, 4);
+        let [b0, b1] = ctx_before.as_slice() else {
+            panic!("expected 2 context_before lines: {ctx_before:?}");
+        };
+        assert_eq!(b0.lo, 3);
+        assert_eq!(b0.ln, 3);
+        assert_eq!(b1.lo, 4);
+        assert_eq!(b1.ln, 4);
 
         // Delete: old line 5
         let del: Vec<_> = hunk.iter().filter(|l| l.tag == ChangeTag::Delete).collect();
         assert_eq!(del.len(), 1);
-        assert_eq!(del[0].lo, 5);
-        assert!(del[0].text.contains("let x = 1;"));
+        assert_eq!(del.first().map(|l| l.lo), Some(5));
+        assert!(del.first().is_some_and(|l| l.text.contains("let x = 1;")));
 
         // Insert: new line 5
         let ins: Vec<_> = hunk.iter().filter(|l| l.tag == ChangeTag::Insert).collect();
         assert_eq!(ins.len(), 1);
-        assert_eq!(ins[0].ln, 5);
-        assert!(ins[0].text.contains("let x = 42;"));
+        assert_eq!(ins.first().map(|l| l.ln), Some(5));
+        assert!(ins.first().is_some_and(|l| l.text.contains("let x = 42;")));
 
         // Context after: lines 6/6, 7/7
         let ctx_after: Vec<_> = hunk
@@ -686,10 +709,13 @@ mod tests {
             .rev()
             .collect::<Vec<_>>();
         assert_eq!(ctx_after.len(), 2);
-        assert_eq!(ctx_after[0].lo, 6);
-        assert_eq!(ctx_after[0].ln, 6);
-        assert_eq!(ctx_after[1].lo, 7);
-        assert_eq!(ctx_after[1].ln, 7);
+        let [a0, a1] = ctx_after.as_slice() else {
+            panic!("expected 2 context_after lines: {ctx_after:?}");
+        };
+        assert_eq!(a0.lo, 6);
+        assert_eq!(a0.ln, 6);
+        assert_eq!(a1.lo, 7);
+        assert_eq!(a1.ln, 7);
 
         // Old column should be monotonically increasing (no duplicates).
         let old_column: Vec<usize> = hunk
@@ -697,13 +723,10 @@ mod tests {
             .filter(|l| l.tag != ChangeTag::Insert)
             .map(|l| l.lo)
             .collect();
-        for i in 1..old_column.len() {
-            assert!(
-                old_column[i] > old_column[i - 1],
-                "old column not monotonic: {:?}",
-                old_column,
-            );
-        }
+        assert!(
+            old_column.windows(2).all(|w| matches!(w, [a, b] if b > a)),
+            "old column not monotonic: {old_column:?}",
+        );
 
         // New column should be monotonically increasing (no duplicates).
         let new_column: Vec<usize> = hunk
@@ -711,13 +734,10 @@ mod tests {
             .filter(|l| l.tag != ChangeTag::Delete)
             .map(|l| l.ln)
             .collect();
-        for i in 1..new_column.len() {
-            assert!(
-                new_column[i] > new_column[i - 1],
-                "new column not monotonic: {:?}",
-                new_column,
-            );
-        }
+        assert!(
+            new_column.windows(2).all(|w| matches!(w, [a, b] if b > a)),
+            "new column not monotonic: {new_column:?}",
+        );
     }
 
     #[test]
@@ -725,36 +745,56 @@ mod tests {
         let hunks = diff_hunks_from_strings("hello\nworld\n", "hello\nearth\n", 1);
         assert_eq!(hunks.len(), 1);
 
-        let hunk = &hunks[0];
+        let Some(hunk) = hunks.first() else {
+            panic!("expected a hunk: {hunks:?}");
+        };
         let deletes: Vec<_> = hunk.iter().filter(|l| l.tag == ChangeTag::Delete).collect();
         let inserts: Vec<_> = hunk.iter().filter(|l| l.tag == ChangeTag::Insert).collect();
         assert_eq!(deletes.len(), 1);
         assert_eq!(inserts.len(), 1);
-        assert!(deletes[0].text.contains("world"));
-        assert!(inserts[0].text.contains("earth"));
-    }
-
-    #[test]
-    fn diff_hunks_from_strings_identical() {
-        let hunks = diff_hunks_from_strings("same\n", "same\n", 1);
-        assert_eq!(hunks.len(), 0);
+        assert!(deletes.first().is_some_and(|l| l.text.contains("world")));
+        assert!(inserts.first().is_some_and(|l| l.text.contains("earth")));
     }
 
     #[test]
     fn diff_hunks_from_strings_empty_old() {
-        // New file creation
+        // Simulates creating a new file
         let hunks = diff_hunks_from_strings("", "new content\n", 1);
         assert_eq!(hunks.len(), 1);
-        let inserts: Vec<_> = hunks[0]
-            .iter()
-            .filter(|l| l.tag == ChangeTag::Insert)
-            .collect();
+        let Some(hunk) = hunks.first() else {
+            panic!("expected a hunk: {hunks:?}");
+        };
+        let inserts: Vec<_> = hunk.iter().filter(|l| l.tag == ChangeTag::Insert).collect();
         assert!(!inserts.is_empty());
     }
 
     #[test]
+    fn diff_hunks_from_strings_two_distant_changes_make_two_hunks() {
+        let old: String = (1..=20).map(|n| format!("line {n}\n")).collect();
+        let new = old.replace("line 2\n", "LINE 2\n").replace("line 18\n", "");
+
+        let hunks = diff_hunks_from_strings(&old, &new, 1);
+
+        let [first, second] = hunks.as_slice() else {
+            panic!("changes 16 lines apart must not share a hunk: {hunks:?}");
+        };
+        // The file start clips the context before line 2 to one line
+        assert_eq!(first.len(), 1 + 2 + 3);
+        assert_eq!(second.len(), 3 + 1 + 2);
+        // The second hunk numbers from its own op, and the delete shifts ln behind lo
+        assert_eq!(
+            second
+                .iter()
+                .find(|l| l.tag == ChangeTag::Delete)
+                .map(|l| (l.lo, l.ln)),
+            Some((18, 18))
+        );
+        assert_eq!(second.last().map(|l| (l.lo, l.ln)), Some((20, 19)));
+    }
+
+    #[test]
     fn blank_line_insert_produces_visible_hunk() {
-        // Simulates hashline insert_after with content: "" — both old and new are empty.
+        // Simulates hashline insert_after with content "", so both old and new are empty
         let details = vec![SearchReplaceEditDetail {
             old_string: String::new(),
             new_string: String::new(),
@@ -772,10 +812,10 @@ mod tests {
             "blank line insert should produce a visible hunk"
         );
 
-        let inserts: Vec<_> = hunks[0]
-            .iter()
-            .filter(|l| l.tag == ChangeTag::Insert)
-            .collect();
+        let Some(hunk) = hunks.first() else {
+            panic!("expected a hunk: {hunks:?}");
+        };
+        let inserts: Vec<_> = hunk.iter().filter(|l| l.tag == ChangeTag::Insert).collect();
         assert_eq!(
             inserts.len(),
             1,
@@ -784,19 +824,22 @@ mod tests {
     }
 
     #[test]
+    fn diff_hunks_from_strings_identical_text_produces_no_hunks() {
+        // A whole-file diff with no change must not leave a context-only hunk the header would count as an edit
+        let text = "a\nb\nc\nd\ne\nf\ng\nh\n";
+        assert!(diff_hunks_from_strings(text, text, 1).is_empty());
+        assert!(diff_hunks_from_strings("one\n", "one\n", 1).is_empty());
+    }
+
+    #[test]
     fn empty_file_write_produces_no_hunks() {
-        // An empty new file (write with empty content, ACP Diff old/new both
-        // empty, no context) must not ride the blank-line heuristic into a
-        // fabricated +1 insertion — now prominent as the collapsed header's
-        // diffstat.
+        // An empty new file (a write with empty content: ACP Diff old and new both empty, no context) must not fabricate a one-line insertion
+        // The fabricated +1 would show as the diffstat in the collapsed header
         let hunks = diff_hunks_from_strings("", "", 1);
         assert!(hunks.is_empty(), "empty-to-empty must diff to nothing");
     }
 
-    // ── Overlap stitching (coalesced same-file edits) ──────────────────
-
-    /// An edit detail with the ±context the real search_replace tool emits
-    /// from its own file snapshot.
+    /// An edit detail with the surrounding context the real search_replace tool emits from its own file snapshot.
     fn edit_detail(
         old: &str,
         new: &str,
@@ -821,10 +864,8 @@ mod tests {
             .collect()
     }
 
-    /// Session 019f646d repro: five sequential 1:1 edits on a 5-line file,
-    /// each hunk carrying overlapping ±3 context from its own snapshot. The
-    /// merged block must render ONE unified hunk of five -/+ pairs — no
-    /// repeated context, no intermediate file states, no separators.
+    /// Five sequential one-for-one line edits on a 5-line file, each hunk carrying overlapping context (three lines each side) from its own snapshot.
+    /// The merged block must render one unified hunk of five -/+ pairs: no repeated context, no intermediate file states, no separators.
     #[test]
     fn stitch_five_sequential_full_line_edits_into_one_hunk() {
         let edits = [
@@ -875,7 +916,7 @@ mod tests {
         let stitched = stitch_overlapping_hunks(hunks);
         assert_eq!(stitched.len(), 1, "overlapping hunks stitch into one");
         assert_eq!(
-            stitch_rows(&stitched[0]),
+            stitch_rows(only_hunk(&stitched)),
             vec![
                 (ChangeTag::Delete, 1, 1, "line one"),
                 (ChangeTag::Insert, 2, 1, "LINE ONE"),
@@ -893,13 +934,19 @@ mod tests {
 
     #[test]
     fn stitch_collapses_double_edit_to_original_and_final() {
-        // a→b then b→c on the same line: the merged hunk shows -a +c only.
+        // Edit "a" to "b" then "b" to "c" on the same line: the merged hunk shows -a +c only
         let first = build_diff_hunks(&[edit_detail("a", "b", 1, "", "x\n")]);
         let second = build_diff_hunks(&[edit_detail("b", "c", 1, "", "x\n")]);
 
-        let stitched = stitch_overlapping_hunks(vec![first[0].clone(), second[0].clone()]);
+        let Some(first_hunk) = first.first() else {
+            panic!("expected first hunk: {first:?}");
+        };
+        let Some(second_hunk) = second.first() else {
+            panic!("expected second hunk: {second:?}");
+        };
+        let stitched = stitch_overlapping_hunks(vec![first_hunk.clone(), second_hunk.clone()]);
         assert_eq!(stitched.len(), 1);
-        let rows: Vec<(ChangeTag, usize, &str)> = stitched[0]
+        let rows: Vec<(ChangeTag, usize, &str)> = only_hunk(&stitched)
             .iter()
             .map(|l| (l.tag, l.ln, l.text.trim_end()))
             .collect();
@@ -927,8 +974,7 @@ mod tests {
             mk("beta", 2, 2, ChangeTag::Delete),
             mk("BETA", 3, 2, ChangeTag::Insert),
         ];
-        // Overlapping `ln` range but conflicting text at ln 1: line-count
-        // drift between snapshots — coordinates lie, so keep both hunks.
+        // Overlapping `ln` range but conflicting text at ln 1: the line counts drifted between snapshots, the coordinates lie, so keep both hunks
         let b = vec![
             mk("omega", 1, 1, ChangeTag::Equal),
             mk("gamma", 3, 3, ChangeTag::Delete),
@@ -937,19 +983,21 @@ mod tests {
 
         let stitched = stitch_overlapping_hunks(vec![a.clone(), b.clone()]);
         assert_eq!(stitched.len(), 2, "disagreement keeps hunks separate");
-        assert_eq!(stitch_rows(&stitched[0]), stitch_rows(&a));
-        assert_eq!(stitch_rows(&stitched[1]), stitch_rows(&b));
+        assert_eq!(stitched.first().map(stitch_rows), Some(stitch_rows(&a)));
+        assert_eq!(stitched.get(1).map(stitch_rows), Some(stitch_rows(&b)));
     }
 
     #[test]
     fn stitch_bails_to_separate_hunks_on_insert_only_overlap() {
-        // "beta"→"BETA" at line 2, then an insert-only edit (the insert_after
-        // shape: empty old_string) between BETA and gamma. The insertion
-        // grows the line count, so every later `ln` in the first hunk would
-        // lie — the unpaired-Insert arm must keep both hunks unmodified.
+        // "beta" edited to "BETA" at line 2, then an insert-only edit (the insert_after shape: empty old_string) between BETA and gamma
+        // The insertion grows the line count, so every later `ln` in the first hunk would lie
+        // The unpaired-Insert arm must keep both hunks unmodified
         let a = build_diff_hunks(&[edit_detail("beta", "BETA", 2, "alpha\n", "gamma\n")]);
         let b = build_diff_hunks(&[edit_detail("", "inserted", 3, "BETA\n", "gamma\n")]);
-        let (a, b) = (a[0].clone(), b[0].clone());
+        let (a, b) = match (a.first(), b.first()) {
+            (Some(a), Some(b)) => (a.clone(), b.clone()),
+            _ => panic!("expected hunks in both diffs"),
+        };
 
         let stitched = stitch_overlapping_hunks(vec![a.clone(), b.clone()]);
         assert_eq!(stitched, vec![a, b], "insert-only overlap keeps both hunks");
@@ -957,22 +1005,24 @@ mod tests {
 
     #[test]
     fn stitch_bails_to_separate_hunks_on_delete_run_overlap() {
-        // Delete-only edit inside the previous hunk's coverage: the pair rule
-        // (Delete immediately followed by its same-`ln` Insert) declines, so
-        // both hunks survive unmodified.
+        // A delete-only edit lands inside the previous hunk's coverage
+        // The pair rule (a Delete immediately followed by its same-`ln` Insert) declines, so both hunks survive unmodified
         let a = build_diff_hunks(&[edit_detail("alpha", "ALPHA", 1, "", "beta\ngamma\n")]);
         let b = build_diff_hunks(&[edit_detail("beta", "", 2, "ALPHA\n", "gamma\n")]);
-        let (a, b) = (a[0].clone(), b[0].clone());
+        let (a, b) = match (a.first(), b.first()) {
+            (Some(a), Some(b)) => (a.clone(), b.clone()),
+            _ => panic!("expected hunks in both diffs"),
+        };
 
         let stitched = stitch_overlapping_hunks(vec![a.clone(), b.clone()]);
         assert_eq!(stitched, vec![a, b], "delete-only overlap keeps both hunks");
 
-        // Same for a multi-line D,D,I,I replacement run (line-count neutral,
-        // but not the single-line pair shape the stitcher trusts).
+        // Same for a multi-line replacement run, two Deletes then two Inserts
+        // It keeps the line count but is not the single-line pair shape the stitcher trusts
         let base = edit_detail("alpha", "ALPHA", 1, "", "beta\ngamma\ndelta\n");
         let multi = edit_detail("beta\ngamma", "BETA\nGAMMA", 2, "ALPHA\n", "delta\n");
-        let a = build_diff_hunks(&[base])[0].clone();
-        let b = build_diff_hunks(&[multi])[0].clone();
+        let a = only_hunk(&build_diff_hunks(&[base])).clone();
+        let b = only_hunk(&build_diff_hunks(&[multi])).clone();
 
         let stitched = stitch_overlapping_hunks(vec![a.clone(), b.clone()]);
         assert_eq!(stitched, vec![a, b], "replacement run keeps both hunks");
@@ -985,7 +1035,7 @@ mod tests {
                 .remove(0)
         };
 
-        // Disjoint hunks keep today's gap-marker rendering.
+        // Disjoint hunks stay separate, keeping the gap marker the pager draws between them
         assert_eq!(stitch_overlapping_hunks(vec![far(5), far(40)]).len(), 2);
         // Later edit above the earlier one: non-monotonic, keep separate.
         assert_eq!(stitch_overlapping_hunks(vec![far(20), far(4)]).len(), 2);
@@ -993,7 +1043,7 @@ mod tests {
 
     #[test]
     fn context_lines_appear_in_hunks() {
-        // Simulates hashline replace with ±3 context from to_search_replace.
+        // Simulates hashline replace with three lines of context each side from to_search_replace
         let details = vec![SearchReplaceEditDetail {
             old_string: "    let x = 1;".to_string(),
             new_string: "    let x = 42;".to_string(),
@@ -1007,7 +1057,9 @@ mod tests {
         let hunks = build_diff_hunks(&details);
         assert_eq!(hunks.len(), 1);
 
-        let hunk = &hunks[0];
+        let Some(hunk) = hunks.first() else {
+            panic!("expected a hunk: {hunks:?}");
+        };
         let equal_lines: Vec<_> = hunk.iter().filter(|l| l.tag == ChangeTag::Equal).collect();
         assert!(
             equal_lines.len() >= 2,
@@ -1054,7 +1106,7 @@ mod tests {
             unicode_normalized: false,
         };
 
-        // Wrap in ToolOutput::SearchReplace — matches production rawOutput format
+        // Wrap in ToolOutput::SearchReplace to match the production rawOutput format
         let raw_output = serde_json::to_value(ToolOutput::SearchReplace(
             SearchReplaceOutput::EditsApplied(edits_applied),
         ))
@@ -1075,12 +1127,16 @@ mod tests {
         assert_eq!(count, 1);
 
         // Verify the hunk has correct content
-        let deletes: Vec<_> = hunks[0]
+        let deletes: Vec<_> = only_hunk(&hunks)
             .iter()
             .filter(|l| l.tag == ChangeTag::Delete)
             .collect();
         assert_eq!(deletes.len(), 1);
-        assert!(deletes[0].text.contains("let x = 1;"));
+        assert!(
+            deletes
+                .first()
+                .is_some_and(|l| l.text.contains("let x = 1;"))
+        );
     }
 
     #[test]
@@ -1126,8 +1182,7 @@ mod tests {
 
     #[test]
     fn extract_edit_hunks_from_diff_meta_structured() {
-        // Strategy 2: structured edit details from Diff.meta
-        // (acp_conversion embeds SearchReplaceEditContextInformation).
+        // Strategy 2: structured edit details from Diff.meta (acp_conversion embeds SearchReplaceEditContextInformation)
         use agent_client_protocol as acp;
         use std::sync::Arc;
         use xai_grok_tools::types::output::SearchReplaceEditContextInformation;
@@ -1144,7 +1199,7 @@ mod tests {
             }],
         };
 
-        // No raw_output — Strategy 1 skipped
+        // No raw_output, so Strategy 1 is skipped
         let tc = acp::ToolCall::new(
             acp::ToolCallId::new(Arc::from("tc1")),
             "Edit test.rs".to_string(),
@@ -1166,12 +1221,12 @@ mod tests {
         assert_eq!(count, 1);
 
         // Line numbers should be absolute (42), not relative (1).
-        let del = hunks[0]
+        let del = only_hunk(&hunks)
             .iter()
             .find(|l| l.tag == ChangeTag::Delete)
             .unwrap();
         assert_eq!(del.lo, 42, "old_line should be absolute");
-        let ins = hunks[0]
+        let ins = only_hunk(&hunks)
             .iter()
             .find(|l| l.tag == ChangeTag::Insert)
             .unwrap();
@@ -1206,12 +1261,12 @@ mod tests {
         assert_eq!(count, 1);
 
         // Line numbers should use start_line=50 from meta, not 1.
-        let del = hunks[0]
+        let del = only_hunk(&hunks)
             .iter()
             .find(|l| l.tag == ChangeTag::Delete)
             .unwrap();
         assert_eq!(del.lo, 50, "old_line should come from meta");
-        let ins = hunks[0]
+        let ins = only_hunk(&hunks)
             .iter()
             .find(|l| l.tag == ChangeTag::Insert)
             .unwrap();
@@ -1220,8 +1275,7 @@ mod tests {
 
     #[test]
     fn context_before_trailing_newline_no_phantom_line() {
-        // When context_before ends with '\n', with_nl should not double it,
-        // otherwise a phantom empty context line appears in the rendered diff.
+        // When context_before ends with '\n', with_nl should not double it, otherwise a phantom empty context line appears in the rendered diff
         let details = vec![SearchReplaceEditDetail {
             old_string: String::new(),
             new_string: "    new_field: None,".to_string(),
@@ -1234,7 +1288,9 @@ mod tests {
 
         let hunks = build_diff_hunks(&details);
         assert_eq!(hunks.len(), 1);
-        let hunk = &hunks[0];
+        let Some(hunk) = hunks.first() else {
+            panic!("expected a hunk: {hunks:?}");
+        };
 
         // Context before should have exactly 2 lines, not 3 (no phantom blank).
         let ctx: Vec<_> = hunk
@@ -1262,8 +1318,8 @@ mod tests {
 
     #[test]
     fn line_prefix_prepended_to_changed_lines() {
-        // Simulates a mid-line match: the file line is "            .filter(|t| old)"
-        // but old_string is just ".filter(|t| old)" — the 12-space indent is the prefix.
+        // Simulates a mid-line match: the file line is "            .filter(|t| old)" but old_string is just ".filter(|t| old)"
+        // The 12-space indent is the prefix
         let details = vec![SearchReplaceEditDetail {
             old_string: ".filter(|t| old)".to_string(),
             new_string: ".filter(|t| new)".to_string(),
@@ -1276,7 +1332,9 @@ mod tests {
 
         let hunks = build_diff_hunks(&details);
         assert_eq!(hunks.len(), 1);
-        let hunk = &hunks[0];
+        let Some(hunk) = hunks.first() else {
+            panic!("expected a hunk: {hunks:?}");
+        };
 
         let del: Vec<_> = hunk.iter().filter(|l| l.tag == ChangeTag::Delete).collect();
         let ins: Vec<_> = hunk.iter().filter(|l| l.tag == ChangeTag::Insert).collect();
@@ -1285,14 +1343,16 @@ mod tests {
 
         // Both changed lines must start with the 12-space prefix.
         assert!(
-            del[0].text.starts_with("            .filter"),
+            del.first()
+                .is_some_and(|l| l.text.starts_with("            .filter")),
             "delete line should have leading indent, got: {:?}",
-            del[0].text,
+            del.first().map(|l| &l.text),
         );
         assert!(
-            ins[0].text.starts_with("            .filter"),
+            ins.first()
+                .is_some_and(|l| l.text.starts_with("            .filter")),
             "insert line should have leading indent, got: {:?}",
-            ins[0].text,
+            ins.first().map(|l| &l.text),
         );
 
         // Context lines already have their own indent (from the file).
@@ -1315,7 +1375,9 @@ mod tests {
 
         let hunks = build_diff_hunks(&details);
         assert_eq!(hunks.len(), 1);
-        let hunk = &hunks[0];
+        let Some(hunk) = hunks.first() else {
+            panic!("expected a hunk: {hunks:?}");
+        };
 
         let dels: Vec<_> = hunk.iter().filter(|l| l.tag == ChangeTag::Delete).collect();
         let inss: Vec<_> = hunk.iter().filter(|l| l.tag == ChangeTag::Insert).collect();
@@ -1324,32 +1386,36 @@ mod tests {
 
         // First delete/insert line: prefix applied.
         assert!(
-            dels[0].text.starts_with("    call_a"),
+            dels.first()
+                .is_some_and(|l| l.text.starts_with("    call_a")),
             "first delete should have prefix, got: {:?}",
-            dels[0].text,
+            dels.first().map(|l| &l.text),
         );
         assert!(
-            inss[0].text.starts_with("    call_x"),
+            inss.first()
+                .is_some_and(|l| l.text.starts_with("    call_x")),
             "first insert should have prefix, got: {:?}",
-            inss[0].text,
+            inss.first().map(|l| &l.text),
         );
 
         // Second delete/insert line: NO extra prefix (already a full file line).
         assert!(
-            dels[1].text.starts_with("    call_b"),
+            dels.get(1)
+                .is_some_and(|l| l.text.starts_with("    call_b")),
             "second delete should keep original indent, got: {:?}",
-            dels[1].text,
+            dels.get(1).map(|l| &l.text),
         );
         assert!(
-            inss[1].text.starts_with("    call_y"),
+            inss.get(1)
+                .is_some_and(|l| l.text.starts_with("    call_y")),
             "second insert should keep original indent, got: {:?}",
-            inss[1].text,
+            inss.get(1).map(|l| &l.text),
         );
     }
 
     #[test]
     fn empty_line_prefix_changes_nothing() {
-        // When line_prefix is empty, behavior is unchanged from before.
+        // An empty line_prefix prepends nothing to the diff lines
         let details = vec![SearchReplaceEditDetail {
             old_string: "old_val".to_string(),
             new_string: "new_val".to_string(),
@@ -1363,11 +1429,11 @@ mod tests {
         let hunks = build_diff_hunks(&details);
         assert_eq!(hunks.len(), 1);
 
-        let del = hunks[0]
+        let del = only_hunk(&hunks)
             .iter()
             .find(|l| l.tag == ChangeTag::Delete)
             .unwrap();
-        let ins = hunks[0]
+        let ins = only_hunk(&hunks)
             .iter()
             .find(|l| l.tag == ChangeTag::Insert)
             .unwrap();

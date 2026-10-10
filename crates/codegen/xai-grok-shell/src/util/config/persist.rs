@@ -1,37 +1,49 @@
 use super::load::load_config_from_toml;
 use super::mcp::{Config, user_config_path};
 use anyhow::Result;
+use std::path::Path;
 use toml::Value as TomlValue;
 use toml::map::Map as TomlMap;
 use xai_grok_agent::prompt::skills::SkillsConfig;
-
+use xai_grok_config::fs_atomic::BoundDest;
 /// Process-wide write lock for `~/.grok/config.toml`.
-///
-/// Serializes the read-modify-write in `save_config` so two rapid
-/// settings toggles can't interleave and clobber each other.
+/// Serializes the read-modify-write in `save_config` so two rapid settings toggles can't interleave and clobber each other.
 static SAVE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
-pub async fn save_config(config: &Config) -> Result<()> {
-    let _guard = SAVE_LOCK.lock().await;
-
-    let path = user_config_path();
-    let mut root: TomlValue = match tokio::fs::read_to_string(&path).await {
-        Ok(s) => {
-            // Refuse to overwrite an unparseable config — silent fallback
-            // to an empty table would permanently drop unmodeled sections.
-            match toml::from_str::<TomlValue>(&s) {
-                Ok(v) => v,
-                Err(parse_err) => {
-                    return Err(anyhow::anyhow!(
-                        "refusing to overwrite unparseable {}: {}; save a backup \
+/// Blank (first-run 0-byte file) is an empty table; other unparseable TOML is an error so a silent fallback cannot drop unmodeled sections.
+pub(crate) fn parse_existing_config_toml(s: &str) -> Result<TomlValue, toml::de::Error> {
+    if s.trim().is_empty() {
+        return Ok(TomlValue::Table(TomlMap::new()));
+    }
+    toml::from_str(s)
+}
+/// Settings-save body. Caller must hold [`ConfigWriteGuard`].
+/// Re-resolve `dest` before publish. A retarget must not merge A onto B.
+async fn save_config_locked(
+    guard: ConfigWriteGuard,
+    slot: &Path,
+    dest: BoundDest,
+    config: &Config,
+) -> Result<()> {
+    let dest = require_same_user_config_dest(slot, &dest)?;
+    let mut root: TomlValue = match tokio::fs::read_to_string(dest.as_path()).await {
+        Ok(s) => match parse_existing_config_toml(&s) {
+            Ok(v) => v,
+            Err(parse_err) => {
+                return Err(anyhow::anyhow!(
+                    "refusing to overwrite unparseable {}: {}; save a backup \
                          and fix the syntax error before retrying",
-                        path.display(),
-                        parse_err,
-                    ));
-                }
+                    slot.display(),
+                    parse_err,
+                ));
             }
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => TomlValue::Table(TomlMap::new()),
+        Err(e) => {
+            return Err(anyhow::anyhow!(
+                "refusing to overwrite unreadable {}: {e}",
+                slot.display()
+            ));
         }
-        Err(_) => TomlValue::Table(TomlMap::new()),
     };
     if !matches!(root, TomlValue::Table(_)) {
         root = TomlValue::Table(TomlMap::new());
@@ -44,118 +56,209 @@ pub async fn save_config(config: &Config) -> Result<()> {
     merge_section(table, "harness", &config.harness);
     merge_section(table, "session", &config.session);
     merge_ask_user_question_section(table, &config.ask_user_question);
-
+    if config.privacy == super::mcp::PrivacyConfig::default() {
+        table.remove("privacy");
+    } else {
+        merge_section(table, "privacy", &config.privacy);
+    }
+    if config.consent == super::consent::ConsentConfig::default() {
+        table.remove("consent");
+    } else {
+        if let Some(TomlValue::Table(section)) = table.get_mut("consent") {
+            section.remove("answers");
+        }
+        merge_section(table, "consent", &config.consent);
+    }
     if config.skills == SkillsConfig::default() {
         table.remove("skills");
     } else {
         merge_section(table, "skills", &config.skills);
     }
-
+    merge_section(table, "telemetry", &config.telemetry);
+    merge_section(table, "features", &config.features);
     let toml_str = toml::to_string_pretty(&root)?;
-    if let Some(parent) = path.parent() {
-        let _ = tokio::fs::create_dir_all(parent).await;
-    }
-
-    // Preserve existing file permissions across the tmp+rename swap.
-    #[cfg(unix)]
-    let prior_mode: Option<u32> = match tokio::fs::metadata(&path).await {
-        Ok(m) => {
-            use std::os::unix::fs::PermissionsExt;
-            Some(m.permissions().mode())
-        }
-        Err(_) => None,
-    };
-    #[cfg(not(unix))]
-    let prior_mode: Option<u32> = None;
-
-    // Unique tmp filename (PID + nanos) avoids inode sharing if a
-    // future caller bypasses SAVE_LOCK.
-    let suffix = {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
-        format!("toml.tmp.{}.{}", std::process::id(), nanos)
-    };
-    let tmp = path.with_extension(suffix);
-    tokio::fs::write(&tmp, toml_str).await?;
-
-    #[cfg(unix)]
-    if let Some(mode) = prior_mode {
-        use std::os::unix::fs::PermissionsExt;
-        // Set mode before rename so permissions never widen atomically.
-        let _ = tokio::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(mode)).await;
-    }
-    let _ = prior_mode;
-
-    tokio::fs::rename(&tmp, &path).await?;
+    let dest = require_same_user_config_dest(slot, &dest)?;
+    guard
+        .run_blocking(move || atomic_write_resolved_string(&dest, &toml_str))
+        .await
+        .map_err(|e| anyhow::anyhow!("config write task failed: {e}"))??;
     Ok(())
 }
-
-/// Acquire the `config.toml` write lock used by [`save_config`], so callers that
-/// mutate the file directly (marketplace add/remove) can't interleave with a
-/// settings save and clobber it.
-pub(crate) async fn lock_config_writes() -> tokio::sync::MutexGuard<'static, ()> {
-    SAVE_LOCK.lock().await
+/// Guard for a user `config.toml` read-modify-write: [`SAVE_LOCK`] plus the config-init flock —
+/// without the flock leg, a SAVE_LOCK writer and a flock writer silently drop each other's edits.
+#[must_use]
+pub(crate) struct ConfigWriteGuard {
+    _save: tokio::sync::MutexGuard<'static, ()>,
+    _flock: std::fs::File,
 }
-
-/// Read a file, treating only `NotFound` as empty. Hard read errors (EACCES,
-/// EIO) propagate so callers don't clobber an unreadable file on the next write.
-pub(crate) fn read_to_string_or_empty(path: &std::path::Path) -> std::io::Result<String> {
+impl ConfigWriteGuard {
+    /// Run `f` on the blocking pool with this guard living in that task.
+    /// Cancelling the returned future must not drop the guard in the async frame.
+    pub(crate) async fn run_blocking<T, F>(self, f: F) -> Result<T, tokio::task::JoinError>
+    where
+        T: Send + 'static,
+        F: FnOnce() -> T + Send + 'static,
+    {
+        tokio::task::spawn_blocking(move || {
+            let _guard = self;
+            f()
+        })
+        .await
+    }
+}
+/// Acquire the user `config.toml` write guard (SAVE_LOCK ⊃ init flock) on the blocking pool;
+/// fails closed — callers must not fall back to an unguarded write.
+/// `SAVE_LOCK` moves into that task so a cancelled await cannot release it while flock is still being acquired.
+pub(crate) async fn lock_config_writes() -> std::io::Result<ConfigWriteGuard> {
+    let save = SAVE_LOCK.lock().await;
+    let grok_home = crate::util::grok_home::grok_home();
+    tokio::task::spawn_blocking(move || {
+        let flock = acquire_init_lock(&grok_home)?;
+        Ok(ConfigWriteGuard {
+            _save: save,
+            _flock: flock,
+        })
+    })
+    .await
+    .map_err(|e| std::io::Error::other(format!("config lock task failed: {e}")))?
+}
+/// Exclusive advisory `flock` on `<grok_home>/.config-init.lock`, retried briefly, serializing
+/// `config.toml` read-modify-writes; only `WouldBlock` retries, and the file is never removed.
+pub fn acquire_init_lock(grok_home: &std::path::Path) -> std::io::Result<std::fs::File> {
+    use fs2::FileExt;
+    let _ = std::fs::create_dir_all(grok_home);
+    let lock_path = grok_home.join(".config-init.lock");
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(&lock_path)?;
+    for _ in 0..50 {
+        match file.try_lock_exclusive() {
+            Ok(()) => return Ok(file),
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::WouldBlock,
+        format!("timed out waiting for {} after 1s", lock_path.display()),
+    ))
+}
+/// Read a file, treating only `NotFound` as empty.
+/// Hard read errors (EACCES, EIO) propagate so callers don't clobber an unreadable file on the next write.
+pub fn read_to_string_or_empty(path: &std::path::Path) -> std::io::Result<String> {
     match std::fs::read_to_string(path) {
         Ok(s) => Ok(s),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
         Err(e) => Err(e),
     }
 }
-
-/// Atomic write via temp file + `rename` (mirrors [`save_config`]) so a crash
-/// mid-write can't truncate `config.toml`. Preserves the dest mode on unix.
-pub(crate) fn atomic_write_string(path: &std::path::Path, content: &str) -> std::io::Result<()> {
-    if let Some(parent) = path.parent() {
+/// Bind the follow dest then read it. Pair with [`atomic_write_follow_bound`].
+pub fn read_follow_bound(path: &std::path::Path) -> std::io::Result<(BoundDest, String)> {
+    let dest = bind_user_config_dest(path)?;
+    let content = read_to_string_or_empty(dest.as_path())?;
+    Ok((dest, content))
+}
+fn bind_user_config_dest(path: &std::path::Path) -> std::io::Result<BoundDest> {
+    bind_user_config_dest_with(path, true, xai_grok_config::user_grok_home().is_some())
+}
+fn bind_user_config_dest_with(
+    path: &std::path::Path,
+    follow_leaf: bool,
+    has_user_home: bool,
+) -> std::io::Result<BoundDest> {
+    if follow_leaf && has_user_home {
+        xai_grok_config::fs_atomic::bind_follow_destination(path)
+    } else {
+        xai_grok_config::fs_atomic::bind_slot_destination(path)
+    }
+}
+/// Re-resolve with the same follow/slot policy used to bind `dest`.
+pub(crate) fn require_same_user_config_dest(
+    slot: &std::path::Path,
+    dest: &BoundDest,
+) -> std::io::Result<BoundDest> {
+    require_same_user_config_dest_with(slot, dest, xai_grok_config::user_grok_home().is_some())
+}
+fn require_same_user_config_dest_with(
+    slot: &std::path::Path,
+    dest: &BoundDest,
+    has_user_home: bool,
+) -> std::io::Result<BoundDest> {
+    let now = bind_user_config_dest_with(slot, true, has_user_home)?;
+    if now != *dest {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "config destination for {} changed from {} to {}",
+                slot.display(),
+                dest.as_path().display(),
+                now.as_path().display()
+            ),
+        ));
+    }
+    Ok(now)
+}
+/// Publish onto `dest` only if `slot` still resolves to it.
+pub fn atomic_write_follow_bound(
+    slot: &std::path::Path,
+    dest: &BoundDest,
+    content: &str,
+) -> std::io::Result<()> {
+    let dest = require_same_user_config_dest(slot, dest)?;
+    atomic_write_resolved_string(&dest, content)
+}
+/// Atomic write via temp file then `rename`. Follows a leaf symlink.
+/// Project `.grok/config.toml` must use [`atomic_replace_string`].
+/// User-config RMW must bind dest before load ([`read_follow_bound`] + [`atomic_write_follow_bound`]).
+pub fn atomic_write_string(path: &std::path::Path, content: &str) -> std::io::Result<()> {
+    atomic_write_string_inner(path, content, true)
+}
+/// Like [`atomic_write_string`], but `rename` replaces a leaf symlink inode.
+pub fn atomic_replace_string(path: &std::path::Path, content: &str) -> std::io::Result<()> {
+    atomic_write_string_inner(path, content, false)
+}
+/// Follow-leaf bind + read. Caller already classified `path` as user `config.toml`.
+pub fn read_follow_leaf(path: &std::path::Path) -> std::io::Result<(BoundDest, String)> {
+    let dest = xai_grok_config::fs_atomic::bind_follow_destination(path)?;
+    let content = read_to_string_or_empty(dest.as_path())?;
+    Ok((dest, content))
+}
+/// Follow-leaf publish if `slot` still resolves to `dest`.
+pub fn atomic_write_follow_leaf(
+    slot: &std::path::Path,
+    dest: &BoundDest,
+    content: &str,
+) -> std::io::Result<()> {
+    let dest = xai_grok_config::fs_atomic::require_same_bound_destination(slot, dest)?;
+    atomic_write_resolved_string(&dest, content)
+}
+fn atomic_write_string_inner(
+    path: &std::path::Path,
+    content: &str,
+    follow_leaf: bool,
+) -> std::io::Result<()> {
+    let dest = if follow_leaf {
+        let first = xai_grok_config::fs_atomic::bind_follow_destination(path)?;
+        xai_grok_config::fs_atomic::require_same_bound_destination(path, &first)?
+    } else {
+        xai_grok_config::fs_atomic::bind_slot_destination(path)?
+    };
+    atomic_write_resolved_string(&dest, content)
+}
+/// Publish onto an already-bound destination. Temp inherits the current dest mode.
+pub(crate) fn atomic_write_resolved_string(dest: &BoundDest, content: &str) -> std::io::Result<()> {
+    if let Some(parent) = dest.as_path().parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-
-    #[cfg(unix)]
-    let prior_mode: Option<u32> = match std::fs::metadata(path) {
-        Ok(m) => {
-            use std::os::unix::fs::PermissionsExt;
-            Some(m.permissions().mode())
-        }
-        Err(_) => None,
-    };
-    #[cfg(not(unix))]
-    let prior_mode: Option<u32> = None;
-
-    let suffix = {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
-        format!("toml.tmp.{}.{}", std::process::id(), nanos)
-    };
-    let tmp = path.with_extension(suffix);
-    std::fs::write(&tmp, content)?;
-
-    #[cfg(unix)]
-    if let Some(mode) = prior_mode {
-        use std::os::unix::fs::PermissionsExt;
-        // Set mode before rename so permissions never widen atomically.
-        let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(mode));
-    }
-    let _ = prior_mode;
-
-    if let Err(e) = std::fs::rename(&tmp, path) {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(e);
-    }
-    Ok(())
+    xai_grok_config::fs_atomic::write_atomically_bound(dest, content, None)
 }
-
-/// Merge `[toolset.ask_user_question]` into the root table. `[toolset]` is
-/// deliberately NOT merged wholesale — it carries runtime-only structs
-/// (`web_search` sampler etc.) whose serialized defaults must never land in
-/// the user file — so only this settings-writable sub-table round-trips.
+/// Merge `[toolset.ask_user_question]` into the root table.
+/// `[toolset]` is deliberately NOT merged wholesale, so only this settings-writable sub-table round-trips.
+/// It carries runtime-only structs (`web_search` sampler etc.) whose serialized defaults must never land in the user file.
 fn merge_ask_user_question_section(
     table: &mut TomlMap<String, TomlValue>,
     ask: &crate::tools::config::AskUserQuestionToolConfig,
@@ -177,11 +280,8 @@ fn merge_ask_user_question_section(
         merge_section(toolset_table, "ask_user_question", ask);
     }
 }
-
-/// Merge serialized fields of `value` into `table[key]`, preserving any
-/// existing keys not present in the serialized output. This prevents
-/// unmodeled fields (e.g. pager-written `show_timestamps`, `auto_dark_theme`)
-/// from being silently dropped when `save_config` round-trips the struct.
+/// Merge serialized fields of `value` into `table[key]`, preserving any existing keys not present in the serialized output.
+/// This prevents `save_config` round-trips from silently dropping unmodeled fields (e.g. pager-written `show_timestamps`, `auto_dark_theme`).
 /// Deep-merge `incoming` into `existing`: nested tables recurse; scalars replace.
 fn merge_toml_tables(
     existing: &mut TomlMap<String, TomlValue>,
@@ -228,11 +328,13 @@ pub async fn update_config<F>(f: F) -> Result<()>
 where
     F: FnOnce(&mut Config),
 {
-    let root: TomlValue =
-        crate::config::load_from_disk().unwrap_or_else(|_| TomlValue::Table(TomlMap::new()));
+    let guard = lock_config_writes().await?;
+    let path = user_config_path();
+    let dest = bind_user_config_dest(&path)?;
+    let root: TomlValue = crate::config::load_config_file(dest.as_path())?;
     let mut cfg = load_config_from_toml(&root);
     f(&mut cfg);
-    save_config(&cfg).await
+    save_config_locked(guard, &path, dest, &cfg).await
 }
 
 /// Write only `[features].session_recap` without merging the whole `Features`
@@ -301,12 +403,35 @@ pub async fn update_features_session_recap(value: bool) -> Result<()> {
     Ok(())
 }
 
-/// Write only `[subagents].allow_worktree` so other `[subagents]` keys stay put.
-pub async fn update_subagents_allow_worktree(value: bool) -> Result<()> {
+fn insert_nested_toml_key(node: &mut TomlValue, sections: &[&str], key: &str, value: TomlValue) {
+    if !matches!(node, TomlValue::Table(_)) {
+        *node = TomlValue::Table(TomlMap::new());
+    }
+    let table = node.as_table_mut().expect("toml node must be a table");
+    if sections.is_empty() {
+        table.insert(key.to_string(), value);
+        return;
+    }
+    let child = table
+        .entry(sections.first().expect("index out of bounds").to_string())
+        .or_insert_with(|| TomlValue::Table(TomlMap::new()));
+    if !matches!(child, TomlValue::Table(_)) {
+        *child = TomlValue::Table(TomlMap::new());
+    }
+    insert_nested_toml_key(
+        child,
+        sections.get(1..).expect("index out of bounds"),
+        key,
+        value,
+    );
+}
+
+/// Write one key under `sections` without splatting the rest of `Config`.
+async fn update_nested_toml_key(sections: &[&str], key: &str, value: TomlValue) -> Result<()> {
     let _guard = SAVE_LOCK.lock().await;
     let path = user_config_path();
     let mut root: TomlValue = match tokio::fs::read_to_string(&path).await {
-        Ok(s) => match toml::from_str::<TomlValue>(&s) {
+        Ok(s) => match parse_existing_config_toml(&s) {
             Ok(v) => v,
             Err(parse_err) => {
                 return Err(anyhow::anyhow!(
@@ -319,20 +444,7 @@ pub async fn update_subagents_allow_worktree(value: bool) -> Result<()> {
         },
         Err(_) => TomlValue::Table(TomlMap::new()),
     };
-    if !matches!(root, TomlValue::Table(_)) {
-        root = TomlValue::Table(TomlMap::new());
-    }
-    let table = root.as_table_mut().expect("root must be a table");
-    let subagents = table
-        .entry("subagents".to_string())
-        .or_insert_with(|| TomlValue::Table(TomlMap::new()));
-    if let TomlValue::Table(subagents_tbl) = subagents {
-        subagents_tbl.insert("allow_worktree".to_string(), TomlValue::Boolean(value));
-    } else {
-        let mut subagents_tbl = TomlMap::new();
-        subagents_tbl.insert("allow_worktree".to_string(), TomlValue::Boolean(value));
-        *subagents = TomlValue::Table(subagents_tbl);
-    }
+    insert_nested_toml_key(&mut root, sections, key, value);
     let toml_str = toml::to_string_pretty(&root)?;
     if let Some(parent) = path.parent() {
         let _ = tokio::fs::create_dir_all(parent).await;
@@ -366,45 +478,29 @@ pub async fn update_subagents_allow_worktree(value: bool) -> Result<()> {
     Ok(())
 }
 
-/// Synchronously load just the management_api_key from the config file.
-///
-/// This is the Management API key (billing / prepaid), not the inference
-/// `XAI_API_KEY`. Prefer the secret-store path when interactive.
-pub fn load_management_api_key_sync() -> Option<String> {
-    let root: toml::Value = crate::config::load_effective_config().ok()?;
-    if let toml::Value::Table(table) = root
-        && let Some(toml::Value::Table(endpoints)) = table.get("endpoints")
-    {
-        endpoints
-            .get("management_api_key")
-            .and_then(|v| v.as_str())
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(str::to_string)
-    } else {
-        None
-    }
+/// Write only `[subagents].allow_worktree`.
+pub async fn update_subagents_allow_worktree(value: bool) -> Result<()> {
+    update_nested_toml_key(&["subagents"], "allow_worktree", TomlValue::Boolean(value)).await
 }
 
-/// Synchronously load `[endpoints] management_team_id` from config.
-///
-/// Explicit Management API team id for prepaid balance. Not SuperGrok OIDC
-/// `team_id`. Operator must set this (Console team id) for console team
-/// Business Usage meters.
-pub fn load_management_team_id_sync() -> Option<String> {
-    let root: toml::Value = crate::config::load_effective_config().ok()?;
-    if let toml::Value::Table(table) = root
-        && let Some(toml::Value::Table(endpoints)) = table.get("endpoints")
-    {
-        endpoints
-            .get("management_team_id")
-            .and_then(|v| v.as_str())
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(str::to_string)
-    } else {
-        None
-    }
+/// Write only `[ui.notifications].session_recap`.
+pub async fn update_ui_notifications_session_recap(value: bool) -> Result<()> {
+    update_nested_toml_key(
+        &["ui", "notifications"],
+        "session_recap",
+        TomlValue::Boolean(value),
+    )
+    .await
+}
+
+/// Write only `[ui.notifications].session_recap_threshold_secs`.
+pub async fn update_ui_notifications_session_recap_threshold_secs(value: u64) -> Result<()> {
+    update_nested_toml_key(
+        &["ui", "notifications"],
+        "session_recap_threshold_secs",
+        TomlValue::Integer(i64::try_from(value).unwrap_or(i64::MAX)),
+    )
+    .await
 }
 
 #[cfg(test)]

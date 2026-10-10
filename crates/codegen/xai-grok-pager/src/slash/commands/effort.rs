@@ -1,44 +1,26 @@
-//! `/effort` — set reasoning effort on the current model without re-picking it.
+//! `/effort`: set reasoning effort on the current model without re-picking it.
 //!
-//! Thin wrapper over `Action::SwitchModel` with the session's current model
-//! id and the chosen effort (same wire path as `/model <name> <effort>`).
+//! Thin wrapper over `Action::SwitchModel` with the session's current model id and the chosen effort (same wire path as `/model <name> <effort>`).
 
-use crate::app::actions::Action;
-use crate::slash::command::{AppCtx, ArgItem, CommandExecCtx, CommandResult, SlashCommand};
+use crate::app::actions::{Action, ModelChoice};
+use crate::slash::command::{
+    AppCtx, ArgItem, CommandExecCtx, CommandResult, SlashCommand, slash_meta,
+};
 use crate::slash::commands::effort_levels::build_effort_arg_items;
 
 /// Set reasoning effort for the active model.
 pub struct EffortCommand;
 
 impl SlashCommand for EffortCommand {
-    fn name(&self) -> &str {
-        "effort"
-    }
-
-    fn description(&self) -> &str {
-        "Set reasoning effort for the current model"
-    }
-
-    fn session_scoped(&self) -> bool {
-        true
-    }
-
-    fn usage(&self) -> &str {
-        // Levels are model-specific; empty-args and UnknownToken errors list
-        // the active model's offered option ids instead of a hardcoded set.
-        "/effort <level>"
-    }
-
-    fn takes_args(&self) -> bool {
-        true
-    }
-
-    fn args_required(&self) -> bool {
-        true
-    }
-
-    fn arg_placeholder(&self) -> Option<&str> {
-        Some("<level>")
+    slash_meta! {
+        name: "effort",
+        description: "Set reasoning effort for the current model",
+        // Levels are model-specific; empty-args and UnknownToken errors list the active model's offered option ids instead of a hardcoded set.
+        usage: "/effort <level>",
+        takes_args: true,
+        args_required: true,
+        session_scoped: true,
+        arg_placeholder: "<level>",
     }
 
     fn suggest_args(&self, ctx: &AppCtx, _args_query: &str) -> Option<Vec<ArgItem>> {
@@ -80,12 +62,11 @@ impl SlashCommand for EffortCommand {
             return CommandResult::Error(format!("Usage: /effort <{levels}>{current}"));
         }
 
-        // Same gate-first policy as the CLI (`--effort`) and headless.
         match ctx.models.resolve_effort_for_model(&model_id, trimmed) {
-            Ok(effort) => CommandResult::Action(Action::SwitchModel {
-                model_id,
+            Ok(effort) => CommandResult::Action(Action::SwitchModel(ModelChoice {
                 effort: Some(effort),
-            }),
+                ..ModelChoice::new(model_id)
+            })),
             Err(err) => CommandResult::Error(err.message()),
         }
     }
@@ -97,25 +78,23 @@ mod tests {
     use crate::acp::model_state::ModelState;
     use crate::slash::commands::effort_levels::EFFORT_LEVELS;
     use agent_client_protocol as acp;
-    use std::sync::Arc;
     use xai_grok_shell::sampling::types::ReasoningEffort;
+    use xai_grok_test_support::acp_fixtures;
 
     fn model_with_reasoning(id: &str, name: &str) -> (acp::ModelId, acp::ModelInfo) {
-        let id = acp::ModelId::new(Arc::from(id));
-        let mut meta = serde_json::Map::new();
-        meta.insert(
-            "supportsReasoningEffort".into(),
-            serde_json::Value::Bool(true),
+        let info = acp_fixtures::model_info_with_meta(
+            id,
+            name,
+            serde_json::json!({ "supportsReasoningEffort": true }),
         );
-        let info = acp::ModelInfo::new(id.clone(), name.to_string())
-            .meta(serde_json::Value::Object(meta).as_object().cloned());
-        (id, info)
+        (acp_fixtures::model_id(id), info)
     }
 
     fn plain_model(id: &str, name: &str) -> (acp::ModelId, acp::ModelInfo) {
-        let id = acp::ModelId::new(Arc::from(id));
-        let info = acp::ModelInfo::new(id.clone(), name.to_string());
-        (id, info)
+        (
+            acp_fixtures::model_id(id),
+            acp_fixtures::model_info(id, name),
+        )
     }
 
     static EMPTY_BUNDLE: crate::app::bundle::BundleState = crate::app::bundle::BundleState {
@@ -157,7 +136,7 @@ mod tests {
         match result {
             CommandResult::Error(msg) => {
                 assert!(msg.contains("Usage: /effort"));
-                // Legacy menu option ids only — not none/minimal.
+                // Legacy menu option ids only, not none/minimal
                 assert!(msg.contains("xhigh|high|medium|low"), "msg={msg}");
                 assert!(msg.contains("current: medium"));
                 assert!(!msg.contains("none"));
@@ -196,7 +175,9 @@ mod tests {
         let mut ctx = dummy_exec_ctx(&state);
         let result = EffortCommand.run(&mut ctx, "high");
         match result {
-            CommandResult::Action(Action::SwitchModel { model_id, effort }) => {
+            CommandResult::Action(Action::SwitchModel(ModelChoice {
+                model_id, effort, ..
+            })) => {
                 assert_eq!(model_id, id);
                 assert_eq!(effort, Some(ReasoningEffort::High));
             }
@@ -206,8 +187,7 @@ mod tests {
 
     #[test]
     fn none_and_minimal_rejected_when_model_menu_omits_them() {
-        // Legacy fallback menu is low..xhigh — `none`/`minimal` used to pass
-        // through and 400 on grok-4.5; reject at the TUI instead.
+        // The legacy fallback menu is low..xhigh; `none`/`minimal` used to pass through and 400 on grok-4.5, so reject at the TUI instead
         let mut state = ModelState::default();
         let (id, info) = model_with_reasoning("reasoning-x", "Reasoning X");
         state.available.insert(id.clone(), info);
@@ -221,8 +201,7 @@ mod tests {
                         msg.contains(&format!("unknown effort level '{token}'")),
                         "expected Error for {token}, got {msg}"
                     );
-                    // Must not re-advertise the rejected token as a valid choice
-                    // (aside from quoting it in "unknown effort level '…'").
+                    // The error must not re-advertise the rejected token as a valid choice (aside from quoting it in "unknown effort level '…'")
                     let after_prefix = msg
                         .split_once("; ")
                         .map(|(_, rest)| rest)
@@ -241,24 +220,26 @@ mod tests {
     #[test]
     fn none_accepted_when_model_menu_offers_it() {
         let mut state = ModelState::default();
-        let id = acp::ModelId::new(Arc::from("voice-dual"));
-        let info = acp::ModelInfo::new(id.clone(), "Voice Dual".to_string()).meta(
+        let id = acp_fixtures::model_id("voice-dual");
+        let info = acp_fixtures::model_info_with_meta(
+            "voice-dual",
+            "Voice Dual",
             serde_json::json!({
                 "supportsReasoningEffort": true,
                 "reasoningEfforts": [
                     { "value": "none", "label": "None", "default": true },
                     { "value": "high", "label": "High" },
                 ],
-            })
-            .as_object()
-            .cloned(),
+            }),
         );
         state.available.insert(id.clone(), info);
         state.current = Some(id.clone());
         let mut ctx = dummy_exec_ctx(&state);
         let result = EffortCommand.run(&mut ctx, "none");
         match result {
-            CommandResult::Action(Action::SwitchModel { model_id, effort }) => {
+            CommandResult::Action(Action::SwitchModel(ModelChoice {
+                model_id, effort, ..
+            })) => {
                 assert_eq!(model_id, id);
                 assert_eq!(effort, Some(ReasoningEffort::None));
             }
@@ -269,21 +250,23 @@ mod tests {
     #[test]
     fn remap_id_dispatches_mapped_canonical_effort() {
         let mut state = ModelState::default();
-        let id = acp::ModelId::new(Arc::from("reasoning-x"));
-        let info = acp::ModelInfo::new(id.clone(), "Reasoning X".to_string()).meta(
+        let id = acp_fixtures::model_id("reasoning-x");
+        let info = acp_fixtures::model_info_with_meta(
+            "reasoning-x",
+            "Reasoning X",
             serde_json::json!({
                 "supportsReasoningEffort": true,
                 "reasoningEfforts": [{ "id": "deep", "value": "xhigh", "label": "Deep" }],
-            })
-            .as_object()
-            .cloned(),
+            }),
         );
         state.available.insert(id.clone(), info);
         state.current = Some(id.clone());
         let mut ctx = dummy_exec_ctx(&state);
         // The rendered row inserts the id; `/effort deep` must send `xhigh`.
         match EffortCommand.run(&mut ctx, "deep") {
-            CommandResult::Action(Action::SwitchModel { model_id, effort }) => {
+            CommandResult::Action(Action::SwitchModel(ModelChoice {
+                model_id, effort, ..
+            })) => {
                 assert_eq!(model_id, id);
                 assert_eq!(effort, Some(ReasoningEffort::Xhigh));
             }
@@ -326,6 +309,8 @@ mod tests {
             billing_surface_visible: true,
             usage_command_visible: true,
             workflows_available: true,
+            saved_workflows: &[],
+            workflow_runs: &[],
             screen_mode: crate::app::ScreenMode::Fullscreen,
             current_title: None,
         };
@@ -342,6 +327,8 @@ mod tests {
             billing_surface_visible: true,
             usage_command_visible: true,
             workflows_available: true,
+            saved_workflows: &[],
+            workflow_runs: &[],
             screen_mode: crate::app::ScreenMode::Fullscreen,
             current_title: None,
         };
@@ -364,17 +351,85 @@ mod tests {
             billing_surface_visible: true,
             usage_command_visible: true,
             workflows_available: true,
+            saved_workflows: &[],
+            workflow_runs: &[],
             screen_mode: crate::app::ScreenMode::Fullscreen,
             current_title: None,
         };
         let items = cmd.suggest_args(&ctx, "").unwrap();
         assert_eq!(items.len(), EFFORT_LEVELS.len());
-        assert_eq!(items[0].insert_text, "xhigh");
-        assert_eq!(items[1].insert_text, "high");
-        assert_eq!(items[1].display, "high (active)");
-        assert_eq!(items[2].insert_text, "medium");
-        assert_eq!(items[3].insert_text, "low");
-        assert!(items[0].match_text.starts_with("a "));
-        assert!(items[3].match_text.starts_with("d "));
+        let [a, b, c, d] = items.as_slice() else {
+            panic!("expected 4 items: {items:?}");
+        };
+        assert_eq!(a.insert_text, "xhigh");
+        assert_eq!(b.insert_text, "high");
+        assert_eq!(b.display, "high (active)");
+        assert_eq!(c.insert_text, "medium");
+        assert_eq!(d.insert_text, "low");
+        assert!(a.match_text.starts_with("a "));
+        assert!(d.match_text.starts_with("d "));
+    }
+
+    #[test]
+    fn typed_label_filters_in_the_picker_and_runs() {
+        let mut state = ModelState::default();
+        let id = acp_fixtures::model_id("grok-4.7");
+        let info = acp_fixtures::model_info_with_meta(
+            "grok-4.7",
+            "Grok 4.7",
+            serde_json::json!({
+                "supportsReasoningEffort": true,
+                "reasoningEfforts": [
+                    { "value": "xhigh", "label": "Extra High" },
+                    { "value": "high", "label": "High" },
+                ],
+            }),
+        );
+        state.available.insert(id.clone(), info);
+        state.current = Some(id.clone());
+
+        let mut ctrl = crate::slash::SlashController::with_builtins(std::path::PathBuf::from("."));
+        let slash = crate::slash::SlashState::default();
+        let top = |ctrl: &mut crate::slash::SlashController, text: &str| {
+            ctrl.refresh(&slash, text, text.len(), &state);
+            slash
+                .snapshot()
+                .matches
+                .first()
+                .map(|row| row.display.clone())
+        };
+        assert_eq!(
+            top(&mut ctrl, "/effort extra").as_deref(),
+            Some("Extra High")
+        );
+        assert_eq!(top(&mut ctrl, "/effort high").as_deref(), Some("High"));
+        assert_eq!(
+            top(&mut ctrl, "/model Grok 4.7 extra").as_deref(),
+            Some("Extra High")
+        );
+        assert_eq!(
+            top(&mut ctrl, "/model Grok 4.7 high").as_deref(),
+            Some("High")
+        );
+
+        let mut ctx = dummy_exec_ctx(&state);
+        match EffortCommand.run(&mut ctx, "Extra High") {
+            CommandResult::Action(Action::SwitchModel(ModelChoice {
+                model_id, effort, ..
+            })) => {
+                assert_eq!(model_id, id);
+                assert_eq!(effort, Some(ReasoningEffort::Xhigh));
+            }
+            other => panic!("expected SwitchModel, got {other:?}"),
+        }
+        match crate::slash::commands::model::ModelCommand.run(&mut ctx, "Grok 4.7 Extra High") {
+            CommandResult::Action(Action::SwitchModel(ModelChoice {
+                model_id, effort, ..
+            })) => {
+                assert_eq!(model_id.0.as_ref(), "grok-4.7");
+                assert_eq!(effort, Some(ReasoningEffort::Xhigh));
+            }
+            other => panic!("expected model switch, got {other:?}"),
+        }
     }
 }

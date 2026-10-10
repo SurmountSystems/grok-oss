@@ -28,8 +28,10 @@ Grok stores each session in its own directory, grouped by working directory. It 
   summary.json            # metadata: summary/title, timestamps, model ID, message counts
   updates.jsonl           # ACP session update stream (conversation + tool calls)
   chat_history.jsonl      # raw chat messages sent to the model
-  resources_state.json    # live TODO / tool Resources snapshot
-  plan.json               # TODO/task list state (snapshot / fallback)
+  system_prompt.txt       # the rendered system prompt, as sent to the model
+  prompt_context.json     # the inputs the system prompt was rendered from
+  tool_definitions.json   # function tools sent on the latest model call (no MCP server__tool entries)
+  plan.json               # TODO/task list state
   rewind_points.jsonl     # rewind points for /rewind undo
   signals.json            # session signals (token usage, tool/turn counters)
   feedback.jsonl          # user feedback and ratings
@@ -41,17 +43,11 @@ Grok stores each session in its own directory, grouped by working directory. It 
   prompt_wal.jsonl           # append-only operator prompt write-ahead log
 ```
 
-`prompt_wal.jsonl` sits next to `unsent_prompt_draft` in that session directory. It is not git, not conversation, and not model tokens. Compact does not rewrite it. Each line is one operator event (Enter send, mid-turn interject, queue enqueue, plan Operator-box notes that ride Approve, or a `/rebuild` persist flush) with a ULID, wall time, session id, kind, full operator text, and `[Image #N]` file ids under `images/` (never inline data URLs). If a crash or rebuild drops a send that is missing from chat history, prompt history, and the queue, session load restores that WAL send as a pending Operator turn.
+`summary.json` is the index entry. It records the session summary and generated title, the model ID, the creation and update timestamps, the message counts, and a parent session reference for forked or restored sessions. It also records the latest last-turn summary and session recap so listing surfaces can show them. `updates.jsonl` is the authoritative conversation log that drives `/resume` and session restore. `tool_definitions.json` omits MCP `server__tool` entries because the model reaches those through `search_tool` and `use_tool`, which are listed. Per-turn token and cost totals are available through `grok usage`.
 
-See [`/rebuild`](04-slash-commands.md#rebuild) for how that persist path writes the WAL. Nested work on the leader survives `/rebuild` the same way a TUI disconnect does (the leader process stays up while nested ids are live).
+### Session titles
 
-Token Economy books live in `$GROK_HOME/grok_oss.db`, not in the session tree. Override the path with `[token_economy] grok_oss_database_path` in toml only. There is no Settings row for that path. See [Configuration](05-configuration.md#token-economy).
-
-### Continue interrupted turn on restart
-
-This is **not** last-session-on-start, and it is **not** the `/resume` picker.
-
-**Last session for this directory** reopens the conversation when you launch bare `grok-oss`. **Continue interrupted turn** is what happens **inside** a reopened session when the last top-level turn was cut short mid-work.
+The session title shown in the dashboard and `/resume` is generated automatically from the conversation. The prompt border shows a title only after a manual `/rename`, alongside the `Stashed` caption when a draft is stashed. Title generation starts right after your first prompt so a session always has a title, and then the title is regenerated from the whole conversation at a couple of early turns and frozen. This lets the title move past a vague first prompt to reflect what the session is really about, while staying stable afterward so you don't lose track of your sessions. A manual `/rename` always wins: once you rename a session, automatic generation never overrides it. Use `/rename --auto` to hand the title back to automatic generation.
 
 When a mid-turn is interrupted in a cancel-resumable way, Grok OSS may write `canceled_turn_resume.json` with the in-flight prompt identity (not secrets). On the next open of that same session, if **`[ui] resume_canceled_turn_on_restart`** is on (default **true**, Settings → Session → **Continue interrupted turn on restart**), Grok OSS re-queues that prompt once and clears the marker.
 
@@ -74,7 +70,7 @@ Do not confuse these:
 | `/start` | Starts paused or interrupted work in the current session. Not the picker. |
 | `/unstick` | Resend the last parent prompt as if the network dropped it. Orphans a hung in-flight prompt. The leader drops that hung `session/prompt` the same way as a disconnected client. WAL images resend as resource links, never data URLs. Not `/resume`. Not a second Operator line. |
 | Running grok-oss sessions | `/running` (alias `/windows`) or `grok-oss running`. Live grok-oss TUI windows on this machine. Not the Agent Dashboard, and not disk history. |
-| L0 GUI | `grok-oss gui`. Laptop coordinator over that window list. Not `/dashboard` and not `/running`. |
+| L0 coordinator | From a laptop, `grok-oss gui --ssh nixbuilder@surmount-1` lists grok-oss windows on that VPS. Not `/dashboard` and not `/running`. This tree does not contain a separate L0 window. |
 
 `summary.json` is the index entry. It records the session summary and generated title, the model ID, the creation and update timestamps, the message counts, and a parent session reference for forked or restored sessions. `updates.jsonl` is the authoritative conversation log that drives `/resume` and session restore.
 
@@ -112,16 +108,6 @@ Confirms, then permanently removes the session history. Returns to the welcome s
 
 ---
 
-## The session todo board
-
-The live session board is the TODO list. `resources_state.json` is the live snapshot. `plan.json` is a resume fallback. Open the pane with `Ctrl+Shift+T`, or click the status-row **tasks N/M** badge. The pane starts closed. A nested overlay shows that nested session's board, not the parent L1 list. `Ctrl+T` expands or collapses thinking.
-
-When the board is open and at least one completed or cancelled row exists, the todo header shows compact **`[−]`** (U+2212 minus) next to close. The icon paints whether or not the todo pane has keyboard focus. It does not paint when the board is hidden or nothing is finished.
-
-Click that icon, press `X` while the todo pane is focused, or run `/clear-completed-todos`. Those paths archive finished rows off the live board (**Clear finished**). Pending and in-progress items stay. This is not `h` hide-done, and it is not a `merge: false` wipe of open work. Hints still say **Clear finished**. The chrome itself is the compact minus, not the long words.
-
----
-
 ## Resuming Sessions
 
 ### From the TUI
@@ -136,9 +122,7 @@ This opens a session picker that lists recent sessions for the current workspace
 
 Typing in the picker filters the list by title and also searches your conversation content as you type; content matches appear under an "Extended search results" heading. Press `Ctrl+/` to search immediately without the brief pause.
 
-For the live top-level sessions in this pager (parent and forks), switch, rename, peek, dispatch, or close them with the [Agent Dashboard](23-dashboard.md): `/dashboard` (aliases `/sessions`, `/agents-dashboard`) or `Ctrl+\`.
-
-To see other live grok-oss TUI windows on this machine, including a second window on the same conversation, use [Running grok-oss sessions](#running-grok-oss-sessions) (`/running`, alias `/windows`). That list is not the Agent Dashboard and not the `/resume` picker.
+For the live top-level sessions in this pager (parent and forks) — switch, rename, peek, dispatch, or close — use the [Agent Dashboard](23-dashboard.md): `/dashboard` (aliases `/sessions`, `/agents-dashboard`) or `Ctrl+\`.
 
 ### From the Command Line
 
@@ -214,10 +198,7 @@ When **Confirm before rewind** is on (default in `/settings`), every pick asks f
 
 ```
 /compact
-/compact [context]
 ```
-
-The optional `context` argument lets you provide additional instructions about what to preserve during compaction.
 
 ### Auto-Compact
 
@@ -243,6 +224,8 @@ This shows:
 - Model (with a model hash for coding models)
 - API backend and sandbox profile (when set)
 - Context window usage (used and total tokens, with the percentage used)
+
+On the Session info tab, click a value to copy it, or drag to select a range (same highlight as the tool viewer). `c` copies the session ID and `y` copies the whole block. Copy uses the same clipboard route as the rest of Grok, including `grok-oss wrap`.
 
 ---
 
@@ -290,9 +273,17 @@ await connection.request("session/load", {
   cwd: "/path/to/project",
   mcpServers: [],
 });
+
+// Change a live option (model or reasoning_effort).
+// session/new and session/load already return the typed configOptions list.
+await connection.request("session/set_config_option", {
+  sessionId,
+  configId: "model",
+  value: { value: "grok-4.6" },
+});
 ```
 
-The agent persists all session updates automatically. Clients can reconnect and load previous sessions by ID.
+The agent persists all session updates automatically. Clients can reconnect and load previous sessions by ID. See [Agent mode](15-agent-mode.md#session-config-options) for the option IDs, value shape, and leader-mode snoop.
 
 ---
 
@@ -321,9 +312,14 @@ grok-oss running
 # Same filtered rows, safe fields only
 grok-oss running --json
 
-# L0 coordinator (safe JSON; not /dashboard and not /running)
+# L0 coordinator on this laptop (safe JSON; not /dashboard and not /running)
 grok-oss gui
+
+# List grok-oss windows on surmount-1
+grok-oss gui --ssh nixbuilder@surmount-1
 ```
+
+From a laptop, the travel command is `grok-oss gui --ssh nixbuilder@surmount-1`. That command lists grok-oss windows on surmount-1 and prints safe JSON. It does not print prompt text. Enqueue of a remote row copies the drop file `l0-enqueue/<session id>/enqueue.json` onto that host's grok home. The grok-oss session there drains that file the same way a local enqueue is drained. A remote row does not write that drop file on the laptop. L0 in this tree is `grok-oss gui` plus that pager drain. This tree does not contain a separate L0 window. From a laptop, `grok-oss gui --ssh <user@host> --session <session id>` reads the prompt from stdin and enqueues that one session on the SSH host, does not print the prompt, and does not write the laptop `l0-enqueue/` drop.
 
 `grok-oss running` is not `grok-oss sessions`. The sessions subcommand is disk history (list and search). `/rebuild` still signals each live grok-oss PID once (dedupe by PID) after two windows can share one conversation.
 
@@ -343,6 +339,22 @@ grok-oss sessions search "rate limit"
 ```
 
 `grok-oss sessions list` shows sessions for the current working directory, grouped by worktree label. Each row lists the session ID, the creation and update dates, the source status, and the summary. `grok-oss sessions search` combines a local SQLite index with remote results.
+
+---
+
+## The grok usage Subcommand
+
+Print persisted token and cost usage for a session. Use this instead of reading session files:
+
+```bash
+# Session totals plus every recorded turn
+grok usage <session-id>
+
+# One turn
+grok usage <session-id> 3
+```
+
+Output is JSON with `sessionId`, `updatedAt`, `session`, and `turns`. A specific turn uses the same envelope with one element in `turns`. Session totals cover the whole conversation, including history inherited by resume or fork. `costUsdTicks` is 10¹⁰ ticks per USD (divide by `1e10` for dollars). A missing turn number is an error. Interactive credit and billing stay on `/usage` in the TUI.
 
 ---
 
@@ -391,6 +403,78 @@ When the registry is unavailable, every row appears as `untracked` and the repor
 
 To reclaim space, run `grok-oss worktree gc --max-age 7d`, which removes tracked worktrees older than the age you give. Without `--max-age`, gc expires nothing, and it visits only worktrees the registry tracks. Remove an untracked worktree with `grok-oss worktree rm <path>`. Both commands take `--dry-run` and report what they would do: gc counts the worktrees it would remove, and `rm` names the path. Neither inspects the working tree for uncommitted or unpushed work, so read the preview first.
 
+`grok-oss worktree create [NAME]` creates the same worktree `grok-oss -w [NAME]` would, without starting a session. It prints the directory the session would have opened in. That path is the only output on stdout, so `cd "$(grok-oss worktree create my-fix)"` works. By default the worktree starts from HEAD with your uncommitted changes copied over. Pass `--ref <ref>` to start from a clean checkout of a branch, tag, or commit. If the new worktree lacks the directory you ran from, such as a `--ref` checkout that predates it or an ignored directory, the command prints the worktree root.
+
+### Manage Grove redirections
+
+A Grove worktree can redirect ignored artifact directories such as `target` and `node_modules` to storage outside the projected tree. The redirect commands take the mount path as their first argument.
+
+```bash
+grok-oss worktree redirect list /path/to/worktree
+grok-oss worktree redirect list /path/to/worktree --json
+grok-oss worktree redirect add /path/to/worktree target bind
+grok-oss worktree redirect del /path/to/worktree target
+grok-oss worktree redirect fixup /path/to/worktree
+grok-oss worktree redirect unmount /path/to/worktree target
+```
+
+`list` prints `repo_path`, `type`, `mechanism`, `target`, `source`, and `state`. Run `unmount` without a repo-relative path to take down every redirect on the mount. Use `fixup --force` to replace Grove-owned residue. Use `fixup --strict` to refuse a populated plain directory.
+
+
+```bash
+grok clone https://example.com/org/repo.git --redirect-ignored
+grok clone https://example.com/org/repo.git \
+  --redirect-ignored --redirect-dir build --redirect-dir '**/node_modules'
+grok clone https://example.com/org/repo.git --no-redirects
+```
+
+`GROVE_REDIRECTS=0` remains a runtime kill switch. Grok does not save the kill switch as the clone's redirect choice.
+
+### Checking Disk Usage
+
+`grok-oss du` (alias: `grok-oss disk-usage`) reports what the grok home (`~/.grok`) uses on disk. It lists each top-level directory, largest first, then each worktree with its size, type, age, label, and path. Worktrees the registry does not track appear as `untracked`. Pass `--json` for the same report as machine-readable output.
+
+```text
+Disk usage for ~/.grok
+    412.3 GB  worktrees
+      1.2 GB  sessions
+    412.0 MB  (top-level files)
+    413.9 GB  total
+  Worktree clones share storage with their source, so the total can exceed real disk use.
+
+Worktrees
+        SIZE  TYPE                AGE        LABEL  PATH
+    380.0 GB  session             12d ago    my-fix ~/.grok/worktrees/xai/worktree-abc
+     32.3 GB  untracked (session) 40d ago           ~/.grok/worktrees/xai/worktree-old
+
+To reclaim space, run `grok-oss worktree gc --max-age 7d --dry-run`, then the same command without `--dry-run`. Without `--max-age`, gc expires nothing, and it keeps a worktree whose work it cannot find elsewhere, naming each one.
+Untracked rows are not in the registry, so gc never visits them. Remove one with `grok-oss worktree rm --dry-run <path>`, then without `--dry-run`.
+```
+
+After the grok-home table, `grok-oss du` may print **Redirections**, **Orphaned redirections**, and **Unattributed redirect directories**. Those bytes live in Grove escape jails, not in the grok-home total. An empty scan prints nothing. Reclaim a live jail with `grok-oss worktree clean-artifacts`. Purge live jails plus proven orphans with `grok-oss du --clean --yes`. Delete only proven orphans with `grok-oss du --clean-orphaned --yes`.
+
+`AGE` is the value `grok-oss worktree gc` measures: time since the worktree was last accessed, or since it was created when that is more recent. Session and agent activity update it; a shell or editor left open in the directory does not. An untracked worktree has no registry entry, so its age comes from the newest file underneath it.
+
+Sizes are physical block counts on Unix and logical file sizes elsewhere, matching what `grok-oss worktree show` reports. A worktree clone shares storage with its source and each copy counts in full, so the total can exceed both `du -sh` and the space actually in use. When the total exceeds the used space on the volume, the report says so. `--json` carries the same figures as `volume_capacity_bytes` and `volume_available_bytes`.
+
+The report measures a single filesystem, the one holding the grok home. A directory on any other filesystem stays out of the total and is counted in `other_filesystem_dirs`, and its worktree rows show `-` for size (`null` in `--json`). A top-level symlink to a directory, such as a relocated `worktrees`, is counted in `unfollowed_dir_symlinks`; its target stays out of the total, though the rows below it are still sized. Directories and entries the report could not read are counted in `unreadable_dirs` and `unstatable_entries`. Run `RUST_LOG=debug grok-oss du` to name each one.
+
+Every worktree row in `--json` also carries `created_at`, `last_accessed_at`, and `last_modified_at` in unix seconds, plus `repo_name` and `git_ref`. Registry fields are `null` for untracked rows. `git_ref` is the branch recorded when the worktree was registered, not the branch checked out now.
+
+When the registry is unavailable, every row appears as `untracked` and the report names the reason. The `--json` `registry` field carries the same value: `read`, `absent`, `busy`, `unopenable`, or `corrupt`. A `busy` registry is held by another process, so retry. An `unopenable` one has a permission or I/O problem, so check the file. A `corrupt` one is the only case that calls for deletion: remove the file the report names, then run `grok-oss worktree db rebuild`.
+
+To reclaim space, run `grok-oss worktree gc --max-age 7d`, which removes tracked worktrees older than the age you give. Without `--max-age`, gc expires nothing, and it visits only worktrees the registry tracks. Remove an untracked worktree with `grok-oss worktree rm <path>`. Both commands take `--dry-run` and report what they would do: gc counts the worktrees it would remove, and `rm` names the path.
+
+Each run judges as many worktrees as it can in about a minute, because the same pass runs on a timer beside your session and reading a whole working tree is not free. Anything it did not reach is counted as `Not judged this pass` and waits for the next run, so on a machine with a lot to reclaim, run gc again until that number is zero.
+
+Before removing an expired worktree, gc checks whether the removal would destroy work: uncommitted, untracked or ignored files, a commit no surviving ref holds, or state kept only in that worktree's git directory. A worktree it cannot check is kept as well. The report counts kept worktrees and names the reason, separately from the ones a live process held back. `--force` does not skip the check, and `grok-oss worktree rm` does not apply it: it removes the path you name.
+
+Ignored files count as work, with one exception: a directory the repository's own ignore rules exclude and that either carries a tool's cache tag or is named like one of its output directories (`target`, `node_modules`, `.venv`, and the rest). A name alone is never enough, so a hand-written `build/` nobody excluded still keeps the worktree.
+
+A commit that only a worktree's own reflog names, which is what a `reset --hard` or an amend leaves behind, gets a lasting name under `refs/grok/reclaimed/<worktree>/<commit>` in the repository the worktree came from. Git counts a reflog as reachability when it prunes, so without that name removing the worktree is what would make the commit unreachable. Recover one with `git log refs/grok/reclaimed/` and `git branch <name> <commit>`.
+
+Those names do not accumulate. Each gc pass drops the ones that no longer hold anything: the commit is reachable from a real ref now, or it is more than 30 days old. The report counts them as `names_collected`.
+
 ---
 
 ## Session Storage Details
@@ -411,11 +495,14 @@ The smaller state files -- `summary.json`, `plan.json`, and `signals.json` -- ar
 
 - `info` -- the session ID and working directory
 - `session_summary` and `generated_title` -- the session summary and its model-generated title
+- `title_is_manual` -- true when the title was set by a manual `/rename` (so automatic generation leaves it alone)
 - `created_at` and `updated_at` -- creation and last-update timestamps
 - `num_messages` and `num_chat_messages` -- update and chat-message counts
 - `current_model_id` -- the model in use
 - `parent_session_id` -- the source session for a fork or restore
-- `agent_name` -- the agent definition active when the session was last saved
+- `agent_name` -- named agents persist this only; an inline `--agent-profile` session also persists `agent_profile` JSON
+- `last_turn_summary` -- an ultra-short summary of the most recent turn
+- `last_recap` -- a bounded preview of the latest session recap
 
 ### Disk Usage
 

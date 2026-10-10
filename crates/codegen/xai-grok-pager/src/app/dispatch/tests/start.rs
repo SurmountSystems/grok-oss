@@ -201,6 +201,90 @@ fn start_with_cancel_resume_marker_continues_interrupted_turn() {
     xai_grok_shell::session::canceled_turn_resume::clear_process_shutdown_cancel_resume();
 }
 
+/// Operator: "Stale prompts at start are still a problem sadly... And yes, what is running is the latest binary."
+///
+/// Empty scrollback, a canceled-turn marker whose text is `/goal do the thing`,
+/// and `chat_history.jsonl` that already has the Human turn
+/// `A goal has been set: do the thing`. `/start` must not queue that prompt.
+#[test]
+#[serial_test::serial(GROK_HOME)]
+fn stale_prompts_at_start_are_still_a_problem_sadly() {
+    let grok_home = tempfile::tempdir().unwrap();
+    let _home = xai_grok_test_support::EnvGuard::set("GROK_HOME", grok_home.path());
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let sid = "stale-goal-at-start";
+    let cwd = grok_home.path().join("stale-goal-cwd");
+    let cwd_str = cwd.to_string_lossy().into_owned();
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.session_id = Some(sid.into());
+        agent.session.cwd = cwd.clone();
+        agent.session.state = AgentState::Idle;
+        agent.session.pending_prompts.clear();
+        // Process start: scrollback has no Human turn yet. Do not push one.
+    }
+    let _ =
+        xai_grok_shell::session::canceled_turn_resume::clear_canceled_turn_resume(&cwd_str, sid);
+    let marker = xai_grok_shell::session::canceled_turn_resume::build_user_cancel_marker(
+        "/goal do the thing",
+        Some("pid-stale-goal"),
+        "2026-09-21T17:22:00Z",
+    )
+    .expect("marker");
+    xai_grok_shell::session::canceled_turn_resume::write_canceled_turn_resume(
+        &cwd_str, sid, &marker,
+    )
+    .expect("write marker");
+    let hist = xai_grok_shell::session::prompt_wal::chat_history_path(&cwd_str, sid)
+        .expect("chat_history.jsonl path");
+    std::fs::create_dir_all(hist.parent().unwrap()).expect("session dir");
+    std::fs::write(
+        &hist,
+        concat!(
+            r#"{"type":"user","content":[{"type":"text","text":"<user_query>\nA goal has been set: do the thing\n</user_query>"}]}"#,
+            "\n",
+        ),
+    )
+    .expect("write chat history");
+
+    let effects = dispatch(Action::SendPrompt("/start".into()), &mut app);
+
+    let queued: Vec<String> = app.agents[&id]
+        .session
+        .pending_prompts
+        .iter()
+        .map(|p| p.text.clone())
+        .collect();
+    assert!(
+        !queued
+            .iter()
+            .any(|t| t.contains("/goal") || t.contains("do the thing")),
+        "Operator: \"Stale prompts at start are still a problem sadly... And yes, what is running is the latest binary.\" queue must not contain the already-recorded /goal; queue={queued:?} effects={effects:?}"
+    );
+    assert!(
+        !effects.iter().any(|e| {
+            matches!(
+                e,
+                Effect::SendPrompt { text, .. }
+                    if text.contains("/goal") || text.contains("do the thing")
+            )
+        }),
+        "Operator: \"Stale prompts at start are still a problem sadly... And yes, what is running is the latest binary.\" /start must not send the already-recorded /goal; effects={effects:?}"
+    );
+    let remaining =
+        xai_grok_shell::session::canceled_turn_resume::load_canceled_turn_resume(&cwd_str, sid)
+            .expect("load after start");
+    assert!(
+        remaining.is_none(),
+        "Operator: \"Stale prompts at start are still a problem sadly... And yes, what is running is the latest binary.\" /start must clear the canceled-turn marker when chat history already has the goal"
+    );
+
+    let _ =
+        xai_grok_shell::session::canceled_turn_resume::clear_canceled_turn_resume(&cwd_str, sid);
+    xai_grok_shell::session::canceled_turn_resume::clear_process_shutdown_cancel_resume();
+}
+
 fn dock_isolated_preview_for_test(app: &mut AppView, id: AgentId, body: &str) {
     let mut viewer =
         crate::views::file_search::line_viewer::LineViewerState::open_markdown_content(

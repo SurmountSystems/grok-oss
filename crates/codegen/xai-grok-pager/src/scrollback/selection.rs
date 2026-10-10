@@ -1,7 +1,6 @@
 //! Selection box rendering for v3 pager.
 //!
-//! The `SelectionBox` is computed by components (like ScrollbackPane) and rendered
-//! by the frame, allowing selection boxes to span component boundaries.
+//! The `SelectionBox` is computed by components (like ScrollbackPane) and rendered by the frame, allowing selection boxes to span component boundaries.
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -18,19 +17,13 @@ mod border_chars {
     pub const BOTTOM_LEFT: char = '└';
     pub const BOTTOM_RIGHT: char = '┘';
     pub const VERTICAL: char = '│';
-    /// Dashed vertical - used on edge rows when clipped to indicate continuation.
+    /// Dashed vertical, used on edge rows when clipped to indicate continuation.
     pub const VERTICAL_DASHED: char = '┆';
 }
 
-/// A selection box that can be drawn around a selected block.
-///
-/// The box consists of:
-/// - Side borders (│) on the left and right edges of `inner_area`
-/// - Top corners (┌┐) one row above `inner_area` (if `!top_clipped`)
-/// - Bottom corners (└┘) one row below `inner_area` (if `!bottom_clipped`)
-///
-/// This struct is returned by components (like ScrollbackPane) and rendered
-/// by the frame, allowing selection boxes to span component boundaries.
+/// A selection box that can be drawn around a selected block. Side borders (│) on the left and right edges of
+/// `inner_area`. Top corners (┌┐) one row above `inner_area` (if `!top_clipped`). Bottom corners (└┘) one row below
+/// `inner_area` (if `!bottom_clipped`).
 #[derive(Debug, Clone)]
 pub struct SelectionBox {
     /// The inner area surrounded by the selection border.
@@ -57,19 +50,8 @@ pub struct SelectionBox {
 }
 
 /// Output from render that needs post-processing.
-///
 /// Render returns this instead of mutating state, keeping render pure.
 /// The caller is responsible for rendering these elements after the main pass.
-///
-/// # Example
-/// ```ignore
-/// let output = pane.render_with_scratch(area, buf, &state, &mut scratch);
-///
-/// // Post-render pass
-/// if let Some(sel) = output.selection_box {
-///     sel.render(buf);
-/// }
-/// ```
 #[derive(Debug, Clone, Default)]
 pub struct RenderOutput {
     /// Selection box to render around the selected entry.
@@ -85,25 +67,22 @@ pub struct RenderOutput {
     pub selection_model: ResolvedSelectionModel,
     /// OSC 8 link overlay for post-flush emission.
     pub link_overlay: LinkOverlay,
+    /// Hit rects for always-on bubble copy glyphs, paired with the entry index.
+    pub bubble_copy_hits: Vec<(Rect, usize)>,
     /// Inline media to render via post-flush escape sequences.
     pub inline_media: Vec<crate::scrollback::render::InlineMediaPlacement>,
     /// Mermaid diagram affordance rows to paint + register click hit-rects for.
     pub diagram_affordances: Vec<crate::scrollback::render::DiagramAffordancePlacement>,
-    /// Always-on bubble copy ⧉ hit rects: `(screen rect, entry_idx)`.
-    pub bubble_copy_hits: Vec<(Rect, usize)>,
-    /// Screen row (relative to the scrollback area top) of the sticky
-    /// header's gap row, when this frame drew a pinned header. The ▲
-    /// response-top indicator renders here; publishing the row the pane
-    /// actually used keeps the indicator from re-deriving (and possibly
-    /// disagreeing with) the frame's layout.
+    /// Screen row (relative to the scrollback area top) of the sticky header's gap row, when this frame drew a pinned header.
+    /// The ▲ response-top indicator renders here.
+    /// Publishing the row the pane actually used keeps the indicator from re-deriving (and possibly disagreeing with) the frame's layout.
     pub sticky_gap_row: Option<u16>,
 }
 
 /// Scroll information for scrollbar rendering.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ScrollInfo {
-    /// Current scroll offset (lines from top). `usize`: tall sessions exceed
-    /// `u16::MAX`.
+    /// Current scroll offset (lines from top). `usize`: tall sessions exceed `u16::MAX`.
     pub scroll_offset: usize,
     /// Visible viewport height (lines). Stays `u16` (a terminal is never that tall).
     pub viewport_height: u16,
@@ -198,8 +177,7 @@ impl SelectionBox {
     }
 
     /// Hit-test rect for the close control, if it would be rendered.
-    ///
-    /// Pure computation — does not touch the buffer. Use for mouse hit-testing.
+    /// Pure computation; it does not touch the buffer. Use for mouse hit-testing.
     /// Returns `None` if not closable, top is clipped, or no room.
     pub fn close_button_rect(&self) -> Option<Rect> {
         if !self.closable || self.top_clipped || self.inner_area.y == 0 {
@@ -220,93 +198,68 @@ impl SelectionBox {
         })
     }
 
-    /// Layout rect for the optional action control left of close.
-    ///
-    /// One space gap between action label and close. Always reserves a
-    /// close-slot width (default ✗ = 1 cell) even when close is not painted, so
-    /// the action does not jump left/right when focus toggles the close control.
-    /// `None` when no label, top clipped, or not enough width.
-    ///
-    /// Geometry is independent of [`Self::action_enabled`]; callers register a
-    /// mouse hit only when enabled.
+    /// Hit-test rect for the optional action left of close.
+    /// A one-column close slot is reserved even when close is not painted,
+    /// so the action x matches the closable layout.
     pub fn action_button_rect(&self) -> Option<Rect> {
         let label = self.action_label?;
         if self.top_clipped || self.inner_area.y == 0 {
             return None;
         }
-        let label_w = (label.chars().count() as u16).max(1);
-        let y = self.inner_area.y - 1;
-        let close_w = self
-            .close_button_rect()
-            .map(|r| r.width)
-            .unwrap_or(1)
-            .max(1);
-        let need = label_w.saturating_add(1).saturating_add(close_w);
-        if need > self.inner_area.width {
+        let action_w = label.chars().count() as u16;
+        if action_w == 0 {
             return None;
         }
+        let close_w = if self.closable {
+            self.close_label
+                .map(|s| s.chars().count() as u16)
+                .unwrap_or(1)
+                .max(1)
+        } else {
+            1
+        };
         let right_x = self.inner_area.x + self.inner_area.width.saturating_sub(1);
         let close_x = right_x.saturating_sub(close_w.saturating_sub(1));
-        let x = close_x.saturating_sub(1 + label_w);
-        if x < self.inner_area.x {
-            return None;
-        }
+        let action_x = close_x.saturating_sub(1).saturating_sub(action_w);
         Some(Rect {
-            x,
-            y,
-            width: label_w,
+            x: action_x,
+            y: self.inner_area.y - 1,
+            width: action_w,
             height: 1,
         })
     }
 
-    /// Style for the optional action label (todo clear-finished icon).
-    ///
-    /// Quiet idle: theme `gray` when enabled (not always-on neon
-    /// `accent_user` green). Stronger on hover (`text_primary`). Disabled
-    /// uses dimmer `gray_dim`. Never agent magenta.
-    fn action_paint_style(&self) -> Style {
+    fn action_style(&self) -> Style {
         let theme = Theme::current();
-        if !self.action_enabled {
-            Style::default().fg(theme.gray_dim)
+        let fg = if !self.action_enabled {
+            theme.gray_dim
         } else if self.action_hovered {
-            Style::default().fg(theme.text_primary)
+            theme.text_primary
         } else {
-            Style::default().fg(theme.gray)
-        }
+            theme.gray
+        };
+        Style::default().fg(fg)
     }
 
-    /// Paint only the optional action label (no rails, corners, or close).
-    ///
-    /// Used when the todo board is open but unfocused (finished rows only).
+    fn paint_action_label(&self, buf: &mut Buffer) {
+        let Some(rect) = self.action_button_rect() else {
+            return;
+        };
+        let Some(label) = self.action_label else {
+            return;
+        };
+        use crate::render::SafeBuf;
+        buf.set_string_safe(rect.x, rect.y, label, self.action_style());
+    }
+
+    /// Paint only the action label. Tests use this without the border pass.
     pub fn render_action_only(&self, buf: &mut Buffer) {
         self.paint_action_label(buf);
     }
 
-    fn paint_action_label(&self, buf: &mut Buffer) {
-        if self.top_clipped || self.inner_area.y == 0 {
-            return;
-        }
-        if let Some(action_rect) = self.action_button_rect()
-            && let Some(label) = self.action_label
-        {
-            use crate::render::SafeBuf;
-            buf.set_string_safe(
-                action_rect.x,
-                action_rect.y,
-                label,
-                self.action_paint_style(),
-            );
-        }
-    }
-
-    /// Render the selection box to the buffer.
-    ///
-    /// Draws:
-    /// - Side borders (│) on left and right edges of inner_area
-    /// - Dashed borders (┆) on edge rows when clipped, to indicate continuation
-    /// - Top corners (┌┐) at inner_area.y - 1 if !top_clipped and y > 0
-    /// - Bottom corners (└┘) at inner_area.y + height if !bottom_clipped
-    /// - Close button (✗) left of ┐ if enabled
+    /// Render the selection box to the buffer. Side borders (│) on left and right edges of inner_area. Top corners (┌┐)
+    /// at inner_area.y - 1 if !top_clipped and y > 0. Bottom corners (└┘) at inner_area.y + height if !bottom_clipped.
+    /// Close button (✗) left of ┐ if enabled.
     pub fn render(&self, buf: &mut Buffer) {
         let area = self.inner_area;
         if area.width == 0 || area.height == 0 {

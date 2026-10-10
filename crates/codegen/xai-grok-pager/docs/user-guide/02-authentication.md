@@ -91,6 +91,8 @@ Meters stay distinct:
 
 grok-oss fetches the console.x.ai Billing Credits card remaining from Management GET `/v1/billing/teams/{team_id}/postpaid/invoice/preview` (GetAmountToPay): `coreInvoice.prepaidCredits.val` minus `coreInvoice.prepaidCreditsUsed.val`. See [Billing Management REST](https://docs.x.ai/developers/rest-api-reference/management/billing) (accessed: 2026-08-22). That remaining is not Management prepaid/balance `total.val` (console team prepaid remaining) and not SuperGrok session `prepaidBalance.val` (SuperGrok dollar credits). JSON `console.billingCreditsCard` is `fetched` with `billingCreditsUsd` when those fields parse, `error` when the Management call failed, and `not_fetched` when grok-oss did not call or the body lacked the pair. grok-oss does not hop sampling from this card. Fail-open printout still must not hop. Real SuperGrok HTTP 402 still hops. A past paste of the Billing Credits dollar is not current remaining. SuperGrok is a paid product.
 
+JSON `console.teamDefaultCreditsUsd` is postpaid preview `defaultCredits`. That amount is not Credits remaining and not the prepaid wallet. JSON `console.teamDefaultCreditsIssuedUsd` is default credits issued on this invoice preview (`coreInvoice.defaultCreditsIssued`) when those cents are in the preview. When they are absent, grok-oss says the issued amount was not in the preview. That line is not the granted share of dashboard Credits remaining. The 30-day dashboard Credits remaining and Credits usage were not in the management bodies this printout parsed. grok-oss does not print a guessed sum of the Billing Credits card, postpaid preview defaultCredits, and the postpaid period total as either dashboard figure. When an inference-key prepaid read returns no cents and a management key plus team id exist, grok-oss also calls Management GET `/v1/billing/teams/{team_id}/prepaid/balance` and prints team prepaid remaining from `total.val`. That prepaid line is not Credits remaining. A successful inference balance is not replaced. If both reads are empty, team prepaid stays unavailable. The prepaid balance is not copied onto the Billing Credits card.
+
 Desired spend order (chrome and rank): spend included SuperGrok period limits on a stored personal SuperGrok login first. A Team / Business SuperGrok JWT is not the paying source while that personal login exists (that JWT settles as team postpaid OAuth / Grok Build and can debit the Billing Credits card). Then SuperGrok dollar credits that never expire, then console team prepaid / console API credits. Remaining included SuperGrok period limits across distinct stored plans are added together. That sum is the real remaining included quota. A unified pool (the same wire pool) counts once. While included SuperGrok period limits still have room, stay on the SuperGrok session. When personal included SuperGrok period limits have room again, grok-oss uses personal SuperGrok, not leftover business credits, unless the Operator pinned console or pinned business. Compact status may paint `SuperGrok period · N%`. A named workspace may paint `SuperGrok period · business · 9%`. Cold chrome is `...%` until a real reading exists. Click that chip to open `/limits`.
 
 Personal SuperGrok and business SuperGrok are distinct identities. Matching `nextReset` is not a shared pool. grok-oss limits JSON is a client printout, not xAI billing truth.
@@ -104,6 +106,8 @@ A grok-oss limits JSON or compact printout of included 100%, remaining 0, or Sup
 Named commands, same words on TUI `/limits` and CLI `grok-oss limits`: `stay-supergrok`, `use-console`, `use-personal`, `use-business`, `meter included|dollar-credits|console|combined`, `refresh` (ForceRefresh). `use-personal` and `use-business` persist the sidecar `$GROK_HOME/limits_pins.json` field `supergrok_identity`. Personal SuperGrok and business SuperGrok are distinct weekly pools; they do not combine. SuperGrok is a paid product. `use-business` is valid even when business has no included period-limits payload. grok-oss fails loud if no stored Team login exists. A second `grok-oss login` stores the Team principal. Pins live in `$GROK_HOME/limits_pins.json`, a sibling of `exhausted_credits/`. No new `[auth]` keys. Stock `preferred_method = "api_key"` still pins console. `stay-supergrok` hop-back does not require console credits. Fail-open: a client 100% / remaining 0 / SuperGrok dollar credits $0 printout must not mark SuperGrok used up or hop to console. Automatic HonorTtl is at most once an hour. `/limits refresh` (ForceRefresh) still fetches even when that snapshot is younger than one hour.
 
 See [Slash Commands → `/limits`](04-slash-commands.md#limits) and [Configuration → Token Economy](05-configuration.md#token-economy).
+
+The small uptime window sits beside the status line. It is not this compact meter, and it does not replace the token chrome. See [Uptime window](04-slash-commands.md#uptime-window).
 
 ---
 
@@ -271,7 +275,7 @@ same JSON fields (such as `issuer`) on every invocation, including refreshes.
   rejected. Nobody is watching. stdin is closed, your stderr is swallowed, and
   the binary is given a few seconds before it is killed. Mint silently or exit
   non-zero — never block.
-- **Unset, a sign-in.** `grok-oss login`, the sign-in screen, or the escalation
+- **Unset — a sign-in.** `grok-oss login`, the sign-in screen, or the escalation
   Grok performs when a headless run couldn't mint. A user is waiting, your
   stderr reaches them, and you have 300 seconds — enough for a browser round
   trip or a device code.
@@ -383,6 +387,13 @@ During a session, the active method handles all mid-session refreshes.
 
 ---
 
+## Grove Git credentials (not this page's `grok-oss login`)
+
+
+**`~/.grok/auth.json` is never read for Git.** `grok-oss login` does not create a Git credential and `grok-oss logout` does not revoke one; the daemon builds its own credential cell from `auth_mode` in Grove config. Those credentials are managed with `grove status` and `grove reload-credentials` -- see [grok clone](27-grok-clone.md#authentication) for the failure classes and their next steps.
+
+---
+
 ## Related settings
 
 Coding-data sharing — **Coding data, retention, and training** in Settings,
@@ -398,7 +409,8 @@ On team accounts, only a team admin can change coding-data sharing.
 Team admins can also enable or disable Zero Data Retention (ZDR) for their team.
 See [How to enable ZDR](https://docs.x.ai/developers/faq/security#how-to-enable-zdr).
 When ZDR is on, coding-data sharing cannot be changed at all — the settings
-row shows `ZDR` in place of the value.
+row shows `ZDR` in place of the value. ZDR does not turn off external OTEL
+or `user.email` — see [ZDR and this stream](24-monitoring-usage.md#zdr-and-this-stream).
 
 See [Monitoring Usage](24-monitoring-usage.md#related-settings) and [Configuration](05-configuration.md#telemetry).
 

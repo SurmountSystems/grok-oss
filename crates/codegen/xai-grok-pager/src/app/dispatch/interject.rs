@@ -1,119 +1,43 @@
-//! Mid-turn interjection dispatch: optimistic local echo, the
-//! `x.ai/interject` effect, and prompt-history recording. Split out of
-//! `dispatch.rs` verbatim (pure code motion).
+//! Mid-turn interjection dispatch: optimistic local echo, the `x.ai/interject` effect, and prompt-history recording.
 
+use super::ctx::NO_SESSION_NOTICE;
 use super::voice::voice_stop_on_submit;
 use crate::app::actions::Effect;
+use crate::app::agent::AgentId;
 use crate::app::agent_view::AgentView;
 use crate::app::app_view::{ActiveView, AppView};
 use crate::scrollback::block::RenderBlock;
+use agent_client_protocol as acp;
 
-/// Send a mid-turn interjection. Pushes a standard user prompt block locally
-/// for instant feedback, records the text in prompt history, clears the
-/// prompt, and fires the `x.ai/interject` ext method carrying a client-minted
-/// id.
-///
-/// The shell broadcasts `x.ai/session/interjection` to every attached pane so
-/// other clients viewing the same session render it too (multi-client /
-/// dashboard mode). Our own broadcast echoes back carrying the same id; the id
-/// is recorded in `self_interjection_ids` so `handle_interjection` drops the
-/// echo instead of rendering a duplicate. Other panes lack the id and render
-/// it. (Optimistic-echo + reconcile-by-id, mirroring the shared prompt queue.)
-/// Where operator text from a nested overlay should go.
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum OverlayOperatorClarify {
-    /// Mid-turn ask to this L2 coordinator session.
-    L2(agent_client_protocol::SessionId),
-    /// L3 specialist overlay: do not inject operator chat.
+    /// Fullscreen overlay is an L3. Operator text stays off that view.
     L3Unbothered,
-    /// No overlay; use the main-thread session.
+    /// Fullscreen overlay is an L2. Route the interject there.
+    L2(acp::SessionId),
     None,
 }
 
 pub(super) fn overlay_operator_clarify(agent: &AgentView) -> OverlayOperatorClarify {
-    let Some(child_sid) = agent.active_subagent.as_deref() else {
+    let Some(sid) = agent.visible_nested_overlay_sid() else {
         return OverlayOperatorClarify::None;
     };
-    if !agent.subagent_views.contains_key(child_sid) {
+    let Some(info) = agent
+        .subagent_sessions
+        .values()
+        .find(|info| info.child_session_id.as_ref() == sid)
+    else {
         return OverlayOperatorClarify::None;
-    }
-    if crate::app::subagent::overlay_child_is_l2_coordinator(&agent.subagent_sessions, child_sid) {
-        OverlayOperatorClarify::L2(agent_client_protocol::SessionId::new(child_sid))
-    } else {
+    };
+    if info.attempt.depth.is_some_and(|depth| depth >= 2) {
         OverlayOperatorClarify::L3Unbothered
+    } else {
+        OverlayOperatorClarify::L2(acp::SessionId::new(sid))
     }
 }
 
-fn refuse_l3_overlay_operator_text(agent: &mut AgentView) -> Vec<Effect> {
-    agent.show_toast(
-        "Specialists are not interrupted. Ask the coordinator from that coordinator's view.",
-    );
-    vec![]
-}
-
-/// True when operator text uniquely names this live subagent (description,
-/// Subagents-list job / tag, full or short id, child_session_id).
-fn text_names_subagent(text: &str, info: &crate::app::subagent::SubagentInfo) -> bool {
-    let hay = text.to_ascii_lowercase();
-    let sid = info.child_session_id.as_ref();
-    let aid = info.subagent_id.as_ref();
-    if !sid.is_empty() && hay.contains(&sid.to_ascii_lowercase()) {
-        return true;
-    }
-    if !aid.is_empty() && aid != sid && hay.contains(&aid.to_ascii_lowercase()) {
-        return true;
-    }
-    // Short id as shown in the Subagents list (first 8 chars of a long id).
-    if sid.len() >= 8 {
-        let short = &sid[..8];
-        if hay.contains(&short.to_ascii_lowercase()) {
-            return true;
-        }
-    }
-    if aid.len() >= 8 && aid != sid {
-        let short = &aid[..8];
-        if hay.contains(&short.to_ascii_lowercase()) {
-            return true;
-        }
-    }
-    let (tag, clean) = crate::app::subagent::parse_tag_prefix(info.description.as_ref());
-    let clean = clean.trim();
-    if clean.len() >= 3 && hay.contains(&clean.to_ascii_lowercase()) {
-        return true;
-    }
-    if let Some(tag) = tag {
-        let tag = tag.trim();
-        if tag.len() >= 3 && hay.contains(&tag.to_ascii_lowercase()) {
-            return true;
-        }
-    }
-    false
-}
-
-/// Main-thread naming of a live L2: return that L2 session only when exactly
-/// one live L2 matches. Ambiguous (0 or 2+) keeps the caller on L1. Never
-/// returns an L3; specialists stay unbothered unless the Operator opens that
-/// specialist overlay (and even then the overlay refuses inject).
-pub(super) fn resolve_uniquely_named_live_l2(
-    agent: &AgentView,
-    text: &str,
-) -> Option<agent_client_protocol::SessionId> {
-    let live = crate::app::subagent::live_subagent_list(agent.subagent_sessions.values());
-    let matches: Vec<_> = live
-        .into_iter()
-        .filter(|info| text_names_subagent(text, info))
-        .collect();
-    if matches.len() != 1 {
-        return None;
-    }
-    let sid = matches[0].child_session_id.as_ref();
-    Some(agent_client_protocol::SessionId::new(sid))
-}
-
-/// Send a mid-turn ask. When an L2 overlay is open, the target is that L2
-/// session. An L3 overlay never receives operator text and never falls
-/// through to the main thread. With no overlay, main-thread text that
-/// uniquely names a live L2 soft-interjects that L2 session.
+/// Send a mid-turn interjection.
+/// Pushes a standard user prompt block locally for instant feedback, records the text in prompt history, and clears the prompt.
+/// The id is recorded in `self_interjection_ids` so `handle_interjection` drops the echo instead of rendering a duplicate.
 pub(super) fn dispatch_interject(
     app: &mut AppView,
     text: String,
@@ -124,111 +48,129 @@ pub(super) fn dispatch_interject(
     let ActiveView::Agent(id) = app.active_view else {
         return vec![];
     };
+    dispatch_interject_on(app, id, text, images)
+}
+
+/// Same as [`dispatch_interject`], but targets `agent_id` instead of the focused pane.
+/// Used when a `/btw` answer lands on a non-active session.
+pub(super) fn dispatch_interject_on(
+    app: &mut AppView,
+    id: AgentId,
+    text: String,
+    images: Vec<crate::prompt_images::PastedImage>,
+) -> Vec<Effect> {
+    dispatch_interject_on_inner(app, id, text, images, /* user_submit */ true)
+}
+
+/// Wait-start / Enter flush: same wire send, without submit side effects (voice stop, history, toast).
+pub(super) fn dispatch_interject_from_held_queue(
+    app: &mut AppView,
+    id: AgentId,
+    text: String,
+    images: Vec<crate::prompt_images::PastedImage>,
+) -> Vec<Effect> {
+    dispatch_interject_on_inner(app, id, text, images, /* user_submit */ false)
+}
+
+fn dispatch_interject_on_inner(
+    app: &mut AppView,
+    id: AgentId,
+    text: String,
+    images: Vec<crate::prompt_images::PastedImage>,
+    user_submit: bool,
+) -> Vec<Effect> {
+    // Voice is app-wide and bound to the focused composer
+    // A /btw answer on another session must not commit interim text or kill dictation on the pane the user is actually talking into
+    if user_submit && matches!(app.active_view, ActiveView::Agent(active) if active == id) {
+        // Hard-reset only; `text` may not be from the composer
+        let _ = voice_stop_on_submit(app);
+    }
     let Some(agent) = app.agents.get_mut(&id) else {
         return vec![];
     };
 
-    // Submitting an interjection retires any edit-contextual ephemeral tip —
-    // even when there is no active session, matching the prompt/bash/
-    // feedback/remember paths.
-    agent.ephemeral_tip.clear_on_submit();
-
-    match overlay_operator_clarify(agent) {
-        OverlayOperatorClarify::L3Unbothered => return refuse_l3_overlay_operator_text(agent),
-        OverlayOperatorClarify::L2(session_id) => {
-            return paint_and_send_interject(agent, id, session_id, text, images);
-        }
-        OverlayOperatorClarify::None => {
-            if let Some(l2_session_id) = resolve_uniquely_named_live_l2(agent, &text) {
-                return paint_and_send_interject(agent, id, l2_session_id, text, images);
-            }
-        }
+    if user_submit {
+        agent.ephemeral_tip.clear_on_submit();
+        agent.release_hook_block_hold();
     }
 
-    let Some(session_id) = agent.session.session_id.clone() else {
-        agent.show_toast("No active session");
+    let routed_session = match overlay_operator_clarify(agent) {
+        OverlayOperatorClarify::L3Unbothered => {
+            agent.show_toast("This overlay is an L3. Type on the L2 that owns it.");
+            return vec![];
+        }
+        OverlayOperatorClarify::L2(session_id) => Some(session_id),
+        OverlayOperatorClarify::None => super::prompt::resolve_uniquely_named_live_l2(agent, &text),
+    };
+
+    let Some(session_id) = routed_session.or_else(|| agent.session.session_id.clone()) else {
+        agent.show_toast(NO_SESSION_NOTICE);
         return vec![];
     };
 
-    paint_and_send_interject(agent, id, session_id, text, images)
-}
-
-fn paint_and_send_interject(
-    agent: &mut AgentView,
-    agent_id: crate::app::agent::AgentId,
-    session_id: agent_client_protocol::SessionId,
-    text: String,
-    images: Vec<crate::prompt_images::PastedImage>,
-) -> Vec<Effect> {
-    // Prefer the target nested view (overlay open, or main-thread retarget to
-    // a named live L2). Fall back to the open overlay child, then L1.
-    let target_sid = session_id.0.to_string();
-    let overlay_sid = agent.active_subagent.clone();
-    let paint_target = if agent.subagent_views.contains_key(&target_sid) {
-        agent
+    if user_submit {
+        let child_key = session_id.0.to_string();
+        let child_key = agent
             .subagent_views
-            .get_mut(&target_sid)
-            .map(|child| &mut **child)
-            .expect("checked")
-    } else if overlay_sid
-        .as_ref()
-        .is_some_and(|sid| agent.subagent_views.contains_key(sid))
-    {
-        agent
-            .subagent_views
-            .get_mut(overlay_sid.as_ref().expect("checked"))
-            .map(|child| &mut **child)
-            .expect("checked")
-    } else {
-        agent
-    };
-    if matches!(
-        paint_target.session.state,
-        crate::app::agent::AgentState::TurnCancelling
-    ) || paint_target.wake_turn_cancelling()
-    {
-        paint_target.abort_cancellable_cancel();
+            .contains_key(&child_key)
+            .then_some(child_key);
+        if let Some(key) = child_key {
+            if let Some(child) = agent.subagent_views.get_mut(&key) {
+                child.abort_cancellable_cancel();
+                child.append_prompt_wal(
+                    xai_grok_shell::session::prompt_wal::PromptWalKind::Interject,
+                    &text,
+                    &images,
+                );
+            }
+        } else {
+            agent.abort_cancellable_cancel();
+            agent.append_prompt_wal(
+                xai_grok_shell::session::prompt_wal::PromptWalKind::Interject,
+                &text,
+                &images,
+            );
+        }
+        agent.record_prompt_in_history(&text);
     }
-    record_interject_prompt_history(paint_target, &text);
 
-    // Local paint first. WAL fsync must not precede the scrollback block.
-    // WAL still runs before this function returns SendInterject.
+    // Push a standard user prompt block locally for instant feedback
+    // Record its id so the broadcast echo (`x.ai/session/interjection`) is deduped instead of rendering a second copy on this pane
     let interjection_id = uuid::Uuid::new_v4().to_string();
-    paint_target
-        .self_interjection_ids
-        .insert(interjection_id.clone());
-    paint_target
+    agent.self_interjection_ids.insert(interjection_id.clone());
+    let entry_id = agent
         .scrollback
         .push_block(RenderBlock::interjection_prompt(&text));
+    agent
+        .interjection_painted_blocks
+        .insert(interjection_id.clone(), entry_id);
+    agent
+        .interjection_retry_images
+        .insert(interjection_id.clone(), images.clone());
 
-    // The composer is NOT touched here: the producer that consumed composer
-    // text (the InterjectPrompt registry arm) clears it at the call site;
-    // every other producer (Send now, edit-interject, plan review comments)
-    // carries non-composer text and must keep the user's draft/stash.
-    paint_target.show_toast("Interjection sent");
+    // The composer is NOT touched here: the producer that consumed composer text (the InterjectPrompt registry arm) clears it at the call site
+    // Every other producer (Send now, edit-interject, plan review comments) carries non-composer text and must keep the user's draft/stash
+    if user_submit {
+        agent.show_toast("Interjection sent");
+    }
 
-    paint_target.append_prompt_wal(
-        xai_grok_shell::session::prompt_wal::PromptWalKind::Interject,
-        &text,
-        &images,
-    );
-
-    // Image-bearing interjection: build text + image content blocks via the
-    // same helper as the queued-prompt drain path (orphan-placeholder
-    // recovery, allowlist, size cap). Text-only stays on the legacy wire.
-    let cwd = paint_target.session.cwd.clone();
-    let blocks = if images.is_empty() {
-        None
+    // Image-bearing interjection: build text and image content blocks via the same helper as the queued-prompt drain path
+    // The helper covers orphan-placeholder recovery, the allowlist, and the size cap. Text-only stays on the legacy wire.
+    let (blocks, skipped_notice) = if images.is_empty() {
+        (None, None)
     } else {
-        Some(crate::prompt_images::build_content_blocks_with_workspace(
+        let build = crate::prompt_images::build_content_blocks_with_workspace_report(
             text.clone(),
             images,
-            Some(std::path::Path::new(&cwd)),
-        ))
+            Some(std::path::Path::new(&agent.session.cwd)),
+        );
+        let notice = agent.skipped_image_send_notice(&build.skipped_display_numbers);
+        (Some(build.blocks), notice)
     };
+    app.pending_image_notices.extend(skipped_notice);
 
     vec![Effect::SendInterject {
-        agent_id,
+        agent_id: id,
         session_id,
         text,
         interjection_id,
@@ -236,40 +178,41 @@ fn paint_and_send_interject(
     }]
 }
 
-/// Cancel-and-send: send `text` (+ images) as a fresh `sendNow` prompt so the
-/// shell cancels the running turn and runs it next. The user block paints at
-/// dispatch (the arm hides the queue echo; the adoption reuses the block).
+/// Cancel-and-send: send `text` (and images) as a fresh `sendNow` prompt so the shell cancels the running turn and runs it next.
+/// The user block paints at dispatch (the arm hides the queue echo; the adoption reuses the block).
 pub(super) fn dispatch_send_prompt_now(
     app: &mut AppView,
     text: String,
     images: Vec<crate::prompt_images::PastedImage>,
+    image_notice: Option<String>,
 ) -> Vec<Effect> {
-    // Hard-reset only — `text` may be a queue row, not the composer.
+    // The composer that raised the notice is already cleared, so it shows even when the send bails below.
+    app.pending_image_notices.extend(image_notice);
+    // Hard-reset only; `text` may be a queue row, not the composer
     let _ = voice_stop_on_submit(app);
     let ActiveView::Agent(id) = app.active_view else {
         return vec![];
     };
+    if let Some(agent) = app.agents.get(&id)
+        && matches!(
+            overlay_operator_clarify(agent),
+            OverlayOperatorClarify::L2(_)
+        )
+    {
+        return dispatch_interject_on(app, id, text, images);
+    }
     let reconnect_pending = app.reconnect_pending;
     let Some(agent) = app.agents.get_mut(&id) else {
         return vec![];
     };
-    match overlay_operator_clarify(agent) {
-        OverlayOperatorClarify::L3Unbothered => return refuse_l3_overlay_operator_text(agent),
-        OverlayOperatorClarify::L2(_) => {
-            return dispatch_interject(app, text, images);
-        }
-        OverlayOperatorClarify::None => {
-            // Main-thread text that uniquely names a live L2 is a mid-turn ask
-            // to that L2, not cancel-and-send on L1.
-            if resolve_uniquely_named_live_l2(agent, &text).is_some() {
-                return dispatch_interject(app, text, images);
-            }
-        }
-    }
+    agent.release_hook_block_hold();
+    // Composer / queue-row / paste Send now all land here, not in dispatch_send_prompt_inner. Drop the credit-limit stash so Try Again cannot resubmit the blocked prompt after the user has moved on.
+    // dispatch_send_prompt_inner. Drop the credit-limit stash so Try Again
+    // cannot resubmit the blocked prompt after the user has moved on.
+    agent.credit_limit_stashed_prompt = None;
 
-    // Mid-outage guard (mirrors the plain prompt path): the producers already
-    // consumed the payload (composer text / queue row), so requeue it locally
-    // instead of firing into a dead channel and losing the message.
+    // Mid-outage guard (mirrors the plain prompt path): the producers already consumed the payload (composer text / queue row)
+    // Requeue it locally instead of firing into a dead channel and losing the message
     if reconnect_pending {
         let queue_id = agent.session.next_queue_id;
         agent.session.next_queue_id += 1;
@@ -292,24 +235,26 @@ pub(super) fn dispatch_send_prompt_now(
     agent.ephemeral_tip.clear_on_submit();
 
     let Some(session_id) = agent.session.session_id.clone() else {
-        agent.show_toast("No active session");
+        agent.show_toast(NO_SESSION_NOTICE);
         return vec![];
     };
 
-    record_interject_prompt_history(agent, &text);
+    agent.record_prompt_in_history(&text);
 
     let prompt_id = uuid::Uuid::new_v4().to_string();
     // Self-originated: the ACP gate must treat this prompt's deltas as ours.
     agent.note_self_originated_prompt(&prompt_id);
-    // Expect the shell's send-now cancel so the turn-end rails suppress its
-    // marker.
+    // Expect the shell's send-now cancel so the turn-end handling suppresses its marker
     super::queue::arm_send_now_and_paint_dispatched(agent, &prompt_id, &text);
 
-    let blocks = crate::prompt_images::build_content_blocks_with_workspace(
+    let build = crate::prompt_images::build_content_blocks_with_workspace_report(
         text.clone(),
         images,
         Some(std::path::Path::new(&agent.session.cwd)),
     );
+    app.pending_image_notices
+        .extend(agent.skipped_image_send_notice(&build.skipped_display_numbers));
+    let blocks = build.blocks;
 
     // Optimistic queue-pane echo, reconciled by the shell's queue broadcast.
     let sid_str = session_id.0.to_string();
@@ -328,24 +273,6 @@ pub(super) fn dispatch_send_prompt_now(
     }]
 }
 
-/// Record an interjection in prompt history (Ctrl+R finds interjections).
-/// Shared by `dispatch_interject` and the edited-queued-interject arm — the
-/// user typed both, so both must be recallable.
-pub(super) fn record_interject_prompt_history(agent: &mut AgentView, text: &str) {
-    let trimmed_key = text.trim().to_string();
-    if trimmed_key.is_empty() {
-        return;
-    }
-    agent
-        .session
-        .prompt_history
-        .retain(|p| p.trim() != trimmed_key);
-    agent.session.prompt_history.insert(0, text.to_string());
-    if agent.session.prompt_history.len() > 200 {
-        agent.session.prompt_history.truncate(200);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -362,12 +289,9 @@ mod tests {
     use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;
 
-    /// Composer-clear ownership: dispatch NEVER touches the composer. The
-    /// only composer-text producer (the InterjectPrompt registry arm) clears
-    /// it at the call site; every other producer (Send now, edit-interject,
-    /// plan review comments) carries non-composer text whose draft/stash
-    /// must survive dispatch — even when it happens to equal the interjected
-    /// text (provenance is not inferred by value equality).
+    /// Composer-clear ownership: dispatch NEVER touches the composer.
+    /// The only composer-text producer (the InterjectPrompt registry arm) clears it at the call site.
+    /// Every other producer (Send now, edit-interject, plan review comments) carries non-composer text whose draft/stash must survive dispatch.
     #[test]
     fn interject_dispatch_never_touches_the_composer() {
         let mut app = test_app_with_agent();
@@ -404,8 +328,7 @@ mod tests {
         ));
         assert_eq!(app.agents.get(&id).unwrap().prompt.text(), "stashed draft");
 
-        // Even a composer that equals the interjected text is preserved —
-        // the InterjectPrompt arm already cleared it for the composer path.
+        // Even a composer that equals the interjected text is preserved; the InterjectPrompt arm already cleared it for the composer path
         app.agents.get_mut(&id).unwrap().prompt.set_text("send me");
         let _ = dispatch(
             Action::Interject {
@@ -443,8 +366,7 @@ mod tests {
         );
     }
 
-    /// A no-session interject still retires the tip: the clear now runs before
-    /// the "No active session" early return, matching the other submit paths.
+    /// A no-session interject still retires the tip: the clear runs before the "No active session" early return, matching the other submit paths.
     #[test]
     fn interject_without_session_still_clears_ephemeral_tip() {
         let mut app = test_app_with_agent();
@@ -482,9 +404,8 @@ mod tests {
         );
     }
 
-    /// Image-bearing interject builds structured blocks (Text first with the
-    /// placeholder intact, then one Image block); no-image stays legacy
-    /// (`blocks: None`) so the wire shape is byte-identical.
+    /// Image-bearing interject builds structured blocks (Text first with the placeholder intact, then one Image block).
+    /// No-image stays legacy (`blocks: None`) so the wire shape is byte-identical.
     #[test]
     fn interject_with_images_builds_blocks_text_first() {
         let mut app = test_app_with_agent();
@@ -512,13 +433,16 @@ mod tests {
             ] => {
                 assert_eq!(text, "look at [Image #1] please");
                 assert_eq!(blocks.len(), 2);
-                match &blocks[0] {
+                match &blocks.first().unwrap_or_else(|| panic!("missing index")) {
                     acp::ContentBlock::Text(tb) => {
                         assert!(tb.text.contains("[Image #1]"), "got {:?}", tb.text)
                     }
                     other => panic!("expected Text first, got {other:?}"),
                 }
-                assert!(matches!(&blocks[1], acp::ContentBlock::Image(_)));
+                assert!(matches!(
+                    &blocks.get(1).unwrap_or_else(|| panic!("missing index")),
+                    acp::ContentBlock::Image(_)
+                ));
             }
             other => panic!("expected SendInterject with blocks, got {other:?}"),
         }
@@ -1010,47 +934,55 @@ mod tests {
         parent_sid: &str,
         depth: u32,
     ) -> crate::app::subagent::SubagentInfo {
+        let now = std::time::Instant::now();
         crate::app::subagent::SubagentInfo {
             subagent_id: child_sid.into(),
             child_session_id: child_sid.into(),
             description: "coordinate the slice".into(),
             subagent_type: "general-purpose".into(),
-            persona: None,
-            role: None,
-            model: None,
-            context_source: None,
-            resumed_from: None,
-            capability_mode: None,
-            workflow_run_id: None,
-            context_normalized: false,
-            parent_prompt_id: None,
-            parent_session_id: Some(parent_sid.into()),
-            depth: Some(depth),
-            started_at: std::time::Instant::now(),
-            last_progress_at: std::time::Instant::now(),
             finished: false,
             status: None,
-            error: None,
-            duration_ms: None,
-            tool_calls: None,
-            turns: None,
-            turn_count: None,
-            tool_call_count: None,
-            tokens_used: None,
-            tokens_past: 0,
-            context_window_tokens: None,
-            context_usage_pct: None,
-            tools_used: Vec::new(),
-            error_count: None,
-            activity_label: None,
-            is_background: false,
-            pending_kill: false,
-            kill_requested_at: None,
-            scrollback_entry_id: None,
+            attempt: crate::app::subagent::SubagentAttemptInfo {
+                lifecycle: crate::app::subagent::SubagentLifecycleState::running_legacy_for_test(),
+                persona: None,
+                role: None,
+                model: None,
+                context_source: None,
+                resumed_from: None,
+                capability_mode: None,
+                workflow_run_id: None,
+                context_normalized: false,
+                parent_prompt_id: None,
+                parent_session_id: Some(parent_sid.into()),
+                depth: Some(depth),
+                started_at: now,
+                last_progress_at: now,
+                status: None,
+                error: None,
+                duration_ms: None,
+                tool_calls: None,
+                turns: None,
+                turn_count: None,
+                tool_call_count: None,
+                tokens_used: None,
+                tokens_past: 0,
+                context_window_tokens: None,
+                context_usage_pct: None,
+                tools_used: Vec::new(),
+                error_count: None,
+                activity_label: None,
+                is_background: false,
+                pending_kill: false,
+                kill_requested_at: None,
+                scrollback_entry_id: None,
+                terminal_entry_id: None,
+            },
+            completed_attempt_tokens: 0,
+            sealed_attempt_tokens: Default::default(),
             prompt: None,
             child_cwd: None,
             worktree_path: None,
-            child_updates_replayed: false,
+            transcript: Default::default(),
         }
     }
 
@@ -1084,7 +1016,6 @@ mod tests {
             next_queue_id: 0,
             yolo_mode: false,
             auto_mode: false,
-            context_only_mode: false,
             prompt_history: Vec::new(),
             prompt_history_loading: false,
             loading_replay: false,
@@ -1107,6 +1038,8 @@ mod tests {
             current_prompt_id: None,
             created_via_new: false,
             session_notes: crate::app::agent::SessionNotes::default(),
+            hook_block_hold: false,
+            blocked_prompt: None,
         };
         let child = crate::app::agent_view::AgentView::new(
             child_session,
@@ -1122,7 +1055,7 @@ mod tests {
         agent
             .subagent_sessions
             .insert(child_sid.into(), overlay_info(child_sid, parent_sid, depth));
-        agent.insert_subagent_view(child_sid.to_string(), Box::new(child));
+        agent.insert_test_child(child_sid.to_string(), Box::new(child));
         agent.open_subagent_fullscreen(child_sid.to_string());
         app
     }
@@ -1153,6 +1086,68 @@ mod tests {
                 .iter()
                 .any(|effect| matches!(effect, Effect::SendPrompt { .. })),
             "L2 overlay must not SendPrompt on L1"
+        );
+    }
+
+    /// One interjection addressed to a live L2 is delivered to that L2 once.
+    /// It must not also enqueue a second copy on the L1 prompt queue, including
+    /// when the send later reports failure.
+    #[test]
+    fn interjection_to_a_live_l2_is_delivered_once_and_the_l1_queue_does_not_gain_a_copy() {
+        let body = "steer the live coordinator once";
+        let mut app = app_with_overlay("l2-coord", 1);
+        let id = AgentId(0);
+        let l1 = app.agents[&id]
+            .session
+            .session_id
+            .clone()
+            .expect("l1 session");
+        let effects = dispatch(Action::SendPrompt(body.into()), &mut app);
+        match effects.as_slice() {
+            [
+                Effect::SendInterject {
+                    session_id, text, ..
+                },
+            ] => {
+                assert_eq!(
+                    session_id.0.as_ref(),
+                    "l2-coord",
+                    "an interjection to a live L2 is delivered once to that L2, and the L1 queue does not gain a copy"
+                );
+                assert_ne!(
+                    session_id, &l1,
+                    "an interjection to a live L2 is delivered once to that L2, and the L1 queue does not gain a copy"
+                );
+                assert_eq!(text, body);
+            }
+            other => panic!(
+                "an interjection to a live L2 is delivered once to that L2, and the L1 queue does not gain a copy; got {other:?}"
+            ),
+        }
+        assert!(
+            !app.agents[&id]
+                .session
+                .pending_prompts
+                .iter()
+                .any(|prompt| prompt.text == body),
+            "an interjection to a live L2 is delivered once to that L2, and the L1 queue does not gain a copy"
+        );
+        let _ = dispatch(
+            Action::TaskComplete(crate::app::actions::TaskResult::InterjectFailed {
+                agent_id: id,
+                session_id: acp::SessionId::new("l2-coord"),
+                error: "couldn't send interjection: transport closed".into(),
+                remaining: vec![(body.into(), String::new(), None)],
+            }),
+            &mut app,
+        );
+        assert!(
+            !app.agents[&id]
+                .session
+                .pending_prompts
+                .iter()
+                .any(|prompt| prompt.text == body),
+            "an interjection to a live L2 is delivered once to that L2, and the L1 queue does not gain a copy"
         );
     }
 
@@ -1318,6 +1313,7 @@ mod tests {
                     attempt: 2,
                     max_retries: u32::MAX,
                     reason: "response headers timed out".into(),
+                    error_type: None,
                 }));
             agent.set_active_pane(ActivePane::Prompt, true);
             agent.prompt.set_text(body);
@@ -1478,7 +1474,7 @@ mod tests {
                 attempts: 1,
                 confirmed: false,
                 cancel_subagents: true,
-                trigger: crate::app::actions::CancelTrigger::Esc,
+                trigger: crate::app::actions::CancelTrigger::CtrlC,
             });
         }
         let effects = dispatch(
@@ -1523,7 +1519,7 @@ mod tests {
                 attempts: 1,
                 confirmed: false,
                 cancel_subagents: true,
-                trigger: crate::app::actions::CancelTrigger::Esc,
+                trigger: crate::app::actions::CancelTrigger::CtrlC,
             });
         }
         let effects = dispatch(
@@ -1634,6 +1630,7 @@ mod tests {
             Action::SendPromptNow {
                 text: "steer the coordinator".into(),
                 images: vec![],
+                image_notice: None,
             },
             &mut app,
         );
@@ -1686,7 +1683,6 @@ mod tests {
             next_queue_id: 0,
             yolo_mode: false,
             auto_mode: false,
-            context_only_mode: false,
             prompt_history: Vec::new(),
             prompt_history_loading: false,
             loading_replay: false,
@@ -1709,6 +1705,8 @@ mod tests {
             current_prompt_id: None,
             created_via_new: false,
             session_notes: crate::app::agent::SessionNotes::default(),
+            hook_block_hold: false,
+            blocked_prompt: None,
         };
         let child = crate::app::agent_view::AgentView::new(
             child_session,
@@ -1719,7 +1717,7 @@ mod tests {
         let mut info = overlay_info(child_sid, &l1_sid, 1);
         info.description = description.into();
         agent.subagent_sessions.insert(child_sid.into(), info);
-        agent.insert_subagent_view(child_sid.to_string(), Box::new(child));
+        agent.insert_test_child(child_sid.to_string(), Box::new(child));
         if let Some((l3_sid, l3_desc)) = l3 {
             let mut l3_info = overlay_info(l3_sid, child_sid, 2);
             l3_info.description = l3_desc.into();
@@ -1799,10 +1797,10 @@ mod tests {
             .get("l2-coord-01a08999")
             .expect("l2 still registered");
         assert!(
-            l2.is_running() && !l2.pending_kill && !l2.finished,
+            l2.is_running() && !l2.attempt.pending_kill && !l2.finished,
             "{CONTRACT} — L2 must keep running (no kill, no wait-for-exit); finished={} pending_kill={}",
             l2.finished,
-            l2.pending_kill
+            l2.attempt.pending_kill
         );
         assert!(
             agent.active_subagent.is_none(),
@@ -1878,7 +1876,11 @@ mod tests {
         // L2s. Prefer keep current L1 routing over picking at random.
         let body = "tell the reviewer to stay additive";
         assert!(
-            resolve_uniquely_named_live_l2(app.agents.get(&id).unwrap(), body).is_none(),
+            super::super::prompt::resolve_uniquely_named_live_l2(
+                app.agents.get(&id).unwrap(),
+                body
+            )
+            .is_none(),
             "shared reviewer tag must be ambiguous across two live L2s"
         );
         let effects = dispatch(Action::SendPrompt(body.into()), &mut app);

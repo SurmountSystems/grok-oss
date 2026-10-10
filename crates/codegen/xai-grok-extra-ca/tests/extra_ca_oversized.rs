@@ -28,7 +28,6 @@ fn oversized_bundle_ignored_clients_build() {
 
     assert!(xai_grok_extra_ca::extra_root_ders().is_empty());
 
-    xai_grok_extra_ca::with_extra_root_certificates(reqwest::Client::builder())
-        .build()
+    xai_grok_extra_ca::build_reqwest_client(|builder| builder)
         .expect("client builds after oversized reject");
 }

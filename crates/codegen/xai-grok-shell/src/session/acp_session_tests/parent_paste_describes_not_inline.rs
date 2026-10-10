@@ -146,6 +146,27 @@ fn request_has_image_part(req: &ConversationRequest) -> bool {
     })
 }
 
+fn run_on_large_stack(name: &str, body: impl FnOnce() + Send + 'static) {
+    std::thread::Builder::new()
+        .name(name.into())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(body)
+        .unwrap_or_else(|err| panic!("spawn {name}: {err}"))
+        .join()
+        .unwrap_or_else(|payload| std::panic::resume_unwind(payload));
+}
+
+fn block_on_local(fut: impl std::future::Future<Output = ()>) {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("current-thread runtime");
+    rt.block_on(async {
+        let local = tokio::task::LocalSet::new();
+        local.run_until(fut).await;
+    });
+}
+
 /// Owed: a parent grok-oss paste transcribes. The parent ConversationRequest
 /// has no `ContentPart::Image`. Persist, `<image_files>`, and AttachedImages
 /// stay.
@@ -153,7 +174,7 @@ fn request_has_image_part(req: &ConversationRequest) -> bool {
 // Grok OSS: a parent grok-oss paste transcribes; the parent ConversationRequest has no ContentPart::Image. This diverges from upstream xAI because parent paste must not inline data-url image parts.
 fn parent_grok_oss_paste_conversation_request_has_no_image_part() {
     run_on_large_stack("parent-paste-describes-not-inline", || {
-        block_on_local(false, async {
+        block_on_local(async {
             let server = MockInferenceServer::start()
                 .await
                 .expect("mock inference server");
@@ -212,7 +233,7 @@ fn parent_grok_oss_paste_conversation_request_has_no_image_part() {
 // Grok OSS: nested grok-oss paste still inlines via add_image so the nested request can inflate file:// to input_image. This diverges from upstream xAI because parent paste transcribes while nested may send input_image from session files.
 fn nested_grok_oss_paste_conversation_request_keeps_image_part() {
     run_on_large_stack("nested-paste-keeps-inline", || {
-        block_on_local(false, async {
+        block_on_local(async {
             let server = MockInferenceServer::start()
                 .await
                 .expect("mock inference server");

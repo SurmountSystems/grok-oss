@@ -164,7 +164,7 @@ check after these `fn`s exist.
 | `paint_composer_box_cursor_uses_human_green_not_agent_magenta` + `focused_composer_paints_human_green_box_caret_*` + `doge_human_box_caret_plate_is_rgb_0_255_0` | Box caret is Human green, never agent magenta; DOGE plate is `Rgb(0,255,0)` not named ANSI Green |
 | `agent_message_block_accent_is_magenta_rail_under_doge_while_running` | Running agent rail is magenta |
 | `info_line_model_name_uses_accent_model_not_gray` | Model label uses `accent_model` (magenta under DOGE) |
-| `status_bar_pushes_credits_compact_included_supergrok_period_limits` | Status bar pushes `"credits"` and paints `SuperGrok period · N%` |
+| `status_row_paints_weekly_limits_used_and_hover_shows_percent_remaining` | Status row paints `limits 28%`. Hover shows `72% left`. The row does not push `SuperGrok period` |
 | `hit_credits_click_dispatches_show_limits` | Click on the compact meter dispatches `ShowLimits` |
 | `titled_doge_composer_frame_is_prompt_border_not_context_yellow` | Titled composer frame is `prompt_border_active` (white); title only is yellow |
 | `plan_approval_footer_paints_five_cta_vocabulary` | Idle plan panel footer paints Approve / Comment / Revise / Exit. Clarify is only after Comment, not an idle top-level CTA |
@@ -188,6 +188,7 @@ cargo test -p xai-grok-pager --lib -- user_prompt_block_accent user_prompt_entry
   doge_human_box_caret_plate_is_rgb_0_255_0 paint_composer_box_cursor_named_ansi_green_becomes_doge_rgb \
   agent_message_block_accent info_line_model_name_uses_accent_model \
   status_bar_pushes_credits_compact_included_supergrok_period_limits \
+  status_row_paints_weekly_limits_used_and_hover_shows_percent_remaining \
   hit_credits_click_dispatches_show_limits \
   titled_doge_composer_frame_is_prompt_border_not_context_yellow \
   plan_approval_footer_paints_five_cta_vocabulary \
@@ -1253,7 +1254,12 @@ Parent `239K / 500K` is the L1 window and must not add nested windows.
 `sum_live_nested_session_windows` adds each live nested session once and
 does not double-count an L3 that already has its own window. List paint
 uses the live `SubagentProgress` sample, not the tracker high-water, so
-compact cannot leave a stale leftover. The nested
+compact cannot leave a stale leftover. The next paint live-updates from
+the current atomic token counters and is not a snapshot frozen until spawn
+or exit. The L1 footer stays the L1 window (`270K` / `↓270k`) and must not
+sum L2 plus L3 twice. grok-oss sqlite ULID session rows record nested
+spend once (an L3 already inside the L2 total is not a second row, and
+there is no third summed row). The nested
 accumulator is still an `AtomicU64` high-water (`fetch_max`) for TECH.md so
 concurrent ACP usage ticks do not race. Grok OSS: this map is not upstream
 xAI. Layout must not read the session transcript jsonl. TECH.md records
@@ -1279,6 +1285,9 @@ credits, and not console team prepaid / console API credits.
 | `xai-grok-pager` `tech_md_write_records_measured_tokens_on_spawn_usage_tick_and_l2_exit` | Temp TECH.md has the measured number, L1 to L2 to L3 tree, aspect table columns, and the not-billing-meters sentence |
 | `xai-grok-pager` `subagents_list_layout_does_not_read_chat_history_jsonl` | Paint takes in-memory counts only and does not open the session transcript file |
 | `xai-grok-pager` `concurrent_nested_l2_usage_ticks_keep_atomic_u64_high_water` | Concurrent 10232 and 8000 usage ticks keep high-water 10232 on AtomicU64; Subagents row contains `10.2k`, does not contain `tokens` or `measured`, and does not contain `10232` |
+| `xai-grok-pager` `subagents_list_and_compact_chrome_live_update_from_current_atomic_counters_not_a_frozen_snapshot` | After 90000, the next paint of a 40100 live sample is `40.1k`, not a frozen `90.0k`. live-update from the current atomic token counters. Not a snapshot |
+| `xai-grok-pager` `footer_down_arrow_270k_is_l1_window_and_does_not_sum_l2_plus_l3_twice` | L1 chip and footer stay `270K` / `270k` when nested L2 is 442200 and L3 is 85600. must not sum L2 plus L3 twice |
+| `xai-grok-shell` `grok_oss_sqlite_ulid_rows_record_nested_l2_and_l3_spend_once` | ULID session rows. Nested spend is recorded once. No third summed row |
 
 ```bash
 cargo test -p xai-grok-pager --lib -- \
@@ -1295,8 +1304,12 @@ cargo test -p xai-grok-pager --lib -- \
   format_subagent_label_shows_measured_tokens_suffix \
   tech_md_write_records_measured_tokens_on_spawn_usage_tick_and_l2_exit \
   subagents_list_layout_does_not_read_chat_history_jsonl \
-  concurrent_nested_l2_usage_ticks_keep_atomic_u64_high_water
+  concurrent_nested_l2_usage_ticks_keep_atomic_u64_high_water \
+  subagents_list_and_compact_chrome_live_update_from_current_atomic_counters_not_a_frozen_snapshot \
+  footer_down_arrow_270k_is_l1_window_and_does_not_sum_l2_plus_l3_twice
 ```
+
+The sqlite test is `just test-remote -p xai-grok-shell --lib grok_oss_sqlite_ulid_rows_record_nested_l2_and_l3_spend_once` because that contract lives in `xai-grok-shell` and the filter above is pager-only.
 
 #### Nested overlay hang, duplicate prompt, L3 click (Surmount / grok-oss fork)
 
@@ -1737,6 +1750,7 @@ with FORK pointers.
 |------------|----------|
 | `xai-grok-pager` `what_instruction_prefers_operator_and_agent_speaker_labels` | Surmount. `/what` instruction and the in-tree what skill prefer Operator and Agent, name the Operator box, and forbid You or Human / Me or Grok as speaker labels. FORK `/what` restatement. |
 | `xai-grok-pager` `what_skill_does_not_mix_grok_build_version_with_grok_oss` | Surmount. `/what` skill never mixes Grok Build `grok --version` with grok-oss `grok-oss --version`. Isolated Preview and plan chrome are grok-oss unless launched as `grok`. Probe this turn. Do not reuse leftover Grok Build 1.0.13 as grok-oss. FORK `/what` restatement. |
+| `xai-grok-pager` `what_and_subagent_skills_read_output_tokens_not_a_null_zero` | Surmount. `/what` and `/subagent` call `local_usage_events_for_session`. The reconcile cell is that row's `output_tokens`, not `total_tokens`, and not the standing estimate. A null `output_tokens` is not printed as `0`. Chain of thought is `reasoning_tokens` and is not added again. Do not write `not_fetched` when `output_tokens` is present. The Billing Credits card wire `not_fetched` stays a different meter. |
 | `xai-grok-pager` `user_guide_what_does_not_mix_grok_build_version_with_grok_oss` | Surmount. User-guide `/what` keeps grok-oss and Grok Build versions distinct. Isolated Preview chrome is grok-oss unless launched as `grok`. Probe this turn. FORK user-guide table `04-slash-commands`. |
 | `xai-grok-pager` `user_guide_operator_agent_speaker_labels_not_human_user_grok` | Surmount. User-guide theming and composer copy paint Operator, not Human/User/Grok as speaker. Keep Isolated Preview leftover-present, Comment then Approve, `/plan` extra text, empty Enter never Approves. FORK user-guide table `06-theming`. |
 | `xai-grok-pager` `waiting_chrome_does_not_paint_human_user_or_grok_as_speaker` | Surmount. Waiting chrome names the model request and does not paint Human, User, or Grok as a speaker. FORK `/what` restatement. |
@@ -1747,6 +1761,7 @@ with FORK pointers.
 cargo test -p xai-grok-pager --lib -- \
   what_instruction_prefers_operator_and_agent_speaker_labels \
   what_skill_does_not_mix_grok_build_version_with_grok_oss \
+  what_and_subagent_skills_read_output_tokens_not_a_null_zero \
   user_guide_what_does_not_mix_grok_build_version_with_grok_oss \
   user_guide_operator_agent_speaker_labels_not_human_user_grok \
   waiting_chrome_does_not_paint_human_user_or_grok_as_speaker \
@@ -2155,11 +2170,11 @@ Do not call SuperGrok free.
 
 | Filter identifier | Contract | Land |
 |-------------------|----------|------|
-| `status_bar_pushes_credits_compact_included_supergrok_period_limits` | Draw pushes `status` key `"credits"` with `SuperGrok period · N%` | **Keep** (`credit_bar` helpers alone do not count) |
+| `status_row_paints_weekly_limits_used_and_hover_shows_percent_remaining` | Status row paints `limits 28%`. Hover shows `72% left`. It does not push `SuperGrok period` | **Keep** |
 | `hit_credits_click_dispatches_show_limits` | Click on the compact meter dispatches `Action::ShowLimits` | **Keep** |
 | `titled_doge_composer_frame_is_prompt_border_not_context_yellow` | Titled composer frame is white (`prompt_border_active`); title only is yellow | **Keep** |
 | `plan_approval_footer_paints_five_cta_vocabulary` | Idle plan panel footer paints Approve / Comment / Revise / Exit. Clarify is only after Comment, not an idle top-level CTA | **Keep** (old `soft_park_draw_paints_panel_*` names are gone; do not revive them) |
-| `y_copies_the_plan_while_the_comment_overlay_is_open` | Comment overlay `y` copies the plan | **Keep** |
+| `y_copies_the_plan_while_the_comment_overlay_is_open` | Focused plan comment composer inserts y. Bare y does not copy. | **Keep** |
 | `plan_approval_pane_has_a_clickable_copy_control` | Copy is a clickable title-bar glyph left of `[↗]`, not a fifth idle CTA | **Keep** |
 | `plan_approval_cta_row_does_not_paint_copy` | Approve / Comment / Revise / Exit row must not paint copy | **Keep** |
 | `plan_approval_copy_button_click_copies_the_plan` | Clicking the copy control copies the plan | **Keep** |
@@ -2196,6 +2211,7 @@ Do not call SuperGrok free.
 ```bash
 # Prove the names still exist (missing fn = land failed), then run:
 cargo test -p xai-grok-pager --lib -- status_bar_pushes_credits_compact_included_supergrok_period_limits \
+  status_row_paints_weekly_limits_used_and_hover_shows_percent_remaining \
   hit_credits_click_dispatches_show_limits \
   titled_doge_composer_frame_is_prompt_border_not_context_yellow \
   plan_approval_footer_paints_five_cta_vocabulary \
@@ -2345,6 +2361,7 @@ cargo test -p xai-grok-pager --lib -- user_prompt_block_accent user_prompt_entry
   doge_human_box_caret_plate_is_rgb_0_255_0 paint_composer_box_cursor_named_ansi_green_becomes_doge_rgb \
   agent_message_block_accent info_line_model_name_uses_accent_model \
   status_bar_pushes_credits_compact_included_supergrok_period_limits \
+  status_row_paints_weekly_limits_used_and_hover_shows_percent_remaining \
   hit_credits_click_dispatches_show_limits \
   titled_doge_composer_frame_is_prompt_border_not_context_yellow \
   plan_approval_footer_paints_five_cta_vocabulary \

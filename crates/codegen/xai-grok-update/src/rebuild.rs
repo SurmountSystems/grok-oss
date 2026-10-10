@@ -462,10 +462,10 @@ pub fn parse_cargo_json_artifact_package(line: &str) -> Option<String> {
         // target block usually appears after "target":{..."name":"pkg"
         // Heuristic: last "name" inside the line that is not a file name is ok
         // for progress; prefer the one after "target".
-        if let Some(idx) = t.find("\"target\"") {
-            if let Some(name_after) = json_string_field(&t[idx..], "\"name\"") {
-                return Some(name_after);
-            }
+        if let Some(idx) = t.find("\"target\"")
+            && let Some(name_after) = json_string_field(&t[idx..], "\"name\"")
+        {
+            return Some(name_after);
         }
         return Some(name);
     }
@@ -740,17 +740,17 @@ pub fn strip_ansi_bytes(input: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(input.len());
     let mut i = 0;
     while i < input.len() {
-        if input[i] == 0x1b {
+        if input.get(i).copied().expect("index out of bounds") == 0x1b {
             i += 1;
             if i >= input.len() {
                 break;
             }
-            match input[i] {
+            match input.get(i).copied().expect("index out of bounds") {
                 b'[' => {
                     // CSI: ESC [ ... final byte in 0x40..=0x7E
                     i += 1;
                     while i < input.len() {
-                        let b = input[i];
+                        let b = input.get(i).copied().expect("index out of bounds");
                         i += 1;
                         if (0x40..=0x7e).contains(&b) {
                             break;
@@ -761,11 +761,14 @@ pub fn strip_ansi_bytes(input: &[u8]) -> Vec<u8> {
                     // OSC: ESC ] ... BEL or ST (ESC \)
                     i += 1;
                     while i < input.len() {
-                        if input[i] == 0x07 {
+                        if input.get(i).copied().expect("index out of bounds") == 0x07 {
                             i += 1;
                             break;
                         }
-                        if input[i] == 0x1b && i + 1 < input.len() && input[i + 1] == b'\\' {
+                        if input.get(i).copied().expect("index out of bounds") == 0x1b
+                            && i + 1 < input.len()
+                            && input.get(i + 1).copied().expect("index out of bounds") == b'\\'
+                        {
                             i += 2;
                             break;
                         }
@@ -779,7 +782,7 @@ pub fn strip_ansi_bytes(input: &[u8]) -> Vec<u8> {
             }
             continue;
         }
-        out.push(input[i]);
+        out.push(input.get(i).copied().expect("index out of bounds"));
         i += 1;
     }
     out
@@ -974,7 +977,7 @@ fn run_command_captured(
 fn tail_for_error(output: &str, max_lines: usize) -> String {
     let lines: Vec<&str> = output.lines().collect();
     let start = lines.len().saturating_sub(max_lines);
-    lines[start..].join("\n")
+    lines.get(start..).expect("index out of bounds").join("\n")
 }
 
 /// Run install for `source_root` (blocking). Prefer `just install`; fall back
@@ -1002,15 +1005,13 @@ pub fn run_install_with_progress(
     }
     let stashed = stash_unstaged_keep_index(source_root)?;
     let result = run_install_with_progress_from_worktree(source_root, &install_path, on_progress);
-    if stashed {
-        if let Err(e) = stash_pop_rebuild_unstaged(source_root) {
-            tracing::warn!(
-                error = %e,
-                "failed to restore unstaged files after staged rebuild compile"
-            );
-            result?;
-            return Err(e);
-        }
+    if stashed && let Err(e) = stash_pop_rebuild_unstaged(source_root) {
+        tracing::warn!(
+            error = %e,
+            "failed to restore unstaged files after staged rebuild compile"
+        );
+        result?;
+        return Err(e);
     }
     result
 }
@@ -1223,7 +1224,7 @@ pub fn parse_version_output(stdout: &str) -> Option<String> {
     // Prefer "name version (sha)" → strip leading product name tokens until a semver-ish token.
     let tokens: Vec<&str> = line.split_whitespace().collect();
     for i in 0..tokens.len() {
-        let candidate = tokens[i..].join(" ");
+        let candidate = tokens.get(i..).expect("index out of bounds").join(" ");
         if leader::parse_binary_identity(&candidate).is_some() {
             // Prefer full "version (sha)" when present.
             if candidate.contains('(') {
@@ -1234,12 +1235,27 @@ pub fn parse_version_output(stdout: &str) -> Option<String> {
     }
     // Fall back: last two tokens as "version (sha)" or single version token.
     if tokens.len() >= 2 {
-        let last_two = format!("{} {}", tokens[tokens.len() - 2], tokens[tokens.len() - 1]);
+        let last_two = format!(
+            "{} {}",
+            tokens
+                .get(tokens.len() - 2)
+                .copied()
+                .expect("index out of bounds"),
+            tokens.last().copied().expect("index out of bounds")
+        );
         if leader::parse_binary_identity(&last_two).is_some() {
             return Some(last_two);
         }
-        if leader::parse_binary_identity(tokens[tokens.len() - 1]).is_some() {
-            return Some(tokens[tokens.len() - 1].to_string());
+        if leader::parse_binary_identity(tokens.last().copied().expect("index out of bounds"))
+            .is_some()
+        {
+            return Some(
+                tokens
+                    .last()
+                    .copied()
+                    .expect("index out of bounds")
+                    .to_string(),
+            );
         }
     } else if let Some(t) = tokens.first()
         && leader::parse_binary_identity(t).is_some()
@@ -1806,8 +1822,10 @@ where
         &installed_path,
         &installed_identity,
         backend,
-        &leader_outcomes,
-        &peer_outcomes,
+        RebuildSummaryRelaunch {
+            leader_outcomes: &leader_outcomes,
+            peer_outcomes: &peer_outcomes,
+        },
         &live_sessions,
         previous_binary_backup.as_deref(),
     );
@@ -1825,17 +1843,28 @@ where
     })
 }
 
+/// Leader and peer relaunch rows for one rebuild summary.
+pub struct RebuildSummaryRelaunch<'a> {
+    /// Soft-signal results for reachable leaders.
+    pub leader_outcomes: &'a [LeaderRelaunchOutcome],
+    /// Cooperative peer TUI signal results.
+    pub peer_outcomes: &'a [PeerRelaunchOutcome],
+}
+
 /// Human-readable rebuild report lines.
 pub fn format_rebuild_summary(
     source_root: &Path,
     installed_path: &Path,
     installed_identity: &str,
     backend: InstallBackend,
-    leader_outcomes: &[LeaderRelaunchOutcome],
-    peer_outcomes: &[PeerRelaunchOutcome],
+    relaunch: RebuildSummaryRelaunch<'_>,
     live_sessions: &[ActiveSession],
     previous_binary_backup: Option<&Path>,
 ) -> Vec<String> {
+    let RebuildSummaryRelaunch {
+        leader_outcomes,
+        peer_outcomes,
+    } = relaunch;
     let mut lines = Vec::new();
     lines.push("Rebuild complete.".to_string());
     lines.push(format!("  Source:    {}", source_root.display()));
@@ -2788,8 +2817,10 @@ mod tests {
             Path::new("/bin/grok-oss"),
             "0.2.120 (abc)",
             InstallBackend::JustInstall,
-            &[],
-            &peers,
+            RebuildSummaryRelaunch {
+                leader_outcomes: &[],
+                peer_outcomes: &peers,
+            },
             &[],
             None,
         );

@@ -30,7 +30,7 @@ struct Candidate {
 pub(super) fn scan(cwd: &Path, now: SystemTime) -> Vec<ForeignSessionSummary> {
     let Some(config_dir) = std::env::var_os("CLAUDE_CONFIG_DIR")
         .map(PathBuf::from)
-        .or_else(|| dirs::home_dir().map(|home| home.join(".claude")))
+        .or_else(|| xai_dirs::home_dir().map(|home| home.join(".claude")))
     else {
         return Vec::new();
     };
@@ -44,7 +44,7 @@ pub(super) fn most_recent(
 ) -> RecentProbe<RecentCandidate> {
     let Some(config_dir) = std::env::var_os("CLAUDE_CONFIG_DIR")
         .map(PathBuf::from)
-        .or_else(|| dirs::home_dir().map(|home| home.join(".claude")))
+        .or_else(|| xai_dirs::home_dir().map(|home| home.join(".claude")))
     else {
         return RecentProbe::Complete(None);
     };
@@ -284,8 +284,7 @@ fn collect_candidates(
             continue;
         };
         let mut project_candidates = Vec::with_capacity(limit);
-        // Enumerate every direct entry in these already-scoped directories so
-        // filesystem order cannot decide which sessions receive the read budget.
+        // Enumerate every direct entry in these already-scoped directories so filesystem order cannot decide which sessions receive the read budget
         let complete = project_root.for_each_entry(|name| {
             let path = project_root.join(&name);
             let Some(session_id) = path
@@ -476,8 +475,8 @@ fn first_prompt(head: &str) -> Option<String> {
 
 fn between<'a>(value: &'a str, start: &str, end: &str) -> Option<&'a str> {
     let start = value.find(start)? + start.len();
-    let end = value[start..].find(end)? + start;
-    Some(&value[start..end])
+    let end = value.get(start..)?.find(end)? + start;
+    value.get(start..end)
 }
 
 fn is_generated_prompt(value: &str) -> bool {

@@ -122,11 +122,146 @@ impl LocalBookSummary {
     }
 }
 
+/// True when this ULID would record nested L2/L3 spend that is already stored.
+///
+/// One grok-oss ULID row per nested work. An L3 whose tokens are already inside
+/// the L2 total for that work is not a second row. A later ulid that sums those
+/// tokens again is not stored. Same `event_ulid` stays `INSERT OR IGNORE`.
+/// L3 stored first is replaced by the covering L2 rollup, not skipped here.
+fn nested_spend_already_recorded(
+    store: &GrokOssStore,
+    event: &LocalUsageEvent,
+) -> Result<bool, rusqlite::Error> {
+    let (Some(total), Some(work)) = (event.total_tokens, event.work_ulid.as_deref()) else {
+        return Ok(false);
+    };
+    let existing: Option<i64> = store.connection().query_row(
+        "SELECT MAX(total_tokens) FROM local_usage_event
+         WHERE session_id = ?1 AND work_ulid = ?2
+           AND lower(agent_kind) IN ('l2', 'nested_l2')",
+        rusqlite::params![event.session_id, work],
+        |row| row.get(0),
+    )?;
+    let kind = event.agent_kind.to_ascii_lowercase();
+    match kind.as_str() {
+        "l3" | "nested_l3" => Ok(existing.is_some_and(|parent| parent >= total)),
+        "l2" | "nested_l2" => Ok(existing.is_some()),
+        _ => Ok(false),
+    }
+}
+
+/// L3-then-L2: drop L3 rows when this L2 total already includes their tokens.
+fn drop_l3_rows_covered_by_arriving_l2(
+    store: &GrokOssStore,
+    event: &LocalUsageEvent,
+) -> Result<(), rusqlite::Error> {
+    let kind = event.agent_kind.to_ascii_lowercase();
+    if kind != "l2" && kind != "nested_l2" {
+        return Ok(());
+    }
+    let (Some(total), Some(work)) = (event.total_tokens, event.work_ulid.as_deref()) else {
+        return Ok(());
+    };
+    let l3_sum: Option<i64> = store.connection().query_row(
+        "SELECT SUM(total_tokens) FROM local_usage_event
+         WHERE session_id = ?1 AND work_ulid = ?2
+           AND lower(agent_kind) IN ('l3', 'nested_l3')",
+        rusqlite::params![event.session_id, work],
+        |row| row.get(0),
+    )?;
+    let Some(covered) = l3_sum else {
+        return Ok(());
+    };
+    if total < covered {
+        return Ok(());
+    }
+    store.connection().execute(
+        "DELETE FROM local_usage_event
+         WHERE session_id = ?1 AND work_ulid = ?2
+           AND lower(agent_kind) IN ('l3', 'nested_l3')",
+        rusqlite::params![event.session_id, work],
+    )?;
+    Ok(())
+}
+
+/// True when this `event_ulid` is already a `local_usage_event` primary key.
+fn event_ulid_exists(store: &GrokOssStore, event_ulid: &str) -> Result<bool, rusqlite::Error> {
+    let n: i64 = store.connection().query_row(
+        "SELECT COUNT(*) FROM local_usage_event WHERE event_ulid = ?1",
+        [event_ulid],
+        |row| row.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// Same nested L2 ulid: raise `total_tokens` in place. Not a second row.
+///
+/// A lower sample (compact) does not shrink the stored total. A different
+/// ulid is not updated here, so a third summed row stays rejected.
+fn raise_nested_l2_total_if_higher(
+    store: &GrokOssStore,
+    event: &LocalUsageEvent,
+) -> Result<(), rusqlite::Error> {
+    let kind = event.agent_kind.to_ascii_lowercase();
+    if kind != "l2" && kind != "nested_l2" {
+        return Ok(());
+    }
+    let Some(total) = event.total_tokens else {
+        return Ok(());
+    };
+    if total <= 0 {
+        return Ok(());
+    }
+    store.connection().execute(
+        "UPDATE local_usage_event
+         SET total_tokens = ?1
+         WHERE event_ulid = ?2
+           AND lower(agent_kind) IN ('l2', 'nested_l2')
+           AND COALESCE(total_tokens, -1) < ?1",
+        rusqlite::params![total, event.event_ulid],
+    )?;
+    Ok(())
+}
+
+/// Finish write for one nested row. Sets output and reasoning only.
+/// Does not insert a row and does not change `total_tokens`.
+pub fn set_nested_l2_finish_output(
+    store: &GrokOssStore,
+    event_ulid: &str,
+    output_tokens: i64,
+    reasoning_tokens: i64,
+) -> Result<usize, rusqlite::Error> {
+    store.connection().execute(
+        "UPDATE local_usage_event
+         SET output_tokens = ?1, reasoning_tokens = ?2
+         WHERE event_ulid = ?3
+           AND lower(agent_kind) IN ('l2', 'nested_l2')",
+        rusqlite::params![output_tokens, reasoning_tokens, event_ulid],
+    )
+}
+
 /// Insert one local event. Idempotent on `event_ulid`. Fail-open: errors returned.
+///
+/// One nested row. The same L2 `event_ulid` refreshes its total upward and
+/// does not insert again. A zero L2 total is not stored. A different L2 ulid
+/// for the same work is not stored. An L3 already covered by the L2 total
+/// is not stored.
 pub fn insert_local_usage_event(
     store: &GrokOssStore,
     event: &LocalUsageEvent,
 ) -> Result<bool, rusqlite::Error> {
+    let kind = event.agent_kind.to_ascii_lowercase();
+    if (kind == "l2" || kind == "nested_l2") && event.total_tokens.unwrap_or(0) <= 0 {
+        return Ok(false);
+    }
+    if event_ulid_exists(store, &event.event_ulid)? {
+        raise_nested_l2_total_if_higher(store, event)?;
+        return Ok(false);
+    }
+    if nested_spend_already_recorded(store, event)? {
+        return Ok(false);
+    }
+    drop_l3_rows_covered_by_arriving_l2(store, event)?;
     let ingested_at = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
     let changed = store.connection().execute(
         r#"
@@ -161,6 +296,98 @@ INSERT OR IGNORE INTO local_usage_event (
         ],
     )?;
     Ok(changed > 0)
+}
+
+#[cfg(test)]
+mod nested_ulid_spend_tests {
+    use super::*;
+    use crate::grok_oss::open_at;
+    use tempfile::TempDir;
+
+    fn nested_event(ulid: &str, kind: &str, total: i64) -> LocalUsageEvent {
+        LocalUsageEvent {
+            event_ulid: ulid.to_string(),
+            session_id: "sess-nested-once".into(),
+            work_ulid: Some("01ARZ3NDEKTSV4RRFFQ69G5FAY".into()),
+            timestamp_utc: "2026-09-21T00:00:00.000Z".into(),
+            turn_type: "nested".into(),
+            agent_kind: kind.into(),
+            model_id: None,
+            input_tokens: None,
+            output_tokens: None,
+            cached_tokens: None,
+            reasoning_tokens: None,
+            total_tokens: Some(total),
+            cost_usd_ticks: None,
+            cost_missing: true,
+            incomplete: false,
+            sampling_identity: None,
+        }
+    }
+
+    /// Operator: ULID session rows. Nested spend is recorded once.
+    #[test]
+    fn grok_oss_sqlite_ulid_rows_record_nested_l2_and_l3_spend_once() {
+        let l2_ulid = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+        let l3_ulid = "01ARZ3NDEKTSV4RRFFQ69G5FAW";
+        let sum_ulid = "01ARZ3NDEKTSV4RRFFQ69G5FAX";
+        let late_l3_ulid = "01ARZ3NDEKTSV4RRFFQ69G5FAT";
+        let l3_tokens = 85_600;
+        let l2_total = 442_200 + l3_tokens;
+        assert_eq!(l2_ulid.len(), 26, "ULID session rows");
+        assert!(
+            !l2_ulid.contains('-')
+                && !l3_ulid.contains('-')
+                && !sum_ulid.contains('-')
+                && !late_l3_ulid.contains('-'),
+            "ULID session rows are grok-oss ULIDs, not Grok Build UUIDs"
+        );
+
+        let tmp = TempDir::new().expect("temp dir");
+        let store = open_at(&tmp.path().join("grok_oss.db")).expect("grok_oss.db");
+        assert!(
+            insert_local_usage_event(&store, &nested_event(l3_ulid, "l3", l3_tokens)).expect("l3"),
+            "ULID session rows"
+        );
+        assert!(
+            insert_local_usage_event(&store, &nested_event(l2_ulid, "l2", l2_total)).expect("l2"),
+            "Nested spend is recorded once"
+        );
+        assert!(
+            !insert_local_usage_event(&store, &nested_event(late_l3_ulid, "l3", l3_tokens))
+                .expect("l3 after l2"),
+            "Nested spend is recorded once"
+        );
+        assert!(
+            !insert_local_usage_event(&store, &nested_event(sum_ulid, "l2", l2_total + l3_tokens))
+                .expect("third"),
+            "Nested spend is recorded once. must not store a third summed row"
+        );
+        assert!(
+            !insert_local_usage_event(&store, &nested_event(l2_ulid, "l2", l2_total))
+                .expect("again"),
+            "ULID session rows stay INSERT OR IGNORE on event_ulid"
+        );
+
+        let count: i64 = store
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM local_usage_event",
+                rusqlite::params![],
+                |row| row.get(0),
+            )
+            .expect("count");
+        let sum: i64 = store
+            .connection()
+            .query_row(
+                "SELECT COALESCE(SUM(total_tokens), 0) FROM local_usage_event",
+                rusqlite::params![],
+                |row| row.get(0),
+            )
+            .expect("sum");
+        assert_eq!(count, 1, "ULID session rows");
+        assert_eq!(sum, l2_total, "Nested spend is recorded once");
+    }
 }
 
 /// Fail-open insert (logs debug on error). Returns whether a new row was written.
@@ -408,6 +635,42 @@ INSERT INTO reconciliation_run (
         ],
     )?;
     Ok(store.connection().last_insert_rowid())
+}
+
+/// Rows in `local_usage_event` for one `session_id`, ordered by `event_ulid`.
+pub fn local_usage_events_for_session(
+    store: &GrokOssStore,
+    session_id: &str,
+) -> Result<Vec<LocalUsageEvent>, rusqlite::Error> {
+    let mut stmt = store.connection().prepare(
+        "SELECT event_ulid, session_id, work_ulid, timestamp_utc, turn_type, agent_kind,
+                model_id, input_tokens, output_tokens, cached_tokens, reasoning_tokens,
+                total_tokens, cost_usd_ticks, cost_missing, incomplete, sampling_identity
+         FROM local_usage_event
+         WHERE session_id = ?1
+         ORDER BY event_ulid",
+    )?;
+    let rows = stmt.query_map([session_id], |row| {
+        Ok(LocalUsageEvent {
+            event_ulid: row.get(0)?,
+            session_id: row.get(1)?,
+            work_ulid: row.get(2)?,
+            timestamp_utc: row.get(3)?,
+            turn_type: row.get(4)?,
+            agent_kind: row.get(5)?,
+            model_id: row.get(6)?,
+            input_tokens: row.get(7)?,
+            output_tokens: row.get(8)?,
+            cached_tokens: row.get(9)?,
+            reasoning_tokens: row.get(10)?,
+            total_tokens: row.get(11)?,
+            cost_usd_ticks: row.get(12)?,
+            cost_missing: row.get::<_, i64>(13)? != 0,
+            incomplete: row.get::<_, i64>(14)? != 0,
+            sampling_identity: row.get(15)?,
+        })
+    })?;
+    rows.collect()
 }
 
 /// Whether `local_usage_event` contains this ulid (spend ingest checks).

@@ -20,6 +20,31 @@ use super::credit_bar::{
     AutoTopupInfo, ConsoleTeamPrepaidGap, CreditBalance, SamplingIdentityKind,
 };
 
+#[cfg(feature = "xai-grok-sampling-types")]
+pub use xai_grok_sampling_types::BillingCreditsCard;
+
+/// GetAmountToPay card status. Mirrors `xai-grok-sampling-types` when that
+/// feature is off so `/limits` still type-checks.
+#[cfg(not(feature = "xai-grok-sampling-types"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BillingCreditsCard {
+    Fetched,
+    Error,
+    #[default]
+    NotFetched,
+}
+
+#[cfg(not(feature = "xai-grok-sampling-types"))]
+impl BillingCreditsCard {
+    pub fn as_wire(self) -> &'static str {
+        match self {
+            Self::Fetched => "fetched",
+            Self::Error => "error",
+            Self::NotFetched => "not_fetched",
+        }
+    }
+}
+
 /// Where a SuperGrok free-period included % reading came from.
 ///
 /// Keeps dual unified fill honest: a filled row is not a successful poll of
@@ -130,17 +155,25 @@ pub enum AutoTopupLine {
 /// SuperGrok dollar credits. Amounts are non-negative USD cents for the current
 /// invoice period.
 ///
-/// [`Self::default_credits_cents`] is the dashboard-class **team default credits**
-/// allotment (often ~$1500 on the wire). It is **not** the prepaid wallet,
-/// **not** included SuperGrok period limits, and **not** SuperGrok top-up dollars.
+/// [`Self::default_credits_cents`] is postpaid preview `defaultCredits`
+/// (often ~$1500 on the wire). It is **not** Credits remaining, **not** the
+/// prepaid wallet, **not** included SuperGrok period limits, and **not**
+/// SuperGrok top-up dollars.
+/// [`Self::default_credits_issued_cents`] is default credits issued on this
+/// invoice preview. It is not the granted share of dashboard Credits remaining.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConsoleTeamPostpaidMeter {
     pub period_total_cents: i64,
     pub oauth_class_cents: i64,
     pub api_class_cents: i64,
     pub other_class_cents: i64,
-    /// Team default credits (dashboard allotment) in USD cents when present.
+    /// Postpaid preview `defaultCredits` in USD cents when present.
+    /// Not Credits remaining. Not the prepaid wallet.
     pub default_credits_cents: Option<i64>,
+    /// Default credits issued on this invoice preview, in USD cents, when
+    /// `coreInvoice.defaultCreditsIssued` was in the preview. `None` means
+    /// the issued amount was not in the preview.
+    pub default_credits_issued_cents: Option<i64>,
 }
 
 impl ConsoleTeamPostpaidMeter {
@@ -157,6 +190,7 @@ impl ConsoleTeamPostpaidMeter {
             api_class_cents: p.api_class_cents,
             other_class_cents: p.other_class_cents,
             default_credits_cents: p.default_credits_cents,
+            default_credits_issued_cents: p.default_credits_issued_cents,
         }
     }
 }
@@ -280,7 +314,7 @@ pub struct ConsoleMeter {
     pub balance_cents: Option<i64>,
     /// Billing Credits card from GetAmountToPay remaining. Never filled from
     /// [`Self::balance_cents`].
-    pub billing_credits_card: xai_grok_sampling_types::BillingCreditsCard,
+    pub billing_credits_card: BillingCreditsCard,
     /// Remaining USD cents when [`Self::billing_credits_card`] is `fetched`.
     pub billing_credits_cents: Option<i64>,
     /// Why dollars are absent when [`Self::balance_cents`] is `None`.
@@ -533,7 +567,7 @@ impl LimitsSnapshot {
     ) -> Self {
         let (included, dollar_credits) = match balance {
             Some(bal) => (
-                Some(included_from_balance(bal)),
+                included_from_balance(bal),
                 dollar_credits_from_balance(bal, autotopup),
             ),
             None => (None, None),
@@ -579,7 +613,7 @@ impl LimitsSnapshot {
                 // Default gap = missing management key (most common dogfood miss);
                 // wire real gap via [`Self::with_console_prepaid_gap`].
                 balance_cents: None,
-                billing_credits_card: xai_grok_sampling_types::BillingCreditsCard::NotFetched,
+                billing_credits_card: BillingCreditsCard::NotFetched,
                 billing_credits_cents: None,
                 prepaid_gap: ConsoleTeamPrepaidGap::MissingManagementKey,
                 postpaid: None,
@@ -667,14 +701,9 @@ impl LimitsSnapshot {
     }
 
     /// Attach Billing Credits remaining from GetAmountToPay. Not team prepaid.
-    pub fn with_billing_credits(
-        mut self,
-        card: xai_grok_sampling_types::BillingCreditsCard,
-        cents: Option<i64>,
-    ) -> Self {
+    pub fn with_billing_credits(mut self, card: BillingCreditsCard, cents: Option<i64>) -> Self {
         self.console.billing_credits_card = card;
-        self.console.billing_credits_cents =
-            cents.filter(|_| card == xai_grok_sampling_types::BillingCreditsCard::Fetched);
+        self.console.billing_credits_cents = cents.filter(|_| card == BillingCreditsCard::Fetched);
         self
     }
 
@@ -746,19 +775,33 @@ impl LimitsSnapshot {
                         // observed on this principal's credits poll (not invented).
                         let dollar_credits = dollar_credits_from_balance(bal, p.autotopup.as_ref());
                         let dollar_credits_observed = bal.prepaid_balance_cents.is_some();
+                        let included = included_from_balance(bal);
+                        let included_source = if included.is_some() {
+                            IncludedSource::ProcessCache
+                        } else {
+                            IncludedSource::Unknown
+                        };
                         (
-                            Some(included_from_balance(bal)),
+                            included,
                             dollar_credits,
                             dollar_credits_observed,
-                            IncludedSource::ProcessCache,
+                            included_source,
                         )
                     }
-                    Some(bal) => (
-                        Some(included_from_balance(bal)),
-                        dollar_credits_from_balance(bal, p.autotopup.as_ref()),
-                        true,
-                        IncludedSource::LivePoll,
-                    ),
+                    Some(bal) => {
+                        let included = included_from_balance(bal);
+                        let included_source = if included.is_some() {
+                            IncludedSource::LivePoll
+                        } else {
+                            IncludedSource::Unknown
+                        };
+                        (
+                            included,
+                            dollar_credits_from_balance(bal, p.autotopup.as_ref()),
+                            true,
+                            included_source,
+                        )
+                    }
                     // included_billing_only with no % yet still means SuperGrok
                     // dollar credits unobserved.
                     None if p.included_billing_only => (None, None, false, IncludedSource::Unknown),
@@ -801,7 +844,7 @@ impl LimitsSnapshot {
                 is_live: live_identity.is_console(),
                 key_available: live_identity.is_console(),
                 balance_cents: None,
-                billing_credits_card: xai_grok_sampling_types::BillingCreditsCard::NotFetched,
+                billing_credits_card: BillingCreditsCard::NotFetched,
                 billing_credits_cents: None,
                 prepaid_gap: ConsoleTeamPrepaidGap::MissingManagementKey,
                 postpaid: None,
@@ -931,18 +974,23 @@ pub fn active_driver_line_for_snapshot_with_meter_source(
     format!("Active: {label}")
 }
 
-fn included_from_balance(bal: &CreditBalance) -> IncludedAllowanceMeter {
+/// Copy included usage only when the poll set `included_usage_known` and the
+/// percent is finite. An unread placeholder stays absent. A real zero stays.
+fn included_from_balance(bal: &CreditBalance) -> Option<IncludedAllowanceMeter> {
+    if !bal.included_usage_known || !bal.usage_pct.is_finite() {
+        return None;
+    }
     let period_label = match bal.period_type.as_deref() {
         Some(t) if t.contains("WEEKLY") => "Weekly",
         Some(t) if t.contains("MONTHLY") => "Monthly",
         _ => "Included",
     };
-    IncludedAllowanceMeter {
+    Some(IncludedAllowanceMeter {
         period_label,
         used_pct: bal.usage_pct,
         next_reset_display: bal.period_end_display.clone(),
         next_reset_at: bal.period_end_at,
-    }
+    })
 }
 
 /// Live countdown to next reset: `Xd Yh Zm Ws` (or `0d 0h 0m 0s` when past).
@@ -1026,6 +1074,17 @@ fn dollar_credits_from_balance(
         auto_topup,
     })
 }
+
+/// Human label for postpaid preview `defaultCredits`.
+/// Not Credits remaining. Not the prepaid wallet.
+const TEAM_DEFAULT_CREDITS_HUMAN_LABEL: &str = "Team default credits (postpaid preview \
+defaultCredits; not Credits remaining; not the prepaid wallet)";
+
+/// Human label for default credits issued on this invoice preview.
+const DEFAULT_CREDITS_ISSUED_HUMAN_LABEL: &str = "Default credits issued on this invoice preview";
+
+/// Shown when `coreInvoice.defaultCreditsIssued` was not in the preview.
+const DEFAULT_CREDITS_ISSUED_ABSENT: &str = "the issued amount was not in the preview.";
 
 /// Format cents as `$N` or `$N.NN` (absolute value).
 fn fmt_dollars(cents: i64) -> String {
@@ -1218,7 +1277,7 @@ pub fn honesty_notes_for_snapshot(snap: &LimitsSnapshot) -> Vec<String> {
         .is_some();
     // Pure guard from snapshot + config (no re-scan of poll history rings).
     let turns_blocked = turns_blocked_free_period_debit_unproven_for_snapshot(snap);
-    honesty_notes_for_limits(LimitsHonestyInput {
+    let mut notes = honesty_notes_for_limits(LimitsHonestyInput {
         live: snap.live_identity,
         has_included_reading: has_included,
         flat_poll_unproven_debit: snap.flat_poll_unproven_debit,
@@ -1229,7 +1288,25 @@ pub fn honesty_notes_for_snapshot(snap: &LimitsSnapshot) -> Vec<String> {
         has_team_default_credits_reading: has_team_default_credits,
         turns_blocked_free_period_debit_unproven: turns_blocked,
         billing_credits_card: snap.console.billing_credits_card,
-    })
+    });
+    let dashboard = super::limits_honesty::NOTE_DASHBOARD_THIRTY_DAY_CREDITS_NOT_PARSED.to_string();
+    if !notes.iter().any(|n| n == &dashboard) {
+        notes.push(dashboard);
+    }
+    if snap.console.postpaid.is_some()
+        && snap
+            .console
+            .postpaid
+            .as_ref()
+            .and_then(|p| p.default_credits_issued_cents)
+            .is_none()
+    {
+        let absent = super::limits_honesty::NOTE_DEFAULT_CREDITS_ISSUED_NOT_IN_PREVIEW.to_string();
+        if !notes.iter().any(|n| n == &absent) {
+            notes.push(absent);
+        }
+    }
+    notes
 }
 
 /// Whether sampler turns would be blocked under unproven free SuperGrok period
@@ -1428,23 +1505,27 @@ fn format_console(lines: &mut Vec<String>, c: &ConsoleMeter) {
     match c.balance_cents {
         Some(cents) => lines.push(format!("  Team prepaid remaining: {}", fmt_dollars(cents))),
         None => {
-            // Short gap only. No Management Key lecture wall; operators
-            // rejected that framing for chat-key honesty (dogfood).
-            lines.push(format!(
-                "  Team prepaid remaining: {}",
+            // Inference key on file and no balance yet: not available.
+            // Other gaps stay distinct. No inference key still names the gap.
+            let gap = if (c.key_available || c.is_live)
+                && c.prepaid_gap == ConsoleTeamPrepaidGap::MissingManagementKey
+            {
+                "not available"
+            } else {
                 c.prepaid_gap.as_display_str()
-            ));
+            };
+            lines.push(format!("  Team prepaid remaining: {gap}"));
         }
     }
     lines.push(format!(
         "  Billing Credits card: {}",
         match (c.billing_credits_card, c.billing_credits_cents) {
-            (xai_grok_sampling_types::BillingCreditsCard::Fetched, Some(cents)) => {
+            (BillingCreditsCard::Fetched, Some(cents)) => {
                 fmt_dollars(cents)
             }
-            (xai_grok_sampling_types::BillingCreditsCard::Fetched, None) => "fetched".to_string(),
-            (xai_grok_sampling_types::BillingCreditsCard::Error, _) => "fetch failed".to_string(),
-            (xai_grok_sampling_types::BillingCreditsCard::NotFetched, _) => {
+            (BillingCreditsCard::Fetched, None) => "fetched".to_string(),
+            (BillingCreditsCard::Error, _) => "fetch failed".to_string(),
+            (BillingCreditsCard::NotFetched, _) => {
                 "not fetched".to_string()
             }
         }
@@ -1467,12 +1548,22 @@ fn format_console(lines: &mut Vec<String>, c: &ConsoleMeter) {
                 "  Team postpaid API class: {}",
                 fmt_dollars(p.api_class_cents)
             ));
-            // Team default credits: dashboard allotment, own line (not prepaid).
+            // Postpaid preview defaultCredits. Not Credits remaining.
+            // Not the prepaid wallet.
             if let Some(dc) = p.default_credits_cents {
                 lines.push(format!(
-                    "  Team default credits (dashboard allotment; not the prepaid wallet): {}",
+                    "  {TEAM_DEFAULT_CREDITS_HUMAN_LABEL}: {}",
                     fmt_dollars(dc)
                 ));
+            }
+            match p.default_credits_issued_cents {
+                Some(issued) => lines.push(format!(
+                    "  {DEFAULT_CREDITS_ISSUED_HUMAN_LABEL}: {}",
+                    fmt_dollars(issued)
+                )),
+                None => lines.push(format!(
+                    "  {DEFAULT_CREDITS_ISSUED_HUMAN_LABEL}: {DEFAULT_CREDITS_ISSUED_ABSENT}"
+                )),
             }
         }
         None => {
@@ -1846,7 +1937,7 @@ mod tests {
         );
         assert!(!out.contains("Path:"), "Path: wording retired: {out}");
         assert!(
-            out.contains("Team prepaid remaining: no management key"),
+            out.contains("Team prepaid remaining: not available"),
             "no fake console $: {out}"
         );
         assert!(
@@ -1934,8 +2025,8 @@ mod tests {
             LimitsSnapshot::from_billing(None, None, SamplingIdentityKind::ConsoleKey);
         let out_k = format_limits_detail(&missing_key);
         assert!(
-            out_k.contains("Team prepaid remaining: no management key"),
-            "default missing key: {out_k}"
+            out_k.contains("Team prepaid remaining: not available"),
+            "inference key, balance missing: {out_k}"
         );
         assert!(
             !out_k.contains("no management key/team id"),
@@ -2064,8 +2155,8 @@ mod tests {
         );
     }
 
-    /// Named contract: SuperGrok live + no management key → Console team block
-    /// still present with honest Balance gap (not silent omit of whole team section).
+    /// Named contract: SuperGrok live, inference key on file, balance missing.
+    /// The console team block stays and says not available. It does not omit the section.
     #[test]
     fn format_supergrok_live_without_mgmt_key_keeps_honest_team_block() {
         let bal = weekly(65.0, "Aug 4, 12:00", None);
@@ -2076,7 +2167,7 @@ mod tests {
         let out = format_limits_detail(&snap);
         assert!(out.contains("Console API:"), "team section present: {out}");
         assert!(
-            out.contains("Team prepaid remaining: no management key"),
+            out.contains("Team prepaid remaining: not available"),
             "honest team gap, not silent omit: {out}"
         );
         assert!(
@@ -2200,6 +2291,7 @@ mod tests {
             api_class_cents: 129,
             other_class_cents: 0,
             default_credits_cents: None,
+            default_credits_issued_cents: None,
         };
         let snap =
             LimitsSnapshot::from_billing(Some(&bal), None, SamplingIdentityKind::SuperGrokSession)
@@ -2836,7 +2928,7 @@ mod tests {
                 is_live: false,
                 key_available: false,
                 balance_cents: None,
-                billing_credits_card: xai_grok_sampling_types::BillingCreditsCard::NotFetched,
+                billing_credits_card: BillingCreditsCard::NotFetched,
                 billing_credits_cents: None,
                 prepaid_gap: ConsoleTeamPrepaidGap::MissingManagementKey,
                 postpaid: None,

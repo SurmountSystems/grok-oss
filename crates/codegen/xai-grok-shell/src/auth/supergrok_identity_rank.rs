@@ -395,7 +395,7 @@ pub fn pick_supergrok_identity_for_auto_with_pin(
 
     with_headroom.sort_by(|a, b| cmp_included_headroom_rank(a, b));
 
-    let best = with_headroom[0];
+    let best = with_headroom.first().copied().expect("index out of bounds");
     PickSupergrokForAuto::Use {
         identity_id: best.identity_id.clone(),
         role: best.role,
@@ -972,6 +972,89 @@ pub fn preferred_uses_supergrok_auto_rank(
     preferred: Option<super::config::PreferredAuthMethod>,
 ) -> bool {
     auto_use_included_limits && !preferred_is_console_primary(preferred)
+}
+
+/// Align the live login `AuthManager` bearer to the included SuperGrok period
+/// primary. `SamplingClient::post` stamps this bearer, not the ranked `api_key`.
+pub(crate) trait AuthManagerRankAlign {
+    fn align_to_ranked_free_period_primary(&self) -> bool;
+}
+
+impl AuthManagerRankAlign for std::sync::Arc<xai_grok_login::AuthManager> {
+    fn align_to_ranked_free_period_primary(&self) -> bool {
+        let path = self.auth_json_path();
+        let Some(home) = path.parent() else {
+            return false;
+        };
+        let candidates = crate::auth::load_supergrok_session_candidates(home);
+        if candidates.len() < 2 {
+            return false;
+        }
+        let ranked = ranked_free_period_primary_token(&candidates);
+        let current_key = self.current_wire_valid().map(|auth| auth.key);
+        if !session_bearer_should_align_to_ranked_free_period_primary(
+            current_key.as_deref(),
+            ranked.as_deref(),
+        ) {
+            return false;
+        }
+        let Some(ranked_tok) = ranked else {
+            return false;
+        };
+        let Ok(mut map) = crate::auth::read_auth_json(path) else {
+            return false;
+        };
+        let Some(auth) = map
+            .values()
+            .find(|entry| entry.key.trim() == ranked_tok.trim())
+            .cloned()
+        else {
+            return false;
+        };
+        if !crate::auth::is_supergrok_session_mode(auth.auth_mode) {
+            return false;
+        }
+        let scope = self.grok_com_config().auth_scope();
+        crate::auth::upsert_supergrok_session(&mut map, &scope, auth.clone());
+        if let Err(err) = xai_grok_login::storage::write_auth_json(path, &map) {
+            tracing::warn!(
+                error = %err,
+                "auth: included SuperGrok period rank align disk write failed; hot_swap only"
+            );
+            xai_grok_telemetry::unified_log::warn(
+                "auth: included SuperGrok period rank align disk write failed",
+                None,
+                Some(serde_json::json!({ "error": err.to_string() })),
+            );
+        }
+        let from_suffix = current_key
+            .as_deref()
+            .map(|key| xai_grok_auth::bearer_suffix(key).to_owned());
+        let to_suffix = xai_grok_auth::bearer_suffix(auth.key.as_str()).to_owned();
+        let principal_type = auth.principal_type.clone();
+        let team_id = auth.team_id.clone();
+        let principal_id = auth.principal_id.clone();
+        self.hot_swap(auth);
+        tracing::info!(
+            from_key_prefix = ?from_suffix,
+            to_key_prefix = %to_suffix,
+            principal_type = ?principal_type,
+            team_id = ?team_id,
+            "auth: aligned SessionToken bearer to included SuperGrok period ranked primary"
+        );
+        xai_grok_telemetry::unified_log::info(
+            "auth: aligned SessionToken bearer to included SuperGrok period ranked primary",
+            None,
+            Some(serde_json::json!({
+                "from_key_prefix": from_suffix,
+                "to_key_prefix": to_suffix,
+                "principal_type": principal_type,
+                "team_id": team_id,
+                "principal_id": principal_id,
+            })),
+        );
+        true
+    }
 }
 
 #[cfg(test)]

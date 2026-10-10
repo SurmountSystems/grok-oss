@@ -1,4 +1,4 @@
-//! Index-access plumbing for the session search SQLite cache.
+//! Path, logging, and open-and-retry helpers for the session search SQLite cache.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -7,23 +7,30 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use crate::fts::{self, SessionSearchIndex};
 use crate::recovery;
 
-pub(crate) fn search_db_path(root_dir: &Path) -> PathBuf {
-    let sessions = root_dir.join("sessions");
-    // Best-effort: the journal-mode classifier statfs's the parent dir.
-    // Owner-only root: the index duplicates session text into the db file.
-    let _ = xai_grok_config::create_dir_all_owner_only(&sessions);
-    let path = sessions.join("session_search.sqlite");
-    // Pre-resolve the per-host sibling so raw file ops target the same file
-    // the index opens.
+/// The file the index would open, without creating anything.
+/// The journal-mode classifier inspects the parent directory, so a caller that means to write must go through [`search_db_path`] first.
+fn db_path_in(root_dir: &Path) -> PathBuf {
+    let path = root_dir.join("sessions").join("session_search.sqlite");
     xai_sqlite_journal::JournalMode::for_db_path(&path).effective_db_path(&path)
+}
+
+/// The same path, with the parent directory created owner only, because the index duplicates session text into the database file.
+/// Best effort: the classifier needs the directory to exist.
+pub(crate) fn search_db_path(root_dir: &Path) -> PathBuf {
+    let _ = xai_grok_config::create_dir_all_owner_only(&root_dir.join("sessions"));
+    db_path_in(root_dir)
+}
+
+/// Whether an index was built earlier. Creates nothing.
+pub(crate) fn search_index_exists(root_dir: &Path) -> bool {
+    db_path_in(root_dir).exists()
 }
 
 pub(crate) fn sqlite_to_io_error(error: rusqlite::Error) -> io::Error {
     io::Error::other(format!("sqlite error: {error}"))
 }
 
-/// Rate-limits a repetitive log site: the first `cap` events go to `warn`,
-/// the rest to `debug`; the budget resets when the search cache is healed.
+/// Rate-limits a repetitive log site: the first `cap` events go to `warn`, the rest to `debug`; the budget resets when the search cache is healed.
 pub(crate) struct HealAwareLogCounter {
     count: AtomicU64,
     epoch_seen: AtomicU64,
@@ -39,8 +46,7 @@ impl HealAwareLogCounter {
         }
     }
 
-    /// Rate-limited warn: within the budget, a tracing warn plus an entry
-    /// in the always-on `unified.jsonl`; past it, tracing debug only.
+    /// Rate-limited warn: within the budget, a tracing warn plus an entry in the always-on `unified.jsonl`; past it, tracing debug only.
     pub(crate) fn warn(
         &self,
         kind: &str,

@@ -1,7 +1,9 @@
-// `McpOAuthConfig` / `McpOAuthConfigMap` re-exported via `mcp` (see `mcp.rs`).
+// `McpOAuthConfig` / `McpOAuthConfigMap` are re-exported via `mcp` (see `mcp.rs`)
 
 mod announcements;
 mod campaigns;
+mod consent;
+
 mod economic_mode;
 mod hints;
 mod load;
@@ -17,10 +19,11 @@ mod worktree;
 
 pub use announcements::*;
 pub use campaigns::{
-    CampaignModelsDefault, campaign_driven_models_default, load_effective_config,
-    load_effective_config_disk_only, persist_models_default, remote_campaigns_from_settings,
-    set_remote_campaigns_from_settings, sync_campaign_fields,
+    CampaignModelsDefault, campaign_driven_models_default, persist_models_default,
+    sync_campaign_fields,
 };
+pub use consent::{ConsentAnswer, set_consent_answer};
+
 pub use economic_mode::{
     ECONOMIC_CONTEXT_CAP, ECONOMIC_MODE_DEFAULT, NESTED_SESSION_CONTEXT_CAP,
     SESSION_ATTENTION_TARGET_PERCENT, apply_economic_context_cap, economic_mode_from_disk,
@@ -30,11 +33,9 @@ pub use economic_mode::{
 pub use hints::*;
 pub use load::*;
 pub use mcp::*;
-pub(crate) use mcp_reenable::reenableable_disabled_stubs;
+pub(crate) use mcp_reenable::{McpDefinitionIndex, needs_definition_scan};
 pub use permissions::*;
 pub use persist::*;
-// `remote` extracted to the `xai-grok-config-types` crate (dependency inversion);
-// re-exported so `crate::util::config::{RemoteSettings, GoalRoleModel}` keep working.
 pub use resolve::*;
 pub use settings_writes::*;
 pub use tips::*;
@@ -44,7 +45,14 @@ pub use turbo_planning::{
     turbo_planning_from_disk,
 };
 pub use worktree::*;
+pub use xai_grok_config::effective_config::{
+    EffectiveConfigLayers, load_effective_config, load_effective_config_with_layers,
+    remote_campaigns_from_settings, set_remote_campaigns_from_settings,
+};
+pub use xai_grok_config::load_effective_config_disk_only;
+// These types live in `xai-grok-config`; the re-export keeps `crate::util::config::{RemoteSettings, GoalRoleModel}` working
 pub use xai_grok_config_types::{
-    CampaignOverride, ContextualHintsRemote, DisplayRefreshSettings, DoomLoopRecoverySettings,
-    GoalRoleModel, RemoteSettings, WorktreeAutoGcSettings, WorktreeKindMaxAge,
+    CampaignOverride, ConsentGate, ContextualHintsRemote, DisplayRefreshSettings,
+    DoomLoopRecoverySettings, GoalRoleModel, LongReasoningReminderSettings, RemoteSettings,
+    WorktreeAutoGcSettings, WorktreeKindMaxAge, deserialize_tolerant,
 };

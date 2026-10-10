@@ -46,6 +46,10 @@ project `.agents/reports/`, `.agents/plans/`, or project-root `.grok/`
 for reports. This pin does not weaken § *Project agent home*. Host
 dual-pin: `~/.grok/AGENTS.md` same heading.
 
+### Bug reports and issue writeups stay out of the product tree (pinned 2026-09-26)
+
+Bug reports and issue writeups stay out of the product tree. They do not go in `docs/issues/`, `docs/features/`, `docs/dev/bugs/`, or any other docs path. GitHub holds the GitHub issue. Local notes go in `~/.agents/reports/` and are not part of the git tree.
+
 ## Product priority (value order)
 
 **Code + tests > docs > git.** Docs matter more than git ceremony; docs matter
@@ -263,10 +267,10 @@ less than product code and tests. Do not invent long essays or git nags.
    2026-08-20; compact split 2026-08-21).** The main (L1) session uses
    the catalog 500k sampling window. AUTO compact on L1 uses that
    window, not the old 200k knee. Nested L2 sampling stays 200k. L2
-   may compact. L3 never compact. An L3 is disposable. If it stalls
+   may compact. A specialist must not compact itself. An L3 is disposable. If it stalls
    or spirals, kill it. Think-only stall: see § *Kill a think-only L3
    after about 15 minutes*. When an L3 is near 200k, it summarizes,
-   reports to L2, and stops. Do not compact-and-continue on L3.
+   reports to L2, and stops. The specialist must not compact itself and continue.
    Keep L1 near about 40% of that 500k window, and keep nested
    sessions near 40% of their 200k window. Compaction is expensive
    and slow. Avoid filling L1: board pointers, spawn, wait, read the
@@ -320,6 +324,16 @@ less than product code and tests. Do not invent long essays or git nags.
    pad a guess. Name which meter and which workspace. SuperGrok Heavy
    is a distinct weekly pool from standard SuperGrok. Dual-pin: host
    `~/.grok/AGENTS.md` § *Limits and credits vocabulary*.
+   **Finished job output tokens (pinned 2026-10-09).** When
+   `local_usage_events_for_session` returns `output_tokens`, print that
+   integer. When it returns null, omit the figure or say the output total
+   was not stored. Do not copy the estimate. Do not print `0`. Do not
+   write `not_fetched` for that cell. Leave the Billing Credits card wire
+   alone. That wire's `not_fetched` is a different meter. The reconcile
+   cell is that row's `output_tokens`, not `total_tokens`, and not the
+   standing estimate. Chain of thought is `reasoning_tokens` and is not
+   added again. Dual-pin: host `~/.grok/AGENTS.md` § *Comprehensive
+   estimate and reconcile*.
    **grok-oss limits printout is not xAI billing truth (pinned 2026-08-19).**
    grok-oss limits JSON and compact chrome are a client printout, not xAI
    billing truth. Distinguish "the CLI printed X" from "the account is X."
@@ -447,10 +461,13 @@ less than product code and tests. Do not invent long essays or git nags.
    never name that Anthropic assistant product. See the named subsection.
    Host dual-pin: `~/.grok/AGENTS.md` same heading.
    **Layers, not parent or child (pinned 2026-09-21):** Nested agents are
-   **L1**, **L2**, and **L3**. Coordinator and specialist are fine. Do not
+   **L1**, **L2**, and **L3**. Coordinator and specialist are fine when
+   the layer is right: the coordinator is the L2, and the specialist is
+   the L3. An L3 is not a coordinator. There is no L4. See § *Layers,
+   not parent or child* and § *An L3 is not a coordinator*. Do not
    call L1 a parent of L2, or L2 a child of L1, or L3 a child of L2. Do
-   not analogize nested agents to OS process trees. See § *Layers, not
-   parent or child*. Host dual-pin: `~/.grok/AGENTS.md` same heading.
+   not analogize nested agents to OS process trees. Host dual-pin:
+   `~/.grok/AGENTS.md` same heading.
    **ISA vs cores vs cargo targets (pinned 2026-08-23).** aarch64 versus
    x86_64 is instruction-set architecture (ISA), not "extra CPUs." CPU in
    that sentence reads as cores or VM size (GitHub `CI_LOW_MEM` versus
@@ -488,6 +505,7 @@ less than product code and tests. Do not invent long essays or git nags.
    `~/.grok/AGENTS.md` § *Self-improving feedback loop*, § *Operator
    speech is work*, § *Never ignore the Operator*, § *Take the Operator
    seriously*, § *Operator and Agent*, § *Layers, not parent or child*,
+   § *An L3 is not a coordinator*,
    § *Never name that Anthropic assistant*, § *Report finished nested
    work the same turn*.
    **Write that down (pinned 2026-08-22; L2 writes 2026-08-28):** when
@@ -548,7 +566,7 @@ less than product code and tests. Do not invent long essays or git nags.
    scripts**, and must **not invent and execute ad-hoc shell scripts that
    download or run untrusted code**, for agent tasks. Active **supply chain
    attacks on the Python ecosystem** make agent-authored `python3` / `pip` /
-   one-off `.py` payloads a real risk. **Shell tool for named product
+   one-off `.py` payloads a real risk. grok-oss must not execute python3. **Shell tool for named product
    commands** (`cargo`, `just`, `cargo test`/nextest, `rg`, read-only git,
    existing in-tree scripts) is fine. **Writing** a new `.py`/throwaway `.sh`
    (or equivalent heredoc payload) and executing it for agent glue is not.
@@ -633,6 +651,186 @@ less than product code and tests. Do not invent long essays or git nags.
     contract. Dual-pin: [`FORK.md`](FORK.md) Land checklist **Named tests
     are contracts**; this file § *The operator's words are the spec*.
     Host: § *Test intent*.
+    **Plan mode screen (pinned 2026-10-07).** These sentences say what
+    that screen must do. They are not a claim that the tests already
+    pass. Do not reshape the asserts to match today's paint.
+    While plan mode is open, the prompt input shows a white outline.
+    The frame glyphs use `prompt_border_active` (`Rgb(255, 255, 255)`
+    on DOGE). They do not use `bg_base`. Ask mode and commenting keep
+    that same white stroke. This is not the plan side panel. Named
+    test: `plan_mode_prompt_input_keeps_a_white_outline`.
+    While plan mode is open, the screen offers a Limits and Credits
+    control when the next request does not draw included SuperGrok
+    period limits. Opening it shows Limits before Credits. The control
+    does not say `limits 0%` or `limits N%` unless that meter is the
+    one the next request draws. SuperGrok is paid. The meters stay
+    distinct: included SuperGrok period limits, SuperGrok dollar
+    credits, and console team prepaid / console API credits. Named test:
+    `plan_mode_screen_offers_limits_and_credits_when_included_limits_are_not_the_next_request`.
+    While plan mode is open, an image the operator provides is kept on
+    that plan turn. Named test:
+    `plan_mode_keeps_an_image_the_operator_provides`.
+    Differences: `titled_doge_composer_frame_is_prompt_border_not_context_yellow`
+    leaves `border_color_override` unset.
+    `plan_prompt_window_paints_white_titled_frame` does not set
+    `plan_mode_active`.
+    `clicking_the_chip_opens_the_card_and_the_limits_tab_shows_ahead_or_behind_a_linear_week`
+    builds `LimitsModalState` itself.
+    `limits_mode_does_not_paint_limits_in_use_for_a_team_jwt_and_an_unread_meter_is_not_zero_percent`
+    requires the in-use chip to stay off. That assert stays.
+    A test that attaches an image only outside plan mode is not the
+    image contract. `approve_or_revise_drains_plan_composer_images`
+    uses the idle-local fixture, not the after-turn `RevisePlan(text)`
+    arm. Dual-pin: [`FORK.md`](FORK.md) **Named tests are
+    contracts** § *Plan mode screen*.
+    **Composer copy, closed header, and plan approval (pinned
+    2026-10-07).** These sentences say what those screens must do.
+    They are not a claim that the tests already pass. Do not reshape
+    the asserts to match today's paint. Rebuild IPC is already wired.
+    This wave does not rewrite `RelaunchForUpdate`. SuperGrok is paid.
+    On DOGE the composer copy control is a three-column
+    square-bracketed copy glyph, inset from the white stroke. Named
+    test:
+    `composer_copy_control_is_a_bracketed_glyph_inset_from_the_white_stroke`.
+    The older test
+    `soft_plan_side_panel_shows_full_title_bordered_copy_muted_divider_and_hides_actions_after_approve`
+    draws the plan-header glyph `[⧉]`. It does not draw this composer
+    label. Today the composer paints the yellow word `[Copy]`. With
+    plan mode closed, and on the plan-approval screen, the header
+    shows `Limits and Credits` when the next request does not draw
+    included SuperGrok period limits. A click opens the card. The
+    label is not a percent. Named test:
+    `closed_plan_header_opens_limits_and_credits_without_a_false_percent`.
+    The older test
+    `plan_mode_screen_offers_limits_and_credits_when_included_limits_are_not_the_next_request`
+    forces plan mode on and builds the modal itself. It does not draw
+    the header while plan mode is closed, and it does not draw the
+    plan-approval header. The team-JWT test
+    `limits_mode_does_not_paint_limits_in_use_for_a_team_jwt_and_an_unread_meter_is_not_zero_percent`
+    still forbids `limits 0%`, `limits 1%`, and a card that says
+    included limits are in use. That assert stays. Shift-Enter, the
+    arrow keys, and Ctrl-Backspace do the same thing on the
+    plan-approval prompt, Ask, and comment as on the main composer.
+    Named test:
+    `every_prompt_handles_shift_enter_arrows_and_ctrl_backspace_like_the_main_composer`.
+    The approval header shows `[✗]` while the footer is
+    `approve | comment | revise | exit`. Named test:
+    `plan_approval_header_shows_the_close_control`. That approval
+    prompt's stroke is white on every side. Named test:
+    `plan_approval_prompt_stroke_is_white_on_every_side`.
+    `plan_mode_prompt_input_keeps_a_white_outline` stays. It draws the
+    white outline on the plan-mode prompt input. It does not draw this
+    approval screen. While planning, the Operator can view an attached
+    image. Named test: `planning_opens_an_attached_image_for_viewing`.
+    `plan_mode_keeps_an_image_the_operator_provides` stays the send
+    path. It keeps the image on that plan turn. It does not open the
+    image for viewing. Dual-pin: [`FORK.md`](FORK.md) **Named tests
+    are contracts** § *Composer copy, closed header, and plan
+    approval*.
+    **Main composer copy and header credits (pinned 2026-10-07).**
+    These sentences say what those surfaces must do. They are not a
+    claim that the tests already pass. Do not reshape the asserts to
+    match today's paint. SuperGrok is paid. Older pins above stay.
+    The main composer does not paint the six-column yellow word
+    `[Copy]` at the bottom right next to the mode caption. Named
+    test:
+    `main_composer_does_not_paint_yellow_copy_at_the_bottom_right`.
+    `composer_copy_control_is_a_bracketed_glyph_inset_from_the_white_stroke`
+    only checks the top row. Today the bottom right still paints that
+    yellow word. The header credits slot shows percent used of
+    included SuperGrok period limits only when the next request draws
+    that meter. Otherwise it shows credits remaining for the meter
+    that request spends. A live Team JWT with hard-expired personal
+    SuperGrok shows team postpaid Billing Credits remaining, not the
+    words `Limits and Credits`, and not `limits N%`. That Team
+    settlement is not included SuperGrok period limits, not SuperGrok
+    dollar credits, and not console team prepaid.
+    `closed_plan_header_opens_limits_and_credits_without_a_false_percent`
+    used to require the words. The Operator replaced that requirement.
+    The team-JWT test
+    `limits_mode_does_not_paint_limits_in_use_for_a_team_jwt_and_an_unread_meter_is_not_zero_percent`
+    still forbids `limits 0%`, `limits 1%`, `Using limits`, and an
+    unread meter painted as zero. When a live personal session draws
+    included limits, the header still shows `limits 28%`. Dual-pin:
+    [`FORK.md`](FORK.md) **Named tests are contracts** § *Main
+    composer copy and header credits*.
+    **View-plan outline and header credits click (pinned 2026-10-07).**
+    These sentences say what those screens must do. They are not a
+    claim that the tests already pass. Do not reshape the asserts to
+    match today's paint. SuperGrok is paid. Older pins above stay.
+    The default view-plan screen is the right-side plan pane
+    (`LineViewerKind::PlanPreview`, fullscreen off). Its rounded frame
+    is white on every side, `prompt_border_active` (`Rgb(255, 255, 255)`
+    on DOGE). It does not use `theme.bg_base`. Named test:
+    `view_plan_screen_outline_is_white_on_every_side`. The older test
+    `soft_plan_side_panel_uses_muted_frame_and_bracketed_header_controls`
+    keeps its bracketed header controls. It no longer requires the frame
+    to stay off white. `plan_mode_prompt_input_keeps_a_white_outline`
+    and `plan_approval_prompt_stroke_is_white_on_every_side` draw the
+    composer, not this pane frame.
+    A left click on the header credits chip writes
+    `MeterSource::Included` and still opens the Limits card, Limits
+    before Credits. On a session that can draw included SuperGrok
+    period limits, the next request draws that meter and the chip shows
+    percent used. On a team-only JWT, with personal SuperGrok
+    hard-expired, the chip stays on team postpaid Billing Credits
+    remaining and does not show `limits 0%` or `limits N%`. Named test:
+    `clicking_the_header_credits_chip_switches_the_next_request_to_included_period_limits_and_still_opens_the_card`.
+    `closed_plan_header_opens_limits_and_credits_without_a_false_percent`
+    stays the team-only `$47.03` contract. Do not invent a hop to the
+    console API key. Dual-pin: [`FORK.md`](FORK.md) **Named tests are
+    contracts** § *View-plan outline and header credits click*.
+    **Dollar-credits pin, console pin, and use_console header (pinned
+    2026-10-07).** These sentences say what the header must do. They
+    are not a claim that the tests already pass. Do not reshape the
+    asserts to match today's paint. SuperGrok is paid. Older pins
+    above stay. The meters stay distinct: included SuperGrok period
+    limits, SuperGrok dollar credits, console team prepaid / console
+    API credits, and team postpaid Billing Credits. A SuperGrok
+    dollar-credits pin (`MeterSource::DollarCredits`) and a known
+    SuperGrok dollar-credits remaining show those dollars on the
+    header (`$87.65` in the fixture). The header does not show the
+    words `Limits and Credits`, team postpaid Billing Credits, console
+    team prepaid, or `limits N%`. When that remaining was not read,
+    the header stays on the words. It does not become `$0` or
+    `limits 0%`. Named test:
+    `header_shows_supergrok_dollar_credits_remaining_when_that_pin_is_set`.
+    A console pin (`MeterSource::Console`) and a known console team
+    prepaid / console API credits remaining show those dollars
+    (`$154.20` in the fixture). The snapshot prepaid remaining wins
+    over a different process-cache amount. An unread console remaining
+    stays on the words. Named test:
+    `header_shows_console_credits_remaining_when_the_console_pin_is_set`.
+    `use_console` and a known console remaining show those same
+    dollars. `use_console` wins when a dollar-credits pin is also set.
+    An unread console remaining stays on the words even when SuperGrok
+    dollar credits were read. Named test:
+    `header_shows_console_credits_remaining_when_use_console_is_set`.
+    Included SuperGrok period limits, when they are what the next
+    request draws and the usage reading is known, still paint percent
+    used (`limits 28%` in the personal fixture). A team-only JWT does
+    not hop to the console API key and does not paint `limits N%`
+    while it is not drawing included limits.
+    `header_credits_slot_matches_the_team_postpaid_dollars_the_limits_card_shows`
+    stays and still requires `$442.97`.
+    `closed_plan_header_opens_limits_and_credits_without_a_false_percent`
+    stays the fixture `$47.03`.
+    `limits_mode_does_not_paint_limits_in_use_for_a_team_jwt_and_an_unread_meter_is_not_zero_percent`
+    still forbids `limits 0%`, `limits 1%`, `Using limits`, and an
+    unread meter painted as zero.
+    `clicking_the_header_credits_chip_switches_the_next_request_to_included_period_limits_and_still_opens_the_card`
+    stays. That click fixture does not seed a SuperGrok dollar-credits
+    remaining, so the words `Limits and Credits` remain its click
+    target. Dual-pin: [`FORK.md`](FORK.md) **Named tests are
+    contracts** § *Dollar-credits pin, console pin, and use_console
+    header*.
+    **Transcript message colors (pinned 2026-10-07).** These sentences say what the transcript must paint. They are not a claim that the tests already pass. Do not reshape the asserts to match today's paint. The message body stays white. The left accent carries the color.
+    - The Operator's message body stays white. On DOGE that is `text_primary`, not `accent_user`. The left accent rail (`┃`) is Operator green, `accent_user` (`Rgb(0, 255, 0)` on DOGE). That rail stays present, including when the prompt is collapsed, because the body is still on screen. The composer caret and the operator rails stay Operator green. The mid-draft letter under the caret still uses `text_primary` on the empty blink half. Do not paint the caret magenta. Do not change that blink rule. Named test: `operator_message_text_stays_white_and_the_left_accent_is_green`. `doge_accent_user_is_pure_green_for_human` stays the palette proof that `accent_user` is pure green. `user_prompt_block_accent_is_static_human_rail` and `user_prompt_block_accent_is_green_rail_under_doge_default` stay.
+    - Chain of thought body stays white (`text_primary`). Its left accent, when the thought is open, is cyan, `accent_system` (`Rgb(0, 255, 255)` on DOGE). `accent_thinking` stays magenta (`Rgb(255, 0, 255)`) and is not that left accent. No new theme key was added. Named test: `chain_of_thought_text_stays_white_and_the_left_accent_is_cyan`.
+    - The Agent's response body stays white (`text_primary`). Its left accent, while the turn is active, is magenta, `accent_running` (`Rgb(255, 0, 255)` on DOGE). A finished turn does not keep a permanent rail. Named test: `agent_response_text_stays_white_and_the_left_accent_is_magenta`.
+    **Use limits click and header figure (pinned 2026-10-07).** These sentences say what the screen must do. They are not a claim that the tests already pass. Do not reshape the asserts to match today's paint. SuperGrok is paid. The meters stay distinct.
+    - A left click on the painted words Use limits changes the card. The hit rect is the footer control that paints those letters, stored from the last paint. Esc, the close control, Exit, comment, and revise stay their own actions. The click writes MeterSource::Included and does not set use_console. It does not hop to the console API key. On a live personal session, and on a hard-expired personal session beside a Team JWT, the next request draws included SuperGrok period limits. The card shows Using limits. The Use limits control is gone because the choice was accepted. The card does not say included limits are not being drawn for the next request. When that meter's usage reading exists, the header shows percent used (`limits 28%` in the personal fixture and in the Team JWT click fixture). When that usage reading does not exist, the header does not invent `limits 0%`, `limits N%`, or `$0`. Named test: `clicking_use_limits_on_the_limits_card_is_handled`. The screen where the operator has not clicked Use limits stays `limits_mode_does_not_paint_limits_in_use_for_a_team_jwt_and_an_unread_meter_is_not_zero_percent`.
+    - While the next request spends a credit meter that has a remaining, the header shows those dollars. The words Limits and Credits are only the missing-reading label. The open Limits card and the header use the same remaining for that meter. The header does not invent $0 or limits 0%. Team postpaid Billing Credits, SuperGrok dollar credits, and console team prepaid / console API credits stay distinct. Named test: `header_shows_the_same_team_postpaid_figure_the_open_card_shows`. The fixture figure is `$442.97` when the next request is not drawing included SuperGrok period limits. `header_credits_slot_matches_the_team_postpaid_dollars_the_limits_card_shows` stays. These sentences are not a claim that the tests already passed.
 16. **No bash-in-nix; SHA-1 is git object ids only (pinned 2026-08-25).**
     Do not wrap old `.sh` in `pkgs.writeShellApplication` (or equivalent
     bash-in-nix). CI/Nix helper logic belongs in named `flake/*.nix` modules
@@ -836,6 +1034,10 @@ This pin does not weaken one live `just check-remote` at a time,
 fire-and-return, or the rule that the Operator owns the VPS builder.
 Dual-pin: this file and host `~/.grok/AGENTS.md` same heading.
 
+### Work on everything with parallel L2s (pinned 2026-10-07)
+
+Operator: remember to work on everything with parallel L2s. When a job has more than one contract, start one L2 per disjoint write set in the same turn. Do not put independent tests on a single L2. A shared file stays with one L2. One runner still owns `just check-remote`. Do not serialize independent work. Dual-pin: host `~/.grok/AGENTS.md` same heading. This does not replace the older implementor-cap pins.
+
 ## Take the Operator seriously (pinned 2026-09-09)
 
 Take the Operator seriously. Their words are the spec. A live grok-oss
@@ -888,8 +1090,10 @@ line that left the composer named Human box.
 ## Layers, not parent or child (pinned 2026-09-21)
 
 Operator: use layer terminology, not parent or child. Nested agents are
-**L1**, **L2**, and **L3**. Coordinator and specialist are fine. Be
-thoughtful in this language always.
+**L1**, **L2**, and **L3**. Coordinator and specialist are fine when
+the layer is right: the coordinator is the L2, and the specialist is
+the L3. An L3 is not a coordinator. See § *An L3 is not a coordinator*.
+Be thoughtful in this language always.
 
 Do not call L1 a parent of L2, or L2 a child of L1, or L3 a child of L2,
 in chat, board titles, spawn descriptions, residual, plans, reports,
@@ -910,8 +1114,31 @@ attached. User-facing copy uses layers. GitHub issue 143 is titled
 describes that work as **L1 follow-up to a running L2**. Do not
 mass-rename GitHub.
 
+Do not say siblings for other L2s or for L3s. When speaking to an L2,
+say L3s for the specialists that L2 spawns, and say other L2s for the
+other coordinators. Be kind in those notes.
+
 This pin does not weaken § *Operator and Agent*. Dual-pin: this file
 (hard constraint 4) and host `~/.grok/AGENTS.md` same heading.
+
+## An L3 is not a coordinator (pinned 2026-10-08)
+
+Operator: "L3s cannot be coordinators because there's nothing for them to coordinate. There is no L4. They can be implementors, researchers, and reviewers."
+
+An L2 coordinates. An L3 implements, researches, or reviews. An L3 does not coordinate. There is no L4. Do not call an L3 a coordinator. Coordinator and specialist remain fine words when the layer is right: the coordinator is the L2, and the specialist is the L3. Implementor, researcher, and reviewer are the L3 roles.
+
+This pin does not weaken § *Layers, not parent or child* or § *Agent depth L1 / L2 / L3*. Dual-pin: host `~/.grok/AGENTS.md` same heading.
+
+## Skills do not override who spawns (pinned 2026-10-09)
+
+The main session is L1. L1 spawns an L2 for implement, diagnosis, and multi-file work. L1 does not do that work.
+An L2 does the work. An L2 spawns an L3 only when that slice is hard. Easy work stays on the L2.
+An L3 implements, researches, or reviews. An L3 does not coordinate and does not spawn. There is no L4.
+Do not call an L3 an L2. Do not spawn "two L2 agents" from inside an L2.
+The plan skill, the implement skill, and the hierarchical skill do not override this. If a skill still says spawn an L3 on every task, change that skill so it matches this rule.
+Do not teach the old half-window rule ("spawn L3 when many greps / half the window") as the spawn rule.
+
+This pin does not weaken § *An L3 is not a coordinator*. Easy work can stay on L2. Do not delete that older sentence. Dual-pin: host `~/.grok/AGENTS.md` same heading.
 
 ## Never name that Anthropic assistant (pinned 2026-09-09)
 
@@ -941,16 +1168,40 @@ Do not spawn the next job and only mention the live count. Finished work
 that is only in a later "one L2 running" defense was never reported.
 
 This sits next to § *Finished nested agents must stop* (kill the
-painted-live row). Stopping the row is not the operator report. Dual-pin:
-this file and host `~/.grok/AGENTS.md` same heading.
+painted-live row). Stopping the row is not the operator report. An
+early L2 exit is not finished work. See
+§ *L1 resumes an early L2 exit*. Dual-pin: this file and host
+`~/.grok/AGENTS.md` same heading.
+
+## L1 resumes an early L2 exit (pinned 2026-09-21)
+
+If an L2 exits early, L1 resumes that same L2. Early means about a
+couple of minutes, few or zero tool calls, no land report, or the L2
+stopped for a repeating sentence before work. L1 uses the product
+resume path for that same L2. That path is not a new L2.
+
+Do not treat that exit as done. Do not start a duplicate L2 for the
+same job.
+
+This is an L1 manager rule. It does not license killing a healthy L2
+that is still working, and it does not replace the rule that a truly
+finished L2 must stop. Those rules stay § *Finished nested agents must
+stop*, § *Report finished nested work the same turn*, and the line that
+says do not kill a healthy in-flight L2. Dual-pin: this file and host
+`~/.grok/AGENTS.md` same heading.
+
+### Close a misaligned L2 (pinned 2026-09-22)
+
+Close a misaligned L2. A nudge is only when that L2 is already on the right job and is missing one fact. If the job changed, close it and start a new one.
 
 ## Subagents — parent is HITL UX only (hard)
 
 The **main/parent thread is HITL UX only**: status to the operator, spawn L2,
 wait, read **short on-disk reports**, board upsert, plus the **Hierarchical
 fast path**. **Research, implementation, multi-file greps, edits, tests, and
-skill-body rewrites never run on L1 or L2**, not even “just a quick look.”
-L2 parallelizes and spawns L3s; L3 does the actual tools and work. Full
+skill-body rewrites never run on L1**, not even “just a quick look.”
+The L2 does that work. The L2 spawns an L3 only when the slice is hard.
+Easy work can stay on that L2. Full
 rule: this file § *Agent depth L1 / L2 / L3*; host `~/.grok/AGENTS.md` §
 *Regressions…* + § *Hard stop — parent is coordinator only*. Git handoff
 only when the operator asked for complex git help (see hard constraint
@@ -970,13 +1221,24 @@ joins under project `.agents/joins/`.
 
 **Supersedes 2026-08-15 "L2 MUST always spawn L3 / always three layers."** Operator contract 2026-08-20 (survives compaction): `~/.agents/reports/feat-l1-500k-nested-200k-CONTRACT.md`
 
+The main session is L1. L1 spawns an L2 for implement, diagnosis, and multi-file work. L1 does not do that work.
+An L2 does the work. An L2 spawns an L3 only when that slice is hard. Easy work stays on the L2.
+An L3 implements, researches, or reviews. An L3 does not coordinate and does not spawn. There is no L4.
+Do not call an L3 an L2. Do not spawn "two L2 agents" from inside an L2.
+The plan skill, the implement skill, and the hierarchical skill do not override this. If a skill still says spawn an L3 on every task, change that skill so it matches this rule.
+
 - **L1 sampling** is the catalog 500k window. AUTO compact on L1 uses that window, not 200k. No 40% throttle on the L1 window size. Cancelled compact must not re-arm.
 - **L2 nested** stays 200k. L2 may compact.
-- **L3 never compact.** An L3 is disposable. If it stalls or spirals, kill it. When an L3 is near 200k, it summarizes, reports to L2, and stops. Do not compact-and-continue on L3. Compact on L3 is an error. Think-only stall: see § *Kill a think-only L3 after about 15 minutes*.
-- **Finished nested agents must stop (pinned 2026-08-22).** When the host says a nested agent has exited, L1 must not leave it painted as live. If the Subagents list still shows Responding and a running timer, kill that id the same turn. A finished L2 must not keep its context open. Compaction of a finished L2 is waste. Host dual-pin: `~/.grok/AGENTS.md` § Agent depth. Same turn, **report** that finished work to the operator (§ *Report finished nested work the same turn*). Killing the painted-live row is not the report.
+- **A specialist must not compact itself.** An L3 is disposable. If it stalls or spirals, kill it. When an L3 is near 200k, it summarizes, reports to L2, and stops. The specialist must not compact itself and continue. Do not compact-and-continue. The specialist compacting itself is an error. Think-only stall: see § *Kill a think-only L3 after about 15 minutes*.
+
+### An L2 may compact a specialist near the nested window (pinned 2026-09-25)
+
+An L2 may compact a specialist it spawned when that specialist is near the 200k nested sampling window. The L2 initiates that compact. The specialist must not compact itself and continue.
+
+- **Finished nested agents must stop (pinned 2026-08-22).** When the host says a nested agent has exited, L1 must not leave it painted as live. If the Subagents list still shows Responding and a running timer, kill that id the same turn. A finished L2 must not keep its context open. Compaction of a finished L2 is waste. Host dual-pin: `~/.grok/AGENTS.md` § Agent depth. Same turn, **report** that finished work to the operator (§ *Report finished nested work the same turn*). Killing the painted-live row is not the report. An early L2 exit is not a finished L2. See § *L1 resumes an early L2 exit*.
 - **L1** never does product work and never shows raw edits. Status, spawn L2, wait, short reports, board, Hierarchical fast path. L1 must not edit product code (see § *I hate seeing you edit code at L1*). L1 must not rewrite process-law files (see § *L1 must not rewrite process law*).
 - **L2** is the coordinator and reports back to the operator at L1. L2 decides whether to spawn L3s. Spawn L3 **only if the problem is actually hard**. Easy work can stay on L2. Easy documentation dual-pins stay on L2.
-- **L3** has about as much agency as L2 except no spawn (no L4).
+- **L3** has about as much agency as L2 except no spawn (no L4). An L3 implements, researches, or reviews. An L3 does not coordinate. Do not call an L3 a coordinator. See § *An L3 is not a coordinator*.
 - **No worktrees** on this tree (`allow_worktree = false`). Do not invent a worktree workflow.
 - Big already-named work runs as **parallel streams**. Explicit plan/implement is for tricky problems and new projects. After Approve, implement. Present is not Approve.
 
@@ -987,12 +1249,12 @@ goes up. Do not go deeper than L3.
 | Depth | Does | Does not |
 |-------|------|----------|
 | **L1 main** | Status to the operator. Spawn L2. Wait. Read short reports. Board upsert. Hierarchical fast path. Modal-free operator chat: typing and chat must stay unobstructed; must not get stuck in plan soft-park or exclusive key capture. | Diagnose, implement, multi-file reads, CI logs, rewriting `AGENTS.md` / `FORK.md` / `RESIDUAL.md` / user-guide / remaining-work reports |
-| **L2 subagent** | Parallelize. Decide whether to spawn L3 (only if the problem is actually hard). Stay token-efficient. Throw context away after a report goes up. Operator-facing nested view: operator questions and clarifications in that L2 overlay go to that L2. | Show raw edits to the operator as if they were L1. Do not inject operator text into a live L3. Spawn L4. |
-| **L3 specialist** | All actual tools and work, in parallel. Same agency as L2 except it cannot spawn. | Spawn L4 (**forbidden**). Do not add extra L3 hobbles (no "L3 may only grep", no weaker model unless product already requires it). |
+| **L2 subagent** | Does the work. Parallelize. Decide whether to spawn L3 (only if the problem is actually hard). Stay token-efficient. Throw context away after a report goes up. Operator-facing nested view: operator questions and clarifications in that L2 overlay go to that L2. | Show raw edits to the operator as if they were L1. Do not inject operator text into a live L3. Spawn L4. |
+| **L3 specialist** | The hard slice, in parallel, when the L2 spawned it. Implementor, researcher, or reviewer. Same agency as L2 except it cannot spawn. | Coordinate, or be called a coordinator. Spawn L4 (**forbidden**). Do not add extra L3 hobbles (no "L3 may only grep", no weaker model unless product already requires it). |
 
-L3 is not a weaker agent. The hard cap is no L4. L2's unique extra versus L3 is spawning L3 plus being the nested view the operator talks to. L3's unique extra versus L2 is doing the tools when spawned. Easy work can stay on L2.
+L3 is not a weaker agent. The hard cap is no L4. L2's unique extra versus L3 is spawning L3 plus being the nested view the operator talks to. An L3 does the hard slice when the L2 spawned it. Easy work can stay on L2.
 
-Spawn an L2 when the job needs isolation from L1: implement, multi-file diagnosis, CI, regressions, skill-maintenance, or any tool work that would fill the parent. The Hierarchical fast path does not spawn L2. Additive "also" / "btw" spawns another L2 (or queues same-file). Do not kill a healthy in-flight L2. Builder jobs on surmount-1 go through one runner L2 (see § *Jobs queue*). Do not spawn a swarm of identical Isolated Preview writers on the same files.
+Spawn an L2 when the job needs isolation from L1: implement, multi-file diagnosis, CI, regressions, skill-maintenance, or any tool work that would fill the parent. The Hierarchical fast path does not spawn L2. Additive "also" / "btw" spawns another L2 (or queues same-file). Do not kill a healthy in-flight L2. See § *L1 resumes an early L2 exit*. Builder jobs on surmount-1 go through one runner L2 (see § *Jobs queue*). Do not spawn a swarm of identical Isolated Preview writers on the same files.
 
 L2 waits on L3, reads L3 short reports, and writes one L2 report under `~/.agents/reports/`. L1 reads that L2 report only and speaks to the operator. L1 does not re-do L3 greps. Those files are reports, not joins. They are not project `.agents/reports/` and not git. Operator compose in the nested L2 view resumes that L2. Do not barge into a running L3 with operator text unless the operator explicitly targeted that specialist (they did not; default is unbothered). Keep L1 list L2-only plus a live L3 count. Do not flatten L2/L3 into one list.
 
@@ -1006,11 +1268,16 @@ these things without spawning L2:
 
 That is the **Hierarchical fast path**. It is not a license to diagnose,
 implement, or walk many files in the main thread. L2 still decides whether
-to spawn L3 when the problem is actually hard. L2 may compact. **Do not
-compact-and-continue** on L3.
+to spawn L3 when the problem is actually hard. L2 may compact a specialist
+it spawned when that specialist is near the 200k nested window. A specialist
+must not compact itself and continue.
 
-L1 and L2 may still use `spawn_subagent`, `todo_write`,
-`get_command_or_subagent_output` / wait, and read the short on-disk report they
+### L1 interactions are spawn and report (pinned 2026-09-26)
+
+An Operator message that asks for a fix, a diagnosis, a multi-file change, or a plan follow-through is an L2 job. L1 spawns that L2 and reports. L1 does not grep, edit, or run the suite to do the job. The Hierarchical fast path stays narrow: one already-named command, one already-named file read, the asked-for short report, one already-named one-line edit. "Just a quick look" is not that path. Easy work stays on that L2. It does not stay on L1. The L2 spawns an L3 only when the slice is hard.
+
+L1 may still use `spawn_subagent`, `todo_write`,
+`get_command_or_subagent_output` / wait, and read the short on-disk report it
 asked for. That is coordination, not work. **Do not go deeper than L3.**
 
 This section is project **D1** law and must survive recon. Host dual-pin:
@@ -1114,23 +1381,25 @@ Host: § *Hard stop* default loop.
 - **User-facing language** (mirror of host `~/.grok/AGENTS.md` § Language,
   2026-07-26; layers 2026-09-21): never bare **child/children** as a nickname
   for subagents (“Child finished green” is wrong). Nested agents are **L1**,
-  **L2**, and **L3**. Coordinator and specialist are fine. Do not call L1 a
-  parent of L2, or L2 a child of L1, or L3 a child of L2. Do not analogize
-  nested agents to OS process trees. Prefer **subagent**, **implementer**,
-  **explore agent**, **worker**, or a role name. Keep ban on “kids” + “cheap.”
-  “Child process” = OS process only, in technical docs. See § *Layers, not
-  parent or child*.
+  **L2**, and **L3**. Coordinator and specialist are fine when the layer is
+  right: the coordinator is the L2, and the specialist is the L3. An L3 is
+  not a coordinator. There is no L4. See § *An L3 is not a coordinator*.
+  Do not call L1 a parent of L2, or L2 a child of L1, or L3 a child of L2.
+  Do not analogize nested agents to OS process trees. Prefer **subagent**,
+  **implementer**, **explore agent**, **worker**, or a role name. Keep ban
+  on “kids” + “cheap.” “Child process” = OS process only, in technical
+  docs. See § *Layers, not parent or child*.
 - **CI fail, regression, multi-file diagnosis, non-trivial fix, skills-location
   claims:** L1’s first tool turn is `spawn_subagent`, not L1 `grep` / `gh`
-  log pull / unnamed test-file reads / “I’ll check the docs.” L2 then
-  spawns L3 specialists. L2 does not grep, walk the hot path, or implement.
+  log pull / unnamed test-file reads / “I’ll check the docs.” The L2 does
+  that work. The L2 spawns an L3 only when the slice is hard.
   Hierarchical fast path stays on L1.
-- L1 and L2 may: spawn, wait, board upsert, read the **short on-disk report**
-  they asked for; L1 also gives brief user status. Git handoff only when asked
+- L1 may: spawn, wait, board upsert, read the **short on-disk report**
+  it asked for, and give brief user status. The L2 does the work. Git handoff only when asked
   for complex git/recon work.
-- L1 and L2 must **not**: pull CI logs, open failing tests, re-run nextest,
+- L1 must **not**: pull CI logs, open failing tests, re-run nextest,
   edit product code, grep “to be sure,” rewrite skill bodies, or
-  research/implement. L3 does that work.
+  research/implement. The L2 does that work. The L2 spawns an L3 only when the slice is hard.
 - **Additive asks / “also” / “btw”:** phrases like **also**, **btw**, **by the
   way**, **this too**, **and also**, **this work too** mean a second slice, not
   a pivot. Board-upsert; **spawn** another subagent (or queue if same-file race);
@@ -1185,6 +1454,8 @@ approve cycle. Track the work, write a size estimate, implement the groups
 in parallel, then reconcile the estimate against what landed. After Approve,
 work starts.
 
+After the Operator clicks Approve, the implement work is an L2. L1 spawns that L2 and reports. L1 does not implement the plan in the main thread. The L2 spawns an L3 only when the slice is hard. Easy work can stay on that L2. It does not stay on L1.
+
 This does not weaken present-is-not-Approve. `exit_plan_mode` tool success
 and soft-park remain present for review, not operator Approve. Empty
 freeform Enter never Approves. Always-approve is tool permissions only,
@@ -1204,7 +1475,7 @@ intent, or recon survival from prose alone.
   **spawn_subagent** (explore or general-purpose as fits). That is L1 spawning
   L2. L2 spawns L3 only if the problem is actually hard. Easy work can stay on L2.
 - Verify against **code and load paths** (and live trees) before asserting
-  (L3 does that work; L1/L2 read the short report).
+  (the L2 does that work; L1 reads the short report; the L2 spawns an L3 only when the slice is hard).
 - Read short on-disk reports; do not re-prove the subagent in the parent.
 - **Auth / credentials store / keyring:** diagnose with **red/green TDD**
   (`cargo test` contracts), not host shell D-Bus/keyring probes. Do **not** fan
@@ -1258,9 +1529,8 @@ already happened. Do not treat this pin as an owed next run.
 
 Chat is **not** enough. Import restores only `FORK_PATHS`; put-history
 cherry-picks product; join (`-s ours`) keeps the onto tip tree. Pins on branch:
-this file (including § *Agent depth L1 / L2 / L3*: three layers for
-implement, multi-file diagnosis, CI, and regressions, plus the
-**Hierarchical fast path**; not the old weaker “spawn L3 when many greps /
+this file (including § *Agent depth L1 / L2 / L3*: L1 spawns and reports, the L2 does the work, and an L3 only when the slice is hard, plus the
+**Hierarchical fast path**; not “L2 MUST always spawn L3 / always three layers,” and not the older weaker “spawn L3 when many greps /
 half the window” rule),
 [`FORK.md`](FORK.md), [`RESIDUAL.md`](RESIDUAL.md),
 [`docs/upstream-history.md`](docs/upstream-history.md) + sibling logs, upstream
@@ -1360,7 +1630,7 @@ history). Detail: [`docs/upstream-history.md`](docs/upstream-history.md).
 
 No `MODE=overlay` / commit-tree. No `cherry-pick --abort` or `FORCE=1` rebuild
 while a healthy stack is mid-pick. Multi-file conflicts → L2 coordinators on
-disjoint paths spawn L3 specialists (L2 does not resolve files itself); L2
+disjoint paths resolve those files and spawn an L3 only when the slice is hard; L2
 writes short reports on disk. Every continue/join merge = human `git commit -S`.
 
 ## Residual

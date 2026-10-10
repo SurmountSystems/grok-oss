@@ -1,24 +1,28 @@
 //! Read-only system-block text for `/queue`, `/tasks`, and `/usage`.
 //!
-//! Plain text committed into scrollback — the primary inspection surface in
-//! minimal mode (no interactive panes). Kept out of `dispatch` for easy
-//! unit tests.
-
-use crate::app::agent::BgTaskStatus;
+//! Plain text committed into scrollback; minimal mode has no interactive panes, so these blocks are its main way to inspect that state.
+//! The formatting lives outside `dispatch` so it is easy to unit test.
+use crate::app::agent::{BgTaskState, BgTaskStatus};
 use crate::app::agent_view::AgentView;
+use crate::app::agent_view::l2_token_tracking::{
+    LiveJobRowInput, STANDING_WRAP_ESTIMATE_TOKENS, STANDING_WRAP_ESTIMATE_WALL,
+    display_live_job_row,
+};
 use crate::app::subagent::{
-    format_live_l3_count, format_subagent_label_among, is_l2_list_row, live_l3_count,
+    format_live_l3_count, format_subagent_label, format_subagent_label_among, is_l2_list_row,
+    live_l3_count, subagent_list_row_usage,
 };
 use crate::util::{format_duration, group_thousands};
-
-/// `/queue` body — a read-only list of the queued prompts.
-///
-/// Server-authoritative shared-queue rows (the in-flight prompt excluded) come
-/// first in broadcast order, then the local drip-feed queue — matching
-/// [`crate::views::queue_pane::QueuePane::sync_from_merged`]'s ordering.
+impl BgTaskState {
+    pub(crate) fn display_kind(&self) -> &'static str {
+        if self.is_monitor { "Monitor" } else { "Task" }
+    }
+}
+/// `/queue` body: a read-only list of the queued prompts.
+/// Rows from the server's shared queue (minus the prompt already running) come first in broadcast order, then the local queue (`pending_prompts`).
+/// This matches [`crate::views::queue_pane::QueuePane::sync_from_merged`]'s ordering.
 pub(crate) fn queue_block_text(agent: &AgentView) -> String {
     let running_id = agent.session.current_prompt_id.as_deref();
-
     let mut rows: Vec<String> = Vec::new();
     let mut pos = 1usize;
     for wire in &agent.shared_queue {
@@ -32,7 +36,6 @@ pub(crate) fn queue_block_text(agent: &AgentView) -> String {
         rows.push(format_queue_row(pos, &prompt.text));
         pos += 1;
     }
-
     if rows.is_empty() {
         "Queue is empty.".to_string()
     } else {
@@ -44,12 +47,77 @@ pub(crate) fn queue_block_text(agent: &AgentView) -> String {
         join_header_rows(header, rows)
     }
 }
+/// `106.8k`, `140k`, `1.5M`, or a bare count under 1000. Not a word in parentheses.
+fn is_compact_token_figure(figure: &str) -> bool {
+    if figure.is_empty() {
+        return false;
+    }
+    let (number, suffixed) = if let Some(number) = figure.strip_suffix('k') {
+        (number, true)
+    } else if let Some(number) = figure.strip_suffix('M') {
+        (number, true)
+    } else {
+        (figure, false)
+    };
+    if number.is_empty() {
+        return false;
+    }
+    let mut parts = number.split('.');
+    let Some(whole) = parts.next() else {
+        return false;
+    };
+    if whole.is_empty() || !whole.bytes().all(|b| b.is_ascii_digit()) {
+        return false;
+    }
+    match parts.next() {
+        None => true,
+        Some(frac) if suffixed && frac.len() == 1 && frac.bytes().all(|b| b.is_ascii_digit()) => {
+            parts.next().is_none()
+        }
+        Some(_) => false,
+    }
+}
 
-///
-/// [`crate::views::tasks_pane::TasksPane`] without its styled rows.
+fn split_trailing_paren(text: &str) -> Option<(&str, &str)> {
+    let trimmed = text.trim_end();
+    let without_close = trimmed.strip_suffix(')')?;
+    let open = without_close.rfind('(')?;
+    let inner = &without_close[open + 1..];
+    if inner.is_empty() || inner.contains('(') || inner.contains(')') {
+        return None;
+    }
+    Some((without_close[..open].trim_end(), inner))
+}
+
+fn strip_trailing_token_tails(text: &str, figure: &str) -> String {
+    if figure.is_empty() || !is_compact_token_figure(figure) {
+        return text.to_string();
+    }
+    let mut rest = text.trim_end().to_string();
+    while let Some((prefix, inner)) = split_trailing_paren(&rest) {
+        let suffixed = inner.ends_with('k') || inner.ends_with('M');
+        let duplicate = is_compact_token_figure(inner) && (suffixed || inner == figure);
+        if !duplicate {
+            break;
+        }
+        rest = prefix.to_string();
+    }
+    rest
+}
+
+/// One compact count at the end. A duplicate token-shaped tail is removed.
+/// `(review notes)` stays.
+fn keep_one_trailing_token_figure(text: &str, figure: &str) -> String {
+    let figure = figure.trim();
+    if figure.is_empty() || !is_compact_token_figure(figure) {
+        return text.to_string();
+    }
+    format!("{} ({figure})", strip_trailing_token_tails(text, figure))
+}
+
+/// `/tasks` body: [`crate::views::tasks_pane::TasksPane`] without its styled rows.
 pub(crate) fn tasks_block_text(agent: &AgentView) -> String {
     let mut rows: Vec<String> = Vec::new();
-
     let mut workflows: Vec<_> = agent.workflow_runs.iter().collect();
     workflows.sort_by(|a, b| {
         b.is_active()
@@ -82,33 +150,26 @@ pub(crate) fn tasks_block_text(agent: &AgentView) -> String {
             format_duration(std::time::Duration::from_millis(run.live_elapsed_ms()))
         ));
     }
-
-    // ── Subagents ──
-    let child_ids: std::collections::HashSet<&str> = agent
-        .subagent_sessions
-        .values()
-        .map(|info| info.child_session_id.as_ref())
-        .collect();
     let mut subs: Vec<_> = agent
         .subagent_sessions
         .values()
-        .filter(|s| s.workflow_run_id.is_none() && is_l2_list_row(s, &child_ids))
+        .filter(|s| s.attempt.workflow_run_id.is_none())
         .collect();
     subs.sort_by(|a, b| {
         b.is_running()
             .cmp(&a.is_running())
-            .then(b.started_at.cmp(&a.started_at))
+            .then(b.attempt.started_at.cmp(&a.attempt.started_at))
             .then(a.child_session_id.cmp(&b.child_session_id))
     });
     let all: Vec<_> = agent.subagent_sessions.values().collect();
     for info in subs {
-        let (type_label, desc) = format_subagent_label_among(info, &all);
-        let status = if info.pending_kill {
+        let (type_label, mut desc) = format_subagent_label(info);
+        let status = if info.attempt.pending_kill {
             "stopping"
         } else if info.is_running() {
             "running"
         } else {
-            info.status.as_deref().unwrap_or("done")
+            info.attempt.status.as_deref().unwrap_or("done")
         };
         let l3 = if info.is_running() {
             format_live_l3_count(live_l3_count(
@@ -120,18 +181,35 @@ pub(crate) fn tasks_block_text(agent: &AgentView) -> String {
         } else {
             String::new()
         };
+        let elapsed_text = format_duration(info.display_elapsed());
+        // Same formatter as the tasks pane. One host figure on the label.
+        // No host figure omits the count. The labeled estimate is not
+        // painted. Do not add the figure to the L1 total or grok-oss sqlite.
+        let shown = display_live_job_row(LiveJobRowInput {
+            job: &desc,
+            estimate_wall: STANDING_WRAP_ESTIMATE_WALL,
+            estimate_tokens: STANDING_WRAP_ESTIMATE_TOKENS,
+            elapsed: &elapsed_text,
+            host_tokens: subagent_list_row_usage(info, &all),
+        });
+        debug_assert_eq!(shown.l1_tokens_added, 0);
+        debug_assert!(!shown.wrote_grok_oss_sqlite);
+        let _labeled_estimate_not_painted = (shown.estimate_wall, shown.estimate_tokens);
+        if !shown.actual_tokens.is_empty() {
+            desc = keep_one_trailing_token_figure(&desc, &shown.actual_tokens);
+        }
         let label = if desc.is_empty() {
             format!("{type_label}{l3}")
         } else {
             format!("{type_label} · {desc}{l3}")
         };
-        rows.push(format!(
-            "  {status:<9}{label}  ({})",
-            format_duration(info.display_elapsed())
-        ));
+        let elapsed = if info.is_running() {
+            shown.elapsed
+        } else {
+            elapsed_text
+        };
+        rows.push(format!("  {status:<9}{label}  ({elapsed})"));
     }
-
-    // ── Background tasks / monitors ──
     let mut tasks: Vec<_> = agent.session.bg_tasks.values().collect();
     tasks.sort_by(|a, b| {
         let (ar, br) = (
@@ -143,7 +221,7 @@ pub(crate) fn tasks_block_text(agent: &AgentView) -> String {
             .then(a.task_id.cmp(&b.task_id))
     });
     for task in tasks {
-        let kind = if task.is_monitor { "Monitor" } else { "Task" };
+        let kind = task.display_kind();
         let one_line = task
             .description
             .as_deref()
@@ -164,8 +242,6 @@ pub(crate) fn tasks_block_text(agent: &AgentView) -> String {
             format_duration(task.elapsed())
         ));
     }
-
-    // ── Scheduled (/loop) tasks ──
     let mut sched: Vec<_> = agent.session.scheduled_tasks.values().collect();
     sched.sort_by(|a, b| {
         a.tag
@@ -182,7 +258,6 @@ pub(crate) fn tasks_block_text(agent: &AgentView) -> String {
             first_nonempty_line(&info.prompt)
         ));
     }
-
     if rows.is_empty() {
         "No background tasks, workflows, or subagents.".to_string()
     } else {
@@ -194,9 +269,7 @@ pub(crate) fn tasks_block_text(agent: &AgentView) -> String {
         join_header_rows(header, rows)
     }
 }
-
-/// `/usage` body — per-session token and cost totals, scoped to the ledger's
-/// lifetime: since session start, or since the last `/resume`.
+/// `/usage` body: per-session token and cost totals, covering the ledger's lifetime (since session start, or since the last `/resume`).
 pub(crate) fn session_usage_block_text(
     usage: &xai_grok_shell::extensions::notification::PromptUsage,
 ) -> String {
@@ -209,7 +282,6 @@ pub(crate) fn session_usage_block_text(
             "Session usage: no model calls yet in this session.".to_string()
         };
     }
-
     let mut rows = Vec::new();
     rows.push(format!(
         "  Input tokens:   {} ({} cached)",
@@ -231,72 +303,34 @@ pub(crate) fn session_usage_block_text(
         format_duration(std::time::Duration::from_millis(t.api_duration_ms)),
     ));
     rows.push(format!("  Cost:           {}", format_cost(t)));
-
     if usage.model_usage.len() > 1 {
+        rows.push(String::new());
         rows.push("  By model:".to_string());
         for (model, m) in &usage.model_usage {
-            rows.push(format!(
-                "    {model} — {} in / {} out · {}",
-                group_thousands(m.input_tokens),
-                group_thousands(m.output_tokens),
-                format_cost(m),
-            ));
+            rows.push(format_by_model_row(model, m));
         }
     }
-
     if usage.usage_is_incomplete {
         rows.push("  Note: usage is incomplete and may under-count.".to_string());
     }
-
     join_header_rows(
         "Session usage (since start or last resume):".to_string(),
         rows,
     )
 }
-
-/// `/notes` body — a read-only list of this session's notes.
-pub(crate) fn notes_block_text(agent: &AgentView) -> String {
-    let notes = agent.session.session_notes.list();
-    if notes.is_empty() {
-        return "No session notes. Add one with /note <text>.".to_string();
+/// Formats one `By model:` row. The cost cell is omitted when `cost_usd_ticks` is `None`.
+fn format_by_model_row(
+    model: &str,
+    m: &xai_grok_shell::extensions::notification::PromptUsageModel,
+) -> String {
+    let tokens = group_thousands(m.total_tokens);
+    if m.cost_usd_ticks.is_some() {
+        format!("    {model}: {tokens} Tokens · {}", format_cost(m))
+    } else {
+        format!("    {model}: {tokens} Tokens")
     }
-    let header = format!(
-        "Session note{} ({}):",
-        if notes.len() == 1 { "" } else { "s" },
-        notes.len()
-    );
-    let rows: Vec<String> = notes
-        .iter()
-        .map(|n| {
-            let first = first_nonempty_line(&n.text);
-            let extra = n.text.lines().count().saturating_sub(1);
-            let tag_suffix = if n.tags.is_empty() {
-                String::new()
-            } else {
-                format!(
-                    "  {}",
-                    n.tags
-                        .iter()
-                        .map(|t| format!("#{t}"))
-                        .collect::<Vec<_>>()
-                        .join(" ")
-                )
-            };
-            if extra > 0 {
-                format!(
-                    "  #{}  {first}  (+{extra} more line{}){tag_suffix}",
-                    n.id + 1,
-                    if extra == 1 { "" } else { "s" },
-                )
-            } else {
-                format!("  #{}  {first}{tag_suffix}", n.id + 1)
-            }
-        })
-        .collect();
-    join_header_rows(header, rows)
 }
-
-/// Cost cell. Ticks are 1e10 per USD; partial sums are scrubbed to absent.
+/// Formats the cost cell. Ticks are 1e10 per USD; a partial sum is reported as absent.
 fn format_cost(m: &xai_grok_shell::extensions::notification::PromptUsageModel) -> String {
     use xai_grok_shell::extensions::notification::ticks_to_usd;
     match m.cost_usd_ticks {
@@ -305,18 +339,14 @@ fn format_cost(m: &xai_grok_shell::extensions::notification::PromptUsageModel) -
         None => "not available (not reported)".to_string(),
     }
 }
-
-/// First non-empty, trimmed line of `text` (empty string if none). Collapses a
-/// multi-line prompt/command to a single display line.
-fn first_nonempty_line(text: &str) -> &str {
+/// First non-empty, trimmed line of `text` (empty string if none). Collapses a multi-line prompt/command to a single display line.
+pub(crate) fn first_nonempty_line(text: &str) -> &str {
     text.lines()
         .map(str::trim)
         .find(|l| !l.is_empty())
         .unwrap_or("")
 }
-
-/// Format one `/queue` row as `  #N  <first non-empty line>` with a
-/// `(+K more lines)` suffix for multi-line prompts.
+/// Format one `/queue` row as `  #N  <first non-empty line>` with a `(+K more lines)` suffix for multi-line prompts.
 fn format_queue_row(pos: usize, text: &str) -> String {
     let first_line = first_nonempty_line(text);
     let extra = text.lines().count().saturating_sub(1);
@@ -329,20 +359,16 @@ fn format_queue_row(pos: usize, text: &str) -> String {
         format!("  #{pos}  {first_line}")
     }
 }
-
-/// Join a header line above its rows into a single block string.
 fn join_header_rows(header: String, rows: Vec<String>) -> String {
     std::iter::once(header)
         .chain(rows)
         .collect::<Vec<_>>()
         .join("\n")
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use xai_grok_shell::extensions::notification::{PromptUsage, PromptUsageModel};
-
     fn model_row(input: u64, output: u64, ticks: Option<i64>) -> PromptUsageModel {
         PromptUsageModel {
             input_tokens: input,
@@ -358,7 +384,6 @@ mod tests {
             cost_missing_calls: 0,
         }
     }
-
     #[test]
     fn session_usage_block_empty_ledger() {
         let usage = PromptUsage::default();
@@ -366,15 +391,12 @@ mod tests {
             session_usage_block_text(&usage),
             "Session usage: no model calls yet in this session."
         );
-
-        // Empty but incomplete must not read as a clean zero.
         let incomplete = PromptUsage {
             usage_is_incomplete: true,
             ..Default::default()
         };
         assert!(session_usage_block_text(&incomplete).contains("incomplete"));
     }
-
     #[test]
     fn session_usage_block_formats_tokens_and_cost() {
         let mut totals = model_row(1_234_567, 45_678, Some(12_345_000_000));
@@ -387,11 +409,8 @@ mod tests {
             ..Default::default()
         };
         let text = session_usage_block_text(&usage);
-        // Snapshot pins content and column alignment together; single-model
-        // sessions must skip the redundant by-model breakdown.
         insta::assert_snapshot!("session_usage_block_full", text);
     }
-
     #[test]
     fn session_usage_block_lists_models_when_multiple() {
         let mut usage = PromptUsage {
@@ -405,11 +424,36 @@ mod tests {
             .model_usage
             .insert("grok-4".into(), model_row(50, 5, None));
         let text = session_usage_block_text(&usage);
-        assert!(text.contains("By model:"), "{text}");
-        assert!(text.contains("grok-build — 100 in / 10 out"), "{text}");
-        assert!(text.contains("grok-4 — 50 in / 5 out"), "{text}");
+        insta::assert_snapshot!("session_usage_block_by_model", text);
     }
-
+    #[test]
+    fn session_usage_block_by_model_shows_cost_only_when_known() {
+        let mut usage = PromptUsage {
+            totals: model_row(123_556, 1_010, Some(20_000_000)),
+            ..Default::default()
+        };
+        usage.model_usage.insert(
+            "grok-4.7-build".into(),
+            model_row(123_456, 1_000, Some(20_000_000)),
+        );
+        usage
+            .model_usage
+            .insert("grok-4".into(), model_row(100, 10, None));
+        let text = session_usage_block_text(&usage);
+        let rows: Vec<&str> = text
+            .lines()
+            .skip_while(|line| *line != "  By model:")
+            .skip(1)
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                "    grok-4.7-build: 124,456 Tokens · $0.0020",
+                "    grok-4: 110 Tokens",
+            ],
+            "{text}"
+        );
+    }
     #[test]
     fn session_usage_block_absent_cost_is_unknown_not_free() {
         let usage = PromptUsage {
@@ -418,10 +462,8 @@ mod tests {
         };
         let text = session_usage_block_text(&usage);
         insta::assert_snapshot!("session_usage_block_absent_cost", text);
-        // Unknown cost must never read as free.
         assert!(!text.contains("$0"), "{text}");
     }
-
     #[test]
     fn session_usage_block_flags_partial_and_incomplete() {
         let mut totals = model_row(100, 10, None);
@@ -435,7 +477,6 @@ mod tests {
         assert!(text.contains("not reported for some calls"), "{text}");
         assert!(text.contains("usage is incomplete"), "{text}");
     }
-
     #[test]
     fn group_thousands_groups_digits() {
         assert_eq!(group_thousands(0), "0");
@@ -443,7 +484,6 @@ mod tests {
         assert_eq!(group_thousands(1_000), "1,000");
         assert_eq!(group_thousands(1_234_567), "1,234,567");
     }
-
     #[test]
     fn first_nonempty_line_skips_blank_leading_lines() {
         assert_eq!(first_nonempty_line("\n  \n  hello \nworld"), "hello");
@@ -451,12 +491,10 @@ mod tests {
         assert_eq!(first_nonempty_line(""), "");
         assert_eq!(first_nonempty_line("only"), "only");
     }
-
     #[test]
     fn format_queue_row_single_line() {
         assert_eq!(format_queue_row(1, "fix the bug"), "  #1  fix the bug");
     }
-
     #[test]
     fn format_queue_row_multiline_reports_extra_lines() {
         assert_eq!(

@@ -12,7 +12,6 @@ use super::super::coordinator_state::{
 use super::super::types::{SubagentInspection, SubagentRequest, SubagentSnapshot};
 use super::{
     ChildControl, ChildRunner, QueryWaitingForSpawn, SubagentCoordinator, SubagentProgress,
-    belongs_to_session,
 };
 
 const DEFAULT_QUERY_BLOCK_TIMEOUT_MS: u64 = 30_000;
@@ -45,29 +44,24 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
         timeout_ms: Option<u64>,
         respond_to: oneshot::Sender<Option<SubagentSnapshot>>,
     ) {
-        if let Some(child) = self.completed.get(&id).filter(|child| {
-            belongs_to_session(
-                &child.request,
-                parent_session_id.as_deref(),
-                self.spawned_by_session
-                    .get(&child.request.id)
-                    .map(String::as_str),
-            )
-        }) {
+        if !self.is_reachable_from_session(&id, parent_session_id.as_deref()) {
+            // A missing graph node is unreachable. A blocking query for an
+            // id no session has spawned yet waits out the unseen-id grace
+            // instead of not_found, so a fire-and-forget spawn can attach.
+            if block && !self.child_exists_any_session(&id) && !self.graph.contains(&id) {
+                self.park_query_waiting_for_spawn(id, parent_session_id, timeout_ms, respond_to);
+            } else {
+                let _ = respond_to.send(None);
+            }
+            return;
+        }
+        if let Some(child) = self.completed.get(&id) {
             let snapshot = (!child.request.owner.is_workflow())
                 .then(|| self.completed_snapshot_for_query(child));
             let _ = respond_to.send(snapshot);
             return;
         }
-        if let Some(child) = self.active.get(&id).filter(|child| {
-            belongs_to_session(
-                &child.request,
-                parent_session_id.as_deref(),
-                self.spawned_by_session
-                    .get(&child.request.id)
-                    .map(String::as_str),
-            )
-        }) {
+        if let Some(child) = self.active.get(&id) {
             if child.request.owner.is_workflow() {
                 let _ = respond_to.send(None);
                 return;
@@ -79,15 +73,7 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
             }
             return;
         }
-        if let Some(child) = self.pending.get(&id).filter(|child| {
-            belongs_to_session(
-                &child.request,
-                parent_session_id.as_deref(),
-                self.spawned_by_session
-                    .get(&child.request.id)
-                    .map(String::as_str),
-            )
-        }) {
+        if let Some(child) = self.pending.get(&id) {
             if child.request.owner.is_workflow() {
                 let _ = respond_to.send(None);
                 return;
@@ -99,16 +85,7 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
             }
             return;
         }
-        if let Some(queued) = self.queued.iter().find(|queued| {
-            queued.request.id == id
-                && belongs_to_session(
-                    &queued.request,
-                    parent_session_id.as_deref(),
-                    self.spawned_by_session
-                        .get(&queued.request.id)
-                        .map(String::as_str),
-                )
-        }) {
+        if let Some(queued) = self.queued.iter().find(|queued| queued.request.id == id) {
             if block {
                 self.push_blocking_waiter(id, timeout_ms, respond_to);
             } else {
@@ -120,9 +97,9 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
             return;
         }
         if block {
-            // Grace is only for a truly unseen id. A live/completed child
-            // this session must not see is not_found immediately, so a
-            // later duplicate Spawn cannot attach the waiter.
+            // Grace is only for a truly unseen id. A live child this
+            // session must not see is not_found immediately, so a later
+            // duplicate Spawn cannot attach the waiter.
             if self.child_exists_any_session(&id) {
                 let _ = respond_to.send(None);
             } else {
@@ -184,13 +161,13 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                     .map(|queued| (*queued.request).clone())
             });
         let visibility = live_request.as_ref().unwrap_or(request);
-        let spawned_by = self.spawned_by_session.get(id).cloned();
         for query in waiting {
-            if !belongs_to_session(
-                visibility,
-                query.parent_session_id.as_deref(),
-                spawned_by.as_deref(),
-            ) {
+            let session = query.parent_session_id.as_deref();
+            // Current `belongs_to_session` is parent-session only. The spawn
+            // graph still admits the immediate spawner once the node exists.
+            let visible = super::belongs_to_session(visibility, session)
+                || self.is_reachable_from_session(id, session);
+            if !visible {
                 let _ = query.respond_to.send(None);
                 continue;
             }
@@ -240,46 +217,15 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
         parent_session_id: Option<String>,
         respond_to: oneshot::Sender<Option<SubagentInspection>>,
     ) {
-        if let Some(child) = self.completed.get(&id).filter(|child| {
-            belongs_to_session(
-                &child.request,
-                parent_session_id.as_deref(),
-                self.spawned_by_session
-                    .get(&child.request.id)
-                    .map(String::as_str),
-            )
-        }) {
+        if !self.is_reachable_from_session(&id, parent_session_id.as_deref()) {
+            let _ = respond_to.send(None);
+        } else if let Some(child) = self.completed.get(&id) {
             let _ = respond_to.send(Some(self.completed_inspection_for_query(child)));
-        } else if let Some(child) = self.pending.get(&id).filter(|child| {
-            belongs_to_session(
-                &child.request,
-                parent_session_id.as_deref(),
-                self.spawned_by_session
-                    .get(&child.request.id)
-                    .map(String::as_str),
-            )
-        }) {
+        } else if let Some(child) = self.pending.get(&id) {
             let _ = respond_to.send(Some(pending_inspection(child)));
-        } else if self.active.get(&id).is_some_and(|child| {
-            belongs_to_session(
-                &child.request,
-                parent_session_id.as_deref(),
-                self.spawned_by_session
-                    .get(&child.request.id)
-                    .map(String::as_str),
-            )
-        }) {
+        } else if self.active.contains_key(&id) {
             self.queue_active_progress(&id, ProgressTarget::Inspect(respond_to));
-        } else if let Some(queued) = self.queued.iter().find(|queued| {
-            queued.request.id == id
-                && belongs_to_session(
-                    &queued.request,
-                    parent_session_id.as_deref(),
-                    self.spawned_by_session
-                        .get(&queued.request.id)
-                        .map(String::as_str),
-                )
-        }) {
+        } else if let Some(queued) = self.queued.iter().find(|queued| queued.request.id == id) {
             let _ = respond_to.send(Some(queued_inspection(
                 &queued.request,
                 queued.queued_at.into_std(),
@@ -297,7 +243,7 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
         })
     }
 
-    fn completed_snapshot_for_query(&self, child: &CompletedChild) -> SubagentSnapshot {
+    pub(super) fn completed_snapshot_for_query(&self, child: &CompletedChild) -> SubagentSnapshot {
         let output = self.persisted_output(child);
         completed_snapshot(child, output.as_deref())
     }
@@ -337,7 +283,8 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
             .active
             .values()
             .filter(|child| {
-                child.request.parent_session_id == parent_session_id
+                self.graph
+                    .is_reachable_from(&child.request.id, &parent_session_id)
                     && !child.request.owner.is_workflow()
             })
             .map(|child| child.request.id.clone())
@@ -436,7 +383,9 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
         let Some(request) = self.list_requests.get_mut(&request_id) else {
             return;
         };
-        request.slots[index] = inspection;
+        if let Some(slot) = request.slots.get_mut(index) {
+            *slot = inspection;
+        }
         request.remaining = request.remaining.saturating_sub(1);
         if request.remaining != 0 {
             return;

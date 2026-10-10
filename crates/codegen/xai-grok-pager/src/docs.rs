@@ -1,8 +1,7 @@
 //! In-app how-to documentation data (embedded markdown).
 //!
-//! Single source of truth: two static arrays (`USER_GUIDE`, `REFERENCE_DOCS`)
-//! hold every doc. All lookups are zero-allocation; `DocEntry` exists only for
-//! backward compatibility with the TUI doc picker.
+//! Single source of truth: two static arrays (`USER_GUIDE`, `REFERENCE_DOCS`) hold every doc.
+//! All lookups are zero-allocation; `DocEntry` exists only for backward compatibility with the TUI doc picker.
 
 /// A compile-time document entry. All fields are `&'static str`.
 #[derive(Debug)]
@@ -166,12 +165,27 @@ pub static USER_GUIDE: &[Doc] = &[
         "Monitoring Usage (External OpenTelemetry)",
         "Export usage metrics to a customer OpenTelemetry collector"
     ),
+    guide!(
+        "25-status-line.md",
+        "Status Line",
+        "A bottom row of live session context, or the output of your own script"
+    ),
+    guide!(
+        "26-config-reference.md",
+        "Configuration Reference",
+        "Field list for config.toml, managed_config.toml, and requirements.toml"
+    ),
+    // Direct include_str! so gazelle can put this file in compile_data.
+    // `guide!` hides the path inside concat!($file) and gazelle cannot see it.
+    Doc {
+        filename: "27-grok-clone.md",
+        title: "grok clone",
+        description: "Depth-1 Grove clone, --full-history, and safe deepen/switch commands",
+        content: include_str!("../docs/user-guide/27-grok-clone.md"),
+    },
 ];
 
-/// Non-user-guide reference docs. Separate from USER_GUIDE because they
-/// live under `docs/` (not `docs/user-guide/`), are not extracted to disk,
-/// and do not follow the NN-*.md managed naming pattern. Bundled via
-/// `include_str!` so they are available at runtime without a docs path.
+/// Non-user-guide reference docs. Bundled via `include_str!` so they are available at runtime without a docs path.
 static REFERENCE_DOCS: &[Doc] = &[
     Doc {
         filename: "hooks-and-plugins.md",
@@ -245,10 +259,11 @@ pub fn extract_user_guide_docs(grok_home: &std::path::Path) {
             USER_GUIDE.iter().map(|d| d.filename).collect();
         for dir_entry in entries.flatten() {
             if let Some(name) = dir_entry.file_name().to_str() {
+                let bytes = name.as_bytes();
                 let is_managed = name.len() > 3
-                    && name.as_bytes()[0].is_ascii_digit()
-                    && name.as_bytes()[1].is_ascii_digit()
-                    && name.as_bytes()[2] == b'-'
+                    && bytes.first().is_some_and(|b| b.is_ascii_digit())
+                    && bytes.get(1).is_some_and(|b| b.is_ascii_digit())
+                    && bytes.get(2) == Some(&b'-')
                     && name.ends_with(".md");
                 if is_managed
                     && !valid.contains(name)
@@ -303,8 +318,8 @@ mod tests {
     fn default_howto_entries_includes_all_user_guide_docs() {
         let entries = default_howto_entries();
         assert_eq!(entries.len(), USER_GUIDE.len() + REFERENCE_DOCS.len());
-        for (i, doc) in USER_GUIDE.iter().enumerate() {
-            assert_eq!(entries[i].title, doc.title, "Entry {} title mismatch", i);
+        for (i, (entry, doc)) in entries.iter().zip(USER_GUIDE.iter()).enumerate() {
+            assert_eq!(entry.title, doc.title, "Entry {} title mismatch", i);
         }
     }
 
@@ -348,12 +363,8 @@ mod tests {
         for doc in USER_GUIDE {
             let path = docs_dir.join(doc.filename);
             assert!(path.exists(), "Expected doc {} to exist", doc.filename);
-            assert_eq!(
-                std::fs::read_to_string(&path).unwrap(),
-                doc.content,
-                "Content mismatch for {}",
-                doc.filename
-            );
+            let got = std::fs::read_to_string(&path).unwrap();
+            assert_eq!(got, doc.content, "Content mismatch for {}", doc.filename);
         }
         assert!(
             !docs_dir.join("99-removed.md").exists(),
@@ -629,6 +640,34 @@ mod tests {
             !auth_lower.contains("billing credits card is console team prepaid")
                 && !auth_lower.contains("billing credits card is supergrok dollar credits"),
             "02-authentication.md must not classify the Billing Credits card as another meter"
+        );
+        assert!(
+            auth.content.contains("postpaid preview defaultCredits")
+                && auth.content.contains("not Credits remaining")
+                && auth.content.contains("not the prepaid wallet"),
+            "02-authentication.md must say team default credits are postpaid preview defaultCredits, not Credits remaining, and not the prepaid wallet"
+        );
+        assert!(
+            !auth_lower.contains("dashboard allotment"),
+            "02-authentication.md must not call postpaid preview defaultCredits a dashboard allotment"
+        );
+        assert!(
+            auth.content
+                .contains("default credits issued on this invoice preview")
+                && auth
+                    .content
+                    .contains("the issued amount was not in the preview"),
+            "02-authentication.md must name default credits issued and the absent preview sentence"
+        );
+        assert!(
+            auth.content.contains(
+                "30-day dashboard Credits remaining and Credits usage were not in the management bodies"
+            ),
+            "02-authentication.md must say those dashboard figures were not parsed"
+        );
+        assert!(
+            auth.content.contains("does not print a guessed sum"),
+            "02-authentication.md must say grok-oss does not print a guessed sum as a dashboard figure"
         );
     }
 
@@ -1074,8 +1113,13 @@ mod tests {
             "19-plan-mode.md must say the selected CTA is marked and Enter submits it"
         );
         assert!(
-            content.contains("line-comment overlay") || content.contains("comment overlay"),
-            "19-plan-mode.md must say y copies while the line-comment overlay is open"
+            content.contains("While the plan comment composer is focused, y inserts"),
+            "19-plan-mode.md must say y inserts while the plan comment composer is focused"
+        );
+        assert!(
+            !content.contains("including while a line-comment overlay is open")
+                && !content.contains("y also copies while the line-comment overlay is open"),
+            "19-plan-mode.md must not say bare y copies while the plan comment composer is focused"
         );
         assert!(
             content.contains("Ctrl+Z") || content.contains("ctrl+z"),

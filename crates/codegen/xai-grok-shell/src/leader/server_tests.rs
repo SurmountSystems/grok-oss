@@ -2,18 +2,21 @@ use std::collections::HashSet;
 use std::time::Duration;
 
 use super::*;
+use crate::leader::protocol::read_message;
 use tempfile::TempDir;
 
-/// Parse a raw payload for the parse-once helper APIs. Panics on invalid
-/// JSON — the routing loop parses once up front, and non-JSON payloads
-/// never reach the helpers (they forward/drop verbatim).
+/// Parse a raw payload for the parse-once helper APIs.
+/// Panics on invalid JSON: the routing loop parses once up front, so non-JSON payloads never reach the helpers (they forward or drop verbatim).
 fn pv(payload: &str) -> serde_json::Value {
     serde_json::from_str(payload).expect("test payload must be valid JSON")
 }
 
-/// The relaunch drain must wait on the agent-derived activity signal —
-/// not just the IPC `agent_busy` flag, which relay-driven turns never set
-/// — and must flush registered session actors before cancelling.
+fn j<'a>(v: &'a serde_json::Value, path: &str) -> &'a serde_json::Value {
+    v.pointer(path).unwrap_or(&serde_json::Value::Null)
+}
+
+/// The relaunch drain must wait on the `AgentActivity` signal, because relay-driven turns never set the IPC `agent_busy` flag.
+/// It must also flush registered session actors before cancelling.
 #[tokio::test]
 async fn relaunch_drain_waits_for_agent_activity_and_flushes_sessions() {
     let (shutdown_tx, _shutdown_rx) =
@@ -49,7 +52,7 @@ async fn relaunch_drain_waits_for_agent_activity_and_flushes_sessions() {
         "drain must not cancel while a relay-driven turn is running"
     );
 
-    // Turn ends → drain flushes the session, then cancels.
+    // The turn ends: the drain flushes the session, then cancels
     *prompt_id.lock().unwrap() = None;
     tokio::time::timeout(Duration::from_secs(5), cancel.cancelled())
         .await
@@ -57,106 +60,8 @@ async fn relaunch_drain_waits_for_agent_activity_and_flushes_sessions() {
     actor.await.expect("session actor should get Shutdown");
 }
 
-/// Surmount / grok-oss fork; tests are contracts.
-/// Nested ids on this leader must still exist after `/rebuild` relaunch
-/// intent. A TUI disconnect leaves the leader up; this drain must too.
-/// Fails if nested ids die (cancel / AutoUpdate) while the gauge is live.
-/// After nested ids finish, the same drain may relaunch (not a `/rebuild`
-/// start gate).
-#[tokio::test]
-async fn relaunch_drain_keeps_nested_ids_alive_after_grace_like_disconnect() {
-    let (shutdown_tx, shutdown_rx) = watch::channel(super::super::protocol::ShutdownReason::Manual);
-    let cancel = CancellationToken::new();
-    let agent_busy = Arc::new(AtomicBool::new(false));
-    let activity = AgentActivity::default();
-    activity.subagent_gauge().store(1, Ordering::Relaxed);
-
-    spawn_relaunch_drain_with_grace(
-        shutdown_tx,
-        cancel.clone(),
-        agent_busy,
-        activity.clone(),
-        Duration::from_millis(80),
-    );
-
-    tokio::time::sleep(Duration::from_millis(250)).await;
-    assert!(
-        !cancel.is_cancelled(),
-        "must not exec-replace this leader while nested ids are still live"
-    );
-    assert_eq!(
-        *shutdown_rx.borrow(),
-        super::super::protocol::ShutdownReason::Manual,
-        "must stay up like a TUI disconnect; AutoUpdate would end nested ids"
-    );
-    assert_eq!(
-        activity.subagent_gauge().load(Ordering::Relaxed),
-        1,
-        "nested ids must still exist after rebuild/relaunch intent"
-    );
-
-    activity.subagent_gauge().store(0, Ordering::Relaxed);
-    tokio::time::timeout(Duration::from_secs(2), cancel.cancelled())
-        .await
-        .expect(
-            "once nested ids finish, the drain may relaunch; this is not a /rebuild start gate",
-        );
-    assert_eq!(
-        *shutdown_rx.borrow(),
-        super::super::protocol::ShutdownReason::AutoUpdate,
-        "idle nested gauge must allow AutoUpdate once the parent turn is idle"
-    );
-}
-
-/// Surmount / grok-oss fork; tests are contracts.
-/// Parent-turn busy must keep this leader process the same way a TUI
-/// disconnect does: no wall-clock AutoUpdate while
-/// [`AgentActivity::is_busy`] (or IPC `agent_busy`) for that parent turn.
-/// The former five-second kill is not this contract. Nested ids are not
-/// this test. Fails if relaunch happens while the parent turn is still busy.
-#[tokio::test]
-async fn relaunch_drain_keeps_parent_turn_until_idle_like_disconnect() {
-    let (shutdown_tx, shutdown_rx) = watch::channel(super::super::protocol::ShutdownReason::Manual);
-    let cancel = CancellationToken::new();
-    let agent_busy = Arc::new(AtomicBool::new(true));
-    let activity = AgentActivity::default();
-    let (_cmd_rx, prompt_id, _pending) = activity.register_for_test("s1");
-    *prompt_id.lock().unwrap() = Some("prompt-parent".to_string());
-
-    spawn_relaunch_drain_with_grace(
-        shutdown_tx,
-        cancel.clone(),
-        agent_busy.clone(),
-        activity,
-        Duration::from_millis(80),
-    );
-
-    tokio::time::sleep(Duration::from_millis(250)).await;
-    assert!(
-        !cancel.is_cancelled(),
-        "must not exec-replace this leader while the parent turn is still busy"
-    );
-    assert_eq!(
-        *shutdown_rx.borrow(),
-        super::super::protocol::ShutdownReason::Manual,
-        "must stay up like a TUI disconnect; AutoUpdate while the parent turn is busy is the old five-second kill"
-    );
-
-    agent_busy.store(false, Ordering::Relaxed);
-    *prompt_id.lock().unwrap() = None;
-    tokio::time::timeout(Duration::from_secs(2), cancel.cancelled())
-        .await
-        .expect("once the parent turn is idle, the drain may relaunch");
-    assert_eq!(
-        *shutdown_rx.borrow(),
-        super::super::protocol::ShutdownReason::AutoUpdate,
-        "idle parent turn must allow AutoUpdate"
-    );
-}
-
-/// `ServerMessageRef::Acp` (the borrowed serialize-only mirror the client
-/// writer uses for shared payloads) must stay byte-identical on the wire
-/// to `ServerMessage::Acp`, or clients would fail to decode ACP frames.
+/// `ServerMessageRef::Acp` is the borrowed serialize-only mirror the client writer uses for shared payloads.
+/// It must stay byte-identical on the wire to `ServerMessage::Acp`, or clients would fail to decode ACP frames.
 #[test]
 fn server_message_ref_is_wire_identical() {
     let payload = r#"{"jsonrpc":"2.0","method":"session/update","params":{"x":1}}"#;
@@ -175,9 +80,8 @@ fn server_message_ref_is_wire_identical() {
     }
 }
 
-/// An UNMUTATED payload forwards to the agent byte-for-byte: parsing for
-/// classification must never normalize key order or whitespace of
-/// pass-through traffic.
+/// An UNMUTATED payload forwards to the agent byte-for-byte.
+/// Parsing for classification must never normalize key order or whitespace of pass-through traffic.
 #[test]
 fn outbound_payload_verbatim_when_unmutated() {
     let original = r#"{ "b" : 1,    "a": 2 }"#.to_string();
@@ -189,8 +93,7 @@ fn outbound_payload_verbatim_when_unmutated() {
     );
 }
 
-/// A MUTATED payload is re-serialized from the injected/rewritten `Value`
-/// (semantically equal, but no longer the original odd formatting).
+/// A MUTATED payload is re-serialized from the injected/rewritten `Value` (semantically equal, but no longer the original odd formatting).
 #[test]
 fn outbound_payload_reserialized_when_mutated() {
     let original = r#"{ "b" : 1,    "a": 2 }"#.to_string();
@@ -207,9 +110,8 @@ fn outbound_payload_reserialized_when_mutated() {
     );
 }
 
-/// A non-JSON payload (`json = None`) is never parsed or re-serialized —
-/// it passes through untouched, matching the old per-helper parse-failure
-/// behavior.
+/// A non-JSON payload (`json = None`) is never parsed or re-serialized.
+/// It passes through untouched, the same as when each helper parsed for itself and hit a parse failure.
 #[test]
 fn outbound_payload_non_json_passthrough() {
     let original = "not json".to_string();
@@ -233,33 +135,33 @@ fn decide_relaunch_is_idempotent_and_directional() {
     });
     let relaunching = AtomicBool::new(false);
 
-    // Equal → declined, and the flag is NOT armed.
+    // An equal version is declined, and the flag is NOT set
     assert!(matches!(
         decide_relaunch_for_update(&control_state, "0.1.100".to_string(), &relaunching),
         Ok(ControlPayload::RelaunchDeclined { .. })
     ));
     assert!(!relaunching.load(Ordering::SeqCst));
 
-    // Strictly-older target (downgrade) → declined; never downgrade.
+    // A strictly-older target (a downgrade) is declined; never downgrade
     assert!(matches!(
         decide_relaunch_for_update(&control_state, "0.1.0".to_string(), &relaunching),
         Ok(ControlPayload::RelaunchDeclined { .. })
     ));
-    // Unparseable target → declined (dev "unknown" builds).
+    // An unparseable target is declined (dev "unknown" builds)
     assert!(matches!(
         decide_relaunch_for_update(&control_state, "unknown".to_string(), &relaunching),
         Ok(ControlPayload::RelaunchDeclined { .. })
     ));
     assert!(!relaunching.load(Ordering::SeqCst));
 
-    // Newer → accepted, arms the flag.
+    // A newer target is accepted and sets the flag
     assert!(matches!(
         decide_relaunch_for_update(&control_state, "0.2.0".to_string(), &relaunching),
         Ok(ControlPayload::Relaunching { .. })
     ));
     assert!(relaunching.load(Ordering::SeqCst));
 
-    // Second accepted request while armed → declined (idempotent).
+    // A second request while the flag is set is declined (idempotent)
     assert!(matches!(
         decide_relaunch_for_update(&control_state, "0.3.0".to_string(), &relaunching),
         Ok(ControlPayload::RelaunchDeclined { .. })
@@ -300,7 +202,7 @@ async fn wait_for_leader_auth_resolves_when_wired_late() {
 
 #[tokio::test]
 async fn workspace_start_errors_when_cancelled_before_auth() {
-    // Cancel while auth is unwired → clean error, no hang.
+    // Cancelling while auth is unwired returns a clean error, no hang
     let state = default_test_control_state(Path::new("/tmp/grok-ws-auth-test.sock"));
     let cancel = CancellationToken::new();
     cancel.cancel();
@@ -312,6 +214,57 @@ async fn workspace_start_errors_when_cancelled_before_auth() {
         "unexpected error: {}",
         err.message
     );
+}
+
+/// A hub-less exposure never arms a metric pump, and every teardown path (pause, a second pause,
+/// stop) drains without hanging and leaves the slot empty. The pump itself has no test
+/// constructor, so a real drain-once assertion is out of reach here.
+#[tokio::test]
+async fn hubless_workspace_exposure_arms_no_metric_pump_and_tears_down_cleanly() {
+    let handle = xai_grok_workspace::WorkspaceHandle::for_test();
+    assert!(arm_metric_donation(&handle).await.is_none());
+
+    let state = default_test_control_state(Path::new("/tmp/grok-ws-metric-test.sock"));
+    state
+        .workspace
+        .exposure
+        .store(Some(Arc::new(WorkspaceExposure {
+            handle,
+            hub_url: "wss://hub.example/v1/tools".to_owned(),
+            cwd: PathBuf::from("/repo"),
+            started_at: Instant::now(),
+            paused: AtomicBool::new(false),
+            metric_donation: Mutex::new(None),
+        })));
+
+    for _ in 0..2 {
+        let payload = tokio::time::timeout(
+            Duration::from_secs(5),
+            handle_workspace_pause(state.clone()),
+        )
+        .await
+        .expect("pause drains promptly")
+        .unwrap();
+        assert!(matches!(
+            payload,
+            ControlPayload::WorkspaceStatus {
+                state: ref s, ..
+            } if s == "paused"
+        ));
+        let exposure = state.workspace.exposure.load_full().unwrap();
+        assert!(exposure.metric_donation.lock().is_none());
+    }
+
+    let payload =
+        tokio::time::timeout(Duration::from_secs(5), handle_workspace_stop(state.clone()))
+            .await
+            .expect("stop drains promptly")
+            .unwrap();
+    assert!(matches!(
+        payload,
+        ControlPayload::WorkspaceStatus { state: ref s, .. } if s == "none"
+    ));
+    assert!(state.workspace.exposure.load().is_none());
 }
 
 async fn setup_test_server(
@@ -337,8 +290,7 @@ async fn setup_test_server_with_client_count(
     (sock_path, handle.cancel, handle.acp_rx, handle.client_count)
 }
 
-/// Like `setup_test_server` but uses `no_exit_on_disconnect=true` and
-/// exposes `response_tx` for injecting agent responses.
+/// Like `setup_test_server` but uses `no_exit_on_disconnect=true` and exposes `response_tx` for injecting agent responses.
 async fn setup_persistent_server(
     temp: &TempDir,
 ) -> (PathBuf, CancellationToken, mpsc::UnboundedSender<String>) {
@@ -346,11 +298,9 @@ async fn setup_persistent_server(
     (sock_path, cancel, response_tx)
 }
 
-/// Like `setup_persistent_server` but also returns the agent-side receiver
-/// (`acp_rx`) so a test can observe forwarded requests — e.g. to read a
-/// `session/load`'s namespaced id and echo a matching load response, which
-/// is required to complete a load now that live broadcasts to a loading
-/// client are buffered until its load response (see `complete_load`).
+/// Like `setup_persistent_server` but also returns the agent-side receiver (`acp_rx`) so a test can observe forwarded requests.
+/// That lets a test read a `session/load`'s namespaced id and echo a matching load response.
+/// Completing the load matters because the leader buffers live broadcasts to a loading client until its load response arrives (see `complete_load`).
 async fn setup_persistent_server_with_agent(
     temp: &TempDir,
 ) -> (
@@ -392,11 +342,9 @@ async fn setup_persistent_server_with_agent(
     (sock_path, cancel, response_tx, acp_rx)
 }
 
-/// Complete an in-flight `session/load` in a test: read the forwarded load
-/// request from the agent channel to learn its leader-assigned namespaced
-/// id, then echo a `LoadSessionResponse` with that id. This routes the
-/// response back to the loading client AND flushes any live notifications
-/// the leader buffered during the load window (live-before-replay guard).
+/// Complete an in-flight `session/load` in a test.
+/// Reads the forwarded load request to learn its leader-assigned namespaced id, then echoes a `LoadSessionResponse` with that id.
+/// That routes the response back to the loading client AND flushes any live notifications the leader buffered during the load window.
 async fn complete_load(
     acp_rx: &mut mpsc::UnboundedReceiver<String>,
     response_tx: &mpsc::UnboundedSender<String>,
@@ -420,7 +368,7 @@ async fn complete_load(
     }
 }
 
-/// Helper to connect and register a client, returning the split stream.
+/// Connect and register a client, returning the split stream.
 async fn connect_and_register(
     sock_path: &std::path::Path,
     client_type: &str,
@@ -431,8 +379,7 @@ async fn connect_and_register(
     connect_and_register_with_mode(sock_path, client_type, ClientMode::Stdio).await
 }
 
-/// Like [`connect_and_register`] but with an explicit [`ClientMode`], for
-/// tests that exercise mode-dependent server behavior (relay demand).
+/// Like [`connect_and_register`] but with an explicit [`ClientMode`], for tests that exercise mode-dependent server behavior (relay demand).
 async fn connect_and_register_with_mode(
     sock_path: &std::path::Path,
     client_type: &str,
@@ -457,11 +404,8 @@ async fn connect_and_register_with_mode(
     (reader, writer)
 }
 
-/// Relay demand gate (relay-on-demand): Stdio registrations must NOT
-/// signal relay demand — a leader serving only interactive clients (TUI
-/// dashboard, IDE) keeps the grok.com relay off. The first Headless
-/// registration (devbox / `grok agent headless` flow) flips the watch so
-/// `run_leader` starts the deferred relay connection.
+/// A Stdio registration must NOT signal relay demand: a leader serving only interactive clients (TUI dashboard, IDE) keeps the grok.com relay off.
+/// The first Headless registration (the devbox / `grok agent headless` flow) flips the watch so `run_leader` starts the deferred relay connection.
 #[tokio::test]
 async fn relay_demand_signals_only_on_headless_registration() {
     let temp = TempDir::new().unwrap();
@@ -473,8 +417,8 @@ async fn relay_demand_signals_only_on_headless_registration() {
     // A Stdio (interactive) client registers: demand must stay false.
     // Hold the connection open so the server doesn't exit on disconnect.
     let _stdio = connect_and_register_with_mode(&sock_path, "grok-tui", ClientMode::Stdio).await;
-    // The Registered server-event is processed asynchronously after the
-    // wire ack; give the server loop a beat before asserting the negative.
+    // The Registered server-event is processed asynchronously after the wire ack
+    // Give the server loop a beat before asserting the negative
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert!(
         !*relay_demand_rx.borrow(),
@@ -833,11 +777,12 @@ async fn initialize_gets_client_identifier_injected() {
     let received = acp_rx.recv().await.unwrap();
     let json: serde_json::Value = serde_json::from_str(&received).unwrap();
     assert_eq!(
-        json["params"]["_meta"]["clientIdentifier"], "grok-tui",
+        j(&json, "/params/_meta/clientIdentifier"),
+        "grok-tui",
         "Leader should inject clientIdentifier from IPC registration"
     );
-    // method and id should still be present (id is namespaced)
-    assert_eq!(json["method"], "initialize");
+    // Injection leaves the rest of the message intact (the id is now namespaced)
+    assert_eq!(j(&json, "/method"), "initialize");
 
     cancel.cancel();
 }
@@ -878,7 +823,8 @@ async fn initialize_preserves_existing_client_identifier() {
     let received = acp_rx.recv().await.unwrap();
     let json: serde_json::Value = serde_json::from_str(&received).unwrap();
     assert_eq!(
-        json["params"]["_meta"]["clientIdentifier"], "grok-web",
+        j(&json, "/params/_meta/clientIdentifier"),
+        "grok-web",
         "Leader should not override existing clientIdentifier"
     );
 
@@ -887,15 +833,15 @@ async fn initialize_preserves_existing_client_identifier() {
 
 #[test]
 fn rewrite_request_id_rewrites_requests() {
-    // JSON-RPC Request: has "method" and "id" -> should rewrite
+    // JSON-RPC Request: has "method" and "id", so it is rewritten
     let mut json = pv(r#"{"jsonrpc":"2.0","method":"test","id":42,"params":{}}"#);
     let client_id = ClientId(123);
     let (namespaced_id, original_id) = rewrite_request_id(&mut json, client_id).unwrap();
 
     assert_eq!(original_id, serde_json::json!(42));
     assert_eq!(namespaced_id, "123|42");
-    assert_eq!(json["id"], "123|42");
-    assert_eq!(json["method"], "test");
+    assert_eq!(j(&json, "/id"), "123|42");
+    assert_eq!(j(&json, "/method"), "test");
 }
 
 #[test]
@@ -952,8 +898,7 @@ fn is_session_attach_request_detects_load_and_resume() {
     assert!(is_session_attach_request(&pv(
         r#"{"jsonrpc":"2.0","id":1,"method":"session/load","params":{"sessionId":"s1","cwd":"/tmp"}}"#
     )));
-    // Resume attaches too, so it needs the same live buffering and the
-    // pending-modal replay that fires on the response.
+    // Resume attaches too, so it needs the same live buffering and the replay of a pending modal on the response
     assert!(is_session_attach_request(&pv(
         r#"{"jsonrpc":"2.0","id":1,"method":"session/resume","params":{"sessionId":"s1","cwd":"/tmp"}}"#
     )));
@@ -970,31 +915,12 @@ fn is_session_attach_request_detects_load_and_resume() {
 }
 
 #[test]
-fn is_scheduled_task_inject_prompt_detects_only_inject() {
-    assert!(is_scheduled_task_inject_prompt(&pv(
-        r#"{"method":"x.ai/scheduled_task_inject_prompt","params":{"sessionId":"s1","taskId":"t1","prompt":"echo hi"}}"#
-    )));
-    // Gateway-wrapped form (the actual wire shape): `_`-prefixed top-level
-    // method with the real method + params nested under `params`.
-    assert!(is_scheduled_task_inject_prompt(&pv(
-        r#"{"method":"_x.ai/scheduled_task_inject_prompt","params":{"method":"x.ai/scheduled_task_inject_prompt","params":{"sessionId":"s1","taskId":"t1","prompt":"echo hi"}}}"#
-    )));
-    // The sibling informational notification is NOT driver-routed (it fans
-    // out so every dashboard updates its tasks pane).
-    assert!(!is_scheduled_task_inject_prompt(&pv(
-        r#"{"method":"x.ai/scheduled_task_fired","params":{"sessionId":"s1"}}"#
-    )));
-    assert!(!is_scheduled_task_inject_prompt(&pv(
-        r#"{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1"}}"#
-    )));
-}
-
-#[test]
 fn is_interaction_request_detects_only_interaction_methods() {
     for m in [
         "session/request_permission",
         "x.ai/ask_user_question",
         "x.ai/exit_plan_mode",
+        "x.ai/mcp/elicit",
     ] {
         let payload = format!(r#"{{"jsonrpc":"2.0","id":1,"method":"{m}","params":{{}}}}"#);
         assert!(
@@ -1002,9 +928,12 @@ fn is_interaction_request_detects_only_interaction_methods() {
             "{m} (direct) must be an interaction"
         );
     }
-    // Gateway-wrapped ext methods (the actual wire shape for ask_user_question
-    // / exit_plan_mode): `_`-prefixed top-level method, real method nested.
-    for m in ["x.ai/ask_user_question", "x.ai/exit_plan_mode"] {
+    // Gateway-wrapped ext methods (the actual wire shape for ask_user_question / exit_plan_mode): `_`-prefixed top-level method, real method nested
+    for m in [
+        "x.ai/ask_user_question",
+        "x.ai/exit_plan_mode",
+        "x.ai/mcp/elicit",
+    ] {
         let payload = format!(
             r#"{{"jsonrpc":"2.0","id":1,"method":"_{m}","params":{{"method":"{m}","params":{{}}}}}}"#
         );
@@ -1017,8 +946,7 @@ fn is_interaction_request_detects_only_interaction_methods() {
     assert!(!is_interaction_request(&pv(
         r#"{"jsonrpc":"2.0","id":1,"method":"fs/read_text_file","params":{}}"#
     )));
-    // `is_interaction_request` keys only on method; the caller gates on
-    // `is_reverse_request` (id present) before treating it as a shared modal.
+    // `is_interaction_request` keys only on method; the caller gates on `is_reverse_request` (id present) before treating it as a shared modal
     assert!(!is_interaction_request(&pv(
         r#"{"jsonrpc":"2.0","method":"x.ai/sessions/changed","params":{}}"#
     )));
@@ -1042,8 +970,7 @@ fn extract_interaction_tool_call_id_handles_direct_and_nested() {
         .as_deref(),
         Some("tc-p")
     );
-    // Gateway-wrapped ask_user_question: real toolCallId lives at
-    // params.params.toolCallId.
+    // Gateway-wrapped ask_user_question: real toolCallId lives at params.params.toolCallId
     assert_eq!(
         extract_interaction_tool_call_id(&pv(
             r#"{"id":1,"method":"_x.ai/ask_user_question","params":{"method":"x.ai/ask_user_question","params":{"sessionId":"s","toolCallId":"tc-w"}}}"#
@@ -1085,10 +1012,8 @@ fn extract_interaction_resolved_tool_call_id_matches_only_resolved() {
 
 #[test]
 fn session_load_request_id_matches_response_id_for_buffer_flush() {
-    // The live-buffer flush keys on the namespaced load-request id and
-    // matches it against the raw id echoed on the load response. Pin that
-    // invariant: the id stored at request time equals the id seen at
-    // response time, and parse_response_id still recovers (client, orig id).
+    // The live-buffer flush keys on the namespaced load-request id and matches it against the raw id echoed on the load response
+    // Pin that invariant: the id stored at request time equals the id seen at response time, and parse_response_id still recovers the client and id
     let mut req = pv(
         r#"{"jsonrpc":"2.0","id":7,"method":"session/load","params":{"sessionId":"sess-x","cwd":"/tmp"}}"#,
     );
@@ -1099,30 +1024,28 @@ fn session_load_request_id_matches_response_id_for_buffer_flush() {
     let (stored_ns_id, _orig) = rewrite_request_id(&mut req, client).unwrap();
     assert_eq!(stored_ns_id, "3|7");
     // The rewritten payload carries exactly the namespaced id the loop stores.
-    assert_eq!(req["id"], stored_ns_id.as_str());
+    assert_eq!(j(&req, "/id"), stored_ns_id.as_str());
 
-    // The agent echoes the namespaced id verbatim on the response;
-    // `parse_response_id` recovers (client, namespaced id) and restores
-    // the original id in place.
+    // The agent echoes the namespaced id verbatim on the response
+    // `parse_response_id` recovers (client, namespaced id) and restores the original id in place
     let mut response = pv(&format!(
         r#"{{"jsonrpc":"2.0","id":"{stored_ns_id}","result":{{"models":[]}}}}"#
     ));
     let (parsed_client, raw_response_id) = parse_response_id(&mut response).unwrap();
     assert_eq!(parsed_client, client);
     assert_eq!(raw_response_id, stored_ns_id);
-    assert_eq!(response["id"], serde_json::json!(7));
+    assert_eq!(j(&response, "/id"), &serde_json::json!(7));
 }
 
 #[test]
 fn live_buffer_holds_during_load_and_flushes_in_order() {
-    // Mirrors the request/intercept/flush/disconnect bookkeeping the leader
-    // loop performs on `pending_load_by_req` + `load_live_buffer`.
+    // Mirrors the request/intercept/flush/disconnect bookkeeping the leader loop performs on `pending_load_by_req` and `load_live_buffer`
     let client = ClientId(5);
     let sid = "sess-y".to_string();
     let mut pending_load_by_req: HashMap<String, (ClientId, String)> = HashMap::new();
     let mut load_live_buffer: HashMap<(ClientId, String), Vec<BufferedLive>> = HashMap::new();
 
-    // Request path: register pending load + empty buffer.
+    // Request path: register the pending load and an empty buffer
     pending_load_by_req.insert("5|1".to_string(), (client, sid.clone()));
     load_live_buffer.entry((client, sid.clone())).or_default();
 
@@ -1142,7 +1065,7 @@ fn live_buffer_holds_during_load_and_flushes_in_order() {
         ["e1", "e2", "e3"]
     );
 
-    // Flush path: matching response id flushes (in order) + clears state.
+    // Flush path: a matching response id flushes (in order) and clears state
     let flushed = pending_load_by_req
         .remove("5|1")
         .and_then(|(c, s)| load_live_buffer.remove(&(c, s)))
@@ -1167,8 +1090,7 @@ fn live_buffer_holds_during_load_and_flushes_in_order() {
     assert!(load_live_buffer.is_empty());
 }
 
-/// An `agent_message_chunk` `session/update` carrying `eventId` at
-/// `params._meta.eventId` (the live-broadcast wire shape).
+/// An `agent_message_chunk` `session/update` carrying `eventId` at `params._meta.eventId` (the live-broadcast wire shape).
 fn live_chunk(sid: &str, seq: u64) -> String {
     format!(
         r#"{{"jsonrpc":"2.0","method":"session/update","params":{{"sessionId":"{sid}","update":{{"sessionUpdate":"agent_message_chunk","content":{{"type":"text","text":"x"}}}},"_meta":{{"eventId":"{sid}-{seq}"}}}}}}"#
@@ -1177,8 +1099,8 @@ fn live_chunk(sid: &str, seq: u64) -> String {
 
 #[test]
 fn event_seq_of_parses_acp_and_ext_and_handles_missing() {
-    // ACP session/update: eventId at params._meta.eventId. The session id
-    // itself contains '-', so the suffix parse must split on the LAST '-'.
+    // ACP session/update: eventId at params._meta.eventId
+    // The session id itself contains '-', so the suffix parse must split on the LAST '-'
     let acp = pv(r#"{"params":{"sessionId":"019e-aa","_meta":{"eventId":"019e-aa-42"}}}"#);
     assert_eq!(event_seq_of(&acp), Some(42));
     // ExtNotification (xAI): nested under params.params._meta.eventId.
@@ -1186,17 +1108,13 @@ fn event_seq_of_parses_acp_and_ext_and_handles_missing() {
         r#"{"params":{"method":"x.ai/session/update","params":{"sessionId":"019e-aa","_meta":{"eventId":"019e-aa-7"}}}}"#,
     );
     assert_eq!(event_seq_of(&ext), Some(7));
-    // No eventId (xAI one-shot / older shell) → None (not dedup-droppable).
+    // No eventId (xAI one-shot / older shell) yields None, so dedup cannot drop the event
     let none = pv(r#"{"params":{"sessionId":"019e-aa","_meta":{}}}"#);
     assert_eq!(event_seq_of(&none), None);
 }
 
-/// Regression: on a mid-turn attach, the in-flight turn streams + persists
-/// during the [subscribe -> gate-close] window, so its chunks are BOTH
-/// buffered-live for the loading client AND read back by replay (same
-/// eventId). The post-load flush must drop the buffered copies that replay
-/// already delivered (`event_seq <= replay max`) and forward only the
-/// genuinely-newer tail — so each event reaches the client exactly once.
+/// Regression: on a mid-turn attach, the in-flight turn streams and persists between subscribe and gate close. Its chunks are therefore BOTH buffered live for the loading client AND read back by replay (same eventId).
+/// The post-load flush must drop the buffered copies replay already delivered (`event_seq <= replay max`) and forward only the newer tail. Each event then reaches the client exactly once.
 #[test]
 fn buffer_flush_drops_replay_overlap_by_event_seq() {
     let client = ClientId(5);
@@ -1217,8 +1135,7 @@ fn buffer_flush_drops_replay_overlap_by_event_seq() {
     assert_eq!(load_replay_max_seq.get(&(client, sid.clone())), Some(&21));
 
     // Buffered-live holds the overlap (7..=21) AND the genuine tail (22,23).
-    // Mirrors the production intercept: the seq is computed at buffer time
-    // (from the already-parsed message) and stored alongside the payload.
+    // Mirrors the production intercept: the seq is computed at buffer time (from the already-parsed message) and stored alongside the payload
     let buf = load_live_buffer.entry((client, sid.clone())).or_default();
     for seq in 7..=23u64 {
         let payload = live_chunk(&sid, seq);
@@ -1229,8 +1146,7 @@ fn buffer_flush_drops_replay_overlap_by_event_seq() {
     // Flush filter (mirrors the leader loop): drop seq <= cutoff, keep rest.
     let cutoff: Option<u64> = load_replay_max_seq.remove(&(client, sid.clone()));
     let buffered = load_live_buffer.remove(&(client, sid.clone())).unwrap();
-    // Mirror the production for-loop: drop the overlap, forward the rest —
-    // using only the stored seq (the flush never re-parses payloads).
+    // Mirror the production for-loop: drop the overlap, forward the rest, using only the stored seq (the flush never re-parses payloads)
     let mut forwarded: Vec<u64> = Vec::new();
     for (_, buffered_seq) in &buffered {
         if let Some(c) = cutoff
@@ -1249,9 +1165,8 @@ fn buffer_flush_drops_replay_overlap_by_event_seq() {
     );
 }
 
-/// Edge case: a fresh process's very first event has `event_seq == 0`. The
-/// cutoff must be an `Option` (not a `> 0` sentinel), so a genuine max of 0
-/// still drops the buffered-live seq-0 duplicate instead of forwarding it.
+/// Edge case: a fresh process's very first event has `event_seq == 0`.
+/// The cutoff must be an `Option` (not a `> 0` sentinel), so a genuine max of 0 still drops the buffered-live seq-0 duplicate.
 #[test]
 fn buffer_flush_drops_replay_overlap_at_seq_zero() {
     let client = ClientId(5);
@@ -1269,7 +1184,7 @@ fn buffer_flush_drops_replay_overlap_at_seq_zero() {
     }
     assert_eq!(load_replay_max_seq.get(&(client, sid.clone())), Some(&0));
 
-    // Buffered-live holds the seq-0 duplicate + the genuine tail (seq 1).
+    // Buffered-live holds the seq-0 duplicate and the genuine tail (seq 1)
     let buf = load_live_buffer.entry((client, sid.clone())).or_default();
     for seq in [0u64, 1] {
         let payload = live_chunk(&sid, seq);
@@ -1284,8 +1199,7 @@ fn buffer_flush_drops_replay_overlap_at_seq_zero() {
         "a genuine cutoff of 0 must be Some(0), not absent"
     );
     let buffered = load_live_buffer.remove(&(client, sid.clone())).unwrap();
-    // Mirror the production for-loop: drop the overlap, forward the rest —
-    // using only the stored seq (the flush never re-parses payloads).
+    // Mirror the production for-loop: drop the overlap, forward the rest, using only the stored seq (the flush never re-parses payloads)
     let mut forwarded: Vec<u64> = Vec::new();
     for (_, buffered_seq) in &buffered {
         if let Some(c) = cutoff
@@ -1306,7 +1220,7 @@ fn buffer_flush_drops_replay_overlap_at_seq_zero() {
 
 #[test]
 fn rewrite_request_id_skips_responses_with_result() {
-    // JSON-RPC Response (success): has "result" and "id", no "method" -> should NOT rewrite
+    // JSON-RPC Response (success): has "result" and "id", no "method", so it is NOT rewritten
     let mut json = pv(r#"{"jsonrpc":"2.0","result":{"content":"hello"},"id":42}"#);
     let before = json.clone();
     assert!(rewrite_request_id(&mut json, ClientId(123)).is_none());
@@ -1315,7 +1229,7 @@ fn rewrite_request_id_skips_responses_with_result() {
 
 #[test]
 fn rewrite_request_id_skips_responses_with_error() {
-    // JSON-RPC Response (error): has "error" and "id", no "method" -> should NOT rewrite
+    // JSON-RPC Response (error): has "error" and "id", no "method", so it is NOT rewritten
     let mut json = pv(r#"{"jsonrpc":"2.0","error":{"code":-32600,"message":"Invalid"},"id":5}"#);
     let before = json.clone();
     assert!(rewrite_request_id(&mut json, ClientId(123)).is_none());
@@ -1324,12 +1238,12 @@ fn rewrite_request_id_skips_responses_with_error() {
 
 #[test]
 fn rewrite_request_id_handles_notifications() {
-    // JSON-RPC Notification: has "method" but no "id" -> nothing to rewrite
+    // JSON-RPC Notification: has "method" but no "id", so nothing to rewrite
     let mut json = pv(r#"{"jsonrpc":"2.0","method":"session/update","params":{}}"#);
     let before = json.clone();
     assert!(rewrite_request_id(&mut json, ClientId(123)).is_none());
     assert_eq!(json, before, "payload unchanged");
-    assert!(json.get("id").is_none()); // Still no id
+    assert!(json.get("id").is_none());
 }
 
 #[test]
@@ -1339,9 +1253,9 @@ fn rewrite_request_id_handles_string_ids() {
     let (namespaced_id, original_id) = rewrite_request_id(&mut json, ClientId(456)).unwrap();
 
     assert_eq!(original_id, serde_json::json!("abc-123"));
-    // String IDs get JSON-serialized with quotes: "abc-123" -> "\"abc-123\""
+    // String IDs get JSON-serialized with quotes: "abc-123" becomes "\"abc-123\""
     assert_eq!(namespaced_id, "456|\"abc-123\"");
-    assert_eq!(json["id"], "456|\"abc-123\"");
+    assert_eq!(j(&json, "/id"), "456|\"abc-123\"");
 }
 
 #[test]
@@ -1364,11 +1278,10 @@ fn inject_capabilities_adds_yolo_mode_to_session_new() {
         ClientId(1)
     ));
 
-    assert_eq!(json["params"]["_meta"]["yoloMode"], true);
+    assert_eq!(j(&json, "/params/_meta/yoloMode"), true);
 }
 
-/// Leader capabilities.auto_mode seeds `_meta.autoMode` on session/new
-/// (the real ConnectFlags.default_auto_mode entry path).
+/// Leader capabilities.auto_mode seeds `_meta.autoMode` on session/new (the real ConnectFlags.default_auto_mode entry path).
 #[test]
 fn inject_capabilities_adds_auto_mode_to_session_new() {
     let payload = format!(
@@ -1389,8 +1302,8 @@ fn inject_capabilities_adds_auto_mode_to_session_new() {
         "",
         ClientId(1)
     ));
-    assert_eq!(json["params"]["_meta"]["autoMode"], true);
-    assert!(json["params"]["_meta"].get("yoloMode").is_none());
+    assert_eq!(j(&json, "/params/_meta/autoMode"), true);
+    assert!(j(&json, "/params/_meta").get("yoloMode").is_none());
 }
 
 /// session/load also receives autoMode (reconnect path).
@@ -1412,7 +1325,7 @@ fn inject_capabilities_adds_auto_mode_to_session_load() {
         "grok-tui",
         ClientId(1)
     ));
-    assert_eq!(json["params"]["_meta"]["autoMode"], true);
+    assert_eq!(j(&json, "/params/_meta/autoMode"), true);
 }
 
 #[test]
@@ -1433,7 +1346,7 @@ fn inject_capabilities_adds_auto_mode_to_session_resume() {
         "grok-tui",
         ClientId(1)
     ));
-    assert_eq!(json["params"]["_meta"]["autoMode"], true);
+    assert_eq!(j(&json, "/params/_meta/autoMode"), true);
 }
 
 /// Yolo suppresses autoMode injection even when auto_mode capability is set.
@@ -1455,11 +1368,34 @@ fn inject_capabilities_yolo_suppresses_auto_mode() {
         "",
         ClientId(1)
     ));
-    assert_eq!(json["params"]["_meta"]["yoloMode"], true);
+    assert_eq!(j(&json, "/params/_meta/yoloMode"), true);
     assert!(
-        json["params"]["_meta"].get("autoMode").is_none(),
+        j(&json, "/params/_meta").get("autoMode").is_none(),
         "yolo must not also inject autoMode"
     );
+}
+
+#[test]
+fn inject_capabilities_preserves_explicit_auto_over_stale_yolo() {
+    let payload = format!(
+        r#"{{"jsonrpc":"2.0","method":"{}","id":1,"params":{{"cwd":"/tmp","_meta":{{"yoloMode":false,"autoMode":true}}}}}}"#,
+        AGENT_METHOD_NAMES.session_new
+    );
+    let caps = ClientCapabilities {
+        auto_mode: false,
+        yolo_mode: true,
+        ..Default::default()
+    };
+    let mut json = pv(&payload);
+
+    assert!(inject_session_request_context(
+        &mut json,
+        &caps,
+        "grok-tui",
+        ClientId(1)
+    ));
+    assert_eq!(j(&json, "/params/_meta/yoloMode"), false);
+    assert_eq!(j(&json, "/params/_meta/autoMode"), true);
 }
 
 #[test]
@@ -1477,8 +1413,7 @@ fn inject_capabilities_skips_non_session_new() {
         "",
         ClientId(1)
     ));
-    // Should be unchanged (or at least not have yoloMode injected)
-    assert!(json["params"].get("_meta").is_none());
+    assert!(j(&json, "/params").get("_meta").is_none());
 }
 
 #[test]
@@ -1501,8 +1436,86 @@ fn inject_capabilities_skips_when_yolo_mode_false() {
         "",
         ClientId(1)
     ));
-    // Should be unchanged
     assert_eq!(json, before);
+}
+
+#[test]
+fn inject_capabilities_adds_status_line_when_it_is_the_only_capability() {
+    let payload = format!(
+        r#"{{"jsonrpc":"2.0","method":"{}","id":1,"params":{{"cwd":"/tmp"}}}}"#,
+        AGENT_METHOD_NAMES.session_new
+    );
+    let caps = ClientCapabilities {
+        status_line: true,
+        ..Default::default()
+    };
+
+    let mut json = pv(&payload);
+    assert!(inject_session_request_context(
+        &mut json,
+        &caps,
+        "",
+        ClientId(1)
+    ));
+    assert_eq!(
+        j(&json, "/params/_meta").get(xai_grok_status_line::CLIENT_STATUS_LINE_META),
+        Some(&serde_json::Value::Bool(true)),
+        "a status-line client that states nothing else must still get its own capability, \
+         not the process-wide initialize one"
+    );
+}
+
+#[test]
+fn inject_capabilities_omits_user_message_echo_when_false() {
+    let payload = format!(
+        r#"{{"jsonrpc":"2.0","method":"{}","id":1,"params":{{"cwd":"/tmp"}}}}"#,
+        AGENT_METHOD_NAMES.session_new
+    );
+    let caps = ClientCapabilities {
+        yolo_mode: true,
+        user_message_echo: false,
+        ..Default::default()
+    };
+
+    let mut json = pv(&payload);
+    assert!(inject_session_request_context(
+        &mut json,
+        &caps,
+        "",
+        ClientId(1)
+    ));
+    assert!(
+        j(&json, "/params/_meta")
+            .get(crate::session::CLIENT_USER_MESSAGE_ECHO_META)
+            .is_none(),
+        "grok agent (echo false) must not inject clientUserMessageEcho=false over initialize"
+    );
+}
+
+#[test]
+fn inject_capabilities_adds_user_message_echo_when_it_is_the_only_capability() {
+    let payload = format!(
+        r#"{{"jsonrpc":"2.0","method":"{}","id":1,"params":{{"cwd":"/tmp"}}}}"#,
+        AGENT_METHOD_NAMES.session_new
+    );
+    let caps = ClientCapabilities {
+        user_message_echo: true,
+        ..Default::default()
+    };
+
+    let mut json = pv(&payload);
+    assert!(inject_session_request_context(
+        &mut json,
+        &caps,
+        "",
+        ClientId(1)
+    ));
+    assert_eq!(
+        j(&json, "/params/_meta").get(crate::session::CLIENT_USER_MESSAGE_ECHO_META),
+        Some(&serde_json::Value::Bool(true)),
+        "a pager that states nothing else must still get live user-message echo, \
+         not the process-wide initialize default"
+    );
 }
 
 #[test]
@@ -1525,9 +1538,8 @@ fn inject_capabilities_preserves_existing_meta() {
         ClientId(1)
     ));
 
-    // Should have both existing foo and new yoloMode
-    assert_eq!(json["params"]["_meta"]["foo"], "bar");
-    assert_eq!(json["params"]["_meta"]["yoloMode"], true);
+    assert_eq!(j(&json, "/params/_meta/foo"), "bar");
+    assert_eq!(j(&json, "/params/_meta/yoloMode"), true);
 }
 
 #[test]
@@ -1550,9 +1562,8 @@ fn inject_capabilities_adds_default_model_to_session_new() {
         ClientId(1)
     ));
 
-    assert_eq!(json["params"]["_meta"]["modelId"], "grok-3-fast");
-    // yoloMode should not be present since it's false
-    assert!(json["params"]["_meta"].get("yoloMode").is_none());
+    assert_eq!(j(&json, "/params/_meta/modelId"), "grok-3-fast");
+    assert!(j(&json, "/params/_meta").get("yoloMode").is_none());
 }
 
 #[test]
@@ -1575,8 +1586,8 @@ fn inject_capabilities_adds_both_yolo_and_model() {
         ClientId(1)
     ));
 
-    assert_eq!(json["params"]["_meta"]["yoloMode"], true);
-    assert_eq!(json["params"]["_meta"]["modelId"], "grok-3-fast");
+    assert_eq!(j(&json, "/params/_meta/yoloMode"), true);
+    assert_eq!(j(&json, "/params/_meta/modelId"), "grok-3-fast");
 }
 
 #[test]
@@ -1594,8 +1605,7 @@ fn inject_capabilities_does_not_override_existing_model_id() {
     let mut json = pv(&payload);
     inject_session_request_context(&mut json, &caps, "", ClientId(1));
 
-    // Should preserve the existing modelId
-    assert_eq!(json["params"]["_meta"]["modelId"], "custom-model");
+    assert_eq!(j(&json, "/params/_meta/modelId"), "custom-model");
 }
 
 #[test]
@@ -1649,8 +1659,8 @@ fn extract_auto_mode_change_derives_from_permission_mode() {
     }
 }
 
-/// Branch 3: None when there's no auto signal — wrong method, or a bare yolo
-/// toggle (no `auto_mode`, no `permission_mode`) must NOT change auto state.
+/// Branch 3: None when there's no auto signal.
+/// A wrong method, or a bare yolo toggle (no `auto_mode`, no `permission_mode`), must NOT change auto state.
 #[test]
 fn extract_auto_mode_change_returns_none_when_no_auto_signal() {
     let payload = r#"{"jsonrpc":"2.0","method":"other/method","params":{"auto_mode":true}}"#;
@@ -1710,6 +1720,47 @@ fn extract_model_id_from_set_model_returns_none_for_missing_model() {
     assert_eq!(extract_model_id_from_set_model(&pv(&payload)), None);
 }
 
+fn set_config_option_envelope(
+    config_id: &'static str,
+    value: agent_client_protocol::SessionConfigOptionValue,
+) -> serde_json::Value {
+    let request = agent_client_protocol::SetSessionConfigOptionRequest::new(
+        agent_client_protocol::SessionId::from("sess-123"),
+        config_id,
+        value,
+    );
+    serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": AGENT_METHOD_NAMES.session_set_config_option,
+        "id": 1,
+        "params": serde_json::to_value(&request).unwrap(),
+    })
+}
+
+#[test]
+fn extract_model_id_from_set_config_option_returns_value() {
+    let envelope = set_config_option_envelope("model", "grok-3-fast".into());
+    assert_eq!(
+        extract_model_id_from_set_config_option(&envelope),
+        Some("grok-3-fast".to_string())
+    );
+}
+
+#[test]
+fn extract_model_id_from_set_config_option_ignores_non_model_config() {
+    let envelope = set_config_option_envelope("reasoning_effort", "high".into());
+    assert_eq!(extract_model_id_from_set_config_option(&envelope), None);
+}
+
+#[test]
+fn extract_model_id_from_set_config_option_ignores_boolean_value() {
+    let envelope = set_config_option_envelope(
+        "model",
+        agent_client_protocol::SessionConfigOptionValue::boolean(true),
+    );
+    assert_eq!(extract_model_id_from_set_config_option(&envelope), None);
+}
+
 // ── patch_initialize_response_model tests ─────────────────────────
 
 #[test]
@@ -1720,7 +1771,7 @@ fn patch_initialize_response_patches_current_model_id() {
     let default_model = Some("grok-3-fast".to_string());
     assert!(patch_initialize_response_model(&mut json, &default_model));
     assert_eq!(
-        json["result"]["meta"]["modelState"]["currentModelId"],
+        j(&json, "/result/meta/modelState/currentModelId"),
         "grok-3-fast"
     );
 }
@@ -1732,14 +1783,13 @@ fn patch_initialize_response_preserves_other_fields() {
     );
     let default_model = Some("grok-3-fast".to_string());
     assert!(patch_initialize_response_model(&mut json, &default_model));
-    assert_eq!(json["result"]["meta"]["grokShell"], true);
+    assert_eq!(j(&json, "/result/meta/grokShell"), true);
     assert_eq!(
-        json["result"]["meta"]["modelState"]["currentModelId"],
+        j(&json, "/result/meta/modelState/currentModelId"),
         "grok-3-fast"
     );
-    // availableModels should be preserved
     assert_eq!(
-        json["result"]["meta"]["modelState"]["availableModels"]
+        j(&json, "/result/meta/modelState/availableModels")
             .as_array()
             .unwrap()
             .len(),
@@ -1794,7 +1844,7 @@ fn patch_initialize_response_noop_for_non_initialize_response() {
         &mut json,
         &Some("grok-3-fast".to_string())
     ));
-    // Should be unchanged — no meta.modelState path
+    // Unchanged: no meta.modelState path to patch
     assert_eq!(json, before);
 }
 
@@ -1852,7 +1902,6 @@ fn extract_session_id_from_params_works() {
 #[test]
 fn extract_session_id_from_nested_params_works() {
     // ext/notification: sessionId is nested inside params.params
-    // Wire format: {"jsonrpc":"2.0","method":"_x.ai/session_notification","params":{"method":"x.ai/session_notification","params":{"sessionId":"sess-nested"}}}
     let payload = r#"{"jsonrpc":"2.0","method":"_x.ai/session_notification","params":{"method":"x.ai/session_notification","params":{"sessionId":"sess-nested"}}}"#;
     assert_eq!(
         extract_session_id(&pv(payload)),
@@ -1939,7 +1988,7 @@ fn extract_child_session_event_none_without_child_id() {
 
 #[test]
 fn inject_capabilities_skips_empty_default_model() {
-    // When default_model is Some(""), it should NOT inject modelId
+    // default_model of Some("") must NOT inject modelId
     let payload = format!(
         r#"{{"jsonrpc":"2.0","method":"{}","id":1,"params":{{"cwd":"/tmp"}}}}"#,
         AGENT_METHOD_NAMES.session_new
@@ -1958,14 +2007,12 @@ fn inject_capabilities_skips_empty_default_model() {
         "",
         ClientId(1)
     ));
-    // With empty default_model and yolo_mode=false, the payload should be unchanged
     assert_eq!(json, before);
 }
 
 #[test]
 fn inject_capabilities_skips_empty_model_with_yolo_mode() {
-    // When default_model is Some("") but yolo_mode is true,
-    // yoloMode should be injected but modelId should NOT
+    // With default_model of Some("") and yolo_mode true, yoloMode is injected but modelId is NOT
     let payload = format!(
         r#"{{"jsonrpc":"2.0","method":"{}","id":1,"params":{{"cwd":"/tmp"}}}}"#,
         AGENT_METHOD_NAMES.session_new
@@ -1984,14 +2031,12 @@ fn inject_capabilities_skips_empty_model_with_yolo_mode() {
         ClientId(1)
     ));
 
-    assert_eq!(json["params"]["_meta"]["yoloMode"], true);
-    // modelId should NOT be present since default_model is empty
-    assert!(json["params"]["_meta"].get("modelId").is_none());
+    assert_eq!(j(&json, "/params/_meta/yoloMode"), true);
+    assert!(j(&json, "/params/_meta").get("modelId").is_none());
 }
 
 #[test]
 fn inject_capabilities_no_model_no_yolo_returns_unchanged() {
-    // When neither yolo_mode nor default_model is set, payload is returned unchanged
     let payload = format!(
         r#"{{"jsonrpc":"2.0","method":"{}","id":1,"params":{{"cwd":"/tmp","_meta":{{"yoloMode":true}}}}}}"#,
         AGENT_METHOD_NAMES.session_new
@@ -2029,7 +2074,7 @@ fn inject_capabilities_adds_client_identifier_to_session_new() {
         ClientId(1),
     ));
     assert_eq!(
-        json["params"]["_meta"]["clientIdentifier"],
+        j(&json, "/params/_meta/clientIdentifier"),
         "grok-code-extension"
     );
 }
@@ -2044,8 +2089,7 @@ fn inject_capabilities_does_not_override_existing_client_identifier() {
 
     let mut json = pv(&payload);
     inject_session_request_context(&mut json, &caps, "grok-tui", ClientId(1));
-    // Should preserve the existing clientIdentifier
-    assert_eq!(json["params"]["_meta"]["clientIdentifier"], "custom-client");
+    assert_eq!(j(&json, "/params/_meta/clientIdentifier"), "custom-client");
 }
 
 #[test]
@@ -2064,12 +2108,12 @@ fn inject_capabilities_adds_client_identifier_to_session_load() {
         ClientId(1),
     ));
     assert_eq!(
-        json["params"]["_meta"]["clientIdentifier"],
+        j(&json, "/params/_meta/clientIdentifier"),
         "grok-code-extension"
     );
-    // session/load should NOT get yoloMode or modelId injected
-    assert!(json["params"]["_meta"].get("yoloMode").is_none());
-    assert!(json["params"]["_meta"].get("modelId").is_none());
+    // session/load gets neither yoloMode nor modelId injected
+    assert!(j(&json, "/params/_meta").get("yoloMode").is_none());
+    assert!(j(&json, "/params/_meta").get("modelId").is_none());
 }
 
 #[test]
@@ -2082,10 +2126,9 @@ fn inject_capabilities_adds_leader_client_id_to_session_load() {
 
     let mut json = pv(&payload);
     inject_session_request_context(&mut json, &caps, "grok-tui", ClientId(42));
-    // The unique ClientId is stamped so the agent can echo it onto replay
-    // notifications for leader unicast routing.
+    // The unique ClientId is stamped so the agent can echo it onto replay notifications for leader unicast routing
     assert_eq!(
-        json["params"]["_meta"]["x.ai/leaderClientId"].as_u64(),
+        j(&json, "/params/_meta/x.ai~1leaderClientId").as_u64(),
         Some(42)
     );
 }
@@ -2100,10 +2143,9 @@ fn inject_capabilities_does_not_override_existing_leader_client_id() {
 
     let mut json = pv(&payload);
     inject_session_request_context(&mut json, &caps, "grok-tui", ClientId(42));
-    // An explicit value already present is respected (mirrors the
-    // clientIdentifier guard).
+    // An explicit value already present is respected (mirrors the clientIdentifier guard)
     assert_eq!(
-        json["params"]["_meta"]["x.ai/leaderClientId"].as_u64(),
+        j(&json, "/params/_meta/x.ai~1leaderClientId").as_u64(),
         Some(7)
     );
 }
@@ -2138,8 +2180,8 @@ fn inject_yolo_notification_adds_client_identifier() {
     assert!(inject_client_identity_into_yolo_notification(
         &mut json, "grok-tui"
     ));
-    assert_eq!(json["params"]["clientIdentifier"], "grok-tui");
-    assert_eq!(json["params"]["yolo_mode"], true);
+    assert_eq!(j(&json, "/params/clientIdentifier"), "grok-tui");
+    assert_eq!(j(&json, "/params/yolo_mode"), true);
 }
 
 #[test]
@@ -2161,7 +2203,7 @@ fn inject_client_identity_adds_identifier_to_initialize() {
     let (mutated, was_initialize) = inject_client_identity_into_initialize(&mut json, "grok-tui");
     assert!(was_initialize, "should have detected an initialize message");
     assert!(mutated, "should have injected the identifier");
-    assert_eq!(json["params"]["_meta"]["clientIdentifier"], "grok-tui");
+    assert_eq!(j(&json, "/params/_meta/clientIdentifier"), "grok-tui");
 }
 
 #[test]
@@ -2173,8 +2215,7 @@ fn inject_client_identity_does_not_override_existing() {
     let (mutated, was_initialize) = inject_client_identity_into_initialize(&mut json, "grok-tui");
     assert!(was_initialize, "should have detected an initialize message");
     assert!(!mutated, "existing identifier means nothing was injected");
-    // Should preserve the existing clientIdentifier
-    assert_eq!(json["params"]["_meta"]["clientIdentifier"], "grok-web");
+    assert_eq!(j(&json, "/params/_meta/clientIdentifier"), "grok-web");
 }
 
 #[test]
@@ -2216,10 +2257,9 @@ fn inject_client_identity_preserves_existing_meta() {
         inject_client_identity_into_initialize(&mut json, "grok-code-extension");
     assert!(was_initialize, "should have detected an initialize message");
     assert!(mutated);
-    // Should have both existing foo and new clientIdentifier
-    assert_eq!(json["params"]["_meta"]["foo"], "bar");
+    assert_eq!(j(&json, "/params/_meta/foo"), "bar");
     assert_eq!(
-        json["params"]["_meta"]["clientIdentifier"],
+        j(&json, "/params/_meta/clientIdentifier"),
         "grok-code-extension"
     );
 }
@@ -2231,11 +2271,11 @@ fn version_mismatch_notification_contains_correct_fields() {
     let payload = make_version_mismatch_notification("0.1.157", "0.1.150")
         .expect("should produce notification");
     let json: serde_json::Value = serde_json::from_str(&payload).unwrap();
-    assert_eq!(json["method"], "x.ai/leader/version_mismatch");
-    assert_eq!(json["params"]["clientVersion"], "0.1.157");
-    assert_eq!(json["params"]["leaderVersion"], "0.1.150");
+    assert_eq!(j(&json, "/method"), "x.ai/leader/version_mismatch");
+    assert_eq!(j(&json, "/params/clientVersion"), "0.1.157");
+    assert_eq!(j(&json, "/params/leaderVersion"), "0.1.150");
     assert!(
-        json["params"]["message"]
+        j(&json, "/params/message")
             .as_str()
             .unwrap_or("")
             .contains("0.1.157"),
@@ -2259,17 +2299,14 @@ fn version_mismatch_notification_is_none_for_unknown_leader_version() {
     );
 }
 
-/// Verify that a session/setModel request updates the client's default_model
-/// capability, so the next session/new injects the updated model.
-#[tokio::test]
-async fn set_model_updates_default_model_for_next_session_new() {
+async fn model_injected_after_set_model(response: Option<serde_json::Value>) -> String {
     let temp = TempDir::new().unwrap();
-    let (sock_path, cancel, mut acp_rx) = setup_test_server(&temp).await;
+    let (sock_path, _cancel, response_tx, mut acp_rx) =
+        setup_persistent_server_with_agent(&temp).await;
 
     let stream = LeaderStream::connect(&sock_path).await.unwrap();
     let (mut reader, mut writer) = tokio::io::split(stream);
 
-    // Register with an initial default_model of "grok-original"
     write_message(
         &mut writer,
         &ClientMessage::Register {
@@ -2286,7 +2323,6 @@ async fn set_model_updates_default_model_for_next_session_new() {
     .unwrap();
     let _: ServerMessage = read_message(&mut reader).await.unwrap();
 
-    // 1. Send session/setModel to switch to "grok-4.5"
     let set_model_payload = format!(
         r#"{{"jsonrpc":"2.0","method":"{}","id":1,"params":{{"sessionId":"sess-1","modelId":"grok-4.5"}}}}"#,
         AGENT_METHOD_NAMES.session_set_model
@@ -2299,10 +2335,19 @@ async fn set_model_updates_default_model_for_next_session_new() {
     )
     .await
     .unwrap();
-    // Consume the forwarded message
-    let _ = acp_rx.recv().await.unwrap();
+    let forwarded = acp_rx.recv().await.unwrap();
 
-    // 2. Send session/new — the leader should inject the UPDATED model ("grok-4.5")
+    if let Some(mut response) = response {
+        let parsed: serde_json::Value = serde_json::from_str(&forwarded).unwrap();
+        let forwarded_id = j(&parsed, "/id").clone();
+        if let Some(obj) = response.as_object_mut() {
+            obj.insert("jsonrpc".into(), serde_json::json!("2.0"));
+            obj.insert("id".into(), forwarded_id);
+        }
+        response_tx.send(response.to_string()).unwrap();
+        let _: ServerMessage = read_message(&mut reader).await.unwrap();
+    }
+
     let session_new_payload = format!(
         r#"{{"jsonrpc":"2.0","method":"{}","id":2,"params":{{"cwd":"/tmp"}}}}"#,
         AGENT_METHOD_NAMES.session_new
@@ -2318,14 +2363,53 @@ async fn set_model_updates_default_model_for_next_session_new() {
 
     let forwarded = acp_rx.recv().await.unwrap();
     let json: serde_json::Value = serde_json::from_str(&forwarded).unwrap();
+    j(&json, "/params/_meta/modelId")
+        .as_str()
+        .unwrap_or_default()
+        .to_string()
+}
 
-    // The injected modelId should be the NEW model, not the original registration model
+#[tokio::test]
+async fn set_model_optimistically_updates_default_model_without_awaiting_response() {
+    let injected = model_injected_after_set_model(None).await;
     assert_eq!(
-        json["params"]["_meta"]["modelId"], "grok-4.5",
-        "Leader should inject the updated model after session/setModel, not the stale registration model"
+        injected, "grok-4.5",
+        "optimistic switch injects the new model"
     );
+}
 
-    cancel.cancel();
+#[tokio::test]
+async fn rejected_set_model_rolls_back_default_model() {
+    let injected = model_injected_after_set_model(Some(
+        serde_json::json!({ "error": { "code": -32602, "message": "unknown model" } }),
+    ))
+    .await;
+    assert_eq!(
+        injected, "grok-original",
+        "rejected switch rolls back to the previous model"
+    );
+}
+
+#[test]
+fn model_switch_tracker_keeps_newest_when_accepts_arrive_out_of_order() {
+    let mut tracker = ModelSwitchTracker::default();
+    tracker.seed_confirmed(Some("orig".to_string()));
+    tracker.record_forward("r1".to_string(), "a".to_string());
+    tracker.record_forward("r2".to_string(), "b".to_string());
+    assert!(tracker.resolve("r2", true));
+    assert!(tracker.resolve("r1", true));
+    assert_eq!(tracker.default_model().as_deref(), Some("b"));
+}
+
+#[test]
+fn model_switch_tracker_rejection_rolls_back_to_last_confirmed() {
+    let mut tracker = ModelSwitchTracker::default();
+    tracker.seed_confirmed(Some("orig".to_string()));
+    tracker.record_forward("r1".to_string(), "a".to_string());
+    assert!(tracker.resolve("r1", true));
+    tracker.record_forward("r2".to_string(), "b".to_string());
+    assert!(tracker.resolve("r2", false));
+    assert_eq!(tracker.default_model().as_deref(), Some("a"));
 }
 
 #[tokio::test]
@@ -2402,8 +2486,7 @@ async fn client_count_decrements_on_disconnect() {
 #[tokio::test]
 async fn client_count_returns_to_zero_after_all_disconnect() {
     let temp = TempDir::new().unwrap();
-    // Use run_leader_server directly with no_exit_on_disconnect=true
-    // so the server doesn't shut down when all clients disconnect.
+    // Use run_leader_server directly with no_exit_on_disconnect=true so the server doesn't shut down when all clients disconnect
     let sock_path = temp.path().join("test.sock");
     let (acp_tx, _acp_rx) = mpsc::unbounded_channel();
     let (_response_tx, response_rx) = mpsc::unbounded_channel();
@@ -2464,7 +2547,7 @@ async fn client_count_not_incremented_before_registration() {
     let (_sock_path, cancel, _acp_rx, client_count) =
         setup_test_server_with_client_count(&temp).await;
 
-    // Connect but do NOT register — just open the TCP connection
+    // Connect but do NOT register, just open the TCP connection
     let _stream = LeaderStream::connect(&_sock_path).await.unwrap();
     tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -2538,14 +2621,14 @@ async fn fallback_routing_forwards_notifications_but_drops_responses() {
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     // Simulate a relay-originated RESPONSE (has "id" but no namespace prefix).
-    // This should be DROPPED — not forwarded to the IPC client.
+    // It must be DROPPED, not forwarded to the IPC client
     response_tx
         .send(r#"{"jsonrpc":"2.0","result":{"ok":true},"id":42}"#.to_string())
         .unwrap();
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     // Simulate a NOTIFICATION (no "id", no session_id match).
-    // This should be forwarded to the last active IPC client.
+    // It must be forwarded to the last active IPC client
     response_tx
         .send(
             r#"{"jsonrpc":"2.0","method":"agent/progress","params":{"status":"working"}}"#
@@ -2554,8 +2637,7 @@ async fn fallback_routing_forwards_notifications_but_drops_responses() {
         .unwrap();
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    // Read from the client — we should get the notification but NOT the response.
-    // The notification arrives, the response was dropped.
+    // Read from the client: the notification arrives, the response was dropped
     let msg: ServerMessage =
         tokio::time::timeout(Duration::from_millis(200), read_message(&mut reader))
             .await
@@ -2565,7 +2647,8 @@ async fn fallback_routing_forwards_notifications_but_drops_responses() {
         ServerMessage::Acp { payload } => {
             let json: serde_json::Value = serde_json::from_str(&payload).unwrap();
             assert_eq!(
-                json["method"], "agent/progress",
+                j(&json, "/method"),
+                "agent/progress",
                 "Should receive the notification, not the relay response"
             );
         }
@@ -2575,8 +2658,7 @@ async fn fallback_routing_forwards_notifications_but_drops_responses() {
     server_cancel.cancel();
 }
 
-/// Relay-originated session notifications must be dropped, not forwarded
-/// to the last active IPC client.
+/// Relay-originated session notifications must be dropped, not forwarded to the last active IPC client.
 #[tokio::test]
 async fn relay_session_notification_not_forwarded_to_ipc_client() {
     let temp = TempDir::new().unwrap();
@@ -2595,13 +2677,13 @@ async fn relay_session_notification_not_forwarded_to_ipc_client() {
     .unwrap();
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    // Notification with unregistered sessionId (relay-originated) — must be dropped
+    // A notification with an unregistered sessionId (relay-originated) must be dropped
     response_tx
         .send(r#"{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"relay-sess-xyz","data":"from-relay"}}"#.into())
         .unwrap();
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    // Session-less notification — should be forwarded, proving the channel is alive
+    // A session-less notification is forwarded, proving the channel is alive
     response_tx
         .send(r#"{"jsonrpc":"2.0","method":"agent/progress","params":{"status":"working"}}"#.into())
         .unwrap();
@@ -2614,8 +2696,8 @@ async fn relay_session_notification_not_forwarded_to_ipc_client() {
     match msg {
         ServerMessage::Acp { payload } => {
             let json: serde_json::Value = serde_json::from_str(&payload).unwrap();
-            assert_eq!(json["method"], "agent/progress");
-            assert!(json["params"].get("sessionId").is_none());
+            assert_eq!(j(&json, "/method"), "agent/progress");
+            assert!(j(&json, "/params").get("sessionId").is_none());
         }
         other => panic!("Expected Acp message, got {:?}", other),
     }
@@ -2623,8 +2705,7 @@ async fn relay_session_notification_not_forwarded_to_ipc_client() {
     cancel.cancel();
 }
 
-/// When a client disconnects while its session streams, notifications for
-/// that session must NOT leak to another client via `last_active_client`.
+/// When a client disconnects while its session streams, notifications for that session must NOT leak to another client via `last_active_client`.
 #[tokio::test]
 async fn dead_client_session_notification_not_leaked_to_other_client() {
     let temp = TempDir::new().unwrap();
@@ -2659,13 +2740,13 @@ async fn dead_client_session_notification_not_leaked_to_other_client() {
     .unwrap();
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    // Notification for dead client A's session — must be dropped
+    // A notification for dead client A's session must be dropped
     response_tx
         .send(r#"{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess-A","sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"leaked content"}}}"#.into())
         .unwrap();
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    // Session-less notification — should reach client B
+    // A session-less notification must reach client B
     response_tx
         .send(r#"{"jsonrpc":"2.0","method":"agent/progress","params":{"status":"working"}}"#.into())
         .unwrap();
@@ -2678,7 +2759,7 @@ async fn dead_client_session_notification_not_leaked_to_other_client() {
     match msg {
         ServerMessage::Acp { payload } => {
             let json: serde_json::Value = serde_json::from_str(&payload).unwrap();
-            assert_eq!(json["method"], "agent/progress");
+            assert_eq!(j(&json, "/method"), "agent/progress");
         }
         other => panic!("Expected Acp message, got {:?}", other),
     }
@@ -2686,8 +2767,7 @@ async fn dead_client_session_notification_not_leaked_to_other_client() {
     cancel.cancel();
 }
 
-/// `ext/notification` with nested sessionId (params.params.sessionId) must
-/// route to the session owner, not fall through to `last_active_client`.
+/// `ext/notification` with nested sessionId (params.params.sessionId) must route to the session owner, not fall through to `last_active_client`.
 #[tokio::test]
 async fn ext_notification_with_nested_session_id_routes_correctly() {
     let temp = TempDir::new().unwrap();
@@ -2731,7 +2811,7 @@ async fn ext_notification_with_nested_session_id_routes_correctly() {
     match msg {
         ServerMessage::Acp { payload } => {
             let json: serde_json::Value = serde_json::from_str(&payload).unwrap();
-            assert_eq!(json["method"], "_x.ai/session_notification");
+            assert_eq!(j(&json, "/method"), "_x.ai/session_notification");
         }
         other => panic!("Expected Acp message, got {:?}", other),
     }
@@ -2750,8 +2830,7 @@ async fn ext_notification_with_nested_session_id_routes_correctly() {
 #[tokio::test]
 async fn server_sends_shutting_down_before_shutdown() {
     let temp = TempDir::new().unwrap();
-    // Use run_leader_server directly with no_exit_on_disconnect=true
-    // so the server doesn't shut down when the client disconnects.
+    // Use run_leader_server directly with no_exit_on_disconnect=true so the server doesn't shut down when the client disconnects
     let sock_path = temp.path().join("test.sock");
     let (acp_tx, _acp_rx) = mpsc::unbounded_channel();
     let (_response_tx, response_rx) = mpsc::unbounded_channel();
@@ -2785,10 +2864,10 @@ async fn server_sends_shutting_down_before_shutdown() {
     // Connect and register a raw client
     let (mut reader, _writer) = connect_and_register(&sock_path, "test").await;
 
-    // Cancel the server — this triggers broadcast_shutdown(Manual)
+    // Cancel the server: this triggers broadcast_shutdown(Manual)
     cancel.cancel();
 
-    // First message should be ShuttingDown
+    // The first message is ShuttingDown
     let msg1: ServerMessage =
         tokio::time::timeout(Duration::from_secs(5), read_message(&mut reader))
             .await
@@ -2806,7 +2885,7 @@ async fn server_sends_shutting_down_before_shutdown() {
         other => panic!("Expected ShuttingDown, got {:?}", other),
     }
 
-    // Second message should be Shutdown (after the grace period)
+    // The second message is Shutdown (after the grace period)
     let msg2: ServerMessage =
         tokio::time::timeout(Duration::from_secs(5), read_message(&mut reader))
             .await
@@ -2826,7 +2905,6 @@ async fn agent_busy_set_when_request_forwarded() {
     let mut handle = spawn_leader_server(sock_path.clone()).await.unwrap();
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    // Initially not busy
     assert!(
         !handle.agent_busy.load(Ordering::Relaxed),
         "agent_busy should be false initially"
@@ -2847,7 +2925,7 @@ async fn agent_busy_set_when_request_forwarded() {
     .unwrap();
     let _: ServerMessage = read_message(&mut reader).await.unwrap();
 
-    // Send a request (has method + id)
+    // Send a request (has method and id)
     write_message(
         &mut writer,
         &ClientMessage::Acp {
@@ -2861,7 +2939,6 @@ async fn agent_busy_set_when_request_forwarded() {
     let forwarded = handle.acp_rx.recv().await.unwrap();
     assert!(forwarded.contains("test/ping"));
 
-    // Now agent_busy should be true
     assert!(
         handle.agent_busy.load(Ordering::Relaxed),
         "agent_busy should be true after forwarding a request"
@@ -2905,7 +2982,7 @@ async fn agent_busy_cleared_when_response_received() {
     // Read the forwarded request and extract the namespaced ID
     let forwarded = handle.acp_rx.recv().await.unwrap();
     let json: serde_json::Value = serde_json::from_str(&forwarded).unwrap();
-    let namespaced_id = json["id"].as_str().unwrap().to_string();
+    let namespaced_id = j(&json, "/id").as_str().unwrap().to_string();
 
     assert!(handle.agent_busy.load(Ordering::Relaxed));
 
@@ -2920,7 +2997,6 @@ async fn agent_busy_cleared_when_response_received() {
     let client_resp: ServerMessage = read_message(&mut reader).await.unwrap();
     assert!(matches!(client_resp, ServerMessage::Acp { .. }));
 
-    // agent_busy should now be false
     // Give a small window for the server loop to process
     tokio::time::sleep(Duration::from_millis(20)).await;
     assert!(
@@ -2974,18 +3050,14 @@ async fn agent_busy_tracks_multiple_pending_requests() {
     // Read both forwarded requests
     let fwd1 = handle.acp_rx.recv().await.unwrap();
     let fwd2 = handle.acp_rx.recv().await.unwrap();
-    let id1 = serde_json::from_str::<serde_json::Value>(&fwd1).unwrap()["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
-    let id2 = serde_json::from_str::<serde_json::Value>(&fwd2).unwrap()["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let parsed1: serde_json::Value = serde_json::from_str(&fwd1).unwrap();
+    let id1 = j(&parsed1, "/id").as_str().unwrap().to_string();
+    let parsed2: serde_json::Value = serde_json::from_str(&fwd2).unwrap();
+    let id2 = j(&parsed2, "/id").as_str().unwrap().to_string();
 
     assert!(handle.agent_busy.load(Ordering::Relaxed));
 
-    // Respond to first request — still busy (one pending)
+    // Respond to first request: still busy (one pending)
     handle
         .response_tx
         .send(format!(
@@ -3000,7 +3072,7 @@ async fn agent_busy_tracks_multiple_pending_requests() {
         "agent_busy should still be true with one request pending"
     );
 
-    // Respond to second request — now idle
+    // Respond to second request: now idle
     handle
         .response_tx
         .send(format!(
@@ -3020,10 +3092,8 @@ async fn agent_busy_tracks_multiple_pending_requests() {
 
 #[tokio::test]
 async fn agent_busy_clears_when_client_disconnects_mid_request() {
-    // Verify that agent_busy correctly clears even when the originating
-    // client has disconnected before the response arrives. The server
-    // should still decrement pending_requests when routing the response,
-    // even though the client is gone.
+    // agent_busy must clear even when the originating client disconnected before the response arrives
+    // The server still decrements pending_requests when routing the response, even though the client is gone
     let temp = TempDir::new().unwrap();
     let sock_path = temp.path().join("busy_disconnect.sock");
 
@@ -3087,7 +3157,7 @@ async fn agent_busy_clears_when_client_disconnects_mid_request() {
         // Read the forwarded request to get the namespaced ID
         let forwarded = acp_rx.recv().await.unwrap();
         let json: serde_json::Value = serde_json::from_str(&forwarded).unwrap();
-        let id = json["id"].as_str().unwrap().to_string();
+        let id = j(&json, "/id").as_str().unwrap().to_string();
 
         assert!(
             agent_busy.load(Ordering::Relaxed),
@@ -3105,7 +3175,6 @@ async fn agent_busy_clears_when_client_disconnects_mid_request() {
     // Wait for disconnect to be processed
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    // Agent_busy should still be true — the request is still in-flight
     assert!(
         agent_busy.load(Ordering::Relaxed),
         "agent_busy should still be true after client disconnect (request still pending)"
@@ -3122,8 +3191,6 @@ async fn agent_busy_clears_when_client_disconnects_mid_request() {
     // Wait for the server to process it
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    // agent_busy should now be false — the response was processed and the
-    // counter decremented even though the client is gone
     assert!(
         !agent_busy.load(Ordering::Relaxed),
         "agent_busy should be false after response arrives (even though client disconnected)"
@@ -3132,8 +3199,8 @@ async fn agent_busy_clears_when_client_disconnects_mid_request() {
     cancel.cancel();
 }
 
-/// Regression: bounded(256) client channel + try_send silently dropped
-/// notifications during session replay bursts. Unbounded channel fixes this.
+/// Regression: a bounded(256) client channel with try_send silently dropped notifications during session replay bursts.
+/// The channel is now unbounded so bursts cannot drop.
 #[tokio::test]
 async fn high_throughput_replay_no_drops() {
     let temp = TempDir::new().unwrap();
@@ -3152,8 +3219,7 @@ async fn high_throughput_replay_no_drops() {
     )
     .await
     .unwrap();
-    // Complete the load so the client leaves the buffering window, then drain
-    // the load response so the count below only tallies the notifications.
+    // Complete the load so the client leaves the buffering window, then drain the load response so the count below only tallies the notifications
     complete_load(&mut acp_rx, &response_tx).await;
     let _ = next_acp_payload(&mut reader).await;
     tokio::time::sleep(Duration::from_millis(20)).await;
@@ -3193,9 +3259,8 @@ async fn high_throughput_replay_no_drops() {
     cancel.cancel();
 }
 
-/// When a client disconnects after interacting with a session, the server
-/// sends an `x.ai/internal/evict_sessions` notification through acp_tx
-/// so the agent can release session memory.
+/// When a client disconnects after interacting with a session, the server sends an `x.ai/internal/evict_sessions` notification through acp_tx.
+/// The agent uses it to release session memory.
 #[tokio::test]
 async fn evict_sessions_notification_on_disconnect() {
     let temp = TempDir::new().unwrap();
@@ -3252,7 +3317,7 @@ async fn evict_sessions_notification_on_disconnect() {
     drop(writer);
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    // The server should have sent an eviction notification through acp_tx.
+    // The server sent an eviction notification through acp_tx
     let eviction_msg = tokio::time::timeout(Duration::from_secs(1), acp_rx.recv())
         .await
         .expect("should receive eviction notification")
@@ -3261,10 +3326,12 @@ async fn evict_sessions_notification_on_disconnect() {
     let json: serde_json::Value =
         serde_json::from_str(&eviction_msg).expect("should be valid JSON");
     assert_eq!(
-        json["method"].as_str().and_then(|m| m.strip_prefix('_')),
+        j(&json, "/method")
+            .as_str()
+            .and_then(|m| m.strip_prefix('_')),
         Some(InternalMethod::EvictSessions.name()),
     );
-    let session_ids = json["params"]["sessionIds"]
+    let session_ids = j(&json, "/params/sessionIds")
         .as_array()
         .expect("sessionIds should be an array");
     assert!(
@@ -3277,8 +3344,7 @@ async fn evict_sessions_notification_on_disconnect() {
     cancel.cancel();
 }
 
-/// When a client disconnects without interacting with any sessions,
-/// no eviction notification should be sent.
+/// When a client disconnects without interacting with any sessions, no eviction notification is sent.
 #[tokio::test]
 async fn no_eviction_when_client_has_no_sessions() {
     let temp = TempDir::new().unwrap();
@@ -3321,7 +3387,6 @@ async fn no_eviction_when_client_has_no_sessions() {
     drop(writer);
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    // No eviction should be sent — try_recv should return empty.
     assert!(
         acp_rx.try_recv().is_err(),
         "no eviction notification should be sent for clients with no sessions"
@@ -3334,8 +3399,8 @@ async fn no_eviction_when_client_has_no_sessions() {
 // Multi-client broadcast routing
 // =========================================================================
 
-/// Read the next `ServerMessage::Acp` payload for a client, ignoring other
-/// server messages, with a short deadline. Returns `None` on timeout.
+/// Read the next `ServerMessage::Acp` payload for a client, ignoring other server messages, with a short deadline.
+/// Returns `None` on timeout.
 async fn next_acp_payload(reader: &mut tokio::io::ReadHalf<LeaderStream>) -> Option<String> {
     let deadline = tokio::time::Instant::now() + Duration::from_millis(800);
     loop {
@@ -3352,8 +3417,7 @@ async fn next_acp_payload(reader: &mut tokio::io::ReadHalf<LeaderStream>) -> Opt
 }
 
 /// Drain up to a few ACP payloads looking for one containing `needle`.
-/// Returns it if found within the window, else `None` (so a "must NOT
-/// receive" assertion can use `.is_none()`).
+/// Returns it if found within the window, else `None` (so a "must NOT receive" assertion can use `.is_none()`).
 async fn next_acp_payload_matching(
     reader: &mut tokio::io::ReadHalf<LeaderStream>,
     needle: &str,
@@ -3377,11 +3441,9 @@ async fn load_session(writer: &mut tokio::io::WriteHalf<LeaderStream>, session_i
         .unwrap();
 }
 
-/// Regression (live-before-replay race): a live `session/notification` that
-/// arrives WHILE a viewer's `session/load` is in flight must be BUFFERED —
-/// not delivered early (which would bump the client's eventId highwater and
-/// make the subsequent lower-eventId replay get deduped away) — and then
-/// flushed, in order, AFTER the load response.
+/// Regression for the race where live traffic beats replay.
+/// A live `session/notification` arriving WHILE a viewer's `session/load` is in flight must be BUFFERED, then flushed in order AFTER the response.
+/// Delivering it early would raise the client's highest-seen eventId, so the lower-eventId replay that follows would be deduped away.
 #[tokio::test]
 async fn live_broadcast_during_load_is_buffered_then_flushed_after_response() {
     let temp = TempDir::new().unwrap();
@@ -3390,8 +3452,8 @@ async fn live_broadcast_during_load_is_buffered_then_flushed_after_response() {
 
     let (mut reader, mut writer) = connect_and_register(&sock_path, "viewer").await;
 
-    // Begin a load but do NOT respond yet — the client is mid-load. Read the
-    // forwarded request to learn its namespaced id for the response later.
+    // Begin a load but do NOT respond yet, so the client is mid-load
+    // Read the forwarded request to learn its namespaced id for the response later
     load_session(&mut writer, "sess-buf").await;
     let forwarded = tokio::time::timeout(Duration::from_secs(1), acp_rx.recv())
         .await
@@ -3418,7 +3480,7 @@ async fn live_broadcast_during_load_is_buffered_then_flushed_after_response() {
         "live broadcast must be buffered until the load response, got {early:?}"
     );
 
-    // Send the load response — it flushes the buffered live notification.
+    // Send the load response: it flushes the buffered live notification
     let response = serde_json::json!({
         "jsonrpc": "2.0",
         "id": load_id,
@@ -3441,18 +3503,17 @@ async fn live_broadcast_during_load_is_buffered_then_flushed_after_response() {
     cancel.cancel();
 }
 
-/// Two clients load the same session; a `session/notification` (no `id`)
-/// must reach BOTH (broadcast), while a reverse-request (`id` + `method`)
-/// reaches ONLY the driver. The second client's `session/load` must not
-/// black out the first (join-not-steal).
+/// Two clients load the same session.
+/// A `session/notification` (no `id`) must reach BOTH, while a reverse-request (`id` and `method`) reaches ONLY the driver.
+/// The second client's `session/load` must not black out the first: it joins, it does not steal.
 #[tokio::test]
 async fn two_clients_one_session_broadcast_and_driver() {
     let temp = TempDir::new().unwrap();
     let (sock_path, cancel, response_tx, mut acp_rx) =
         setup_persistent_server_with_agent(&temp).await;
 
-    // Client A loads first → becomes driver. Complete the load (echo a load
-    // response) so A leaves the buffering window and receives live broadcasts.
+    // Client A loads first and becomes driver
+    // Complete the load (echo a load response) so A leaves the buffering window and receives live broadcasts
     let (mut reader_a, mut writer_a) = connect_and_register(&sock_path, "client-a").await;
     load_session(&mut writer_a, "sess-multi").await;
     complete_load(&mut acp_rx, &response_tx).await;
@@ -3460,7 +3521,7 @@ async fn two_clients_one_session_broadcast_and_driver() {
     let _ = next_acp_payload(&mut reader_a).await;
     tokio::time::sleep(Duration::from_millis(30)).await;
 
-    // Client B loads second → joins as subscriber (does not steal).
+    // Client B loads second and joins as subscriber (does not steal)
     let (mut reader_b, mut writer_b) = connect_and_register(&sock_path, "client-b").await;
     load_session(&mut writer_b, "sess-multi").await;
     complete_load(&mut acp_rx, &response_tx).await;
@@ -3482,9 +3543,8 @@ async fn two_clients_one_session_broadcast_and_driver() {
         "client B must receive the broadcast notification (no blackout), got {got_b:?}"
     );
 
-    // A NON-interaction reverse-request (has both id + method) goes to the
-    // driver (A) only. (Interaction reverse-requests are shared — see
-    // `interaction_request_broadcasts_to_all_subscribers`.)
+    // A NON-interaction reverse-request (has both id and method) goes to the driver (A) only
+    // (Interaction reverse-requests are shared; see `interaction_request_broadcasts_to_all_subscribers`.)
     let req = r#"{"jsonrpc":"2.0","id":42,"method":"fs/read_text_file","params":{"sessionId":"sess-multi","path":"/tmp/x"}}"#;
     response_tx.send(req.to_string()).unwrap();
 
@@ -3504,58 +3564,9 @@ async fn two_clients_one_session_broadcast_and_driver() {
     cancel.cancel();
 }
 
-/// A `x.ai/scheduled_task_inject_prompt` (cron `/loop` fire) must be routed
-/// to the SINGLE session driver, not fanned out to every subscriber. If it
-/// broadcast, each attached dashboard would enqueue + try to drive the same
-/// cron turn (phantom `#N` queue rows, competing drivers, stuck turns). The
-/// other clients render the resulting turn from the broadcast deltas.
-#[tokio::test]
-async fn scheduled_task_inject_prompt_routes_to_driver_only() {
-    let temp = TempDir::new().unwrap();
-    let (sock_path, cancel, response_tx, mut acp_rx) =
-        setup_persistent_server_with_agent(&temp).await;
-
-    // Client A loads first → becomes driver.
-    let (mut reader_a, mut writer_a) = connect_and_register(&sock_path, "client-a").await;
-    load_session(&mut writer_a, "sess-cron").await;
-    complete_load(&mut acp_rx, &response_tx).await;
-    let _ = next_acp_payload(&mut reader_a).await;
-    tokio::time::sleep(Duration::from_millis(30)).await;
-
-    // Client B loads second → joins as subscriber (does not steal driver).
-    let (mut reader_b, mut writer_b) = connect_and_register(&sock_path, "client-b").await;
-    load_session(&mut writer_b, "sess-cron").await;
-    complete_load(&mut acp_rx, &response_tx).await;
-    let _ = next_acp_payload(&mut reader_b).await;
-    tokio::time::sleep(Duration::from_millis(30)).await;
-
-    // The agent fires a scheduled task → inject_prompt notification, in the
-    // real gateway-WRAPPED wire form (`_x.ai/...` top-level, nested method +
-    // params) — the shape that previously fell through to broadcast.
-    let inject = r#"{"method":"_x.ai/scheduled_task_inject_prompt","params":{"method":"x.ai/scheduled_task_inject_prompt","params":{"sessionId":"sess-cron","taskId":"task-1","prompt":"echo hello","humanSchedule":"every 1m"}}}"#;
-    response_tx.send(inject.to_string()).unwrap();
-
-    let got_a = next_acp_payload(&mut reader_a).await;
-    let got_b = next_acp_payload(&mut reader_b).await;
-    assert!(
-        got_a
-            .as_deref()
-            .is_some_and(|p| p.contains("scheduled_task_inject_prompt")),
-        "driver A must receive the cron inject_prompt, got {got_a:?}"
-    );
-    assert!(
-        got_b.is_none(),
-        "non-driver B must NOT receive the cron inject_prompt, got {got_b:?}"
-    );
-
-    cancel.cancel();
-}
-
-/// A blocking interaction reverse-request (permission / `ask_user_question` /
-/// plan-approval) is SHARED: broadcast to every subscriber so any client can
-/// render + answer the modal. Contrast
-/// with `two_clients_one_session_broadcast_and_driver`, where an ordinary
-/// reverse-request reaches the driver only.
+/// A blocking interaction reverse-request (permission / `ask_user_question` / plan-approval) is SHARED.
+/// It broadcasts to every subscriber so any client can render and answer the modal.
+/// Contrast with `two_clients_one_session_broadcast_and_driver`, where an ordinary reverse-request reaches the driver only.
 #[tokio::test]
 async fn interaction_request_broadcasts_to_all_subscribers() {
     let temp = TempDir::new().unwrap();
@@ -3574,8 +3585,7 @@ async fn interaction_request_broadcasts_to_all_subscribers() {
     let _ = next_acp_payload(&mut reader_b).await;
     tokio::time::sleep(Duration::from_millis(30)).await;
 
-    // The agent raises an `ask_user_question` reverse-request in the real
-    // gateway-WRAPPED wire form (`_x.ai/...` top-level, method+params nested).
+    // The agent raises an `ask_user_question` reverse-request in the gateway-WRAPPED wire form (`_x.ai/...` top-level, nested method and params)
     // This is the shape that previously fell through to driver-only.
     let req = r#"{"jsonrpc":"2.0","id":501,"method":"_x.ai/ask_user_question","params":{"method":"x.ai/ask_user_question","params":{"sessionId":"sess-int","toolCallId":"tc-q","questions":[]}}}"#;
     response_tx.send(req.to_string()).unwrap();
@@ -3594,9 +3604,8 @@ async fn interaction_request_broadcasts_to_all_subscribers() {
     cancel.cancel();
 }
 
-/// A client that attaches WHILE an interaction is pending must render it too:
-/// the leader caches the issued interaction and replays it to the new
-/// subscriber after its `session/load` completes.
+/// A client that attaches WHILE an interaction is pending must render it too.
+/// The leader caches the issued interaction and replays it to the new subscriber after its `session/load` completes.
 #[tokio::test]
 async fn pending_interaction_replayed_to_late_joiner() {
     let temp = TempDir::new().unwrap();
@@ -3609,14 +3618,13 @@ async fn pending_interaction_replayed_to_late_joiner() {
     let _ = next_acp_payload(&mut reader_a).await;
     tokio::time::sleep(Duration::from_millis(30)).await;
 
-    // Interaction raised (wrapped wire form) while only A is attached →
-    // cached by the leader.
+    // An interaction raised (wrapped wire form) while only A is attached is cached by the leader
     let req = r#"{"jsonrpc":"2.0","id":601,"method":"_x.ai/ask_user_question","params":{"method":"x.ai/ask_user_question","params":{"sessionId":"sess-int","toolCallId":"tc-late","questions":[]}}}"#;
     response_tx.send(req.to_string()).unwrap();
     let _ = next_acp_payload_matching(&mut reader_a, "ask_user_question").await;
     tokio::time::sleep(Duration::from_millis(30)).await;
 
-    // B attaches LATE → must receive the replayed cached interaction.
+    // B attaches LATE and must receive the replayed cached interaction
     let (mut reader_b, mut writer_b) = connect_and_register(&sock_path, "client-b").await;
     load_session(&mut writer_b, "sess-int").await;
     complete_load(&mut acp_rx, &response_tx).await;
@@ -3629,8 +3637,7 @@ async fn pending_interaction_replayed_to_late_joiner() {
     cancel.cancel();
 }
 
-/// Like [`connect_and_register`] but also returns the server-assigned
-/// `ClientId` (needed to address targeted replay payloads at the client).
+/// Like [`connect_and_register`] but also returns the server-assigned `ClientId` (needed to address targeted replay payloads at the client).
 async fn connect_register_get_id(
     sock_path: &std::path::Path,
     client_type: &str,
@@ -3658,20 +3665,16 @@ async fn connect_register_get_id(
     (reader, writer, ClientId(client_id))
 }
 
-/// A client that reattaches AFTER a subagent spawned is backfilled into
-/// the child route when its parent `session/load` response lands: the
-/// parent→child index survives the disconnect eviction (which only
-/// empties subscriber sets), so live child updates resume without any
-/// replayed spawn line. Driver inheritance is pinned too: a driver-only
-/// child reverse-request must reach the reattached client.
+/// A client that reattaches AFTER a subagent spawned is backfilled into the child route when its parent `session/load` response lands.
+/// The parent-to-child index survives the disconnect eviction, which only empties subscriber sets. Live child updates therefore resume without a replayed spawn line.
+/// Driver inheritance is pinned too: a driver-only child reverse-request must reach the reattached client.
 #[tokio::test]
 async fn reattached_client_backfilled_into_child_routes() {
     let temp = TempDir::new().unwrap();
     let (sock_path, cancel, response_tx, mut acp_rx) =
         setup_persistent_server_with_agent(&temp).await;
 
-    // A attaches and a subagent spawns LIVE → child route = snapshot {A},
-    // index edge sess-sub → child-sub.
+    // A attaches and a subagent spawns LIVE: the child route is the snapshot {A}, and the index gains the edge sess-sub to child-sub
     let (mut reader_a, mut writer_a) = connect_and_register(&sock_path, "client-a").await;
     load_session(&mut writer_a, "sess-sub").await;
     complete_load(&mut acp_rx, &response_tx).await;
@@ -3687,14 +3690,13 @@ async fn reattached_client_backfilled_into_child_routes() {
         "sanity: A receives the live spawn"
     );
 
-    // A disconnects: subscriber sets empty + evicted; the index edge stays.
+    // A disconnects: subscriber sets are emptied and evicted; the index edge stays
     drop(reader_a);
     drop(writer_a);
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    // A2 reconnects and reloads the parent — no replayed spawn line is
-    // sent, so receiving child updates proves the response-time BACKFILL
-    // (not replay registration).
+    // A2 reconnects and reloads the parent
+    // No replayed spawn line is sent, so receiving child updates proves the response-time BACKFILL (not replay registration)
     let (mut reader_a2, mut writer_a2) = connect_and_register(&sock_path, "client-a").await;
     load_session(&mut writer_a2, "sess-sub").await;
     complete_load(&mut acp_rx, &response_tx).await;
@@ -3710,8 +3712,7 @@ async fn reattached_client_backfilled_into_child_routes() {
         "live child updates must reach the reattached client via backfill"
     );
 
-    // Backfill also re-seeded the child driver (parent driver = A2), so a
-    // driver-only child reverse-request routes to A2 instead of dropping.
+    // Backfill also re-seeded the child driver (the parent driver is A2), so a driver-only child reverse-request routes to A2 instead of dropping
     let child_reverse = r#"{"jsonrpc":"2.0","id":777,"method":"x.ai/child_thing","params":{"sessionId":"child-sub"}}"#;
     response_tx.send(child_reverse.to_string()).unwrap();
     assert!(
@@ -3724,10 +3725,8 @@ async fn reattached_client_backfilled_into_child_routes() {
     cancel.cancel();
 }
 
-/// A loading client receives the child route from the targeted REPLAYED
-/// `subagent_spawned` alone (fresh-leader relaunch: no live spawn ever
-/// crossed this server instance, the index is empty, only replay lines
-/// describe the subagent).
+/// A loading client receives the child route from the targeted REPLAYED `subagent_spawned` alone.
+/// This is the fresh-leader relaunch case: no live spawn ever crossed this server, the index is empty, and only replay lines describe the subagent.
 #[tokio::test]
 async fn replayed_spawn_registers_child_route_for_loading_client() {
     let temp = TempDir::new().unwrap();
@@ -3764,9 +3763,8 @@ async fn replayed_spawn_registers_child_route_for_loading_client() {
     cancel.cancel();
 }
 
-/// A client that attaches to the parent while another client already holds
-/// a live child route is backfilled into that route (child sets are
-/// spawn-time snapshots; joining the parent must join its descendants).
+/// A client that attaches to the parent while another client already holds a live child route is backfilled into that route.
+/// Child sets are snapshots taken at spawn time, so joining the parent must join its descendants.
 #[tokio::test]
 async fn late_attacher_backfilled_into_existing_child_routes() {
     let temp = TempDir::new().unwrap();
@@ -3779,7 +3777,7 @@ async fn late_attacher_backfilled_into_existing_child_routes() {
     let _ = next_acp_payload(&mut reader_a).await;
     tokio::time::sleep(Duration::from_millis(30)).await;
 
-    // Live spawn while only A subscribes → child route = snapshot {A}.
+    // A live spawn while only A subscribes makes the child route the snapshot {A}
     let spawned_live = r#"{"jsonrpc":"2.0","method":"x.ai/session_notification","params":{"sessionId":"sess-sub2","update":{"sessionUpdate":"subagent_spawned","child_session_id":"child-sub2"}}}"#;
     response_tx.send(spawned_live.to_string()).unwrap();
     let _ = next_acp_payload_matching(&mut reader_a, "subagent_spawned").await;
@@ -3809,9 +3807,8 @@ async fn late_attacher_backfilled_into_existing_child_routes() {
     cancel.cancel();
 }
 
-/// A replayed `subagent_finished` unsubscribes ONLY its target client:
-/// another client's live child route must survive one client's history
-/// replay (full teardown is reserved for the LIVE finish).
+/// A replayed `subagent_finished` unsubscribes ONLY its target client.
+/// Another client's live child route must survive one client's history replay (full teardown is reserved for the LIVE finish).
 #[tokio::test]
 async fn replayed_finished_does_not_tear_down_live_child_route() {
     let temp = TempDir::new().unwrap();
@@ -3828,8 +3825,7 @@ async fn replayed_finished_does_not_tear_down_live_child_route() {
     response_tx.send(spawned_live.to_string()).unwrap();
     let _ = next_acp_payload_matching(&mut reader_a, "subagent_spawned").await;
 
-    // B attaches (backfilled into the child route), then its replay
-    // contains a finished line for the child → B alone is unsubscribed.
+    // B attaches (backfilled into the child route), then its replay contains a finished line for the child, so B alone is unsubscribed
     let (mut reader_b, mut writer_b, b_id) = connect_register_get_id(&sock_path, "client-b").await;
     load_session(&mut writer_b, "sess-tear").await;
     complete_load(&mut acp_rx, &response_tx).await;
@@ -3862,9 +3858,7 @@ async fn replayed_finished_does_not_tear_down_live_child_route() {
     cancel.cancel();
 }
 
-/// Backfill walks the index depth-first: a nested child (spawned under a
-/// CHILD session) is also joined when a client attaches to the root
-/// parent.
+/// Backfill walks the index depth-first: a nested child (spawned under a CHILD session) is also joined when a client attaches to the root parent.
 #[tokio::test]
 async fn backfill_covers_nested_children() {
     let temp = TempDir::new().unwrap();
@@ -3877,7 +3871,7 @@ async fn backfill_covers_nested_children() {
     let _ = next_acp_payload(&mut reader_a).await;
     tokio::time::sleep(Duration::from_millis(30)).await;
 
-    // child under parent, grandchild under child (live broadcasts).
+    // Child under parent, grandchild under child (live broadcasts)
     let spawned_child = r#"{"jsonrpc":"2.0","method":"x.ai/session_notification","params":{"sessionId":"sess-nest","update":{"sessionUpdate":"subagent_spawned","child_session_id":"child-nest"}}}"#;
     response_tx.send(spawned_child.to_string()).unwrap();
     let _ = next_acp_payload_matching(&mut reader_a, "subagent_spawned").await;
@@ -3907,11 +3901,8 @@ async fn backfill_covers_nested_children() {
     cancel.cancel();
 }
 
-/// Re-parenting on an INTERMEDIATE finish: root → A → B (both live). A
-/// finishes LIVE while B keeps running. A new client loading the ROOT must
-/// still be backfilled into B's live route — `prune_child_route` promotes B
-/// onto A's parent so the forward-only root walk reaches it. Without
-/// re-parenting the root→A edge is gone and B's subtree is orphaned.
+/// Re-parenting on an INTERMEDIATE finish: root spawns A, A spawns B, both live. A finishes LIVE while B keeps running. A new client loading the ROOT must still be backfilled into B's live route.
+/// `prune_child_route` promotes B onto A's parent so the forward-only root walk reaches it. Without re-parenting the edge from root to A is gone and B's subtree is orphaned.
 #[tokio::test]
 async fn intermediate_finish_reparents_live_grandchild_for_root_backfill() {
     let temp = TempDir::new().unwrap();
@@ -3924,7 +3915,7 @@ async fn intermediate_finish_reparents_live_grandchild_for_root_backfill() {
     let _ = next_acp_payload(&mut reader_a).await;
     tokio::time::sleep(Duration::from_millis(30)).await;
 
-    // root → A → B (live spawns).
+    // Root spawns A, then A spawns B, both live
     let spawned_a = r#"{"jsonrpc":"2.0","method":"x.ai/session_notification","params":{"sessionId":"sess-rep","update":{"sessionUpdate":"subagent_spawned","child_session_id":"child-a"}}}"#;
     response_tx.send(spawned_a.to_string()).unwrap();
     let _ = next_acp_payload_matching(&mut reader_a, "child-a").await;
@@ -3960,9 +3951,8 @@ async fn intermediate_finish_reparents_live_grandchild_for_root_backfill() {
     cancel.cancel();
 }
 
-/// The LIVE `subagent_finished` still tears the route down globally and
-/// prunes the index: after it, a reattaching client is NOT backfilled
-/// into the dead child (no leaked routes for finished subagents).
+/// The LIVE `subagent_finished` still tears the route down globally and prunes the index.
+/// After it, a reattaching client is NOT backfilled into the dead child (no leaked routes for finished subagents).
 #[tokio::test]
 async fn live_finished_prunes_index_so_reattach_skips_dead_child() {
     let temp = TempDir::new().unwrap();
@@ -3991,8 +3981,7 @@ async fn live_finished_prunes_index_so_reattach_skips_dead_child() {
     let _ = next_acp_payload(&mut reader_a2).await;
     tokio::time::sleep(Duration::from_millis(30)).await;
 
-    // A stray update on the dead child must not reach A2 (it is
-    // relay-classified — the route and index entry are gone).
+    // A stray update on the dead child must not reach A2 (it is relay-classified; the route and index entry are gone)
     let child_live = r#"{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"child-dead","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"DEAD_CHILD_DELTA"}}}}"#;
     response_tx.send(child_live.to_string()).unwrap();
     assert!(
@@ -4005,12 +3994,9 @@ async fn live_finished_prunes_index_so_reattach_skips_dead_child() {
     cancel.cancel();
 }
 
-/// Symmetric twin of `live_finished_prunes_index_so_reattach_skips_dead_child`
-/// for the no-subscribers case: the parent goes fully detached (every
-/// client disconnects, the index edge survives), THEN a live
-/// `subagent_finished` arrives. It is relay-classified (no subscribers) and
-/// dropped — but it must still prune the index edge, so a reattaching
-/// client's `session/load` backfill does not resurrect the dead child.
+/// Symmetric twin of `live_finished_prunes_index_so_reattach_skips_dead_child` for the no-subscribers case.
+/// The parent goes fully detached (every client disconnects, the index edge survives), THEN a live `subagent_finished` arrives. It is relay-classified (no subscribers) and dropped, but it must still prune the index edge.
+/// A reattaching client's `session/load` backfill then does not resurrect the dead child.
 #[tokio::test]
 async fn detached_live_finished_prunes_index_so_reattach_skips_dead_child() {
     let temp = TempDir::new().unwrap();
@@ -4027,14 +4013,13 @@ async fn detached_live_finished_prunes_index_so_reattach_skips_dead_child() {
     response_tx.send(spawned_live.to_string()).unwrap();
     let _ = next_acp_payload_matching(&mut reader_a, "subagent_spawned").await;
 
-    // Every client disconnects → parent fully detached. Eviction empties
-    // the subscriber/driver maps but keeps the `child_sessions` edge.
+    // Every client disconnects, so the parent goes fully detached
+    // Eviction empties the subscriber/driver maps but keeps the `child_sessions` edge
     drop(reader_a);
     drop(writer_a);
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    // Live finish arrives while detached: relay-classified (no subscribers)
-    // and dropped, but it must still prune the dead child's edge.
+    // A live finish arrives while detached: relay-classified (no subscribers) and dropped, but it must still prune the dead child's edge
     let finished_live = r#"{"jsonrpc":"2.0","method":"x.ai/session_notification","params":{"sessionId":"sess-detach","update":{"sessionUpdate":"subagent_finished","child_session_id":"child-detach"}}}"#;
     response_tx.send(finished_live.to_string()).unwrap();
     tokio::time::sleep(Duration::from_millis(30)).await;
@@ -4058,10 +4043,8 @@ async fn detached_live_finished_prunes_index_so_reattach_skips_dead_child() {
     cancel.cancel();
 }
 
-/// A loader disconnecting between a dead child's replayed spawn and
-/// replayed finish must not leak the index edge: the orphan-drop arm still
-/// prunes when nothing holds the route, so a later attacher is not
-/// backfilled into the dead child.
+/// A loader disconnecting between a dead child's replayed spawn and replayed finish must not leak the index edge.
+/// The orphan-drop arm still prunes when nothing holds the route, so a later attacher is not backfilled into the dead child.
 #[tokio::test]
 async fn mid_burst_disconnect_still_prunes_dead_child_route() {
     let temp = TempDir::new().unwrap();
@@ -4081,8 +4064,8 @@ async fn mid_burst_disconnect_still_prunes_dead_child_route() {
     response_tx.send(spawned_replay).unwrap();
     let _ = next_acp_payload_matching(&mut reader_a, "subagent_spawned").await;
 
-    // Disconnect mid-burst: eviction empties the routes, the index edge
-    // stays. The dead child's replayed finish then arrives orphaned.
+    // Disconnect mid-burst: eviction empties the routes, the index edge stays
+    // The dead child's replayed finish then arrives orphaned
     drop(reader_a);
     drop(writer_a);
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -4112,11 +4095,9 @@ async fn mid_burst_disconnect_still_prunes_dead_child_route() {
     cancel.cancel();
 }
 
-/// An ORPHANED replayed finish (its target already vanished) must leave a
-/// route other clients hold untouched — the orphan branch prunes only
-/// when nothing holds the route. An always-prune mutation of that guard
-/// would let one dead client's stale replay burst tear down A's live
-/// route.
+/// An ORPHANED replayed finish (its target already vanished) must leave a route other clients hold untouched.
+/// The orphan branch prunes only when nothing holds the route.
+/// If it always pruned, one dead client's stale replay burst could tear down A's live route.
 #[tokio::test]
 async fn orphaned_replayed_finished_leaves_held_route_untouched() {
     let temp = TempDir::new().unwrap();
@@ -4133,8 +4114,7 @@ async fn orphaned_replayed_finished_leaves_held_route_untouched() {
     response_tx.send(spawned_live.to_string()).unwrap();
     let _ = next_acp_payload_matching(&mut reader_a, "subagent_spawned").await;
 
-    // B registers and vanishes; a replayed finish targeted at B arrives
-    // orphaned while A still holds the route.
+    // B registers and vanishes; a replayed finish targeted at B arrives orphaned while A still holds the route
     let (reader_b, writer_b, b_id) = connect_register_get_id(&sock_path, "client-b").await;
     drop(reader_b);
     drop(writer_b);
@@ -4158,10 +4138,9 @@ async fn orphaned_replayed_finished_leaves_held_route_untouched() {
     cancel.cancel();
 }
 
-/// A replayed spawn UNIONS the loading client into an existing live route:
-/// a regression to the live arm's snapshot-replace would tear down the
-/// holder's route on someone else's history replay (the symmetric twin of
-/// `replayed_finished_does_not_tear_down_live_child_route`).
+/// A replayed spawn UNIONS the loading client into an existing live route.
+/// If it regressed to the live arm's snapshot-replace, someone else's history replay would tear down the holder's route.
+/// Symmetric twin of `replayed_finished_does_not_tear_down_live_child_route`.
 #[tokio::test]
 async fn replayed_spawn_unions_into_existing_live_route() {
     let temp = TempDir::new().unwrap();
@@ -4209,9 +4188,8 @@ async fn replayed_spawn_unions_into_existing_live_route() {
     cancel.cancel();
 }
 
-/// A replayed finish that removes the LAST subscriber prunes the route,
-/// driver, and index edge — a later attacher must not be backfilled into
-/// a child whose finish was only ever observed via replay.
+/// A replayed finish that removes the LAST subscriber prunes the route, driver, and index edge.
+/// A later attacher must not be backfilled into a child whose finish was only ever observed via replay.
 #[tokio::test]
 async fn replayed_finished_last_subscriber_prunes_dead_child() {
     let temp = TempDir::new().unwrap();
@@ -4264,11 +4242,9 @@ async fn replayed_finished_last_subscriber_prunes_dead_child() {
     cancel.cancel();
 }
 
-/// Isolates the REQUEST-side backfill call site: it subscribes the loader
-/// to live children the moment the `session/load` request passes through,
-/// so a child delta arriving MID-LOAD (post-request, pre-response) is
-/// delivered instead of dropped as subscriber-less. With only the
-/// response-side site the delta would be lost before the response lands.
+/// Isolates the REQUEST-side backfill call site: it subscribes the loader to live children the moment the `session/load` request passes through.
+/// A child delta arriving MID-LOAD (post-request, pre-response) is then delivered instead of dropped for having no subscriber.
+/// With only the response-side site the delta would be lost before the response lands.
 #[tokio::test]
 async fn mid_load_child_delta_reaches_loader_via_request_side_backfill() {
     let temp = TempDir::new().unwrap();
@@ -4288,8 +4264,7 @@ async fn mid_load_child_delta_reaches_loader_via_request_side_backfill() {
     drop(writer_a);
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    // B begins a load but the agent has NOT responded yet; a child delta
-    // lands in that window.
+    // B begins a load but the agent has NOT responded yet; a child delta lands in that window
     let (mut reader_b, mut writer_b) = connect_and_register(&sock_path, "client-b").await;
     load_session(&mut writer_b, "sess-midload").await;
     tokio::time::sleep(Duration::from_millis(30)).await;
@@ -4308,21 +4283,13 @@ async fn mid_load_child_delta_reaches_loader_via_request_side_backfill() {
     cancel.cancel();
 }
 
-/// A pending interaction must SURVIVE a full client disconnect and be
-/// replayed on reconnect. A session with a pending interaction has a running
-/// turn (the tool awaits the answer), so the agent keeps it resident across
-/// the disconnect with the reverse-request still parked
-/// (`session_has_live_work`). The leader must therefore NOT drop its
-/// interaction cache on detach — otherwise the reconnecting client gets no
-/// modal while the agent is still waiting. Regression for the "modal vanishes
-/// on reconnect" bug.
 #[tokio::test]
 async fn pending_interaction_survives_disconnect_and_replays_on_reconnect() {
     let temp = TempDir::new().unwrap();
     let (sock_path, cancel, response_tx, mut acp_rx) =
         setup_persistent_server_with_agent(&temp).await;
 
-    // A attaches; interaction raised while only A is attached → cached.
+    // A attaches; an interaction raised while only A is attached is cached
     let (mut reader_a, mut writer_a) = connect_and_register(&sock_path, "client-a").await;
     load_session(&mut writer_a, "sess-int").await;
     complete_load(&mut acp_rx, &response_tx).await;
@@ -4334,13 +4301,13 @@ async fn pending_interaction_survives_disconnect_and_replays_on_reconnect() {
     let _ = next_acp_payload_matching(&mut reader_a, "ask_user_question").await;
     tokio::time::sleep(Duration::from_millis(30)).await;
 
-    // A FULLY disconnects (it is the only subscriber). Previously this dropped
-    // the interaction cache for the session.
+    // A FULLY disconnects (it is the only subscriber)
+    // Previously this dropped the interaction cache for the session
     drop(reader_a);
     drop(writer_a);
     tokio::time::sleep(Duration::from_millis(80)).await;
 
-    // Reconnect (B) → the still-pending interaction must replay on its load.
+    // Reconnect (B): the still-pending interaction must replay on its load
     let (mut reader_b, mut writer_b) = connect_and_register(&sock_path, "client-b").await;
     load_session(&mut writer_b, "sess-int").await;
     complete_load(&mut acp_rx, &response_tx).await;
@@ -4353,13 +4320,9 @@ async fn pending_interaction_survives_disconnect_and_replays_on_reconnect() {
     cancel.cancel();
 }
 
-/// An interaction raised while the session has NO subscriber (a session
-/// started from the dashboard whose turn hit `ask_user_question` before
-/// anyone entered it, or a reverse-request that races ahead of the
-/// `session/new`/`session/load` response that registers the subscriber) must
-/// still be cached, so the FIRST client to attach gets the modal replayed.
-/// Regression for the "entered the session, modal never appears, turn stuck
-/// Waiting" bug — the cache insert used to be gated on an existing subscriber.
+/// An interaction raised while the session has NO subscriber must still be cached, so the FIRST client to attach gets the modal replayed.
+/// That happens when a dashboard-started session hits `ask_user_question` before anyone enters it.
+/// It also happens when a reverse-request races ahead of the `session/new`/`session/load` response that registers the subscriber. Regression for the "entered the session, modal never appears, turn stuck Waiting" bug: the cache insert used to require a subscriber.
 #[tokio::test]
 async fn interaction_raised_with_no_subscriber_is_cached_and_replayed_on_first_attach() {
     let temp = TempDir::new().unwrap();
@@ -4371,7 +4334,7 @@ async fn interaction_raised_with_no_subscriber_is_cached_and_replayed_on_first_a
     response_tx.send(req.to_string()).unwrap();
     tokio::time::sleep(Duration::from_millis(40)).await;
 
-    // First client attaches → must receive the replayed cached interaction.
+    // The first client attaches and must receive the replayed cached interaction
     let (mut reader_a, mut writer_a) = connect_and_register(&sock_path, "client-a").await;
     load_session(&mut writer_a, "sess-int").await;
     complete_load(&mut acp_rx, &response_tx).await;
@@ -4384,9 +4347,8 @@ async fn interaction_raised_with_no_subscriber_is_cached_and_replayed_on_first_a
     cancel.cancel();
 }
 
-/// Once an interaction resolves (first-answer-wins → `InteractionResolved`),
-/// the leader evicts it from the replay cache, so a client that attaches
-/// afterwards does NOT get a stale modal.
+/// Once an interaction resolves (first answer wins, emitting `InteractionResolved`), the leader evicts it from the replay cache.
+/// A client that attaches afterwards does NOT get a stale modal.
 #[tokio::test]
 async fn resolved_interaction_not_replayed_to_late_joiner() {
     let temp = TempDir::new().unwrap();
@@ -4399,8 +4361,7 @@ async fn resolved_interaction_not_replayed_to_late_joiner() {
     let _ = next_acp_payload(&mut reader_a).await;
     tokio::time::sleep(Duration::from_millis(30)).await;
 
-    // Raise then resolve the interaction (wrapped wire form), no other client
-    // attached yet.
+    // Raise then resolve the interaction (wrapped wire form), no other client attached yet
     let req = r#"{"jsonrpc":"2.0","id":701,"method":"_x.ai/ask_user_question","params":{"method":"x.ai/ask_user_question","params":{"sessionId":"sess-int","toolCallId":"tc-ev","questions":[]}}}"#;
     response_tx.send(req.to_string()).unwrap();
     let _ = next_acp_payload_matching(&mut reader_a, "ask_user_question").await;
@@ -4410,7 +4371,7 @@ async fn resolved_interaction_not_replayed_to_late_joiner() {
     let _ = next_acp_payload_matching(&mut reader_a, "interaction_resolved").await;
     tokio::time::sleep(Duration::from_millis(30)).await;
 
-    // B attaches AFTER resolution → must NOT receive the evicted interaction.
+    // B attaches AFTER resolution and must NOT receive the evicted interaction
     let (mut reader_b, mut writer_b) = connect_and_register(&sock_path, "client-b").await;
     load_session(&mut writer_b, "sess-int").await;
     complete_load(&mut acp_rx, &response_tx).await;
@@ -4423,8 +4384,7 @@ async fn resolved_interaction_not_replayed_to_late_joiner() {
     cancel.cancel();
 }
 
-/// When the driver disconnects but another subscriber remains, the session
-/// is NOT evicted and the driver role transfers to the remaining client.
+/// When the driver disconnects but another subscriber remains, the session is NOT evicted and the driver role transfers to the remaining client.
 #[tokio::test]
 async fn driver_disconnect_transfers_not_evicts() {
     let temp = TempDir::new().unwrap();
@@ -4474,16 +4434,13 @@ async fn driver_disconnect_transfers_not_evicts() {
     drop(writer_a);
     tokio::time::sleep(Duration::from_millis(80)).await;
 
-    // No eviction should be sent — B still subscribes.
     assert!(
         acp_rx.try_recv().is_err(),
         "session must NOT be evicted while another subscriber remains"
     );
 
     // A NON-interaction reverse-request now reaches B (driver transferred).
-    // (A non-interaction method exercises the driver-only path; interaction
-    // reverse-requests are broadcast instead — see the shared-interaction
-    // tests.)
+    // (A non-interaction method exercises the driver-only path; interaction reverse-requests broadcast instead, see the shared-interaction tests.)
     let req = r#"{"jsonrpc":"2.0","id":7,"method":"fs/read_text_file","params":{"sessionId":"sess-xfer","path":"/tmp/x"}}"#;
     response_tx.send(req.to_string()).unwrap();
     let req_b = next_acp_payload(&mut reader_b).await;
@@ -4497,9 +4454,8 @@ async fn driver_disconnect_transfers_not_evicts() {
     cancel.cancel();
 }
 
-/// `x.ai/sessions/changed` is a machine-wide roster notification with no
-/// sessionId; it must broadcast to every registered client (not just the
-/// last-active one) so all open dashboards stay in sync.
+/// `x.ai/sessions/changed` is a machine-wide roster notification with no sessionId.
+/// It must broadcast to every registered client (not just the last-active one) so all open dashboards stay in sync.
 #[tokio::test]
 async fn roster_changed_broadcasts_to_all_clients() {
     let temp = TempDir::new().unwrap();
@@ -4526,11 +4482,132 @@ async fn roster_changed_broadcasts_to_all_clients() {
     cancel.cancel();
 }
 
-/// `x.ai/models/update` is a machine-wide catalog notification with no
-/// sessionId; it must broadcast to every registered client so every model
-/// picker refreshes after a config.toml / models_cache.json hot-reload —
-/// not just the last-active client. Uses the production wire form: agent
-/// ext notifications arrive `_`-prefixed (`_x.ai/models/update`).
+/// The `RosterListMerge` seam through a real leader: the leader namespaces client A's list id,
+/// the merge records that namespaced id off the forwarded request and extends the matching
+/// (fake) agent response, and the leader routes the merged response back to A only, with A's
+/// original id restored. The synthesized `changed` line then reaches both clients.
+#[tokio::test]
+async fn roster_merge_round_trips_namespaced_ids_and_broadcasts_changes() {
+    use crate::agent::roster::{RosterActivity, RosterEntry, RosterListResponse, RosterOrigin};
+    use crate::leader::roster_merge::{ExternalRoster, RosterListMerge, changed_notification};
+    use crate::session::ExtMethodResult;
+
+    let temp = TempDir::new().unwrap();
+    let (sock_path, cancel, response_tx, mut acp_rx) =
+        setup_persistent_server_with_agent(&temp).await;
+    let (mut reader_a, mut writer_a) = connect_and_register(&sock_path, "client-a").await;
+    let (mut reader_b, _writer_b) = connect_and_register(&sock_path, "client-b").await;
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    let cursor_row = RosterEntry {
+        session_id: "cursor-worker:bc-1".to_owned(),
+        title: Some("External agent bc-1".to_owned()),
+        cwd: "/home/u/.grok/worktrees/proj/cursor-bc-1".to_owned(),
+        is_worktree: true,
+        session_kind: Some("cursor-worker".to_owned()),
+        model_id: None,
+        reasoning_effort: None,
+        yolo: false,
+        activity: RosterActivity::Idle,
+        last_turn_summary: None,
+        resident: false,
+        last_change_unix_ms: 1,
+        origin: RosterOrigin::Local,
+    };
+    let roster = ExternalRoster::new();
+    roster.replace(vec![cursor_row.clone()]);
+    let merge = RosterListMerge::new(roster);
+
+    write_message(
+        &mut writer_a,
+        &ClientMessage::Acp {
+            payload: r#"{"jsonrpc":"2.0","id":41,"method":"_x.ai/sessions/list","params":{}}"#
+                .to_owned(),
+        },
+    )
+    .await
+    .unwrap();
+
+    // The fake agent does what `run_leader`'s bridges do around the real agent.
+    let forwarded = tokio::time::timeout(Duration::from_secs(1), acp_rx.recv())
+        .await
+        .expect("forwarded list request")
+        .expect("agent channel open");
+    merge.observe_inbound(&forwarded);
+    let forwarded_json: serde_json::Value = serde_json::from_str(&forwarded).unwrap();
+    let namespaced_id = forwarded_json
+        .get("id")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    assert!(
+        namespaced_id.as_str().is_some_and(|id| id.ends_with("|41")),
+        "leader namespaces the client id: {namespaced_id}"
+    );
+    let live = RosterEntry {
+        session_id: "live".to_owned(),
+        session_kind: None,
+        resident: true,
+        ..cursor_row.clone()
+    };
+    let body: serde_json::Value = serde_json::from_str(
+        ExtMethodResult::success(RosterListResponse {
+            sessions: vec![live],
+        })
+        .to_ext_response()
+        .unwrap()
+        .0
+        .get(),
+    )
+    .unwrap();
+    let reply =
+        serde_json::json!({"jsonrpc": "2.0", "id": namespaced_id, "result": body}).to_string();
+    let merged = merge.filter_outbound(&reply).into_owned();
+    assert_ne!(
+        reply, merged,
+        "the pending id matched and rows were appended"
+    );
+    response_tx.send(merged).unwrap();
+
+    let got_a = next_acp_payload(&mut reader_a)
+        .await
+        .expect("client A gets its answer");
+    let got_a: serde_json::Value = serde_json::from_str(&got_a).unwrap();
+    assert_eq!(
+        Some(&serde_json::json!(41)),
+        got_a.get("id"),
+        "original id restored"
+    );
+    let ids: Vec<&str> = got_a
+        .pointer("/result/result/sessions")
+        .and_then(serde_json::Value::as_array)
+        .unwrap()
+        .iter()
+        .map(|s| s["sessionId"].as_str().unwrap())
+        .collect();
+    assert_eq!(vec!["live", "cursor-worker:bc-1"], ids);
+    assert!(
+        next_acp_payload(&mut reader_b).await.is_none(),
+        "client B never asked and must not receive A's response"
+    );
+
+    response_tx
+        .send(changed_notification(vec![cursor_row], Vec::new()))
+        .unwrap();
+    for (name, reader) in [("A", &mut reader_a), ("B", &mut reader_b)] {
+        let got = next_acp_payload(reader).await;
+        assert!(
+            got.as_deref().is_some_and(
+                |p| p.contains("_x.ai/sessions/changed") && p.contains("cursor-worker:bc-1")
+            ),
+            "client {name} must receive the synthesized roster broadcast, got {got:?}"
+        );
+    }
+
+    cancel.cancel();
+}
+
+/// `x.ai/models/update` is a machine-wide catalog notification with no sessionId. It must broadcast to every registered client, not just the last-active one.
+/// Every model picker then refreshes after a config.toml / models_cache.json hot-reload. Uses the production wire form: agent ext notifications arrive `_`-prefixed (`_x.ai/models/update`).
 #[tokio::test]
 async fn models_update_broadcasts_to_all_clients() {
     let temp = TempDir::new().unwrap();
@@ -4557,12 +4634,9 @@ async fn models_update_broadcasts_to_all_clients() {
     cancel.cancel();
 }
 
-/// `x.ai/mcp/servers_updated` is a machine-wide MCP-catalog notification
-/// with no sessionId (session-agnostic by design); it must broadcast to
-/// every registered client so managed connectors don't vanish from clients
-/// that weren't last-active when the post-initialize background fetch
-/// resolved. Uses the production wire form (`_`-prefixed ext notification
-/// with the real method nested in params).
+/// `x.ai/mcp/servers_updated` is a machine-wide MCP-catalog notification with no sessionId (session-agnostic by design). It must broadcast to every registered client.
+/// Otherwise managed connectors vanish from clients that weren't last-active when the post-initialize background fetch resolved.
+/// Uses the production wire form (`_`-prefixed ext notification with the real method nested in params).
 #[tokio::test]
 async fn mcp_servers_updated_broadcasts_to_all_clients() {
     let temp = TempDir::new().unwrap();
@@ -4593,9 +4667,8 @@ async fn mcp_servers_updated_broadcasts_to_all_clients() {
     cancel.cancel();
 }
 
-/// The broadcast classifier must accept both wire forms (`_`-prefixed
-/// production ext notifications and direct methods) for the machine-wide
-/// set, and reject sessionful / unrelated methods.
+/// The broadcast classifier must accept both wire forms (`_`-prefixed production ext notifications and direct methods) for the machine-wide set.
+/// It must reject sessionful / unrelated methods.
 #[test]
 fn machine_wide_broadcast_classifier_matches_both_wire_forms() {
     // Direct forms.
@@ -4624,8 +4697,7 @@ fn machine_wide_broadcast_classifier_matches_both_wire_forms() {
     assert!(is_machine_wide_broadcast_notification(&pv(
         r#"{"jsonrpc":"2.0","method":"_x.ai/announcements/update","params":{"method":"x.ai/announcements/update","params":{"gen":2,"announcements":[]}}}"#
     )));
-    // Non-broadcast methods. `x.ai/settings/update` must stay unicast —
-    // it carries auth/gate state resolved for the requesting client.
+    // Non-broadcast methods. `x.ai/settings/update` must stay unicast: it carries auth/gate state resolved for the requesting client.
     assert!(!is_machine_wide_broadcast_notification(&pv(
         r#"{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s"}}"#
     )));
@@ -4638,8 +4710,7 @@ fn machine_wide_broadcast_classifier_matches_both_wire_forms() {
 // Code-nav capability injection tests
 // =========================================================================
 
-/// Verify that the leader injects `codeNavEnabled: true` into session/new
-/// when the client registered with `code_nav_enabled: true`.
+/// The leader injects `codeNavEnabled: true` into session/new when the client registered with `code_nav_enabled: true`.
 #[test]
 fn inject_capabilities_sets_code_nav_enabled_true() {
     let caps = ClientCapabilities {
@@ -4654,15 +4725,14 @@ fn inject_capabilities_sets_code_nav_enabled_true() {
     let mut json = pv(payload);
     inject_session_request_context(&mut json, &caps, "grok-web", ClientId(1));
     assert_eq!(
-        json["params"]["_meta"]["codeNavEnabled"],
-        serde_json::json!(true),
+        j(&json, "/params/_meta/codeNavEnabled"),
+        &serde_json::json!(true),
         "leader must inject codeNavEnabled=true for code-nav-capable client"
     );
 }
 
-/// Verify that the leader injects `codeNavEnabled: false` when the client
-/// did NOT register with `code_nav_enabled` — preventing a prior eligible
-/// client's shared state from bleeding into this client's sessions.
+/// The leader injects `codeNavEnabled: false` when the client did NOT register with `code_nav_enabled`.
+/// That keeps a prior eligible client's shared state from bleeding into this client's sessions.
 #[test]
 fn inject_capabilities_sets_code_nav_enabled_false() {
     let caps = ClientCapabilities {
@@ -4676,14 +4746,13 @@ fn inject_capabilities_sets_code_nav_enabled_false() {
     let mut json = pv(payload);
     inject_session_request_context(&mut json, &caps, "grok-tui", ClientId(1));
     assert_eq!(
-        json["params"]["_meta"]["codeNavEnabled"],
-        serde_json::json!(false),
+        j(&json, "/params/_meta/codeNavEnabled"),
+        &serde_json::json!(false),
         "leader must inject codeNavEnabled=false for client without code-nav capability"
     );
 }
 
-/// Verify that `codeNavEnabled` is also injected into `session/load` so
-/// reconnect sessions inherit the correct per-client capability.
+/// `codeNavEnabled` is also injected into `session/load` so reconnect sessions inherit the correct per-client capability.
 #[test]
 fn inject_capabilities_injects_code_nav_into_session_load() {
     let caps = ClientCapabilities {
@@ -4697,15 +4766,14 @@ fn inject_capabilities_injects_code_nav_into_session_load() {
     let mut json = pv(payload);
     inject_session_request_context(&mut json, &caps, "grok-web", ClientId(1));
     assert_eq!(
-        json["params"]["_meta"]["codeNavEnabled"],
-        serde_json::json!(true),
+        j(&json, "/params/_meta/codeNavEnabled"),
+        &serde_json::json!(true),
         "leader must inject codeNavEnabled into session/load for reconnect isolation"
     );
 }
 
-/// Verify leader-mode client isolation: two clients with different code-nav
-/// capabilities get independent `codeNavEnabled` values injected into their
-/// session/new requests.
+/// Verify leader-mode client isolation: two clients with different code-nav capabilities
+/// get independent `codeNavEnabled` values injected into their session/new requests.
 #[test]
 fn inject_capabilities_two_clients_stay_isolated() {
     let web_caps = ClientCapabilities {
@@ -4725,12 +4793,12 @@ fn inject_capabilities_two_clients_stay_isolated() {
     inject_session_request_context(&mut tui_json, &tui_caps, "grok-tui", ClientId(2));
 
     assert_eq!(
-        web_json["params"]["_meta"]["codeNavEnabled"],
-        serde_json::json!(true)
+        j(&web_json, "/params/_meta/codeNavEnabled"),
+        &serde_json::json!(true)
     );
     assert_eq!(
-        tui_json["params"]["_meta"]["codeNavEnabled"],
-        serde_json::json!(false)
+        j(&tui_json, "/params/_meta/codeNavEnabled"),
+        &serde_json::json!(false)
     );
 }
 
@@ -4757,29 +4825,29 @@ fn inject_capabilities_terminal_and_fs_per_client() {
     inject_session_request_context(&mut tui_json, &tui_caps, "grok-tui", ClientId(2));
 
     assert_eq!(
-        web_json["params"]["_meta"]["clientTerminal"],
-        serde_json::json!(true)
+        j(&web_json, "/params/_meta/clientTerminal"),
+        &serde_json::json!(true)
     );
     assert_eq!(
-        web_json["params"]["_meta"]["clientFsRead"],
-        serde_json::json!(true)
+        j(&web_json, "/params/_meta/clientFsRead"),
+        &serde_json::json!(true)
     );
     assert_eq!(
-        web_json["params"]["_meta"]["clientFsWrite"],
-        serde_json::json!(true)
+        j(&web_json, "/params/_meta/clientFsWrite"),
+        &serde_json::json!(true)
     );
 
     assert_eq!(
-        tui_json["params"]["_meta"]["clientTerminal"],
-        serde_json::json!(false)
+        j(&tui_json, "/params/_meta/clientTerminal"),
+        &serde_json::json!(false)
     );
     assert_eq!(
-        tui_json["params"]["_meta"]["clientFsRead"],
-        serde_json::json!(false)
+        j(&tui_json, "/params/_meta/clientFsRead"),
+        &serde_json::json!(false)
     );
     assert_eq!(
-        tui_json["params"]["_meta"]["clientFsWrite"],
-        serde_json::json!(false)
+        j(&tui_json, "/params/_meta/clientFsWrite"),
+        &serde_json::json!(false)
     );
 }
 
@@ -4797,16 +4865,16 @@ fn inject_capabilities_terminal_into_session_load() {
     inject_session_request_context(&mut json, &caps, "grok-web", ClientId(1));
 
     assert_eq!(
-        json["params"]["_meta"]["clientTerminal"],
-        serde_json::json!(true)
+        j(&json, "/params/_meta/clientTerminal"),
+        &serde_json::json!(true)
     );
     assert_eq!(
-        json["params"]["_meta"]["clientFsRead"],
-        serde_json::json!(false)
+        j(&json, "/params/_meta/clientFsRead"),
+        &serde_json::json!(false)
     );
     assert_eq!(
-        json["params"]["_meta"]["clientFsWrite"],
-        serde_json::json!(false)
+        j(&json, "/params/_meta/clientFsWrite"),
+        &serde_json::json!(false)
     );
 }
 
@@ -4836,7 +4904,7 @@ async fn subagent_child_session_routed_after_spawned() {
             .unwrap()
             .unwrap();
 
-    // Notification on child session should be routed to the parent owner
+    // A notification on the child session is routed to the parent owner
     response_tx
         .send(r#"{"jsonrpc":"2.0","method":"x.ai/session_notification","params":{"sessionId":"child-123","update":{"sessionUpdate":"message_delta","content":"hello"}}}"#.into())
         .unwrap();
@@ -4849,7 +4917,7 @@ async fn subagent_child_session_routed_after_spawned() {
     match msg {
         ServerMessage::Acp { payload } => {
             let json: serde_json::Value = serde_json::from_str(&payload).unwrap();
-            assert_eq!(json["params"]["sessionId"], "child-123");
+            assert_eq!(j(&json, "/params/sessionId"), "child-123");
         }
         other => panic!("Expected Acp, got {:?}", other),
     }
@@ -4893,7 +4961,7 @@ async fn subagent_child_session_cleaned_up_on_finished() {
             .unwrap()
             .unwrap();
 
-    // Notification on finished child session should NOT be routed
+    // A notification on the finished child session must NOT be routed
     response_tx
         .send(r#"{"jsonrpc":"2.0","method":"x.ai/session_notification","params":{"sessionId":"child-456","update":{"sessionUpdate":"message_delta"}}}"#.into())
         .unwrap();
@@ -4946,7 +5014,7 @@ async fn subagent_child_session_not_leaked_to_other_client() {
     .unwrap();
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    // Child session notification should go to Client A, not B
+    // The child session notification goes to Client A, not B
     response_tx
         .send(r#"{"jsonrpc":"2.0","method":"x.ai/session_notification","params":{"sessionId":"child-789","update":{"sessionUpdate":"message_delta"}}}"#.into())
         .unwrap();
@@ -4970,9 +5038,8 @@ async fn subagent_child_session_not_leaked_to_other_client() {
 
 #[tokio::test]
 async fn leader_client_id_unicasts_to_target_only() {
-    // A notification carrying `_meta["x.ai/leaderClientId"]` (as the agent
-    // stamps onto every session/load replay line) must be routed to ONLY that
-    // client, even when another client is attached to the same session.
+    // The agent stamps `_meta["x.ai/leaderClientId"]` onto every session/load replay line
+    // A notification carrying it must be routed to ONLY that client, even when another client is attached to the same session
     let temp = TempDir::new().unwrap();
     let (sock_path, cancel, response_tx) = setup_persistent_server(&temp).await;
 
@@ -5036,10 +5103,8 @@ async fn leader_client_id_unicasts_to_target_only() {
 
 #[tokio::test]
 async fn leader_client_id_dropped_when_target_disconnected() {
-    // Regression: a replay line tagged for a client that disconnected
-    // mid-replay must be DROPPED, not fall through to the subscriber
-    // broadcast — other subscribers would render the full `isReplay`
-    // transcript into an uncleared scrollback (duplicated history).
+    // Regression: a replay line tagged for a client that disconnected mid-replay must be DROPPED, not fall through to the subscriber broadcast
+    // Other subscribers would render the full `isReplay` transcript into an uncleared scrollback (duplicated history)
     let temp = TempDir::new().unwrap();
     let (sock_path, cancel, response_tx) = setup_persistent_server(&temp).await;
 
@@ -5061,8 +5126,7 @@ async fn leader_client_id_dropped_when_target_disconnected() {
         other => panic!("Expected Registered, got {:?}", other),
     };
 
-    // Client B subscribes to the session A is about to load, so a
-    // fallthrough to the subscriber broadcast WOULD reach it.
+    // Client B subscribes to the session A is about to load, so a fallthrough to the subscriber broadcast WOULD reach it
     let (mut reader_b, mut writer_b) = connect_and_register(&sock_path, "test-b").await;
     write_message(
         &mut writer_b,
@@ -5079,9 +5143,8 @@ async fn leader_client_id_dropped_when_target_disconnected() {
     drop(writer_a);
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    // Agent emits replay lines still tagged for A: the direct ACP shape
-    // (`params._meta`) and the nested ext/notification shape
-    // (`params.params._meta`) the xAI `session/update` envelope uses.
+    // The agent emits replay lines still tagged for A, in both shapes
+    // The direct ACP shape carries `params._meta`; the nested ext/notification shape (the xAI envelope) carries `params.params._meta`
     response_tx
         .send(format!(
             r#"{{"jsonrpc":"2.0","method":"session/update","params":{{"sessionId":"sess-1","update":{{"sessionUpdate":"agent_message_chunk"}},"_meta":{{"isReplay":true,"x.ai/leaderClientId":{}}}}}}}"#,

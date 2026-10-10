@@ -1,16 +1,20 @@
-//! Tabbed usage / session-info modal, opened by `/usage`, `/session-info`,
-//! `/context`, and the context-bar click. Minimal mode keeps the scrollback
-//! blocks instead; this modal is never armed there.
+//! Tabbed usage and session-info modal, opened by `/usage`, `/session-info`, `/context`, and the context-bar click.
+//! Minimal mode keeps the scrollback blocks instead; this modal never opens there.
 //!
-//! The modal opens with loading placeholders; the task-result handlers fill
-//! the slots in as the fetches land.
+//! The Session-info tab supports click-to-copy on value rows (with hover) and in-app drag-select after a movement threshold.
+//! `c` and `y` stay as programmatic copy.
+//! The modal opens with loading placeholders; the task-result handlers fill the slots in as the fetches land.
 
-use crossterm::event::{KeyCode, KeyEvent, MouseEventKind};
+use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEventKind};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Widget};
+
+use crate::views::drag_select::{
+    TextDrag, TextEndpoint, endpoint_at, endpoint_at_clamped, paint_text_drag, text_for_drag,
+};
 
 use crate::scrollback::blocks::ContextInfoBlock;
 use crate::theme::Theme;
@@ -25,7 +29,8 @@ pub const COPY_SESSION_ID_SHORTCUT: usize = 1;
 /// Footer shortcut ID for "copy all session info".
 pub const COPY_ALL_SESSION_INFO_SHORTCUT: usize = 2;
 
-/// The three tabs, in display order.
+/// Painted tabs are Context usage and Session info, in that order.
+/// `UsageLimit` is not in [`UsageInfoTab::ALL`], so the window has no Usage limit tab.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UsageInfoTab {
     ContextUsage,
@@ -34,11 +39,7 @@ pub enum UsageInfoTab {
 }
 
 impl UsageInfoTab {
-    pub const ALL: [UsageInfoTab; 3] = [
-        UsageInfoTab::ContextUsage,
-        UsageInfoTab::UsageLimit,
-        UsageInfoTab::SessionInfo,
-    ];
+    pub const ALL: [UsageInfoTab; 2] = [UsageInfoTab::ContextUsage, UsageInfoTab::SessionInfo];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -53,7 +54,14 @@ impl UsageInfoTab {
     }
 
     pub fn from_index(i: usize) -> Self {
-        *Self::ALL.get(i).unwrap_or(&Self::ALL[0])
+        match i {
+            0 => UsageInfoTab::ContextUsage,
+            1 | 2 => UsageInfoTab::SessionInfo,
+            _ => Self::ALL
+                .get(i)
+                .copied()
+                .unwrap_or(UsageInfoTab::ContextUsage),
+        }
     }
 }
 
@@ -71,9 +79,8 @@ pub struct UsageInfoContext {
     pub subscription_tier: Option<String>,
 }
 
-/// Modal state. Billing figures are NOT stored here — the render reads the
-/// agent's cached `credit_balance` mirror, so a silent billing refresh
-/// updates the open modal for free.
+/// Modal state. Billing figures are NOT stored here.
+/// The render reads the agent's cached `credit_balance` mirror, so a silent billing refresh updates the open modal for free.
 pub struct UsageInfoModalState {
     pub window: ModalWindowState,
     pub active_tab: UsageInfoTab,
@@ -81,29 +88,29 @@ pub struct UsageInfoModalState {
     pub ctx: UsageInfoContext,
     pub context: Option<ContextInfoBlock>,
     pub context_error: Option<String>,
-    /// Structured `/session-info` rows, built upstream from typed session data
-    /// (never by re-parsing a formatted string).
+    /// Structured `/session-info` rows, built upstream from typed session data (never by re-parsing a formatted string).
     pub session_fields: Option<Vec<SessionInfoField>>,
     pub session_error: Option<String>,
     /// Pre-formatted session token/cost summary (`session_usage_block_text`).
     pub session_usage_text: Option<String>,
     pub billing_loading: bool,
     pub billing_error: Option<String>,
-    /// Fetch generation stamped at open; results from an earlier open (same
-    /// session, modal reopened) are dropped instead of overwriting.
+    /// Fetch generation stamped at open; results from an earlier open (same session, modal reopened) are dropped instead of overwriting.
     pub fetch_nonce: u64,
-    /// Hit rects for every copyable Session-info value row (click-to-copy),
-    /// refreshed every render. Empty on the other tabs.
+    /// Hit rects for copyable value rows, refreshed every render.
     pub copy_hits: Vec<SessionCopyHit>,
-    /// Content-line index of the value row under the cursor, used to paint the
-    /// hover highlight. Cleared on tab switch.
+    /// Content-line index of the hovered value row.
     pub hovered_copy_line: Option<usize>,
+    content_rect: Rect,
+    plain_lines: Vec<String>,
+    /// Press held until movement promotes a drag (same threshold as scrollback).
+    pending_press: Option<PendingPress>,
+    text_drag: Option<TextDrag>,
 }
 
-/// One labeled Session-info row, built upstream from typed session data. The
-/// modal renders and copies straight from these — it never parses a formatted
-/// string. `compact` selects the dense `Label: value` layout for the
-/// model/runtime group.
+/// One labeled Session-info row, built upstream from typed session data.
+/// The modal renders and copies straight from these; it never parses a formatted string.
+/// `compact` selects the dense `Label: value` layout for the model/runtime group.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionInfoField {
     pub label: &'static str,
@@ -111,15 +118,22 @@ pub struct SessionInfoField {
     pub compact: bool,
 }
 
-/// A click-to-copy value row in the Session info tab. `rect` is the on-screen
-/// hit area (full content width, one row), refreshed every render; `value` is
-/// the text copied on click; `line_idx` indexes the tab's rendered lines so the
-/// mouse handler and the renderer agree on which row is hovered.
+/// On-screen hit for a click-to-copy value row.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionCopyHit {
     pub rect: Rect,
     pub value: String,
     pub line_idx: usize,
+}
+
+/// Left-button press before the movement threshold promotes a drag.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PendingPress {
+    start_col: u16,
+    start_row: u16,
+    endpoint: TextEndpoint,
+    /// Set when the press landed on a value row; copied on release without drag.
+    click_value: Option<String>,
 }
 
 impl UsageInfoModalState {
@@ -135,10 +149,14 @@ impl UsageInfoModalState {
             session_usage_text: None,
             billing_loading: false,
             billing_error: None,
-            fetch_nonce: 0,
+            fetch_nonce: Default::default(),
             session_fields: None,
             copy_hits: Vec::new(),
             hovered_copy_line: None,
+            content_rect: Rect::default(),
+            plain_lines: Vec::new(),
+            pending_press: None,
+            text_drag: None,
         }
     }
 
@@ -146,13 +164,65 @@ impl UsageInfoModalState {
         if self.active_tab != tab {
             self.active_tab = tab;
             self.scroll = 0;
-            self.hovered_copy_line = None;
+            self.clear_text_drag();
         }
     }
 
-    /// The full Session-info block as one readable, clipboard-friendly string
-    /// (`Label: value` lines). Returns `None` unless the Session info tab is
-    /// active and its rows have loaded.
+    /// Drop any in-progress press/drag and the hover highlight (chrome calls this).
+    pub fn clear_text_drag(&mut self) {
+        self.pending_press = None;
+        self.text_drag = None;
+        self.hovered_copy_line = None;
+    }
+
+    pub(crate) fn has_active_drag(&self) -> bool {
+        self.text_drag.is_some()
+    }
+
+    fn endpoint_at(&self, column: u16, row: u16) -> Option<TextEndpoint> {
+        endpoint_at(
+            &self.plain_lines,
+            self.content_rect,
+            self.scroll as usize,
+            column,
+            row,
+        )
+    }
+
+    fn endpoint_at_clamped(&self, column: u16, row: u16) -> Option<TextEndpoint> {
+        endpoint_at_clamped(
+            &self.plain_lines,
+            self.content_rect,
+            self.scroll as usize,
+            column,
+            row,
+        )
+    }
+
+    fn scroll_to(&mut self, offset: u16) {
+        self.scroll = offset;
+        // Content moves under a still pointer; drop an unfinished gesture.
+        self.clear_text_drag();
+    }
+
+    /// Finish an active drag whose `Up(Left)` never arrived (bare `Moved`). Unlike scrollback recovery
+    /// (which discards), a non-empty drag still copies, so the selection band does not vanish without
+    /// copying. The pending press is left alone: it paints nothing and the next Down overwrites it.
+    pub(crate) fn finish_lost_drag(&mut self) -> UsageModalOutcome {
+        let outcome = if let Some(drag) = self.text_drag.take()
+            && drag.is_non_empty()
+            && let Some(text) = text_for_drag(drag, &self.plain_lines, self.content_rect.width)
+        {
+            UsageModalOutcome::CopyText(text)
+        } else {
+            UsageModalOutcome::Changed
+        };
+        self.hovered_copy_line = None;
+        outcome
+    }
+
+    /// The full Session-info block as one readable, clipboard-friendly string (`Label: value` lines).
+    /// Returns `None` unless the Session info tab is active and its rows have loaded.
     pub fn session_info_copy_all(&self) -> Option<String> {
         if self.active_tab != UsageInfoTab::SessionInfo {
             return None;
@@ -167,15 +237,6 @@ impl UsageInfoModalState {
         )
     }
 
-    /// Scroll to an absolute offset, dropping any hover highlight. The cursor
-    /// stays put while the content shifts under it, so the previously hovered
-    /// content line no longer sits under the pointer; the next mouse move
-    /// recomputes it.
-    fn scroll_to(&mut self, offset: u16) {
-        self.scroll = offset;
-        self.hovered_copy_line = None;
-    }
-
     fn step_tab(&mut self, forward: bool) {
         let n = UsageInfoTab::ALL.len();
         let i = self.active_tab.index();
@@ -188,26 +249,104 @@ impl UsageInfoModalState {
     }
 }
 
-/// Outcome of a content key/mouse event. Chrome events (Esc, `[✗]`, tab
-/// clicks, footer clicks) are handled by the caller via `modal_window`.
+/// Outcome of routing one key/mouse event through the modal.
+/// The host (agent view or dashboard) owns the modal slot, the clipboard, and the toast surface, so every variant is a request to it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UsageModalOutcome {
-    /// Copy the session ID to the clipboard (caller owns clipboard + toast).
+    /// Drop the modal (Esc, `[✗]`, click outside). Only the chrome routers emit this.
+    Close,
+    /// Copy the session ID to the clipboard.
     /// Emitted by the `c` shortcut and the footer button.
     CopySessionId,
-    /// Copy an arbitrary Session-info value row (caller owns clipboard +
-    /// toast). Emitted when a copyable row is clicked.
+    /// Copy Session-info text.
+    /// Emitted by `y`, a click on a value row, the footer "copy all" button, and a finished drag-select.
     CopyText(String),
     Changed,
     Unchanged,
 }
 
-pub fn handle_usage_modal_key(
+/// The modal's chrome config: no title, tabs, footer, or fold tree of its own (tabs and shortcuts are painted by `render_usage_modal`).
+fn chrome_cfg() -> ModalWindowConfig<'static> {
+    ModalWindowConfig {
+        title: "",
+        tabs: None,
+        shortcuts: &[],
+        sizing: ModalSizing::default(),
+        fold_info: None,
+    }
+}
+
+/// Route a key: `modal_window` chrome first (Esc closes), then the content keys.
+pub fn route_usage_modal_key(state: &mut UsageInfoModalState, key: &KeyEvent) -> UsageModalOutcome {
+    match mw::handle_modal_key(&mut state.window, key, &chrome_cfg()) {
+        mw::ModalWindowOutcome::CloseRequested => UsageModalOutcome::Close,
+        mw::ModalWindowOutcome::Unhandled => handle_usage_modal_key(state, key),
+        // The chrome config declares no tabs, footer, or fold tree, so these never fire for keys
+        mw::ModalWindowOutcome::Handled
+        | mw::ModalWindowOutcome::TabChanged(_)
+        | mw::ModalWindowOutcome::ShortcutActivated(_)
+        | mw::ModalWindowOutcome::CollapseGroup
+        | mw::ModalWindowOutcome::ExpandGroup
+        | mw::ModalWindowOutcome::CollapseDetails
+        | mw::ModalWindowOutcome::ExpandDetails
+        | mw::ModalWindowOutcome::JumpToParent(_) => UsageModalOutcome::Changed,
+    }
+}
+
+/// Route a mouse event: chrome first (close button, tab headers, footer buttons stay clickable), then drag / wheel / click-to-copy.
+pub fn route_usage_modal_mouse(
     state: &mut UsageInfoModalState,
-    key: &KeyEvent,
+    kind: MouseEventKind,
+    column: u16,
+    row: u16,
 ) -> UsageModalOutcome {
+    match mw::handle_modal_mouse(&mut state.window, kind, column, row) {
+        mw::ModalWindowOutcome::CloseRequested => UsageModalOutcome::Close,
+        mw::ModalWindowOutcome::TabChanged(idx) => {
+            state.set_tab(UsageInfoTab::from_index(idx));
+            UsageModalOutcome::Changed
+        }
+        mw::ModalWindowOutcome::ShortcutActivated(id) => {
+            // Footer click: drop gesture and hover
+            state.clear_text_drag();
+            if id == COPY_SESSION_ID_SHORTCUT {
+                UsageModalOutcome::CopySessionId
+            } else if id == COPY_ALL_SESSION_INFO_SHORTCUT
+                && let Some(text) = state.session_info_copy_all()
+            {
+                UsageModalOutcome::CopyText(text)
+            } else {
+                UsageModalOutcome::Changed
+            }
+        }
+        mw::ModalWindowOutcome::Handled => {
+            // Same rule as content: a bare Moved with an active drag is a lost Up, and a non-empty drag still copies
+            // The pending press is left alone for click-to-copy
+            if matches!(kind, MouseEventKind::Moved) {
+                if state.has_active_drag() {
+                    return state.finish_lost_drag();
+                }
+                state.hovered_copy_line = None;
+            } else {
+                // Same-tab click and other chrome Downs: drop gesture and hover
+                state.clear_text_drag();
+            }
+            UsageModalOutcome::Changed
+        }
+        mw::ModalWindowOutcome::Unhandled => handle_usage_modal_mouse(state, kind, column, row),
+        // Fold-tree navigation belongs to the settings modal; this window has no fold info
+        mw::ModalWindowOutcome::CollapseGroup
+        | mw::ModalWindowOutcome::ExpandGroup
+        | mw::ModalWindowOutcome::CollapseDetails
+        | mw::ModalWindowOutcome::ExpandDetails
+        | mw::ModalWindowOutcome::JumpToParent(_) => UsageModalOutcome::Changed,
+    }
+}
+
+/// Content keys (tabs, scroll, copy); chrome has already had its turn in [`route_usage_modal_key`].
+fn handle_usage_modal_key(state: &mut UsageInfoModalState, key: &KeyEvent) -> UsageModalOutcome {
     use crossterm::event::KeyModifiers;
-    // BackTab / `G` legitimately carry SHIFT; reject only real chords.
+    // BackTab and `G` legitimately carry SHIFT; reject only real chords
     if key
         .modifiers
         .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER)
@@ -247,7 +386,7 @@ pub fn handle_usage_modal_key(
             state.scroll_to(0);
             UsageModalOutcome::Changed
         }
-        // Scroll offsets are clamped to the content height at render time.
+        // Clamped to content height at render time.
         KeyCode::End | KeyCode::Char('G') => {
             state.scroll_to(u16::MAX);
             UsageModalOutcome::Changed
@@ -261,7 +400,8 @@ pub fn handle_usage_modal_key(
     }
 }
 
-pub fn handle_usage_modal_mouse(
+/// Content gestures (wheel, click-to-copy, drag-select); chrome has already had its turn in [`route_usage_modal_mouse`].
+fn handle_usage_modal_mouse(
     state: &mut UsageInfoModalState,
     kind: MouseEventKind,
     column: u16,
@@ -273,9 +413,9 @@ pub fn handle_usage_modal_mouse(
             .iter()
             .find(|h| {
                 column >= h.rect.x
-                    && column < h.rect.x + h.rect.width
+                    && column < h.rect.x.saturating_add(h.rect.width)
                     && row >= h.rect.y
-                    && row < h.rect.y + h.rect.height
+                    && row < h.rect.y.saturating_add(h.rect.height)
             })
             .cloned()
     };
@@ -288,14 +428,104 @@ pub fn handle_usage_modal_mouse(
             state.scroll_to(state.scroll.saturating_add(3));
             UsageModalOutcome::Changed
         }
-        MouseEventKind::Down(crossterm::event::MouseButton::Left) => match hit_at(state) {
-            Some(hit) => UsageModalOutcome::CopyText(hit.value),
-            None => UsageModalOutcome::Unchanged,
-        },
+        MouseEventKind::Down(MouseButton::Left)
+            if state.active_tab == UsageInfoTab::SessionInfo && in_content(state, column, row) =>
+        {
+            let Some(ep) = state.endpoint_at(column, row) else {
+                return UsageModalOutcome::Unchanged;
+            };
+            // Hold the press; promote to drag only after a 1-cell move (same threshold as scrollback)
+            state.pending_press = Some(PendingPress {
+                start_col: column,
+                start_row: row,
+                endpoint: ep,
+                click_value: hit_at(state).map(|h| h.value),
+            });
+            state.text_drag = None;
+            UsageModalOutcome::Changed
+        }
+        MouseEventKind::Drag(MouseButton::Left) => {
+            if let Some(pending) = state.pending_press.as_ref() {
+                // Same 1-cell threshold as scrollback `drag_threshold_exceeded`.
+                let moved =
+                    pending.start_col.abs_diff(column) >= 1 || pending.start_row.abs_diff(row) >= 1;
+                if !moved {
+                    return UsageModalOutcome::Unchanged;
+                }
+                let ep = pending.endpoint;
+                state.pending_press = None;
+                state.text_drag = Some(TextDrag {
+                    anchor: ep,
+                    head: ep,
+                });
+            }
+            if state.text_drag.is_none() {
+                return UsageModalOutcome::Unchanged;
+            }
+            let rect = state.content_rect;
+            if rect.width == 0 || rect.height == 0 {
+                state.clear_text_drag();
+                return UsageModalOutcome::Changed;
+            }
+            if row < rect.y {
+                state.scroll = state.scroll.saturating_sub(1);
+            } else if row >= rect.y.saturating_add(rect.height) {
+                state.scroll = state.scroll.saturating_add(1);
+            }
+            if let Some(ep) = state.endpoint_at_clamped(column, row)
+                && let Some(d) = state.text_drag.as_mut()
+            {
+                d.head = ep;
+            }
+            UsageModalOutcome::Changed
+        }
+        MouseEventKind::Up(MouseButton::Left) => {
+            if let Some(pending) = state.pending_press.take() {
+                return match pending.click_value {
+                    Some(text) => UsageModalOutcome::CopyText(text),
+                    None => UsageModalOutcome::Changed,
+                };
+            }
+            let Some(mut final_drag) = state.text_drag.take() else {
+                return UsageModalOutcome::Unchanged;
+            };
+            if let Some(ep) = state.endpoint_at_clamped(column, row) {
+                final_drag.head = ep;
+            }
+            if final_drag.is_non_empty()
+                && let Some(text) =
+                    text_for_drag(final_drag, &state.plain_lines, state.content_rect.width)
+            {
+                return UsageModalOutcome::CopyText(text);
+            }
+            UsageModalOutcome::Changed
+        }
         MouseEventKind::Moved => {
+            // Bare Moved with an active drag: treat as lost Up and finish (copy).
+            // Pending press is not cleared here (click still works if Up arrives).
+            let lost = if state.has_active_drag() {
+                Some(state.finish_lost_drag())
+            } else {
+                None
+            };
             let new_hover = hit_at(state).map(|h| h.line_idx);
-            if new_hover != state.hovered_copy_line {
+            let hover_changed = new_hover != state.hovered_copy_line;
+            if hover_changed {
                 state.hovered_copy_line = new_hover;
+            }
+            match lost {
+                Some(UsageModalOutcome::CopyText(text)) => UsageModalOutcome::CopyText(text),
+                Some(UsageModalOutcome::Changed) | None if hover_changed => {
+                    UsageModalOutcome::Changed
+                }
+                Some(other) => other,
+                None => UsageModalOutcome::Unchanged,
+            }
+        }
+        MouseEventKind::Down(_) => {
+            // A new non-left press (or Left outside content) ends a stuck drag.
+            if state.text_drag.take().is_some() {
+                state.hovered_copy_line = None;
                 UsageModalOutcome::Changed
             } else {
                 UsageModalOutcome::Unchanged
@@ -335,8 +565,6 @@ pub fn render_usage_modal(
             id: COPY_SESSION_ID_SHORTCUT,
         });
     }
-    // "Copy all" is meaningful only on the Session info tab once its text has
-    // loaded. (The row click-to-copy hint lives next to the tab's title.)
     if state.active_tab == UsageInfoTab::SessionInfo
         && state.session_fields.as_ref().is_some_and(|f| !f.is_empty())
     {
@@ -352,8 +580,7 @@ pub fn render_usage_modal(
         id: 0,
     });
 
-    // v_pad / footer_lines pad the body top and bottom (shortcuts render
-    // bottom-aligned, so the spare footer row reads as bottom padding).
+    // v_pad and footer_lines pad the body top and bottom (shortcuts render bottom-aligned, so the spare footer row reads as bottom padding)
     let sizing = ModalSizing {
         width_pct: 0.65,
         max_width: 100,
@@ -364,7 +591,7 @@ pub fn render_usage_modal(
         footer_lines: 3,
     }
     .with_compact(compact);
-    // No border title — the tab bar is the header, as in the extensions modal.
+    // No border title; the tab bar is the header, as in the extensions modal
     let config = ModalWindowConfig {
         title: "",
         tabs: Some(&labels),
@@ -373,9 +600,8 @@ pub fn render_usage_modal(
         fold_info: None,
     };
 
-    // The chrome always fills `area` minus `v_margin`, so cap the height
-    // ourselves: tall terminals would otherwise get a mostly-empty box.
-    // 30 rows ≈ the widest tab's content (context grid + legend) + chrome.
+    // The chrome always fills `area` minus `v_margin`, so cap the height ourselves: tall terminals would otherwise get a mostly-empty box
+    // 30 rows is about the widest tab's content (the context grid plus legend) plus chrome
     const MAX_MODAL_HEIGHT: u16 = 30;
     let outer = MAX_MODAL_HEIGHT + sizing.v_margin * 2;
     let area = if area.height > outer {
@@ -390,15 +616,28 @@ pub fn render_usage_modal(
     };
 
     let Some(mca) = mw::render_modal_window(buf, area, &mut state.window, &config, theme) else {
+        // Too small to paint: zero geometry must not leave a live drag.
+        state.content_rect = Rect::default();
+        state.plain_lines.clear();
         state.copy_hits.clear();
+        state.clear_text_drag();
         return;
     };
     let content = mca.content;
-    let tab = tab_lines(state, balance, theme, content.width);
+    let tab = tab_content(state, balance, theme, content.width);
+    state.content_rect = content;
+    let plain_lines: Vec<String> = tab.lines.iter().map(ToString::to_string).collect();
+    // Endpoints index these strings; drop any gesture if the painted text changed.
+    if state.plain_lines != plain_lines {
+        state.clear_text_drag();
+    }
+    state.plain_lines = plain_lines;
     // No wrapping: one row per logical line keeps the scroll clamp exact.
-    let max_scroll = tab.lines.len().saturating_sub(content.height as usize);
+    let max_scroll = state
+        .plain_lines
+        .len()
+        .saturating_sub(content.height as usize);
     state.scroll = (state.scroll as usize).min(max_scroll) as u16;
-    // Map each copyable value row to its on-screen hit rect for this frame.
     state.copy_hits = tab
         .copy_targets
         .iter()
@@ -423,19 +662,36 @@ pub fn render_usage_modal(
         .take(content.height as usize)
         .collect();
     Paragraph::new(visible).render(content, buf);
+    if let Some(drag) = state.text_drag {
+        paint_text_drag(
+            drag,
+            &state.plain_lines,
+            state.content_rect,
+            state.scroll as usize,
+            buf,
+            theme,
+        );
+    }
 }
 
-/// A copyable value row: `line_idx` indexes `TabContent::lines`; `value` is the
-/// text copied when the row is clicked.
+fn in_content(state: &UsageInfoModalState, column: u16, row: u16) -> bool {
+    let r = state.content_rect;
+    r.width > 0
+        && r.height > 0
+        && column >= r.x
+        && column < r.x.saturating_add(r.width)
+        && row >= r.y
+        && row < r.y.saturating_add(r.height)
+}
+
+/// A copyable value row: `line_idx` indexes the tab's lines; `value` is copied on click.
 struct CopyTarget {
     line_idx: usize,
     value: String,
 }
 
-/// Rendered content of one tab.
 struct TabContent {
     lines: Vec<Line<'static>>,
-    /// Copyable value rows in this tab (empty on non-Session-info tabs).
     copy_targets: Vec<CopyTarget>,
 }
 
@@ -448,7 +704,7 @@ impl TabContent {
     }
 }
 
-fn tab_lines(
+fn tab_content(
     state: &UsageInfoModalState,
     balance: Option<&CreditBalance>,
     theme: &Theme,
@@ -546,10 +802,15 @@ fn allowance_lines(
 ) -> Vec<Line<'static>> {
     let mut lines: Vec<Line<'static>> = Vec::new();
 
-    // "Weekly limit" / "Monthly limit" / "Usage", plus the plan name.
+    // Unknown period paints "Usage limit". Weekly and monthly keep their labels.
+    let usage_name = if bal.usage_label() == "Usage" {
+        "Usage limit"
+    } else {
+        bal.usage_label()
+    };
     let header = match &state.ctx.subscription_tier {
-        Some(tier) => format!("{} ({tier})", bal.usage_label()),
-        None => bal.usage_label().to_string(),
+        Some(tier) => format!("{usage_name} ({tier})"),
+        None => usage_name.to_string(),
     };
     lines.push(Line::styled(header, header_style(theme)));
     lines.push(Line::default());
@@ -577,7 +838,7 @@ fn allowance_lines(
         lines.push(muted_line(theme, format!("Resets: {reset}")));
     }
 
-    // Prepaid credits (stored as negative cents — accounting convention).
+    // Prepaid credits (stored as negative cents, an accounting convention)
     if let Some(prepaid) = bal.prepaid_balance_cents.map(i64::abs).filter(|c| *c > 0) {
         lines.push(Line::default());
         lines.push(plain(
@@ -614,11 +875,10 @@ fn session_info_content(state: &UsageInfoModalState, theme: &Theme) -> TabConten
         return TabContent::from_lines(vec![muted_line(theme, "Loading session info\u{2026}")]);
     };
 
-    // The title carries a dim inline hint for the row click-to-copy affordance.
     let mut lines = vec![Line::from(vec![
         Span::styled("Session info", header_style(theme)),
         Span::styled(
-            "   click values to copy",
+            "   click or drag to copy",
             Style::default().fg(theme.gray_dim),
         ),
     ])];
@@ -630,12 +890,10 @@ fn session_info_content(state: &UsageInfoModalState, theme: &Theme) -> TabConten
             lines.push(Line::default());
         }
         if compact {
-            // Dense `Label: value` on one row: label and value read as a unit,
-            // so the whole row highlights on hover and copies as `Label: value`.
             let value_idx = lines.len();
             let hovered = state.hovered_copy_line == Some(value_idx);
             let label_style = if hovered {
-                theme.muted().bg(theme.bg_hover)
+                theme.muted().patch(theme.hover_overlay())
             } else {
                 theme.muted()
             };
@@ -671,12 +929,10 @@ fn session_info_content(state: &UsageInfoModalState, theme: &Theme) -> TabConten
     }
 }
 
-/// Style for a copyable value: a `bg_hover` background highlight while the
-/// cursor is over the row, matching the home screen's hovered rows.
 fn copy_value_style(theme: &Theme, hovered: bool) -> Style {
     let mut style = Style::default().fg(theme.text_primary);
     if hovered {
-        style = style.bg(theme.bg_hover);
+        style = style.patch(theme.hover_overlay());
     }
     style
 }
@@ -705,7 +961,7 @@ mod tests {
 
     fn state_with_session() -> UsageInfoModalState {
         UsageInfoModalState::new(
-            UsageInfoTab::UsageLimit,
+            UsageInfoTab::ContextUsage,
             UsageInfoContext {
                 session_id: Some("sid-123".to_string()),
                 usage_visible: true,
@@ -714,6 +970,51 @@ mod tests {
                 subscription_tier: Some("SuperGrok".to_string()),
             },
         )
+    }
+
+    #[test]
+    fn usage_window_from_the_context_figure_has_no_usage_limit_tab() {
+        let area = Rect::new(0, 0, 80, 24);
+        let theme = Theme::current();
+        let mut state = UsageInfoModalState::new(
+            UsageInfoTab::ContextUsage,
+            UsageInfoContext {
+                session_id: Some("sid-123".to_string()),
+                usage_visible: false,
+                chat_kind: false,
+                billing_redirect_url: None,
+                subscription_tier: Some("SuperGrok".to_string()),
+            },
+        );
+        let mut painted = String::new();
+        for _ in 0..UsageInfoTab::ALL.len() {
+            let mut buf = Buffer::empty(area);
+            render_usage_modal(&mut buf, area, &mut state, None, false, &theme);
+            for y in 0..area.height {
+                for x in 0..area.width {
+                    painted.push_str(buf[(x, y)].symbol());
+                }
+                painted.push('\n');
+            }
+            handle_usage_modal_key(&mut state, &key(KeyCode::Tab));
+        }
+        assert!(
+            painted.contains("Context usage"),
+            "context figure opens Context usage:\n{painted}"
+        );
+        assert!(
+            painted.contains("Session info"),
+            "Session info stays:\n{painted}"
+        );
+        assert!(
+            !painted.contains("Usage limit"),
+            "the usage window has no Usage limit tab:\n{painted}"
+        );
+        assert!(
+            !painted.contains("Usage limits are managed by your team."),
+            "that body is gone:\n{painted}"
+        );
+        assert_eq!(state.window.tab_rects.len(), 2);
     }
 
     #[test]
@@ -753,19 +1054,28 @@ mod tests {
             usage_pct: 50.67,
             effective_usage_pct: 50.67,
             period_end_display: Some("May 29, 00:00".to_string()),
+            period_end_at: None,
             pay_as_you_go: true,
             on_demand_cap_cents: Some(10_000),
             on_demand_used_cents: Some(0),
             prepaid_balance_cents: None,
             period_type: Some("USAGE_PERIOD_TYPE_WEEKLY".to_string()),
             is_unified_billing_user: None,
-            ..Default::default()
+            grok_build_usage_pct: None,
+            included_usage_known: true,
         };
         let theme = Theme::current();
         let lines = usage_limit_lines(&state, Some(&bal), &theme);
         let text: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
-        assert_eq!(text[0], "Weekly limit (SuperGrok)");
-        assert!(text[2].ends_with("50%"), "bar row: {:?}", text[2]);
+        assert_eq!(
+            text.first().map(String::as_str),
+            Some("Weekly limit (SuperGrok)")
+        );
+        assert!(
+            text.get(2).is_some_and(|l| l.ends_with("50%")),
+            "bar row: {:?}",
+            text.get(2)
+        );
         assert!(text.iter().any(|l| l.contains("Resets: May 29, 00:00")));
         assert!(text.iter().any(|l| l == "Pay as you go: Enabled"));
         assert!(
@@ -784,20 +1094,36 @@ mod tests {
         let mut state = state_with_session();
         state.billing_loading = true;
         let lines = usage_limit_lines(&state, None, &theme);
-        assert!(lines[0].to_string().contains("Loading usage"));
+        assert!(
+            lines
+                .first()
+                .is_some_and(|l| l.to_string().contains("Loading usage"))
+        );
 
         state.ctx.billing_redirect_url = Some("https://x.example/usage".to_string());
         let lines = usage_limit_lines(&state, None, &theme);
-        assert!(lines[0].to_string().contains("https://x.example/usage"));
+        assert!(
+            lines
+                .first()
+                .is_some_and(|l| l.to_string().contains("https://x.example/usage"))
+        );
 
         state.ctx.usage_visible = false;
         let lines = usage_limit_lines(&state, None, &theme);
-        assert!(lines[0].to_string().contains("managed by your team"));
+        assert!(
+            lines
+                .first()
+                .is_some_and(|l| l.to_string().contains("managed by your team"))
+        );
 
-        // Gateway chat sessions surface no billing at all.
+        // Gateway chat sessions show no billing at all
         state.ctx.chat_kind = true;
         let lines = usage_limit_lines(&state, None, &theme);
-        assert!(lines[0].to_string().contains("Loading session usage"));
+        assert!(
+            lines
+                .first()
+                .is_some_and(|l| l.to_string().contains("Loading session usage"))
+        );
     }
 
     #[test]
@@ -805,27 +1131,20 @@ mod tests {
         let area = Rect::new(0, 0, 80, 24);
         let mut buf = Buffer::empty(area);
         let mut state = state_with_session();
-        state.session_usage_text = Some("Session usage: no model calls yet.".to_string());
         let theme = Theme::current();
         render_usage_modal(&mut buf, area, &mut state, None, false, &theme);
         let text: String = (0..area.height)
             .map(|y| {
                 (0..area.width)
-                    .map(|x| buf[(x, y)].symbol().to_string())
+                    .filter_map(|x| buf.cell((x, y)).map(|c| c.symbol().to_string()))
                     .collect::<String>()
                     + "\n"
             })
             .collect();
-        for needle in [
-            "Context usage",
-            "Usage limit",
-            "Session info",
-            "copy session ID",
-            "Session usage: no model calls yet.",
-        ] {
+        for needle in ["Context usage", "Session info", "copy session ID"] {
             assert!(text.contains(needle), "missing {needle:?} in:\n{text}");
         }
-        assert_eq!(state.window.tab_rects.len(), 3);
+        assert_eq!(state.window.tab_rects.len(), 2);
         assert!(state.window.close_button_rect.is_some());
     }
 
@@ -866,6 +1185,15 @@ mod tests {
                 hash_hit.rect.x,
                 hash_hit.rect.y,
             ),
+            UsageModalOutcome::Changed
+        );
+        assert_eq!(
+            handle_usage_modal_mouse(
+                &mut state,
+                MouseEventKind::Up(crossterm::event::MouseButton::Left),
+                hash_hit.rect.x,
+                hash_hit.rect.y,
+            ),
             UsageModalOutcome::CopyText("Model Hash: fp-abc".to_string())
         );
 
@@ -881,7 +1209,7 @@ mod tests {
         );
 
         // Other tabs never expose copy hits.
-        state.set_tab(UsageInfoTab::UsageLimit);
+        state.set_tab(UsageInfoTab::ContextUsage);
         render_usage_modal(&mut buf, area, &mut state, None, false, &theme);
         assert!(state.copy_hits.is_empty());
     }
@@ -891,7 +1219,6 @@ mod tests {
         let area = Rect::new(0, 0, 80, 24);
         let mut buf = Buffer::empty(area);
         let mut state = state_with_session();
-        // Copy-all is unavailable until the Session info tab has rows.
         assert_eq!(state.session_info_copy_all(), None);
         state.set_tab(UsageInfoTab::SessionInfo);
         assert_eq!(state.session_info_copy_all(), None);
@@ -900,18 +1227,16 @@ mod tests {
             field("Model Hash", "fp-abc", true),
             field("Turn", "3", true),
         ]);
-        // Rows are joined as readable `Label: value` lines.
         assert_eq!(
             state.session_info_copy_all().as_deref(),
             Some("Session ID: sid-123\nModel Hash: fp-abc\nTurn: 3")
         );
-        // The footer surfaces a clickable "copy all" button on this tab.
         let theme = Theme::current();
         render_usage_modal(&mut buf, area, &mut state, None, false, &theme);
         let text: String = (0..area.height)
             .map(|y| {
                 (0..area.width)
-                    .map(|x| buf[(x, y)].symbol().to_string())
+                    .filter_map(|x| buf.cell((x, y)).map(|c| c.symbol().to_string()))
                     .collect::<String>()
                     + "\n"
             })
@@ -921,10 +1246,9 @@ mod tests {
             "missing copy-all button:\n{text}"
         );
         assert!(
-            text.contains("click values to copy"),
-            "missing row-copy hint:\n{text}"
+            text.contains("click or drag to copy"),
+            "missing copy hint:\n{text}"
         );
-        // The `y` key returns the same readable block.
         assert_eq!(
             handle_usage_modal_key(&mut state, &key(KeyCode::Char('y'))),
             UsageModalOutcome::CopyText(
@@ -941,62 +1265,290 @@ mod tests {
     }
 
     #[test]
-    fn hovering_a_value_row_updates_hover_state() {
+    fn click_value_row_copies_without_drag() {
         let area = Rect::new(0, 0, 80, 24);
         let mut buf = Buffer::empty(area);
         let mut state = state_with_session();
         state.set_tab(UsageInfoTab::SessionInfo);
-        state.session_fields = Some(vec![field("Turn", "3", true)]);
-        let theme = Theme::current();
-        render_usage_modal(&mut buf, area, &mut state, None, false, &theme);
-        let hit = state.copy_hits.first().expect("turn row visible").clone();
-        assert_eq!(
-            handle_usage_modal_mouse(&mut state, MouseEventKind::Moved, hit.rect.x, hit.rect.y),
-            UsageModalOutcome::Changed
-        );
-        assert_eq!(state.hovered_copy_line, Some(hit.line_idx));
-
-        // Turn is a compact row: the whole line highlights (label + value) and
-        // it copies as "Turn: 3".
-        assert_eq!(hit.value, "Turn: 3");
-        let tab = session_info_content(&state, &theme);
-        let row = &tab.lines[hit.line_idx];
-        assert_eq!(
-            row.spans[0].style.bg,
-            Some(theme.bg_hover),
-            "compact label must be highlighted"
-        );
-        assert_eq!(
-            row.spans[1].style.bg,
-            Some(theme.bg_hover),
-            "value must be highlighted"
-        );
-        // Moving off the row clears the hover.
+        state.session_fields = Some(vec![
+            field("Session ID", "sid-123", false),
+            field("Model Hash", "fp-abc", true),
+        ]);
+        render_usage_modal(&mut buf, area, &mut state, None, false, &Theme::current());
+        let values: Vec<&str> = state.copy_hits.iter().map(|h| h.value.as_str()).collect();
+        assert_eq!(values, ["sid-123", "Model Hash: fp-abc"]);
+        let hit = state
+            .copy_hits
+            .iter()
+            .find(|h| h.value == "Model Hash: fp-abc")
+            .expect("hash hit")
+            .clone();
         assert_eq!(
             handle_usage_modal_mouse(
                 &mut state,
-                MouseEventKind::Moved,
+                MouseEventKind::Down(MouseButton::Left),
                 hit.rect.x,
-                area.height - 1,
+                hit.rect.y,
             ),
             UsageModalOutcome::Changed
         );
-        assert_eq!(state.hovered_copy_line, None);
+        assert_eq!(
+            handle_usage_modal_mouse(
+                &mut state,
+                MouseEventKind::Up(MouseButton::Left),
+                hit.rect.x,
+                hit.rect.y,
+            ),
+            UsageModalOutcome::CopyText("Model Hash: fp-abc".to_string())
+        );
     }
 
     #[test]
-    fn scrolling_clears_stale_hover() {
+    fn drag_select_copies_slice_and_paints_selection_band() {
+        let area = Rect::new(0, 0, 80, 24);
+        let mut buf = Buffer::empty(area);
         let mut state = state_with_session();
         state.set_tab(UsageInfoTab::SessionInfo);
-        // Wheel scroll: the content shifts under a stationary cursor, so the
-        // hover must drop rather than highlight whatever slid under it.
-        state.hovered_copy_line = Some(6);
-        handle_usage_modal_mouse(&mut state, MouseEventKind::ScrollDown, 0, 0);
-        assert_eq!(state.hovered_copy_line, None);
-        // Keyboard scroll clears it for the same reason.
-        state.hovered_copy_line = Some(6);
-        handle_usage_modal_key(&mut state, &key(KeyCode::Down));
-        assert_eq!(state.hovered_copy_line, None);
+        state.session_fields = Some(vec![field("Model Hash", "fp-abc", true)]);
+        let theme = Theme::current();
+        render_usage_modal(&mut buf, area, &mut state, None, false, &theme);
+
+        let line_idx = state
+            .plain_lines
+            .iter()
+            .position(|l| l.contains("fp-abc"))
+            .expect("hash row");
+        let Some(line) = state.plain_lines.get(line_idx) else {
+            panic!("plain line {line_idx} missing");
+        };
+        let hash_col = line.find("fp-abc").expect("hash") as u16;
+        let rect = state.content_rect;
+        let y = rect.y + (line_idx as u16).saturating_sub(state.scroll);
+        let x0 = rect.x + hash_col;
+        let x1 = x0 + 5;
+
+        assert_eq!(
+            handle_usage_modal_mouse(&mut state, MouseEventKind::Down(MouseButton::Left), x0, y,),
+            UsageModalOutcome::Changed
+        );
+        // Same-cell drag stays pending (not promoted)
+        assert_eq!(
+            handle_usage_modal_mouse(&mut state, MouseEventKind::Drag(MouseButton::Left), x0, y,),
+            UsageModalOutcome::Unchanged
+        );
+        assert_eq!(
+            handle_usage_modal_mouse(&mut state, MouseEventKind::Drag(MouseButton::Left), x1, y,),
+            UsageModalOutcome::Changed
+        );
+
+        render_usage_modal(&mut buf, area, &mut state, None, false, &theme);
+        let Some(cell) = buf.cell((x0, y)) else {
+            panic!("cell ({x0},{y}) missing");
+        };
+        if theme.text_primary != ratatui::style::Color::Reset
+            && theme.bg_base != ratatui::style::Color::Reset
+        {
+            assert_eq!(cell.bg, theme.text_primary, "selection band");
+            assert_eq!(cell.fg, theme.bg_base);
+        } else {
+            assert!(cell.modifier.contains(ratatui::style::Modifier::REVERSED));
+        }
+
+        assert_eq!(
+            handle_usage_modal_mouse(&mut state, MouseEventKind::Up(MouseButton::Left), x1, y),
+            UsageModalOutcome::CopyText("fp-abc".to_string())
+        );
+    }
+
+    #[test]
+    fn drag_from_blank_line_keeps_newline() {
+        let area = Rect::new(0, 0, 80, 24);
+        let mut buf = Buffer::empty(area);
+        let mut state = state_with_session();
+        state.set_tab(UsageInfoTab::SessionInfo);
+        state.session_fields = Some(vec![field("Title", "t", false)]);
+        render_usage_modal(&mut buf, area, &mut state, None, false, &Theme::current());
+
+        let blank = state
+            .plain_lines
+            .iter()
+            .position(|l| l.is_empty())
+            .expect("separator");
+        let title = state
+            .plain_lines
+            .iter()
+            .position(|l| l == "Title:")
+            .expect("title");
+        let rect = state.content_rect;
+        let y0 = rect.y + blank as u16;
+        let y1 = rect.y + title as u16;
+        handle_usage_modal_mouse(
+            &mut state,
+            MouseEventKind::Down(MouseButton::Left),
+            rect.x,
+            y0,
+        );
+        handle_usage_modal_mouse(
+            &mut state,
+            MouseEventKind::Drag(MouseButton::Left),
+            rect.x + 6,
+            y1,
+        );
+        assert_eq!(
+            handle_usage_modal_mouse(
+                &mut state,
+                MouseEventKind::Up(MouseButton::Left),
+                rect.x + 6,
+                y1,
+            ),
+            UsageModalOutcome::CopyText("\nTitle:".to_string())
+        );
+    }
+
+    #[test]
+    fn content_reload_cancels_in_progress_drag() {
+        let area = Rect::new(0, 0, 80, 24);
+        let mut buf = Buffer::empty(area);
+        let mut state = state_with_session();
+        state.set_tab(UsageInfoTab::SessionInfo);
+        render_usage_modal(&mut buf, area, &mut state, None, false, &Theme::current());
+        let rect = state.content_rect;
+        assert_eq!(
+            handle_usage_modal_mouse(
+                &mut state,
+                MouseEventKind::Down(MouseButton::Left),
+                rect.x,
+                rect.y,
+            ),
+            UsageModalOutcome::Changed
+        );
+        state.session_fields = Some(vec![field("Title", "t", false)]);
+        render_usage_modal(&mut buf, area, &mut state, None, false, &Theme::current());
+        assert_eq!(
+            handle_usage_modal_mouse(
+                &mut state,
+                MouseEventKind::Up(MouseButton::Left),
+                rect.x + 4,
+                rect.y,
+            ),
+            UsageModalOutcome::Unchanged
+        );
+    }
+
+    #[test]
+    fn bare_moved_ends_stale_drag() {
+        let area = Rect::new(0, 0, 80, 24);
+        let mut buf = Buffer::empty(area);
+        let mut state = state_with_session();
+        state.set_tab(UsageInfoTab::SessionInfo);
+        state.session_fields = Some(vec![field("Model Hash", "fp-abc", true)]);
+        render_usage_modal(&mut buf, area, &mut state, None, false, &Theme::current());
+        let Some(hit) = state.copy_hits.first().cloned() else {
+            panic!("expected a copy hit: {:?}", state.copy_hits);
+        };
+        let line = state
+            .plain_lines
+            .iter()
+            .find(|l| l.contains("fp-abc"))
+            .expect("hash line")
+            .clone();
+        let x0 = hit.rect.x + line.find("fp-abc").expect("hash") as u16;
+        handle_usage_modal_mouse(
+            &mut state,
+            MouseEventKind::Down(MouseButton::Left),
+            x0,
+            hit.rect.y,
+        );
+        handle_usage_modal_mouse(
+            &mut state,
+            MouseEventKind::Drag(MouseButton::Left),
+            x0 + 3,
+            hit.rect.y,
+        );
+        assert!(state.text_drag.is_some());
+        // Bare Moved means the Up was lost off-terminal; finish like Up (copy and clear)
+        let out = handle_usage_modal_mouse(&mut state, MouseEventKind::Moved, x0 + 4, hit.rect.y);
+        assert!(
+            matches!(out, UsageModalOutcome::CopyText(ref s) if s.starts_with("fp")),
+            "expected partial copy of hash, got {out:?}"
+        );
+        assert!(state.text_drag.is_none());
+        assert!(state.pending_press.is_none());
+    }
+
+    #[test]
+    fn bare_moved_keeps_pending_press_for_click() {
+        let area = Rect::new(0, 0, 80, 24);
+        let mut buf = Buffer::empty(area);
+        let mut state = state_with_session();
+        state.set_tab(UsageInfoTab::SessionInfo);
+        state.session_fields = Some(vec![field("Model Hash", "fp-abc", true)]);
+        render_usage_modal(&mut buf, area, &mut state, None, false, &Theme::current());
+        let Some(hit) = state.copy_hits.first().cloned() else {
+            panic!("expected a copy hit: {:?}", state.copy_hits);
+        };
+        handle_usage_modal_mouse(
+            &mut state,
+            MouseEventKind::Down(MouseButton::Left),
+            hit.rect.x,
+            hit.rect.y,
+        );
+        assert!(state.pending_press.is_some());
+        // Moved must not clear pending; terminals that report held motion as Moved must still click
+        let _ = handle_usage_modal_mouse(&mut state, MouseEventKind::Moved, hit.rect.x, hit.rect.y);
+        assert!(state.pending_press.is_some());
+        assert!(state.text_drag.is_none());
+        assert_eq!(
+            handle_usage_modal_mouse(
+                &mut state,
+                MouseEventKind::Up(MouseButton::Left),
+                hit.rect.x,
+                hit.rect.y,
+            ),
+            UsageModalOutcome::CopyText("Model Hash: fp-abc".to_string())
+        );
+    }
+
+    #[test]
+    fn chrome_clicks_do_not_start_content_drag() {
+        let area = Rect::new(0, 0, 80, 24);
+        let mut buf = Buffer::empty(area);
+        let mut state = state_with_session();
+        state.set_tab(UsageInfoTab::SessionInfo);
+        state.session_fields = Some(vec![field("Session ID", "sid-123", false)]);
+        render_usage_modal(&mut buf, area, &mut state, None, false, &Theme::current());
+        let rect = state.content_rect;
+        assert!(rect.width > 0 && rect.height > 0);
+        assert_eq!(
+            handle_usage_modal_mouse(
+                &mut state,
+                MouseEventKind::Down(MouseButton::Left),
+                rect.x + rect.width / 2,
+                rect.y.saturating_sub(1),
+            ),
+            UsageModalOutcome::Unchanged,
+        );
+        assert!(state.pending_press.is_none());
+        assert!(state.text_drag.is_none());
+    }
+
+    #[test]
+    fn clear_text_drag_also_clears_hover() {
+        let mut state = state_with_session();
+        state.hovered_copy_line = Some(2);
+        state.pending_press = Some(PendingPress {
+            start_col: 1,
+            start_row: 1,
+            endpoint: TextEndpoint {
+                line_idx: 0,
+                col: 0,
+            },
+            click_value: None,
+        });
+        state.clear_text_drag();
+        assert!(state.hovered_copy_line.is_none());
+        assert!(state.pending_press.is_none());
+        assert!(state.text_drag.is_none());
     }
 
     #[test]
@@ -1015,8 +1567,6 @@ mod tests {
     #[test]
     fn session_info_tab_spaces_groups_and_compacts_model_block() {
         let mut state = state_with_session();
-        // Auth is never a field (it's prose the string form appends), so it
-        // simply isn't present here — no filtering needed at the modal.
         state.session_fields = Some(vec![
             field("Title", "t", false),
             field("Session ID", "sid-123", false),
@@ -1030,7 +1580,7 @@ mod tests {
         assert_eq!(
             text,
             [
-                "Session info   click values to copy",
+                "Session info   click or drag to copy",
                 "",
                 "Title:",
                 "t",
@@ -1043,24 +1593,6 @@ mod tests {
                 "",
                 "Model: Grok",
                 "Context: 1 / 2",
-            ]
-        );
-        // Each copy target is (value line index, copied text). Non-compact rows
-        // copy just the value; the compact model/runtime rows copy the whole
-        // `Label: value` line.
-        let targets: Vec<(usize, &str)> = tab
-            .copy_targets
-            .iter()
-            .map(|t| (t.line_idx, t.value.as_str()))
-            .collect();
-        assert_eq!(
-            targets,
-            [
-                (3, "t"),
-                (6, "sid-123"),
-                (9, "/tmp"),
-                (11, "Model: Grok"),
-                (12, "Context: 1 / 2"),
             ]
         );
     }

@@ -1,6 +1,6 @@
 # Configuration
 
-Grok OSS reads settings from config files, environment variables, and CLI flags. This page covers the common options. SuperGrok is paid. This page says **included SuperGrok period limits**. SuperGrok is paid; do not call SuperGrok free.
+Grok reads settings from config files, environment variables, and CLI flags. This page covers the common options. The field list for `config.toml`, `managed_config.toml`, and `requirements.toml` is [26-config-reference.md](26-config-reference.md) (extracted to `~/.grok/docs/user-guide/` on launch).
 
 ---
 
@@ -10,9 +10,28 @@ Settings resolve highest-priority first:
 
 1. **CLI flags** (e.g. `--yolo`, `--model`, `--sandbox`)
 2. **Environment variables** (e.g. `XAI_API_KEY`, `GROK_MEMORY`)
-3. **config.toml** (`~/.grok/config.toml`)
-4. **Managed / requirements config** (files your org may deploy, e.g. `managed_config.toml` / `requirements.toml`)
-5. **Built-in defaults**
+3. **`requirements.toml` / MDM** (org-enforced; clamps every config layer below, including the overlay)
+4. **`GROK_CONFIG` / `GROK_CONFIG_PATH` overlay** (above `config.toml` and managed, below `requirements.toml` / MDM)
+5. **config.toml** (`~/.grok/config.toml`)
+6. **`managed_config.toml`** (org-deployed defaults; below `config.toml`)
+7. **Built-in defaults**
+
+Within the config-file tier, the layers merge lowest-to-highest: `managed_config.toml` → `config.toml` → `GROK_CONFIG` overlay → `requirements.toml` / MDM. So `requirements.toml` and MDM clamp **both** your `config.toml` and the overlay.
+
+`GROK_CONFIG` / `GROK_CONFIG_PATH` (tier 4) are config **overlays**: a merged config layer, not direct-setting environment variables like `XAI_API_KEY` (tier 2). They set config keys (subject to the allowlist below), so read them as part of the config-file tier rather than the env-var tier.
+
+### Injecting config with `GROK_CONFIG`
+
+A harness or ACP client that launches `grok-oss agent stdio` can inject settings without writing a `config.toml` or relocating `$GROK_HOME`:
+
+- **`GROK_CONFIG`**: an inline JSON object overlay.
+- **`GROK_CONFIG_PATH`**: an *additional* file overlay (not a replacement for `config.toml`), a JSON or TOML file read by its extension (`.json` → JSON, else TOML). `GROK_CONFIG` wins if both are set. An empty `GROK_CONFIG` is treated as unset, and a malformed one logs a warning and falls through to `GROK_CONFIG_PATH`.
+
+The overlay is **deep-merged** on top of your `config.toml` (it overrides only the keys it sets), placed above the user/managed layers but **below** `requirements.toml` / MDM so an enterprise pin still wins. A malformed blob is ignored with a warning. This mirrors `CODEX_CONFIG` from the `codex-acp` adapter (a JSON object merged into the session config); Grok is ACP-native, so the overlay lives in the agent itself. It only affects settings read from the merged config, and it is **not** a permission-escalation path. The overlay is confined, fail-closed, to an **allowlist** of soft settings (`models`, `features`, a narrowed `toolset`, and a `shell_environment_policy` limited to its filter fields, which select among env names the launcher already controls and cannot inject an env value into tool subprocesses); every other table is dropped at the choke point, so the overlay cannot spawn commands, set auth policy, redirect network traffic, elevate trust, or add a discovery source. Even on the allowlisted settings, a specific set of security gates read the raw disk layers rather than the overlay. The `ConfigLayers::env_overlay` rustdoc is the canonical list of what the overlay can and cannot reach and which gates read it overlay-free; see also the [internal environment-variables reference](../internal/22-environment-variables.md). Use `GROK_DEFAULT_SELECTED_PERMISSION` for headless permission control. For example, to set the default reasoning effort:
+
+```bash
+GROK_CONFIG='{"models": {"default_reasoning_effort": "high"}}' grok-oss agent stdio
+```
 
 ---
 
@@ -26,9 +45,16 @@ Location: `~/.grok/config.toml`. If the file is missing, Grok uses its built-in 
 [cli]
 auto_update = true                     # check for updates on launch
 
+[agent]
+# name = "grok-build"                  # default agent on interactive `grok` (no --plan / --agent-profile)
+# definition = "/path/to/agent.md"     # path wins over name if both are set
+
 [models]
 default = "grok-4.5"                   # model used for new sessions
 web_search = "grok-4.5"                # model used by the web_search tool
+# Optional picker allowlist (globs on catalog key or model id). Empty = unrestricted.
+# A signed policy pin replaces this list (model id only) and cannot be widened from here.
+# allowed_models = ["grok-4.5", "grok-4*"]
 
 # Defaults applied to every model; a per-model [model.<id>] value always wins.
 # See "Custom Models" for the per-model overrides and full details.
@@ -38,6 +64,7 @@ top_p = 0.95
 max_completion_tokens = 8192
 max_retries = 8
 inference_idle_timeout_secs = 600
+subagent_rate_limit_max_attempts = 8
 stream_tool_calls = true
 
 [ui]
@@ -56,8 +83,8 @@ allow_session_multiline = true         # Allow Ctrl+M / /multiline / Multiline s
                                        # composer_multiline.
 max_thoughts_width = 120               # max column width for reasoning display
 default_selected_permission = "always_allow_all_sessions" # preselected row on the FIRST approval prompt
-remember_tool_approvals = false        # show per-command "Always allow" options on permission prompts;
-                                       # grants are remembered per project (default: false); see 22-permissions-and-safety.md
+remember_tool_approvals = true         # show per-command "Always allow" options on permission prompts;
+                                       # grants are remembered per project (default: true); see 22-permissions-and-safety.md
 show_thinking_blocks = true            # show agent thinking blocks in the TUI (default: true)
 always_expand_thinking = false         # collapsed Thought-for headers (including nested overlays);
                                        # true keeps the body open. Ctrl+T writes this same key.
@@ -65,16 +92,13 @@ group_tool_verbs = true                # fold runs of read/search/list tool call
                                        # and finished thoughts among them into one row (default: true)
 collapsed_edit_blocks = false          # show edits as one-line +N/-M diffstat summaries and merge
                                        # back-to-back same-file edits into one row, expand for the
-                                       # diffs (default: false; pager.toml [scrollback.blocks.edit]
-                                       # expanded_by_default/line_summary override its fold shape)
+                                       # diffs (default: false)
 page_flip_on_send = true               # pin a just-sent prompt at the top of the viewport so the
                                        # response starts on a fresh page (default: true); set false
                                        # so sending never moves the scroll position
-scrub_ascii_punct = true               # scrub fancy punctuation in assistant text to ASCII-safe
-                                       # forms (default: true); env GROK_SCRUB_ASCII_PUNCT=0 also off
-ulid_session_ids = true                # use ULIDs as the primary session id in grok-oss
-                                       # (default: true); set false to show the Grok Build UUID
-                                       # as the primary id. The ULID map still exists either way.
+follow_up_behavior = "queue"           # mid-turn follow-ups: "queue" (wait for turn end; default) or
+                                       # "steer" (plain Enter still queues visibly, then injects at the
+                                       # next tool/model safe gap). See Keyboard Shortcuts → Mid-turn.
 screen_mode = "fullscreen"             # default render mode: "fullscreen" | "minimal"
                                        # (unset → fullscreen); set via /settings → Default screen mode
 auto_run_implement = true              # after a successful turn, auto-queue a trailing /implement
@@ -89,7 +113,8 @@ cancel_subagents_on_turn_cancel = "ask" # ask | always_stop | always_continue
 # Process-rule reminder list (Settings): soft nested-spawn reminder strings.
 # Empty or off adds no extra reminder text. Spawn still succeeds.
 
-# Token Economy. All of these except grok_oss_database_path are also in /settings.
+# Token Economy. Implement-loop effort is thoroughness, not how many Review rows to launch.
+# All of these except grok_oss_database_path are also in /settings.
 # Durable books live in $GROK_HOME/grok_oss.db (not session trees).
 [token_economy]
 cap_implement_effort_when_economic = true  # with [ui] economic_mode: ceiling + desired inject
@@ -108,72 +133,54 @@ telemetry = false                      # anonymous usage telemetry
 feedback = true                        # feedback system (default: true)
 lsp_tools = false                      # expose the lsp tool
 codebase_indexing = true               # code graph indexing (default: true)
-two_pass_compaction = false            # prefire two-pass compaction (default: false, opt-in)
-session_recap = true                   # /recap + auto return-from-away recap (restart required)
+two_pass_compaction = true             # prefire two-pass compaction (default: true)
 remote_fetch = true                    # allow optional online model-catalog fetches (default: true;
                                        # set false for firewalled/air-gapped deployments; background
                                        # managed-config sync has its own switch: managed_config)
 
 [session]
 auto_compact_threshold_percent = 95    # auto-compact at this % of the *effective* context window
-                                       # (default 95; /settings live-applies 85 / 90 / 95 / 98
-                                       # plus 200k / 475k token presets). With economic mode on,
-                                       # 95% is about 190k of the 200k soft-cap.
+                                       # (0-100; settings UI offers 85 / 90 / 95 / 98;
+                                       # default 95; stock Grok 4.5 catalog must not undercut
+                                       # this default; open sessions pick up Settings changes live).
+                                       # With [ui] economic_mode = true the window is soft-capped
+                                       # at 200k, so 95% is about 190k tokens.
+                                       # The compaction banner shows usage % and the configured
+                                       # threshold (e.g. "Context 81% full (auto-compact at 95%)").
+# Or pin an absolute token budget instead (wins over percent when set):
+# auto_compact_threshold_tokens = 200000  # Grok 4.5 long-context price cliff (same 200k as
+#                                         # economic mode). Costs double for the entire request
+#                                         # above 200k when the window is uncapped.
+# auto_compact_threshold_tokens = 475000  # 95% of Grok 4.5's 500k catalog window; prefer when
+#                                         # economic mode is off
+
 load_envrc = true                      # load .envrc environment variables
 
 [tools]
 respect_gitignore = false              # default: false; set true to make every tool skip gitignored files
+
+# Optional caps on parallel media generation in a single model step.
+# Per tool name. First 2×-or-more burst: discard that step and retry once.
+# Any other over-cap (including a second 2× burst) keeps the first K.
+# Defaults: image 8, video 4.
+# Env vars GROK_MAX_PARALLEL_IMAGE_GEN_CALLS / GROK_MAX_PARALLEL_VIDEO_GEN_CALLS
+# override these values (see environment-variables doc).
+# [tools.media_gen]
+# max_parallel_image_gen_calls = 8
+# max_parallel_video_gen_calls = 4
 ```
 
-#### Token Economy
+### Default agent
 
-Token Economy is the Grok OSS surface for **spend brakes and books**. SuperGrok is paid. Period pacing talks about **included SuperGrok period limits** (how much of that included quota is already used), not SuperGrok dollar credits.
+Interactive `grok` uses `[agent]` in `config.toml` when you do not pass `--plan`, `--ask-user`, or `--agent-profile`:
 
-Desired spend order (chrome and rank): spend included SuperGrok period limits on a stored personal SuperGrok login first. A Team / Business SuperGrok JWT is not the paying source while that personal login exists (that JWT settles as team postpaid OAuth / Grok Build and can debit the Billing Credits card). Then SuperGrok dollar credits that never expire, then console team prepaid / console API credits. Remaining included SuperGrok period limits across distinct stored plans are added together. That sum is the real remaining included quota. A unified pool (the same wire pool) counts once. While included SuperGrok period limits still have room, stay on the SuperGrok session. After those included SuperGrok period limits are full, sampling hops to SuperGrok dollar credits, then to the console API as failover. Operator CLI: `grok-oss limits` and `grok-oss limits --json`.
+```toml
+[agent]
+name = "my-custom-agent"
+# definition = "/path/to/agent.md"   # path wins over name
+```
 
-| Knob | Default | Where | Role |
-|------|---------|-------|------|
-| `[ui] economic_mode` | true | Settings → Agent | Soft-cap effective context at 200k (price cliff). Also gates implement-effort ceiling and desired inject when the cap master is true. `/economic-mode` overrides one conversation. |
-| `[ui] auto_run_implement` | true | Settings → Agent | After a successful turn, auto-queue a trailing `/implement` block. Plan-approval review comments that contain `/implement` are that turn, not a second auto-run when leftover work is operator-gated only. |
-| `[ui] resume_canceled_turn_on_restart` | true | Settings → Session | Continue interrupted turn (`canceled_turn_resume.json`). Not last-session-on-start and not `/resume`. |
-| `[ui] cancel_subagents_on_turn_cancel` | `ask` | Settings → Agent | When you cancel a parent turn that still has running subagents: ask, always stop, or always leave them running. |
-| `[ui] hide_header` | false | Settings → Appearance | Hide in-app status / welcome / dashboard headers only. Not the window title. |
-| `[ui] composer_multiline` | true | Settings → Editor | When false, the Operator box stays single-line for Enter and Shift+Enter (they send or interject and never insert a newline). Session Multiline (`Ctrl+M` / `/multiline`) cannot turn newline-on-Enter back on. `Ctrl+Enter` still inserts a newline when interject is not appropriate. Plan Preview and the main Prompt honor the same flag. Default keeps current multiline behavior. |
-| `[ui] allow_session_multiline` | true | Settings → Editor | When false, `Ctrl+M`, `/multiline`, and the session Multiline settings row cannot turn session Multiline on. Distinct from `composer_multiline`. `Ctrl+Enter` and `Shift+Enter` newline behavior is unchanged. Default on. |
-| `[ui] scrub_ascii_punct` | true | Settings → Appearance | Map em dashes, smart quotes, and similar marks in assistant text to ASCII-safe forms. Env `GROK_SCRUB_ASCII_PUNCT=0` also turns it off. The agent cannot silently disable this; `disable_ascii_scrub` always goes through a permission prompt. |
-| `[ui] ulid_session_ids` | true | Settings → Session | Use ULIDs as the primary session id in grok-oss. Default on. Turn off to show the Grok Build UUID as the primary id. The ULID map still exists either way. |
-| `[ui] always_expand_thinking` | false | Settings | Keep thinking fully expanded. Off paints collapsed Thought-for headers, including nested overlays. Ctrl+T writes this same key so the next thought and the next session match the last toggle. Distinct from `show_thinking_blocks`. |
-| `[ui] plan_approval_park` | `soft` | Settings → Agent | Soft side panel (default) or `modal` fullscreen. |
-| Turbo planning | on | Settings → Agent | While exclusive `/plan` or Isolated Preview `/plan --soft` is the live plan turn, reasoning effort is **xhigh** even if the session `/effort` is medium. After Exit or Approve, the session effort applies again. Off means those plan turns use the session effort. Default on. The only live indication is the existing lower-right yellow model/effort line showing `xhigh`. The magenta model id stays the model id. There is no TURBO badge, banner, or toast. This is not implement-skill effort. See [Plan Mode](19-plan-mode.md). |
-| Process-rule reminder list | empty | Settings | When this is on and the list is not empty, those strings inject as **soft** reminders into nested spawn, in the same family as path assignment. Spawn still succeeds. A third implementor L2 still spawns. Extra L2s are not auto-killed. Off or an empty list adds no extra reminder text. These reminders are not a hard max-2 enforcer. See [Subagents](16-subagents.md). |
-| `cap_implement_effort_when_economic` | true | Settings → Agent | Master for economic ceiling plus desired inject. |
-| `max_implement_effort` | 3 | Settings → Agent | Hard ceiling 1–5 when economic caps are active. |
-| `min_implement_effort` | 1 | Settings → Agent | Floor always applied. Set 2 to raise thoroughness, not reviewer count. |
-| `desired_implement_effort` | 2 | Settings → Agent | Injected when `--effort` is missing under economic caps. |
-| `lock_implement_effort` | 0 | Settings → Agent | 1–5 forces that effort. 0 is unlocked. |
-| `show_period_pacing` | true | Settings → Agent | Included SuperGrok period linear-burn chrome on status, `/limits`, `/usage`. Never dollar-izes period %. |
-| `local_spend_ledger` | true | Settings → Agent | Ingest session `usage.jsonl` into the local book. |
-| `reconcile_management_usage` | true | Settings → Agent | Remote Management samples on `/spend` and `/limits`. |
-| `[ui.notifications] session_recap` | true | Settings → Session | Auto return-from-away recap. |
-| `session_recap_threshold_secs` | 30 | Settings → Session | Debounce seconds before auto recap. |
-| `[features] session_recap` | true | Settings → Session (restart) | Master: `/recap` plus auto recap. |
-| `[session] auto_compact_threshold_percent` | 95 | Settings → Session | Live-applies. Not 85. |
-| `[token_economy] grok_oss_database_path` | empty | **toml only** | Empty means `$GROK_HOME/grok_oss.db`. There is **no** Settings row for this path. |
-
-**Implement effort** here is the implement skill integer 1–5. That number is thoroughness. It is not how many Review rows to launch. It is not model reasoning effort (`/effort`). One reviewer unless you explicitly asked for more.
-
-Application order (product may rewrite the command string and toast):
-
-1. If `lock_implement_effort` is 1–5, start from that value.
-2. Else, if effort is missing and economic caps are on, inject `desired_implement_effort`.
-3. Apply floor `min_implement_effort` (always).
-4. If economic mode is on and the cap master is true, apply ceiling `max_implement_effort`.
-
-**Pacing** compares included SuperGrok period used percent to time elapsed through the billing period. Copy says ahead of or behind **linear burn**. Missing period bounds omit pacing.
-
-**Double-entry** (`/spend`, and a section on `/limits`): local book vs remote Management samples. Gap honesty when local cost is missing.
-
-Slash cross-links: `/economic-mode`, `/limits`, `/usage`, `/spend`.
+`definition` is a markdown file with YAML frontmatter. `name` is a built-in or discovered agent (`~/.grok/agents/`, `.grok/agents/`). If the named agent is missing, Grok uses `GROK_AGENT`, then the built-in default. `--agent-profile`, `--plan`, and `--ask-user` still override that session. Field list: [26-config-reference.md](26-config-reference.md).
 
 #### Turbo planning
 
@@ -253,7 +260,7 @@ default_selected_permission = "allow_once"
 
 After you answer the first prompt the cursor turns **sticky**: each later prompt preselects whatever you last confirmed (pick "No" once and subsequent prompts start on their reject row), carrying across edit / bash / MCP prompts until you restart. So this setting only picks the starting point.
 
-Values match case-insensitively; an unset or unrecognized value falls back to `always_allow_all_sessions`. The `allow_command_always` row is always scoped to the specific action being approved (command / tool / domain / edit-session), never a global allow-everything — that's what `always_allow_all_sessions` is for. Note the per-command "Always allow" rows only appear when `[ui] remember_tool_approvals = true` (default false). See [22-permissions-and-safety.md](22-permissions-and-safety.md).
+Values match case-insensitively; an unset or unrecognized value falls back to `always_allow_all_sessions`. The `allow_command_always` row is always scoped to the specific action being approved (command / tool / domain / edit-session), never a global allow-everything — that's what `always_allow_all_sessions` is for. Note the per-command "Always allow" rows appear while `[ui] remember_tool_approvals` is enabled (the default; set it to `false` to hide them). See [22-permissions-and-safety.md](22-permissions-and-safety.md).
 
 You can also override this with `GROK_DEFAULT_SELECTED_PERMISSION`, which is handy for headless or agent test runs that shouldn't mutate `config.toml`. Precedence: env var → `config.toml` → `always_allow_all_sessions`.
 
@@ -263,8 +270,8 @@ You can also override this with `GROK_DEFAULT_SELECTED_PERMISSION`, which is han
 
 | Value | Behavior |
 |-------|----------|
-| `false` (default) | Bare-letter and `Shift+letter` keys (`j`/`k`, `h`/`l`, `g`/`G`, `y`/`Y`, `o`/`O`, `r`, `x`, `e`/`E`, `H`/`L`, plus `i`) are suppressed in the scrollback: pressing one focuses the prompt and types the character. Arrows, `Tab`, `Space`, `PageUp`/`PageDown`, and every `Ctrl+letter` shortcut still navigate. `Esc` is **not** a scrollback key — it cancels a running turn, and while idle follows the clear / rewind policy (see [Keyboard Shortcuts](03-keyboard-shortcuts.md#escape)). |
-| `true` | All vim-style scrollback bindings are active, exactly as listed in [Keyboard Shortcuts](03-keyboard-shortcuts.md). Mid-turn `Esc` is swallowed in this mode (`Ctrl+C` cancels); minimal mode keeps Esc-cancel regardless. |
+| `false` (default) | Bare-letter and `Shift+letter` keys (`j`/`k`, `h`/`l`, `g`/`G`, `y`/`Y`, `o`/`O`, `r`, `x`, `e`/`E`, `H`/`L`, plus `i`) are suppressed in the scrollback: pressing one focuses the prompt and types the character. Arrows, `Tab`, `Space`, `PageUp`/`PageDown`, and every `Ctrl+letter` shortcut still navigate. `Esc` is **not** a scrollback key — it never cancels a running turn (`Ctrl+C` does), and while idle follows the clear / rewind policy (see [Keyboard Shortcuts](03-keyboard-shortcuts.md#escape)). |
+| `true` | All vim-style scrollback bindings are active, exactly as listed in [Keyboard Shortcuts](03-keyboard-shortcuts.md). Esc behavior is the same in both settings. |
 
 Toggle it at runtime with `/vim-mode`, or from `/settings` → **Vim scrollback navigation**. Grok writes the change to `[ui] vim_mode` immediately and applies it to every future pager session, including new agents and subagents in the same process. There's no per-session override — `config.toml` is the source of truth on next launch. `vim_mode` is independent of `simple_mode`.
 
@@ -321,9 +328,17 @@ timeout_secs = 1800                    # seconds to wait when enabled (default: 
 proxy_endpoint = "https://proxy.example.com"   # egress proxy URL
 allowed_domains = ["docs.rs", "x.ai"]          # override the built-in allowlist
 allow_local = false                            # true = allow localhost / 127.0.0.0/8 / ::1 only
+
+[toolset.web_search]
+# Restrict web_search to these domains (max 5). Mutually exclusive with excluded_domains.
+allowed_domains = ["docs.x.ai", "arxiv.org"]
+# ...or block these domains instead (leave allowed_domains unset):
+# excluded_domains = ["reddit.com", "pinterest.com"]
 ```
 
 `allow_local` is off by default (SSRF fail-closed). Turn it on (or set `GROK_WEB_FETCH_ALLOW_LOCAL=1`) and `web_fetch` may reach **explicit** loopback hosts only — private, link-local, and cloud-metadata ranges stay blocked. Resolution: TOML > env > default off.
+
+`[toolset.web_search]` constrains the `web_search` tool's domains — the allowlist/blocklist the search itself runs under (not a post-filter). `allowed_domains` and `excluded_domains` are **mutually exclusive**; if you set both, the allowlist wins and the blocklist is dropped with a warning. An empty or absent list is unbounded. This applies to both the backend-hosted search (models with server-side search) and the client-side fallback. A configured policy is **authoritative**: it cannot be bypassed by the model — the model's own per-call `allowed_domains` is ignored whenever you have set `allowed_domains` or `excluded_domains` here (so a blocklist is a real block). The model's per-call allowlist only applies when you have configured nothing. Resolution: requirements → user `config.toml` → managed → default (unset). Config is read at session start, so edit it before starting a session — changes don't apply mid-session.
 
 `[toolset.ask_user_question]` is honored across **requirements.toml**, **managed config**, and your user **`config.toml`**. Precedence: requirements → env (`GROK_ASK_USER_QUESTION_TIMEOUT_ENABLED` / `GROK_ASK_USER_QUESTION_TIMEOUT_SECS`) → user config → managed → defaults. Set `timeout_enabled = false` in your user config to disable the automatic questionnaire timeout for yourself; `timeout_secs` must be a positive integer. You can also toggle `timeout_enabled` from `/settings` → **Ask-Question timeout** (under Agent & Approval); changes apply to newly started sessions.
 
@@ -369,7 +384,7 @@ Credential resolution: `api_key` > `env_key` > signed-in session token > `XAI_AP
 To override a built-in model, use its name as the section key and set only the fields you need:
 
 ```toml
-[model.grok-build]
+[model.grok-4.6]
 api_key = "my-api-key"
 ```
 
@@ -396,17 +411,24 @@ url = "https://mcp.example.com/api/mcp"  # HTTP/SSE transport
 headers = { "x-mcp-session-id" = "{{session_id}}" }
 ```
 
+Remote (HTTP/SSE) servers receive a default `User-Agent: grok-cli/<version>` header; a
+valid `User-Agent` entry in `headers` overrides it (Figma servers receive bare
+`grok-cli`). See [MCP servers](07-mcp-servers.md) for details.
+
 MCP servers can also be set per-project in `.grok/config.toml`. Project-scoped config contributes `[mcp_servers]`, `[plugins]`, and `[permission]` rules; every other section loads only from `~/.grok/config.toml`.
 
 Priority for `[mcp_servers]` and `[plugins]`: `.grok/config.toml` (current dir) > `<repo-root>/.grok/config.toml` > `~/.grok/config.toml`. `[permission]` rules aren't overridden by priority — they merge across all files with `deny` > `ask` > `allow` (see [22-permissions-and-safety.md](22-permissions-and-safety.md)).
 
 ### Memory
 
-Persist knowledge across sessions (requires `--experimental-memory` or `GROK_MEMORY=1`).
+Persist knowledge across sessions. Enable it with `[memory] enabled = true` or
+`GROK_MEMORY=1`; an explicit `[memory] enabled = false` turns it off even when a
+managed remote setting enables it. Notes recorded by earlier versions are
+carried over automatically. See [13-memory.md](13-memory.md).
 
 ```toml
 [memory]
-enabled = false                       # enable memory
+enabled = true
 
 [memory.session]
 save_on_end = true                    # write metadata summary on session end
@@ -416,14 +438,14 @@ enabled = true                        # watch memory files for external edits
 
 [memory.search]
 max_results = 6                       # default number of results
-min_score = 0.35                      # minimum relevance score
+min_score = 0.7                       # minimum relevance score
 
 [memory.initial_injection]
 enabled = true                        # auto-inject memory on first turn
-min_score = 0.0                       # score threshold for first-turn injection
+min_score = 0.9                       # score threshold for first-turn injection
 
 [memory.embedding]
-model = "embedding-model"             # embedding model name
+# model is unset by default, so retrieval uses full-text search only
 dimensions = 1024                     # vector dimensions
 ```
 
@@ -432,15 +454,14 @@ dimensions = 1024                     # vector dimensions
 ```toml
 [subagents]
 enabled = true
-allow_worktree = false                # default: force isolation=none on spawn
-parent_follow_up = true               # default on; false is SpaceXAI spawn/wait/resume_from completed-only
+sampling_limit = 12                   # concurrent in-flight subagent sampling calls per process; defaults to max_concurrent (32) when unset (GROK_SUBAGENT_SAMPLING_LIMIT)
 
 [subagents.toggle]
 explore = true                        # enable/disable specific types
 plan = false
 
 [subagents.models]
-explore = "grok-build"               # route to different models
+explore = "grok-4.6"               # route to different models
 ```
 
 To pin the model a subagent uses, set its entry under `[subagents.models]`.
@@ -464,7 +485,7 @@ enabled = false                       # disable background workflows (or GROK_WO
 
 Project workflows are discovered from `<repo-root>/.grok/workflows/`; user workflows from `~/.grok/workflows/`. Discovery and invocation key off the script's `meta.name`, so keep each filename aligned with its `meta.name`. Built-ins win over project names, and project names win over user names, so keep names unique across scopes.
 
-Each launch gets a session-unique display handle such as `deep-research-2`. That handle is what you see in the `/workflows` run dashboard and pass to `/workflow pause`, `resume`, or `stop` — the internal run IDs never surface in commands. A numbered handle isn't a reusable definition name, so the dashboard disables **save** until you pick a new unique `meta.name` and save the edited script yourself. See [Slash Commands](04-slash-commands.md) for examples.
+Each launch gets a session-unique display handle such as `deep-research-2`. That handle is what you see in the `/workflow runs` dashboard and pass to `/workflow pause`, `resume`, or `stop` — the internal run IDs never surface in commands. A numbered handle isn't a reusable definition name, so the dashboard disables **save** until you pick a new unique `meta.name` and save the edited script yourself. See [Slash Commands](04-slash-commands.md) for examples.
 
 ### Skills
 
@@ -626,6 +647,20 @@ Run `/doctor` in the affected session. It shows the detected notification and fo
 
 **Sleep prevention not taking effect:** on macOS, sleep prevention uses `IOPMAssertionCreateWithName` via CoreFoundation; on Linux, `systemd-inhibit` (which must be on `$PATH`). Make sure the relevant tool is available. Prevention is only active during agent turns and releases automatically when the turn ends.
 
+### Status line
+
+An optional row at the bottom of the full-screen pager, disabled by default. Opt in with `[ui.status_line]`:
+
+```toml
+[ui.status_line]
+type = "builtin"                # builtin | command | disabled
+items = ["cwd", "model", "context"]
+```
+
+The other keys are `items` (which built-in segments to show, in order), `command`, `padding`, and `refresh_interval` (in seconds; re-runs a `command` row on a timer, so an incident page or a CI status reaches an idle session). The [Status Line guide](25-status-line.md) documents all of them, along with the JSON contract a `command` script reads on stdin and an example script.
+
+Minimal mode has no status-line row; it uses the terminal tab title instead (see [Notifications](#notifications) `title.items`).
+
 ### Keyboard shortcuts
 
 Keyboard shortcuts are **not** configurable — all bindings are built in. See [Keyboard Shortcuts](03-keyboard-shortcuts.md) for the complete reference.
@@ -660,9 +695,19 @@ otel_metrics_exporter = "otlp"                            # otlp | console | non
 otel_logs_exporter = "otlp"                               # otlp | console | none
 otel_endpoint = "https://collector.corp.example:4318"     # OTLP base endpoint
 otel_protocol = "http/protobuf"                           # http/protobuf | grpc
-otel_log_user_prompts = false                             # content gate (admins can pin via requirements)
-otel_log_tool_details = false                             # content gate (admins can pin via requirements)
+otel_certificate = "/etc/ssl/corp-ca.pem"                 # optional: trust private CA (path only)
+otel_client_certificate = "/etc/ssl/client.crt"           # optional: mTLS client cert (path only)
+otel_client_key = "/etc/ssl/client.key"                   # optional: mTLS client key (path only)
+otel_log_user_prompts = false                             # content gate (admins pin via requirements)
+otel_log_assistant_responses = false                      # unset follows prompts; pin false for prompts-only
+otel_log_tool_details = true                              # metadata/preview; enterprise default on for SIEM join
+otel_log_tool_content = false                             # full-body gate; independent of details — does not imply names/paths
 ```
+
+Listed `[telemetry] otel_*` keys in signed `requirements.toml` **pin** over
+process env (destination lock). `managed_config.toml` does not. There is no
+`headers` key — collector tokens stay in `OTEL_EXPORTER_OTLP_HEADERS`. See
+[Monitoring & Usage](24-monitoring-usage.md).
 
 ### Version pinning
 
@@ -716,9 +761,9 @@ auth_token_ttl = 3600
 default = "company-grok"
 
 [model.company-grok]
-model = "grok-build"
+model = "grok-4.6"
 base_url = "https://grok-proxy.acme.com/"
-name = "Grok Build Latest (Proxy)"
+name = "Grok 4.6 (Proxy)"
 context_window = 128000
 
 [features]
@@ -806,8 +851,8 @@ dim_accent = 0.5                      # dimming factor for collapsed accents (0.
 [scrollback.blocks.edit]
 indent = true                         # indent diff content
 vpad = false                          # vertical padding
-# expanded_by_default = true          # unset: follows [ui] collapsed_edit_blocks in config.toml
-                                      # (flag on = collapsed one-liner); uncomment to pin either shape
+# expanded_by_default = true          # Unset follows Collapsed edit blocks. When that setting is on,
+                                      # edits start collapsed even if this line is true.
 dual_line_numbers = false             # two-column line numbers (old + new)
 # line_summary = false                # show +N/-M in the collapsed header; unset follows the same flag
 hunk_separator = "…"                  # separator between diff hunks (default: "…")
@@ -821,19 +866,6 @@ min_lines = 2                         # minimum content lines in sticky mode
 animate = true                        # animated accent while thinking
 truncated_lines = 3                   # lines in truncated mode
 ```
-
-### Todo
-
-```toml
-[todo]
-badge_format = "default"              # "default", "colon", or "comma"
-```
-
-Badge format examples:
-
-- `default`: `2/5` — a `done/total` progress fraction (done = completed, total = all tasks except cancelled).
-- `colon`: `[>:1 [ ]:4 ok:3 x:2]` — icon:count.
-- `comma`: `[1 >, 4 [ ], 3 ok, 2 x]` — count icon, comma-separated.
 
 ### Plugins
 
@@ -925,6 +957,14 @@ The key ones. See the README for the complete list.
 | `.grok/agents/` | Project-scoped agent definitions |
 | `.grok/hooks/` | Project-scoped hooks |
 | `.grok/lsp.json` | LSP server configuration |
+
+### How Grok saves `config.toml`
+
+Writes to **`~/.grok/config.toml`** (`/settings`, `/vim-mode`, and other user-config saves) follow a leaf symlink. The atomic rename writes the referent (a file in your dotfiles repo). The link stays a link. If the link is dangling, the write creates the referent as a regular file.
+
+Writes to a **project** `.grok/config.toml` (MCP / plugin / permission edits) **replace** a leaf symlink with a regular file. That keeps a later save from following the link out of the repository.
+
+A user `config.toml` that cannot be parsed is not overwritten. Fix the syntax (or restore a backup) and save again.
 
 ---
 

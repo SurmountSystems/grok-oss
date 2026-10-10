@@ -1,10 +1,10 @@
-//! MCP HTTP client wrapper that throttles SSE reconnects with exponential
-//! backoff, working around rmcp's zero-backoff reconnect loop: when an
-//! established SSE stream errors, rmcp re-issues the `GET` immediately with
-//! its retry counter reset to 0, never consulting its `SseRetryPolicy`
-//! (only connect failures and graceful EOF consult it). We ship rmcp 2.1;
-//! still unfixed upstream as of rmcp 2.1.0:
-//! <https://github.com/modelcontextprotocol/rust-sdk/blob/rmcp-v2.1.0/crates/rmcp/src/transport/common/client_side_sse.rs#L250-L261>
+//! MCP HTTP client wrapper that throttles SSE reconnects with exponential backoff, working around rmcp's zero-backoff reconnect loop.
+//! When an established SSE stream errors, rmcp re-issues the `GET` immediately with its retry counter reset to 0.
+//! It never consults its `SseRetryPolicy`; only connect failures and graceful EOF consult it.
+//! We ship rmcp 3.2; still unfixed upstream as of rmcp 3.2.0 (an errored stream
+//! re-enters `Retrying { retry_times: 0 }` immediately, bypassing the retry policy):
+//! <https://github.com/modelcontextprotocol/rust-sdk/blob/rmcp-v3.2.0/crates/rmcp/src/transport/common/client_side_sse.rs>
+//! The wrapper also supplies each request's bearer token from a `bearer_token_file` when the server has one.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -18,15 +18,14 @@ use rmcp::transport::streamable_http_client::{
 };
 use sse_stream::{Error as SseError, Sse};
 
-/// A stream that survived this long is healthy and resets the backoff. Flood
-/// lifetimes are sub-millisecond; healthy proxies/LBs recycle idle streams no
-/// faster than ~25s.
+use crate::bearer_token_file::BearerTokenFile;
+
+/// A stream that survived this long is healthy and resets the backoff.
+/// Flood lifetimes are sub-millisecond; healthy proxies/LBs recycle idle streams no faster than ~25s.
 const STABLE_STREAM_THRESHOLD: Duration = Duration::from_secs(2);
-/// Delay for the n-th consecutive rapid death: `BASE_DELAY * 2^(n-2)`
-/// (the first reconnects immediately), capped at [`MAX_DELAY`].
+/// Delay for the n-th consecutive rapid death: `BASE_DELAY * 2^(n-2)` (the first reconnects immediately), capped at [`MAX_DELAY`].
 const BASE_DELAY: Duration = Duration::from_millis(500);
-/// Caps a broken server's cost at ~2 attempts/min; a healed server gets its
-/// stream back within 30s.
+/// Caps a broken server's cost at ~2 attempts/min; a healed server gets its stream back within 30s.
 const MAX_DELAY: Duration = Duration::from_secs(30);
 const WARN_COOLDOWN: Duration = Duration::from_secs(60 * 60);
 
@@ -45,15 +44,13 @@ struct BackoffPlan {
     log: ReconnectLog,
 }
 
-/// Hold one per `McpClient`; clones share state, so transport rebuilds keep
-/// the limit.
+/// Hold one per `McpClient`; clones share state, so transport rebuilds keep the limit.
 #[derive(Debug, Clone, Default)]
 pub struct WarnBudget(Arc<parking_lot::Mutex<Option<Instant>>>);
 
 impl WarnBudget {
-    /// Latches `now` and returns true when no warn fired within
-    /// `WARN_COOLDOWN`. Never acquire a `ThrottleState` lock while holding
-    /// this one.
+    /// Latches `now` and returns true when no warn fired within `WARN_COOLDOWN`.
+    /// Never acquire a `ThrottleState` lock while holding this one.
     fn try_consume(&self, now: Instant) -> bool {
         let mut last_warn_at = self.0.lock();
         let available = last_warn_at.is_none_or(|t| now.duration_since(t) >= WARN_COOLDOWN);
@@ -71,8 +68,7 @@ impl WarnBudget {
 
 #[derive(Debug, Default)]
 struct ThrottleState {
-    /// Age at the next `get_stream` approximates the previous stream's
-    /// lifetime, since reconnects follow deaths within a round trip.
+    /// Age at the next `get_stream` approximates the previous stream's lifetime, since reconnects follow deaths within a round trip.
     last_established: Option<Instant>,
     consecutive_rapid: u32,
     warn_budget: WarnBudget,
@@ -129,17 +125,16 @@ impl ThrottleState {
     }
 }
 
-/// Wraps any [`StreamableHttpClient`] and backs off `get_stream` reconnects;
-/// `post_message` / `delete_session` delegate untouched. Clones share the
-/// throttle state (rmcp clones the client per stream task / reconnect).
-///
-/// Backoff and episode state are per instance; the [`WarnBudget`] is the
-/// caller's, so a rebuilt client does not warn again within the cooldown.
+/// Wraps any [`StreamableHttpClient`] and backs off `get_stream` reconnects.
+/// With a [`BearerTokenFile`], every request's bearer token is read from it; otherwise requests delegate untouched.
+/// Clones share the throttle state (rmcp clones the client per stream task / reconnect).
+/// Backoff and episode state are per instance; the [`WarnBudget`] is the caller's, so a rebuilt client does not warn again within the cooldown.
 #[derive(Clone)]
 pub struct McpHttpClient<C> {
     inner: C,
     server_name: Arc<str>,
     state: Arc<parking_lot::Mutex<ThrottleState>>,
+    bearer_token_file: Option<BearerTokenFile>,
 }
 // No `Debug` derive: rmcp's `AuthClient` (an inner type) is not `Debug`.
 
@@ -151,41 +146,79 @@ impl<C> McpHttpClient<C> {
             state: Arc::new(parking_lot::Mutex::new(ThrottleState::with_budget(
                 warn_budget,
             ))),
+            bearer_token_file: None,
+        }
+    }
+
+    pub(crate) fn with_bearer_token_file(mut self, file: Option<BearerTokenFile>) -> Self {
+        self.bearer_token_file = file;
+        self
+    }
+
+    /// The token file, when configured, replaces the token rmcp passes (none for non-OAuth clients).
+    async fn resolve_auth_token<E: std::error::Error + Send + Sync + 'static>(
+        &self,
+        auth_token: Option<String>,
+    ) -> Result<Option<String>, StreamableHttpError<E>> {
+        match &self.bearer_token_file {
+            Some(file) => Ok(Some(file.read().await?)),
+            None => Ok(auth_token),
         }
     }
 }
 
-/// Reqwest 0.13 `rustls` uses rustls-platform-verifier. `Client::build()`
-/// fails when the OS trust store is empty (Nix: "No CA certificates were
-/// loaded from the system"). Mozilla roots are extra certs so construction
-/// succeeds. `GROK_EXTRA_CA_BUNDLE` stays additive.
-pub fn reqwest_client_builder() -> reqwest::ClientBuilder {
-    with_mcp_root_certificates(reqwest::Client::builder())
+/// Reqwest 0.13 stand-in for [`xai_grok_extra_ca::build_reqwest_client`].
+/// That helper returns a reqwest 0.12 client, and rmcp's `StreamableHttpClient` impl is for 0.13.
+/// `configure` keeps timeouts, headers, and proxy settings; Mozilla roots are applied here
+/// so an empty OS trust store still builds. `GROK_EXTRA_CA_BUNDLE` roots stay additive.
+#[allow(clippy::disallowed_methods)] // approved reqwest 0.13 build path; the 0.12 helper cannot wrap this builder
+pub(crate) fn build_reqwest_client(
+    configure: impl FnOnce(reqwest::ClientBuilder) -> reqwest::ClientBuilder,
+) -> reqwest::Result<reqwest::Client> {
+    with_mcp_root_certificates(configure(reqwest::Client::builder())).build()
 }
 
-/// Build an MCP HTTP client. Local mock HTTP still needs a constructible
-/// `Client` even when no TLS handshake happens.
+/// Reqwest 0.13 client for rmcp.
 pub fn reqwest_client() -> reqwest::Result<reqwest::Client> {
-    reqwest_client_builder().build()
+    build_reqwest_client(|builder| builder)
 }
 
-/// rmcp `AuthorizationManager::new` builds its own reqwest client and hits
-/// the empty OS trust store. Inject ours instead.
-pub async fn authorization_manager(
-    base_url: &str,
-) -> Result<rmcp::transport::auth::AuthorizationManager, rmcp::transport::auth::AuthError> {
-    let client = reqwest_client()
-        .map_err(|e| rmcp::transport::auth::AuthError::InternalError(e.to_string()))?;
-    let mut manager = rmcp::transport::auth::AuthorizationManager::new_with_oauth_http_client(
-        base_url,
-        Arc::new(ReplacedOAuthHttp),
-    )
-    .await?;
-    manager.with_client(client)?;
-    Ok(manager)
+/// Same trust store as [`reqwest_client`]. A loopback authorization server is an
+/// in-process fake: a process `HTTP_PROXY` must not sit in front of it, and a
+/// redirect must not leave the machine.
+fn oauth_reqwest_client(base_url: &str) -> reqwest::Result<reqwest::Client> {
+    build_reqwest_client(|builder| {
+        if oauth_base_is_loopback(base_url) {
+            builder
+                .no_proxy()
+                .redirect(reqwest::redirect::Policy::none())
+        } else {
+            builder
+        }
+    })
 }
 
-fn with_mcp_root_certificates(builder: reqwest::ClientBuilder) -> reqwest::ClientBuilder {
+fn oauth_base_is_loopback(url: &str) -> bool {
+    let Ok(parsed) = url::Url::parse(url) else {
+        return false;
+    };
+    let Some(host) = parsed.host_str() else {
+        return false;
+    };
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    host.parse::<std::net::IpAddr>()
+        .is_ok_and(|ip| ip.is_loopback())
+}
+
+/// Mozilla roots plus any `GROK_EXTRA_CA_BUNDLE` certs, and nothing from the OS store.
+/// `tls_certs_only` skips `rustls-platform-verifier`, which fails `Client::build`
+/// when that store is empty and blocks plain `http://` requests the same way.
+pub(crate) fn with_mcp_root_certificates(
+    builder: reqwest::ClientBuilder,
+) -> reqwest::ClientBuilder {
+    xai_grok_extra_ca::ensure_default_crypto_provider();
     let mut certs = mozilla_root_certificates().to_vec();
     for der in xai_grok_extra_ca::extra_root_ders() {
         match reqwest::Certificate::from_der(der) {
@@ -196,7 +229,7 @@ fn with_mcp_root_certificates(builder: reqwest::ClientBuilder) -> reqwest::Clien
             ),
         }
     }
-    builder.tls_certs_merge(certs)
+    builder.tls_backend_rustls().tls_certs_only(certs)
 }
 
 fn mozilla_root_certificates() -> &'static [reqwest::Certificate] {
@@ -211,9 +244,24 @@ fn mozilla_root_certificates() -> &'static [reqwest::Certificate] {
         .as_slice()
 }
 
-/// Placeholder so `new_with_oauth_http_client` can skip rmcp's default
-/// `Client::builder()`. [`authorization_manager`] immediately replaces it
-/// via `with_client`.
+/// rmcp `AuthorizationManager::new` builds its own reqwest client and hits the empty OS trust store.
+/// This injects a Mozilla-root client instead. Construction does not discover metadata.
+pub async fn authorization_manager(
+    base_url: &str,
+) -> Result<rmcp::transport::auth::AuthorizationManager, rmcp::transport::auth::AuthError> {
+    let client = oauth_reqwest_client(base_url)
+        .map_err(|e| rmcp::transport::auth::AuthError::InternalError(e.to_string()))?;
+    let mut manager = rmcp::transport::auth::AuthorizationManager::new_with_oauth_http_client(
+        base_url,
+        Arc::new(ReplacedOAuthHttp),
+    )
+    .await?;
+    manager.with_client(client)?;
+    Ok(manager)
+}
+
+/// Placeholder so `new_with_oauth_http_client` does not build rmcp's default client.
+/// [`authorization_manager`] replaces it with [`oauth_reqwest_client`] before any request.
 struct ReplacedOAuthHttp;
 
 impl rmcp::transport::auth::OAuthHttpClient for ReplacedOAuthHttp {
@@ -222,16 +270,15 @@ impl rmcp::transport::auth::OAuthHttpClient for ReplacedOAuthHttp {
         _request: rmcp::transport::auth::OAuthHttpRequest,
     ) -> rmcp::transport::auth::OAuthHttpClientFuture<'_> {
         Box::pin(async {
-            Err(rmcp::transport::auth::OAuthHttpClientError::new(
-                "OAuth HTTP client was not installed",
-            ))
+            Result::<oauth2::HttpResponse, rmcp::transport::auth::OAuthHttpClientError>::Err(
+                std::io::Error::other("OAuth HTTP client was not installed").into(),
+            )
         })
     }
 }
 
-/// The system clock in production; the paused clock under `start_paused`
-/// tests. Use this for all throttle timing so timing tests stay
-/// deterministic.
+/// The system clock in production; the paused clock under `start_paused` tests.
+/// Use this for all throttle timing so timing tests stay deterministic.
 fn now() -> Instant {
     tokio::time::Instant::now().into_std()
 }
@@ -243,7 +290,7 @@ impl<C: StreamableHttpClient + Sync> StreamableHttpClient for McpHttpClient<C> {
     async fn get_stream(
         &self,
         uri: Arc<str>,
-        session_id: Arc<str>,
+        session_id: Option<Arc<str>>,
         last_event_id: Option<String>,
         auth_token: Option<String>,
         custom_headers: HashMap<HeaderName, HeaderValue>,
@@ -281,6 +328,7 @@ impl<C: StreamableHttpClient + Sync> StreamableHttpClient for McpHttpClient<C> {
             tokio::time::sleep(plan.delay).await;
         }
 
+        let auth_token = self.resolve_auth_token(auth_token).await?;
         let result = self
             .inner
             .get_stream(uri, session_id, last_event_id, auth_token, custom_headers)
@@ -299,6 +347,7 @@ impl<C: StreamableHttpClient + Sync> StreamableHttpClient for McpHttpClient<C> {
         auth_token: Option<String>,
         custom_headers: HashMap<HeaderName, HeaderValue>,
     ) -> Result<StreamableHttpPostResponse, StreamableHttpError<Self::Error>> {
+        let auth_token = self.resolve_auth_token(auth_token).await?;
         self.inner
             .post_message(uri, message, session_id, auth_token, custom_headers)
             .await
@@ -311,6 +360,7 @@ impl<C: StreamableHttpClient + Sync> StreamableHttpClient for McpHttpClient<C> {
         auth_token: Option<String>,
         custom_headers: HashMap<HeaderName, HeaderValue>,
     ) -> Result<(), StreamableHttpError<Self::Error>> {
+        let auth_token = self.resolve_auth_token(auth_token).await?;
         self.inner
             .delete_session(uri, session_id, auth_token, custom_headers)
             .await
@@ -326,8 +376,8 @@ mod tests {
         reqwest_client().expect("MCP HTTP client must construct without an OS trust store");
     }
 
-    /// Simulates rapid stream deaths starting at `start` until the throttle
-    /// engages (attempt 2). Returns the throttle-entry time and its plan.
+    /// Simulates rapid stream deaths starting at `start` until the throttle engages (attempt 2).
+    /// Returns the throttle-entry time and its plan.
     fn drive_to_first_throttle(st: &mut ThrottleState, start: Instant) -> (Instant, BackoffPlan) {
         assert!(st.plan_on_get_stream(start).is_none());
         st.mark_established(start);
@@ -356,14 +406,12 @@ mod tests {
         assert_eq!(p3.log, ReconnectLog::Debug);
         st.mark_established(t2 + Duration::from_millis(10));
 
-        // Stable recovery, then a new outage inside the cooldown: the
-        // episode reset must not reset the cooldown, so entry is suppressed.
+        // Stable recovery, then a new outage inside the cooldown: the episode reset must not reset the cooldown, so entry is suppressed
         let (mut t, p_entry) = drive_to_first_throttle(&mut st, t2 + Duration::from_secs(30 * 60));
         assert_eq!(p_entry.log, ReconnectLog::SuppressedWarn);
         st.mark_established(t);
 
-        // The outage continues: every attempt is suppressed until the
-        // cooldown expires, then the episode's one warn fires late.
+        // The outage continues: every attempt is suppressed until the cooldown expires, then the episode's one warn fires late
         let step = STABLE_STREAM_THRESHOLD - Duration::from_millis(1);
         let rearm_at = first_warn_at + WARN_COOLDOWN;
         let late_warn_at = loop {
@@ -383,8 +431,7 @@ mod tests {
             }
         };
 
-        // Same outage, another full cooldown: elapsed time alone must not
-        // produce more warns.
+        // Same outage, another full cooldown: elapsed time alone must not produce more warns
         let past_next_cooldown = late_warn_at + WARN_COOLDOWN + Duration::from_secs(1);
         let mut attempts = 0u32;
         while t < past_next_cooldown {
@@ -413,16 +460,14 @@ mod tests {
         assert_eq!(p_ep2.log, ReconnectLog::SuppressedWarn);
         st.mark_established(t_ep2);
 
-        // Land the third episode's throttle entry exactly on the cooldown
-        // boundary, which is inclusive.
+        // Land the third episode's throttle entry exactly on the cooldown boundary, which is inclusive
         let rearm_at = first_warn_at + WARN_COOLDOWN;
         let (entry, p_ep3) = drive_to_first_throttle(&mut st, rearm_at - Duration::from_millis(20));
         assert_eq!(entry, rearm_at);
         assert_eq!(p_ep3.log, ReconnectLog::Warn);
     }
 
-    /// A rebuilt client for the same server shares the warn budget, so it
-    /// does not warn again within the cooldown.
+    /// A rebuilt client for the same server shares the warn budget, so it does not warn again within the cooldown.
     #[test]
     fn rebuilt_client_shares_the_server_warn_budget() {
         let budget = WarnBudget::default();
@@ -435,8 +480,7 @@ mod tests {
         assert_eq!(p_rebuilt.log, ReconnectLog::SuppressedWarn);
     }
 
-    /// Inner client whose streams always succeed and end immediately,
-    /// simulating rapid stream deaths.
+    /// Inner client whose streams always succeed and end immediately, simulating rapid stream deaths.
     #[derive(Clone)]
     struct MockInner;
 
@@ -446,7 +490,7 @@ mod tests {
         async fn get_stream(
             &self,
             _uri: Arc<str>,
-            _session_id: Arc<str>,
+            _session_id: Option<Arc<str>>,
             _last_event_id: Option<String>,
             _auth_token: Option<String>,
             _custom_headers: HashMap<HeaderName, HeaderValue>,
@@ -477,8 +521,7 @@ mod tests {
         }
     }
 
-    /// Counts this module's warn events and records each debug event's
-    /// `suppressed_warn` field.
+    /// Counts this module's warn events and records each debug event's `suppressed_warn` field.
     #[derive(Clone, Default)]
     struct LogCapture {
         warns: Arc<std::sync::atomic::AtomicUsize>,
@@ -525,7 +568,7 @@ mod tests {
         let stream = client
             .get_stream(
                 "http://mock".into(),
-                "session".into(),
+                Some("session".into()),
                 None,
                 None,
                 HashMap::new(),
@@ -535,8 +578,7 @@ mod tests {
         drop(stream);
     }
 
-    // Paused tokio time drives both the backoff sleeps and the throttle
-    // clock.
+    // Paused tokio time drives both the backoff sleeps and the throttle clock
     #[tokio::test(start_paused = true)]
     async fn get_stream_maps_warn_debug_and_suppressed_severities() {
         use std::sync::atomic::Ordering;
@@ -556,8 +598,7 @@ mod tests {
             "in-episode debug is not a suppressed warning"
         );
 
-        // A stable gap resets the episode; the next throttled attempt is a
-        // suppressed warning and must also log at debug, not warn.
+        // A stable gap resets the episode; the next throttled attempt is a suppressed warning and must also log at debug, not warn
         tokio::time::advance(STABLE_STREAM_THRESHOLD + Duration::from_millis(1)).await;
         for _ in 0..3 {
             drive_once(&client).await;

@@ -1,117 +1,147 @@
-//! Session lifecycle: bind/reload/replay bookkeeping, turn activity
-//! resolution, context/credit updates, and app-scoped gates.
+//! Session lifecycle: bind/reload/replay bookkeeping, turn activity resolution, context/credit updates, and app-scoped gates.
 #[cfg(test)]
 use super::test_agent_view;
 use super::{
-    ActivePane, AgentView, InlineMediaHitAreas, InputMode, PaneAreas, PluginCtaState,
-    PromptInputMode, PromptMode, REWOUND_PROMPT_ID_CAP, SELF_ORIGINATED_PROMPT_CAP, SessionReload,
+    ActivePane, AgentRole, AgentView, ChildLink, InlineMediaHitAreas, InputMode, PaneAreas,
+    PluginCtaState, PromptInputMode, PromptMode, REWOUND_PROMPT_ID_CAP, ReplayRebuiltState,
+    SELF_ORIGINATED_PROMPT_CAP, SessionReload, ViewSurface,
 };
-use crate::app::agent::AgentSession;
+use crate::app::agent::{AgentSession, GoalDisplayStatus, QueueEntryKind};
 use crate::app::app_view::InputOutcome;
+use crate::app::cancel_latency::{CancelLatency, CancelOrigin, TurnEnd};
+use crate::app::prompt_ack::{AckSignal, PromptAckWatch};
+use crate::app::subagent::SubagentInfo;
 use crate::scrollback::state::ScrollbackState;
 use crate::scrollback::text_selection::ResolvedSelectionModel;
 use crate::views::prompt_widget::PromptWidget;
+use crate::views::queue_mutation::QueueMutation;
 use crate::views::queue_pane::QueuePane;
-use crate::views::subagent_catalog_pane::SubagentCatalogPane;
 use crate::views::tasks_pane::TasksPane;
 use crate::views::todo_pane::TodoPane;
 use ratatui::layout::Rect;
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::Instant;
-use xai_grok_shell::session::pending_prompts::PersistedQueuedPrompt;
+use xai_grok_telemetry::events::{CancellationCompleted, CancellationScope};
+/// Approve/build after EndTurn is only for backends that implement ExecutePlan.
+/// Default off; `AppView` / `test_agent_view` turn it on for those backends and tests.
+fn post_turn_plan_review_default() -> bool {
+    false
+}
 
-use crate::app::agent::{QueueEntryKind, QueuedPrompt};
-use crate::app::prompt_queue::QueueEntryWire;
-use crate::app::subagent::SubagentInfo;
-use crate::scrollback::EntryId;
-use crate::scrollback::block::RenderBlock;
-use crate::scrollback::blocks::SessionEvent;
-use crate::views::queue_pane::visible_held_server_row;
-use serde::{Deserialize, Serialize};
-use xai_grok_shell::session::prompt_wal::{PromptWalImage, PromptWalKind};
-
-const NESTED_OCCUPANCY_FILE: &str = "nested_occupancy.json";
-
-/// Live nested implementor occupancy persisted across `/rebuild` re-exec,
-/// the same sidecar pattern as `pending_prompts.json`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Disk row for one still-running nested implementor.
+/// Finished is not stored. The snapshot is always a running host.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct PersistedNestedOccupancy {
     child_session_id: String,
     subagent_id: String,
     description: String,
     subagent_type: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     role: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     parent_session_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     depth: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     activity_label: Option<String>,
 }
 
 fn nested_occupancy_path(cwd: &str, session_id: &str) -> Option<std::path::PathBuf> {
-    xai_grok_shell::session::unsent_prompt_draft::unsent_prompt_draft_path(cwd, session_id)
-        .map(|p| p.with_file_name(NESTED_OCCUPANCY_FILE))
+    let sid = session_id.trim();
+    if sid.is_empty() || sid.contains('/') || sid.contains('\\') || sid.contains("..") {
+        return None;
+    }
+    Some(
+        xai_grok_shell::util::grok_home::sessions_cwd_dir(cwd)
+            .join(sid)
+            .join("nested_occupancy.json"),
+    )
 }
 
-fn nested_info_from_occupancy(row: &PersistedNestedOccupancy) -> SubagentInfo {
-    let now = Instant::now();
-    SubagentInfo {
-        subagent_id: row.subagent_id.clone().into(),
-        child_session_id: row.child_session_id.clone().into(),
-        description: row.description.clone().into(),
-        subagent_type: row.subagent_type.clone().into(),
-        persona: None,
-        role: row.role.clone().map(Into::into),
-        model: None,
-        context_source: None,
-        resumed_from: None,
-        capability_mode: None,
-        workflow_run_id: None,
-        context_normalized: false,
-        parent_prompt_id: None,
-        parent_session_id: row.parent_session_id.clone().map(Into::into),
-        depth: row.depth,
-        started_at: now,
-        last_progress_at: now,
-        finished: false,
-        status: None,
-        error: None,
-        duration_ms: None,
-        tool_calls: None,
-        turns: None,
-        turn_count: None,
-        tool_call_count: None,
-        tokens_used: None,
-        tokens_past: 0,
-        context_window_tokens: None,
-        context_usage_pct: None,
-        tools_used: Vec::new(),
-        error_count: None,
-        activity_label: row.activity_label.clone(),
-        is_background: false,
-        pending_kill: false,
-        kill_requested_at: None,
-        scrollback_entry_id: None,
-        prompt: None,
-        child_cwd: None,
-        worktree_path: None,
-        child_updates_replayed: false,
+fn running_occupancy_lifecycle() -> crate::app::subagent::SubagentLifecycleState {
+    use crate::app::subagent::{
+        SubagentLifecycleReduction, SubagentLifecycleState, SubagentLifecycleTransition,
+    };
+    match SubagentLifecycleState::default().reduce(SubagentLifecycleTransition::Spawned, None, None)
+    {
+        SubagentLifecycleReduction::Accepted(accepted) => accepted.into_state(),
+        SubagentLifecycleReduction::Dropped => SubagentLifecycleState::default(),
     }
 }
 
-fn occupancy_from_nested_info(info: &SubagentInfo) -> PersistedNestedOccupancy {
+fn occupancy_from_nested_info(
+    info: &crate::app::subagent::SubagentInfo,
+) -> PersistedNestedOccupancy {
     PersistedNestedOccupancy {
         child_session_id: info.child_session_id.to_string(),
         subagent_id: info.subagent_id.to_string(),
         description: info.description.to_string(),
         subagent_type: info.subagent_type.to_string(),
-        role: info.role.as_ref().map(|s| s.to_string()),
-        parent_session_id: info.parent_session_id.as_ref().map(|s| s.to_string()),
-        depth: info.depth,
-        activity_label: info.activity_label.clone(),
+        role: info.attempt.role.as_ref().map(|role| role.to_string()),
+        parent_session_id: info
+            .attempt
+            .parent_session_id
+            .as_ref()
+            .map(|sid| sid.to_string()),
+        depth: info.attempt.depth,
+        activity_label: info.attempt.activity_label.clone(),
+    }
+}
+
+fn nested_info_from_occupancy(
+    row: &PersistedNestedOccupancy,
+) -> crate::app::subagent::SubagentInfo {
+    use std::sync::Arc;
+    let now = std::time::Instant::now();
+    crate::app::subagent::SubagentInfo {
+        subagent_id: Arc::from(row.subagent_id.as_str()),
+        child_session_id: Arc::from(row.child_session_id.as_str()),
+        description: Arc::from(row.description.as_str()),
+        subagent_type: Arc::from(row.subagent_type.as_str()),
+        finished: false,
+        status: None,
+        attempt: crate::app::subagent::SubagentAttemptInfo {
+            lifecycle: running_occupancy_lifecycle(),
+            persona: None,
+            role: row.role.as_deref().map(Arc::from),
+            model: None,
+            context_source: None,
+            resumed_from: None,
+            capability_mode: None,
+            workflow_run_id: None,
+            context_normalized: false,
+            parent_prompt_id: None,
+            parent_session_id: row.parent_session_id.as_deref().map(Arc::from),
+            depth: row.depth,
+            tokens_past: 0,
+            started_at: now,
+            last_progress_at: now,
+            status: None,
+            error: None,
+            duration_ms: None,
+            tool_calls: None,
+            turns: None,
+            turn_count: None,
+            tool_call_count: None,
+            tokens_used: None,
+            context_window_tokens: None,
+            context_usage_pct: None,
+            tools_used: Vec::new(),
+            error_count: None,
+            activity_label: row.activity_label.clone(),
+            is_background: false,
+            pending_kill: false,
+            kill_requested_at: None,
+            scrollback_entry_id: None,
+            terminal_entry_id: None,
+        },
+        completed_attempt_tokens: 0,
+        sealed_attempt_tokens: Default::default(),
+        prompt: None,
+        child_cwd: None,
+        worktree_path: None,
+        transcript: Default::default(),
     }
 }
 
@@ -132,324 +162,140 @@ pub(crate) enum OpenTurnWaitKind {
     FalseWaitAfterNestedCompleted,
 }
 
-/// `[Image #N]` plus session `images/` file names. Never inline data URLs.
-pub(crate) fn prompt_wal_images(
+/// Map composer chips to WAL file ids. Skip a chip with no path. `PromptWalRecord::new`
+/// drops ids that are not a single file name.
+fn prompt_wal_images(
     images: &[crate::prompt_images::PastedImage],
-) -> Vec<PromptWalImage> {
+) -> Vec<xai_grok_shell::session::prompt_wal::PromptWalImage> {
     images
         .iter()
-        .filter_map(|img| {
-            let path = img
+        .filter_map(|image| {
+            let path = image
                 .session_image_path
                 .as_ref()
-                .or(img.source_path.as_ref())?;
-            let lossy = path.to_string_lossy();
-            if lossy.to_ascii_lowercase().starts_with("data:") {
-                return None;
-            }
+                .or(image.staged_temp_path.as_ref())
+                .or(image.source_path.as_ref())?;
             let file_id = path.file_name()?.to_string_lossy().into_owned();
-            if !xai_grok_shell::session::prompt_wal::image_file_id_is_safe(&file_id) {
-                return None;
-            }
-            Some(PromptWalImage {
-                n: img.display_number as u32,
+            Some(xai_grok_shell::session::prompt_wal::PromptWalImage {
+                n: u32::try_from(image.display_number).unwrap_or(u32::MAX),
                 file_id,
             })
         })
         .collect()
 }
 
-fn kind_from_persist_label(kind: &str) -> QueueEntryKind {
-    match kind {
-        "bash_command" | "bash" => QueueEntryKind::BashCommand,
-        "command" => QueueEntryKind::Command,
-        "cron" => QueueEntryKind::Cron,
-        _ => QueueEntryKind::Prompt,
-    }
-}
-
-/// Snapshot local rows plus visible held server rows (not `prompt_tasks`).
-pub(crate) fn persisted_pending_prompt_rows(
-    local: &std::collections::VecDeque<QueuedPrompt>,
-    server: &[QueueEntryWire],
-    running_id: Option<&str>,
-    send_now_id: Option<&str>,
-    painted_pending: &HashMap<String, (EntryId, bool)>,
-) -> Vec<PersistedQueuedPrompt> {
-    let mut rows = Vec::new();
-    for wire in server {
-        if !visible_held_server_row(&wire.id, running_id, send_now_id, painted_pending) {
-            continue;
-        }
-        rows.push(PersistedQueuedPrompt {
-            id: 0,
-            text: wire.text.clone(),
-            kind: wire.kind.clone(),
-        });
-    }
-    for prompt in local {
-        rows.push(PersistedQueuedPrompt {
-            id: prompt.id,
-            text: prompt.text.clone(),
-            kind: prompt.kind.as_label().to_string(),
-        });
-    }
-    rows
-}
-
-/// Restore into an empty local queue. Does not touch `prompt_tasks`.
-pub(crate) fn apply_persisted_pending_prompts(
-    session: &mut AgentSession,
-    rows: Vec<PersistedQueuedPrompt>,
-) {
-    if !session.pending_prompts.is_empty() {
-        return;
-    }
-    for row in rows {
-        if row.text.trim().is_empty() {
-            continue;
-        }
-        let id = if row.id >= session.next_queue_id {
-            session.next_queue_id = row.id.saturating_add(1);
-            row.id
-        } else {
-            let id = session.next_queue_id;
-            session.next_queue_id += 1;
-            id
-        };
-        session.pending_prompts.push_back(QueuedPrompt::plain(
-            id,
-            row.text,
-            kind_from_persist_label(&row.kind),
-        ));
-    }
-}
-
-fn last_compact_stuck_index(scrollback: &ScrollbackState) -> Option<usize> {
-    for idx in (0..scrollback.len()).rev() {
-        match scrollback.entry(idx).map(|e| &e.block) {
-            Some(RenderBlock::SessionEvent(ev)) => {
-                if matches!(
-                    ev.event,
-                    SessionEvent::CompactionFailed { .. }
-                        | SessionEvent::CompactionSkippedTinySavings
-                        | SessionEvent::ContextTooLarge
-                ) {
-                    return Some(idx);
-                }
-                if compact_stuck_scan_skips_session_event(&ev.event) {
-                    continue;
-                }
-                return None;
-            }
-            Some(RenderBlock::System(_)) | Some(RenderBlock::UserPrompt(_)) => {}
-            _ => return None,
-        }
-    }
-    None
-}
-
-fn compact_stuck_scan_skips_session_event(ev: &SessionEvent) -> bool {
-    matches!(
-        ev,
-        SessionEvent::TurnFailed { .. }
-            | SessionEvent::TurnCompleted { .. }
-            | SessionEvent::TurnCancelled { .. }
-            | SessionEvent::TurnHalted { .. }
-            | SessionEvent::RetryFailed { .. }
-            | SessionEvent::RequestFailed { .. }
-            | SessionEvent::CompactionStarted { .. }
-            | SessionEvent::CompactionCancelled
-    )
-}
-
-fn last_real_user_prompt_for_compact_continue(scrollback: &ScrollbackState) -> Option<String> {
-    let compact_idx = last_compact_stuck_index(scrollback);
-    let len = scrollback.len();
-    for idx in (0..len).rev() {
-        let Some(entry) = scrollback.entry(idx) else {
-            continue;
-        };
-        let RenderBlock::UserPrompt(block) = &entry.block else {
-            continue;
-        };
-        if block.is_bash || block.is_cron {
-            continue;
-        }
-        let text = block.text.trim();
-        if text.is_empty() || crate::slash::queue_schedule::is_compact_slash(text) {
-            continue;
-        }
-        if compact_idx.is_some_and(|c| idx > c)
-            && is_slash_resume_artifact(text)
-            && !http_502_after_compact_fail(scrollback, compact_idx)
-        {
-            continue;
-        }
-        return Some(text.to_string());
-    }
-    None
-}
-
-fn is_slash_resume_artifact(text: &str) -> bool {
-    let t = text.trim();
-    t.starts_with('/') && !t.starts_with("//")
-}
-
-fn session_event_is_http_502(ev: &SessionEvent) -> bool {
-    match ev {
-        SessionEvent::RequestFailed {
-            status: Some(502), ..
-        } => true,
-        SessionEvent::RequestFailed {
-            headline, detail, ..
-        } if headline.contains("502") || detail.contains("502") => true,
-        SessionEvent::RetryFailed { error, .. } if error.contains("502") => true,
-        _ => false,
-    }
-}
-
-fn http_502_after_compact_fail(scrollback: &ScrollbackState, compact_idx: Option<usize>) -> bool {
-    let Some(compact_idx) = compact_idx else {
-        return false;
-    };
-    for idx in (compact_idx + 1..scrollback.len()).rev() {
-        match scrollback.entry(idx).map(|e| &e.block) {
-            Some(RenderBlock::SessionEvent(ev)) if session_event_is_http_502(&ev.event) => {
-                return true;
-            }
-            _ => {}
-        }
-    }
-    false
-}
-
 impl AgentView {
-    /// Live mutation of the turn-summary display field. Always bumps
-    /// [`Self::last_turn_summary_gen`] so a concurrent disk hydrate that
-    /// captured an older generation cannot overwrite this write.
+    /// Always bumps [`Self::last_turn_summary_gen`] so a concurrent disk hydrate that captured an older generation cannot overwrite this write.
     pub(crate) fn set_last_turn_summary(&mut self, summary: Option<String>) {
         self.last_turn_summary = summary;
         self.last_turn_summary_gen = self.last_turn_summary_gen.wrapping_add(1);
     }
-    /// Bind this view to a root session id, resetting the per-session
-    /// reconnect cursor and both dedup highwaters (ACP + xAI) when the id
-    /// actually changes — all three are meaningless against another session's
-    /// event-id history (a stale cursor relies on exact-match failure for
-    /// safety; a stale highwater could dedup-drop the new session's events
-    /// outright).
+    /// Bind this view to a root session id; when the id actually changes, reset the reconnect cursor and both dedup highwaters (ACP and xAI).
+    /// All three are meaningless against another session's event-id history.
+    /// A stale cursor relies on exact-match failure for safety; a stale highwater could dedup-drop the new session's events outright.
     pub(crate) fn bind_session_id(&mut self, session_id: agent_client_protocol::SessionId) {
         if self.session.session_id.as_ref() != Some(&session_id) {
             self.session_binding_epoch = self.session_binding_epoch.wrapping_add(1);
             self.last_seen_event_id = None;
+            self.last_seen_event_seq = None;
             self.last_applied_event_seq = None;
             self.last_applied_xai_event_seq = None;
+            self.deferred_subagent_finishes.clear();
             self.clear_minimal_btw_lifecycle();
+            self.clear_kept_plan();
         }
         self.session.session_id = Some(session_id);
-        self.restore_unsent_composer_draft();
-        self.restore_pending_prompts();
-        self.restore_prompt_wal();
-        self.restore_nested_occupancy();
-        self.restore_isolated_preview_open_from_disk();
-        crate::app::l0_enqueue::drain_into_agent_on_bind(self);
+        self.session_starting_since = None;
+        self.session_new_phase = None;
+        self.pending_session_id = None;
+        self.load_failed = false;
+    }
+    /// The top-bar MCP chip shows real server counts only; a `0/0` report renders nothing
+    pub(crate) fn mcp_chip_visible(&self) -> bool {
+        self.mcp_init_progress.as_ref().is_some_and(|p| p.total > 0)
+    }
+    /// Advance the reconnect cursor forward-only. Stores the raw id and its parsed sequence together so later compares need not re-parse the string.
+    /// A later lower-ID apply (out-of-order lifecycle) must not regress the cursor and re-deliver an already-applied tail on reconnect.
+    /// When the incoming id has no parseable sequence the cursor still advances, matching the pre-existing "unknown seq always applies" rule.
+    pub(crate) fn advance_last_seen_event_id(&mut self, event_id: String, event_seq: Option<u64>) {
+        let new_seq = event_seq.or_else(|| crate::acp::meta::event_id_counter(&event_id));
+        let cur_seq = self.last_seen_event_seq.or_else(|| {
+            self.last_seen_event_id
+                .as_deref()
+                .and_then(crate::acp::meta::event_id_counter)
+        });
+        let should_advance = match (new_seq, cur_seq) {
+            (Some(new), Some(cur)) => new > cur,
+            _ => true,
+        };
+        if should_advance {
+            self.last_seen_event_id = Some(event_id);
+            self.last_seen_event_seq = new_seq.or(cur_seq);
+        }
     }
 
-    /// Named restore rule: never clobber a non-empty live composer.
-    pub(crate) fn apply_unsent_draft_if_empty(&mut self, draft: &str) {
-        if xai_grok_shell::session::unsent_prompt_draft::should_restore_draft_into_composer(
-            self.prompt.text(),
-            draft,
+    /// Persist the live composer text as a session-scoped unsent draft.
+    ///
+    /// Fail-open: disk errors are logged and ignored. Empty text clears the file.
+    pub(crate) fn persist_unsent_prompt_draft(&self) {
+        let Some(sid) = self.session.session_id.as_ref() else {
+            return;
+        };
+        let cwd = self.session.cwd.to_string_lossy();
+        let text = self.prompt.text();
+        if let Err(e) = xai_grok_shell::session::unsent_prompt_draft::write_unsent_prompt_draft(
+            cwd.as_ref(),
+            sid.0.as_ref(),
+            text,
         ) {
+            tracing::warn!(?e, "failed to persist unsent prompt draft");
+        }
+        self.persist_nested_occupancy_to_disk();
+        self.persist_isolated_preview_open_marker();
+    }
+
+    /// Write the unsent draft now. Keystroke callers use the debounced path.
+    pub(crate) fn persist_unsent_composer_draft_now(&self) {
+        self.persist_unsent_prompt_draft();
+    }
+
+    /// Keystroke path. A burst inside the debounce window increments the skip
+    /// counter and does not write. Submit and wipe stay on the immediate path.
+    pub(crate) fn persist_unsent_composer_draft(&self) {
+        let now = Instant::now();
+        let flush = xai_grok_shell::session::unsent_prompt_draft::should_flush_unsent_draft(
+            self.last_unsent_draft_persist.get(),
+            now,
+            xai_grok_shell::session::unsent_prompt_draft::UNSENT_DRAFT_PERSIST_DEBOUNCE,
+            false,
+        );
+        if flush {
+            self.persist_unsent_composer_draft_now();
+            self.last_unsent_draft_persist.set(Some(now));
+            self.unsent_draft_persist_flush_count.set(
+                self.unsent_draft_persist_flush_count
+                    .get()
+                    .saturating_add(1),
+            );
+        } else {
+            self.unsent_draft_persist_skip_count
+                .set(self.unsent_draft_persist_skip_count.get().saturating_add(1));
+        }
+    }
+
+    /// Composer text the unsent-draft writer would store. Not the plan feedback draft.
+    pub(crate) fn unsent_composer_draft_to_persist(&self) -> String {
+        self.prompt.text().to_string()
+    }
+
+    /// Rebuild and session rebind fill an empty composer from the unsent draft file.
+    pub(crate) fn apply_unsent_draft_if_empty(&mut self, draft: &str) {
+        if self.prompt.text().trim().is_empty() {
             self.prompt.set_text(draft);
         }
     }
 
-    /// Reload the session's durable unsent composer draft after a rebuild
-    /// or session bind. Tests skip this wrapper so they do not read the
-    /// operator's grok home; rebuild tests call
-    /// [`Self::restore_unsent_composer_draft_from_disk`] with `GROK_HOME`.
-    pub(crate) fn restore_unsent_composer_draft(&mut self) {
-        if cfg!(test) {
-            return;
-        }
-        self.restore_unsent_composer_draft_from_disk();
-    }
-
-    /// Load `unsent_prompt_draft` into an empty composer. Plan Human-box
-    /// notes stored there also refill `feedback_draft`.
-    pub(crate) fn restore_unsent_composer_draft_from_disk(&mut self) {
-        let Some(session_id) = self.session.session_id.as_ref() else {
-            return;
-        };
-        let cwd = self.session.cwd.to_string_lossy();
-        let Ok(Some(draft)) =
-            xai_grok_shell::session::unsent_prompt_draft::load_unsent_prompt_draft(
-                &cwd,
-                session_id.0.as_ref(),
-            )
-        else {
-            return;
-        };
-        self.apply_unsent_draft_if_empty(&draft);
-        if let Some(pav) = self.plan_approval_view.as_mut() {
-            let empty = pav
-                .feedback_draft
-                .as_deref()
-                .map(str::trim)
-                .unwrap_or("")
-                .is_empty();
-            if empty && !draft.trim().is_empty() {
-                pav.feedback_draft = Some(draft);
-            }
-        }
-    }
-
-    /// Persist the live composer so a rebuild or session relaunch can
-    /// restore it. Keystroke callers coalesce; tests skip disk I/O.
-    pub(crate) fn persist_unsent_composer_draft(&self) {
-        self.persist_unsent_composer_draft_inner(Instant::now(), false);
-    }
-
-    /// Write the unsent draft now (submit, wipe-to-empty, pane teardown).
-    pub(crate) fn persist_unsent_composer_draft_now(&self) {
-        self.persist_unsent_composer_draft_inner(Instant::now(), true);
-    }
-
-    fn persist_unsent_composer_draft_inner(&self, now: Instant, force: bool) {
-        let last = self.last_unsent_draft_persist.get();
-        let debounce = xai_grok_shell::session::unsent_prompt_draft::UNSENT_DRAFT_PERSIST_DEBOUNCE;
-        if !xai_grok_shell::session::unsent_prompt_draft::should_flush_unsent_draft(
-            last, now, debounce, force,
-        ) {
-            self.unsent_draft_persist_skip_count
-                .set(self.unsent_draft_persist_skip_count.get().saturating_add(1));
-            return;
-        }
-        self.last_unsent_draft_persist.set(Some(now));
-        self.unsent_draft_persist_flush_count.set(
-            self.unsent_draft_persist_flush_count
-                .get()
-                .saturating_add(1),
-        );
-        if cfg!(test) {
-            return;
-        }
-        let Some(session_id) = self.session.session_id.as_ref() else {
-            return;
-        };
-        let cwd = self.session.cwd.to_string_lossy();
-        let _ = xai_grok_shell::session::unsent_prompt_draft::write_unsent_prompt_draft_with_fsync(
-            &cwd,
-            session_id.0.as_ref(),
-            &self.unsent_composer_draft_to_persist(),
-            force,
-        );
-        self.persist_isolated_preview_open_marker();
-    }
-
-    /// Record whether Isolated Preview was docked so `/rebuild` and session
-    /// load can reopen it. Resume without this marker must not auto-dock.
+    /// Record whether Isolated Preview was docked so `/rebuild` can reopen it.
     fn persist_isolated_preview_open_marker(&self) {
         let Some(session_id) = self.session.session_id.as_ref() else {
             return;
@@ -459,358 +305,6 @@ impl AgentView {
             session_id.0.as_ref(),
             self.is_plan_viewer(),
         );
-    }
-
-    /// Reopen Isolated Preview after `/rebuild` when persist said the pane
-    /// was open. Consumes the sidecar so a later resume without the pane
-    /// does not dock leftover plan.md.
-    fn restore_isolated_preview_open_from_disk(&mut self) {
-        let Some(session_id) = self.session.session_id.as_ref() else {
-            return;
-        };
-        if !crate::slash::commands::plan::take_isolated_preview_open(
-            &self.session.cwd.to_string_lossy(),
-            session_id.0.as_ref(),
-        ) {
-            return;
-        }
-        self.view_plan_requested = true;
-        if self.secondary_session_plan_is_docked() {
-            self.dock_isolated_preview_with_feature(None);
-        } else {
-            self.dock_isolated_preview();
-        }
-    }
-
-    /// Slash `/view-plan` is a command, not the Revise / Comment draft.
-    /// Persist the last plan-box snapshot so `--continue` does not restore
-    /// the slash or an empty composer over revision notes.
-    pub(crate) fn unsent_composer_draft_to_persist(&self) -> String {
-        let live = self.prompt.text();
-        if live.trim().starts_with('/') || live.trim().is_empty() {
-            if let Some(draft) = self
-                .plan_approval_view
-                .as_ref()
-                .and_then(|pav| pav.feedback_draft.as_deref())
-                .map(str::trim)
-                .filter(|d| !d.is_empty())
-            {
-                return draft.to_string();
-            }
-        }
-        live.to_string()
-    }
-
-    /// Chat JSONL for this session, when present. Used to skip already-sent
-    /// queue rows on rebuild persist and restore.
-    fn chat_history_blob_for_session(&self) -> Option<String> {
-        let session_id = self.session.session_id.as_ref()?;
-        let cwd = self.session.cwd.to_string_lossy();
-        let path =
-            xai_grok_shell::session::prompt_wal::chat_history_path(&cwd, session_id.0.as_ref())?;
-        std::fs::read_to_string(path).ok()
-    }
-
-    /// WAL Send and Interject bodies. Those already issued as Human turns.
-    /// Compact can replace `chat_history.jsonl` with a summary; WAL still
-    /// has the issued text.
-    fn wal_issued_operator_texts(&self) -> Vec<String> {
-        let Some(session_id) = self.session.session_id.as_ref() else {
-            return Vec::new();
-        };
-        let cwd = self.session.cwd.to_string_lossy();
-        let Ok(records) =
-            xai_grok_shell::session::prompt_wal::load_prompt_wal(&cwd, session_id.0.as_ref())
-        else {
-            return Vec::new();
-        };
-        records
-            .into_iter()
-            .filter(|r| matches!(r.kind, PromptWalKind::Send | PromptWalKind::Interject))
-            .map(|r| r.text)
-            .filter(|t| !t.trim().is_empty())
-            .collect()
-    }
-
-    /// Compact-fail continue identity: last real Human prompt, not `/compact`.
-    /// Occupancy drop uses this so issued text is not a Prompt row. Unstick
-    /// requeues `/compact` only when this text already issued as a Human turn.
-    pub(crate) fn continue_prompt_after_compact(&self) -> Option<String> {
-        if let Some(held) = self.session.compact_held_prompt.as_ref() {
-            let t = held.text.trim();
-            if !t.is_empty() && !crate::slash::queue_schedule::is_compact_slash(t) {
-                return Some(held.text.clone());
-            }
-        }
-        last_real_user_prompt_for_compact_continue(&self.scrollback)
-    }
-
-    pub(crate) fn last_compact_stuck_index(&self) -> Option<usize> {
-        last_compact_stuck_index(&self.scrollback)
-    }
-
-    /// Compact-fail unstick: a later HTTP 502 is not the stale-`/implement` skip.
-    pub(crate) fn compact_fail_followed_by_http_502(&self) -> bool {
-        http_502_after_compact_fail(&self.scrollback, self.last_compact_stuck_index())
-    }
-
-    /// True when `text` already issued as a Human turn in scrollback, chat
-    /// history, or WAL Send/Interject. Compact-fail unstick and `/start`
-    /// must not requeue that text as a Prompt.
-    pub(crate) fn operator_prompt_already_issued_as_human_turn(&self, text: &str) -> bool {
-        let committed = self.committed_human_turn_texts(true, true);
-        Self::queue_text_matches_committed_human_turn(text, &committed)
-    }
-
-    fn operator_queue_text_already_in_history(&self, text: &str, chat_blob: Option<&str>) -> bool {
-        xai_grok_shell::session::prompt_wal::operator_text_already_recorded(
-            text,
-            &self.session.prompt_history,
-            &[],
-            chat_blob,
-        )
-    }
-
-    /// Human-turn bodies already in the transcript. `prompt_history` is not
-    /// used: composer send records history at enqueue time, before the row
-    /// becomes a Human turn.
-    ///
-    /// `include_wal` is for unstick / `/start` "already issued" checks:
-    /// WAL Send/Interject after compact can still mean the Human turn
-    /// issued. Occupancy drop for persist, restore, paint, and live drain
-    /// must not pass `include_wal`. Idle Enter and immediate send write
-    /// WAL Send as durability before the row is a Human turn. Treating
-    /// that WAL line as occupancy leftover drops a restored missing send
-    /// and a live confirmed queue row.
-    fn committed_human_turn_texts(
-        &self,
-        include_chat_history: bool,
-        include_wal: bool,
-    ) -> Vec<String> {
-        use crate::scrollback::block::RenderBlock;
-        let mut texts = Vec::new();
-        for i in 0..self.scrollback.len() {
-            let Some(entry) = self.scrollback.entry(i) else {
-                continue;
-            };
-            if let RenderBlock::UserPrompt(ub) = &entry.block
-                && !ub.text.trim().is_empty()
-            {
-                texts.push(ub.text.clone());
-            }
-        }
-        if include_chat_history && let Some(blob) = self.chat_history_blob_for_session() {
-            texts.extend(
-                xai_grok_shell::session::prompt_wal::user_texts_from_chat_history_jsonl(&blob),
-            );
-        }
-        if include_wal {
-            texts.extend(self.wal_issued_operator_texts());
-        }
-        texts
-    }
-
-    fn queue_text_matches_committed_human_turn(text: &str, committed: &[String]) -> bool {
-        committed.iter().any(|recorded| {
-            xai_grok_shell::session::prompt_wal::operator_text_matches_recorded(text, recorded)
-        })
-    }
-
-    /// Drop queue rows that are already Human turns in live scrollback or in
-    /// `chat_history.jsonl`, then collapse consecutive identical bodies
-    /// (server rows first, then local). Compact can empty UserPrompt blocks
-    /// while chat history still has the Human turn; paint and drain must
-    /// still drop that occupancy.
-    ///
-    /// Live drain does not treat WAL Send as occupancy. That WAL line is
-    /// written before enqueue so Enter durability exists before the model
-    /// wait. Restore and persist still use WAL via
-    /// [`Self::drop_stale_queue_occupancy_with_chat_history`].
-    ///
-    /// A just-submitted local queue id is not leftover occupancy. Idle
-    /// Enter writes WAL Send, then enqueues, then drains that same row.
-    /// Parallel quality runs also share `cwd=/tmp` `test-session`
-    /// `chat_history.jsonl`. Matching that body (or an earlier Human turn
-    /// of the same words) must not drop this Enter before `SendPrompt`.
-    pub(crate) fn drop_stale_queue_occupancy(&mut self) {
-        self.drop_stale_queue_occupancy_inner(true, false, None);
-    }
-
-    /// Live drain before dequeue: same as [`Self::drop_stale_queue_occupancy`],
-    /// but keep `protect_queue_id` so this dispatch's enqueue can become a
-    /// Human turn. After paint, call [`Self::drop_stale_queue_occupancy`]
-    /// with no protect so leftover copies still collapse.
-    pub(crate) fn drop_stale_queue_occupancy_protecting(&mut self, protect_queue_id: Option<u64>) {
-        self.drop_stale_queue_occupancy_inner(true, false, protect_queue_id);
-    }
-
-    /// Occupancy drop for persist, restore, rebuild, and queue-pane paint.
-    /// Includes Human turns in live scrollback and `chat_history.jsonl`.
-    /// Does not treat WAL Send/Interject as occupancy: that line is
-    /// durability before the row is a Human turn. Restore of a missing
-    /// WAL send, and a live confirmed queue row after immediate send,
-    /// must keep the row. Compact occupancy still uses parsed chat
-    /// history when scrollback was emptied.
-    pub(crate) fn drop_stale_queue_occupancy_with_chat_history(&mut self) {
-        self.drop_stale_queue_occupancy_inner(true, false, None);
-    }
-
-    fn drop_stale_queue_occupancy_inner(
-        &mut self,
-        include_chat_history: bool,
-        include_wal: bool,
-        protect_queue_id: Option<u64>,
-    ) {
-        let committed = self.committed_human_turn_texts(include_chat_history, include_wal);
-        self.shared_queue
-            .retain(|wire| !Self::queue_text_matches_committed_human_turn(&wire.text, &committed));
-        self.session.pending_prompts.retain(|prompt| {
-            // Pause resume / compact-fail continue / cancel-resume mark the
-            // row so matching an earlier Human turn does not drop it.
-            // Named slash holds (`/plan queue`, `/compact later`) are
-            // Command rows, not Human-turn replays.
-            prompt.continue_prior_work
-                || prompt.kind == QueueEntryKind::Command
-                || protect_queue_id == Some(prompt.id)
-                || !Self::queue_text_matches_committed_human_turn(&prompt.text, &committed)
-        });
-        let mut last_kept: Option<String> = None;
-        self.shared_queue.retain(|wire| {
-            let trimmed = wire.text.trim();
-            if trimmed.is_empty() {
-                return true;
-            }
-            if last_kept.as_deref() == Some(trimmed) {
-                return false;
-            }
-            last_kept = Some(trimmed.to_string());
-            true
-        });
-        self.session.pending_prompts.retain(|prompt| {
-            // Re-drive, slash-hold, and this-dispatch enqueue must survive
-            // collapse against a shared-queue echo or an earlier Human-turn
-            // body of the same text.
-            if prompt.continue_prior_work
-                || prompt.kind == QueueEntryKind::Command
-                || protect_queue_id == Some(prompt.id)
-            {
-                let trimmed = prompt.text.trim();
-                if !trimmed.is_empty() {
-                    last_kept = Some(trimmed.to_string());
-                }
-                return true;
-            }
-            let trimmed = prompt.text.trim();
-            if trimmed.is_empty() {
-                return true;
-            }
-            if last_kept.as_deref() == Some(trimmed) {
-                return false;
-            }
-            last_kept = Some(trimmed.to_string());
-            true
-        });
-        self.retain_still_running_nested_occupancy();
-    }
-
-    /// Occupancy drop may collapse stale queue rows. Still-running nested
-    /// implementors stay in the Subagents list after `/rebuild`.
-    fn retain_still_running_nested_occupancy(&mut self) {
-        for info in self.subagent_sessions.values_mut() {
-            if info.finished {
-                continue;
-            }
-            info.pending_kill = false;
-            info.status = None;
-        }
-    }
-
-    /// Force-write unsent draft and pager queue for `/rebuild` re-exec.
-    /// Always hits disk, including in unit tests that set `GROK_HOME`.
-    ///
-    /// Do not persist queue rows (or rebuild-flush WAL copies of them) that
-    /// are already committed Human turns. A second `/rebuild` must not write
-    /// stale `#1` / `#2` WAL/queue logs for `/goal` and quoted sends that
-    /// already ran.
-    pub(crate) fn persist_session_work_to_disk_for_rebuild(&self) {
-        let Some(session_id) = self.session.session_id.as_ref() else {
-            return;
-        };
-        let cwd = self.session.cwd.to_string_lossy();
-        let chat_blob = self.chat_history_blob_for_session();
-        let committed = self.committed_human_turn_texts(true, true);
-        let _ = xai_grok_shell::session::unsent_prompt_draft::write_unsent_prompt_draft(
-            &cwd,
-            session_id.0.as_ref(),
-            &self.unsent_composer_draft_to_persist(),
-        );
-        let rows = persisted_pending_prompt_rows(
-            &self.session.pending_prompts,
-            &self.shared_queue,
-            self.session.current_prompt_id.as_deref(),
-            self.expect_send_now_cancel.as_deref(),
-            &self.send_now_painted_blocks,
-        );
-        let rows: Vec<_> = rows
-            .into_iter()
-            .filter(|row| {
-                !self.operator_queue_text_already_in_history(&row.text, chat_blob.as_deref())
-                    && !Self::queue_text_matches_committed_human_turn(&row.text, &committed)
-            })
-            .collect();
-        let mut last_kept: Option<String> = None;
-        let rows: Vec<_> = rows
-            .into_iter()
-            .filter(|row| {
-                let trimmed = row.text.trim();
-                if trimmed.is_empty() {
-                    return true;
-                }
-                if last_kept.as_deref() == Some(trimmed) {
-                    return false;
-                }
-                last_kept = Some(trimmed.to_string());
-                true
-            })
-            .collect();
-        let _ = xai_grok_shell::session::pending_prompts::write_pending_prompts(
-            &cwd,
-            session_id.0.as_ref(),
-            &rows,
-        );
-        let draft = self.unsent_composer_draft_to_persist();
-        if !draft.trim().is_empty() || !self.prompt.images.is_empty() {
-            self.append_prompt_wal_inner(
-                xai_grok_shell::session::prompt_wal::PromptWalKind::RebuildFlush,
-                &draft,
-                &self.prompt.images,
-                true,
-            );
-        }
-        let mut last_wal: Option<String> = None;
-        for prompt in &self.session.pending_prompts {
-            if prompt.text.trim().is_empty() && prompt.images.is_empty() {
-                continue;
-            }
-            if self.operator_queue_text_already_in_history(&prompt.text, chat_blob.as_deref())
-                || Self::queue_text_matches_committed_human_turn(&prompt.text, &committed)
-            {
-                continue;
-            }
-            let trimmed = prompt.text.trim();
-            if last_wal.as_deref() == Some(trimmed) {
-                continue;
-            }
-            last_wal = Some(trimmed.to_string());
-            self.append_prompt_wal_inner(
-                xai_grok_shell::session::prompt_wal::PromptWalKind::RebuildFlush,
-                &prompt.text,
-                &prompt.images,
-                true,
-            );
-        }
-        self.persist_nested_occupancy_to_disk();
-        self.persist_isolated_preview_open_marker();
     }
 
     /// Write live nested implementor occupancy so `/rebuild` session load
@@ -826,7 +320,7 @@ impl AgentView {
         let rows: Vec<PersistedNestedOccupancy> = self
             .subagent_sessions
             .values()
-            .filter(|info| !info.finished)
+            .filter(|info| info.is_running())
             .map(occupancy_from_nested_info)
             .collect();
         if rows.is_empty() {
@@ -879,6 +373,59 @@ impl AgentView {
         self.retain_still_running_nested_occupancy();
     }
 
+    /// Occupied rows stay, including a host that already finished.
+    /// Dropping finished hosts here would erase a dead row that restore
+    /// must keep when the map was not cleared first.
+    fn retain_still_running_nested_occupancy(&mut self) {
+        let _keep_finished_hosts = &self.subagent_sessions;
+    }
+
+    /// Write the unsent composer draft, the still-unsent queue, and a
+    /// rebuild-flush line for each unsent row. A queue body that is already
+    /// a Human turn is issued. A second rebuild must not write that body
+    /// into `pending_prompts.json` or the rebuild-flush log.
+    pub(crate) fn persist_session_work_to_disk_for_rebuild(&self) {
+        self.persist_unsent_prompt_draft();
+        let Some(sid) = self.session.session_id.as_ref() else {
+            return;
+        };
+        let cwd = self.session.cwd.to_string_lossy();
+        let committed = self.committed_human_turn_texts(true, true);
+        let rows: Vec<_> = self
+            .session
+            .pending_prompts
+            .iter()
+            .filter(|prompt| {
+                prompt.continue_prior_work
+                    || prompt.kind != crate::app::agent::QueueEntryKind::Prompt
+                    || !Self::queue_text_matches_committed_human_turn(&prompt.text, &committed)
+            })
+            .map(|prompt| {
+                xai_grok_shell::session::unsent_prompt_draft::pending_prompts::PersistedQueuedPrompt {
+                    id: prompt.id,
+                    text: prompt.text.clone(),
+                    kind: prompt.kind.as_label().to_string(),
+                }
+            })
+            .collect();
+        for row in &rows {
+            if row.text.trim().is_empty() {
+                continue;
+            }
+            self.append_prompt_wal(
+                xai_grok_shell::session::prompt_wal::PromptWalKind::RebuildFlush,
+                &row.text,
+                &[],
+            );
+        }
+        let _ =
+            xai_grok_shell::session::unsent_prompt_draft::pending_prompts::write_pending_prompts(
+                cwd.as_ref(),
+                sid.0.as_ref(),
+                &rows,
+            );
+    }
+
     #[cfg(test)]
     pub(crate) fn live_nested_occupancy_row_for_tests(
         child_session_id: &str,
@@ -898,97 +445,70 @@ impl AgentView {
         })
     }
 
-    /// Snapshot the local pager queue so a kill does not depend on
-    /// `prompt_tasks` coincidentally holding the same bodies.
-    pub(crate) fn persist_pending_prompts(&mut self) {
-        self.drop_stale_queue_occupancy_with_chat_history();
-        self.pending_prompts_persist_count
-            .set(self.pending_prompts_persist_count.get().saturating_add(1));
-        if cfg!(test) {
-            return;
-        }
-        let Some(session_id) = self.session.session_id.as_ref() else {
+    /// Clear durable unsent draft after a successful submit (or explicit discard).
+    pub(crate) fn clear_unsent_prompt_draft(&self) {
+        let Some(sid) = self.session.session_id.as_ref() else {
             return;
         };
         let cwd = self.session.cwd.to_string_lossy();
-        let rows = persisted_pending_prompt_rows(
-            &self.session.pending_prompts,
-            &self.shared_queue,
-            self.session.current_prompt_id.as_deref(),
-            self.expect_send_now_cancel.as_deref(),
-            &self.send_now_painted_blocks,
-        );
-        let _ = xai_grok_shell::session::pending_prompts::write_pending_prompts_with_fsync(
-            &cwd,
-            session_id.0.as_ref(),
-            &rows,
-            xai_grok_shell::session::pending_prompts::PENDING_PROMPTS_QUEUE_SNAPSHOT_FSYNC,
-        );
+        if let Err(e) = xai_grok_shell::session::unsent_prompt_draft::clear_unsent_prompt_draft(
+            cwd.as_ref(),
+            sid.0.as_ref(),
+        ) {
+            tracing::warn!(?e, "failed to clear unsent prompt draft");
+        }
     }
 
-    /// Reload the durable pager queue after bind/rebuild when memory is empty.
-    /// Tests skip this wrapper so they do not read the operator's grok home.
-    pub(crate) fn restore_pending_prompts(&mut self) {
-        if cfg!(test) {
+    /// Load durable draft into an empty composer for the bound session.
+    pub(crate) fn maybe_restore_unsent_prompt_draft(&mut self) {
+        let Some(sid) = self.session.session_id.as_ref() else {
+            return;
+        };
+        let cwd = self.session.cwd.to_string_lossy();
+        let draft = match xai_grok_shell::session::unsent_prompt_draft::load_unsent_prompt_draft(
+            cwd.as_ref(),
+            sid.0.as_ref(),
+        ) {
+            Ok(d) => d,
+            Err(e) => {
+                tracing::warn!(?e, "failed to load unsent prompt draft");
+                return;
+            }
+        };
+        let Some(text) = draft else {
+            return;
+        };
+        if xai_grok_shell::session::unsent_prompt_draft::should_restore_draft_into_composer(
+            self.prompt.text(),
+            &text,
+        ) {
+            self.prompt.set_text(&text);
+            self.prompt.set_cursor(text.len());
+        }
+    }
+
+    /// Last-session restore without a canceled-turn marker must not keep a
+    /// queue row whose text is already a Human turn. `continue_prior_work`
+    /// is not spared here. A present marker stays on the canceled-turn path.
+    fn drop_recorded_prompts_when_no_canceled_turn_marker(&mut self) {
+        let Some(session_id) = self.session.session_id.as_ref() else {
+            return;
+        };
+        let cwd = self.session.cwd.to_string_lossy().into_owned();
+        let sid = session_id.0.to_string();
+        if matches!(
+            xai_grok_shell::session::canceled_turn_resume::load_canceled_turn_resume(&cwd, &sid),
+            Ok(Some(_))
+        ) {
             return;
         }
-        self.restore_pending_prompts_from_disk();
-    }
-
-    /// Load `pending_prompts.json` into an empty local queue, and always drop
-    /// occupancy that is already a Human turn.
-    ///
-    /// Skip rows already committed as Human turns in chat history (including
-    /// `/goal` rewrites and JSON-escaped quotes). Rebuild persist can leave
-    /// those issued bodies in `pending_prompts.json`. A live in-memory queue
-    /// must not skip occupancy drop: stale prompts continue to be a problem
-    /// after rebuild when memory is already non-empty.
-    pub(crate) fn restore_pending_prompts_from_disk(&mut self) {
-        let sid = self.session.session_id.as_ref().map(|s| s.0.to_string());
-        if let Some(sid) = sid {
-            let cwd = self.session.cwd.to_string_lossy().into_owned();
-            if let Ok(rows) =
-                xai_grok_shell::session::pending_prompts::load_pending_prompts(&cwd, &sid)
-            {
-                let chat_blob = xai_grok_shell::session::prompt_wal::chat_history_path(&cwd, &sid)
-                    .and_then(|p| std::fs::read_to_string(p).ok());
-                let rows: Vec<_> = rows
-                    .into_iter()
-                    .filter(|row| {
-                        !xai_grok_shell::session::prompt_wal::operator_text_already_recorded(
-                            &row.text,
-                            &self.session.prompt_history,
-                            &[],
-                            chat_blob.as_deref(),
-                        )
-                    })
-                    .collect();
-                if self.session.pending_prompts.is_empty() && self.shared_queue.is_empty() {
-                    apply_persisted_pending_prompts(&mut self.session, rows);
-                } else {
-                    for row in rows {
-                        if row.text.trim().is_empty() {
-                            continue;
-                        }
-                        let already = self.session.pending_prompts.iter().any(|p| {
-                            xai_grok_shell::session::prompt_wal::operator_text_matches_recorded(
-                                &row.text, &p.text,
-                            )
-                        }) || self.shared_queue.iter().any(|w| {
-                            xai_grok_shell::session::prompt_wal::operator_text_matches_recorded(
-                                &row.text, &w.text,
-                            )
-                        });
-                        if already {
-                            continue;
-                        }
-                        self.session.enqueue_prompt(row.text);
-                    }
-                }
-            }
-        }
-        self.drop_stale_queue_occupancy_with_chat_history();
-        self.sync_queue_pane();
+        let committed = self.committed_human_turn_texts(true, false);
+        self.session.pending_prompts.retain(|prompt| {
+            prompt.kind == QueueEntryKind::Command
+                || !Self::queue_text_matches_committed_human_turn(&prompt.text, &committed)
+        });
+        self.shared_queue
+            .retain(|wire| !Self::queue_text_matches_committed_human_turn(&wire.text, &committed));
     }
 
     /// Tests skip disk so they do not read the operator grok home.
@@ -1129,12 +649,14 @@ impl AgentView {
     pub(crate) fn unbind_session_id(&mut self) {
         if self.session.session_id.take().is_some() {
             self.session_binding_epoch = self.session_binding_epoch.wrapping_add(1);
+            self.deferred_subagent_finishes.clear();
             self.clear_minimal_btw_lifecycle();
+            self.clear_kept_plan();
         }
     }
-    /// Record a prompt id this client originated (sent to the agent as the turn
-    /// driver). Used by the ACP gate to keep `attached_as_viewer` per-turn
-    /// accurate. Bounded FIFO; a no-op for ids already tracked.
+    /// Record a prompt id this client originated (sent to the agent as the turn driver).
+    /// The ACP gate uses it to keep `attached_as_viewer` accurate per turn.
+    /// The list is a bounded FIFO; an id already tracked is a no-op.
     pub fn note_self_originated_prompt(&mut self, prompt_id: &str) {
         if self.is_self_originated_prompt(prompt_id) {
             return;
@@ -1145,8 +667,7 @@ impl AgentView {
             self.self_originated_prompt_ids.pop_front();
         }
     }
-    /// Whether `prompt_id` is a turn THIS client originated (vs. one another
-    /// client drives, or a server-initiated turn).
+    /// Whether `prompt_id` is a turn THIS client originated (vs. one another client drives, or a server-initiated turn).
     pub fn is_self_originated_prompt(&self, prompt_id: &str) -> bool {
         self.self_originated_prompt_ids
             .iter()
@@ -1164,6 +685,16 @@ impl AgentView {
     pub(crate) fn is_rewound_prompt(&self, prompt_id: &str) -> bool {
         self.rewound_prompt_ids.iter().any(|p| p == prompt_id)
     }
+    /// Same as [`Self::new`], then inherit the app's post-turn review flag.
+    pub fn from_app(
+        app: &crate::app::app_view::AppView,
+        session: AgentSession,
+        scrollback: ScrollbackState,
+    ) -> Self {
+        let mut agent = Self::new(session, scrollback);
+        agent.post_turn_plan_review = app.post_turn_plan_review;
+        agent
+    }
     /// Create a new agent view with default UI state.
     ///
     /// The prompt widget is initialized with the session's working directory.
@@ -1177,7 +708,6 @@ impl AgentView {
             tip_typing_dismissed: false,
             todo: TodoPane::new(),
             tasks: TasksPane::new(),
-            catalog: SubagentCatalogPane::new(),
             queue: QueuePane::new(),
             shared_queue: Vec::new(),
             attached_as_viewer: false,
@@ -1186,29 +716,56 @@ impl AgentView {
             last_applied_event_seq: None,
             last_applied_xai_event_seq: None,
             last_seen_event_id: None,
+            last_seen_event_seq: None,
+            deferred_subagent_finishes: Default::default(),
             session_reload: None,
             unexpected_replay_drops: 0,
             late_replay_until: None,
             replayed_terminal_prompts: HashSet::new(),
+            replayed_visible_prompts: HashSet::new(),
+            replayed_bash_prompts: HashSet::new(),
             failed_wake_marker_for: None,
             running_wake_turn: None,
             finished_wake_prompts: HashSet::new(),
+            ended_child_prompt_ids: HashSet::new(),
+            superseded_child_prompt_ids: HashSet::new(),
+            unidentified_child_turn_closed_ms: None,
+            unidentified_child_turn_closed_prompt: None,
             active_pane: ActivePane::Prompt,
+            dock_cursor: 0,
+            dock_workflows_expanded: true,
+            dock_subagents_expanded: true,
+            dock_tasks_expanded: true,
+            dock_watchers_expanded: true,
+            dock_workflows_show_all: false,
+            dock_subagents_show_all: false,
+            dock_tasks_show_all: false,
+            dock_watchers_show_all: false,
+            dock_offsets: Default::default(),
+            dock_reveal_pending: false,
+            dock_hovered: None,
+            dock_stop_button: None,
+            dock_queued_expanded: true,
+            dock_on: false,
+            dock_shown: false,
+            dock_hidden: false,
             prompt_mode: PromptMode::Normal,
             prompt_input_mode: PromptInputMode::Normal,
             multiline_mode: false,
             vim_mode: crate::appearance::cache::load_vim_mode(),
             input_mode: InputMode::Vim,
             bash_turn: false,
-            cron_task_id: None,
             stashed_prompt: None,
+            prompt_stash: None,
+            draft_consumed: false,
             credit_limit_stashed_prompt: None,
             reauth_stashed_prompt: None,
             active_modal: None,
             modal_buttons: Vec::new(),
             modal_hovered_key: None,
             context_state: None,
-            session_sampling_window: None,
+            status_context: None,
+            last_status_line_size: None,
             chat_kind: false,
             conversation_entry: false,
             app_chat_mode: false,
@@ -1225,7 +782,6 @@ impl AgentView {
             cleared_workflow_runs: std::collections::HashSet::new(),
             show_workflows: false,
             workflows_view: crate::views::workflows::WorkflowsViewState::default(),
-            pending_stop_hooks: None,
             last_cleared_goal_id: None,
             show_goal_detail: false,
             turn_start_ms: None,
@@ -1237,6 +793,8 @@ impl AgentView {
             turn_paused_duration: std::time::Duration::ZERO,
             turn_paused_wall: std::time::Duration::ZERO,
             self_interjection_ids: std::collections::HashSet::new(),
+            interjection_painted_blocks: std::collections::HashMap::new(),
+            interjection_retry_images: std::collections::HashMap::new(),
             last_active_at: Some(Instant::now()),
             current_branch: None,
             is_worktree: false,
@@ -1253,6 +811,8 @@ impl AgentView {
             deferred_text_press: None,
             persistent_text_selection: None,
             table_selection_geometry: None,
+            drag_table_geometry: None,
+            btw_selection_wrap_width: None,
             selection_created_at: None,
             last_drag_mouse: None,
             drag_autoscroll: None,
@@ -1285,14 +845,12 @@ impl AgentView {
             prompt_wal_append_count: Cell::new(0),
             pending_prompts_persist_count: Cell::new(0),
             hovered_prompt: false,
-            hit_badge: Default::default(),
             hit_context: Default::default(),
             hit_credits: Default::default(),
             hit_todo_close: Default::default(),
             hit_todo_clear_done: Default::default(),
             hit_bg_close: Default::default(),
             hit_subagent_close: Default::default(),
-            hit_catalog_close: Default::default(),
             hit_bg_status: Default::default(),
             hit_goal_status: Default::default(),
             hit_goal_close: Default::default(),
@@ -1304,17 +862,22 @@ impl AgentView {
             hit_bg_button: Default::default(),
             last_bg_click: None,
             hit_queue_close: Default::default(),
-            hit_queue_badge: Default::default(),
             hit_plan_button: Default::default(),
             hit_plan_approval_status: Default::default(),
             hit_follow_indicator: Default::default(),
             hit_response_top_indicator: Default::default(),
             hit_cwd: Default::default(),
+            hit_dashboard: Default::default(),
+            hit_overlay_prev: Default::default(),
+            hit_overlay_next: Default::default(),
+            hit_cancel_button: Default::default(),
+            hit_pause_button: Default::default(),
             hit_header_dashboard: Default::default(),
             hit_header_prev: Default::default(),
             hit_header_next: Default::default(),
-            hit_cancel_button: Default::default(),
-            hit_pause_button: Default::default(),
+            session_sampling_window: None,
+            sampling_identity: crate::views::credit_bar::SamplingIdentityKind::SuperGrokSession,
+            latest_inline_plan_content: None,
             global_work_paused: false,
             hit_watching_cue: Default::default(),
             watching_cue_toast_shown: false,
@@ -1337,6 +900,7 @@ impl AgentView {
             video_viewer: None,
             gboom: None,
             inline_media_cache: std::collections::HashMap::new(),
+            inline_media_load_failed: std::collections::HashMap::new(),
             inline_media_ids: std::collections::HashMap::new(),
             inline_media_iterm_emitted: std::collections::HashMap::new(),
             next_inline_media_id: 2,
@@ -1347,9 +911,13 @@ impl AgentView {
             inline_media_active: false,
             last_placed_ids: HashSet::new(),
             last_terminal_size: (0, 0),
+            last_resize_at: None,
             terminal_size_stale: false,
             inline_media_hits: InlineMediaHitAreas::default(),
             extensions_modal: None,
+            feedback_modal: None,
+            pending_feedback_trace_uploads: Default::default(),
+            parked_feedback_trace_consents: Default::default(),
             agents_modal: None,
             persona_detail: None,
             btw_state: None,
@@ -1360,17 +928,23 @@ impl AgentView {
             ephemeral_tip: Default::default(),
             word_select_tip_prompt_snapshot: None,
             last_word_select_probe: None,
+            export_copy_detector: Default::default(),
             sticky_toast: None,
             mode_switch_banner: None,
             session_banner_active: false,
             pinned_upgrade_cta_live: false,
             block_viewer: None,
+            block_viewer_resume: None,
             scrollback_search: None,
             hit_sb_copy: Default::default(),
             hit_bubble_copy: Vec::new(),
+            pending_stop_hooks: None,
             hovered_bubble_copy: false,
             hit_sb_view: Default::default(),
             question_view: None,
+            elicitation_view: None,
+            pending_elicitation: None,
+            elicit_hits: Vec::new(),
             hit_question_scrollbar: Default::default(),
             hovered_question_item: None,
             question_scrollbar_dragging: false,
@@ -1381,27 +955,43 @@ impl AgentView {
             question_scroll_region: None,
             plan_mode_active: false,
             plan_mode_pending: None,
+            available_modes: Vec::new(),
+            session_mode: xai_grok_tools::types::SessionMode::Default,
+            session_mode_pending: None,
             plan_decision_resolved: false,
+            plan_approved_implement: false,
+            paste_chip_approval_not_wire_interject: false,
             plan_feedback_in_flight: None,
             isolated_preview_rewrite_wait_prompt: None,
             isolated_preview_shows_secondary_plan: false,
+            last_isolated_preview_plan_feedback: None,
             deferred_session_mode: None,
+            deferred_permission_mode: None,
             pending_extensions_fetch: false,
             in_dashboard_overlay: false,
+            workspace_dashboard_enabled: false,
+            overlay_stop_label: None,
             overlay_can_cycle: false,
             fork_family_position: None,
             mcp_init_progress: None,
+            session_starting_since: None,
+            session_new_phase: None,
+            pending_session_id: None,
             acp_synced_generation: 0,
             hovered_permission_item: None,
             last_permission_click: None,
             permission_queue: VecDeque::new(),
             next_perm_req_id: 0,
             permission_stashed_prompt: None,
+            plan_freeform_prefill_deferred: false,
             permission_stashed_pane: None,
             permission_pattern_edit: None,
             plan_approval_view: None,
             view_plan_requested: false,
-            latest_inline_plan_content: None,
+            kept_plan: crate::app::agent_view::KeptPlan::default(),
+            post_turn_plan_review: post_turn_plan_review_default(),
+            execute_plan: None,
+            pending_post_turn_commit: None,
             plan_comments: Vec::new(),
             plan_next_comment_id: 0,
             casual_commenting_range: None,
@@ -1413,8 +1003,6 @@ impl AgentView {
             cancel_trigger_hint: None,
             rewind_state: None,
             rewind_points: None,
-            inline_edit: None,
-            pending_inline_resubmit: None,
             jump_state: None,
             timeline_rail: None,
             timeline_hover: None,
@@ -1424,23 +1012,22 @@ impl AgentView {
             finished_nested_wait_ids: HashSet::new(),
             subagent_views: HashMap::new(),
             active_subagent: None,
-            is_subagent_view: false,
+            role: AgentRole::Root,
+            activity_row_clocks: false,
             hit_subagent_frame_close: Default::default(),
             hit_overlay_nested_status: Default::default(),
             overlay_nested_status_child_sid: None,
             sharing_enabled: false,
-            scheduler_background_loops: None,
+            memory_mode: None,
             billing_surface_visible: false,
             usage_command_visible: true,
-            sampling_identity: crate::views::credit_bar::SamplingIdentityKind::default(),
-            console_team_prepaid_cents: None,
-            console_prepaid_billing_settled: false,
-            rebuild_progress: None,
             input_log: crate::input_log::InputRingBuffer::new(),
             esc_pressed_at: None,
             rewind_suppress_deadline: None,
+            minimal_cancel_hint_turn: None,
             pending_first_prompt: None,
             pending_fork_banner: None,
+            load_failed: false,
             loading_placeholder_id: None,
             pending_recap_entry: None,
             display_name: None,
@@ -1453,11 +1040,14 @@ impl AgentView {
             deferred_send: None,
             pending_turn_end_reconcile: None,
             pending_cancel_resend: None,
+            prompt_ack: None,
+            cancel_latency: None,
             expect_send_now_cancel: None,
             front_message_committed: true,
             optimistic_queue_ids: std::collections::HashSet::new(),
             send_now_awaiting_confirm: None,
             send_now_painted_blocks: std::collections::HashMap::new(),
+            send_now_echo_pending: std::collections::HashMap::new(),
             follow_without_jump_prompt_id: None,
             plugin_cta: PluginCtaState::default(),
             follow_ups: None,
@@ -1469,6 +1059,9 @@ impl AgentView {
             follow_up_pending: HashMap::new(),
             follow_up_pending_order: VecDeque::new(),
             pending_adoption_updates: Vec::new(),
+            composer_copy_button: None,
+            console_prepaid_billing_settled: false,
+            rebuild_progress: None,
         };
         let mode = if crate::appearance::cache::load_simple_mode() {
             InputMode::Simple
@@ -1478,173 +1071,115 @@ impl AgentView {
         view.set_input_mode(mode);
         view
     }
-    /// Establish read-only child identity before a view is stored or opened.
-    pub(crate) fn mark_as_subagent_view(&mut self) {
-        self.is_subagent_view = true;
-    }
-    /// Register a child view and establish its read-only subagent identity.
+    /// Register a child view; the sole path that turns a view into a child, so the role is stamped exactly once.
+    /// A child always opens on its transcript, whatever `AgentView::new` chose: `q`/`Esc` close from bare scrollback.
+    /// Its composer stays hidden until a role gives it a route, and its queue pane is a read-only mirror.
     pub(crate) fn insert_subagent_view(
         &mut self,
         child_sid: String,
         mut child_view: Box<AgentView>,
+        link: ChildLink,
     ) {
-        child_view.mark_as_subagent_view();
+        child_view.role = AgentRole::Child(link);
+        child_view.active_pane = ActivePane::Scrollback;
+        child_view.queue.set_mutation(QueueMutation::ReadOnly);
         self.subagent_views.insert(child_sid, child_view);
     }
-    /// Create a nested child view if spawn registered the row without one.
-    ///
-    /// L3 specialists spawned from an L2 arrive on the parent registry via
-    /// nested `SubagentSpawned` and used to skip `subagent_views`. Clicking
-    /// the overlay control that shows that specialist then no-ops.
-    pub(crate) fn ensure_subagent_child_view(&mut self, child_sid: &str) {
-        if self.subagent_views.contains_key(child_sid) {
-            return;
-        }
-        let info = self.subagent_sessions.get(child_sid);
-        let cwd = info
-            .and_then(|i| i.child_cwd.as_deref())
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| self.session.cwd.clone());
-        let is_worktree = info.is_some_and(|i| i.worktree_path.is_some());
-        let child_idle = info.is_some_and(|i| i.finished);
-        let child_session = AgentSession {
-            id: crate::app::agent::AgentId(0),
-            acp_tx: self.session.acp_tx.clone(),
-            session_id: Some(agent_client_protocol::SessionId::new(child_sid)),
-            models: self.session.models.clone(),
-            state: if child_idle {
-                crate::app::agent::AgentState::Idle
-            } else {
-                crate::app::agent::AgentState::TurnRunning
-            },
-            tracker: crate::acp::tracker::AcpUpdateTracker::new(),
-            cwd,
-            is_worktree,
-            forked_from: None,
-            pending_prompts: std::collections::VecDeque::new(),
-            next_queue_id: 0,
-            yolo_mode: true,
-            auto_mode: false,
-            context_only_mode: false,
-            prompt_history: Vec::new(),
-            prompt_history_loading: false,
-            loading_replay: false,
-            restore_degree: None,
-            rate_limited: false,
-            model_incompatible: false,
-            credit_limit_blocked: false,
-            free_usage_blocked: false,
-            bg_tasks: std::collections::BTreeMap::new(),
-            bg_tool_call_to_task: std::collections::HashMap::new(),
-            scheduled_tasks: std::collections::HashMap::new(),
-            available_commands: Vec::new(),
-            available_commands_generation: 0,
-            available_tools: None,
-            model_switch_pending: false,
-            user_model_preference: None,
-            deferred_model_switch: None,
-            in_flight_prompt: None,
-            compact_held_prompt: None,
-            current_prompt_id: None,
-            created_via_new: false,
-            session_notes: crate::app::agent::SessionNotes::default(),
-        };
-        let mut child_scrollback = crate::scrollback::state::ScrollbackState::new();
-        child_scrollback.set_appearance(self.scrollback.appearance().clone());
-        let mut child_view = AgentView::new(child_session, child_scrollback);
-        child_view.set_input_mode(InputMode::Vim);
-        child_view.active_pane = crate::views::agent::ActivePane::Scrollback;
-        child_view.set_sharing_enabled(self.sharing_enabled);
-        child_view.set_billing_surface_visible(self.billing_surface_visible);
-        child_view.set_usage_command_visible(self.usage_command_visible);
-        child_view
-            .prompt
-            .set_screen_mode(self.prompt.slash_controller.screen_mode());
-        child_view.app_chat_mode = self.app_chat_mode;
-        let parent_cwd = self.session.cwd.clone();
-        let child_cwd = self
-            .subagent_sessions
-            .get(child_sid)
-            .and_then(|info| info.child_cwd.clone());
-        crate::app::subagent::replay_inherited_updates_with_fallback(
-            &mut child_view,
-            child_sid,
-            &parent_cwd,
-            child_cwd.as_deref().map(std::path::Path::new),
-            xai_grok_shell::session::storage::ReplayLookupFallback::Relocation,
-        );
-        if let Some(info) = self.subagent_sessions.get_mut(child_sid) {
-            info.child_updates_replayed = true;
-        }
-        self.insert_subagent_view(child_sid.to_string(), Box::new(child_view));
+    /// The folder the header and the dashboard show, on the session's own computer
+    pub(crate) fn location_path(&self) -> &std::path::Path {
+        &self.session.cwd
     }
-    /// Open the nested session for a tasks-pane agent id (subagent id or
-    /// child session id). Creates a missing child view so L3 overlay clicks
-    /// are not dead.
-    pub(crate) fn open_listed_subagent(&mut self, listed_id: &str) -> bool {
-        let child_sid = self
-            .subagent_sessions
-            .get(listed_id)
-            .map(|info| info.child_session_id.to_string())
-            .or_else(|| {
-                self.subagent_sessions
-                    .iter()
-                    .find(|(_, info)| info.subagent_id.as_ref() == listed_id)
-                    .map(|(k, _)| k.clone())
-            });
-        let Some(child_sid) = child_sid else {
-            return false;
-        };
-        self.ensure_subagent_child_view(&child_sid);
-        if !self.subagent_views.contains_key(&child_sid) {
-            return false;
-        }
-        self.open_subagent_fullscreen(child_sid);
-        true
+    #[cfg(test)]
+    pub(crate) fn subagent_view(&self, child_sid: &str) -> Option<&AgentView> {
+        self.subagent_views.get(child_sid).map(|v| &**v)
     }
-    /// Close the visible nested overlay one level.
-    ///
-    /// L3 pops to its parent L2 when that coordinator view is already
-    /// on the overlay stack. L2 dismisses to the main thread. Overlay
-    /// dismiss is not Cancel.
-    pub(crate) fn dismiss_nested_overlay(&mut self) {
-        let Some(child_sid) = self.active_subagent.clone() else {
-            return;
-        };
-        let parent_sid = self
-            .subagent_sessions
-            .get(&child_sid)
-            .and_then(|info| info.parent_session_id.as_deref())
-            .filter(|parent| *parent != child_sid)
-            .filter(|parent| self.subagent_views.contains_key(*parent))
-            .map(str::to_owned);
-        self.active_subagent = None;
-        if let Some(parent_sid) = parent_sid {
-            self.open_subagent_fullscreen(parent_sid);
-        }
+    #[cfg(test)]
+    pub(crate) fn subagent_view_mut(&mut self, child_sid: &str) -> Option<&mut AgentView> {
+        self.subagent_views.get_mut(child_sid).map(|v| &mut **v)
     }
-    /// Clear the turn-timing fields and stamp `last_active_at` to "now".
-    ///
-    /// Call this from every site that ends a turn (success, failure,
-    /// cancellation, reconnect cleanup). Centralised so the fields cannot
-    /// drift apart at the ~10 termination call sites across `dispatch.rs`
-    /// and `event_loop.rs`. The wall anchor is cleared so a later turn that
-    /// reuses a prompt id (stash-and-resubmit after `/login`) can never
-    /// wall-max against a previous attempt's anchor in
-    /// [`honest_turn_elapsed`].
-    pub fn mark_turn_finished(&mut self) {
+    /// Called at every turn-termination site; clears the wall anchor so a turn that reuses a prompt id cannot report the prior attempt's wall span.
+    pub(crate) fn mark_turn_finished(&mut self, end: TurnEnd) {
+        let now = Instant::now();
         self.turn_started_at = None;
         self.turn_paused_duration = std::time::Duration::ZERO;
         self.turn_paused_wall = std::time::Duration::ZERO;
         self.turn_start_ms = None;
         self.turn_start_ms_prompt = None;
-        self.last_active_at = Some(Instant::now());
-        crate::app::active_session_heartbeat::write_from_agent(self);
+        self.last_active_at = Some(now);
+        self.note_prompt_ack(AckSignal::TurnEnded, now);
+        if let Some(event) = self.settle_cancel(end, now) {
+            xai_grok_telemetry::session_ctx::log_event(event);
+        }
     }
-    /// Absorb a closing/replaced question view's open span into the turn's
-    /// pause totals, on both clocks — a close site that updated only the
-    /// `Instant` pause would resurface suspend time as worked time in
-    /// [`honest_turn_elapsed`].
+    /// Start the acknowledgment watch for a prompt this client just drained and sent.
+    /// Chat sessions never arm: the gateway bridge has no queue broadcast, so their first signal is the first delta.
+    pub(crate) fn arm_prompt_ack(&mut self, prompt_id: &str, now: Instant) {
+        if self.chat_kind {
+            return;
+        }
+        self.prompt_ack = Some(PromptAckWatch::new(prompt_id, now));
+    }
+    /// Disarm the watch when a signal names the awaited prompt; anything else (no id, another prompt) is ignored.
+    pub(crate) fn ack_prompt_if_named(
+        &mut self,
+        prompt_id: Option<&str>,
+        signal: AckSignal,
+        now: Instant,
+    ) {
+        if let Some(prompt_id) = prompt_id
+            && self
+                .prompt_ack
+                .as_ref()
+                .is_some_and(|watch| watch.prompt_id() == prompt_id)
+        {
+            self.note_prompt_ack(signal, now);
+        }
+    }
+    /// Disarm the watch: the shell proved it holds the prompt.
+    pub(crate) fn note_prompt_ack(&mut self, signal: AckSignal, now: Instant) {
+        let Some(watch) = self.prompt_ack.take() else {
+            return;
+        };
+        crate::unified_log::info(
+            "prompt.acked",
+            self.session.session_id.as_ref().map(|s| s.0.as_ref()),
+            Some(serde_json::json!({
+                "prompt_id": watch.prompt_id(),
+                "signal": signal,
+                "waited_ms": watch.waited(now).as_millis() as u64,
+            })),
+        );
+    }
+    /// Cancel the running work and set its latency anchor in one place, so the action and the `CancellationScope` it measures cannot drift apart.
+    pub(crate) fn cancel_and_arm(&mut self, scope: CancellationScope, origin: CancelOrigin) {
+        let now = Instant::now();
+        match scope {
+            CancellationScope::Turn => self.session.cancel_turn(&mut self.scrollback),
+            CancellationScope::Compaction => self.session.cancel_compact_command(),
+        }
+        if origin == CancelOrigin::UserGesture && self.surface() == ViewSurface::Root {
+            self.cancel_latency
+                .get_or_insert_with(|| CancelLatency::new(now, scope));
+        }
+    }
+    /// Settle a pending user-cancel anchor into a `CancellationCompleted`.
+    /// The anchor is consumed on both ends, so the event is emitted at most once.
+    pub(crate) fn settle_cancel(
+        &mut self,
+        end: TurnEnd,
+        now: Instant,
+    ) -> Option<CancellationCompleted> {
+        let pending = self.cancel_latency.take();
+        match end {
+            TurnEnd::Completed => pending.map(|p| CancellationCompleted {
+                latency_ms: now.saturating_duration_since(p.requested_at).as_millis() as u64,
+                scope: p.scope,
+            }),
+            TurnEnd::Aborted => None,
+        }
+    }
+    /// Absorb a closing/replaced question view's open span into the turn's pause totals, on both clocks.
+    /// A close site that updated only the `Instant` pause would resurface suspend time as worked time in [`honest_turn_elapsed`].
     pub(crate) fn record_question_pause(
         &mut self,
         qv: &crate::views::question_view::QuestionViewState,
@@ -1657,42 +1192,84 @@ impl AgentView {
     pub(crate) fn clear_minimal_btw_lifecycle(&mut self) {
         crate::minimal_api::clear_minimal_btw(self);
     }
-    /// Accept leftover `isReplay` after `loading_replay` clears. Long enough
-    /// for FIFO drain of a foreign ACP head after the Unrelated firehose timeout.
+    /// How long leftover `isReplay` updates stay accepted after `loading_replay` clears.
+    /// Long enough for the FIFO to drain another session's ACP events from its head after the Unrelated firehose timeout releases the load barrier.
     pub(crate) const LATE_REPLAY_GRACE: std::time::Duration = std::time::Duration::from_secs(30);
     pub(crate) fn arm_late_replay_grace(&mut self) {
         self.late_replay_until = Some(std::time::Instant::now() + Self::LATE_REPLAY_GRACE);
     }
-    /// Enter a `session/load` replay window: flip `loading_replay` on and reset
-    /// every field coupled to that transition together, so no site can drift
-    /// (e.g. reset one coupled field but miss another). Called at every
-    /// replay-window entry: the fresh/restore load ctor paths and the
-    /// reconnect/fork reuse paths.
+    /// Whether a replayed (`isReplay`) update should be applied right now.
+    /// True while a `session/load` replay window is open, or while the post-load grace for a late replay tail runs (see `late_replay_until`).
+    /// Anything else is a misrouted replay against a live transcript.
+    pub(crate) fn accepts_replayed_update(&self) -> bool {
+        self.session.loading_replay
+            || self
+                .late_replay_until
+                .is_some_and(|deadline| std::time::Instant::now() < deadline)
+    }
+    /// Enter a `session/load` replay window: the fields coupled to that transition (including `cancel_latency`) reset together in one place.
     pub(crate) fn begin_replay_window(&mut self) {
         self.clear_minimal_btw_lifecycle();
         self.session.loading_replay = true;
         self.replayed_terminal_prompts.clear();
+        self.replayed_visible_prompts.clear();
+        self.replayed_bash_prompts.clear();
         self.unexpected_replay_drops = 0;
         self.late_replay_until = None;
         self.running_wake_turn = None;
         self.finished_wake_prompts.clear();
+        self.ended_child_prompt_ids.clear();
+        self.superseded_child_prompt_ids.clear();
+        self.unidentified_child_turn_closed_ms = None;
+        self.unidentified_child_turn_closed_prompt = None;
         self.pending_cancel_resend = None;
-        self.pending_stop_hooks = None;
+        self.cancel_latency = None;
         self.clear_send_now_expectation();
         self.front_message_committed = true;
         self.optimistic_queue_ids.clear();
         self.send_now_awaiting_confirm = None;
         self.send_now_painted_blocks.clear();
+        self.send_now_echo_pending.clear();
         self.workflow_blocks.clear();
         self.workflow_run_revisions.clear();
         self.cleared_workflow_runs.clear();
         self.workflow_runs.clear();
     }
-    /// Open a reconnect reload window: stash the current transcript/tracker
-    /// and point the live fields at fresh state for the incoming
-    /// `session/load` replay. The transcript is NOT cleared — it stays
-    /// recoverable until [`finish_session_reload`](Self::finish_session_reload)
-    /// decides the outcome.
+    /// Swap every replay-rebuilt field for a fresh value and return the old state.
+    /// The fields reset together so stale revision gates cannot suppress the replayed updates.
+    pub(crate) fn take_replay_rebuilt_state(&mut self) -> ReplayRebuiltState {
+        let fresh = self.scrollback.fresh_continuation();
+        let tracker = crate::acp::tracker::AcpUpdateTracker::sharing_labels(
+            &self.session.tracker.subagent_labels,
+        );
+        ReplayRebuiltState {
+            scrollback: std::mem::replace(&mut self.scrollback, fresh),
+            tracker: std::mem::replace(&mut self.session.tracker, tracker),
+            todo: std::mem::take(&mut self.todo),
+            workflow_blocks: std::mem::take(&mut self.workflow_blocks),
+            workflow_runs: std::mem::take(&mut self.workflow_runs),
+            workflow_run_revisions: std::mem::take(&mut self.workflow_run_revisions),
+            cleared_workflow_runs: std::mem::take(&mut self.cleared_workflow_runs),
+        }
+    }
+    /// Put a taken [`ReplayRebuiltState`] back: the counterpart of [`Self::take_replay_rebuilt_state`].
+    /// A caller whose rebuild failed restores the stash so it does not leave a bare view where content used to be.
+    /// The subagent restore path and the reload failure outcome use it.
+    pub(crate) fn restore_replay_rebuilt_state(&mut self, mut taken: ReplayRebuiltState) {
+        taken.scrollback.raise_id_floor(self.scrollback.id_floor());
+        taken
+            .scrollback
+            .raise_invalidation_floor(self.scrollback.invalidation_generations());
+        self.scrollback = taken.scrollback;
+        self.session.tracker = taken.tracker;
+        self.todo = taken.todo;
+        self.workflow_blocks = taken.workflow_blocks;
+        self.workflow_runs = taken.workflow_runs;
+        self.workflow_run_revisions = taken.workflow_run_revisions;
+        self.cleared_workflow_runs = taken.cleared_workflow_runs;
+    }
+    /// Open a reconnect reload window: stash the current transcript/tracker and point the live fields at fresh state for the `session/load` replay.
+    /// The transcript is NOT cleared; it stays recoverable until [`finish_session_reload`](Self::finish_session_reload) decides the outcome.
     pub(crate) fn begin_session_reload(&mut self, generation: u64) {
         self.dismiss_jump_picker();
         if let Some(prev) = self.session_reload.take() {
@@ -1702,7 +1279,7 @@ impl AgentView {
                 "session reload superseded without finalize; restoring previous stash first"
             );
             if self.apply_reload_outcome(prev, false) {
-                crate::memory_release::release_retained_memory_with("reload-supersede");
+                crate::memory_release::release_retained_memory("reload-supersede");
             }
         }
         while self.scrollback.in_batch() {
@@ -1715,25 +1292,20 @@ impl AgentView {
             self.scrollback.remove_entry(rid);
         }
         self.session.model_switch_pending = false;
+        self.session.models.model_changed_during_switch = false;
+        self.release_hook_block_hold();
         self.pending_adoption_updates.clear();
-        let fresh = self.scrollback.fresh_continuation();
+        let stash = self.take_replay_rebuilt_state();
         self.session_reload = Some(SessionReload {
             generation,
-            scrollback: std::mem::replace(&mut self.scrollback, fresh),
-            tracker: std::mem::replace(
-                &mut self.session.tracker,
-                crate::acp::tracker::AcpUpdateTracker::new(),
-            ),
-            todo: std::mem::take(&mut self.todo),
-            workflow_blocks: std::mem::take(&mut self.workflow_blocks),
-            workflow_runs: std::mem::take(&mut self.workflow_runs),
-            workflow_run_revisions: std::mem::take(&mut self.workflow_run_revisions),
-            cleared_workflow_runs: std::mem::take(&mut self.cleared_workflow_runs),
+            stash,
             last_seen_event_id: self.last_seen_event_id.clone(),
+            last_seen_event_seq: self.last_seen_event_seq,
             last_applied_event_seq: self.last_applied_event_seq,
             last_applied_xai_event_seq: self.last_applied_xai_event_seq,
             saw_replay: false,
             saw_todo_update: false,
+            replayed_expiry_notices: Vec::new(),
         });
         self.loading_placeholder_id = Some(self.scrollback.push_block(
             crate::scrollback::block::RenderBlock::system("Reloading session after reconnect..."),
@@ -1742,24 +1314,30 @@ impl AgentView {
         self.begin_replay_window();
         self.pause_live_prompt_reconnect();
     }
-    /// Record that an `isReplay` update applied while a reload window is open.
-    /// No-op otherwise.
+    /// Record that an `isReplay` update applied while a reload window is open. No-op otherwise.
     pub(crate) fn mark_reload_replay_seen(&mut self) {
         if let Some(reload) = self.session_reload.as_mut() {
             reload.saw_replay = true;
         }
     }
-    /// Record that a Plan update applied while a reload window is open.
-    /// No-op otherwise.
+    /// Record a staged expiry notice so the finalize that keeps the stash can drop copies the stash already shows.
+    /// No-op outside a reconnect reload window (a fresh `session/load` has no stash to duplicate against).
+    pub(crate) fn note_replayed_expiry_notice(
+        &mut self,
+        entry_id: crate::scrollback::entry::EntryId,
+    ) {
+        if let Some(reload) = self.session_reload.as_mut() {
+            reload.replayed_expiry_notices.push(entry_id);
+        }
+    }
+    /// Record that a Plan update applied while a reload window is open. No-op otherwise.
     pub(crate) fn mark_reload_todo_update(&mut self) {
         if let Some(reload) = self.session_reload.as_mut() {
             reload.saw_todo_update = true;
         }
     }
-    /// Start a locally-tracked turn: enter TurnRunning with the turn-scoped
-    /// bookkeeping every real turn start must apply, so no caller can miss
-    /// it. Deliberately NOT used by server-initiated synthetic turns
-    /// (auto-wake / actor runs): they never call `start_turn`.
+    /// Start a locally-tracked turn: enter TurnRunning with the turn-scoped bookkeeping every real turn start must apply, so no caller can miss it.
+    /// Deliberately NOT used by server-initiated synthetic turns (auto-wake / actor runs): they never call `start_turn`.
     pub(crate) fn start_turn_boundary(&mut self, starting_prompt_id: Option<&str>) {
         if self
             .expect_send_now_cancel
@@ -1768,16 +1346,31 @@ impl AgentView {
         {
             self.expect_send_now_cancel = None;
         }
+        if self
+            .follow_without_jump_prompt_id
+            .as_deref()
+            .is_some_and(|id| Some(id) != starting_prompt_id)
+        {
+            self.follow_without_jump_prompt_id = None;
+        }
         self.front_message_committed = false;
         self.pending_cancel_resend = None;
-        self.finished_nested_wait_ids.clear();
+        self.prompt_ack = None;
+        self.cancel_latency = None;
         self.session.start_turn(&mut self.scrollback);
         crate::app::active_session_heartbeat::write_from_agent(self);
     }
-    /// Adopt the in-flight turn another client is driving, conveyed by the
-    /// `session/load` response meta (`x.ai/runningPromptId`): enter
-    /// TurnRunning and match subsequent live deltas. No user-prompt block is
-    /// pushed — the turn's prompt and prior chunks arrived via the replay.
+    /// Locally originated prompt or ExecutePlan turn. `note_self` is idempotent.
+    pub(crate) fn begin_local_turn(&mut self, prompt_id: &str) {
+        self.note_self_originated_prompt(prompt_id);
+        self.start_turn_boundary(Some(prompt_id));
+        self.session.current_prompt_id = Some(prompt_id.to_owned());
+        self.arm_prompt_ack(prompt_id, Instant::now());
+        self.turn_started_at = Some(Instant::now());
+    }
+    /// Adopt the in-flight turn another client is driving, conveyed by the `session/load` response meta (`x.ai/runningPromptId`).
+    /// Enters TurnRunning and matches subsequent live deltas.
+    /// No user-prompt block is pushed; the turn's prompt and prior chunks arrived via the replay.
     pub(crate) fn adopt_running_prompt(&mut self, prompt_id: String) {
         self.start_turn_boundary(Some(&prompt_id));
         self.session.tracker.clear_user_echo_skip();
@@ -1788,29 +1381,23 @@ impl AgentView {
         self.flush_pending_follow_ups(&prompt_id);
     }
     /// Finalize any open reload window as FAILED, regardless of generation.
-    ///
-    /// For load initiations that take over the agent (fork/worktree/restore
-    /// binding a new session): the stash belongs to the superseded
-    /// pre-reconnect state, and an open window would corrupt the incoming
-    /// load's batch/replay bookkeeping — and defer its results. The window's
-    /// pending re-init completion later no-ops (generation gone).
+    /// An open window would corrupt the incoming load's batch/replay bookkeeping and defer its results.
+    /// The window's pending re-init completion later no-ops (generation gone).
     pub(crate) fn abort_session_reload(&mut self) {
         if let Some(reload) = self.session_reload.take()
             && self.apply_reload_outcome(reload, false)
         {
-            crate::memory_release::release_retained_memory_with("reload-abort");
+            crate::memory_release::release_retained_memory("reload-abort");
         }
     }
     /// Finalize the reload window opened for `generation`.
-    ///
-    /// Returns `false` (untouched state) when no window with that generation
-    /// is open — the agent was never reloading, or a newer reconnect already
-    /// superseded it.
+    /// Returns `false` (untouched state) when no window with that generation is open.
+    /// Either the agent was never reloading, or a newer reconnect already superseded it.
     pub(crate) fn finish_session_reload(&mut self, generation: u64, success: bool) -> bool {
         match self.session_reload.take() {
             Some(reload) if reload.generation == generation => {
                 if self.apply_reload_outcome(reload, success) {
-                    crate::memory_release::release_retained_memory_with("reload-finalize");
+                    crate::memory_release::release_retained_memory("reload-finalize");
                 }
                 true
             }
@@ -1826,24 +1413,43 @@ impl AgentView {
             None => false,
         }
     }
-    /// Whether a running prompt reported on a `session/load` (resume /
-    /// reconnect) is adoptable by THIS agent: the pure synthetic-turn guard
-    /// ([`acp_handler::should_adopt_running_prompt`]) AND not terminal-in-replay.
-    /// A turn whose durable `TurnCompleted` already arrived in this load's replay
-    /// (recorded in [`Self::replayed_terminal_prompts`]) has ended; adopting it
-    /// would re-strand the viewer on "Waiting…".
-    ///
-    /// [`acp_handler::should_adopt_running_prompt`]: crate::app::acp_handler::should_adopt_running_prompt
+    /// Whether a running prompt reported on a `session/load` (resume / reconnect) is adoptable by THIS agent.
+    /// Requires the synthetic-turn guard ([`acp_handler::should_adopt_running_prompt`]) and that the turn did not already end in this load's replay.
+    /// Adopting it would re-strand the viewer on "Waiting…".
     pub(crate) fn should_adopt_running_prompt(&self, prompt_id: &str) -> bool {
         crate::app::acp_handler::should_adopt_running_prompt(prompt_id)
             && !self.replayed_terminal_prompts.contains(prompt_id)
             && !self.is_rewound_prompt(prompt_id)
     }
-    /// Wake turn in flight (streaming or cancelling) while the pane is idle.
+    /// Whether a wake turn is in flight (streaming or cancelling) while the pane is idle.
     pub(crate) fn wake_turn_active(&self) -> bool {
         self.session.state.is_idle() && self.running_wake_turn.is_some()
     }
-    /// Wake cancel sent and still waiting on its terminal. Pane stays idle.
+    pub(crate) fn has_wake_source(&self) -> bool {
+        self.running_wake_turn.is_some()
+            || self.session.has_running_bg_tasks()
+            || self
+                .subagent_sessions
+                .values()
+                .any(crate::app::subagent::SubagentInfo::is_running)
+            || !self.session.scheduled_tasks.is_empty()
+            || self
+                .workflow_runs
+                .iter()
+                .any(crate::views::workflows::WorkflowRunSnapshot::is_active)
+            || self
+                .goal_state
+                .as_ref()
+                .is_some_and(|goal| goal.status == GoalDisplayStatus::Active)
+    }
+    pub(crate) fn is_eligible_for_auto_recap(&self) -> bool {
+        self.session.session_id.is_some()
+            && self.session.state.is_idle()
+            && self.active_modal.is_none()
+            && self.question_view.is_none()
+            && !self.has_wake_source()
+    }
+    /// Whether the wake cancel was sent and is still waiting on its terminal. The pane stays idle.
     pub(crate) fn wake_turn_cancelling(&self) -> bool {
         self.session.state.is_idle()
             && self
@@ -1851,8 +1457,12 @@ impl AgentView {
                 .as_ref()
                 .is_some_and(|wake| wake.cancel_sent)
     }
-    /// Single setter for [`RunningWakeTurn`]. No-op unless the pane is idle
-    /// and not replaying; keeps an in-flight cancel marker for the same id.
+    /// Whether Send now can target a local turn or an idle-looking automatic wake.
+    pub(crate) fn can_send_now(&self) -> bool {
+        self.session.state.is_turn_running()
+            || (self.wake_turn_active() && !self.wake_turn_cancelling())
+    }
+    /// Single setter for [`RunningWakeTurn`]. No-op unless the pane is idle and not replaying; keeps an in-flight cancel marker for the same id.
     pub(crate) fn note_streaming_wake_turn(&mut self, prompt_id: &str) {
         if !self.session.state.is_idle() || self.session.loading_replay {
             return;
@@ -1872,13 +1482,13 @@ impl AgentView {
             cancel_sent: false,
         });
     }
-    /// Local turn, running `/compact`, or streaming wake not yet asked to stop.
+    /// True for a local turn, a running `/compact`, or a streaming wake not yet asked to stop.
     pub(crate) fn stoppable_activity_running(&self) -> bool {
         self.session.state.is_turn_running()
             || self.session.state.is_compact_running()
             || (self.wake_turn_active() && !self.wake_turn_cancelling())
     }
-    /// Local or wake cancel still in flight.
+    /// Whether a local or wake cancel is still in flight.
     pub(crate) fn any_cancel_pending(&self) -> bool {
         self.session.state.is_cancelling() || self.wake_turn_cancelling()
     }
@@ -1913,7 +1523,7 @@ impl AgentView {
             false
         }
     }
-    /// Status-row chrome for a wake turn, or `None` when a local turn owns it.
+    /// The status-row display state for a wake turn, or `None` when a local turn owns the row.
     pub(crate) fn wake_display_state(&self) -> Option<&'static crate::app::agent::AgentState> {
         if !self.session.state.is_idle() {
             return None;
@@ -1926,14 +1536,9 @@ impl AgentView {
             }
         })
     }
-    /// Finalize a reconnect-reload window and, iff the running prompt is
-    /// adoptable, adopt it. Returns whether the window finalized.
-    ///
-    /// Adoption is gated by [`Self::should_adopt_running_prompt`] and ordered
-    /// AFTER finalize so the finalize side effect (force-idle + window resolve)
-    /// always runs even when adoption is skipped for a synthetic / non-adoptable
-    /// / terminal-in-replay running id. The reconnect loop in `event_loop.rs`
-    /// calls this per agent.
+    /// Finalize a reconnect-reload window and, iff the running prompt is adoptable, adopt it. Returns whether the window finalized.
+    /// Adoption is gated by [`Self::should_adopt_running_prompt`] and ordered AFTER finalize.
+    /// The finalize side effects (force-idle and window resolve) then run even when adoption is skipped for a non-adoptable running id.
     pub(crate) fn finalize_reload_and_maybe_adopt(
         &mut self,
         generation: u64,
@@ -1941,6 +1546,9 @@ impl AgentView {
         running_prompt_id: Option<String>,
     ) -> bool {
         let finalized = self.finish_session_reload(generation, ok);
+        if finalized {
+            self.release_stale_execute_plan_prompt(running_prompt_id.as_deref());
+        }
         if finalized
             && let Some(pid) = running_prompt_id
             && self.should_adopt_running_prompt(&pid)
@@ -1949,14 +1557,9 @@ impl AgentView {
         }
         finalized
     }
-    /// Resolve a closed window per the [`SessionReload`] outcome trichotomy.
-    ///
-    /// Returns whether a heavy transient was dropped — the stashed pre-reload
-    /// scrollback (success + full replay) or the staged partial replay
-    /// (failure). The success+cursor branch *reuses* the stash and moves the
-    /// tail entries into it: nothing multi-MB drops, so callers must NOT
-    /// purge for it (a full-arena purge there would madvise away warm pages
-    /// on the most common reconnect outcome, once per open tab).
+    /// Resolve a closed window per the three [`SessionReload`] outcomes.
+    /// The success-with-cursor branch *reuses* the stash and moves the tail entries into it: nothing multi-MB drops, so callers must NOT purge.
+    /// (A full-arena purge there would madvise away warm pages on the most common reconnect outcome, once per open tab.)
     #[must_use = "purge retained memory iff a heavy transient dropped"]
     fn apply_reload_outcome(&mut self, reload: SessionReload, success: bool) -> bool {
         self.resume_live_prompt_after_reconnect();
@@ -1967,16 +1570,50 @@ impl AgentView {
             self.scrollback.end_batch();
             true
         } else if success {
-            let tail = std::mem::replace(&mut self.scrollback, reload.scrollback);
+            let stash = reload.stash;
+            let mut tail = std::mem::replace(&mut self.scrollback, stash.scrollback);
+            let mut dedupe_budget: HashMap<String, usize> = HashMap::new();
+            for entry_id in &reload.replayed_expiry_notices {
+                let staged_text = (0..tail.len()).find_map(|i| {
+                    let entry = tail.get(i)?;
+                    if entry.id != *entry_id {
+                        return None;
+                    }
+                    match &entry.block {
+                        crate::scrollback::block::RenderBlock::System(block) => {
+                            Some(block.text.clone())
+                        }
+                        _ => None,
+                    }
+                });
+                let Some(staged_text) = staged_text else {
+                    continue;
+                };
+                let budget = dedupe_budget.entry(staged_text.clone()).or_insert_with(|| {
+                    (0..self.scrollback.len())
+                        .filter(|i| {
+                            matches!(
+                                self.scrollback.get(*i).map(|e| &e.block),
+                                Some(crate::scrollback::block::RenderBlock::System(block))
+                                    if block.text == staged_text
+                            )
+                        })
+                        .count()
+                });
+                if *budget > 0 {
+                    *budget -= 1;
+                    tail.remove_entry(*entry_id);
+                }
+            }
             self.scrollback.append_entries_from(tail);
-            self.workflow_blocks.extend(reload.workflow_blocks);
+            self.workflow_blocks.extend(stash.workflow_blocks);
             {
                 let mut live_by_id: HashMap<String, _> = std::mem::take(&mut self.workflow_runs)
                     .into_iter()
                     .map(|run| (run.run_id.clone(), run))
                     .collect();
-                let mut merged = Vec::with_capacity(reload.workflow_runs.len() + live_by_id.len());
-                for run in reload.workflow_runs {
+                let mut merged = Vec::with_capacity(stash.workflow_runs.len() + live_by_id.len());
+                for run in stash.workflow_runs {
                     if let Some(live) = live_by_id.remove(&run.run_id) {
                         merged.push(live);
                     } else {
@@ -1987,34 +1624,24 @@ impl AgentView {
                 live_only.sort_by_key(|run| run.received_at);
                 merged.extend(live_only);
                 self.cleared_workflow_runs
-                    .extend(reload.cleared_workflow_runs);
+                    .extend(stash.cleared_workflow_runs);
                 merged.retain(|run| !self.cleared_workflow_runs.contains(&run.run_id));
                 self.workflow_runs = merged;
             }
-            for (run_id, rev) in reload.workflow_run_revisions {
+            for (run_id, rev) in stash.workflow_run_revisions {
                 self.workflow_run_revisions
                     .entry(run_id)
                     .and_modify(|live| *live = (*live).max(rev))
                     .or_insert(rev);
             }
             if !reload.saw_todo_update {
-                self.todo = reload.todo;
+                self.todo = stash.todo;
             }
             false
         } else {
-            let floor = self.scrollback.id_floor();
-            let staging_generations = self.scrollback.invalidation_generations();
-            self.scrollback = reload.scrollback;
-            self.scrollback.raise_id_floor(floor);
-            self.scrollback
-                .raise_invalidation_floor(staging_generations);
-            self.session.tracker = reload.tracker;
-            self.todo = reload.todo;
-            self.workflow_blocks = reload.workflow_blocks;
-            self.workflow_runs = reload.workflow_runs;
-            self.workflow_run_revisions = reload.workflow_run_revisions;
-            self.cleared_workflow_runs = reload.cleared_workflow_runs;
+            self.restore_replay_rebuilt_state(reload.stash);
             self.last_seen_event_id = reload.last_seen_event_id;
+            self.last_seen_event_seq = reload.last_seen_event_seq;
             self.last_applied_event_seq = reload.last_applied_event_seq;
             self.last_applied_xai_event_seq = reload.last_applied_xai_event_seq;
             true
@@ -2032,14 +1659,13 @@ impl AgentView {
         if let Some(id) = self.pending_recap_entry.take() {
             self.scrollback.remove_entry(id);
         }
-        self.mark_turn_finished();
+        self.mark_turn_finished(TurnEnd::Aborted);
         self.activity_started_at = None;
         self.last_activity = None;
         self.reset_follow_ups_for_reload();
         dropped_heavy
     }
-    /// Effective turn elapsed time, excluding time spent in question views
-    /// (accumulated pauses plus the currently open one, on both clocks).
+    /// Effective turn elapsed time, excluding time spent in question views (accumulated pauses plus the currently open one, on both clocks).
     pub fn turn_elapsed(&self) -> Option<std::time::Duration> {
         let instant_elapsed = self.turn_started_at?.elapsed();
         let now_ms = chrono::Utc::now().timestamp_millis();
@@ -2059,27 +1685,9 @@ impl AgentView {
             now_ms,
         }))
     }
-    /// Turn activity for the status spinner, with the implicit "no activity"
-    /// gap during a running inference turn resolved into an explicit
-    /// [`WaitingReason`] so the spinner names *what* we're waiting on.
-    ///
-    /// The tracker already returns `Waiting(TaskOutput/TasksComplete/Sleep)`,
-    /// and `Waiting(Subagent)` for a foreground `task` call from the moment it's
-    /// issued. This fills in the remaining gap: if no tracker activity but a
-    /// foreground subagent is registered as running, it's still `Subagent`
-    /// (covers any window where the task tool call has cleared but the child is
-    /// live); otherwise the model itself (`Model`). Bash turns keep `None` so
-    /// the status line renders its own "Running…".
-    ///
-    /// `Waiting for the model` is the live sampler wait. It is also the false
-    /// wait after a nested id already exited. [`Self::open_turn_wait_kind`]
-    /// distinguishes those cases. Do not call that string a hang without
-    /// evidence. `/unstick` stays operator-invoked; do not auto-fire it on
-    /// a long live wait.
-    ///
-    /// For `Waiting(TaskOutput { task_ids, .. })`, also resolves a display
-    /// `subject` from live bg-task / subagent state (description preferred,
-    /// else command) so the spinner can read `{description}…`.
+    /// Turn activity for the status spinner: an implicit "no activity" gap during a running inference turn resolves to an explicit [`WaitingReason`].
+    /// A `TaskOutput` wait shows the bg task's description (`{description}…`).
+    /// A `Subagent` wait shows the subagent count (`Waiting for subagent` or `Waiting for N subagents`).
     pub(crate) fn resolve_turn_activity(&self) -> Option<crate::acp::tracker::TurnActivity> {
         use crate::acp::tracker::{TurnActivity, WaitingReason};
         match self.open_turn_wait_kind() {
@@ -2093,9 +1701,8 @@ impl AgentView {
                 .map(|activity| self.enrich_waiting_activity(activity)),
         }
     }
-    /// Wait detection without display enrichment — for predicates that need
-    /// the wait's identity and must not churn with view-resolved display
-    /// state; [`Self::resolve_turn_activity`] adds the display subject on top.
+    /// Wait detection without display enrichment, for predicates that need the wait's identity and must not churn with view-resolved display state.
+    /// [`Self::resolve_turn_activity`] adds the display subject on top.
     pub(crate) fn resolve_turn_activity_unenriched(
         &self,
     ) -> Option<crate::acp::tracker::TurnActivity> {
@@ -2151,6 +1758,13 @@ impl AgentView {
         if !matches!(self.session.state, AgentState::TurnRunning) {
             return None;
         }
+        if self
+            .prompt_ack
+            .as_ref()
+            .is_some_and(PromptAckWatch::is_soft_noticed)
+        {
+            return Some(TurnActivity::Waiting(WaitingReason::PromptAck));
+        }
         if self.bash_turn {
             return None;
         }
@@ -2161,7 +1775,6 @@ impl AgentView {
         };
         Some(TurnActivity::Waiting(reason))
     }
-
     /// How chrome should read an open turn's wait.
     ///
     /// Live nested wait, live sampler wait, and false wait after nested
@@ -2190,7 +1803,6 @@ impl AgentView {
             Some(_) => None,
         }
     }
-
     /// Nested ids this turn waited on, now finished. Historical leftover
     /// rows in `subagent_sessions` are not this turn.
     fn this_turn_waited_nested_already_finished(&self) -> bool {
@@ -2199,8 +1811,7 @@ impl AgentView {
         }
         !self.finished_nested_wait_ids.is_empty()
     }
-
-    /// Fill in a `TaskOutput` / `Subagent` wait's display subject.
+    /// Adds the display subject to a `TaskOutput` or `Subagent` wait.
     fn enrich_waiting_activity(
         &self,
         activity: crate::acp::tracker::TurnActivity,
@@ -2224,7 +1835,7 @@ impl AgentView {
                 // the generic "Waiting on subagent…" label. Id fallback is
                 // for unnamed TaskOutput / Model waits (live_specialist).
                 TurnActivity::Waiting(WaitingReason::Subagent {
-                    display: self.subagent_wait_subject(),
+                    display: Some(self.subagent_wait_subject()),
                 })
             }
             TurnActivity::Waiting(WaitingReason::Model) => {
@@ -2239,11 +1850,8 @@ impl AgentView {
         }
     }
     /// Best user-facing name for the tasks being waited on.
-    ///
-    /// Uses the first resolvable subject. Multi-id waits always reflect the
-    /// full `task_ids` length (`"first + N more"` with `N = task_ids.len()-1`)
-    /// so partial resolution still reads as multi-task. Unknown ids → `None`
-    /// (spinner falls back to the generic label).
+    /// Uses the first resolvable subject.
+    /// Multi-id waits reflect the full `task_ids` length (`"first + N more"`, `N = task_ids.len()-1`) so partial resolution reads as multi-task.
     fn subject_for_wait_tasks(&self, task_ids: &[String]) -> Option<String> {
         use crate::acp::tracker::{MAX_ACTIVITY_SUBJECT_CHARS, clamp_activity_subject};
         if task_ids.is_empty() {
@@ -2275,13 +1883,9 @@ impl AgentView {
             Some(format!("{base}{suffix}"))
         }
     }
-    /// Resolve one task id to a display subject (description preferred, else
-    /// a *short* command / subagent description).
-    ///
-    /// Long bare commands are intentionally not used as subjects — the spinner
-    /// falls back to the generic `"Waiting on task output…"` instead of
-    /// stuffing a wall of shell into the status line. Descriptions are kept
-    /// but clamped by the caller via [`clamp_activity_subject`].
+    /// Resolve one task id to a display subject (description preferred, else a *short* command / subagent description).
+    /// A long bare command is not used as a subject; the spinner falls back to the generic `"Waiting on task output…"` label.
+    /// Descriptions are kept but clamped by the caller via [`clamp_activity_subject`].
     fn lookup_task_subject(&self, task_id: &str) -> Option<String> {
         use crate::acp::tracker::MAX_ACTIVITY_SUBJECT_CHARS;
         fn first_nonempty_line(s: &str) -> &str {
@@ -2312,6 +1916,28 @@ impl AgentView {
             .find(|info| info.subagent_id.as_ref() == task_id)
             .and_then(specialist_lookup_subject)
     }
+    /// Whether a foreground subagent (`task`/`spawn_subagent`, not `run_in_background`) is currently running.
+    /// The parent turn is blocked on it, so the spinner should read as a subagent wait.
+    fn has_running_foreground_subagent(&self) -> bool {
+        self.running_foreground_subagents().next().is_some()
+    }
+    /// The one predicate shared by the wait gate and its subject.
+    fn running_foreground_subagents(
+        &self,
+    ) -> impl Iterator<Item = &crate::app::subagent::SubagentInfo> {
+        self.subagent_sessions.values().filter(|s| {
+            s.is_running() && !s.attempt.is_background && s.attempt.workflow_run_id.is_none()
+        })
+    }
+    /// Running specialists the nested overlay can name: foreground or
+    /// background, excluding workflow runs.
+    pub(crate) fn running_live_specialists(
+        &self,
+    ) -> impl Iterator<Item = &crate::app::subagent::SubagentInfo> {
+        self.subagent_sessions
+            .values()
+            .filter(|s| s.is_running() && s.attempt.workflow_run_id.is_none())
+    }
     /// Wait chrome stays while at least one named id is still running, or is
     /// not in the bg-task / subagent maps yet and has no `SubagentFinished`
     /// evidence. A completed nested id missing from the map is not live.
@@ -2327,7 +1953,6 @@ impl AgentView {
         }
         task_ids.iter().any(|id| self.wait_id_still_running(id))
     }
-
     fn wait_id_still_running(&self, id: &str) -> bool {
         use crate::app::agent::BgTaskStatus;
         if self.finished_nested_wait_ids.contains(id) {
@@ -2345,12 +1970,11 @@ impl AgentView {
             .find(|info| info.subagent_id.as_ref() == id)
         {
             Some(info) => info.is_running(),
-            // Wait tool is still pending; missing maps is not "completed"
+            // Wait tool is still pending; missing maps is not completed
             // unless `SubagentFinished` already recorded the id.
             None => true,
         }
     }
-
     /// Record nested ids this turn waited on (wait tool / spawn wait) so
     /// wait chrome cannot hang after the nested row is dropped from
     /// [`Self::subagent_sessions`]. Do not record every `SubagentFinished`.
@@ -2371,7 +1995,6 @@ impl AgentView {
                 .insert(subagent_id.to_string());
         }
     }
-
     /// Wait tool (`get_command_or_subagent_output`) targeting these ids, or
     /// spawn wait / `wait_commands_or_subagents`. Background nested finish
     /// with no wait is not a this-turn wait.
@@ -2393,7 +2016,6 @@ impl AgentView {
                 }),
         }
     }
-
     /// Mark satisfied `get_command_or_subagent_output` waits completed so a
     /// leftover Pending wait cannot keep the parent turn blocked after
     /// `SubagentFinished`.
@@ -2422,7 +2044,6 @@ impl AgentView {
             );
         }
     }
-
     /// Drop tracker task-output waits whose waited-on children have all
     /// completed, so ACP `SubagentFinished` ends wait chrome even if the wait
     /// tool call is still Pending.
@@ -2442,234 +2063,23 @@ impl AgentView {
         let keys: Vec<String> = drop.into_iter().map(|(key, _)| key).collect();
         self.session.tracker.remove_blocking_waits(&keys);
     }
-
-    /// Whether a foreground subagent (`task`/`spawn_subagent`, not
-    /// `run_in_background`) is currently running. The parent turn is blocked on
-    /// it, so the spinner should read as a subagent wait.
-    fn has_running_foreground_subagent(&self) -> bool {
-        self.running_foreground_subagents().next().is_some()
-    }
-    /// The one predicate shared by the wait gate and its subject.
-    fn running_foreground_subagents(
-        &self,
-    ) -> impl Iterator<Item = &crate::app::subagent::SubagentInfo> {
-        self.subagent_sessions
-            .values()
-            .filter(|s| s.is_running() && !s.is_background && s.workflow_run_id.is_none())
-    }
-    /// Display subject for a foreground-subagent wait; `None` when no running
-    /// child has a description.
-    fn subagent_wait_subject(&self) -> Option<String> {
-        let mut running: Vec<_> = self.running_foreground_subagents().collect();
-        running.sort_by_key(|info| info.started_at);
-        specialist_wait_subject_from(&running, false)
-    }
-    /// Running specialists the nested overlay can name: foreground or
-    /// background, excluding workflow runs.
-    pub(crate) fn running_live_specialists(
-        &self,
-    ) -> impl Iterator<Item = &crate::app::subagent::SubagentInfo> {
-        self.subagent_sessions
-            .values()
-            .filter(|s| s.is_running() && s.workflow_run_id.is_none())
-    }
-    /// True when this view still has a live nested specialist or an animating
-    /// pane. A TurnRunning overlay child on an idle parent parks; cancel
-    /// resend and nested jobs keep Fast ticks.
-    pub(crate) fn has_live_work_animation(&self) -> bool {
-        self.scrollback.needs_animation()
-            || self.tasks.needs_tick()
-            || self.running_live_specialists().next().is_some()
-    }
-    /// Nested-agent **X** that sat on `killing...` past
-    /// [`crate::app::agent::PENDING_KILL_TIMEOUT_SECS`] is cancelled in chrome.
-    /// Background-task kills still clear `pending_kill` so the operator can retry.
-    pub(crate) fn finalize_overdue_pending_kills(&mut self) -> bool {
-        use crate::app::agent::PENDING_KILL_TIMEOUT_SECS;
-        use std::sync::Arc;
-        let now = Instant::now();
-        let mut overdue: Vec<(String, std::time::Duration)> = Vec::new();
-        for info in self.subagent_sessions.values_mut() {
-            if info.finished {
-                continue;
-            }
-            let Some(requested) = info.kill_requested_at else {
-                continue;
-            };
-            if now.duration_since(requested).as_secs() < PENDING_KILL_TIMEOUT_SECS {
-                continue;
-            }
-            let elapsed = info.display_elapsed();
-            info.finished = true;
-            info.status = Some(Arc::from("cancelled"));
-            info.pending_kill = false;
-            info.kill_requested_at = None;
-            info.activity_label = None;
-            info.duration_ms = Some(elapsed.as_millis() as u64);
-            overdue.push((info.child_session_id.to_string(), elapsed));
-        }
-        let mut changed = !overdue.is_empty();
-        for (child_sid, elapsed) in overdue {
-            if let Some(child) = self.subagent_views.get_mut(&child_sid) {
-                child.session.state = crate::app::agent::AgentState::Idle;
-                crate::app::subagent::finalize_finished_child_view(child, elapsed);
-                changed = true;
-            }
-        }
-        for task in self.session.bg_tasks.values_mut() {
-            if let Some(requested) = task.kill_requested_at
-                && now.duration_since(requested).as_secs() >= PENDING_KILL_TIMEOUT_SECS
-            {
-                task.pending_kill = false;
-                task.kill_requested_at = None;
-                changed = true;
-            }
-        }
-        changed
-    }
-    /// Wall-clock elapsed for the live-work sparkler. Frame choice must not
-    /// depend on a parked tasks-pane tick counter (that counter aliases onto
-    /// one density glyph).
-    pub(crate) fn live_work_sparkler_elapsed_ms(&self) -> u64 {
-        let mut elapsed_ms = 0u64;
-        if !self.session.state.is_idle()
-            && let Some(started) = self.activity_started_at
-        {
-            elapsed_ms = elapsed_ms.max(started.elapsed().as_millis() as u64);
-        }
-        for info in self.subagent_sessions.values() {
-            if info.is_running() && info.workflow_run_id.is_none() {
-                elapsed_ms = elapsed_ms.max(info.display_elapsed().as_millis() as u64);
-            }
-        }
-        for task in self.session.bg_tasks.values() {
-            if task.status == crate::app::agent::BgTaskStatus::Running
-                && let Ok(elapsed) = task.start_time.elapsed()
-            {
-                elapsed_ms = elapsed_ms.max(elapsed.as_millis() as u64);
-            }
-        }
-        elapsed_ms
+    /// The subagent wait label with the running subagent count, such as `Waiting for 2 subagents`.
+    fn subagent_wait_subject(&self) -> String {
+        crate::acp::tracker::waiting_on_subagents_subject(
+            self.running_foreground_subagents().count(),
+        )
     }
     /// Name a live specialist (description, else id) plus last tool/progress
     /// when the registry has it. Used when a task-output wait has no resolved
     /// subject, including background L3s the nested overlay is blocked on.
     fn live_specialist_wait_subject(&self) -> Option<String> {
         let mut running: Vec<_> = self.running_live_specialists().collect();
-        running.sort_by_key(|info| info.started_at);
+        running.sort_by_key(|info| info.attempt.started_at);
         specialist_wait_subject_from(&running, true)
-    }
-    /// Copy nested specialists parented to `child_sid` into that overlay child
-    /// view. Live L3 rows live on the parent registry; the nested wait chrome
-    /// reads the child's map.
-    pub(crate) fn sync_parented_specialists_into_child_view(&mut self, child_sid: &str) {
-        let rows: Vec<(String, crate::app::subagent::SubagentInfo)> = self
-            .subagent_sessions
-            .values()
-            .filter(|info| {
-                info.parent_session_id.as_deref() == Some(child_sid)
-                    && info.workflow_run_id.is_none()
-            })
-            .map(|info| (info.child_session_id.to_string(), info.clone()))
-            .collect();
-        let Some(child) = self.subagent_views.get_mut(child_sid) else {
-            return;
-        };
-        for (id, info) in rows {
-            child.subagent_sessions.insert(id, info);
-        }
-    }
-    /// True when the nested child is showing AUTO compact chrome.
-    ///
-    /// Compact chrome must not steal the parent TUI: parent still scrolls.
-    pub(crate) fn child_is_auto_compacting(&self, child_sid: &str) -> bool {
-        use crate::acp::tracker::TurnActivity;
-        self.subagent_views.get(child_sid).is_some_and(|child| {
-            matches!(
-                child.session.tracker.activity(),
-                Some(TurnActivity::AutoCompacting)
-            )
-        })
-    }
-
-    /// Child session id of a fullscreen overlay that is allowed to replace
-    /// the parent TUI. Operator `[↗]` may set this while the child is
-    /// AutoCompacting. AutoCompactStarted still clears `active_subagent`
-    /// so compact chrome does not auto-steal.
-    pub(crate) fn visible_nested_overlay_sid(&self) -> Option<&str> {
-        self.active_subagent.as_deref()
-    }
-
-    /// Overlay title wait chrome: name the live parented specialist, last
-    /// tool, and keep a trailing ellipsis. Does not use the 40-char spinner
-    /// clamp so a description like `Land check-remote full gate` stays visible.
-    /// Replaces generic task-output wait and model-wait chrome when a parented
-    /// specialist is still running. Thinking / Responding stay.
-    pub(crate) fn overlay_wait_activity_label(&self, child_sid: &str) -> Option<String> {
-        use crate::acp::tracker::{TurnActivity, WaitingReason};
-        let child_activity = self
-            .subagent_views
-            .get(child_sid)
-            .and_then(|cv| cv.resolve_turn_activity());
-        let child_label = child_activity
-            .as_ref()
-            .map(crate::app::subagent::format_activity_label)
-            .or_else(|| {
-                self.subagent_views
-                    .get(child_sid)
-                    .and_then(|cv| cv.session.state.is_busy().then(|| "Waiting".to_string()))
-            });
-        let generic_wait = matches!(
-            child_activity,
-            Some(
-                TurnActivity::Waiting(
-                    WaitingReason::TaskOutput { .. }
-                        | WaitingReason::Model
-                        | WaitingReason::Subagent { .. }
-                ) | TurnActivity::WritingToolCall(_)
-            )
-        ) || child_label.as_deref().is_some_and(|s| {
-            let lower = s.to_ascii_lowercase();
-            lower.contains("waiting on task output")
-                || lower.contains("waiting for the model")
-                || lower.starts_with("preparing ")
-        });
-        if generic_wait {
-            let mut live: Vec<&crate::app::subagent::SubagentInfo> = self
-                .subagent_sessions
-                .values()
-                .filter(|info| {
-                    info.is_running()
-                        && info.workflow_run_id.is_none()
-                        && info.parent_session_id.as_deref() == Some(child_sid)
-                })
-                .collect();
-            if !live.is_empty() {
-                live.sort_by_key(|info| info.started_at);
-                return overlay_specialist_wait_label(&live);
-            }
-            if let Some(progress) = self
-                .subagent_sessions
-                .get(child_sid)
-                .and_then(|info| info.wait_progress_label())
-            {
-                return Some(format!("{progress}…"));
-            }
-            if let Some(name) = self.subagent_views.get(child_sid).and_then(|cv| {
-                match cv.session.tracker.activity() {
-                    Some(TurnActivity::WritingToolCall(w)) => w.tool_name.clone(),
-                    _ => None,
-                }
-            }) {
-                return Some(name);
-            }
-        }
-        child_label
     }
     /// Update context state with a full snapshot from live callers.
     ///
-    /// No-op for gateway/chat-kind sessions — local GetSessionInfo / sampler
-    /// breakdowns must not populate the context bar (remote owns context).
+    /// No-op for gateway/chat-kind sessions: local GetSessionInfo / sampler breakdowns must not populate the context bar (remote owns context).
     pub fn apply_full_context_info(&mut self, next: xai_grok_shell::session::ContextInfo) {
         if self.chat_kind {
             self.context_state = None;
@@ -2680,11 +2090,9 @@ impl AgentView {
         }
         self.context_state = Some(next);
     }
-    /// Update context state from a streaming notification carrying only
-    /// `used` and `total` fields.
+    /// Update context state from a streaming notification carrying only `used` and `total` fields.
     ///
-    /// No-op for gateway/chat-kind sessions (same policy as
-    /// [`Self::apply_full_context_info`]).
+    /// No-op for gateway/chat-kind sessions (same policy as [`Self::apply_full_context_info`]).
     pub fn apply_context_used(&mut self, used: u64, total: u64) {
         if self.chat_kind {
             self.context_state = None;
@@ -2711,6 +2119,14 @@ impl AgentView {
             }
         }
     }
+    /// Rescales the context meter to the current window until the agent reports the next size.
+    pub(crate) fn refresh_context_total(&mut self) {
+        if let Some(used) = self.context_state.as_ref().map(|c| c.used)
+            && let Some(window) = self.session.models.get_context_window()
+        {
+            self.apply_context_used(used, window);
+        }
+    }
     /// Apply Build coding-credit balance only for non-chat agents.
     /// Gateway/chat-kind sessions keep credits unset so bars/warnings stay off.
     pub fn apply_credit_balance(
@@ -2726,10 +2142,9 @@ impl AgentView {
         self.credit_balance = balance;
         self.auto_topup = auto_topup;
     }
-    /// Record a key event to the input flight recorder.
+    /// Record a key event to the input log ring buffer.
     ///
-    /// Zero heap allocations — stores raw `Copy` types in the ring buffer.
-    /// Formatting into strings happens only during dump (`snapshot_entries`).
+    /// This allocates nothing: raw `Copy` types go into the ring buffer, and formatting into strings happens only during dump (`snapshot_entries`).
     pub(crate) fn record_input(
         &mut self,
         key: &crossterm::event::KeyEvent,
@@ -2744,7 +2159,7 @@ impl AgentView {
             ActivePane::Queue => ActivePaneSnapshot::Queue,
             ActivePane::Prompt => ActivePaneSnapshot::Prompt,
             ActivePane::Tasks => ActivePaneSnapshot::Tasks,
-            ActivePane::Catalog => ActivePaneSnapshot::Catalog,
+            ActivePane::Dock => ActivePaneSnapshot::Other,
         };
         let outcome_snap = match outcome {
             InputOutcome::Changed | InputOutcome::ArmPending { .. } => OutcomeSnapshot::Changed,
@@ -2772,11 +2187,9 @@ impl AgentView {
             textarea_changed: delta.textarea_changed,
         });
     }
-    /// Set the sharing-enabled flag on this view and propagate it to the
-    /// slash-command registry so the `/share` entry stays hidden/visible in
-    /// lockstep with `AgentView::sharing_enabled`. Use this instead of
-    /// mutating `sharing_enabled` directly when a new agent is created or a
-    /// session is loaded, so the field and registry can't drift.
+    /// Set the sharing-enabled flag on this view and propagate it to the slash-command registry.
+    /// The `/share` entry then stays hidden or visible in step with `AgentView::sharing_enabled`.
+    /// Use this instead of mutating `sharing_enabled` directly on agent creation or session load, so the field and registry can't drift.
     pub fn set_sharing_enabled(&mut self, enabled: bool) {
         self.sharing_enabled = enabled;
         self.prompt
@@ -2784,8 +2197,7 @@ impl AgentView {
             .registry_mut()
             .set_share_visible(enabled);
     }
-    /// Set [`Self::billing_surface_visible`] (see the field doc) and mirror it
-    /// into this agent's slash controller, so the two can't drift.
+    /// Set [`Self::billing_surface_visible`] (see the field doc) and mirror it into this agent's slash controller, so the two can't drift.
     pub fn set_billing_surface_visible(&mut self, visible: bool) {
         self.billing_surface_visible = visible;
         self.prompt
@@ -2798,16 +2210,13 @@ impl AgentView {
             .slash_controller
             .set_usage_command_visible(visible);
     }
-    /// Replace the restricted slash-command deny list in this agent's
-    /// registry (e.g. `/usage` denied on the free / X Basic tiers). Deny
-    /// wins over every `set_*_visible` gate.
+    /// Replace the restricted slash-command deny list in this agent's registry (e.g. `/usage` denied on the free / X Basic tiers).
+    /// Deny wins over every `set_*_visible` gate.
     pub fn set_restricted_commands(&mut self, names: &[String]) {
         self.prompt.set_restricted_commands(names);
     }
     /// Show or hide the `/dashboard` slash command in this agent's registry.
-    /// Driven by the dashboard feature flag
-    /// (`crate::views::dashboard::dashboard_enabled()`) at agent-creation
-    /// time — independent of leader mode.
+    /// Driven by the dashboard feature flag (`crate::views::dashboard::dashboard_enabled()`) at agent-creation time, independent of leader mode.
     pub fn set_dashboard_visible(&mut self, visible: bool) {
         self.prompt
             .slash_controller
@@ -2842,7 +2251,7 @@ impl AgentView {
         ));
         self.set_restricted_commands(restricted_commands);
     }
-    /// ACP `kind` for `x.ai/session/rename`: the lane this session opened on.
+    /// ACP `kind` for `x.ai/session/rename`: which list (Chat or Build) this session opened on.
     pub(crate) fn rename_kind(&self) -> xai_grok_shell::session::unified_list::SessionKind {
         if self.conversation_entry {
             xai_grok_shell::session::unified_list::SessionKind::Chat
@@ -2854,31 +2263,26 @@ impl AgentView {
     pub fn set_session_recap_available(&mut self, available: bool) {
         self.prompt.set_recap_visible(available);
     }
-    /// Show or hide the `/voice` slash command in this agent's registry,
-    /// gated on the runtime voice gate (GA default on; kill switch may hide).
+    /// Show or hide the `/voice` slash command in this agent's registry, gated on the runtime voice gate (GA default on; kill switch may hide).
     pub fn set_voice_mode_available(&mut self, available: bool) {
         self.prompt.set_voice_visible(available);
     }
 }
-/// Inputs for [`honest_turn_elapsed`]: the turn span and pause total measured
-/// on each clock, plus the wire anchor's provenance. `now_ms` is injected so
-/// tests control the wall clock.
+/// Inputs for [`honest_turn_elapsed`]: the turn span and pause total measured on each clock, plus the prompt the wire anchor was stamped for.
+/// `now_ms` is injected so tests control the wall clock.
 struct TurnElapsedParams<'a> {
     instant_elapsed: std::time::Duration,
     instant_paused: std::time::Duration,
-    /// `turnStartMs` wire anchor (UTC ms) and the prompt id it was stamped
-    /// for; the anchor counts only when that id matches the running prompt
-    /// (interleaved deltas can re-stamp it with another prompt's anchor).
+    /// `turnStartMs` wire anchor (UTC ms) and the prompt id it was stamped for; the anchor counts only when that id matches the running prompt.
+    /// (Interleaved deltas can re-stamp it with another prompt's anchor.)
     wall_anchor_ms: Option<i64>,
     wall_paused: std::time::Duration,
     anchor_prompt: Option<&'a str>,
     current_prompt: Option<&'a str>,
     now_ms: i64,
 }
-/// Turn elapsed for [`AgentView::turn_elapsed`], honest across OS suspends
-/// (`Instant` pauses while the machine sleeps; the wall clock keeps
-/// counting). Each span is netted against pauses measured on its own clock,
-/// and the larger net wins; the tests below enumerate the guard cases.
+/// Turn elapsed for [`AgentView::turn_elapsed`], honest across OS suspends (`Instant` pauses while the machine sleeps; the wall clock keeps going).
+/// Each span is netted against pauses measured on its own clock, and the larger net wins; the tests below enumerate the guard cases.
 fn honest_turn_elapsed(params: TurnElapsedParams<'_>) -> std::time::Duration {
     let instant_net = params.instant_elapsed.saturating_sub(params.instant_paused);
     let (Some(start_ms), Some(anchor_prompt), Some(current_prompt)) = (
@@ -2894,8 +2298,7 @@ fn honest_turn_elapsed(params: TurnElapsedParams<'_>) -> std::time::Duration {
     let wall_net = wall_since_ms(start_ms, params.now_ms).saturating_sub(params.wall_paused);
     instant_net.max(wall_net)
 }
-/// Wall-clock span since `start_ms`, clamped to zero when `start_ms`
-/// postdates `now_ms` (skew) so a wall span can never go negative.
+/// Wall-clock span since `start_ms`, clamped to zero when `start_ms` postdates `now_ms` (skew) so a wall span can never go negative.
 fn wall_since_ms(start_ms: i64, now_ms: i64) -> std::time::Duration {
     std::time::Duration::from_millis(u64::try_from(now_ms.saturating_sub(start_ms)).unwrap_or(0))
 }
@@ -2967,56 +2370,23 @@ fn specialist_wait_subject_from(
     let activity = running.first().and_then(|info| info.wait_progress_label());
     match activity.as_deref() {
         Some(activity) => {
-            const PREFIX: &str = "Subagent (";
-            const SUFFIX_HEAD: &str = "): ";
-            const SUBAGENT_AFFIX_CHARS: usize = PREFIX.len() + SUFFIX_HEAD.len();
-            const ACTIVITY_FLOOR: usize = 8;
-            let desc_claim = description
-                .chars()
-                .count()
-                .min(MAX_ACTIVITY_SUBJECT_CHARS - SUBAGENT_AFFIX_CHARS - ACTIVITY_FLOOR);
-            let activity: String = activity
-                .chars()
-                .take(MAX_ACTIVITY_SUBJECT_CHARS - SUBAGENT_AFFIX_CHARS - desc_claim)
-                .collect();
+            // `{description}: {tool}`. A `Subagent (` wrapper left about 18
+            // columns for the name, so `Land check-remote full gate` was cut
+            // before the 40-character clamp and the overlay never painted it.
+            // The tool suffix stays whole so `read_file` is not cut to `read_fil`.
+            const SEP: &str = ": ";
+            let activity_budget =
+                MAX_ACTIVITY_SUBJECT_CHARS.saturating_sub(SEP.len() + SUBJECT_DESC_FLOOR);
+            let activity: String = activity.chars().take(activity_budget).collect();
             Some(budgeted_subject(
-                PREFIX,
+                "",
                 &description,
-                &format!("{SUFFIX_HEAD}{activity}"),
+                &format!("{SEP}{activity}"),
             ))
         }
         None => Some(budgeted_subject("Subagent: ", &description, "")),
     }
 }
-
-/// Overlay wait chrome for one or more live specialists. Unclamped so the
-/// title can name the waited-on agent and last tool together.
-fn overlay_specialist_wait_label(
-    running: &[&crate::app::subagent::SubagentInfo],
-) -> Option<String> {
-    let first = *running.first()?;
-    let (_, desc) = crate::app::subagent::parse_tag_prefix(first.description.trim());
-    let name = if !desc.trim().is_empty() {
-        desc.trim().to_string()
-    } else {
-        specialist_identity(first, true)?
-    };
-    let progress = first.wait_progress_label();
-    let body = if running.len() > 1 {
-        let n = running.len();
-        match progress {
-            Some(p) => format!("{n} subagents: {name} +{}: {p}", n - 1),
-            None => format!("{n} subagents: {name} +{}", n - 1),
-        }
-    } else {
-        match progress {
-            Some(p) => format!("{name}: {p}"),
-            None => name,
-        }
-    };
-    Some(format!("{body}…"))
-}
-
 /// `{prefix}{description}{suffix}` with the description cut to the leftover
 /// budget; a cut description ends with `…` inside that budget. Callers size
 /// `prefix` + `suffix` so the composed subject stays within
@@ -3046,8 +2416,7 @@ mod honest_turn_elapsed_tests {
     const NOW_MS: i64 = 1_700_000_000_000;
     const MIN: u64 = 60;
     const HOUR: u64 = 3_600;
-    /// Valid same-prompt anchor context with zero spans; tests override the
-    /// fields under test via struct-update syntax.
+    /// Valid same-prompt anchor context with zero spans; tests override the fields under test via struct-update syntax.
     fn base() -> TurnElapsedParams<'static> {
         TurnElapsedParams {
             instant_elapsed: Duration::ZERO,
@@ -3163,10 +2532,35 @@ mod honest_turn_elapsed_tests {
     }
 }
 #[cfg(test)]
+mod advance_last_seen_event_id_tests {
+    use super::*;
+    #[test]
+    fn unparseable_id_preserves_known_highwater_seq() {
+        let mut view = test_agent_view(Some("s1"), std::path::PathBuf::from("/tmp"));
+        view.advance_last_seen_event_id("sess-1-7".into(), Some(7));
+        assert_eq!(view.last_seen_event_id.as_deref(), Some("sess-1-7"));
+        assert_eq!(view.last_seen_event_seq, Some(7));
+        view.advance_last_seen_event_id("sess-1-opaque".into(), None);
+        assert_eq!(view.last_seen_event_id.as_deref(), Some("sess-1-opaque"));
+        assert_eq!(
+            view.last_seen_event_seq,
+            Some(7),
+            "known highwater must survive an unparseable id"
+        );
+        view.advance_last_seen_event_id("sess-1-3".into(), Some(3));
+        assert_eq!(view.last_seen_event_id.as_deref(), Some("sess-1-opaque"));
+        assert_eq!(view.last_seen_event_seq, Some(7));
+        view.advance_last_seen_event_id("sess-1-9".into(), Some(9));
+        assert_eq!(view.last_seen_event_id.as_deref(), Some("sess-1-9"));
+        assert_eq!(view.last_seen_event_seq, Some(9));
+    }
+}
+#[cfg(test)]
 mod resolve_turn_activity_tests {
     use super::*;
     use crate::acp::tracker::{TurnActivity, WaitingReason};
     use crate::app::agent::AgentState;
+    use rstest::rstest;
     fn running_view() -> AgentView {
         let mut view = test_agent_view(Some("s1"), std::path::PathBuf::from("/tmp"));
         view.session.state = AgentState::TurnRunning;
@@ -3216,7 +2610,7 @@ mod resolve_turn_activity_tests {
             Some(TurnActivity::Waiting(WaitingReason::Model)),
             "first-token wait must stay Waiting(Model), got {activity:?}"
         );
-        let label = crate::views::turn_status::leftover_viewport_wait_label(&activity);
+        let label = super::super::render::leftover_viewport_wait_label(&activity);
         assert_eq!(
             label.as_deref(),
             Some("Waiting for the model…"),
@@ -3240,7 +2634,7 @@ mod resolve_turn_activity_tests {
     fn first_token_wait_after_unwaited_this_turn_nested_finish_paints_waiting_for_the_model() {
         let mut view = running_view();
         let mut nested = running_child("this-turn background nested this turn did not wait on");
-        nested.is_background = true;
+        nested.attempt.is_background = true;
         nested.subagent_id = std::sync::Arc::from("sa-bg-nowait");
         view.subagent_sessions.insert("l2-bg-nowait".into(), nested);
         mark_specialist_completed(view.subagent_sessions.get_mut("l2-bg-nowait").unwrap());
@@ -3262,7 +2656,7 @@ mod resolve_turn_activity_tests {
             Some(TurnActivity::Waiting(WaitingReason::Model)),
             "first-token wait must stay Waiting(Model), got {activity:?}"
         );
-        let label = crate::views::turn_status::leftover_viewport_wait_label(&activity);
+        let label = super::super::render::leftover_viewport_wait_label(&activity);
         assert_eq!(
             label.as_deref(),
             Some("Waiting for the model…"),
@@ -3360,148 +2754,31 @@ mod resolve_turn_activity_tests {
         info.description = std::sync::Arc::from(description);
         info
     }
-    /// A live foreground subagent wait is healthy work. Sticky Retrying
-    /// chrome must not paint as if the turn failed and is restarting.
-    #[test]
-    fn healthy_subagent_wait_does_not_paint_retrying() {
+    #[rstest]
+    #[case::one(&["scan src/"], "Waiting for subagent…")]
+    #[case::several(&["scan src/", "fix tests"], "Waiting for 2 subagents…")]
+    fn subagent_wait_label_counts_running_children(
+        #[case] descriptions: &[&str],
+        #[case] expected: &str,
+    ) {
         let mut view = running_view();
-        view.subagent_sessions
-            .insert("child-1".into(), running_child("flatten G1"));
-        view.session
-            .set_retry_activity(Some(TurnActivity::Retrying {
-                attempt: 1,
-                max_retries: 3,
-                reason: "reconnecting".into(),
-            }));
-        let activity = view.resolve_turn_activity().expect("waiting activity");
-        assert!(
-            !matches!(activity, TurnActivity::Retrying { .. }),
-            "healthy subagent wait must not paint Retrying, got {activity:?}"
-        );
-        assert_eq!(activity.as_label(), "waiting_subagent");
-        let TurnActivity::Waiting(reason) = activity else {
-            panic!("expected waiting activity, got {activity:?}");
+        for (i, description) in descriptions.iter().enumerate() {
+            view.subagent_sessions
+                .insert(format!("child-{i}"), running_child(description));
+        }
+        let Some(TurnActivity::Waiting(reason)) = view.resolve_turn_activity() else {
+            panic!("expected waiting activity");
         };
-        assert!(
-            reason.label().contains("flatten G1") || reason.label().contains("subagent"),
-            "wait chrome must name the subagent wait, got {}",
-            reason.label()
-        );
+        assert_eq!(expected, reason.label());
     }
-
-    /// A real sampler retry with no live subagent wait still shows Retrying
-    /// so the footer can name the model request.
     #[test]
-    fn sampler_retry_without_subagent_wait_still_paints_retrying() {
-        let mut view = running_view();
-        view.session
-            .set_retry_activity(Some(TurnActivity::Retrying {
-                attempt: 1,
-                max_retries: 3,
-                reason: "HTTP 429".into(),
-            }));
-        assert!(
-            matches!(
-                view.resolve_turn_activity(),
-                Some(TurnActivity::Retrying { attempt: 1, .. })
-            ),
-            "got {:?}",
-            view.resolve_turn_activity()
-        );
-    }
-
-    #[test]
-    fn subagent_wait_names_single_child() {
+    fn parent_activity_replaces_subagent_wait() {
         let mut view = running_view();
         view.subagent_sessions
             .insert("child-1".into(), running_child("scan src/"));
-        let activity = view.resolve_turn_activity().expect("waiting activity");
-        assert_eq!(activity.as_label(), "waiting_subagent");
-        let TurnActivity::Waiting(reason) = activity else {
-            panic!("expected waiting activity");
-        };
-        assert_eq!(reason.label(), "Subagent: scan src/…");
-    }
-    #[test]
-    fn subagent_wait_strips_description_tag_prefix() {
-        let mut view = running_view();
-        view.subagent_sessions
-            .insert("child-1".into(), running_child("[reviewer] check lints"));
-        let Some(TurnActivity::Waiting(reason)) = view.resolve_turn_activity() else {
-            panic!("expected waiting activity");
-        };
-        assert_eq!(reason.label(), "Subagent: check lints…");
-        let mut earlier = running_child("[explore] scan src/");
-        earlier.started_at = std::time::Instant::now() - std::time::Duration::from_secs(5);
-        view.subagent_sessions.insert("child-0".into(), earlier);
-        let Some(TurnActivity::Waiting(reason)) = view.resolve_turn_activity() else {
-            panic!("expected waiting activity");
-        };
-        assert_eq!(reason.label(), "2 subagents: scan src/ +1…");
-    }
-    #[test]
-    fn subagent_wait_composes_child_activity() {
-        let mut view = running_view();
-        let mut info = running_child("fix flaky test");
-        info.activity_label = Some("Writing subagent prompt…".into());
-        view.subagent_sessions.insert("child-1".into(), info);
-        let Some(TurnActivity::Waiting(reason)) = view.resolve_turn_activity() else {
-            panic!("expected waiting activity");
-        };
-        assert_eq!(reason.label(), "Subagent (fix flaky test): Writing subag…");
-    }
-    #[test]
-    fn subagent_wait_long_description_keeps_activity_visible() {
-        let mut view = running_view();
-        let mut info = running_child("abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGH");
-        info.activity_label = Some("Running: cargo test".into());
-        view.subagent_sessions.insert("child-1".into(), info);
-        let Some(TurnActivity::Waiting(reason)) = view.resolve_turn_activity() else {
-            panic!("expected waiting activity");
-        };
-        assert_eq!(reason.label(), "Subagent (abcdefghijklmnopqr…): Running:…");
-    }
-    /// QA case: long description + long activity. The description gets first
-    /// claim on the budget (inner ellipsis when cut) and the activity keeps
-    /// at least its first 8 chars.
-    #[test]
-    fn subagent_wait_long_desc_and_activity_gives_description_priority() {
-        let mut view = running_view();
-        let mut info = running_child("summarize scratchpad findings into notes");
-        info.activity_label = Some("Waiting for response…".into());
-        view.subagent_sessions.insert("child-1".into(), info);
-        let Some(TurnActivity::Waiting(reason)) = view.resolve_turn_activity() else {
-            panic!("expected waiting activity");
-        };
-        let label = reason.label();
-        assert_eq!(label, "Subagent (summarize scratchp…): Waiting…");
-        assert!(label.chars().count() <= 41, "label too long: {label:?}");
-    }
-    #[test]
-    fn subagent_wait_multi_child_truncated_description_gets_inner_ellipsis() {
-        let mut view = running_view();
-        let mut earlier = running_child("audit every dashboard panel for drift");
-        earlier.started_at = std::time::Instant::now() - std::time::Duration::from_secs(5);
-        view.subagent_sessions.insert("child-1".into(), earlier);
-        view.subagent_sessions
-            .insert("child-2".into(), running_child("fix tests"));
-        let Some(TurnActivity::Waiting(reason)) = view.resolve_turn_activity() else {
-            panic!("expected waiting activity");
-        };
-        assert_eq!(reason.label(), "2 subagents: audit every dashboard p… +1…");
-    }
-    #[test]
-    fn subagent_wait_counts_parallel_children() {
-        let mut view = running_view();
-        let mut earlier = running_child("scan src/");
-        earlier.started_at = std::time::Instant::now() - std::time::Duration::from_secs(5);
-        view.subagent_sessions.insert("child-1".into(), earlier);
-        view.subagent_sessions
-            .insert("child-2".into(), running_child("fix tests"));
-        let Some(TurnActivity::Waiting(reason)) = view.resolve_turn_activity() else {
-            panic!("expected waiting activity");
-        };
-        assert_eq!(reason.label(), "2 subagents: scan src/ +1…");
+        view.session
+            .set_compaction_activity(Some(TurnActivity::Thinking));
+        assert_eq!(view.resolve_turn_activity(), Some(TurnActivity::Thinking));
     }
     #[test]
     fn unenriched_wait_matches_variant_without_subject() {
@@ -3514,87 +2791,6 @@ mod resolve_turn_activity_tests {
             Some(TurnActivity::Waiting(WaitingReason::subagent()))
         );
         assert!(view.is_waiting_on_subagent());
-        let Some(TurnActivity::Waiting(WaitingReason::Subagent { display })) =
-            view.resolve_turn_activity()
-        else {
-            panic!("expected subagent wait");
-        };
-        assert_eq!(display.as_deref(), Some("Subagent: scan src/"));
-    }
-    #[test]
-    fn subagent_wait_labels_bounded_for_adversarial_inputs() {
-        use crate::acp::tracker::{MAX_ACTIVITY_SUBJECT_CHARS, WaitingReason};
-        let long_desc = "x".repeat(500);
-        let descriptions = [
-            "",
-            "d",
-            long_desc.as_str(),
-            "line one\nline two\nline three",
-            "[tag]",
-        ];
-        let activities = [
-            None,
-            Some("Run".to_string()),
-            Some("a".repeat(40)),
-            Some("b".repeat(50)),
-        ];
-        let mut cases = 0;
-        for n in [1usize, 3] {
-            for desc in descriptions {
-                for activity in &activities {
-                    cases += 1;
-                    let mut view = running_view();
-                    for i in 0..n {
-                        let mut info = running_child(desc);
-                        info.started_at = std::time::Instant::now()
-                            - std::time::Duration::from_secs((n - i) as u64);
-                        if i == 0 {
-                            info.activity_label = activity.clone();
-                        }
-                        view.subagent_sessions.insert(format!("child-{i}"), info);
-                    }
-                    let Some(TurnActivity::Waiting(reason)) = view.resolve_turn_activity() else {
-                        panic!("expected waiting activity");
-                    };
-                    if let WaitingReason::Subagent {
-                        display: Some(display),
-                    } = &reason
-                    {
-                        assert!(
-                            display.chars().count() <= MAX_ACTIVITY_SUBJECT_CHARS,
-                            "unbounded display {display:?} (desc {} chars, activity {activity:?}, n {n})",
-                            desc.len(),
-                        );
-                    }
-                    let label = reason.label();
-                    assert!(
-                        label.chars().count() <= MAX_ACTIVITY_SUBJECT_CHARS + 1,
-                        "label too long: {label:?}"
-                    );
-                    if n == 1
-                        && let Some(activity) = activity
-                        && matches!(&reason, WaitingReason::Subagent { display: Some(_) })
-                    {
-                        let head: String = activity.chars().take(8).collect();
-                        assert!(
-                            label.contains(&head),
-                            "activity head {head:?} missing from {label:?}"
-                        );
-                    }
-                }
-            }
-        }
-        assert_eq!(cases, 40);
-    }
-    #[test]
-    fn subagent_wait_falls_back_without_description() {
-        let mut view = running_view();
-        view.subagent_sessions
-            .insert("child-1".into(), running_child("  "));
-        let Some(TurnActivity::Waiting(reason)) = view.resolve_turn_activity() else {
-            panic!("expected waiting activity");
-        };
-        assert_eq!(reason.label(), "Waiting on subagent…");
     }
     #[test]
     fn tracker_subagent_wait_is_enriched() {
@@ -3618,10 +2814,9 @@ mod resolve_turn_activity_tests {
         let Some(TurnActivity::Waiting(reason)) = view.resolve_turn_activity() else {
             panic!("expected waiting activity");
         };
-        assert_eq!(reason.label(), "Subagent: scan src/…");
+        assert_eq!(reason.label(), "Waiting for subagent…");
     }
-    /// When waiting on task output, the spinner subject is the bg task's
-    /// description (preferred over the raw command).
+    /// When waiting on task output, the spinner subject is the bg task's description (preferred over the raw command).
     #[test]
     fn task_output_wait_uses_bg_task_description() {
         use crate::acp::meta::NotificationMeta;
@@ -3899,42 +3094,50 @@ mod resolve_turn_activity_tests {
                 child_session_id: Arc::from("child-session-xyz"),
                 description: Arc::from("explore the auth module"),
                 subagent_type: Arc::from("explore"),
-                persona: None,
-                role: None,
-                model: None,
-                context_source: None,
-                resumed_from: None,
-                capability_mode: None,
-                workflow_run_id: None,
-                context_normalized: false,
-                parent_prompt_id: None,
-                parent_session_id: None,
-                depth: None,
-                started_at: now,
-                last_progress_at: now,
                 finished: false,
                 status: None,
-                error: None,
-                duration_ms: None,
-                tool_calls: None,
-                turns: None,
-                turn_count: None,
-                tool_call_count: None,
-                tokens_used: None,
-                tokens_past: 0,
-                context_window_tokens: None,
-                context_usage_pct: None,
-                tools_used: vec![],
-                error_count: None,
-                activity_label: None,
-                is_background: true,
-                pending_kill: false,
-                kill_requested_at: None,
-                scrollback_entry_id: None,
+                attempt: crate::app::subagent::SubagentAttemptInfo {
+                    lifecycle:
+                        crate::app::subagent::SubagentLifecycleState::running_legacy_for_test(),
+                    persona: None,
+                    role: None,
+                    model: None,
+                    context_source: None,
+                    resumed_from: None,
+                    capability_mode: None,
+                    workflow_run_id: None,
+                    context_normalized: false,
+                    parent_prompt_id: None,
+                    parent_session_id: None,
+                    depth: None,
+                    tokens_past: 0,
+                    started_at: now,
+                    last_progress_at: now,
+                    status: None,
+                    error: None,
+                    duration_ms: None,
+                    tool_calls: None,
+                    turns: None,
+                    turn_count: None,
+                    tool_call_count: None,
+                    tokens_used: None,
+                    context_window_tokens: None,
+                    context_usage_pct: None,
+                    tools_used: vec![],
+                    error_count: None,
+                    activity_label: None,
+                    is_background: true,
+                    pending_kill: false,
+                    kill_requested_at: None,
+                    scrollback_entry_id: None,
+                    terminal_entry_id: None,
+                },
+                completed_attempt_tokens: 0,
+                sealed_attempt_tokens: Default::default(),
                 prompt: None,
                 child_cwd: None,
                 worktree_path: None,
-                child_updates_replayed: false,
+                transcript: Default::default(),
             },
         );
         let meta = NotificationMeta::default();
@@ -3962,7 +3165,7 @@ mod resolve_turn_activity_tests {
         };
         assert_eq!(reason.label(), "explore the auth module…");
     }
-    /// Long bare commands are not used as subjects — keep the original label.
+    /// Long bare commands are not used as subjects; the original label is kept.
     #[test]
     fn task_output_wait_long_command_keeps_generic_label() {
         use crate::acp::meta::NotificationMeta;
@@ -4043,8 +3246,8 @@ mod resolve_turn_activity_tests {
         use std::sync::Arc;
         let mut view = running_view();
         let mut specialist = running_child("prove cert DNS-01");
-        specialist.is_background = true;
-        specialist.activity_label = Some("read_file".into());
+        specialist.attempt.is_background = true;
+        specialist.attempt.activity_label = Some("read_file".into());
         specialist.subagent_id = Arc::from("sa-l3-cert");
         view.subagent_sessions.insert("l3-cert".into(), specialist);
         let meta = NotificationMeta::default();
@@ -4091,10 +3294,10 @@ mod resolve_turn_activity_tests {
     fn nested_l2_task_output_wait_names_last_tool_from_progress() {
         let mut view = running_view();
         let mut specialist = running_child("Land check-remote");
-        specialist.is_background = true;
-        specialist.activity_label = Some("Waiting on task output…".into());
-        specialist.tools_used = vec![std::sync::Arc::from("read_file")];
-        specialist.tool_call_count = Some(4);
+        specialist.attempt.is_background = true;
+        specialist.attempt.activity_label = Some("Waiting on task output…".into());
+        specialist.attempt.tools_used = vec![std::sync::Arc::from("read_file")];
+        specialist.attempt.tool_call_count = Some(4);
         view.subagent_sessions.insert("l3-gate".into(), specialist);
         pending_task_output_wait(&mut view, serde_json::json!({ "timeout_ms": 30_000 }));
         let activity = view.resolve_turn_activity().expect("activity");
@@ -4123,9 +3326,9 @@ mod resolve_turn_activity_tests {
     fn nested_l2_model_wait_names_live_background_specialist() {
         let mut view = running_view();
         let mut specialist = running_child("CheckersLater");
-        specialist.is_background = true;
-        specialist.tools_used = vec![std::sync::Arc::from("read_file")];
-        specialist.tool_call_count = Some(6);
+        specialist.attempt.is_background = true;
+        specialist.attempt.tools_used = vec![std::sync::Arc::from("read_file")];
+        specialist.attempt.tool_call_count = Some(6);
         view.subagent_sessions.insert("l3-impl".into(), specialist);
         let activity = view.resolve_turn_activity().expect("activity");
         let label = crate::app::subagent::format_activity_label(&activity);
@@ -4153,9 +3356,9 @@ mod resolve_turn_activity_tests {
             .tracker
             .note_tool_call_arguments_delta(Some("search_replace"), 0);
         let mut specialist = running_child("remote compile");
-        specialist.is_background = true;
+        specialist.attempt.is_background = true;
         specialist.child_session_id = std::sync::Arc::from("l3-impl");
-        specialist.tools_used = vec![std::sync::Arc::from("read_file")];
+        specialist.attempt.tools_used = vec![std::sync::Arc::from("read_file")];
         view.subagent_sessions.insert("l3-impl".into(), specialist);
         let activity = view.resolve_turn_activity().expect("activity");
         let label = crate::app::subagent::format_activity_label(&activity);
@@ -4171,10 +3374,10 @@ mod resolve_turn_activity_tests {
 
     fn mark_specialist_completed(info: &mut crate::app::subagent::SubagentInfo) {
         use std::sync::Arc;
-        info.finished = true;
-        info.status = Some(Arc::from("completed"));
-        info.duration_ms = Some(1_500);
-        info.activity_label = None;
+        info.set_finished_for_test(true);
+        info.attempt.status = Some(Arc::from("completed"));
+        info.attempt.duration_ms = Some(1_500);
+        info.attempt.activity_label = None;
     }
 
     fn pending_task_output_wait(view: &mut AgentView, raw_input: serde_json::Value) {
@@ -4208,8 +3411,8 @@ mod resolve_turn_activity_tests {
         use std::sync::Arc;
         let mut view = running_view();
         let mut specialist = running_child("prove cert DNS-01");
-        specialist.is_background = true;
-        specialist.activity_label = Some("read_file".into());
+        specialist.attempt.is_background = true;
+        specialist.attempt.activity_label = Some("read_file".into());
         specialist.subagent_id = Arc::from("sa-l3-cert");
         view.subagent_sessions.insert("l3-cert".into(), specialist);
         pending_task_output_wait(&mut view, serde_json::json!({ "timeout_ms": 600_000 }));
@@ -4269,12 +3472,12 @@ mod resolve_turn_activity_tests {
             "completed nested-agent timer must stop at SubagentFinished duration"
         );
         assert_ne!(
-            info.activity_label.as_deref(),
+            info.attempt.activity_label.as_deref(),
             Some("Responding"),
             "list must not keep painting Responding after the nested agent completed"
         );
         assert_ne!(
-            info.activity_label.as_deref(),
+            info.attempt.activity_label.as_deref(),
             Some("Thinking"),
             "list must not keep painting Thinking after the nested agent completed"
         );
@@ -4287,7 +3490,7 @@ mod resolve_turn_activity_tests {
         use std::sync::Arc;
         let mut view = running_view();
         let mut specialist = running_child("remote Lake");
-        specialist.is_background = true;
+        specialist.attempt.is_background = true;
         specialist.subagent_id = Arc::from("sa-l3-lake");
         view.subagent_sessions.insert("l3-lake".into(), specialist);
         pending_task_output_wait(
@@ -4321,7 +3524,7 @@ mod resolve_turn_activity_tests {
         use std::sync::Arc;
         let mut view = running_view();
         let mut specialist = running_child("General Fix image token counting grok-4.6");
-        specialist.is_background = true;
+        specialist.attempt.is_background = true;
         specialist.subagent_id = Arc::from("sa-l2-done");
         view.subagent_sessions.insert("l2-done".into(), specialist);
         pending_task_output_wait(
@@ -4392,7 +3595,7 @@ mod resolve_turn_activity_tests {
         use std::sync::Arc;
         let mut view = running_view();
         let mut specialist = running_child("remote Lake");
-        specialist.is_background = true;
+        specialist.attempt.is_background = true;
         specialist.subagent_id = Arc::from("sa-l3-lake");
         view.subagent_sessions.insert("l3-lake".into(), specialist);
         pending_task_output_wait(&mut view, serde_json::json!({ "timeout_ms": 600_000 }));
@@ -4425,7 +3628,7 @@ mod resolve_turn_activity_tests {
         use std::sync::Arc;
         let mut view = running_view();
         let mut specialist = running_child("General Fix image token counting grok-4.6");
-        specialist.is_background = true;
+        specialist.attempt.is_background = true;
         specialist.subagent_id = Arc::from("sa-l2-done");
         view.subagent_sessions.insert("l2-done".into(), specialist);
         pending_task_output_wait(
@@ -4474,7 +3677,7 @@ mod status_window_tests {
             attempts: 1,
             confirmed: false,
             cancel_subagents: true,
-            trigger: crate::app::actions::CancelTrigger::Esc,
+            trigger: crate::app::actions::CancelTrigger::DashboardStop,
         });
         agent.start_turn_boundary(None);
         assert!(agent.session.state.is_turn_running());
@@ -4488,6 +3691,32 @@ mod status_window_tests {
         agent.adopt_running_prompt("p-run".into());
         assert!(agent.front_message_committed);
         assert!(agent.expects_send_now_cancel());
+    }
+    #[test]
+    fn session_rebind_forgets_a_waiting_plan() {
+        let mut agent = test_agent_view(Some("s1"), std::path::PathBuf::from("/tmp"));
+        agent.plan_mode_active = true;
+        agent.kept_plan =
+            crate::app::agent_view::KeptPlan::kept(Some("# Build it\n".to_owned()), None);
+        agent.open_post_turn_plan_review();
+        assert!(agent.plan_approval_view.is_some());
+        agent.bind_session_id(agent_client_protocol::SessionId::new("s2"));
+        assert!(
+            !agent.kept_plan.is_kept(),
+            "a new session must not inherit the previous keep"
+        );
+        assert!(agent.kept_plan.body().is_none());
+        assert!(
+            agent.plan_approval_view.is_none(),
+            "approve/build must not dispatch ExecutePlan into the new session"
+        );
+        agent.kept_plan =
+            crate::app::agent_view::KeptPlan::kept(Some("# Build it\n".to_owned()), None);
+        agent.bind_session_id(agent_client_protocol::SessionId::new("s2"));
+        assert!(
+            agent.kept_plan.is_kept(),
+            "rebinding the same id is reconnect, not a new session"
+        );
     }
     #[test]
     fn session_rebind_and_replay_invalidate_minimal_btw() {
@@ -4561,8 +3790,22 @@ mod reconnect_workflow_maps_tests {
             1,
             "run list must be restored from the stash on cursor reconnect"
         );
-        assert_eq!(agent.workflow_runs[0].run_id, "wf-1");
-        assert_eq!(agent.workflow_runs[0].status, "active");
+        assert_eq!(
+            agent
+                .workflow_runs
+                .first()
+                .unwrap_or_else(|| panic!("missing index"))
+                .run_id,
+            "wf-1"
+        );
+        assert_eq!(
+            agent
+                .workflow_runs
+                .first()
+                .unwrap_or_else(|| panic!("missing index"))
+                .status,
+            "active"
+        );
         assert_eq!(
             agent.workflow_run_revisions.get("wf-1").copied(),
             Some(4),
@@ -4675,82 +3918,51 @@ mod reconnect_workflow_maps_tests {
         );
     }
 }
-
 #[cfg(test)]
-mod pending_prompts_persist_tests {
-    use super::*;
-    use xai_grok_shell::session::pending_prompts::PersistedQueuedPrompt;
-
-    fn empty_session() -> crate::app::agent::AgentSession {
-        crate::app::agent_view::test_agent_view(
-            Some("test-session"),
-            std::path::PathBuf::from("/tmp"),
-        )
-        .session
+mod auto_recap_eligibility_tests {
+    use super::super::test_agent_view;
+    use crate::app::agent::{AgentState, ScheduledTaskInfo};
+    fn bound_idle_agent() -> super::AgentView {
+        test_agent_view(Some("s1"), std::path::PathBuf::from("/tmp"))
     }
-
     #[test]
-    fn apply_persisted_pending_prompts_restores_empty_queue() {
-        let mut session = empty_session();
-        apply_persisted_pending_prompts(
-            &mut session,
-            vec![
-                PersistedQueuedPrompt {
-                    id: 3,
-                    text: "first queued".into(),
-                    kind: "prompt".into(),
-                },
-                PersistedQueuedPrompt {
-                    id: 4,
-                    text: "second queued".into(),
-                    kind: "prompt".into(),
-                },
-            ],
+    fn eligible_only_when_bound_idle_and_unblocked() {
+        let mut agent = bound_idle_agent();
+        assert!(agent.is_eligible_for_auto_recap());
+        agent.session.state = AgentState::TurnRunning;
+        assert!(!agent.is_eligible_for_auto_recap(), "running turn");
+        agent.session.state = AgentState::Idle;
+        agent.active_modal = Some(crate::views::modal::ActiveModal::CommandPalette {
+            entries: crate::views::modal::default_palette_entries(
+                agent.sharing_enabled,
+                &agent.prompt.slash_controller,
+            ),
+            state: crate::views::picker::PickerState::input_active(),
+            window: crate::views::modal_window::ModalWindowState::new(),
+        });
+        assert!(!agent.is_eligible_for_auto_recap(), "open modal");
+        agent.active_modal = None;
+        let unbound = test_agent_view(None, std::path::PathBuf::from("/tmp"));
+        assert!(!unbound.is_eligible_for_auto_recap(), "no session yet");
+    }
+    #[test]
+    fn scheduled_loop_blocks_the_recap_request_until_deleted() {
+        let mut agent = bound_idle_agent();
+        agent.session.scheduled_tasks.insert(
+            "loop-1".to_owned(),
+            ScheduledTaskInfo {
+                task_id: "loop-1".to_owned(),
+                prompt: "babysit prs".to_owned(),
+                human_schedule: "every 1h".to_owned(),
+                created_at: std::time::Instant::now(),
+                next_fire_at: None,
+                tag: "loop".to_owned(),
+                last_subagent_id: None,
+            },
         );
-        assert_eq!(session.pending_prompts.len(), 2);
-        assert_eq!(session.pending_prompts[0].text, "first queued");
-        assert_eq!(session.pending_prompts[1].text, "second queued");
-        assert!(session.next_queue_id > 4);
-    }
-
-    #[test]
-    fn apply_persisted_pending_prompts_does_not_clobber_live_queue() {
-        let mut session = empty_session();
-        session.enqueue_prompt("already here".into());
-        apply_persisted_pending_prompts(
-            &mut session,
-            vec![PersistedQueuedPrompt {
-                id: 9,
-                text: "from disk".into(),
-                kind: "prompt".into(),
-            }],
-        );
-        assert_eq!(session.pending_prompts.len(), 1);
-        assert_eq!(session.pending_prompts[0].text, "already here");
-    }
-
-    #[test]
-    fn snapshot_includes_visible_server_rows_not_running() {
-        let local = std::collections::VecDeque::from([QueuedPrompt::plain(
-            1,
-            "local row",
-            QueueEntryKind::Prompt,
-        )]);
-        let server = vec![QueueEntryWire {
-            id: "srv-1".into(),
-            version: 0,
-            owner: None,
-            last_editor: None,
-            kind: "prompt".into(),
-            text: "server queued".into(),
-            position: 0,
-            combined_texts: None,
-        }];
-        let rows =
-            persisted_pending_prompt_rows(&local, &server, Some("running"), None, &HashMap::new());
-        assert_eq!(rows.len(), 2);
-        assert_eq!(rows[0].text, "server queued");
-        assert_eq!(rows[1].text, "local row");
+        assert!(!agent.is_eligible_for_auto_recap());
+        agent.session.scheduled_tasks.remove("loop-1");
+        assert!(agent.is_eligible_for_auto_recap());
     }
 }
 
@@ -4767,7 +3979,7 @@ mod resume_restore_occupancy_tests {
     use crate::app::dispatch::dispatch;
     use crate::scrollback::block::RenderBlock;
     use agent_client_protocol as acp;
-    use xai_grok_shell::session::pending_prompts::PersistedQueuedPrompt;
+    use xai_grok_shell::session::unsent_prompt_draft::pending_prompts::PersistedQueuedPrompt;
 
     const BODY: &str = "resume occupancy operator prompt that must appear once";
 
@@ -4804,7 +4016,7 @@ mod resume_restore_occupancy_tests {
     }
 
     fn write_queue_row(cwd: &str, sid: &str, body: &str) {
-        xai_grok_shell::session::pending_prompts::write_pending_prompts(
+        xai_grok_shell::session::unsent_prompt_draft::pending_prompts::write_pending_prompts(
             cwd,
             sid,
             &[PersistedQueuedPrompt {
@@ -4832,6 +4044,7 @@ mod resume_restore_occupancy_tests {
                 agent_id: AgentId(0),
                 session_id: acp::SessionId::new(sid),
                 models: None,
+                modes: None,
                 code_restored: false,
                 restore_summary: None,
                 restore_degree: None,

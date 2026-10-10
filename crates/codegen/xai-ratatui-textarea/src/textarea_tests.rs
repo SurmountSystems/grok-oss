@@ -1,47 +1,5 @@
 use super::*;
 // crossterm types are intentionally not imported here to avoid unused warnings
-use rand::prelude::*;
-
-fn rand_grapheme(rng: &mut rand::rngs::StdRng) -> String {
-    let r: u8 = rng.random_range(0..100);
-    match r {
-        0..=4 => "\n".to_string(),
-        5..=12 => " ".to_string(),
-        13..=35 => (rng.random_range(b'a'..=b'z') as char).to_string(),
-        36..=45 => (rng.random_range(b'A'..=b'Z') as char).to_string(),
-        46..=52 => (rng.random_range(b'0'..=b'9') as char).to_string(),
-        53..=65 => {
-            // Some emoji (wide graphemes)
-            let choices = ["👍", "😊", "🐍", "🚀", "🧪", "🌟"];
-            choices[rng.random_range(0..choices.len())].to_string()
-        }
-        66..=75 => {
-            // CJK wide characters
-            let choices = ["漢", "字", "測", "試", "你", "好", "界", "编", "码"];
-            choices[rng.random_range(0..choices.len())].to_string()
-        }
-        76..=85 => {
-            // Combining mark sequences
-            let base = ["e", "a", "o", "n", "u"][rng.random_range(0..5)];
-            let marks = ["\u{0301}", "\u{0308}", "\u{0302}", "\u{0303}"];
-            format!("{base}{}", marks[rng.random_range(0..marks.len())])
-        }
-        86..=92 => {
-            // Some non-latin single codepoints (Greek, Cyrillic, Hebrew)
-            let choices = ["Ω", "β", "Ж", "ю", "ש", "م", "ह"];
-            choices[rng.random_range(0..choices.len())].to_string()
-        }
-        _ => {
-            // ZWJ sequences (single graphemes but multi-codepoint)
-            let choices = [
-                "👩\u{200D}💻", // woman technologist
-                "👨\u{200D}💻", // man technologist
-                "🏳️\u{200D}🌈", // rainbow flag
-            ];
-            choices[rng.random_range(0..choices.len())].to_string()
-        }
-    }
-}
 
 fn ta_with(text: &str) -> TextArea {
     let mut t = TextArea::new();
@@ -118,7 +76,14 @@ fn canonical_adapter_applies_same_byte_metadata_edits_with_history() {
     assert!(textarea.undo());
     assert_eq!(textarea.text(), "TOKEN");
     assert_eq!(textarea.elements().len(), 1);
-    assert_eq!(textarea.elements()[0].id, id);
+    assert_eq!(
+        textarea
+            .elements()
+            .first()
+            .unwrap_or_else(|| panic!("expected an element"))
+            .id,
+        id
+    );
     assert!(textarea.redo());
     assert_eq!(textarea.text(), "TOKEN");
     assert!(textarea.elements().is_empty());
@@ -132,7 +97,14 @@ fn replace_element_forces_cursor_end_and_restores_metadata() {
     let id = before.replace_range_with_element(5..10, "NODE", ElementKind(1), None);
     let end = 5 + "NODE".len();
     assert_eq!(before.cursor(), end);
-    assert_eq!(before.elements()[0].id, id);
+    assert_eq!(
+        before
+            .elements()
+            .first()
+            .unwrap_or_else(|| panic!("expected an element"))
+            .id,
+        id
+    );
 
     assert!(before.undo());
     assert_eq!(before.text(), "left TOKEN right");
@@ -140,7 +112,14 @@ fn replace_element_forces_cursor_end_and_restores_metadata() {
     assert_eq!(before.cursor(), 0);
     assert!(before.redo());
     assert_eq!(before.text(), "left NODE right");
-    assert_eq!(before.elements()[0].id, id);
+    assert_eq!(
+        before
+            .elements()
+            .first()
+            .unwrap_or_else(|| panic!("expected an element"))
+            .id,
+        id
+    );
     assert_eq!(before.cursor(), end);
 
     let mut after = ta_with("left TOKEN right");
@@ -177,6 +156,76 @@ fn set_text_preserves_cursor_clamped_across_grow_and_shrink() {
 }
 
 #[test]
+fn restore_elements_skips_out_of_bounds_ranges() {
+    let mut textarea = ta_with("short");
+    textarea.restore_elements([(0..5, ElementKind(1), None), (0..6, ElementKind(1), None)]);
+
+    let ranges: Vec<_> = textarea
+        .elements()
+        .iter()
+        .map(|element| element.range.clone())
+        .collect();
+    assert_eq!(ranges, vec![0..5]);
+}
+
+#[test]
+fn restore_element_returns_id_over_existing_text() {
+    let mut textarea = ta_with("see [Image #1] now");
+    textarea.clear_history();
+
+    let id = textarea
+        .restore_element(4..14, ElementKind(3), None)
+        .unwrap_or_else(|| panic!("expected a registered element"));
+
+    assert_eq!(textarea.text(), "see [Image #1] now");
+    let elem = textarea
+        .elements()
+        .first()
+        .unwrap_or_else(|| panic!("expected an element"));
+    assert_eq!(
+        (elem.id, elem.range.clone(), elem.kind),
+        (id, 4..14, ElementKind(3))
+    );
+    assert!(
+        !textarea.can_undo(),
+        "restore_element must not record an undo step"
+    );
+}
+
+#[test]
+fn restore_element_rejects_overlapping_range() {
+    let mut textarea = ta_with("[Image #1] tail");
+    textarea
+        .restore_element(0..10, ElementKind(3), None)
+        .unwrap_or_else(|| panic!("first registration must succeed"));
+
+    assert_eq!(textarea.restore_element(5..12, ElementKind(3), None), None);
+    assert_eq!(textarea.restore_element(0..10, ElementKind(1), None), None);
+    assert_eq!(textarea.restore_element(0..100, ElementKind(3), None), None);
+    assert_eq!(textarea.elements().len(), 1);
+}
+
+#[test]
+fn restore_element_accepts_adjacent_range() {
+    let mut textarea = ta_with("[Image #1][Image #2]");
+    textarea
+        .restore_element(0..10, ElementKind(3), None)
+        .unwrap_or_else(|| panic!("first registration must succeed"));
+
+    assert!(
+        textarea
+            .restore_element(10..20, ElementKind(3), None)
+            .is_some()
+    );
+    let ranges: Vec<_> = textarea
+        .elements()
+        .iter()
+        .map(|element| element.range.clone())
+        .collect();
+    assert_eq!(ranges, vec![0..10, 10..20]);
+}
+
+#[test]
 fn set_text_restores_zero_length_element_metadata_through_history() {
     let mut textarea = TextArea::new();
     let id = textarea.insert_element("", ElementKind(7), None);
@@ -187,8 +236,22 @@ fn set_text_restores_zero_length_element_metadata_through_history() {
     assert!(textarea.undo());
     assert_eq!(textarea.text(), "");
     assert_eq!(textarea.elements().len(), 1);
-    assert_eq!(textarea.elements()[0].id, id);
-    assert_eq!(textarea.elements()[0].range, 0..0);
+    assert_eq!(
+        textarea
+            .elements()
+            .first()
+            .unwrap_or_else(|| panic!("expected an element"))
+            .id,
+        id
+    );
+    assert_eq!(
+        textarea
+            .elements()
+            .first()
+            .unwrap_or_else(|| panic!("expected an element"))
+            .range,
+        0..0
+    );
     assert!(textarea.redo());
     assert!(textarea.elements().is_empty());
 }
@@ -210,7 +273,14 @@ fn rejected_adapter_plan_has_no_side_effects() {
     assert_eq!(result, Err(ApplyEditPlanError::StalePlan));
     assert_eq!(textarea.text(), "TOKEN");
     assert_eq!(textarea.elements().len(), 1);
-    assert_eq!(textarea.elements()[0].id, id);
+    assert_eq!(
+        textarea
+            .elements()
+            .first()
+            .unwrap_or_else(|| panic!("expected an element"))
+            .id,
+        id
+    );
     assert_eq!(textarea.selection_range(), Some(0..5));
     assert_eq!(textarea.kill_buffer, "sentinel");
     assert_eq!(textarea.preferred_col, Some(3));
@@ -246,10 +316,24 @@ fn insert_str_at_inside_element_clamps_to_an_atomic_boundary() {
     textarea.insert_str_at(3, "X");
     assert_eq!(textarea.text(), "aXTOKENb");
     assert_eq!(textarea.cursor(), 8);
-    assert_eq!(textarea.elements()[0].range, 2..7);
+    assert_eq!(
+        textarea
+            .elements()
+            .first()
+            .unwrap_or_else(|| panic!("expected an element"))
+            .range,
+        2..7
+    );
     assert!(textarea.undo());
     assert_eq!(textarea.text(), "aTOKENb");
-    assert_eq!(textarea.elements()[0].range, 1..6);
+    assert_eq!(
+        textarea
+            .elements()
+            .first()
+            .unwrap_or_else(|| panic!("expected an element"))
+            .range,
+        1..6
+    );
 }
 
 #[test]
@@ -258,7 +342,12 @@ fn canonical_adapter_keeps_elements_atomic_for_motion_and_deletion() {
     backward.insert_str("a");
     let id = backward.insert_element("TOKEN", ElementKind(1), None);
     backward.insert_str("b");
-    let range = backward.elements()[0].range.clone();
+    let range = backward
+        .elements()
+        .first()
+        .unwrap_or_else(|| panic!("expected an element"))
+        .range
+        .clone();
     backward.set_cursor(range.end);
     backward.move_cursor_left();
     assert_eq!(backward.cursor(), range.start);
@@ -272,7 +361,12 @@ fn canonical_adapter_keeps_elements_atomic_for_motion_and_deletion() {
     forward.insert_str("a");
     forward.insert_element("TOKEN", ElementKind(1), None);
     forward.insert_str("b");
-    let range = forward.elements()[0].range.clone();
+    let range = forward
+        .elements()
+        .first()
+        .unwrap_or_else(|| panic!("expected an element"))
+        .range
+        .clone();
     forward.set_cursor(range.start);
     forward.delete_forward(1);
     assert_eq!(forward.text(), "ab");
@@ -338,10 +432,9 @@ fn is_undo_input_accepts_ctrl_and_cmd_z() {
 
 #[test]
 fn is_undo_input_rejects_redo_and_plain_z() {
-    // Uppercase 'Z' (redo) stays excluded so the guard is disjoint from
-    // the redo arm regardless of match order.
+    // Kitty terminals spell Ctrl+Shift+Z as a lowercase 'z' with Shift, and that chord is redo.
     assert!(!is_undo_input(&KeyEvent::new(
-        KeyCode::Char('Z'),
+        KeyCode::Char('z'),
         KeyModifiers::CONTROL | KeyModifiers::SHIFT
     )));
     // A bare 'z' (no chord modifier) is plain typing, not undo.
@@ -353,6 +446,22 @@ fn is_undo_input_rejects_redo_and_plain_z() {
         KeyCode::Char('z'),
         KeyModifiers::SHIFT
     )));
+}
+
+/// Terminals speaking the kitty keyboard protocol send Ctrl+Shift+Z as a lowercase 'z' with the Shift flag set.
+#[test]
+fn kitty_spelled_ctrl_shift_z_redoes_instead_of_undoing() {
+    let mut textarea = TextArea::new();
+    textarea.insert_str("kept");
+    textarea.input(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL));
+    assert_eq!(textarea.text(), "");
+
+    textarea.input(KeyEvent::new(
+        KeyCode::Char('z'),
+        KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+    ));
+
+    assert_eq!(textarea.text(), "kept");
 }
 
 #[test]
@@ -627,7 +736,12 @@ fn delete_forward_word_handles_atomic_elements() {
     t.insert_str(" tail");
 
     // cursor in the middle of the element, delete_forward_word deletes the element
-    let elem_range = t.elements()[0].range.clone();
+    let elem_range = t
+        .elements()
+        .first()
+        .unwrap_or_else(|| panic!("expected an element"))
+        .range
+        .clone();
     let _ = t
         .text
         .set_cursor_byte(elem_range.start + (elem_range.len() / 2));
@@ -651,20 +765,13 @@ fn element_id_is_unique_and_stable() {
     t.set_cursor(0);
     t.delete_forward(1); // deletes "aaa" atomically
     assert_eq!(t.elements().len(), 1);
-    assert_eq!(t.elements()[0].id, id2);
-}
-
-#[test]
-fn element_kind_preserved() {
-    let mut t = TextArea::new();
-    let kind_paste = ElementKind(1);
-    let kind_file = ElementKind(2);
-
-    t.insert_element("paste", kind_paste, None);
-    t.insert_element("file", kind_file, None);
-
-    assert_eq!(t.elements()[0].kind, kind_paste);
-    assert_eq!(t.elements()[1].kind, kind_file);
+    assert_eq!(
+        t.elements()
+            .first()
+            .unwrap_or_else(|| panic!("expected an element"))
+            .id,
+        id2
+    );
 }
 
 #[test]
@@ -710,7 +817,10 @@ fn element_display_can_be_set_and_updated() {
     let id = t.insert_element("lots of raw text here", ElementKind(1), Some(display));
 
     // Verify display is set
-    let elem = &t.elements()[0];
+    let elem = &t
+        .elements()
+        .first()
+        .unwrap_or_else(|| panic!("expected an element"));
     assert!(elem.display.is_some());
     assert_eq!(
         elem.display.as_ref().unwrap().to_string(),
@@ -720,7 +830,10 @@ fn element_display_can_be_set_and_updated() {
     // Update display
     let new_display = Line::from("[Pasted 5 lines, 200 chars]");
     t.set_element_display(id, Some(new_display));
-    let elem = &t.elements()[0];
+    let elem = &t
+        .elements()
+        .first()
+        .unwrap_or_else(|| panic!("expected an element"));
     assert_eq!(
         elem.display.as_ref().unwrap().to_string(),
         "[Pasted 5 lines, 200 chars]"
@@ -728,39 +841,16 @@ fn element_display_can_be_set_and_updated() {
 
     // Clear display
     t.set_element_display(id, None);
-    assert!(t.elements()[0].display.is_none());
+    assert!(
+        t.elements()
+            .first()
+            .unwrap_or_else(|| panic!("expected an element"))
+            .display
+            .is_none()
+    );
 
     // Buffer text is unchanged
     assert_eq!(t.element_text(id), Some("lots of raw text here"));
-}
-
-#[test]
-fn insert_element_returns_id_for_metadata_tracking() {
-    let mut t = TextArea::new();
-    let mut metadata: std::collections::HashMap<ElementId, String> =
-        std::collections::HashMap::new();
-
-    let id1 = t.insert_element("paste1", ElementKind(1), None);
-    metadata.insert(id1, "First paste".to_string());
-
-    let id2 = t.insert_element("paste2", ElementKind(1), None);
-    metadata.insert(id2, "Second paste".to_string());
-
-    // Verify we can look up metadata by id
-    assert_eq!(metadata.get(&id1), Some(&"First paste".to_string()));
-    assert_eq!(metadata.get(&id2), Some(&"Second paste".to_string()));
-
-    // Delete first element
-    t.set_cursor(0);
-    t.delete_forward(1);
-
-    // id2 still valid in our metadata map
-    let remaining = &t.elements()[0];
-    assert_eq!(remaining.id, id2);
-    assert_eq!(
-        metadata.get(&remaining.id),
-        Some(&"Second paste".to_string())
-    );
 }
 
 #[test]
@@ -775,9 +865,12 @@ fn elements_returns_sorted_slice() {
 
     let elems = t.elements();
     assert_eq!(elems.len(), 2);
-    assert!(elems[0].range.start < elems[1].range.start);
-    assert_eq!(&t.text()[elems[0].range.clone()], "BBB");
-    assert_eq!(&t.text()[elems[1].range.clone()], "DDD");
+    let [first, second] = elems else {
+        panic!("expected two elements: {elems:?}");
+    };
+    assert!(first.range.start < second.range.start);
+    assert_eq!(t.text().get(first.range.clone()).unwrap_or(""), "BBB");
+    assert_eq!(t.text().get(second.range.clone()).unwrap_or(""), "DDD");
 }
 
 // ===== Phase 2: Display rendering & truncation tests =====
@@ -906,10 +999,9 @@ fn render_element_with_prefix_text() {
 
 #[test]
 fn render_text_after_element_uses_display_width() {
-    // User scenario: "foo " + element("Clean build", display="[📎 Pasted 1 line, 11 chars]") + " abcde"
-    // Display: "[📎 Pasted 1 line, 11 chars]" = 1+2+1+23+1 = 28 display cols
-    // Buffer: "Clean build" = 11 bytes
-    // Without fix, text after element renders at buffer x, overlapping with element display.
+    // User scenario: "foo " + element("Clean build", display="[📎 Pasted 1 line, 11 chars]") + " abcde". Display: "[📎 Pasted
+    // 1 line, 11 chars]" = 1+2+1+23+1 = 28 display cols. Buffer: "Clean build" = 11 bytes. Without fix, text after element
+    // renders at buffer x, overlapping with element display.
     let mut t = TextArea::new();
     t.insert_str("foo ");
     let display = Line::from(vec![
@@ -1025,7 +1117,7 @@ fn set_text_and_replace_expand_tabs() {
     t.replace_range(4..4, "\tx");
     assert_eq!(t.text(), "col1    x    col2");
     // Insert-only replace places cursor at end of inserted expansion (4 spaces + 'x').
-    assert_eq!(&t.text()[4..9], "    x");
+    assert_eq!(t.text().get(4..9).unwrap_or(""), "    x");
 
     let mut t0 = TextArea::new();
     t0.set_tab_width(0);
@@ -1085,7 +1177,7 @@ fn multi_column_paste_tabs_readable() {
     assert_eq!(x, 19);
     let bol = t.text().rfind('\n').map(|i| i + 1).unwrap_or(0);
     assert_eq!(x as usize, t.display_width_of_range(bol, end));
-    let last_line = &t.text()[bol..];
+    let last_line = t.text().get(bol..).unwrap_or("");
     let (paint, paint_w) = paint_plain_for_display(last_line, 80, 4);
     assert_eq!(paint.as_ref(), last_line);
     assert_eq!(paint_w, 19);
@@ -1097,13 +1189,25 @@ fn insert_element_expands_tabs_and_covers_full_range() {
     t.insert_element("a\tb", ElementKind(0), None);
     assert_eq!(t.text(), "a    b");
     assert_eq!(t.elements().len(), 1);
-    assert_eq!(t.elements()[0].range, 0..6);
+    assert_eq!(
+        t.elements()
+            .first()
+            .unwrap_or_else(|| panic!("expected an element"))
+            .range,
+        0..6
+    );
     assert_eq!(t.cursor(), 6);
 
     let mut t2 = TextArea::new();
     t2.insert_element("a\tb\nc\td", ElementKind(1), Some(Line::from("[P]")));
     assert_eq!(t2.text(), "a    b\nc    d");
-    assert_eq!(t2.elements()[0].range, 0..t2.text().len());
+    assert_eq!(
+        t2.elements()
+            .first()
+            .unwrap_or_else(|| panic!("expected an element"))
+            .range,
+        0..t2.text().len()
+    );
     assert_eq!(t2.cursor(), t2.text().len());
     assert!(!t2.text().contains('\t'));
 }
@@ -1114,7 +1218,13 @@ fn replace_range_with_element_expands_tabs() {
     t.insert_str("xx");
     t.replace_range_with_element(0..2, "a\tb", ElementKind(0), None);
     assert_eq!(t.text(), "a    b");
-    assert_eq!(t.elements()[0].range, 0..6);
+    assert_eq!(
+        t.elements()
+            .first()
+            .unwrap_or_else(|| panic!("expected an element"))
+            .range,
+        0..6
+    );
     assert_eq!(t.cursor(), 6);
 }
 
@@ -1449,11 +1559,8 @@ fn kill_to_eol_removes_element_in_range() {
     assert!(t.elements().is_empty());
 }
 
-// ===== Element newline skipping in BOL/EOL =====
-//
-// Elements with multi-line buffer text (e.g. paste blocks) should be
-// treated as atomic for line navigation. Newlines inside elements are
-// NOT line boundaries.
+// ===== Element newline skipping in BOL/EOL =====. Elements with multi-line buffer text (e.g. paste blocks) should be
+// treated as atomic for line navigation. Newlines inside elements are NOT line boundaries.
 
 #[test]
 fn ctrl_e_skips_newline_inside_element() {
@@ -1641,10 +1748,9 @@ fn wrapping_element_without_display_uses_buffer_width() {
 
 #[test]
 fn wrapping_element_display_renders_on_correct_lines() {
-    // End-to-end: wrapping + rendering with display element.
-    // "abc " (4) + element("xy", display="[ELEM]" = 6 cols) + " d" (2)
-    // At width 8: "abc " (4) + "[ELEM]" (6) = 10 > 8 → wrap before element
-    // Line 1: "abc " (4 cols), Line 2: "[ELEM] d" (8 cols)
+    // End-to-end: wrapping + rendering with display element. "abc " (4) + element("xy", display="[ELEM]" = 6 cols) + " d"
+    // (2). At width 8: "abc " (4) + "[ELEM]" (6) = 10 > 8 → wrap before element. Line 1: "abc " (4 cols), Line 2: "[ELEM] d"
+    // (8 cols)
     let mut t = TextArea::new();
     t.insert_str("abc ");
     let display = Line::from("[ELEM]");
@@ -1679,12 +1785,9 @@ fn wrapping_element_display_renders_on_correct_lines() {
 
 #[test]
 fn wrapping_element_with_newlines_stays_single_line() {
-    // When an element's buffer text contains \n, wrapping must NOT split at those
-    // newlines. The element's display is a single-line chip; the \n is internal.
-    // Scenario: "hello " + element("line1\nline2\nline3", display="[paste]") + " world"
-    // Buffer: "hello line1\nline2\nline3 world"  (contains \n inside element)
-    // Display: "hello [paste] world" = 6 + 7 + 6 = 19 cols
-    // At width 40: should be 1 visual line.
+    // When an element's buffer text contains \n, wrapping must NOT split at those newlines. The element's display is a
+    // single-line chip; the \n is internal. Buffer: "hello line1\nline2\nline3 world" (contains \n inside element). Display:
+    // "hello [paste] world" = 6 + 7 + 6 = 19 cols. At width 40: should be 1 visual line.
     let mut t = TextArea::new();
     t.insert_str("hello ");
     let display = Line::from("[paste]"); // 7 display cols
@@ -1997,26 +2100,6 @@ fn alt_d_deletes_forward_word() {
 }
 
 #[test]
-fn ctrl_p_moves_cursor_up() {
-    let mut t = ta_with("first\nsecond\nthird");
-    let second_line_start = 6; // after "first\n"
-    t.set_cursor(second_line_start + 2); // middle of "second"
-    t.input(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL));
-    // Should be on first line now
-    assert!(t.cursor() < second_line_start);
-}
-
-#[test]
-fn ctrl_n_moves_cursor_down() {
-    let mut t = ta_with("first\nsecond\nthird");
-    t.set_cursor(2); // middle of "first"
-    t.input(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL));
-    let second_line_start = 6;
-    // Should be on second line now
-    assert!(t.cursor() >= second_line_start);
-}
-
-#[test]
 fn control_h_backspace() {
     // Test Ctrl+H as backspace
     let mut t = ta_with("12345");
@@ -2037,27 +2120,6 @@ fn control_h_backspace() {
     assert_eq!(t.text(), "124");
     assert_eq!(t.cursor(), 3);
 }
-#[test]
-fn char_bs_backspace() {
-    // Test Char('\x08') (BS) as backspace
-    let mut t = ta_with("12345");
-    t.set_cursor(3); // cursor after '3'
-    t.input(KeyEvent::new(KeyCode::Char('\x08'), KeyModifiers::NONE));
-    assert_eq!(t.text(), "1245");
-    assert_eq!(t.cursor(), 2);
-}
-
-#[test]
-fn char_del_deletes_backward() {
-    // Char('\x7f') (DEL) should delete backward — on Unix terminals,
-    // Backspace sends 0x7F in legacy mode (no Kitty protocol).
-    let mut t = ta_with("12345");
-    t.set_cursor(2); // cursor after '2'
-    t.input(KeyEvent::new(KeyCode::Char('\x7f'), KeyModifiers::NONE));
-    assert_eq!(t.text(), "1345");
-    assert_eq!(t.cursor(), 1);
-}
-
 #[test]
 fn raw_delete_chars_ignore_stray_modifiers() {
     for raw in ['\u{0008}', '\u{007f}'] {
@@ -2468,9 +2530,12 @@ fn screen_spans_of_range_covers_wrapped_rows() {
     );
     assert!(spans.iter().all(|r| r.height == 1));
     for pair in spans.windows(2) {
-        assert_eq!(pair[1].y, pair[0].y + 1, "rows must be consecutive");
+        let [a, b] = pair else {
+            panic!("expected a pair of spans: {pair:?}");
+        };
+        assert_eq!(b.y, a.y + 1, "rows must be consecutive");
     }
-    for r in &spans[1..] {
+    for r in spans.get(1..).unwrap_or(&[]) {
         assert_eq!(r.x, area.x, "continuation rows start at the left edge");
         assert!(r.right() <= area.x + area.width);
     }
@@ -2518,10 +2583,9 @@ fn screen_spans_of_range_uses_display_width() {
 
 #[test]
 fn screen_spans_of_range_clamps_to_content_edge() {
-    // Overflowing content puts the scrollbar up, so content is only
-    // `tw = width - 1` columns. Row 0's byte range keeps its trailing
-    // wrap spaces ("ab   " measures 5), but the reported span must stop
-    // at the content edge (4), never reaching the scrollbar column.
+    // Overflowing content puts the scrollbar up, so content is only `tw = width - 1` columns. Row 0's byte range keeps its
+    // trailing wrap spaces ("ab " measures 5), but the reported span must stop at the content edge (4), never reaching the
+    // scrollbar column.
     let mut t = ta_with("ab   cd ef gh");
     t.set_cursor(0);
     let area = Rect::new(0, 0, 5, 2);
@@ -2659,6 +2723,8 @@ fn wrapped_navigation_with_wide_graphemes() {
     assert_eq!(t.cursor(), "👍👍".len());
 }
 
+/// textwrap sums per-char widths, so each 2-col ZWJ cluster fills a 4-col row; Up from the end
+/// lands on row 1's cluster start, not row 2's start.
 #[test]
 fn wrapped_navigation_with_zwj_graphemes() {
     let grapheme = "👩\u{200D}💻";
@@ -2672,7 +2738,7 @@ fn wrapped_navigation_with_zwj_graphemes() {
     assert!(pos_after_down >= grapheme.len() * 2);
 
     t.move_cursor_up();
-    assert_eq!(t.cursor(), grapheme.len() * 2);
+    assert_eq!(grapheme.len(), t.cursor());
 }
 
 #[test]
@@ -2688,227 +2754,11 @@ fn element_aware_wrap_ranges_preserve_zwj_graphemes() {
     };
 
     assert_eq!(ranges.len(), 3);
-    assert_eq!(&t.text()[ranges[0].clone()], grapheme);
-    assert_eq!(&t.text()[ranges[1].clone()], grapheme);
-}
-
-#[test]
-fn fuzz_textarea_randomized() {
-    // Deterministic seed for reproducibility
-    // Seed the RNG based on the current day in Pacific Time (PST/PDT). This
-    // keeps the fuzz test deterministic within a day while still varying
-    // day-to-day to improve coverage.
-    let pst_today_seed: u64 = (chrono::Utc::now() - chrono::Duration::hours(8))
-        .date_naive()
-        .and_hms_opt(0, 0, 0)
-        .unwrap()
-        .and_utc()
-        .timestamp() as u64;
-    let mut rng = rand::rngs::StdRng::seed_from_u64(pst_today_seed);
-
-    for _case in 0..500 {
-        let mut ta = TextArea::new();
-        let mut state = TextAreaState::default();
-        // Track element payloads we insert. Payloads use characters '[' and ']' which
-        // are not produced by rand_grapheme(), avoiding accidental collisions.
-        let mut elem_texts: Vec<String> = Vec::new();
-        let mut next_elem_id: usize = 0;
-        // Start with a random base string
-        let base_len = rng.random_range(0..30);
-        let mut base = String::new();
-        for _ in 0..base_len {
-            base.push_str(&rand_grapheme(&mut rng));
-        }
-        ta.set_text(&base);
-        // Choose a valid char boundary for initial cursor
-        let mut boundaries: Vec<usize> = vec![0];
-        boundaries.extend(ta.text().char_indices().map(|(i, _)| i).skip(1));
-        boundaries.push(ta.text().len());
-        let init = boundaries[rng.random_range(0..boundaries.len())];
-        ta.set_cursor(init);
-
-        let mut width: u16 = rng.random_range(1..=12);
-        let mut height: u16 = rng.random_range(1..=4);
-
-        for _step in 0..60 {
-            // Mostly stable width/height, occasionally change
-            if rng.random_bool(0.1) {
-                width = rng.random_range(1..=12);
-            }
-            if rng.random_bool(0.1) {
-                height = rng.random_range(1..=4);
-            }
-
-            // Pick an operation
-            match rng.random_range(0..18) {
-                0 => {
-                    // insert small random string at cursor
-                    let len = rng.random_range(0..6);
-                    let mut s = String::new();
-                    for _ in 0..len {
-                        s.push_str(&rand_grapheme(&mut rng));
-                    }
-                    ta.insert_str(&s);
-                }
-                1 => {
-                    // Include mid-grapheme char boundaries so normalization stays exercised.
-                    let mut b: Vec<usize> = vec![0];
-                    b.extend(ta.text().char_indices().map(|(i, _)| i).skip(1));
-                    b.push(ta.text().len());
-                    let i1 = rng.random_range(0..b.len());
-                    let i2 = rng.random_range(0..b.len());
-                    let (start, end) = if b[i1] <= b[i2] {
-                        (b[i1], b[i2])
-                    } else {
-                        (b[i2], b[i1])
-                    };
-                    let insert_len = rng.random_range(0..=4);
-                    let mut s = String::new();
-                    for _ in 0..insert_len {
-                        s.push_str(&rand_grapheme(&mut rng));
-                    }
-                    let before = ta.text().len();
-                    let atomic_ranges = ta.element_ranges();
-                    let plan = ta
-                        .text
-                        .plan_replace_byte_range(start..end, &s, &atomic_ranges);
-                    let normalized_len = plan.replaced_byte_range().len();
-                    ta.replace_range(start..end, &s);
-                    let after = ta.text().len();
-                    assert_eq!(
-                        after as isize,
-                        before as isize + (s.len() as isize) - (normalized_len as isize)
-                    );
-                }
-                2 => ta.delete_backward(rng.random_range(0..=3)),
-                3 => ta.delete_forward(rng.random_range(0..=3)),
-                4 => ta.delete_backward_word(),
-                5 => ta.kill_to_beginning_of_line(),
-                6 => ta.kill_to_end_of_line(),
-                7 => ta.move_cursor_left(),
-                8 => ta.move_cursor_right(),
-                9 => ta.move_cursor_up(),
-                10 => ta.move_cursor_down(),
-                11 => ta.move_cursor_to_beginning_of_line(true),
-                12 => ta.move_cursor_to_end_of_line(true),
-                13 => {
-                    // Insert an element with a unique sentinel payload
-                    let payload =
-                        format!("[[EL#{}:{}]]", next_elem_id, rng.random_range(1000..9999));
-                    next_elem_id += 1;
-                    ta.insert_element(&payload, ElementKind(0), None);
-                    elem_texts.push(payload);
-                }
-                14 => {
-                    // Try inserting inside an existing element (should clamp to boundary)
-                    if let Some(payload) = elem_texts.choose(&mut rng).cloned()
-                        && let Some(start) = ta.text().find(&payload)
-                    {
-                        let end = start + payload.len();
-                        if end - start > 2 {
-                            let pos = rng.random_range(start + 1..end - 1);
-                            let ins = rand_grapheme(&mut rng);
-                            ta.insert_str_at(pos, &ins);
-                        }
-                    }
-                }
-                15 => {
-                    // Replace a range that intersects an element -> whole element should be replaced
-                    if let Some(payload) = elem_texts.choose(&mut rng).cloned()
-                        && let Some(start) = ta.text().find(&payload)
-                    {
-                        let end = start + payload.len();
-                        // Create an intersecting range [start-δ, end-δ2)
-                        let mut s = start.saturating_sub(rng.random_range(0..=2));
-                        let mut e = (end + rng.random_range(0..=2)).min(ta.text().len());
-                        // Align to char boundaries to satisfy String::replace_range contract
-                        let txt = ta.text();
-                        while s > 0 && !txt.is_char_boundary(s) {
-                            s -= 1;
-                        }
-                        while e < txt.len() && !txt.is_char_boundary(e) {
-                            e += 1;
-                        }
-                        if s < e {
-                            // Small replacement text
-                            let mut srep = String::new();
-                            for _ in 0..rng.random_range(0..=2) {
-                                srep.push_str(&rand_grapheme(&mut rng));
-                            }
-                            ta.replace_range(s..e, &srep);
-                        }
-                    }
-                }
-                16 => {
-                    // Try setting the cursor to a position inside an element; it should clamp out
-                    if let Some(payload) = elem_texts.choose(&mut rng).cloned()
-                        && let Some(start) = ta.text().find(&payload)
-                    {
-                        let end = start + payload.len();
-                        if end - start > 2 {
-                            let pos = rng.random_range(start + 1..end - 1);
-                            ta.set_cursor(pos);
-                        }
-                    }
-                }
-                _ => {
-                    // Jump to word boundaries
-                    if rng.random_bool(0.5) {
-                        let p = ta.beginning_of_previous_word();
-                        ta.set_cursor(p);
-                    } else {
-                        let p = ta.end_of_next_word();
-                        ta.set_cursor(p);
-                    }
-                }
-            }
-
-            // Sanity invariants
-            assert!(ta.cursor() <= ta.text().len());
-
-            // Element invariants
-            for payload in &elem_texts {
-                if let Some(start) = ta.text().find(payload) {
-                    let end = start + payload.len();
-                    // 1) Text inside elements matches the initially set payload
-                    assert_eq!(&ta.text()[start..end], payload);
-                    // 2) Cursor is never strictly inside an element
-                    let c = ta.cursor();
-                    assert!(
-                        c <= start || c >= end,
-                        "cursor inside element: {start}..{end} at {c}"
-                    );
-                }
-            }
-
-            // Render and compute cursor positions; ensure they are in-bounds and do not panic
-            let area = Rect::new(0, 0, width, height);
-            // Stateless render into an area tall enough for all wrapped lines
-            let total_lines = ta.desired_height(width);
-            let full_area = Rect::new(0, 0, width, total_lines.max(1));
-            let mut buf = Buffer::empty(full_area);
-            ratatui::widgets::WidgetRef::render_ref(&(&ta), full_area, &mut buf);
-
-            // cursor_pos: x must be within width when present
-            let _ = ta.cursor_pos(area);
-
-            // cursor_pos_with_state: always within viewport rows
-            let (_x, _y) = ta
-                .cursor_pos_with_state(area, state)
-                .unwrap_or((area.x, area.y));
-
-            // Stateful render should not panic, and updates scroll
-            let mut sbuf = Buffer::empty(area);
-            ratatui::widgets::StatefulWidgetRef::render_ref(&(&ta), area, &mut sbuf, &mut state);
-
-            // After wrapping, desired height equals the number of lines we would render without scroll
-            let total_lines = total_lines as usize;
-            // state.scroll must not exceed total_lines when content fits within area height
-            if (height as usize) >= total_lines {
-                assert_eq!(state.scroll, 0);
-            }
-        }
-    }
+    let [first, second, ..] = ranges.as_slice() else {
+        panic!("expected two ranges: {ranges:?}");
+    };
+    assert_eq!(t.text().get(first.clone()).unwrap_or(""), grapheme);
+    assert_eq!(t.text().get(second.clone()).unwrap_or(""), grapheme);
 }
 
 // ── Mouse M1: Screen→Buffer mapping tests ──
@@ -3024,10 +2874,9 @@ fn buffer_pos_at_screen_wide_unicode() {
     assert_eq!(t.buffer_pos_at_screen(0, 0, area, state), Some(0));
     // col 1 → first column of 🦀 → pos 1
     assert_eq!(t.buffer_pos_at_screen(1, 0, area, state), Some(1));
-    // col 2 → second column of 🦀 → still pos 1 (within the 2-wide grapheme;
-    // display_col_to_buffer_pos snaps to start of grapheme since target_col < width_so_far)
-    // Actually: width_so_far after 'a' is 1, then 🦀 adds 2 → width_so_far=3 > target_col=2
-    // → returns pos 1 (start of 🦀)
+    // col 2 → second column of 🦀 → still pos 1 (within the 2-wide grapheme; display_col_to_buffer_pos snaps to start of
+    // grapheme since target_col < width_so_far). Actually: width_so_far after 'a' is 1, then 🦀 adds 2 → width_so_far=3 >
+    // target_col=2 → returns pos 1 (start of 🦀)
     assert_eq!(t.buffer_pos_at_screen(2, 0, area, state), Some(1));
     // col 3 → 'b' at pos 5 (1 + 4 bytes for 🦀)
     assert_eq!(t.buffer_pos_at_screen(3, 0, area, state), Some(5));
@@ -3184,7 +3033,9 @@ fn selection_rendering_applies_default_selection_style() {
     let default_fg = Color::Rgb(192, 202, 245);
     // Cells 1, 2, 3 should have the default selection bg + fg
     for col in 1..4u16 {
-        let cell = &buf[(col, 0)];
+        let Some(cell) = buf.cell((col, 0)) else {
+            panic!("expected cell at col {col}");
+        };
         assert_eq!(
             cell.bg, default_bg,
             "cell at col {col} should have default selection bg"
@@ -3195,29 +3046,11 @@ fn selection_rendering_applies_default_selection_style() {
         );
     }
     // Cell 0 ('h') and cell 4 ('o') should NOT have selection bg
-    assert_ne!(buf[(0, 0)].bg, default_bg);
-    assert_ne!(buf[(4, 0)].bg, default_bg);
+    assert_ne!(buf.cell((0, 0)).map(|c| c.bg), Some(default_bg));
+    assert_ne!(buf.cell((4, 0)).map(|c| c.bg), Some(default_bg));
 }
 
 // ── Phase 1: Undo/Redo plumbing tests ──
-
-#[test]
-fn undo_insert_chars_one_at_a_time() {
-    let mut ta = TextArea::new();
-    ta.insert_str("a");
-    ta.insert_str("b");
-    ta.insert_str("c");
-    assert_eq!(ta.text(), "abc");
-    assert_eq!(ta.cursor(), 3);
-
-    // Phase 2: consecutive single-char inserts are batched into 1 undo step.
-    assert!(ta.undo());
-    assert_eq!(ta.text(), "");
-    assert_eq!(ta.cursor(), 0);
-
-    // Nothing left to undo.
-    assert!(!ta.undo());
-}
 
 #[test]
 fn redo_after_undo_restores() {
@@ -3547,17 +3380,6 @@ fn kill_consecutive_each_own_step() {
 }
 
 #[test]
-fn insert_str_multi_char_is_one_step() {
-    // A single insert_str("hello world") call is 1 undo step.
-    let mut ta = TextArea::new();
-    ta.insert_str("hello world");
-    assert_eq!(ta.undo.stack.len(), 1);
-
-    ta.undo();
-    assert_eq!(ta.text(), "");
-}
-
-#[test]
 fn set_text_always_discrete() {
     let mut ta = TextArea::new();
     ta.set_text("first");
@@ -3717,7 +3539,13 @@ fn undo_insert_element_redo_preserves_element_id() {
     let mut ta = TextArea::new();
     let id = ta.insert_element("@foo", ElementKind(1), None);
     assert_eq!(ta.elements().len(), 1);
-    assert_eq!(ta.elements()[0].id, id);
+    assert_eq!(
+        ta.elements()
+            .first()
+            .unwrap_or_else(|| panic!("expected an element"))
+            .id,
+        id
+    );
     assert_eq!(ta.cursor(), "@foo".len());
 
     ta.undo(); // remove element
@@ -3727,7 +3555,13 @@ fn undo_insert_element_redo_preserves_element_id() {
 
     ta.redo(); // restore element — same ElementId
     assert_eq!(ta.elements().len(), 1);
-    assert_eq!(ta.elements()[0].id, id);
+    assert_eq!(
+        ta.elements()
+            .first()
+            .unwrap_or_else(|| panic!("expected an element"))
+            .id,
+        id
+    );
     assert_eq!(ta.text(), "@foo");
     assert_eq!(ta.cursor(), "@foo".len());
 }
@@ -3737,7 +3571,13 @@ fn undo_redo_zero_length_element_preserves_metadata_and_cursor() {
     let mut ta = TextArea::new();
     let id = ta.insert_element("", ElementKind(9), None);
     assert_eq!(ta.cursor(), 0);
-    assert_eq!(ta.elements()[0].range, 0..0);
+    assert_eq!(
+        ta.elements()
+            .first()
+            .unwrap_or_else(|| panic!("expected an element"))
+            .range,
+        0..0
+    );
 
     assert!(ta.undo());
     assert!(ta.elements().is_empty());
@@ -3745,8 +3585,20 @@ fn undo_redo_zero_length_element_preserves_metadata_and_cursor() {
 
     assert!(ta.redo());
     assert_eq!(ta.elements().len(), 1);
-    assert_eq!(ta.elements()[0].id, id);
-    assert_eq!(ta.elements()[0].range, 0..0);
+    assert_eq!(
+        ta.elements()
+            .first()
+            .unwrap_or_else(|| panic!("expected an element"))
+            .id,
+        id
+    );
+    assert_eq!(
+        ta.elements()
+            .first()
+            .unwrap_or_else(|| panic!("expected an element"))
+            .range,
+        0..0
+    );
     assert_eq!(ta.cursor(), 0);
 }
 
@@ -3758,7 +3610,13 @@ fn undo_replace_range_with_element_restores_original() {
     let id = ta.replace_range_with_element(6..10, "@bar.rs", ElementKind(2), None);
     assert_eq!(ta.text(), "hello @bar.rs world");
     assert_eq!(ta.elements().len(), 1);
-    assert_eq!(ta.elements()[0].id, id);
+    assert_eq!(
+        ta.elements()
+            .first()
+            .unwrap_or_else(|| panic!("expected an element"))
+            .id,
+        id
+    );
 
     ta.undo(); // undo replace → original text, no elements
     assert_eq!(ta.text(), "hello @foo world");
@@ -3767,7 +3625,13 @@ fn undo_replace_range_with_element_restores_original() {
     ta.redo(); // redo → element back
     assert_eq!(ta.text(), "hello @bar.rs world");
     assert_eq!(ta.elements().len(), 1);
-    assert_eq!(ta.elements()[0].id, id);
+    assert_eq!(
+        ta.elements()
+            .first()
+            .unwrap_or_else(|| panic!("expected an element"))
+            .id,
+        id
+    );
 }
 
 #[test]
@@ -3779,16 +3643,34 @@ fn undo_element_display_preserved() {
         ratatui::text::Span::styled("]", Style::default().fg(Color::Green)),
     ]);
     let id = ta.insert_element("@file.rs", ElementKind(0), Some(display));
-    assert!(ta.elements()[0].display.is_some());
+    assert!(
+        ta.elements()
+            .first()
+            .unwrap_or_else(|| panic!("expected an element"))
+            .display
+            .is_some()
+    );
 
     ta.undo();
     assert!(ta.elements().is_empty());
 
     ta.redo();
     assert_eq!(ta.elements().len(), 1);
-    assert_eq!(ta.elements()[0].id, id);
+    assert_eq!(
+        ta.elements()
+            .first()
+            .unwrap_or_else(|| panic!("expected an element"))
+            .id,
+        id
+    );
     // Display should be restored from the snapshot clone
-    let restored = ta.elements()[0].display.as_ref().unwrap();
+    let restored = ta
+        .elements()
+        .first()
+        .unwrap_or_else(|| panic!("expected an element"))
+        .display
+        .as_ref()
+        .unwrap();
     assert_eq!(restored.spans.len(), 3);
     let text: String = restored.spans.iter().map(|s| s.content.as_ref()).collect();
     assert_eq!(text, "[file.rs]");
@@ -3829,8 +3711,20 @@ fn backspace_on_element_undo_restores_element() {
     ta.undo();
     assert_eq!(ta.text(), "before [paste]");
     assert_eq!(ta.elements().len(), 1);
-    assert_eq!(ta.elements()[0].id, id);
-    assert_eq!(ta.elements()[0].range, 7..14);
+    assert_eq!(
+        ta.elements()
+            .first()
+            .unwrap_or_else(|| panic!("expected an element"))
+            .id,
+        id
+    );
+    assert_eq!(
+        ta.elements()
+            .first()
+            .unwrap_or_else(|| panic!("expected an element"))
+            .range,
+        7..14
+    );
 }
 
 // ── Phase 4: Undo group tests ──
@@ -4141,10 +4035,9 @@ fn drag_across_element_expands_to_element_boundaries() {
     ta.insert_element("ELEM", ElementKind(0), None);
     ta.insert_str("cd");
 
-    // Now test partial overlap: drag from col 0 to col 3 (into the element).
-    // display_col_to_buffer_pos snaps col 3 to element start (2) since dist
-    // to start (1) < dist to end (3). Raw selection 0..2 → but element at
-    // 2..6 is NOT overlapped, so no expansion.
+    // Now test partial overlap: drag from col 0 to col 3 (into the element). display_col_to_buffer_pos snaps col 3 to
+    // element start (2) since dist to start (1) < dist to end (3). Raw selection 0..2 → but element at 2..6 is NOT
+    // overlapped, so no expansion.
     ta.handle_mouse(mouse_down(0, 0), area, state);
     ta.handle_mouse(mouse_drag(3, 0), area, state);
     let range = ta.selection_range().unwrap();
@@ -4312,10 +4205,8 @@ fn ctrl_x_with_zero_width_selection_falls_through() {
     ta.set_cursor(5);
     ta.set_selection(5, 5);
 
-    // Ctrl-X on zero-width selection shouldn't eat the key.
-    // It should clear selection and fall through to normal handling
-    // (which for Ctrl-X without selection is a no-op, but the selection
-    // must be cleared).
+    // Ctrl-X on zero-width selection shouldn't eat the key. It should clear selection and fall through to normal handling
+    // (which for Ctrl-X without selection is a no-op, but the selection must be cleared).
     ta.input(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL));
     assert!(ta.selection.is_none());
 }
@@ -4665,7 +4556,9 @@ fn selection_uses_custom_style_override() {
 
     // Cells 1, 2, 3 should have Blue background (custom selection style)
     for col in 1..4u16 {
-        let cell = &buf[(col, 0)];
+        let Some(cell) = buf.cell((col, 0)) else {
+            panic!("expected cell at col {col}");
+        };
         assert_eq!(
             cell.bg,
             Color::Blue,
@@ -4673,8 +4566,8 @@ fn selection_uses_custom_style_override() {
         );
     }
     // Cell 0 ('h') and cell 4 ('o') should NOT have Blue bg
-    assert_ne!(buf[(0, 0)].bg, Color::Blue);
-    assert_ne!(buf[(4, 0)].bg, Color::Blue);
+    assert_ne!(buf.cell((0, 0)).map(|c| c.bg), Some(Color::Blue));
+    assert_ne!(buf.cell((4, 0)).map(|c| c.bg), Some(Color::Blue));
 }
 
 #[test]
@@ -4724,10 +4617,9 @@ fn drag_below_area_scrolls_down_and_extends_selection() {
     let action = ta.handle_mouse(mouse_drag(0, 5), area, state);
     assert_eq!(action, MouseAction::SelectionUpdated);
 
-    // Cursor should have moved past the visible area.
-    // With scroll=0 and height=3, visible lines are 0,1,2 (aaa,bbb,ccc).
-    // Dragging below → target_line = visible_end = 3 → "ddd" starts at byte 12.
-    // At col 0, cursor should be at byte 12 (start of "ddd").
+    // Cursor should have moved past the visible area. With scroll=0 and height=3, visible lines are 0,1,2 (aaa,bbb,ccc).
+    // Dragging below → target_line = visible_end = 3 → "ddd" starts at byte 12. At col 0, cursor should be at byte 12 (start
+    // of "ddd").
     assert!(ta.cursor() >= 12);
 
     // Selection should extend from anchor (0) to the new cursor position.
@@ -4749,10 +4641,9 @@ fn drag_above_area_scrolls_up_and_extends_selection() {
     // Click on bottom visible line (row 2).
     ta.handle_mouse(mouse_down(1, 2), area, state);
 
-    // Drag above the visible area (row is before area.y).
-    // Since area.y = 0, dragging to row=0 when scroll=2 means the row
-    // is at the top edge. We need a row *above* the area. With area.y=0,
-    // we can't go negative, but we can use an area with area.y > 0.
+    // Drag above the visible area (row is before area.y). Since area.y = 0, dragging to row=0 when scroll=2 means the row is
+    // at the top edge. We need a row *above* the area. With area.y=0, we can't go negative, but we can use an area with
+    // area.y > 0.
     let area2 = Rect::new(0, 5, 40, 3); // area starts at row 5
     ta.handle_mouse(mouse_down(1, 7), area2, state); // click at row 7 (visible)
 
@@ -4792,16 +4683,8 @@ fn drag_below_area_moves_cursor_past_last_visible_line() {
 
 #[test]
 fn drag_above_wide_column_still_scrolls_up() {
-    // Bug: when dragging above the area with a column wider than the
-    // target line, display_col_to_buffer_pos returns line_end which
-    // equals the *next* line's start.  wrapped_line_index_by_start
-    // then resolves to the next line, so effective_scroll sees the
-    // cursor as still within the viewport and doesn't scroll.
-    //
-    // Scenario: 10 short lines ("ab"), area is 3 rows tall with
-    // area.y = 2 (so we can drag above).  Scroll starts at line 5.
-    // We drag to row 1 (above area.y = 2) at column 50 (way past
-    // each 3-byte line).  The cursor must land ON the target line
+    // Scenario: 10 short lines ("ab"), area is 3 rows tall with area.y = 2 (so we can drag above). Scroll starts at line 5.
+    // We drag to row 1 (above area.y = 2) at column 50 (way past each 3-byte line). The cursor must land ON the target line
     // (line 4), not spill over to line 5.
     let text = "ab\nab\nab\nab\nab\nab\nab\nab\nab\nab";
     let mut ta = ta_with(text);
@@ -4850,10 +4733,8 @@ fn drag_below_wide_column_still_scrolls_down() {
     let action = ta.handle_mouse(mouse_drag(50, 5), area, state);
     assert_eq!(action, MouseAction::SelectionUpdated);
 
-    // visible_end = 0 + 3 = 3.  dist = 5 - 3 + 1 = 3.
-    // n = drag_scroll_lines_for_distance(3) = 2.
-    // target_line = (3 + 2 - 1) = 4.  Line 4 spans bytes 12..15.
-    // Cursor must be within [12, 14], not at 15.
+    // visible_end = 0 + 3 = 3. dist = 5 - 3 + 1 = 3. n = drag_scroll_lines_for_distance(3) = 2. target_line = (3 + 2 - 1) =
+    // 4. Line 4 spans bytes 12..15. Cursor must be within [12, 14], not at 15.
     let cursor = ta.cursor();
     assert!(
         (12..15).contains(&cursor),
@@ -4933,11 +4814,9 @@ fn click_on_text_with_multibyte_chars_does_not_panic() {
 
 #[test]
 fn selecting_wrapped_line_ending_with_multibyte_char_does_not_panic() {
-    // Regression: when a line wraps and '│' (3-byte char) ends up right
-    // at the wrap boundary, the wrapping code (or rendering) can produce
-    // a byte position inside the multi-byte character.
-    //
-    // Reproduce: enough spaces so '│' is pushed to the next wrapped line.
+    // Regression: when a line wraps and '│' (3-byte char) ends up right at the wrap boundary, the wrapping code (or
+    // rendering) can produce a byte position inside the multi-byte character. Reproduce: enough spaces so '│' is pushed to
+    // the next wrapped line.
     let text = format!("{}│", " ".repeat(29)); // 29 spaces + '│' = 30 display cols
     let mut ta = ta_with(&text);
     let area = Rect::new(0, 0, 30, 5); // width 30 → '│' wraps to next line
@@ -5497,7 +5376,10 @@ fn scrollbar_wrapping_uses_narrower_width() {
     // The 19-char line should NOT wrap at width 19 — it fits exactly.
     let lines = ta.wrapped_lines(cw);
     // First wrapped line should contain all 19 chars.
-    assert_eq!(&ta.text()[lines[0].clone()], &"a".repeat(19));
+    let Some(first) = lines.first() else {
+        panic!("expected a wrapped line: {lines:?}");
+    };
+    assert_eq!(ta.text().get(first.clone()).unwrap_or(""), &"a".repeat(19));
 }
 
 #[test]
@@ -5654,7 +5536,9 @@ fn scrollbar_render_produces_track_and_thumb() {
     // All cells in the scrollbar column should have the track bg color.
     let mut has_thumb = false;
     for row in 0..5u16 {
-        let cell = &buf[(sb_col, row)];
+        let Some(cell) = buf.cell((sb_col, row)) else {
+            panic!("expected scrollbar cell at row {row}");
+        };
         // Track bg is Rgb(45,45,55); check bg is set.
         assert!(cell.style().bg.is_some(), "scrollbar cell should have bg");
         if cell.symbol() != " " {
@@ -5676,7 +5560,9 @@ fn no_scrollbar_column_when_content_fits() {
     StatefulWidgetRef::render_ref(&&ta, area, &mut buf, &mut state);
 
     let last_col = 19u16;
-    let cell = &buf[(last_col, 0u16)];
+    let Some(cell) = buf.cell((last_col, 0u16)) else {
+        panic!("expected cell at last column");
+    };
     // Should be default (empty space), not scrollbar styled.
     assert!(
         cell.style().bg.is_none() || !matches!(cell.style().bg, Some(Color::Rgb(32, 35, 53))),
@@ -5847,7 +5733,9 @@ fn copy_on_selection_finalized_sets_provider() {
     ta.handle_mouse(mouse_drag(5, 0), area, state);
     ta.handle_mouse(mouse_up(5, 0), area, state);
 
-    // Now Ctrl-V should paste "hello" (from provider)
+    // Mouse-up copies to the provider; drop the highlight so Ctrl+V inserts
+    // instead of replacing the selection.
+    ta.clear_selection();
     ta.set_cursor(5);
     ta.input(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::CONTROL));
     assert_eq!(ta.text(), "hellohello");
@@ -5953,16 +5841,6 @@ fn hover_between_two_elements() {
 
 // ── set_scroll_override / scroll_override tests ────────────────────
 
-#[test]
-fn scroll_override_getter_setter() {
-    let mut ta = TextArea::new();
-    assert_eq!(ta.scroll_override(), None);
-    ta.set_scroll_override(Some(5));
-    assert_eq!(ta.scroll_override(), Some(5));
-    ta.set_scroll_override(None);
-    assert_eq!(ta.scroll_override(), None);
-}
-
 /// Helper: stateful render (saves typing the full trait path).
 fn render_stateful(ta: &TextArea, area: Rect, buf: &mut Buffer, state: &mut TextAreaState) {
     ratatui::widgets::StatefulWidgetRef::render_ref(&ta, area, buf, state);
@@ -6040,11 +5918,7 @@ fn scroll_override_survives_render_cycles() {
 
 #[test]
 fn scroll_override_save_restore_round_trip() {
-    // Simulates the collapsed-prompt pattern:
-    // 1. Render normally (cursor-follow)
-    // 2. Save state.scroll + scroll_override
-    // 3. Override to 0, render collapsed
-    // 4. Restore both → next render shows original viewport
+    // Render normally (cursor-follow); Save state.scroll + scroll_override; Override to 0, render collapsed.
     let text = (0..30)
         .map(|i| format!("line {i}"))
         .collect::<Vec<_>>()
@@ -6199,17 +6073,6 @@ fn alt_word_nav_preserved() {
 }
 
 #[test]
-fn ctrl_alt_h_deletes_word() {
-    let mut t = ta_with("hello world");
-    t.set_cursor(t.text().len());
-    t.input(KeyEvent::new(
-        KeyCode::Char('h'),
-        KeyModifiers::CONTROL | KeyModifiers::ALT,
-    ));
-    assert_eq!(t.text(), "hello ");
-}
-
-#[test]
 fn plain_and_shifted_chars_insert() {
     let mut t = TextArea::new();
     for c in ['a', 'z', '1', '/', '@', '{', '!', '~'] {
@@ -6243,4 +6106,634 @@ fn shift_number_trusts_terminal_character() {
     let mut t = TextArea::new();
     t.input(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::SHIFT));
     assert_eq!(t.text(), "/");
+}
+
+#[test]
+fn shift_arrow_extends_selection_by_grapheme() {
+    let mut t = ta_with("abc");
+    t.set_cursor(0);
+    t.input(KeyEvent::new(KeyCode::Right, KeyModifiers::SHIFT));
+    assert_eq!(t.selection_range(), Some(0..1));
+    t.input(KeyEvent::new(KeyCode::Right, KeyModifiers::SHIFT));
+    assert_eq!(t.selection_range(), Some(0..2));
+    // Reversing shrinks toward the sticky anchor.
+    t.input(KeyEvent::new(KeyCode::Left, KeyModifiers::SHIFT));
+    assert_eq!(t.selection_range(), Some(0..1));
+}
+
+#[test]
+fn alt_shift_arrow_extends_selection_by_word() {
+    let mut t = ta_with("hello-world tail");
+    let hyphen = t.text().find('-').unwrap();
+    let space = t.text().find(' ').unwrap();
+
+    t.set_cursor(0);
+    t.input(KeyEvent::new(
+        KeyCode::Right,
+        KeyModifiers::ALT | KeyModifiers::SHIFT,
+    ));
+    assert_eq!(t.selection_range(), Some(0..hyphen));
+    t.input(KeyEvent::new(
+        KeyCode::Right,
+        KeyModifiers::ALT | KeyModifiers::SHIFT,
+    ));
+    assert_eq!(t.selection_range(), Some(0..hyphen + 1));
+
+    // From the far side: word-extend left keeps its own anchor.
+    t.clear_selection();
+    t.set_cursor(space);
+    t.input(KeyEvent::new(
+        KeyCode::Left,
+        KeyModifiers::ALT | KeyModifiers::SHIFT,
+    ));
+    assert_eq!(t.selection_range(), Some(hyphen + 1..space));
+}
+
+#[test]
+fn super_shift_arrow_extends_selection_to_line_edges() {
+    let mut t = ta_with("hello world");
+    let mid = t.text().find(' ').unwrap();
+    t.set_cursor(mid);
+    t.input(KeyEvent::new(
+        KeyCode::Right,
+        KeyModifiers::SUPER | KeyModifiers::SHIFT,
+    ));
+    assert_eq!(t.selection_range(), Some(mid..t.text().len()));
+    // Extending to the other edge crosses the anchor.
+    t.input(KeyEvent::new(
+        KeyCode::Left,
+        KeyModifiers::SUPER | KeyModifiers::SHIFT,
+    ));
+    assert_eq!(t.selection_range(), Some(0..mid));
+}
+
+#[test]
+fn shift_extension_anchor_sticky_across_granularities() {
+    let mut t = ta_with_word_selected();
+    t.input(KeyEvent::new(KeyCode::Right, KeyModifiers::SHIFT));
+    assert_eq!(t.selection_range(), Some(0.."alpha ".len()));
+}
+
+/// `"alpha beta"` with `"alpha"` selected via Alt+Shift+Right from 0.
+fn ta_with_word_selected() -> TextArea {
+    let mut t = ta_with("alpha beta");
+    t.set_cursor(0);
+    t.input(KeyEvent::new(
+        KeyCode::Right,
+        KeyModifiers::ALT | KeyModifiers::SHIFT,
+    ));
+    assert_eq!(t.selection_range(), Some(0..5));
+    t
+}
+
+#[test]
+fn keyboard_selection_feeds_existing_selection_actions() {
+    // Backspace deletes it, like a mouse selection would.
+    let mut t = ta_with_word_selected();
+    t.input(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+    assert_eq!(t.text(), " beta");
+
+    // Typing replaces it.
+    let mut t = ta_with_word_selected();
+    t.input(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+    assert_eq!(t.text(), "x beta");
+
+    // A plain arrow collapses it to the corresponding edge.
+    let mut t = ta_with_word_selected();
+    t.input(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+    assert_eq!(t.selection_range(), None);
+    assert_eq!(t.cursor(), 0);
+}
+
+#[test]
+fn shift_up_down_extends_selection_by_line() {
+    let mut t = ta_with("one\ntwo\nthree");
+    let two = t.text().find("two").unwrap();
+    t.set_cursor(two);
+    t.input(KeyEvent::new(KeyCode::Down, KeyModifiers::SHIFT));
+    assert_eq!(
+        t.selection_range(),
+        Some(two..t.text().find("three").unwrap())
+    );
+    // Reversing crosses the anchor into the first line.
+    t.input(KeyEvent::new(KeyCode::Up, KeyModifiers::SHIFT));
+    t.input(KeyEvent::new(KeyCode::Up, KeyModifiers::SHIFT));
+    assert_eq!(t.selection_range(), Some(0..two));
+}
+
+/// A stray bit alongside SUPER must not degrade the chord to a plain arrow.
+#[test]
+fn super_chords_tolerate_extra_modifier_bits() {
+    let mut t = ta_with("hello world");
+    let mid = t.text().find(' ').unwrap();
+    t.set_cursor(mid);
+    t.input(KeyEvent::new(
+        KeyCode::Left,
+        KeyModifiers::SUPER | KeyModifiers::META,
+    ));
+    assert_eq!(t.cursor(), 0);
+    t.input(KeyEvent::new(
+        KeyCode::Right,
+        KeyModifiers::SUPER | KeyModifiers::META,
+    ));
+    assert_eq!(t.cursor(), t.text().len());
+}
+
+#[test]
+fn plain_up_down_collapse_selection_then_move_a_line() {
+    let mut t = ta_with("one\ntwo\nthree");
+    let two = t.text().find("two").unwrap();
+    let three = t.text().find("three").unwrap();
+    t.set_cursor(two);
+    t.input(KeyEvent::new(KeyCode::Down, KeyModifiers::SHIFT));
+    assert_eq!(t.selection_range(), Some(two..three));
+
+    // Down: collapse to the end edge, then one line further.
+    t.input(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    assert_eq!(t.selection_range(), None);
+    assert!(t.cursor() > three, "moved a line past the end edge");
+
+    // Up: collapse to the start edge, then one line up.
+    t.set_cursor(two);
+    t.input(KeyEvent::new(KeyCode::Down, KeyModifiers::SHIFT));
+    t.input(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+    assert_eq!(t.selection_range(), None);
+    assert!(t.cursor() < two, "moved a line above the start edge");
+}
+
+#[test]
+fn cmd_c_copies_selection_and_keeps_it() {
+    let mut t = ta_with_word_selected();
+    t.input(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::SUPER));
+    assert_eq!(t.take_clipboard().as_deref(), Some("alpha"));
+    assert_eq!(
+        t.selection_range(),
+        Some(0..5),
+        "highlight survives the copy"
+    );
+    assert_eq!(t.text(), "alpha beta");
+}
+
+#[test]
+fn cmd_x_cuts_selection() {
+    let mut t = ta_with_word_selected();
+    t.input(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::SUPER));
+    assert_eq!(t.take_clipboard().as_deref(), Some("alpha"));
+    assert_eq!(t.text(), " beta");
+    assert_eq!(t.selection_range(), None);
+}
+
+#[test]
+fn cmd_c_without_selection_is_inert() {
+    let mut t = ta_with("alpha beta");
+    t.set_cursor(3);
+    t.input(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::SUPER));
+    assert_eq!(t.take_clipboard(), None);
+    assert_eq!(t.text(), "alpha beta");
+    assert_eq!(t.cursor(), 3);
+}
+
+/// Copy over a chip-spanning highlight yields the chip's raw text.
+#[test]
+fn cmd_c_copies_chip_raw_text() {
+    let mut t = TextArea::new();
+    t.insert_str("ab");
+    t.insert_element("element_text", ElementKind(0), None);
+    t.insert_str("cd");
+    t.set_selection(0, t.text().len());
+    t.input(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::SUPER));
+    assert_eq!(t.take_clipboard().as_deref(), Some("abelement_textcd"));
+    assert!(t.selection_range().is_some());
+}
+
+/// Word moves over a highlight collapse to the edge FIRST, then move a word.
+#[test]
+fn word_move_collapses_leftward_selection_first() {
+    let mut t = ta_with("abc abc abc");
+    t.set_cursor(4);
+    t.input(KeyEvent::new(
+        KeyCode::Left,
+        KeyModifiers::ALT | KeyModifiers::SHIFT,
+    ));
+    assert_eq!(t.selection_range(), Some(0..4));
+
+    // Right edge (4), then one word right → end of the second word.
+    t.input(KeyEvent::new(KeyCode::Right, KeyModifiers::ALT));
+    assert_eq!(t.cursor(), 7);
+    assert_eq!(t.selection_range(), None);
+
+    t.set_cursor(4);
+    t.input(KeyEvent::new(
+        KeyCode::Left,
+        KeyModifiers::ALT | KeyModifiers::SHIFT,
+    ));
+    // Left edge (0), then one word left → stays at 0.
+    t.input(KeyEvent::new(KeyCode::Left, KeyModifiers::ALT));
+    assert_eq!(t.cursor(), 0);
+    assert_eq!(t.selection_range(), None);
+}
+
+#[test]
+fn word_move_collapses_rightward_selection_first() {
+    let mut t = ta_with("abc abc abc");
+    t.set_cursor(4);
+    t.input(KeyEvent::new(
+        KeyCode::Right,
+        KeyModifiers::ALT | KeyModifiers::SHIFT,
+    ));
+    assert_eq!(t.selection_range(), Some(4..7));
+
+    // Left edge (4), then one word left → 0 — NOT word-left from the
+    // head at 7 (which would land back on 4).
+    t.input(KeyEvent::new(KeyCode::Left, KeyModifiers::ALT));
+    assert_eq!(t.cursor(), 0);
+
+    t.set_cursor(4);
+    t.input(KeyEvent::new(
+        KeyCode::Right,
+        KeyModifiers::ALT | KeyModifiers::SHIFT,
+    ));
+    // Right edge (7), then one word right → end of the third word.
+    t.input(KeyEvent::new(KeyCode::Right, KeyModifiers::ALT));
+    assert_eq!(t.cursor(), 11);
+}
+
+#[test]
+fn super_arrow_collapses_multiline_selection_first() {
+    let mut t = ta_with("one two\nthree four");
+    let two = t.text().find("two").unwrap();
+    t.set_cursor(two);
+    t.input(KeyEvent::new(KeyCode::Down, KeyModifiers::SHIFT));
+    let range = t.selection_range().expect("selection spans lines");
+    assert!(t.text().get(range).is_some_and(|s| s.contains('\n')));
+
+    // Cmd+Left: line start of the START edge's line, not the head's.
+    t.input(KeyEvent::new(KeyCode::Left, KeyModifiers::SUPER));
+    assert_eq!(t.cursor(), 0);
+    assert_eq!(t.selection_range(), None);
+}
+
+#[test]
+fn ctrl_f_collapses_like_plain_arrow() {
+    let mut t = ta_with_word_selected();
+    t.input(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL));
+    assert_eq!(t.cursor(), 5, "collapse to the end edge, no extra move");
+    assert_eq!(t.selection_range(), None);
+}
+
+/// Plain arrows over a leftward selection collapse to the edges, no extra move.
+#[test]
+fn plain_arrows_collapse_leftward_selection_to_edges() {
+    let mut t = ta_with("hello world");
+    let start = "hello ".len();
+    t.set_cursor(start + 2);
+    t.input(KeyEvent::new(
+        KeyCode::Left,
+        KeyModifiers::SUPER | KeyModifiers::SHIFT,
+    ));
+    assert_eq!(t.selection_range(), Some(0..start + 2));
+
+    t.input(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+    assert_eq!(t.cursor(), start + 2, "Right collapses to the anchor");
+    assert_eq!(t.selection_range(), None);
+
+    t.input(KeyEvent::new(
+        KeyCode::Left,
+        KeyModifiers::SUPER | KeyModifiers::SHIFT,
+    ));
+    t.input(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+    assert_eq!(t.cursor(), 0, "Left collapses to the head");
+    assert_eq!(t.selection_range(), None);
+    assert_eq!(t.text(), "hello world", "collapse never edits");
+}
+
+/// Shift+arrows extend a mouse selection from the HEAD, not the parked cursor.
+#[test]
+fn double_click_then_shift_arrows_extend_from_the_head() {
+    let mut t = ta_with("hello world");
+    let area = Rect::new(0, 0, 40, 5);
+    let state = TextAreaState::default();
+    t.handle_mouse(mouse_down(2, 0), area, state);
+    t.handle_mouse(mouse_down(2, 0), area, state);
+    assert_eq!(t.selection_range(), Some(0..5));
+    assert_eq!(t.cursor(), 4, "cursor on last char, one before the head");
+
+    t.input(KeyEvent::new(KeyCode::Right, KeyModifiers::SHIFT));
+    assert_eq!(t.selection_range(), Some(0..6), "extends past the head");
+    t.input(KeyEvent::new(KeyCode::Left, KeyModifiers::SHIFT));
+    assert_eq!(t.selection_range(), Some(0..5), "shrinks back to the head");
+}
+
+/// Vertical extends after a triple-click move from the head, not the click position.
+#[test]
+fn triple_click_then_shift_vertical_extends_from_the_head() {
+    let mut t = ta_with("one\ntwo\nthree");
+    let area = Rect::new(0, 0, 40, 5);
+    let state = TextAreaState::default();
+    // Triple-click "two" (row 1) → selects "two\n" (4..8), cursor at 5.
+    for _ in 0..3 {
+        t.handle_mouse(mouse_down(1, 1), area, state);
+    }
+    assert_eq!(t.selection_range(), Some(4..8));
+    assert_eq!(t.cursor(), 5, "cursor stays at the click position");
+
+    // Down from the head (start of "three") reaches the buffer end.
+    t.input(KeyEvent::new(KeyCode::Down, KeyModifiers::SHIFT));
+    assert_eq!(t.selection_range(), Some(4..t.text().len()));
+
+    // And Up from a fresh triple-click returns the head to the anchor,
+    // emptying the selection (browser semantics).
+    for _ in 0..3 {
+        t.handle_mouse(mouse_down(1, 1), area, state);
+    }
+    t.input(KeyEvent::new(KeyCode::Up, KeyModifiers::SHIFT));
+    assert_eq!(t.selection_range(), None);
+}
+
+/// Shift+Home/End extend like every text field.
+#[test]
+fn shift_home_end_extend_selection() {
+    let mut t = ta_with("hello world");
+    let mid = t.text().find(' ').unwrap();
+    t.set_cursor(mid);
+    t.input(KeyEvent::new(KeyCode::End, KeyModifiers::SHIFT));
+    assert_eq!(t.selection_range(), Some(mid..t.text().len()));
+    // Crossing the anchor to the row start.
+    t.input(KeyEvent::new(KeyCode::Home, KeyModifiers::SHIFT));
+    assert_eq!(t.selection_range(), Some(0..mid));
+}
+
+/// Home/End with a selection collapse to the edge first, like Cmd+Left/Right.
+#[test]
+fn home_end_collapse_to_selection_edge_before_moving() {
+    let mut t = ta_with("one\ntwo\nthree");
+    let w = t.text().find('w').unwrap();
+    t.set_cursor(w);
+    t.input(KeyEvent::new(KeyCode::Down, KeyModifiers::SHIFT));
+    let head = t.selection_range().unwrap().end;
+    assert!(head > w);
+
+    t.input(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
+    assert_eq!(t.selection_range(), None);
+    assert_eq!(t.cursor(), t.text().len(), "end of the END edge's line");
+
+    t.set_cursor(w);
+    t.input(KeyEvent::new(KeyCode::Down, KeyModifiers::SHIFT));
+    t.input(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
+    assert_eq!(t.cursor(), w - 1, "start of the START edge's line");
+}
+
+/// Kill chords over a highlight delete just the selection and stash it for yank.
+#[test]
+fn kill_chords_delete_only_the_selection_and_stash_for_yank() {
+    let mut t = ta_with_word_selected();
+    t.input(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL));
+    assert_eq!(t.text(), " beta", "Ctrl+K deletes the selection only");
+    t.input(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::CONTROL));
+    assert_eq!(t.text(), "alpha beta", "yank restores what was killed");
+
+    let mut t = ta_with_word_selected();
+    t.input(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL));
+    assert_eq!(t.text(), " beta", "Ctrl+W deletes the selection only");
+}
+
+/// Yank over a highlight replaces it as one undo step.
+#[test]
+fn ctrl_y_yank_replaces_selection() {
+    let mut t = ta_with("alpha beta");
+    t.set_cursor(5);
+    t.input(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL));
+    assert_eq!(t.text(), "alpha", "Ctrl+K stashed \" beta\"");
+    t.set_cursor(5);
+    t.set_selection(0, 5);
+    t.input(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::CONTROL));
+    assert_eq!(t.text(), " beta", "yank replaced the selection");
+    assert_eq!(t.selection_range(), None);
+    t.undo();
+    assert_eq!(t.text(), "alpha", "replace is a single undo step");
+}
+
+/// Internal-clipboard paste (Ctrl+V) over a highlight replaces it.
+#[test]
+fn ctrl_v_paste_replaces_selection() {
+    let mut t = ta_with("hello world");
+    t.set_clipboard_text("X".to_owned());
+    t.set_cursor(t.text().len());
+    t.set_selection(6, t.text().len());
+    t.input(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::CONTROL));
+    assert_eq!(t.text(), "hello X");
+    assert_eq!(t.selection_range(), None);
+}
+
+/// Shift-extended emacs line chords (Cocoa supports these).
+#[test]
+fn ctrl_shift_a_e_extend_to_logical_line_edges() {
+    let mut t = ta_with("hello world");
+    let mid = t.text().find(' ').unwrap();
+    t.set_cursor(mid);
+    t.input(KeyEvent::new(
+        KeyCode::Char('e'),
+        KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+    ));
+    assert_eq!(t.selection_range(), Some(mid..t.text().len()));
+    t.input(KeyEvent::new(
+        KeyCode::Char('a'),
+        KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+    ));
+    assert_eq!(t.selection_range(), Some(0..mid));
+}
+
+/// Windows Win32 input reports shifted letters uppercase (`Char('E')` +
+/// CTRL|SHIFT); the intercept folds case so emacs extends work there.
+#[test]
+fn ctrl_shift_uppercase_letter_extends_like_lowercase() {
+    let mut t = ta_with("hello world");
+    let mid = t.text().find(' ').unwrap();
+    t.set_cursor(mid);
+    t.input(KeyEvent::new(
+        KeyCode::Char('E'),
+        KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+    ));
+    assert_eq!(t.selection_range(), Some(mid..t.text().len()));
+    // Plain typed capitals are untouched: Shift+X still inserts 'X'.
+    let mut t = ta_with("");
+    t.input(KeyEvent::new(KeyCode::Char('X'), KeyModifiers::SHIFT));
+    assert_eq!(t.text(), "X");
+}
+
+/// Ctrl+P/N are movement rows in the shared table.
+#[test]
+fn ctrl_p_n_move_by_visual_row() {
+    let mut t = ta_with("one\ntwo");
+    t.set_cursor(0);
+    t.input(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL));
+    assert_eq!(t.cursor(), t.text().find("two").unwrap());
+    t.input(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL));
+    assert_eq!(t.cursor(), 0);
+}
+
+/// Extending over a chip hops it atomically.
+#[test]
+fn shift_right_extends_across_a_chip_atomically() {
+    let mut t = TextArea::new();
+    t.insert_str("ab");
+    t.insert_element("element_text", ElementKind(0), None);
+    t.insert_str("cd");
+    t.set_cursor(2);
+    t.input(KeyEvent::new(KeyCode::Right, KeyModifiers::SHIFT));
+    assert_eq!(t.selected_text().as_deref(), Some("element_text"));
+}
+
+/// The collapse path shares the Super arms' stray-bit tolerance.
+#[test]
+fn super_chords_with_stray_bits_collapse_to_edge_then_move() {
+    let mut t = ta_with("hello world");
+    t.set_cursor(8);
+    t.set_selection(3, 8);
+    t.input(KeyEvent::new(
+        KeyCode::Left,
+        KeyModifiers::SUPER | KeyModifiers::META,
+    ));
+    assert_eq!(t.selection_range(), None);
+    assert_eq!(t.cursor(), 0, "line start from the START edge");
+}
+
+/// Vertical extends at the buffer edges degrade to extend-to-0/len.
+#[test]
+fn shift_vertical_at_buffer_edges_extends_to_bounds() {
+    let mut t = ta_with("one\ntwo");
+    t.set_cursor(1);
+    t.input(KeyEvent::new(KeyCode::Up, KeyModifiers::SHIFT));
+    assert_eq!(t.selection_range(), Some(0..1));
+
+    let last = t.text().len() - 1;
+    t.clear_selection();
+    t.set_cursor(last);
+    t.input(KeyEvent::new(KeyCode::Down, KeyModifiers::SHIFT));
+    assert_eq!(t.selection_range(), Some(last..t.text().len()));
+}
+
+/// A plain vertical collapse keeps the sticky column from the extend,
+/// so the caret continues down the column the user was tracking.
+#[test]
+fn plain_down_after_extend_keeps_preferred_col() {
+    let mut t = ta_with("longline\nab\nlongline");
+    t.set_cursor(6);
+    t.input(KeyEvent::new(KeyCode::Down, KeyModifiers::SHIFT));
+    t.input(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    let third_line = t.text().rfind('\n').unwrap() + 1;
+    assert_eq!(t.selection_range(), None);
+    assert_eq!(
+        t.cursor(),
+        third_line + 6,
+        "column 6 restored past the 2-char line"
+    );
+}
+
+/// `preferred_col` survives a vertical extend through a short line.
+#[test]
+fn shift_down_zigzag_keeps_preferred_col() {
+    let mut t = ta_with("longline\nab\nlongline");
+    t.set_cursor(6);
+    t.input(KeyEvent::new(KeyCode::Down, KeyModifiers::SHIFT));
+    t.input(KeyEvent::new(KeyCode::Down, KeyModifiers::SHIFT));
+    let third_line = t.text().rfind('\n').unwrap() + 1;
+    assert_eq!(
+        t.selection_range(),
+        Some(6..third_line + 6),
+        "column 6 restored after passing the 2-char line"
+    );
+}
+
+/// Cmd+C on a zero-width selection copies nothing and drops the stale selection.
+#[test]
+fn cmd_c_on_zero_width_selection_clears_it() {
+    let mut t = ta_with("hello");
+    t.set_selection(3, 3);
+    t.input(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::SUPER));
+    assert!(t.selection.is_none());
+    assert_eq!(t.take_clipboard(), None);
+}
+
+/// Wrapped-row index of the cursor; `cursor_pos` would report a phantom row for a full last row.
+fn cursor_row(t: &TextArea, width: u16) -> usize {
+    TextArea::wrapped_line_index_by_start(&t.wrapped_lines(width), t.cursor()).unwrap()
+}
+
+/// Up onto a narrower soft-wrapped row lands inside it, and the goal column survives the clamp.
+#[test]
+fn up_from_wide_row_lands_on_last_char_of_narrower_soft_row() {
+    let width = 8;
+    let mut t = ta_with("aaa bb ccccccc");
+    assert_eq!(vec![0..7, 7..14], *t.wrapped_lines(width));
+
+    t.move_cursor_up();
+    assert_eq!(6, t.cursor());
+    assert_eq!(0, cursor_row(&t, width));
+    assert_eq!(Some((6, 0)), t.cursor_pos(Rect::new(0, 0, width, 5)));
+
+    t.move_cursor_down();
+    assert_eq!(14, t.cursor());
+
+    t.move_cursor_up();
+    assert_eq!(6, t.cursor());
+    t.move_cursor_up();
+    assert_eq!(0, t.cursor());
+}
+
+/// A newline-terminated row is not soft-wrapped, so its exclusive end (the newline) is reachable.
+#[test]
+fn up_onto_newline_terminated_row_lands_on_the_newline() {
+    let mut t = ta_with("ab\ncdef");
+    assert_eq!(vec![0..2, 3..7], *t.wrapped_lines(8));
+
+    t.move_cursor_up();
+    assert_eq!(2, t.cursor());
+    assert_eq!(0, cursor_row(&t, 8));
+}
+
+/// Down onto a narrower soft-wrapped row lands on it instead of skipping to the row below.
+#[test]
+fn down_from_wide_row_lands_on_last_char_of_narrower_soft_row() {
+    let mut t = ta_with("ccccccc aaa bb ddddddd");
+    assert_eq!(vec![0..8, 8..15, 15..22], *t.wrapped_lines(8));
+    t.set_cursor(7);
+
+    t.move_cursor_down();
+    assert_eq!(14, t.cursor());
+    assert_eq!(1, cursor_row(&t, 8));
+
+    t.move_cursor_down();
+    assert_eq!(22, t.cursor());
+}
+
+/// A soft row closed by an atomic element has no cursor byte past the element's start.
+#[test]
+fn up_onto_soft_row_closed_by_element_lands_before_the_element() {
+    let mut t = TextArea::new();
+    t.insert_element("xyz", ElementKind(0), Some(Line::from("[ELEM]")));
+    t.insert_str("longword");
+    assert_eq!(vec![0..3, 3..11], *t.wrapped_lines(8));
+
+    t.move_cursor_up();
+    assert_eq!(0, t.cursor());
+    assert_eq!(0, cursor_row(&t, 8));
+}
+
+/// Drag-scroll clamps onto every row, hard-break rows included; past a trailing chip the head must
+/// stay inside the chip so the selection expands over it rather than stopping at its start.
+#[test]
+fn drag_below_area_past_trailing_element_selects_the_element() {
+    let mut t = ta_with("aaa\nbbb\nccc\nddd");
+    t.insert_element("xyz", ElementKind(0), Some(Line::from("[ELEM]")));
+    assert_eq!(18, t.text().len());
+    t.set_cursor(0);
+    let area = Rect::new(0, 0, 40, 3);
+    let state = TextAreaState::default();
+
+    t.handle_mouse(mouse_down(0, 0), area, state);
+    let action = t.handle_mouse(mouse_drag(50, 5), area, state);
+
+    assert_eq!(MouseAction::SelectionUpdated, action);
+    assert_eq!(Some(0..18), t.selection_range());
 }

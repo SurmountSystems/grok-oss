@@ -87,7 +87,10 @@ fn search_create_linear_issue() {
     let index = Bm25ToolSearchIndex::new(make_snapshot(linear_tools()));
     let snap = index.search_snapshot("create linear issue", 3);
     assert!(!snap.results.is_empty());
-    assert_eq!(snap.results[0].tool_name, "linear__save_issue");
+    assert_eq!(
+        snap.results.first().map(|r| r.tool_name.as_str()),
+        Some("linear__save_issue")
+    );
     assert!(snap.is_ready);
 }
 
@@ -96,7 +99,10 @@ fn search_read_slack_thread() {
     let index = Bm25ToolSearchIndex::new(make_snapshot(linear_tools()));
     let snap = index.search_snapshot("read slack thread", 3);
     assert!(!snap.results.is_empty());
-    assert_eq!(snap.results[0].tool_name, "demo-mcp__readSlackThread");
+    assert_eq!(
+        snap.results.first().map(|r| r.tool_name.as_str()),
+        Some("demo-mcp__readSlackThread")
+    );
 }
 
 #[test]
@@ -104,7 +110,10 @@ fn search_list_issues() {
     let index = Bm25ToolSearchIndex::new(make_snapshot(linear_tools()));
     let snap = index.search_snapshot("list my issues", 3);
     assert!(!snap.results.is_empty());
-    assert_eq!(snap.results[0].tool_name, "linear__list_issues");
+    assert_eq!(
+        snap.results.first().map(|r| r.tool_name.as_str()),
+        Some("linear__list_issues")
+    );
 }
 
 #[test]
@@ -163,8 +172,7 @@ fn search_surface_disambiguation() {
 fn search_deploy_graceful_empty() {
     let index = Bm25ToolSearchIndex::new(make_snapshot(linear_tools()));
     let snap = index.search_snapshot("deploy", 5);
-    // "deploy" doesn't match any tool descriptions — should return low/no results
-    // without panicking
+    // "deploy" matches no tool description; the search returns few or no results without panicking
     assert!(snap.total_hidden_tools > 0);
 }
 
@@ -230,8 +238,8 @@ fn search_underscore_joined_identifier_components() {
     let snap_exact = index.search_snapshot("query_prometheus_range", 3);
     assert_eq!(snap_exact.results.len(), 1);
     assert_eq!(
-        snap_exact.results[0].tool_name,
-        "grok_com_chronosphere__query_prometheus_range"
+        snap_exact.results.first().map(|r| r.tool_name.as_str()),
+        Some("grok_com_chronosphere__query_prometheus_range")
     );
 }
 
@@ -254,10 +262,22 @@ fn gateway_tool_with_canonical_connector_tool_name_appears_in_results() {
 
     let snap = index.search_snapshot("grafana dashboards", 5);
     assert_eq!(snap.results.len(), 1);
-    assert_eq!(snap.results[0].tool_name, "grafana__search_dashboards");
-    assert_eq!(snap.results[0].server_name, "grafana");
-    assert_eq!(snap.results[0].parameters, vec!["query"]);
-    assert_eq!(snap.results[0].input_schema, schema);
+    assert_eq!(
+        snap.results.first().map(|r| r.tool_name.as_str()),
+        Some("grafana__search_dashboards")
+    );
+    assert_eq!(
+        snap.results.first().map(|r| r.server_name.as_str()),
+        Some("grafana")
+    );
+    assert_eq!(
+        snap.results.first().map(|r| r.parameters.clone()),
+        Some(vec!["query".to_string()])
+    );
+    assert_eq!(
+        snap.results.first().map(|r| r.input_schema.clone()),
+        Some(schema)
+    );
 }
 
 #[test]
@@ -273,8 +293,14 @@ fn gateway_exact_canonical_name_match_returns_tool() {
 
     let snap = index.search_snapshot("slack__search", 5);
     assert_eq!(snap.results.len(), 1);
-    assert_eq!(snap.results[0].tool_name, "slack__search");
-    assert_eq!(snap.results[0].server_name, "slack");
+    assert_eq!(
+        snap.results.first().map(|r| r.tool_name.as_str()),
+        Some("slack__search")
+    );
+    assert_eq!(
+        snap.results.first().map(|r| r.server_name.as_str()),
+        Some("slack")
+    );
 }
 
 #[test]
@@ -282,8 +308,14 @@ fn local_mcp_tool_indexing_still_uses_qualified_name() {
     let index = Bm25ToolSearchIndex::new(make_snapshot(linear_tools()));
     let snap = index.search_snapshot("linear__save_issue", 5);
     assert_eq!(snap.results.len(), 1);
-    assert_eq!(snap.results[0].tool_name, "linear__save_issue");
-    assert_eq!(snap.results[0].server_name, "linear");
+    assert_eq!(
+        snap.results.first().map(|r| r.tool_name.as_str()),
+        Some("linear__save_issue")
+    );
+    assert_eq!(
+        snap.results.first().map(|r| r.server_name.as_str()),
+        Some("linear")
+    );
 }
 
 #[test]
@@ -318,9 +350,12 @@ fn list_server_summaries_groups_gateway_tools_by_connector_id() {
     }]));
     let summaries = index.list_server_summaries();
     assert_eq!(summaries.len(), 1);
-    assert_eq!(summaries[0].name, "grafana");
-    assert_eq!(summaries[0].tool_count, 1);
-    assert_eq!(summaries[0].tool_names, vec!["search_dashboards"]);
+    assert_eq!(summaries.first().map(|s| s.name.as_str()), Some("grafana"));
+    assert_eq!(summaries.first().map(|s| s.tool_count), Some(1));
+    assert_eq!(
+        summaries.first().map(|s| s.tool_names.clone()),
+        Some(vec!["search_dashboards".to_string()])
+    );
 }
 
 #[test]
@@ -339,7 +374,7 @@ fn list_server_summaries_includes_descriptions() {
     let index = Bm25ToolSearchIndex::new(make_snapshot_with_servers(tools, servers));
     let summaries = index.list_server_summaries();
     assert_eq!(summaries.len(), 2);
-    // BTreeMap order is alphabetical by server name (demo-mcp < linear).
+    // BTreeMap order is alphabetical by server name (demo-mcp before linear)
     let linear = summaries
         .iter()
         .find(|s| s.name == "linear")
@@ -392,9 +427,15 @@ fn list_server_summaries_shows_server_with_zero_tools() {
     let index = Bm25ToolSearchIndex::new(make_snapshot_with_servers(vec![], servers));
     let summaries = index.list_server_summaries();
     assert_eq!(summaries.len(), 1);
-    assert_eq!(summaries[0].name, "empty_server");
-    assert_eq!(summaries[0].tool_count, 0);
-    assert_eq!(summaries[0].description.as_deref(), Some("No tools yet"));
+    assert_eq!(
+        summaries.first().map(|s| s.name.as_str()),
+        Some("empty_server")
+    );
+    assert_eq!(summaries.first().map(|s| s.tool_count), Some(0));
+    assert_eq!(
+        summaries.first().and_then(|s| s.description.as_deref()),
+        Some("No tools yet")
+    );
 }
 
 // -- exact match tests --
@@ -421,12 +462,12 @@ fn search_exact_qualified_name() {
     ];
     let index = Bm25ToolSearchIndex::new(make_snapshot(tools));
 
-    // Exact qualified name → instant match, no BM25 needed
+    // An exact qualified name matches instantly, no BM25 needed
     let snap = index.search_snapshot("grafana_observability_ui__SearchDashboards", 5);
     assert_eq!(snap.results.len(), 1);
     assert_eq!(
-        snap.results[0].tool_name,
-        "grafana_observability_ui__SearchDashboards"
+        snap.results.first().map(|r| r.tool_name.as_str()),
+        Some("grafana_observability_ui__SearchDashboards")
     );
 }
 
@@ -452,12 +493,11 @@ fn search_exact_bare_tool_name() {
     ];
     let index = Bm25ToolSearchIndex::new(make_snapshot(tools));
 
-    // Bare tool name → exact match on tool_name
     let snap = index.search_snapshot("SearchDashboards", 5);
     assert_eq!(snap.results.len(), 1);
     assert_eq!(
-        snap.results[0].tool_name,
-        "grafana_observability_ui__SearchDashboards"
+        snap.results.first().map(|r| r.tool_name.as_str()),
+        Some("grafana_observability_ui__SearchDashboards")
     );
 }
 
@@ -476,15 +516,15 @@ fn search_exact_match_case_insensitive() {
     let snap = index.search_snapshot("searchdashboards", 5);
     assert_eq!(snap.results.len(), 1);
     assert_eq!(
-        snap.results[0].tool_name,
-        "grafana_observability_ui__SearchDashboards"
+        snap.results.first().map(|r| r.tool_name.as_str()),
+        Some("grafana_observability_ui__SearchDashboards")
     );
 }
 
 #[test]
 fn search_exact_bare_name_ambiguous_returns_first_match() {
     // Two servers register tools with the same bare name.
-    // `find()` returns the first match — the model might have wanted the second.
+    // `find()` returns the first match; the model might have wanted the second
     let tools = vec![
         ToolMetadata {
             qualified_name: "server_a__fetch".into(),
@@ -505,18 +545,18 @@ fn search_exact_bare_name_ambiguous_returns_first_match() {
     ];
     let index = Bm25ToolSearchIndex::new(make_snapshot(tools));
 
-    // Bare name "fetch" → returns server_a (first in Vec), silently ignoring server_b
+    // Bare name "fetch" returns server_a (first in the Vec) and silently ignores server_b
     let snap = index.search_snapshot("fetch", 5);
     assert_eq!(snap.results.len(), 1);
-    assert_eq!(snap.results[0].tool_name, "server_a__fetch");
-    // server_b__fetch is never returned — the model can't discover it
-    // without knowing the qualified name
+    assert_eq!(
+        snap.results.first().map(|r| r.tool_name.as_str()),
+        Some("server_a__fetch")
+    );
+    // server_b__fetch is never returned; the model can't discover it without knowing the qualified name
 }
 
 // -- e2e tests with real Grafana + Mattermost tool data --
 
-/// Build a realistic tool index matching a production MCP environment
-/// with Grafana and Mattermost servers.
 fn grafana_mattermost_tools() -> Vec<ToolMetadata> {
     vec![
         ToolMetadata {
@@ -649,27 +689,31 @@ fn grafana_mattermost_tools() -> Vec<ToolMetadata> {
 fn e2e_exact_qualified_name_grafana() {
     let index = Bm25ToolSearchIndex::new(make_snapshot(grafana_mattermost_tools()));
 
-    // Model queries with the exact qualified name
     let snap = index.search_snapshot("grafana-ai__SearchDashboards", 5);
     assert_eq!(snap.results.len(), 1);
-    assert_eq!(snap.results[0].tool_name, "grafana-ai__SearchDashboards");
+    assert_eq!(
+        snap.results.first().map(|r| r.tool_name.as_str()),
+        Some("grafana-ai__SearchDashboards")
+    );
 }
 
 #[test]
 fn e2e_exact_bare_tool_name_grafana() {
     let index = Bm25ToolSearchIndex::new(make_snapshot(grafana_mattermost_tools()));
 
-    // Model queries with bare tool name (no server prefix)
     let snap = index.search_snapshot("SearchDashboards", 5);
     assert_eq!(snap.results.len(), 1);
-    assert_eq!(snap.results[0].tool_name, "grafana-ai__SearchDashboards");
+    assert_eq!(
+        snap.results.first().map(|r| r.tool_name.as_str()),
+        Some("grafana-ai__SearchDashboards")
+    );
 }
 
 #[test]
 fn e2e_exact_match_other_grafana_tools() {
     let index = Bm25ToolSearchIndex::new(make_snapshot(grafana_mattermost_tools()));
 
-    // Each Grafana tool should be findable by exact bare name
+    // Each Grafana tool is findable by exact bare name
     for (query, expected) in [
         ("GetDashboardByUID", "grafana-ai__GetDashboardByUID"),
         ("GenerateDeeplink", "grafana-ai__GenerateDeeplink"),
@@ -690,7 +734,8 @@ fn e2e_exact_match_other_grafana_tools() {
             "query {query:?} should return exactly 1 result"
         );
         assert_eq!(
-            snap.results[0].tool_name, expected,
+            snap.results.first().map(|r| r.tool_name.as_str()),
+            Some(expected),
             "query {query:?} should match {expected:?}"
         );
     }
@@ -702,11 +747,17 @@ fn e2e_exact_match_mattermost() {
 
     let snap = index.search_snapshot("mattermost__SearchPosts", 5);
     assert_eq!(snap.results.len(), 1);
-    assert_eq!(snap.results[0].tool_name, "mattermost__SearchPosts");
+    assert_eq!(
+        snap.results.first().map(|r| r.tool_name.as_str()),
+        Some("mattermost__SearchPosts")
+    );
 
     let snap = index.search_snapshot("SearchPosts", 5);
     assert_eq!(snap.results.len(), 1);
-    assert_eq!(snap.results[0].tool_name, "mattermost__SearchPosts");
+    assert_eq!(
+        snap.results.first().map(|r| r.tool_name.as_str()),
+        Some("mattermost__SearchPosts")
+    );
 }
 
 #[test]
@@ -716,21 +767,24 @@ fn e2e_exact_match_case_insensitive_grafana() {
     // Model might lowercase the qualified name
     let snap = index.search_snapshot("grafana-ai__searchdashboards", 5);
     assert_eq!(snap.results.len(), 1);
-    assert_eq!(snap.results[0].tool_name, "grafana-ai__SearchDashboards");
+    assert_eq!(
+        snap.results.first().map(|r| r.tool_name.as_str()),
+        Some("grafana-ai__SearchDashboards")
+    );
 }
 
 #[test]
 fn e2e_fuzzy_search_dashboards() {
     let index = Bm25ToolSearchIndex::new(make_snapshot(grafana_mattermost_tools()));
 
-    // Natural language query should find dashboard-related tools via BM25
     let snap = index.search_snapshot("search dashboards", 5);
     assert!(
         !snap.results.is_empty(),
         "fuzzy 'search dashboards' should return results"
     );
     assert_eq!(
-        snap.results[0].tool_name, "grafana-ai__SearchDashboards",
+        snap.results.first().map(|r| r.tool_name.as_str()),
+        Some("grafana-ai__SearchDashboards"),
         "'search dashboards' should rank SearchDashboards first"
     );
 }
@@ -745,7 +799,8 @@ fn e2e_fuzzy_grafana_alert() {
         "fuzzy 'delete alert rule' should return results"
     );
     assert_eq!(
-        snap.results[0].tool_name, "grafana-ai__DeleteAlertRule",
+        snap.results.first().map(|r| r.tool_name.as_str()),
+        Some("grafana-ai__DeleteAlertRule"),
         "'delete alert rule' should rank DeleteAlertRule first"
     );
 }
@@ -760,7 +815,8 @@ fn e2e_fuzzy_datasources() {
         "fuzzy 'list datasources prometheus' should return results"
     );
     assert_eq!(
-        snap.results[0].tool_name, "grafana-ai__ListDatasources",
+        snap.results.first().map(|r| r.tool_name.as_str()),
+        Some("grafana-ai__ListDatasources"),
         "'list datasources prometheus' should rank ListDatasources first"
     );
 }
@@ -774,7 +830,7 @@ fn e2e_fuzzy_search_posts_mattermost() {
         !snap.results.is_empty(),
         "fuzzy 'search mattermost messages' should return results"
     );
-    // Mattermost SearchPosts should appear (it has "Search" and "Mattermost" in its doc)
+    // Mattermost SearchPosts appears (it has "Search" and "Mattermost" in its doc)
     let names: Vec<&str> = snap.results.iter().map(|r| r.tool_name.as_str()).collect();
     assert!(
         names.contains(&"mattermost__SearchPosts"),
@@ -786,8 +842,6 @@ fn e2e_fuzzy_search_posts_mattermost() {
 fn e2e_no_match_falls_through_to_bm25() {
     let index = Bm25ToolSearchIndex::new(make_snapshot(grafana_mattermost_tools()));
 
-    // A query that doesn't exactly match any tool name should still
-    // return BM25 results (not an empty exact-match response)
     let snap = index.search_snapshot("dashboard panel queries grafana", 5);
     assert!(
         !snap.results.is_empty(),
@@ -862,14 +916,14 @@ fn split_double_underscore_delimiter() {
 
 #[test]
 fn split_all_uppercase_stays_together() {
-    // No lowercase→uppercase transition, so stays as one token
+    // No lowercase-to-uppercase transition, so each stays one token
     assert_eq!(split_identifier("UID"), vec!["UID"]);
     assert_eq!(split_identifier("HTTP"), vec!["HTTP"]);
 }
 
 #[test]
 fn split_trailing_acronym() {
-    // "ByUID" → "By" + "UID" (y→U transition)
+    // "ByUID" splits into "By" and "UID" at the y-to-U transition
     assert_eq!(
         split_identifier("GetDashboardByUID"),
         vec!["Get", "Dashboard", "By", "UID"]
@@ -878,7 +932,7 @@ fn split_trailing_acronym() {
 
 #[test]
 fn split_consecutive_delimiters() {
-    // triple underscore: split("__") → ["a", "_b"] → split('_') → ["a","","b"]
+    // Triple underscore: split("__") yields ["a", "_b"], then split('_') yields ["a","","b"]
     assert_eq!(split_identifier("a___b"), vec!["a", "b"]);
 }
 
@@ -933,7 +987,7 @@ fn normalize_empty() {
 
 #[test]
 fn normalize_whitespace_only() {
-    // split_whitespace on "   " yields nothing → extra is empty → passthrough
+    // split_whitespace on "   " yields nothing, so extra is empty and the query passes through
     assert_eq!(normalize_query("   "), "   ");
 }
 
@@ -973,33 +1027,19 @@ fn normalize_kebab_query() {
 
 #[test]
 fn normalize_hyphenated_english_harmless() {
-    // "high-priority" triggers normalization but result is harmless —
-    // just appends "high priority" which are already in the query
+    // "high-priority" triggers normalization but the result is harmless: it just appends "high priority", tokens already in the query
     let result = normalize_query("create a high-priority issue");
     assert!(result.starts_with("create a high-priority issue"));
-    // Extra tokens are subsets of what's already there, won't hurt BM25
 }
 
-// -- MCP name format coverage --
-//
-// Real MCP qualified names follow the pattern `{server}__{tool}` where
-// server and tool names independently use different conventions:
-//
-//   Server formats:  simple        ("linear")
-//                    kebab-case    ("grafana-ai")
-//                    snake_case    ("grok_com_slack")
-//
-//   Tool formats:    snake_case    ("save_issue")
-//                    PascalCase    ("SearchDashboards")
-//                    camelCase     ("sendMessage")
-//                    kebab-case    ("notion-search")
-//                    single word   ("fetch")
+// Real MCP qualified names follow the pattern `{server}__{tool}` where server and tool names independently use different conventions.
+// Server formats: simple ("linear") kebab-case ("grafana-ai") snake_case ("grok_com_slack").
+// Tool formats: snake_case ("save_issue") PascalCase ("SearchDashboards") camelCase ("sendMessage") kebab-case ("notion-search") single word ("fetch").
 
-/// Fixture covering every server × tool naming convention observed in
-/// production MCP configs.
+/// Fixture covering every combination of server and tool naming conventions observed in production MCP configs.
 fn mcp_format_tools() -> Vec<ToolMetadata> {
     vec![
-        // simple server + snake_case tool
+        // simple server and snake_case tool
         ToolMetadata {
             qualified_name: "linear__save_issue".into(),
             server_name: "linear".into(),
@@ -1008,7 +1048,7 @@ fn mcp_format_tools() -> Vec<ToolMetadata> {
             parameters: vec!["title".into()],
             input_schema: serde_json::json!({}),
         },
-        // simple server + camelCase tool
+        // simple server and camelCase tool
         ToolMetadata {
             qualified_name: "linear__getIssueDetails".into(),
             server_name: "linear".into(),
@@ -1017,7 +1057,7 @@ fn mcp_format_tools() -> Vec<ToolMetadata> {
             parameters: vec!["id".into()],
             input_schema: serde_json::json!({}),
         },
-        // kebab-case server + PascalCase tool
+        // kebab-case server and PascalCase tool
         ToolMetadata {
             qualified_name: "grafana-ai__SearchDashboards".into(),
             server_name: "grafana-ai".into(),
@@ -1026,7 +1066,7 @@ fn mcp_format_tools() -> Vec<ToolMetadata> {
             parameters: vec!["query".into()],
             input_schema: serde_json::json!({}),
         },
-        // snake_case server + snake_case tool
+        // snake_case server and snake_case tool
         ToolMetadata {
             qualified_name: "grok_com_slack__slack_send_message".into(),
             server_name: "grok_com_slack".into(),
@@ -1035,7 +1075,7 @@ fn mcp_format_tools() -> Vec<ToolMetadata> {
             parameters: vec!["channel_id".into(), "text".into()],
             input_schema: serde_json::json!({}),
         },
-        // snake_case server + PascalCase tool
+        // snake_case server and PascalCase tool
         ToolMetadata {
             qualified_name: "grok_com_chronosphere__QueryPrometheusRange".into(),
             server_name: "grok_com_chronosphere".into(),
@@ -1044,7 +1084,7 @@ fn mcp_format_tools() -> Vec<ToolMetadata> {
             parameters: vec!["query".into(), "start".into(), "end".into()],
             input_schema: serde_json::json!({}),
         },
-        // simple server + kebab-case tool
+        // simple server and kebab-case tool
         ToolMetadata {
             qualified_name: "notion__notion-search".into(),
             server_name: "notion".into(),
@@ -1053,7 +1093,7 @@ fn mcp_format_tools() -> Vec<ToolMetadata> {
             parameters: vec!["query".into()],
             input_schema: serde_json::json!({}),
         },
-        // simple server + single word tool
+        // simple server and single word tool
         ToolMetadata {
             qualified_name: "jira__fetch".into(),
             server_name: "jira".into(),
@@ -1062,7 +1102,7 @@ fn mcp_format_tools() -> Vec<ToolMetadata> {
             parameters: vec!["key".into()],
             input_schema: serde_json::json!({}),
         },
-        // kebab-case server + snake_case tool
+        // kebab-case server and snake_case tool
         ToolMetadata {
             qualified_name: "my-server__get_user_info".into(),
             server_name: "my-server".into(),
@@ -1071,7 +1111,7 @@ fn mcp_format_tools() -> Vec<ToolMetadata> {
             parameters: vec!["user_id".into()],
             input_schema: serde_json::json!({}),
         },
-        // kebab-case server + camelCase tool
+        // kebab-case server and camelCase tool
         ToolMetadata {
             qualified_name: "my-server__listProjects".into(),
             server_name: "my-server".into(),
@@ -1087,89 +1127,101 @@ fn mcp_format_tools() -> Vec<ToolMetadata> {
 
 #[test]
 fn fmt_exact_simple_snake() {
-    // simple__snake_case
     let index = Bm25ToolSearchIndex::new(make_snapshot(mcp_format_tools()));
     let snap = index.search_snapshot("linear__save_issue", 5);
     assert_eq!(snap.results.len(), 1);
-    assert_eq!(snap.results[0].tool_name, "linear__save_issue");
+    assert_eq!(
+        snap.results.first().map(|r| r.tool_name.as_str()),
+        Some("linear__save_issue")
+    );
 }
 
 #[test]
 fn fmt_exact_simple_camel() {
-    // simple__camelCase
     let index = Bm25ToolSearchIndex::new(make_snapshot(mcp_format_tools()));
     let snap = index.search_snapshot("linear__getIssueDetails", 5);
     assert_eq!(snap.results.len(), 1);
-    assert_eq!(snap.results[0].tool_name, "linear__getIssueDetails");
+    assert_eq!(
+        snap.results.first().map(|r| r.tool_name.as_str()),
+        Some("linear__getIssueDetails")
+    );
 }
 
 #[test]
 fn fmt_exact_kebab_pascal() {
-    // kebab-case__PascalCase
     let index = Bm25ToolSearchIndex::new(make_snapshot(mcp_format_tools()));
     let snap = index.search_snapshot("grafana-ai__SearchDashboards", 5);
     assert_eq!(snap.results.len(), 1);
-    assert_eq!(snap.results[0].tool_name, "grafana-ai__SearchDashboards");
+    assert_eq!(
+        snap.results.first().map(|r| r.tool_name.as_str()),
+        Some("grafana-ai__SearchDashboards")
+    );
 }
 
 #[test]
 fn fmt_exact_snake_server_snake_tool() {
-    // snake_case__snake_case
     let index = Bm25ToolSearchIndex::new(make_snapshot(mcp_format_tools()));
     let snap = index.search_snapshot("grok_com_slack__slack_send_message", 5);
     assert_eq!(snap.results.len(), 1);
     assert_eq!(
-        snap.results[0].tool_name,
-        "grok_com_slack__slack_send_message"
+        snap.results.first().map(|r| r.tool_name.as_str()),
+        Some("grok_com_slack__slack_send_message")
     );
 }
 
 #[test]
 fn fmt_exact_snake_server_pascal_tool() {
-    // snake_case__PascalCase
     let index = Bm25ToolSearchIndex::new(make_snapshot(mcp_format_tools()));
     let snap = index.search_snapshot("grok_com_chronosphere__QueryPrometheusRange", 5);
     assert_eq!(snap.results.len(), 1);
     assert_eq!(
-        snap.results[0].tool_name,
-        "grok_com_chronosphere__QueryPrometheusRange"
+        snap.results.first().map(|r| r.tool_name.as_str()),
+        Some("grok_com_chronosphere__QueryPrometheusRange")
     );
 }
 
 #[test]
 fn fmt_exact_simple_kebab_tool() {
-    // simple__kebab-case
     let index = Bm25ToolSearchIndex::new(make_snapshot(mcp_format_tools()));
     let snap = index.search_snapshot("notion__notion-search", 5);
     assert_eq!(snap.results.len(), 1);
-    assert_eq!(snap.results[0].tool_name, "notion__notion-search");
+    assert_eq!(
+        snap.results.first().map(|r| r.tool_name.as_str()),
+        Some("notion__notion-search")
+    );
 }
 
 #[test]
 fn fmt_exact_simple_single_word() {
-    // simple__word
     let index = Bm25ToolSearchIndex::new(make_snapshot(mcp_format_tools()));
     let snap = index.search_snapshot("jira__fetch", 5);
     assert_eq!(snap.results.len(), 1);
-    assert_eq!(snap.results[0].tool_name, "jira__fetch");
+    assert_eq!(
+        snap.results.first().map(|r| r.tool_name.as_str()),
+        Some("jira__fetch")
+    );
 }
 
 #[test]
 fn fmt_exact_kebab_server_snake_tool() {
-    // kebab-case__snake_case
     let index = Bm25ToolSearchIndex::new(make_snapshot(mcp_format_tools()));
     let snap = index.search_snapshot("my-server__get_user_info", 5);
     assert_eq!(snap.results.len(), 1);
-    assert_eq!(snap.results[0].tool_name, "my-server__get_user_info");
+    assert_eq!(
+        snap.results.first().map(|r| r.tool_name.as_str()),
+        Some("my-server__get_user_info")
+    );
 }
 
 #[test]
 fn fmt_exact_kebab_server_camel_tool() {
-    // kebab-case__camelCase
     let index = Bm25ToolSearchIndex::new(make_snapshot(mcp_format_tools()));
     let snap = index.search_snapshot("my-server__listProjects", 5);
     assert_eq!(snap.results.len(), 1);
-    assert_eq!(snap.results[0].tool_name, "my-server__listProjects");
+    assert_eq!(
+        snap.results.first().map(|r| r.tool_name.as_str()),
+        Some("my-server__listProjects")
+    );
 }
 
 // ── Exact match: bare tool names ────────────────────────────────
@@ -1179,7 +1231,10 @@ fn fmt_bare_snake_case() {
     let index = Bm25ToolSearchIndex::new(make_snapshot(mcp_format_tools()));
     let snap = index.search_snapshot("save_issue", 5);
     assert_eq!(snap.results.len(), 1);
-    assert_eq!(snap.results[0].tool_name, "linear__save_issue");
+    assert_eq!(
+        snap.results.first().map(|r| r.tool_name.as_str()),
+        Some("linear__save_issue")
+    );
 }
 
 #[test]
@@ -1187,7 +1242,10 @@ fn fmt_bare_camel_case() {
     let index = Bm25ToolSearchIndex::new(make_snapshot(mcp_format_tools()));
     let snap = index.search_snapshot("getIssueDetails", 5);
     assert_eq!(snap.results.len(), 1);
-    assert_eq!(snap.results[0].tool_name, "linear__getIssueDetails");
+    assert_eq!(
+        snap.results.first().map(|r| r.tool_name.as_str()),
+        Some("linear__getIssueDetails")
+    );
 }
 
 #[test]
@@ -1195,7 +1253,10 @@ fn fmt_bare_pascal_case() {
     let index = Bm25ToolSearchIndex::new(make_snapshot(mcp_format_tools()));
     let snap = index.search_snapshot("SearchDashboards", 5);
     assert_eq!(snap.results.len(), 1);
-    assert_eq!(snap.results[0].tool_name, "grafana-ai__SearchDashboards");
+    assert_eq!(
+        snap.results.first().map(|r| r.tool_name.as_str()),
+        Some("grafana-ai__SearchDashboards")
+    );
 }
 
 #[test]
@@ -1203,7 +1264,10 @@ fn fmt_bare_kebab_case() {
     let index = Bm25ToolSearchIndex::new(make_snapshot(mcp_format_tools()));
     let snap = index.search_snapshot("notion-search", 5);
     assert_eq!(snap.results.len(), 1);
-    assert_eq!(snap.results[0].tool_name, "notion__notion-search");
+    assert_eq!(
+        snap.results.first().map(|r| r.tool_name.as_str()),
+        Some("notion__notion-search")
+    );
 }
 
 #[test]
@@ -1211,7 +1275,10 @@ fn fmt_bare_single_word() {
     let index = Bm25ToolSearchIndex::new(make_snapshot(mcp_format_tools()));
     let snap = index.search_snapshot("fetch", 5);
     assert_eq!(snap.results.len(), 1);
-    assert_eq!(snap.results[0].tool_name, "jira__fetch");
+    assert_eq!(
+        snap.results.first().map(|r| r.tool_name.as_str()),
+        Some("jira__fetch")
+    );
 }
 
 // ── Exact match: case insensitivity across formats ──────────────
@@ -1221,7 +1288,10 @@ fn fmt_case_insensitive_qualified_kebab_pascal() {
     let index = Bm25ToolSearchIndex::new(make_snapshot(mcp_format_tools()));
     let snap = index.search_snapshot("GRAFANA-AI__SEARCHDASHBOARDS", 5);
     assert_eq!(snap.results.len(), 1);
-    assert_eq!(snap.results[0].tool_name, "grafana-ai__SearchDashboards");
+    assert_eq!(
+        snap.results.first().map(|r| r.tool_name.as_str()),
+        Some("grafana-ai__SearchDashboards")
+    );
 }
 
 #[test]
@@ -1230,8 +1300,8 @@ fn fmt_case_insensitive_qualified_snake_snake() {
     let snap = index.search_snapshot("GROK_COM_SLACK__SLACK_SEND_MESSAGE", 5);
     assert_eq!(snap.results.len(), 1);
     assert_eq!(
-        snap.results[0].tool_name,
-        "grok_com_slack__slack_send_message"
+        snap.results.first().map(|r| r.tool_name.as_str()),
+        Some("grok_com_slack__slack_send_message")
     );
 }
 
@@ -1240,7 +1310,10 @@ fn fmt_case_insensitive_bare_camel() {
     let index = Bm25ToolSearchIndex::new(make_snapshot(mcp_format_tools()));
     let snap = index.search_snapshot("getissuedetails", 5);
     assert_eq!(snap.results.len(), 1);
-    assert_eq!(snap.results[0].tool_name, "linear__getIssueDetails");
+    assert_eq!(
+        snap.results.first().map(|r| r.tool_name.as_str()),
+        Some("linear__getIssueDetails")
+    );
 }
 
 // ── Whitespace handling ─────────────────────────────────────────
@@ -1250,7 +1323,10 @@ fn fmt_leading_trailing_whitespace() {
     let index = Bm25ToolSearchIndex::new(make_snapshot(mcp_format_tools()));
     let snap = index.search_snapshot("  SearchDashboards  ", 5);
     assert_eq!(snap.results.len(), 1);
-    assert_eq!(snap.results[0].tool_name, "grafana-ai__SearchDashboards");
+    assert_eq!(
+        snap.results.first().map(|r| r.tool_name.as_str()),
+        Some("grafana-ai__SearchDashboards")
+    );
 }
 
 #[test]
@@ -1258,7 +1334,10 @@ fn fmt_whitespace_qualified() {
     let index = Bm25ToolSearchIndex::new(make_snapshot(mcp_format_tools()));
     let snap = index.search_snapshot("  linear__save_issue  ", 5);
     assert_eq!(snap.results.len(), 1);
-    assert_eq!(snap.results[0].tool_name, "linear__save_issue");
+    assert_eq!(
+        snap.results.first().map(|r| r.tool_name.as_str()),
+        Some("linear__save_issue")
+    );
 }
 
 // ── Server name alone should NOT exact match ────────────────────
@@ -1267,12 +1346,10 @@ fn fmt_whitespace_qualified() {
 fn fmt_server_name_only_falls_through() {
     let index = Bm25ToolSearchIndex::new(make_snapshot(mcp_format_tools()));
 
-    // "linear" is a server name, not a tool name — should fall through
-    // to BM25, not return a single exact match
     let snap = index.search_snapshot("linear", 5);
     // BM25 may return multiple tools from the linear server
     assert!(
-        snap.results.len() != 1 || snap.results[0].tool_name != "linear",
+        !matches!(snap.results.as_slice(), [r] if r.tool_name == "linear"),
         "server name alone should not be an exact tool match"
     );
 }
@@ -1281,7 +1358,6 @@ fn fmt_server_name_only_falls_through() {
 fn fmt_kebab_server_only_falls_through() {
     let index = Bm25ToolSearchIndex::new(make_snapshot(mcp_format_tools()));
     let snap = index.search_snapshot("grafana-ai", 5);
-    // Should fall through to BM25 — "grafana-ai" is not a tool name
     for r in &snap.results {
         assert_ne!(
             r.tool_name, "grafana-ai",
@@ -1308,12 +1384,13 @@ fn fmt_snake_server_only_falls_through() {
 fn fmt_wrong_server_prefix_falls_through() {
     let index = Bm25ToolSearchIndex::new(make_snapshot(mcp_format_tools()));
 
-    // Model hallucinated the wrong server prefix — no exact match,
-    // falls through to BM25 which may still find the right tool
+    // Model hallucinated the wrong server prefix: there is no exact match, so the query falls through to BM25, which may still find the right tool
     let snap = index.search_snapshot("slack__SearchDashboards", 5);
     // Not an exact match, so results.len() > 1 or different ordering is fine
     assert!(
-        snap.results.is_empty() || snap.results[0].tool_name != "slack__SearchDashboards",
+        snap.results
+            .first()
+            .is_none_or(|r| r.tool_name != "slack__SearchDashboards"),
         "hallucinated qualified name should not exact match"
     );
 }
@@ -1322,19 +1399,17 @@ fn fmt_wrong_server_prefix_falls_through() {
 fn fmt_wrong_tool_name_falls_through() {
     let index = Bm25ToolSearchIndex::new(make_snapshot(mcp_format_tools()));
     let snap = index.search_snapshot("linear__create_issue", 5);
-    // "create_issue" doesn't exist — should fall through to BM25
     assert!(
-        snap.results.is_empty() || snap.results[0].tool_name != "linear__create_issue",
+        snap.results
+            .first()
+            .is_none_or(|r| r.tool_name != "linear__create_issue"),
         "nonexistent tool should not exact match"
     );
 }
 
-// ── Needle-in-haystack: production-scale index ──────────────────
-//
-// Realistic fixture with ~55 tools across 5 servers (Slack 17,
-// Notion 14, Grafana 9, Linear 8, GitHub 7). Tests that BM25
-// finds the right tool via partial / natural-language queries
-// when there are many competing documents.
+// ── Needle-in-haystack: production-scale index ──────────────────.
+// Realistic fixture with ~55 tools across 5 servers (Slack 17, Notion 14, Grafana 9, Linear 8, GitHub 7).
+// Tests that BM25 finds the right tool via partial or natural-language queries when there are many competing documents.
 
 fn production_haystack() -> Vec<ToolMetadata> {
     let tool = |qn: &str, server: &str, name: &str, desc: &str, params: &[&str]| ToolMetadata {
@@ -1740,7 +1815,6 @@ fn production_haystack() -> Vec<ToolMetadata> {
     ]
 }
 
-/// Helper: assert the needle is in the top-N results.
 fn assert_top_n(snap: &SearchSnapshot, expected_tool: &str, n: usize, query: &str) {
     let names: Vec<&str> = snap
         .results
@@ -1762,8 +1836,8 @@ fn haystack_exact_qualified_name() {
     let snap = index.search_snapshot("grok_com_slack__slack_search_public", 5);
     assert_eq!(snap.results.len(), 1);
     assert_eq!(
-        snap.results[0].tool_name,
-        "grok_com_slack__slack_search_public"
+        snap.results.first().map(|r| r.tool_name.as_str()),
+        Some("grok_com_slack__slack_search_public")
     );
 }
 
@@ -1773,8 +1847,8 @@ fn haystack_exact_bare_name() {
     let snap = index.search_snapshot("slack_search_public", 5);
     assert_eq!(snap.results.len(), 1);
     assert_eq!(
-        snap.results[0].tool_name,
-        "grok_com_slack__slack_search_public"
+        snap.results.first().map(|r| r.tool_name.as_str()),
+        Some("grok_com_slack__slack_search_public")
     );
 }
 
@@ -1783,7 +1857,10 @@ fn haystack_exact_notion_kebab() {
     let index = Bm25ToolSearchIndex::new(make_snapshot(production_haystack()));
     let snap = index.search_snapshot("notion-search", 5);
     assert_eq!(snap.results.len(), 1);
-    assert_eq!(snap.results[0].tool_name, "notion__notion-search");
+    assert_eq!(
+        snap.results.first().map(|r| r.tool_name.as_str()),
+        Some("notion__notion-search")
+    );
 }
 
 #[test]
@@ -1791,7 +1868,10 @@ fn haystack_exact_grafana_pascal() {
     let index = Bm25ToolSearchIndex::new(make_snapshot(production_haystack()));
     let snap = index.search_snapshot("SearchDashboards", 5);
     assert_eq!(snap.results.len(), 1);
-    assert_eq!(snap.results[0].tool_name, "grafana-ai__SearchDashboards");
+    assert_eq!(
+        snap.results.first().map(|r| r.tool_name.as_str()),
+        Some("grafana-ai__SearchDashboards")
+    );
 }
 
 // ── Needle-in-haystack: BM25 fuzzy queries ──────────────────────
@@ -1799,7 +1879,6 @@ fn haystack_exact_grafana_pascal() {
 #[test]
 fn haystack_bm25_search_slack_public() {
     let index = Bm25ToolSearchIndex::new(make_snapshot(production_haystack()));
-    // Natural language query for the Slack public search tool
     let snap = index.search_snapshot("search public slack messages", 5);
     assert_top_n(
         &snap,
@@ -1912,7 +1991,7 @@ fn haystack_bm25_github_search_code() {
 #[test]
 fn haystack_disambiguate_search_public_vs_private() {
     let index = Bm25ToolSearchIndex::new(make_snapshot(production_haystack()));
-    // "public" should rank the public-only tool above the public+private tool
+    // "public" ranks the public-only tool above the public-and-private tool
     let snap = index.search_snapshot("search public channels only", 5);
     let names: Vec<&str> = snap.results.iter().map(|r| r.tool_name.as_str()).collect();
     let pub_pos = names
@@ -1925,7 +2004,6 @@ fn haystack_disambiguate_search_public_vs_private() {
         pub_pos.is_some(),
         "slack_search_public should appear for 'search public channels only', got {names:?}"
     );
-    // If both appear, public-only should rank first
     if let (Some(p), Some(pp)) = (pub_pos, priv_pos) {
         assert!(
             p < pp,
@@ -1937,7 +2015,7 @@ fn haystack_disambiguate_search_public_vs_private() {
 #[test]
 fn haystack_disambiguate_linear_create_vs_github_create() {
     let index = Bm25ToolSearchIndex::new(make_snapshot(production_haystack()));
-    // "linear issue" should rank Linear's save_issue above GitHub's create_issue
+    // "linear issue" ranks Linear's save_issue above GitHub's create_issue
     let snap = index.search_snapshot("create linear issue", 5);
     assert_top_n(&snap, "linear__save_issue", 2, "create linear issue");
 }
@@ -1945,7 +2023,7 @@ fn haystack_disambiguate_linear_create_vs_github_create() {
 #[test]
 fn haystack_disambiguate_notion_create_comment_vs_linear() {
     let index = Bm25ToolSearchIndex::new(make_snapshot(production_haystack()));
-    // "notion comment" should find the Notion tool, not Linear's create_comment
+    // "notion comment" finds the Notion tool, not Linear's create_comment
     let snap = index.search_snapshot("add comment notion page", 5);
     assert_top_n(
         &snap,
@@ -1962,9 +2040,8 @@ fn haystack_disambiguate_notion_create_comment_vs_linear() {
 #[test]
 fn haystack_wrong_server_prefix_finds_tool() {
     let index = Bm25ToolSearchIndex::new(make_snapshot(production_haystack()));
-    // Model hallucinated "grafana-ai__SearchDashboards" but correct
-    // server is different. Not an exact match — BM25 with normalized
-    // query should still surface the tool via "Search" + "Dashboards".
+    // Model hallucinated "grafana-ai__SearchDashboards" but correct server is different
+    // Not an exact match, so BM25 with the normalized query still finds the tool via "Search" and "Dashboards"
     let snap = index.search_snapshot("wrong_server__SearchDashboards", 5);
     assert_top_n(
         &snap,
@@ -1977,7 +2054,6 @@ fn haystack_wrong_server_prefix_finds_tool() {
 #[test]
 fn haystack_partial_snake_case_query() {
     let index = Bm25ToolSearchIndex::new(make_snapshot(production_haystack()));
-    // Query is a partial snake_case identifier — not an exact tool name
     let snap = index.search_snapshot("search_public", 5);
     assert_top_n(
         &snap,
@@ -1990,8 +2066,7 @@ fn haystack_partial_snake_case_query() {
 #[test]
 fn haystack_camel_case_query_finds_tool() {
     let index = Bm25ToolSearchIndex::new(make_snapshot(production_haystack()));
-    // camelCase query that doesn't exactly match any tool name but
-    // shares components after normalization
+    // camelCase query that doesn't exactly match any tool name but shares components after normalization
     let snap = index.search_snapshot("getDashboardByUID", 5);
     assert_top_n(
         &snap,
@@ -2017,21 +2092,18 @@ fn haystack_qualified_name_typo_server() {
 #[test]
 fn haystack_underscore_joined_natural_query() {
     let index = Bm25ToolSearchIndex::new(make_snapshot(production_haystack()));
-    // User types tool name with underscores as a query
     let snap = index.search_snapshot("slack_send_message", 5);
     // Exact match on bare tool name catches this
     assert_eq!(
-        snap.results[0].tool_name,
-        "grok_com_slack__slack_send_message"
+        snap.results.first().map(|r| r.tool_name.as_str()),
+        Some("grok_com_slack__slack_send_message")
     );
 }
 
 #[test]
 fn haystack_kebab_tool_partial() {
     let index = Bm25ToolSearchIndex::new(make_snapshot(production_haystack()));
-    // Query uses kebab-case but is not an exact tool name
     let snap = index.search_snapshot("notion-create", 5);
-    // Should find multiple notion-create-* tools
     let notion_create_count = snap
         .results
         .iter()
@@ -2056,16 +2128,9 @@ fn haystack_total_tools() {
     assert_eq!(snap.total_hidden_tools, expected);
 }
 
-// ── Score comparison: before / after each rule ───────────────────
-//
-// Measures BM25 scores for the same queries under four configs:
-//   baseline       = old to_document (only _ split) + raw query
-//   +doc_norm      = new to_document (split_identifier) + raw query
-//   +query_norm    = old to_document + normalize_query
-//   +both          = new to_document + normalize_query
-//
-// Asserts that each rule independently improves the score for
-// identifier-style queries and that the combined score is best.
+// ── Score comparison: before / after each rule ───────────────────.
+// Measures BM25 scores for the same queries under four configs: baseline = old to_document (only _ split) + raw query +doc_norm = new to_document (split_identifier) + raw query +query_norm = old to_document +.
+// Asserts that each rule independently improves the score for identifier-style queries and that the combined score is best.
 
 /// Old to_document: only splits words containing `_`.
 fn to_document_baseline(t: &ToolMetadata) -> String {
@@ -2104,25 +2169,20 @@ fn score_comparison_document_normalization() {
     let old_docs: Vec<String> = tools.iter().map(to_document_baseline).collect();
     let new_docs: Vec<String> = tools.iter().map(|t| t.to_document()).collect();
 
-    // Queries that benefit from to_document splitting camelCase / kebab / __
+    // Queries that benefit from to_document splitting camelCase, kebab, and __
     let cases: &[(&str, &str)] = &[
-        // camelCase tool name — old doc has "SearchDashboards" as one
-        // token, new doc adds "Search Dashboards"
+        // camelCase tool name: old doc has "SearchDashboards" as one token, new doc adds "Search Dashboards"
         (
             "search dashboards visibility",
             "grafana-ai__SearchDashboards",
         ),
-        // kebab-case tool name — old doc doesn't split on -,
-        // new doc adds "notion create pages"
+        // kebab-case tool name: old doc doesn't split on -, new doc adds "notion create pages"
         ("create pages", "notion__notion-create-pages"),
-        // qualified name in doc — old doc doesn't include qualified_name,
-        // new doc indexes split components of "grafana-ai__SearchDashboards"
+        // qualified name in doc: old doc doesn't include qualified_name, new doc indexes split components of "grafana-ai__SearchDashboards"
         ("grafana dashboards", "grafana-ai__SearchDashboards"),
-        // PascalCase tool — "GetDashboardByUID" split into
-        // "Get Dashboard By UID"
+        // PascalCase tool: "GetDashboardByUID" splits into "Get Dashboard By UID"
         ("get dashboard uid", "grafana-ai__GetDashboardByUID"),
-        // kebab server name — old doc has "grafana-ai" as one token,
-        // new doc adds "grafana ai"
+        // kebab server name: old doc has "grafana-ai" as one token, new doc adds "grafana ai"
         ("grafana alert", "grafana-ai__DeleteAlertRule"),
     ];
 
@@ -2145,27 +2205,24 @@ fn score_comparison_document_normalization() {
 #[test]
 fn score_comparison_query_normalization() {
     let tools = production_haystack();
-    // Use the NEW to_document for both — isolate the query normalization effect
+    // Use the NEW to_document for both to isolate the query normalization effect
     let docs: Vec<String> = tools.iter().map(|t| t.to_document()).collect();
 
-    // Queries containing compound identifiers that benefit from
-    // normalize_query splitting __, _, -, camelCase
+    // Queries containing compound identifiers that benefit from normalize_query splitting __, _, -, camelCase
     let cases: &[(&str, &str)] = &[
-        // __ delimiter — "wrong_server__SearchDashboards" splits into
-        // extra tokens "wrong server Search Dashboards"
+        // __ delimiter: "wrong_server__SearchDashboards" splits into extra tokens "wrong server Search Dashboards"
         (
             "wrong_server__SearchDashboards",
             "grafana-ai__SearchDashboards",
         ),
-        // partial snake_case — "search_public" adds "search public"
+        // partial snake_case: "search_public" adds "search public"
         ("search_public", "grok_com_slack__slack_search_public"),
-        // wrong server prefix — "slack__slack_read_thread" adds
-        // "slack slack read thread"
+        // wrong server prefix: "slack__slack_read_thread" adds "slack slack read thread"
         (
             "slack__slack_read_thread",
             "grok_com_slack__slack_read_thread",
         ),
-        // kebab query — "notion-create" adds "notion create"
+        // kebab query: "notion-create" adds "notion create"
         ("notion-create", "notion__notion-create-pages"),
     ];
 

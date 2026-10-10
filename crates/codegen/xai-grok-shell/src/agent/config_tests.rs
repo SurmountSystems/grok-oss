@@ -2,6 +2,41 @@ use super::*;
 use serial_test::serial;
 use xai_grok_test_support::EnvGuard;
 #[test]
+fn coding_data_opt_out_does_not_block_uploads_to_own_bucket() {
+    let normal = xai_grok_login::GrokAuth::test_default();
+    let opted_out = xai_grok_login::GrokAuth {
+        coding_data_retention_opt_out: true,
+        ..xai_grok_login::GrokAuth::test_default()
+    };
+    let zdr = xai_grok_login::GrokAuth {
+        team_blocked_reasons: vec!["BLOCKED_REASON_NO_LOGS".into()],
+        ..xai_grok_login::GrokAuth::test_default()
+    };
+    let cases = [
+        (None, &normal, false),
+        (None, &opted_out, true),
+        (None, &zdr, true),
+        (Some("s3://acme-traces"), &normal, false),
+        (Some("s3://acme-traces"), &opted_out, false),
+        (Some("gs://acme-traces"), &opted_out, false),
+        (Some("s3://acme-traces"), &zdr, true),
+        (Some("ftp://acme-traces"), &opted_out, true),
+    ];
+    for (bucket, auth, expected) in cases {
+        let endpoints = EndpointsConfig {
+            trace_upload_bucket: bucket.map(str::to_owned),
+            ..EndpointsConfig::default()
+        };
+        assert_eq!(
+            expected,
+            endpoints.is_trace_upload_blocked_for(auth),
+            "bucket={bucket:?} opt_out={} zdr={}",
+            auth.coding_data_retention_opt_out,
+            auth.is_zdr_team()
+        );
+    }
+}
+#[test]
 fn main_cli_tools_override_preserves_profile_injection_policy() {
     let overrides = CliAgentOverrides {
         tools: Some(vec!["read_file".into()]),
@@ -14,9 +49,9 @@ fn main_cli_tools_override_preserves_profile_injection_policy() {
         assert_eq!(definition.inject_default_tools, expected_injection);
     }
 }
-/// `AutoModeConfig` parses identically from a local `[auto_mode]` TOML table
-/// and an equivalent remote settings JSON object (serde is format-agnostic). The
-/// lean shape is all scalars/enums, so no custom tolerant deser is needed.
+/// `AutoModeConfig` parses identically from a local `[auto_mode]` TOML table and an equivalent remote settings JSON object.
+/// Serde is format-agnostic.
+/// The lean shape is all scalars/enums, so no custom tolerant deserializer is needed.
 #[test]
 fn auto_mode_config_parses_from_toml_and_json_equivalently() {
     use xai_grok_workspace::permission::ClassifierPromptType;
@@ -125,11 +160,8 @@ fn laziness_detector_block_round_trips_through_serde() {
     assert_eq!(cfg.min_confidence, Some(0.8));
     assert_eq!(cfg.include_reasoning, Some(false));
 }
-/// Pins all three states of the per-model `include_reasoning`
-/// override (`Some(true)`, `Some(false)`, absent → `None`) so a
-/// future drift on the `#[serde(default)]` attribute or the field
-/// type fails the test rather than silently changing the resolved
-/// default.
+/// Pins all three states of the per-model `include_reasoning` override (`Some(true)`, `Some(false)`, and absent giving `None`).
+/// A future drift on the `#[serde(default)]` attribute or the field type fails the test rather than silently changing the resolved default.
 #[test]
 fn laziness_detector_include_reasoning_serde_states() {
     let some_true: LazinessDetectorPerModelConfig =
@@ -178,6 +210,12 @@ fn inject_url_derived_headers_adds_proxy_headers_for_cli_chat_proxy_url() {
         headers.get("x-authenticateresponse").map(String::as_str),
         Some("authenticate-response")
     );
+    assert_eq!(
+        headers
+            .get(crate::http::CLIENT_MODE_HEADER)
+            .map(String::as_str),
+        Some(crate::http::process_client_mode())
+    );
 }
 #[test]
 fn inject_url_derived_headers_skips_proxy_headers_for_external_url() {
@@ -185,6 +223,12 @@ fn inject_url_derived_headers_skips_proxy_headers_for_external_url() {
     inject_url_derived_headers(&mut headers, None, "https://api.x.ai/v1");
     assert!(headers.get("X-XAI-Token-Auth").is_none());
     assert!(headers.get("x-authenticateresponse").is_none());
+    assert_eq!(
+        headers
+            .get(crate::http::CLIENT_MODE_HEADER)
+            .map(String::as_str),
+        Some(crate::http::process_client_mode())
+    );
 }
 #[test]
 fn inject_url_derived_headers_preserves_caller_extra_headers() {
@@ -229,6 +273,43 @@ fn parses_toolset_overrides() {
     assert_eq!(cfg.toolset.ask_user_question.timeout_secs, Some(30));
 }
 #[test]
+fn parses_cursor_worker_table_without_unrecognized_keys() {
+    let raw_config: toml::Value = toml::from_str(
+        r#"
+            [cursor_worker]
+            auto_start = true
+            name = "devbox"
+            worker_dirs = ["/srv/a", "/srv/b"]
+            max_agents = 2
+            any_repo = false
+            hub_url = "wss://hub.example/v1/tools"
+            rewrite_shell_output = true
+            "#,
+    )
+    .unwrap();
+    let cfg = Config::new_from_toml_cfg(&raw_config).expect("config should parse");
+    assert_eq!(
+        CursorWorkerConfig {
+            auto_start: true,
+            name: Some("devbox".to_owned()),
+            worker_dirs: vec!["/srv/a".to_owned(), "/srv/b".to_owned()],
+            max_agents: Some(2),
+            any_repo: Some(false),
+            hub_url: Some("wss://hub.example/v1/tools".to_owned()),
+            rewrite_shell_output: true,
+        },
+        cfg.cursor_worker
+    );
+    assert!(
+        cfg.config_warnings.is_empty(),
+        "every key is a declared field: {:?}",
+        cfg.config_warnings
+    );
+    let empty: toml::Value = toml::from_str("").unwrap();
+    let cfg = Config::new_from_toml_cfg(&empty).expect("config should parse");
+    assert_eq!(CursorWorkerConfig::default(), cfg.cursor_worker);
+}
+#[test]
 fn parses_toolset_bash_float_timeout() {
     let raw_config: toml::Value = toml::from_str(
         r#"
@@ -250,8 +331,7 @@ fn resolve_runtime_fields_propagates_disable_zdr_incompatible_tools() {
             cli_subagents: None,
             cli_web_search_model: None,
             cli_session_summary_model: None,
-            cli_experimental_memory: false,
-            cli_no_memory: false,
+            memory_enabled_override: None,
             disable_web_search: false,
             todo_gate: false,
             laziness_debug_log: None,
@@ -269,6 +349,34 @@ fn resolve_runtime_fields_propagates_disable_zdr_incompatible_tools() {
     assert!(cfg.disable_zdr_incompatible_tools);
 }
 #[test]
+fn re_resolve_runtime_fields_refreshes_typed_memory_from_raw_config() {
+    let initial: toml::Value = toml::from_str(
+            "[memory]\nenabled = true\n[memory.search]\nmax_results = 6\n[memory_v2]\nenabled = false\ncapture_status_enabled = false",
+        )
+        .unwrap();
+    let updated: toml::Value = toml::from_str(
+            "[memory]\nenabled = true\n[memory.search]\nmax_results = 12\n[memory_v2]\nenabled = true\ncapture_status_enabled = true",
+        )
+        .unwrap();
+    let mut cfg = Config::new_from_toml_cfg(&initial).unwrap();
+    cfg.memory_enabled_override = Some(true);
+    cfg.re_resolve_runtime_fields(&updated);
+    let memory = cfg.memory_config.unwrap();
+    assert_eq!(memory.search.max_results, 12);
+    assert_eq!(memory.mode, crate::config::MemoryMode::V2);
+    assert!(memory.v2.capture_status_enabled);
+}
+#[test]
+fn resolved_memory_config_uses_isolated_v2_namespace() {
+    let raw: toml::Value =
+        toml::from_str("[memory]\nenabled = true\n[memory_v2]\nenabled = true").unwrap();
+    let mut cfg = Config::new_from_toml_cfg(&raw).unwrap();
+    cfg.re_resolve_runtime_fields(&raw);
+    let memory = cfg.memory_config.expect("resolved config is retained");
+    assert!(memory.enabled);
+    assert_eq!(memory.mode, crate::config::MemoryMode::V2);
+}
+#[test]
 fn resolve_runtime_fields_propagates_disable_web_search() {
     fn ctx(raw: &toml::Value, disable_web_search: bool) -> RuntimeResolutionContext<'_> {
         RuntimeResolutionContext {
@@ -278,8 +386,7 @@ fn resolve_runtime_fields_propagates_disable_web_search() {
             cli_subagents: None,
             cli_web_search_model: None,
             cli_session_summary_model: None,
-            cli_experimental_memory: false,
-            cli_no_memory: false,
+            memory_enabled_override: None,
             disable_web_search,
             todo_gate: false,
             laziness_debug_log: None,
@@ -415,14 +522,13 @@ fn resolve_aux_model_honors_grok_build_override() {
     assert_eq!(resolved.base_url, "https://vendor.example/v1");
     assert_eq!(resolved.api_key.as_deref(), Some("vendor-key"));
 }
-/// Cold cache falls back to the session model, never the xAI proxy;
-/// warm cache serves the provider token at the provider endpoint.
+/// Cold cache falls back to the session model, never the xAI proxy; warm cache serves the provider token at the provider endpoint.
 #[tokio::test]
 async fn aux_model_with_auth_provider_never_reroutes() {
     let endpoints = EndpointsConfig::default();
-    let provider = crate::auth::AuthProviderRef::new(
+    let provider = xai_grok_login::AuthProviderRef::new(
         "aux-provider-test".into(),
-        crate::auth::AuthProviderConfig {
+        xai_grok_login::AuthProviderConfig {
             command: "printf aux-token".into(),
             args: None,
             token_ttl_secs: Some(3600),
@@ -461,9 +567,7 @@ async fn aux_model_with_auth_provider_never_reroutes() {
     assert_eq!(resolved.base_url, "https://litellm.example/v1");
     assert_eq!(resolved.api_key.as_deref(), Some("aux-token"));
 }
-/// The session bearer resolver must never be stamped onto a third-party
-/// sampler: the sampler substitutes the resolver's bearer at request
-/// time.
+/// The session bearer resolver must never be stamped onto a third-party sampler: the sampler substitutes the resolver's bearer at request time.
 #[test]
 fn session_resolver_is_not_stamped_onto_third_party_samplers() {
     #[derive(Debug)]
@@ -475,6 +579,7 @@ fn session_resolver_is_not_stamped_onto_third_party_samplers() {
     }
     let session_cfg = SamplerConfig {
         bearer_resolver: Some(std::sync::Arc::new(SessionResolver)),
+        conversation_group_id: Some("root-group".into()),
         ..SamplerConfig::default()
     };
     let mut third_party = SamplerConfig {
@@ -486,6 +591,13 @@ fn session_resolver_is_not_stamped_onto_third_party_samplers() {
         third_party.bearer_resolver.is_none(),
         "a third-party endpoint must keep its resolved credential"
     );
+    assert_eq!(
+        third_party
+            .conversation_group_id
+            .as_ref()
+            .map(|id| id.as_ref()),
+        Some("root-group")
+    );
     let mut first_party = SamplerConfig {
         base_url: EndpointsConfig::default().resolve_inference_base_url(),
         ..SamplerConfig::default()
@@ -495,15 +607,21 @@ fn session_resolver_is_not_stamped_onto_third_party_samplers() {
         first_party.bearer_resolver.is_some(),
         "first-party aux samplers keep the session refresh behavior"
     );
+    assert_eq!(
+        first_party
+            .conversation_group_id
+            .as_ref()
+            .map(|id| id.as_ref()),
+        Some("root-group")
+    );
 }
-/// A cold cache disables web search rather than sending an
-/// unauthenticated request.
+/// A cold cache disables web search rather than sending an unauthenticated request.
 #[tokio::test]
 async fn web_search_with_auth_provider_requires_warm_cache() {
     let endpoints = EndpointsConfig::default();
-    let provider = crate::auth::AuthProviderRef::new(
+    let provider = xai_grok_login::AuthProviderRef::new(
         "web-search-provider-test".into(),
-        crate::auth::AuthProviderConfig {
+        xai_grok_login::AuthProviderConfig {
             command: "printf ws-token".into(),
             args: None,
             token_ttl_secs: Some(3600),
@@ -541,7 +659,7 @@ async fn web_search_with_auth_provider_requires_warm_cache() {
     .expect("warm cache resolves");
     assert_eq!(resolved.api_key.as_deref(), Some("ws-token"));
 }
-/// GBT-4128: bad `[mcp_servers.*]` entries are dropped, not fatal.
+/// Bad `[mcp_servers.*]` entries are dropped, not fatal.
 #[test]
 fn invalid_mcp_server_stub_does_not_fail_config_load() {
     let raw_config: toml::Value = toml::from_str(
@@ -578,10 +696,9 @@ fn invalid_mcp_server_stub_does_not_fail_config_load() {
         cfg.mcp_servers.contains_key("linear"),
         "valid MCP neighbor must still load"
     );
-    assert!(cfg.mcp_servers["linear"].enabled);
+    assert!(cfg.mcp_servers.get("linear").is_some_and(|s| s.enabled));
 }
-/// The lenient parser warns per problem and never fails the whole
-/// config.
+/// The lenient parser warns per problem and never fails the whole config.
 #[test]
 fn auth_provider_parse_warnings_are_lenient_and_specific() {
     use super::super::config_model_override_parse::{ConfigWarningKind, WarningTarget};
@@ -804,7 +921,7 @@ fn parses_auth_provider_tables_and_model_reference() {
     let cfg = Config::new_from_toml_cfg(&raw_config).expect("config should parse");
     assert_eq!(
         cfg.auth_providers.get("litellm"),
-        Some(&crate::auth::AuthProviderConfig {
+        Some(&xai_grok_login::AuthProviderConfig {
             command: "/usr/local/bin/litellm-token".into(),
             args: Some(vec!["--scope".into(), "corp".into()]),
             token_ttl_secs: Some(3600),
@@ -830,9 +947,8 @@ fn parses_auth_provider_tables_and_model_reference() {
         "declaring an auth provider implies supported_in_api"
     );
 }
-/// A static key shadows a fully defined provider through the real
-/// `resolve_model_list` + `attach_trusted_config` pipeline (not a
-/// hand-built ref): the static key wins even with the provider cache warm.
+/// A static key shadows a fully defined provider through the real `resolve_model_list` and `attach_trusted_config` pipeline (not a hand-built ref).
+/// The static key wins even with the provider cache warm.
 #[tokio::test]
 async fn static_key_shadows_defined_provider_through_pipeline() {
     let raw_config: toml::Value = toml::from_str(
@@ -894,9 +1010,9 @@ fn undefined_auth_provider_fails_closed() {
 async fn resolve_credentials_serves_cached_provider_token() {
     use xai_chat_state::AuthType;
     let mut model = test_model_entry("m", "https://litellm.example/v1", None, None, None);
-    let provider = crate::auth::AuthProviderRef::new(
+    let provider = xai_grok_login::AuthProviderRef::new(
         "resolve-creds-test".into(),
-        crate::auth::AuthProviderConfig {
+        xai_grok_login::AuthProviderConfig {
             command: "printf provider-minted-token".into(),
             args: None,
             token_ttl_secs: Some(3600),
@@ -913,17 +1029,16 @@ async fn resolve_credentials_serves_cached_provider_token() {
     assert_eq!(creds.auth_type, AuthType::ApiKey);
     assert_eq!(creds.base_url, "https://litellm.example/v1");
 }
-/// A set `env_key` shadows even a warm provider cache at resolve time, so
-/// the static credential wins on the wire and the provider never governs.
+/// A set `env_key` shadows even a warm provider cache at resolve time, so the static credential wins on the wire and the provider never governs.
 #[tokio::test]
 async fn set_env_key_shadows_warm_provider_at_resolve_time() {
     use xai_grok_test_support::EnvGuard;
     let var = "GROK_TEST_ENVKEY_SHADOW";
     let _guard = EnvGuard::set(var, "env-token");
     let mut model = test_model_entry("m", "https://litellm.example/v1", None, Some(var), None);
-    let provider = crate::auth::AuthProviderRef::new(
+    let provider = xai_grok_login::AuthProviderRef::new(
         "env-shadow-test".into(),
-        crate::auth::AuthProviderConfig {
+        xai_grok_login::AuthProviderConfig {
             command: "printf provider-token".into(),
             args: None,
             token_ttl_secs: Some(3600),
@@ -949,7 +1064,7 @@ async fn set_env_key_shadows_warm_provider_at_resolve_time() {
 #[test]
 fn prefetched_entry_provider_config_comes_from_trusted_tables_only() {
     let mut entry = test_model_entry("m", "https://cache.example/v1", None, None, None);
-    let smuggled: crate::auth::AuthProviderRef =
+    let smuggled: xai_grok_login::AuthProviderRef =
         serde_json::from_str(r#"{"name": "cache-smuggle-test", "config": {"command": "evil"}}"#)
             .unwrap();
     entry.auth_provider = Some(smuggled);
@@ -957,17 +1072,23 @@ fn prefetched_entry_provider_config_comes_from_trusted_tables_only() {
     prefetched.insert("cached-model".to_string(), entry);
     let cfg = Config::default();
     let resolved = resolve_model_list(&cfg, Some(prefetched.clone()));
-    let provider = resolved["cached-model"].auth_provider.as_ref().unwrap();
+    let Some(cached) = resolved.get("cached-model") else {
+        panic!("expected cached-model: {resolved:?}");
+    };
+    let provider = cached.auth_provider.as_ref().unwrap();
     assert_eq!(
-        resolve_credentials(&resolved["cached-model"], Some("session-jwt")).api_key,
+        resolve_credentials(cached, Some("session-jwt")).api_key,
         None,
         "an unusable provider fails closed"
     );
-    assert_eq!(provider.config, crate::auth::AuthProviderConfig::default());
+    assert_eq!(
+        provider.config,
+        xai_grok_login::AuthProviderConfig::default()
+    );
     let mut cfg = Config::default();
     cfg.auth_providers.insert(
         "cache-smuggle-test".to_string(),
-        crate::auth::AuthProviderConfig {
+        xai_grok_login::AuthProviderConfig {
             command: "printf local".to_string(),
             args: None,
             token_ttl_secs: None,
@@ -976,7 +1097,10 @@ fn prefetched_entry_provider_config_comes_from_trusted_tables_only() {
         },
     );
     let resolved = resolve_model_list(&cfg, Some(prefetched));
-    let provider = resolved["cached-model"].auth_provider.as_ref().unwrap();
+    let Some(cached) = resolved.get("cached-model") else {
+        panic!("expected cached-model: {resolved:?}");
+    };
+    let provider = cached.auth_provider.as_ref().unwrap();
     assert_eq!(provider.config.command, "printf local");
 }
 #[test]
@@ -999,63 +1123,20 @@ fn provider_model_fails_closed_on_prefetched_custom_base_url() {
         test_model_entry("m", "https://evil.example/v1", None, None, None),
     );
     let resolved = resolve_model_list(&cfg, Some(prefetched));
+    let m = resolved.get("m").unwrap_or_else(|| {
+        panic!(
+            "expected model m: {:?}",
+            resolved.keys().collect::<Vec<_>>()
+        )
+    });
     assert_eq!(
-        resolve_credentials(&resolved["m"], Some("session-jwt")).api_key,
+        resolve_credentials(m, Some("session-jwt")).api_key,
         None,
         "a prefetched custom base_url must fail closed, not leak the session token",
     );
 }
-fn test_model_entry(
-    model: &str,
-    base_url: &str,
-    api_key: Option<&str>,
-    env_key: Option<&str>,
-    api_base_url: Option<&str>,
-) -> ModelEntry {
-    ModelEntry {
-        info: ModelInfo {
-            user_selectable: true,
-            id: None,
-            model: model.to_string(),
-            base_url: base_url.to_string(),
-            name: None,
-            description: None,
-            max_completion_tokens: None,
-            temperature: None,
-            top_p: None,
-            api_backend: ApiBackend::default(),
-            auth_scheme: Default::default(),
-            extra_headers: IndexMap::new(),
-            query_params: IndexMap::new(),
-            env_http_headers: IndexMap::new(),
-            context_window: NonZeroU64::new(200_000).unwrap(),
-            auto_compact_threshold_percent: None,
-            system_prompt_label: None,
-            use_concise: false,
-            agent_type: default_agent_type(),
-            inference_idle_timeout_secs: None,
-            max_retries: None,
-            hidden: false,
-            supported_in_api: true,
-            reasoning_effort: None,
-            supports_reasoning_effort: false,
-            reasoning_efforts: Vec::new(),
-            supports_backend_search: false,
-            compactions_remaining: None,
-            compaction_at_tokens: None,
-            show_model_fingerprint: false,
-            stream_tool_calls: None,
-            laziness_detector: LazinessDetectorPerModelConfig::default(),
-        },
-        api_key: api_key.map(|s| s.to_string()),
-        env_key: env_key.map(EnvKeys::single),
-        auth_provider: None,
-        api_base_url: api_base_url.map(|s| s.to_string()),
-    }
-}
-/// The effective-model RE-support lookup must use the model ACTUALLY used:
-/// the resolved aux model when present, else the session model (an
-/// unresolvable slug ⇒ aux `None` ⇒ session model's capability wins).
+/// The effective-model RE-support lookup must use the model ACTUALLY used: the resolved aux model when present, else the session model.
+/// An unresolvable slug resolves aux to `None`, so the session model's capability wins.
 #[test]
 fn effective_classifier_supports_re_uses_actually_used_model() {
     let mut re_model = test_model_entry("v9", "https://x/v1", None, None, None);
@@ -1108,10 +1189,13 @@ fn sampling_config_uses_fallback_when_no_model_api_key() {
         &model,
         ResolvedCredentials {
             api_key: Some("fallback-key".to_string()),
+            failover_api_keys: Vec::new(),
             base_url: model.info().base_url.clone(),
             auth_type: xai_chat_state::AuthType::ApiKey,
             auth_scheme: AuthScheme::Bearer,
-            ..Default::default()
+            failover_base_url: None,
+            session_base_url: None,
+            session_identity_key: None,
         },
         None,
         None,
@@ -1184,13 +1268,16 @@ fn default_models_dual_endpoint_routing() {
         );
         let api_key_creds = ResolvedCredentials {
             api_key: Some("key".into()),
+            failover_api_keys: Vec::new(),
             base_url: entry
                 .api_base_url
                 .clone()
                 .unwrap_or(entry.info().base_url.clone()),
             auth_type: xai_chat_state::AuthType::ApiKey,
             auth_scheme: AuthScheme::Bearer,
-            ..Default::default()
+            failover_base_url: None,
+            session_base_url: None,
+            session_identity_key: None,
         };
         assert_eq!(
             api_key_creds.base_url, endpoints.xai_api_base_url,
@@ -1331,7 +1418,7 @@ fn resolve_credentials_empty_env_key_falls_through_to_session() {
     let alias = "GROK_TEST_EMPTY_ENV_LC_ALIAS";
     let _primary = EnvGuard::set(primary, "");
     let _alias = EnvGuard::set(alias, "");
-    let mut model = test_model_entry("m", "https://inference.example/v1", None, None, None);
+    let mut model = test_model_entry("m", "https://api.x.ai/v1", None, None, None);
     model.env_key = Some(EnvKeys::new([primary, alias]));
     assert!(!model.has_own_credentials());
     let creds = resolve_credentials(&model, Some("session-jwt"));
@@ -1361,7 +1448,7 @@ fn resolve_credentials_empty_env_key_falls_through_to_global_key() {
 #[test]
 fn resolve_credentials_empty_api_key_falls_through_to_session() {
     use xai_chat_state::AuthType;
-    let model = test_model_entry("m", "https://inference.example/v1", Some(""), None, None);
+    let model = test_model_entry("m", "https://api.x.ai/v1", Some(""), None, None);
     assert!(!model.has_own_credentials());
     let creds = resolve_credentials(&model, Some("session-jwt"));
     assert_eq!(creds.auth_type, AuthType::SessionToken);
@@ -1391,15 +1478,15 @@ fn config_toml_env_key_array_parses() {
 #[test]
 fn resolve_credentials_sets_auth_type() {
     use xai_chat_state::AuthType;
-    let model = test_model_entry("m", "https://example.com/v1", None, None, None);
+    let model = test_model_entry("m", "https://api.x.ai/v1", None, None, None);
     let creds = resolve_credentials(&model, Some("tok"));
     assert_eq!(creds.auth_type, AuthType::SessionToken);
     let byok = test_model_entry("m", "https://example.com/v1", Some("key"), None, None);
     let creds = resolve_credentials(&byok, Some("tok"));
     assert_eq!(creds.auth_type, AuthType::ApiKey);
 }
-/// Regression: BYOK env-var auth must stay ApiKey even when signed in,
-/// otherwise the bearer resolver overwrites the BYOK key with a session JWT.
+/// Regression: BYOK env-var auth must stay ApiKey even when signed in, otherwise the bearer resolver overwrites the BYOK key with a session JWT. `#[serial]`: mutates the process env. A unique var name is NOT enough.
+/// The `unsafe set_var` hazard is the global `environ` array (realloc races every concurrent `getenv` in the binary) The test must therefore serialize against all env tests
 #[test]
 #[serial_test::serial]
 fn resolve_credentials_env_key_byok_keeps_api_key_auth_with_session() {
@@ -1461,133 +1548,24 @@ fn proxy_messages_models_use_bearer_auth_scheme() {
         Some("xai-grok-cli")
     );
 }
-/// Regression: without a session key, `resolve_credentials` falls through
-/// to ApiKey. Session-based callers must override auth_type to SessionToken
-/// when their auth manager has only a buffered/expired token.
+/// Regression: without a session key, `resolve_credentials` falls through to ApiKey.
+/// Session-based callers must override auth_type to SessionToken when their auth manager has only a buffered/expired token.
 #[test]
 fn resolve_credentials_no_session_key_returns_api_key() {
     let model = test_model_entry("m", "https://example.com/v1", None, None, None);
     let creds = resolve_credentials(&model, None);
     assert_eq!(creds.auth_type, xai_chat_state::AuthType::ApiKey);
 }
-
-#[test]
-fn default_models_include_openrouter_grok_45_separate_from_default() {
-    let endpoints = EndpointsConfig::default();
-    let models = default_model_entries(&endpoints);
-    let or_id = crate::auth::openrouter::OPENROUTER_GROK_45_CATALOG_ID;
-    let entry = models
-        .get(or_id)
-        .unwrap_or_else(|| panic!("missing {or_id} in defaults"));
-    assert_eq!(
-        entry.info.model,
-        crate::auth::openrouter::OPENROUTER_GROK_45_MODEL
-    );
-    assert_eq!(
-        entry.info.base_url,
-        crate::auth::openrouter::OPENROUTER_API_URL
-    );
-    assert_eq!(entry.info.api_backend, ApiBackend::ChatCompletions);
-    assert!(entry.supported_in_api);
-    assert_eq!(
-        entry.env_key.as_ref().map(|k| k.names()),
-        Some(vec![crate::auth::openrouter::OPENROUTER_API_KEY_ENV])
-    );
-    // Native default stays first-party; OpenRouter is additive.
-    let dm = crate::models::default_model();
-    assert_ne!(
-        dm,
-        crate::auth::openrouter::OPENROUTER_GROK_45_CATALOG_ID,
-        "OpenRouter must stay additive, not the product default"
-    );
-    assert!(
-        models.contains_key(dm) || models.values().any(|m| m.model == dm),
-        "defaults must include the product default model {dm}"
-    );
-}
-
-/// Keep host Secret Service, `$GROK_HOME` file store, and Zed harness probes
-/// out of OpenRouter `resolve_credentials` tests.
-///
-/// `just check-local` inherits the operator shell and does not set
-/// `GROK_DISABLE_SHARED_HARNESS_SECRETS` (Nix `cargo-ci` does). With
-/// `OPENROUTER_API_KEY` unset, `collect_own_credentials(..., openrouter)`
-/// calls `load_openrouter_api_key_default`, which probes Zed Secret Service
-/// (`connect` / `ensure_unlocked`) with no timeout and can block for minutes.
-fn isolate_openrouter_resolve_from_host() -> (tempfile::TempDir, [EnvGuard; 4]) {
-    let home = tempfile::TempDir::new().expect("temp GROK_HOME");
-    let guards = [
-        EnvGuard::set("GROK_HOME", home.path()),
-        EnvGuard::set(crate::auth::credentials_store::FORCE_FILE_ENV, "1"),
-        EnvGuard::set(
-            crate::auth::harness_secrets::DISABLE_SHARED_HARNESS_ENV,
-            "1",
-        ),
-        EnvGuard::unset(crate::auth::openrouter::OPENROUTER_API_KEYS_ENV),
-    ];
-    (home, guards)
-}
-
-#[test]
-#[serial_test::serial]
-fn resolve_credentials_openrouter_uses_env_not_session() {
-    use xai_chat_state::AuthType;
-    let (_home, _iso) = isolate_openrouter_resolve_from_host();
-    let _env = xai_grok_test_support::EnvGuard::set(
-        crate::auth::openrouter::OPENROUTER_API_KEY_ENV,
-        "sk-or-test",
-    );
-    let entry = ModelEntry::from_config_entry(&openrouter_grok_45_default_entry());
-    let creds = resolve_credentials(&entry, Some("session-jwt"));
-    assert_eq!(creds.auth_type, AuthType::ApiKey);
-    assert_eq!(creds.api_key.as_deref(), Some("sk-or-test"));
-    assert_eq!(creds.base_url, crate::auth::openrouter::OPENROUTER_API_URL);
-}
-
-#[test]
-#[serial_test::serial]
-fn resolve_credentials_openrouter_does_not_use_xai_session() {
-    use xai_chat_state::AuthType;
-    let (_home, _iso) = isolate_openrouter_resolve_from_host();
-    let _env =
-        xai_grok_test_support::EnvGuard::unset(crate::auth::openrouter::OPENROUTER_API_KEY_ENV);
-    let entry = ModelEntry::from_config_entry(&openrouter_grok_45_default_entry());
-    let creds = resolve_credentials(&entry, Some("session-jwt"));
-    assert_eq!(creds.auth_type, AuthType::ApiKey);
-    assert_ne!(
-        creds.api_key.as_deref(),
-        Some("session-jwt"),
-        "OpenRouter must never use the xAI session token"
-    );
-    assert_eq!(creds.base_url, crate::auth::openrouter::OPENROUTER_API_URL);
-}
-
-#[test]
-// Grok OSS: OpenRouter request headers set Surmount referer and Grok OSS title. This diverges from upstream xAI because OpenRouter attribution headers must identify this unofficial fork.
-fn inject_url_derived_headers_adds_openrouter_attribution() {
-    let mut headers = IndexMap::new();
-    inject_url_derived_headers(
-        &mut headers,
-        None,
-        crate::auth::openrouter::OPENROUTER_API_URL,
-    );
-    assert_eq!(
-        headers.get("HTTP-Referer").map(String::as_str),
-        Some(crate::auth::openrouter::OPENROUTER_HTTP_REFERER)
-    );
-    assert_eq!(
-        headers.get("X-Title").map(String::as_str),
-        Some(crate::auth::openrouter::OPENROUTER_X_TITLE)
-    );
-    assert!(!headers.contains_key("X-XAI-Token-Auth"));
-}
 fn api_key_creds(base_url: &str) -> ResolvedCredentials {
     ResolvedCredentials {
         api_key: Some("xai-secret".to_string()),
+        failover_api_keys: Vec::new(),
         base_url: base_url.to_string(),
         auth_type: xai_chat_state::AuthType::ApiKey,
         auth_scheme: Default::default(),
-        ..Default::default()
+        failover_base_url: None,
+        session_base_url: None,
+        session_identity_key: None,
     }
 }
 /// `disable_api_key_auth` kill switch (Claude `forceLoginMethod` parity).
@@ -1617,12 +1595,9 @@ fn enforce_disable_api_key_auth_blocks_first_party_only() {
     enforce_disable_api_key_auth(&mut creds, true, Some("session-jwt"));
     assert_eq!(creds.auth_type, AuthType::SessionToken);
 }
-/// Regression for the OVERRIDE_MODEL kill-switch bypass: a first-party model
-/// with its own api_key resolves to `ApiKey` (priority 1, beating the
-/// session), and the kill switch — now applied inside
-/// `try_resolve_model_credentials` — swaps it for the session token. BYOK
-/// (non-x.ai) own keys are preserved. (`try_resolve_model_credentials`
-/// loads global config, so this exercises its resolve + enforce core.)
+/// Regression for the OVERRIDE_MODEL kill-switch bypass. A first-party model with its own api_key resolves to `ApiKey` (priority 1, beating the session).
+/// The kill switch, now applied inside `try_resolve_model_credentials`, swaps it for the session token. BYOK (non-x.ai) own keys are preserved.
+/// (`try_resolve_model_credentials` loads global config, so this exercises its resolve and enforce core.)
 #[test]
 fn try_resolve_model_credentials_swaps_first_party_own_key_under_kill_switch() {
     use xai_chat_state::AuthType;
@@ -1709,6 +1684,10 @@ fn has_own_credentials_guards_session_vs_external_key() {
         for (model_id, entry) in default_model_entries(&endpoints) {
             assert!(
                 !entry.has_own_credentials(),
+                "{model_id}: Default model must not claim own credentials"
+            );
+            assert!(
+                !entry.has_own_credentials(),
                 "{model_id}: default catalog must not claim own credentials when OPENROUTER_API_KEY is unset"
             );
         }
@@ -1741,9 +1720,8 @@ fn has_own_credentials_guards_session_vs_external_key() {
     );
     assert!(config_model.has_own_credentials());
 }
-/// The `ConfigUnavailable → Unknown` arm matters for safety: a transient
-/// config failure must not read as a definite `NotByok`, which would drive
-/// the live resolver and could overwrite a per-model BYOK key.
+/// The `ConfigUnavailable → Unknown` arm matters for safety.
+/// A transient config failure must not read as a definite `NotByok`, which would drive the live resolver and could overwrite a per-model BYOK key.
 #[test]
 fn byok_from_lookup_classifies_all_states() {
     assert_eq!(
@@ -1776,26 +1754,6 @@ fn resolve_model_auth_facts_empty_model_id_is_unknown() {
     assert_eq!(
         resolve_model_auth_facts_and_provider("").0.byok,
         ModelByok::Unknown
-    );
-}
-#[test]
-fn user_override_adds_api_key_to_default_model() {
-    let dm = crate::models::default_model();
-    let raw_config: toml::Value = toml::from_str(&format!(
-        r#"
-            [model."{dm}"]
-            api_key = "user-custom-api-key"
-            "#,
-    ))
-    .unwrap();
-    let cfg = Config::new_from_toml_cfg(&raw_config).expect("config should parse");
-    let resolved = resolve_model_list(&cfg, None);
-    let model = resolved.get(dm).expect("model should exist");
-    assert_eq!(model.api_key, Some("user-custom-api-key".to_string()));
-    assert_eq!(model.info.model, dm);
-    assert_eq!(
-        model.info.base_url, "https://cli-chat-proxy.grok.com/v1",
-        "base_url should inherit from default, not be stale"
     );
 }
 #[test]
@@ -1958,12 +1916,11 @@ fn compaction_mode_precedence_env_over_config_over_remote_over_default() {
     );
     assert_eq!(
         resolve_compaction_mode_from(None, None, None),
-        CompactionMode::Summary
+        CompactionMode::Segments(xai_chat_state::CompactionDetail::default())
     );
 }
-/// Detail shares the env>config>remote>default combinator that the mode
-/// test exercises; the detail-specific facts are remote settings routing and the
-/// `Verbose` default (with unrecognized values falling through).
+/// Detail shares the env>config>remote>default combinator that the mode test exercises.
+/// The detail-specific facts are remote settings routing and the `Verbose` default (with unrecognized values falling through).
 #[test]
 fn compaction_detail_resolves_remote_settings_and_verbose_default() {
     use xai_chat_state::CompactionDetail;
@@ -2030,6 +1987,57 @@ fn parses_model_context_window() {
     assert_eq!(model.info.context_window, NonZeroU64::new(256_000).unwrap());
 }
 #[test]
+fn context_window_is_the_default_and_context_windows_are_the_choices() {
+    let raw_config: toml::Value = toml::from_str(
+        r#"
+            [model.my-custom-model]
+            model = "custom-llm"
+            base_url = "https://api.example.com/v1"
+            context_window = 256000
+            context_windows = [500000, 256000]
+            "#,
+    )
+    .unwrap();
+    let cfg = Config::new_from_toml_cfg(&raw_config).expect("config should parse");
+    let resolved = resolve_model_list(&cfg, None);
+    let model = resolved.get("my-custom-model").expect("model should exist");
+    assert_eq!(model.info.context_window.get(), 256_000);
+    let windows: Vec<u64> = model.info.context_windows.iter().map(|w| w.get()).collect();
+    assert_eq!(windows, [500_000, 256_000]);
+}
+#[rstest::rstest]
+#[case::scalar_without_list(Some(256_000), &[], Some((256_000, vec![])))]
+#[case::list_without_scalar(
+    None,
+    &[500_000,
+    256_000,
+    500_000],
+    Some((500_000, vec![500_000, 256_000]))
+)]
+#[case::scalar_missing_from_list_is_added(
+    Some(300_000),
+    &[256_000,
+    500_000],
+    Some((300_000, vec![300_000, 256_000, 500_000]))
+)]
+#[case::scalar_in_list_keeps_list_order(
+    Some(500_000),
+    &[256_000,
+    500_000],
+    Some((500_000, vec![256_000, 500_000]))
+)]
+#[case::neither(None, &[], None)]
+fn context_window_choices_resolve(
+    #[case] context_window: Option<u64>,
+    #[case] listed: &[u64],
+    #[case] expected: Option<(u64, Vec<u64>)>,
+) {
+    let listed: Vec<NonZeroU64> = listed.iter().filter_map(|w| NonZeroU64::new(*w)).collect();
+    let got = context_window_choices(context_window.and_then(NonZeroU64::new), &listed)
+        .map(|(default, choices)| (default.get(), choices.iter().map(|w| w.get()).collect()));
+    assert_eq!(got, expected);
+}
+#[test]
 fn sampling_config_context_window_from_entry_or_default() {
     let model = test_model_entry("any-model", "https://api.x.ai/v1", None, None, None);
     let config = sampling_config_for_model(
@@ -2052,6 +2060,70 @@ fn sampling_config_context_window_from_entry_or_default() {
         None,
     );
     assert_eq!(config.context_window, 256_000);
+}
+#[test]
+fn unset_max_request_bytes_defaults_from_api_backend() {
+    let raw_config: toml::Value = toml::from_str(
+        r#"
+            [model.capped-messages]
+            model = "claude"
+            base_url = "https://api.example.com/v1"
+            api_backend = "messages"
+            context_window = 1000000
+            max_request_bytes = 20000000
+
+            [model.uncapped-messages]
+            model = "claude"
+            base_url = "https://api.example.com/v1"
+            api_backend = "messages"
+            context_window = 1000000
+
+            [model.uncapped-chat]
+            model = "m"
+            base_url = "https://api.example.com/v1"
+            api_backend = "chat_completions"
+            context_window = 1000000
+
+            [model.uncapped-responses]
+            model = "m"
+            base_url = "https://api.example.com/v1"
+            api_backend = "responses"
+            context_window = 1000000
+            "#,
+    )
+    .unwrap();
+    let cfg = Config::new_from_toml_cfg(&raw_config).expect("config should parse");
+    let resolved = resolve_model_list(&cfg, None);
+    let max_request_bytes = |key: &str| {
+        let model = resolved.get(key).expect("model should exist");
+        sampling_config_for_model(
+            model,
+            resolve_credentials(model, None),
+            None,
+            None,
+            None,
+            None,
+        )
+        .max_request_bytes
+    };
+    assert_eq!(
+        NonZeroU64::new(20_000_000),
+        max_request_bytes("capped-messages"),
+        "an explicit cap overrides the backend default"
+    );
+    assert_eq!(
+        NonZeroU64::new(30_000_000),
+        max_request_bytes("uncapped-messages"),
+        "a messages model budgets to the 30 MB Messages host cap"
+    );
+    assert_eq!(
+        NonZeroU64::new(50 * 1024 * 1024),
+        max_request_bytes("uncapped-chat")
+    );
+    assert_eq!(
+        NonZeroU64::new(50 * 1024 * 1024),
+        max_request_bytes("uncapped-responses")
+    );
 }
 #[test]
 fn parses_model_api_backend_responses() {
@@ -2090,8 +2162,9 @@ fn parses_model_api_backend_chat_completions() {
     assert_eq!(model.info.api_backend, ApiBackend::ChatCompletions);
 }
 /// Messages backend auto-defaults supports_reasoning_effort=true.
-/// Without this, `--reasoning-effort` is silently dropped in
-/// xai-grok-shell/src/agent/models.rs:857 for any BYOK Claude config.
+/// Without this, `--reasoning-effort` is silently dropped by
+/// `model_offers_reasoning_effort` in agent/remote_config/resolution.rs for any
+/// BYOK Claude config.
 #[test]
 fn model_messages_backend_auto_defaults_supports_reasoning_effort() {
     let raw_config: toml::Value = toml::from_str(
@@ -2112,8 +2185,7 @@ fn model_messages_backend_auto_defaults_supports_reasoning_effort() {
         "Messages backend should auto-default supports_reasoning_effort=true",
     );
 }
-/// An explicit `supports_reasoning_effort = false` in config must override
-/// the Messages auto-default — config wins.
+/// An explicit `supports_reasoning_effort = false` in config must override the Messages auto-default; config wins.
 #[test]
 fn model_messages_backend_respects_explicit_supports_reasoning_effort_false() {
     let raw_config: toml::Value = toml::from_str(
@@ -2135,14 +2207,15 @@ fn model_messages_backend_respects_explicit_supports_reasoning_effort_false() {
         "explicit supports_reasoning_effort=false in config must override the Messages auto-default",
     );
 }
-/// Non-Messages backends keep their existing default (false) since adaptive
-/// thinking is Messages-backend-specific and other providers vary per upstream model.
+/// Non-Messages backends keep their existing default (false).
+/// Adaptive thinking is specific to the Messages backend, and other providers vary per upstream model.
+/// The row aliases a wire id with no catalog menu, so the assertion isolates the backend default from slug propagation.
 #[test]
 fn model_chat_completions_backend_does_not_auto_default_supports_reasoning_effort() {
     let raw_config: toml::Value = toml::from_str(
         r#"
             [model.my-openai]
-            model = "grok-4.5"
+            model = "upstream-model"
             base_url = "https://api.example.com/v1"
             context_window = 200000
             api_backend = "chat_completions"
@@ -2225,38 +2298,11 @@ fn model_use_concise_defaults_to_false() {
 #[test]
 fn model_info_from_config_propagates_use_concise() {
     let entry = ModelEntryConfig {
-        id: None,
         model: "test".to_string(),
         base_url: "https://test.api/v1".to_string(),
-        name: None,
-        description: None,
-        max_completion_tokens: None,
-        temperature: None,
-        top_p: None,
-        api_key: None,
-        env_key: None,
-        api_backend: ApiBackend::default(),
-        auth_scheme: None,
-        extra_headers: IndexMap::new(),
         context_window: NonZeroU64::new(200_000).unwrap(),
-        auto_compact_threshold_percent: None,
-        system_prompt_label: None,
-        api_base_url: None,
         use_concise: true,
-        agent_type: default_agent_type(),
-        inference_idle_timeout_secs: None,
-        max_retries: None,
-        hidden: false,
-        supported_in_api: true,
-        reasoning_effort: None,
-        supports_reasoning_effort: false,
-        reasoning_efforts: Vec::new(),
-        supports_backend_search: false,
-        compactions_remaining: None,
-        compaction_at_tokens: None,
-        show_model_fingerprint: false,
-        stream_tool_calls: None,
-        laziness_detector: LazinessDetectorPerModelConfig::default(),
+        ..Default::default()
     };
     let info = ModelInfo::from_config(&entry);
     assert!(info.use_concise);
@@ -2384,38 +2430,11 @@ fn model_agent_type_defaults_to_grok_build() {
 #[test]
 fn model_info_from_config_propagates_agent_type() {
     let entry = ModelEntryConfig {
-        id: None,
         model: "test".to_string(),
         base_url: "https://test.api/v1".to_string(),
-        name: None,
-        description: None,
-        max_completion_tokens: None,
-        temperature: None,
-        top_p: None,
-        api_key: None,
-        env_key: None,
-        api_backend: ApiBackend::default(),
-        auth_scheme: None,
-        extra_headers: IndexMap::new(),
         context_window: NonZeroU64::new(200_000).unwrap(),
-        auto_compact_threshold_percent: None,
-        system_prompt_label: None,
-        api_base_url: None,
-        use_concise: false,
         agent_type: "codex".to_string(),
-        inference_idle_timeout_secs: None,
-        max_retries: None,
-        hidden: false,
-        supported_in_api: true,
-        reasoning_effort: None,
-        supports_reasoning_effort: false,
-        reasoning_efforts: Vec::new(),
-        supports_backend_search: false,
-        compactions_remaining: None,
-        compaction_at_tokens: None,
-        show_model_fingerprint: false,
-        stream_tool_calls: None,
-        laziness_detector: LazinessDetectorPerModelConfig::default(),
+        ..Default::default()
     };
     let info = ModelInfo::from_config(&entry);
     assert_eq!(info.agent_type, "codex");
@@ -2431,8 +2450,11 @@ fn acp_model_meta_includes_agent_type_when_present() {
     let acp_models = to_acp_model_info(&models);
     let acp_model = acp_models.values().next().expect("should have one model");
     let meta = acp_model.meta.as_ref().expect("meta should be present");
-    assert_eq!(meta["agentType"], "codex");
-    assert_eq!(meta["totalContextTokens"], 256_000);
+    assert_eq!(meta.get("agentType"), Some(&serde_json::json!("codex")));
+    assert_eq!(
+        meta.get("totalContextTokens"),
+        Some(&serde_json::json!(256_000))
+    );
 }
 #[test]
 fn acp_model_meta_always_includes_agent_type() {
@@ -2444,11 +2466,98 @@ fn acp_model_meta_always_includes_agent_type() {
     let acp_models = to_acp_model_info(&models);
     let acp_model = acp_models.values().next().expect("should have one model");
     let meta = acp_model.meta.as_ref().expect("meta should be present");
-    assert_eq!(meta["totalContextTokens"], 256_000);
     assert_eq!(
-        meta["agentType"], DEFAULT_AGENT_TYPE,
+        meta.get("totalContextTokens"),
+        Some(&serde_json::json!(256_000))
+    );
+    assert_eq!(
+        meta.get("agentType").and_then(|v| v.as_str()),
+        Some(DEFAULT_AGENT_TYPE),
         "agentType should always be in meta, defaulting to DEFAULT_AGENT_TYPE"
     );
+}
+#[test]
+fn config_model_notice_reaches_acp_meta() {
+    use xai_grok_sampling_types::{ModelNotice, ModelNoticeSeverity, parse_model_notice_meta};
+    let raw_config: toml::Value = toml::from_str(
+        r#"
+            [model.old-model]
+            model = "old-model"
+            base_url = "https://api.example.com/v1"
+            context_window = 200000
+            notice = { severity = "warning", text = "Deprecated Oct 15", label = "deprecated" }
+            "#,
+    )
+    .expect("test TOML parses");
+    let cfg = Config::new_from_toml_cfg(&raw_config).expect("config should parse");
+    let models = resolve_model_list(&cfg, None);
+    let acp_models = to_acp_model_info(&models);
+    let meta = acp_models
+        .get(&acp::ModelId::new("old-model"))
+        .and_then(|model| model.meta.as_ref())
+        .expect("configured model has meta");
+    assert_eq!(
+        Some(
+            &serde_json::json!({"severity": "warning", "text": "Deprecated Oct 15", "label": "deprecated"})
+        ),
+        meta.get("notice")
+    );
+    assert_eq!(
+        Some(ModelNotice {
+            severity: ModelNoticeSeverity::Warning,
+            text: "Deprecated Oct 15".to_owned(),
+            label: Some("deprecated".to_owned()),
+        }),
+        parse_model_notice_meta(Some(meta))
+    );
+}
+#[test]
+fn config_blank_notice_clears_the_inherited_notice() {
+    use xai_grok_sampling_types::{ModelNotice, ModelNoticeSeverity};
+    let mut base = test_model_entry("old-model", "https://test.api/v1", None, None, None);
+    base.info.notice = Some(ModelNotice {
+        severity: ModelNoticeSeverity::Critical,
+        text: "Retired".to_owned(),
+        label: None,
+    });
+    let over: ConfigModelOverride =
+        toml::from_str(r#"notice = { text = "" }"#).expect("override TOML parses");
+    let entry = over.apply("old-model", Some(base), &EndpointsConfig::default());
+    assert_eq!(None, entry.info.notice);
+}
+#[test]
+fn acp_model_meta_omits_notice_when_unset() {
+    let mut models = IndexMap::new();
+    models.insert(
+        "m".to_owned(),
+        test_model_entry("m", "https://test.api/v1", None, None, None),
+    );
+    let acp_models = to_acp_model_info(&models);
+    let meta = acp_models
+        .values()
+        .next()
+        .and_then(|model| model.meta.as_ref())
+        .expect("model has meta");
+    assert_eq!(None, meta.get("notice"));
+}
+#[test]
+fn model_entry_config_notice_survives_a_serde_round_trip() {
+    use xai_grok_sampling_types::{ModelNotice, ModelNoticeSeverity};
+    let entry = ModelEntryConfig {
+        model: "old-model".to_owned(),
+        base_url: "https://test.api/v1".to_owned(),
+        context_window: NonZeroU64::new(200_000).expect("non-zero"),
+        notice: Some(ModelNotice {
+            severity: ModelNoticeSeverity::Warning,
+            text: "Deprecated Oct 15".to_owned(),
+            label: None,
+        }),
+        ..Default::default()
+    };
+    let json = serde_json::to_value(&entry).expect("entry serializes");
+    let back: ModelEntryConfig = serde_json::from_value(json).expect("entry deserializes");
+    assert_eq!(entry.notice, back.notice);
+    assert_eq!(entry.notice, ModelInfo::from_config(&back).notice);
 }
 #[test]
 fn acp_model_meta_emits_reasoning_effort_when_supported() {
@@ -2464,8 +2573,14 @@ fn acp_model_meta_emits_reasoning_effort_when_supported() {
         .meta
         .clone()
         .unwrap();
-    assert_eq!(meta["supportsReasoningEffort"], true);
-    assert_eq!(meta["reasoningEffort"], "high");
+    assert_eq!(
+        meta.get("supportsReasoningEffort"),
+        Some(&serde_json::json!(true))
+    );
+    assert_eq!(
+        meta.get("reasoningEffort"),
+        Some(&serde_json::json!("high"))
+    );
 }
 #[test]
 fn acp_model_meta_supports_without_default_effort() {
@@ -2480,7 +2595,10 @@ fn acp_model_meta_supports_without_default_effort() {
         .meta
         .clone()
         .unwrap();
-    assert_eq!(meta["supportsReasoningEffort"], true);
+    assert_eq!(
+        meta.get("supportsReasoningEffort"),
+        Some(&serde_json::json!(true))
+    );
     assert!(meta.get("reasoningEffort").is_none());
 }
 #[test]
@@ -2512,10 +2630,26 @@ fn acp_model_meta_emits_reasoning_efforts_and_derives_legacy() {
         .meta
         .clone()
         .unwrap();
-    assert_eq!(meta[REASONING_EFFORTS_META_KEY][0]["id"], "deep");
-    assert_eq!(meta[REASONING_EFFORTS_META_KEY][0]["value"], "xhigh");
-    assert_eq!(meta["supportsReasoningEffort"], true);
-    assert_eq!(meta["reasoningEffort"], "high");
+    assert_eq!(
+        meta.get(REASONING_EFFORTS_META_KEY)
+            .and_then(|v| v.get(0))
+            .and_then(|v| v.get("id")),
+        Some(&serde_json::json!("deep"))
+    );
+    assert_eq!(
+        meta.get(REASONING_EFFORTS_META_KEY)
+            .and_then(|v| v.get(0))
+            .and_then(|v| v.get("value")),
+        Some(&serde_json::json!("xhigh"))
+    );
+    assert_eq!(
+        meta.get("supportsReasoningEffort"),
+        Some(&serde_json::json!(true))
+    );
+    assert_eq!(
+        meta.get("reasoningEffort"),
+        Some(&serde_json::json!("high"))
+    );
 }
 #[test]
 fn acp_model_meta_omits_reasoning_efforts_when_list_empty() {
@@ -2532,8 +2666,14 @@ fn acp_model_meta_omits_reasoning_efforts_when_list_empty() {
         .clone()
         .unwrap();
     assert!(meta.get(REASONING_EFFORTS_META_KEY).is_none());
-    assert_eq!(meta["supportsReasoningEffort"], true);
-    assert_eq!(meta["reasoningEffort"], "medium");
+    assert_eq!(
+        meta.get("supportsReasoningEffort"),
+        Some(&serde_json::json!(true))
+    );
+    assert_eq!(
+        meta.get("reasoningEffort"),
+        Some(&serde_json::json!("medium"))
+    );
 }
 #[test]
 fn acp_model_meta_keeps_explicit_scalar_when_list_present() {
@@ -2556,8 +2696,11 @@ fn acp_model_meta_keeps_explicit_scalar_when_list_present() {
         .meta
         .clone()
         .unwrap();
-    assert_eq!(meta["supportsReasoningEffort"], true);
-    assert_eq!(meta["reasoningEffort"], "low");
+    assert_eq!(
+        meta.get("supportsReasoningEffort"),
+        Some(&serde_json::json!(true))
+    );
+    assert_eq!(meta.get("reasoningEffort"), Some(&serde_json::json!("low")));
 }
 #[test]
 fn acp_model_meta_derives_first_option_when_no_default() {
@@ -2588,8 +2731,14 @@ fn acp_model_meta_derives_first_option_when_no_default() {
         .meta
         .clone()
         .unwrap();
-    assert_eq!(meta["supportsReasoningEffort"], true);
-    assert_eq!(meta["reasoningEffort"], "medium");
+    assert_eq!(
+        meta.get("supportsReasoningEffort"),
+        Some(&serde_json::json!(true))
+    );
+    assert_eq!(
+        meta.get("reasoningEffort"),
+        Some(&serde_json::json!("medium"))
+    );
 }
 #[test]
 fn acp_model_meta_omits_reasoning_when_unsupported() {
@@ -2616,11 +2765,40 @@ fn acp_model_meta_always_has_context_window() {
     models.insert("unknown-model".to_string(), entry);
     let acp_models = to_acp_model_info(&models);
     let meta = acp_models.values().next().unwrap().meta.as_ref().unwrap();
-    assert_eq!(meta["totalContextTokens"], 200_000);
+    assert_eq!(
+        meta.get("totalContextTokens"),
+        Some(&serde_json::json!(200_000))
+    );
+    assert!(
+        !meta.contains_key("contextWindows"),
+        "a single-window model advertises no menu"
+    );
+}
+#[test]
+fn acp_model_meta_advertises_context_windows_menu() {
+    let mut models = IndexMap::new();
+    let mut entry = test_model_entry("multi-window", "https://test.api/v1", None, None, None);
+    entry.info.context_window = NonZeroU64::new(256_000).unwrap();
+    entry.info.context_windows = vec![
+        NonZeroU64::new(256_000).unwrap(),
+        NonZeroU64::new(500_000).unwrap(),
+    ];
+    models.insert("multi-window".to_string(), entry);
+    let acp_models = to_acp_model_info(&models);
+    let meta = acp_models.values().next().unwrap().meta.as_ref().unwrap();
+    assert_eq!(
+        meta.get("totalContextTokens"),
+        Some(&serde_json::json!(256_000)),
+        "the default stays the advertised total"
+    );
+    assert_eq!(
+        meta.get("contextWindows"),
+        Some(&serde_json::json!([256_000, 500_000]))
+    );
 }
 #[test]
 fn hidden_model_excluded_from_acp_but_kept_in_catalog() {
-    use crate::agent::models::{available_models, resolve_model_catalog};
+    use crate::agent::remote_config::{available_models, resolve_model_catalog};
     let raw_config: toml::Value = toml::from_str(
         r#"
             [model.visible-model]
@@ -2658,7 +2836,7 @@ fn hidden_model_excluded_from_acp_but_kept_in_catalog() {
 }
 #[test]
 fn disabled_models_removed_from_catalog() {
-    use crate::agent::models::resolve_model_catalog;
+    use crate::agent::remote_config::resolve_model_catalog;
     let raw: toml::Value = toml::from_str(
         r#"
             [models]
@@ -2675,7 +2853,7 @@ fn disabled_models_removed_from_catalog() {
 }
 #[test]
 fn hidden_models_kept_in_catalog_but_not_in_acp() {
-    use crate::agent::models::{available_models, resolve_model_catalog};
+    use crate::agent::remote_config::{available_models, resolve_model_catalog};
     let raw: toml::Value = toml::from_str(
         r#"
             [models]
@@ -2690,12 +2868,12 @@ fn hidden_models_kept_in_catalog_but_not_in_acp() {
     let catalog = resolve_model_catalog(&Config::new_from_toml_cfg(&raw).unwrap(), None);
     let available = available_models(&catalog, true);
     assert!(catalog.contains_key("to-hide"));
-    assert!(catalog["to-hide"].info.hidden);
+    assert!(catalog.get("to-hide").is_some_and(|c| c.info.hidden));
     assert!(!available.values().any(|m| m.name == "to-hide"));
 }
 #[test]
 fn allowed_models_marks_selectable_by_wildcard_key_or_model() {
-    use crate::agent::models::resolve_model_catalog;
+    use crate::agent::remote_config::resolve_model_catalog;
     let raw: toml::Value = toml::from_str(
         r#"
             [models]
@@ -2716,19 +2894,28 @@ fn allowed_models_marks_selectable_by_wildcard_key_or_model() {
     )
     .unwrap();
     let catalog = resolve_model_catalog(&Config::new_from_toml_cfg(&raw).unwrap(), None);
-    assert!(catalog["keep-one"].info.user_selectable, "wildcard match");
     assert!(
-        catalog["explicit-key"].info.user_selectable,
+        catalog
+            .get("keep-one")
+            .is_some_and(|c| c.info.user_selectable),
+        "wildcard match"
+    );
+    assert!(
+        catalog
+            .get("explicit-key")
+            .is_some_and(|c| c.info.user_selectable),
         "matched by catalog key or model id"
     );
     assert!(
-        !catalog["to-drop"].info.user_selectable,
+        catalog
+            .get("to-drop")
+            .is_some_and(|c| !c.info.user_selectable),
         "kept but not selectable"
     );
 }
 #[test]
 fn allowed_models_empty_is_unrestricted() {
-    use crate::agent::models::resolve_model_catalog;
+    use crate::agent::remote_config::resolve_model_catalog;
     let raw: toml::Value = toml::from_str(
         r#"
             [models]
@@ -2742,14 +2929,14 @@ fn allowed_models_empty_is_unrestricted() {
     .unwrap();
     let catalog = resolve_model_catalog(&Config::new_from_toml_cfg(&raw).unwrap(), None);
     assert!(
-        catalog["foo"].info.user_selectable,
+        catalog.get("foo").is_some_and(|c| c.info.user_selectable),
         "empty allowed_models must not restrict"
     );
 }
 #[test]
 fn invalid_glob_is_rejected_by_validation() {
-    use crate::agent::models::ModelGlobSet;
-    assert!(ModelGlobSet::compile(Some(&vec!["grok[".to_string()])).is_err());
+    use crate::agent::remote_config::ModelGlobSet;
+    assert!(ModelGlobSet::compile(Some(["grok[".to_string()].as_slice())).is_err());
     let raw: toml::Value = toml::from_str(
         r#"
             [models]
@@ -2768,7 +2955,7 @@ fn invalid_glob_is_rejected_by_validation() {
 }
 #[test]
 fn supported_in_api_false_hides_from_api_key_users() {
-    use crate::agent::models::{available_models, resolve_model_catalog};
+    use crate::agent::remote_config::{available_models, resolve_model_catalog};
     let raw: toml::Value = toml::from_str(
         r#"
             [model.oauth-only-model]
@@ -2835,38 +3022,11 @@ fn inference_idle_timeout_secs_absent_defaults_to_none() {
 #[test]
 fn inference_idle_timeout_propagates_to_model_info() {
     let entry = ModelEntryConfig {
-        id: None,
         model: "test".to_string(),
         base_url: "https://test.api/v1".to_string(),
-        name: None,
-        description: None,
-        max_completion_tokens: None,
-        temperature: None,
-        top_p: None,
-        api_key: None,
-        env_key: None,
-        api_backend: ApiBackend::default(),
-        auth_scheme: None,
-        extra_headers: IndexMap::new(),
         context_window: NonZeroU64::new(200_000).unwrap(),
-        auto_compact_threshold_percent: None,
-        system_prompt_label: None,
-        api_base_url: None,
-        use_concise: false,
-        agent_type: default_agent_type(),
         inference_idle_timeout_secs: Some(120),
-        max_retries: None,
-        hidden: false,
-        supported_in_api: true,
-        reasoning_effort: None,
-        supports_reasoning_effort: false,
-        reasoning_efforts: Vec::new(),
-        supports_backend_search: false,
-        compactions_remaining: None,
-        compaction_at_tokens: None,
-        show_model_fingerprint: false,
-        stream_tool_calls: None,
-        laziness_detector: LazinessDetectorPerModelConfig::default(),
+        ..Default::default()
     };
     let info = ModelInfo::from_config(&entry);
     assert_eq!(info.inference_idle_timeout_secs, Some(120));
@@ -2894,6 +3054,37 @@ fn telemetry_config_parses_custom_values_from_toml() {
         Some("custom-token")
     );
     assert!(!cfg.telemetry.mixpanel_enabled);
+}
+#[test]
+fn telemetry_otel_timeout_accepts_toml_integer_and_string() {
+    let as_int: toml::Value = toml::from_str(
+        r#"
+            [telemetry]
+            otel_timeout = 10000
+            otel_metric_export_interval = 60000
+            "#,
+    )
+    .unwrap();
+    let cfg = Config::new_from_toml_cfg(&as_int).expect("integer otel_timeout must parse");
+    assert_eq!(cfg.telemetry.otel_timeout.as_deref(), Some("10000"));
+    assert_eq!(
+        cfg.telemetry.otel_metric_export_interval.as_deref(),
+        Some("60000")
+    );
+    let as_str: toml::Value = toml::from_str(
+        r#"
+            [telemetry]
+            otel_timeout = "10000"
+            otel_metric_export_interval = "60000"
+            "#,
+    )
+    .unwrap();
+    let cfg = Config::new_from_toml_cfg(&as_str).expect("string otel_timeout must parse");
+    assert_eq!(cfg.telemetry.otel_timeout.as_deref(), Some("10000"));
+    assert_eq!(
+        cfg.telemetry.otel_metric_export_interval.as_deref(),
+        Some("60000")
+    );
 }
 /// Empty/whitespace values must become `None`, not reach the HTTP client as empty strings.
 #[test]
@@ -2960,8 +3151,7 @@ fn grok_com_config_still_works() {
     let oidc = cfg.grok_com_config.oidc.expect("oidc should be set");
     assert_eq!(oidc.issuer, "https://example.okta.com");
 }
-/// `disable_api_key_auth` plumbs through the `[auth]` alias, and absent
-/// means None (opt-in knob, zero impact by default).
+/// `disable_api_key_auth` parses through the `[auth]` alias, and absent means None (opt-in knob, zero impact by default).
 #[test]
 fn disable_api_key_auth_parses_from_auth_alias() {
     let absent = Config::new_from_toml_cfg(&toml::from_str("").unwrap()).unwrap();
@@ -2976,11 +3166,38 @@ fn disable_api_key_auth_parses_from_auth_alias() {
     let cfg = Config::new_from_toml_cfg(&raw).expect("config should parse");
     assert_eq!(cfg.grok_com_config.disable_api_key_auth, Some(true));
 }
-/// `force_login_team_uuid` parses a string (pin), array (any-of), or `[]`
-/// (fail closed); absent => None.
+/// `login_device_flow` reaches `Config::login_device_flow` via both `[grok_com_config]` and the `[auth]` alias, without warning as unrecognized.
+#[test]
+fn login_device_flow_reads_from_config() {
+    let absent = Config::new_from_toml_cfg(&toml::from_str("").unwrap()).unwrap();
+    assert_eq!(absent.login_device_flow, None);
+    for section in ["grok_com_config", "auth"] {
+        let raw: toml::Value =
+            toml::from_str(&format!("[{section}]\nlogin_device_flow = true\n")).unwrap();
+        let cfg = Config::new_from_toml_cfg(&raw).expect("config should parse");
+        assert_eq!(
+            cfg.login_device_flow,
+            Some(true),
+            "`[{section}] login_device_flow` must reach Config::login_device_flow"
+        );
+        assert!(
+            !cfg.config_warnings
+                .iter()
+                .any(|w| w.target.label().contains("login_device_flow")),
+            "`[{section}] login_device_flow` must not warn as unrecognized: {:?}",
+            cfg.config_warnings
+        );
+    }
+}
+/// `force_login_team_uuid` parses a string (pin), array (any-of), or `[]` (fail closed); absent means None.
 #[test]
 fn force_login_team_uuid_parses_string_and_array() {
     use crate::auth::ForceLoginTeam;
+    let _g = crate::env::EnvVarGuard::remove("GROK_FORCE_LOGIN_TEAM_ID");
+    assert!(
+        xai_grok_login::force_login_team_from_requirements().is_none(),
+        "clear the force_login_team_uuid pin in requirements.toml to run this test",
+    );
     let absent = Config::new_from_toml_cfg(&toml::from_str("").unwrap()).unwrap();
     assert_eq!(absent.grok_com_config.force_login_team_uuid, None);
     let raw: toml::Value = toml::from_str(
@@ -3023,12 +3240,61 @@ fn force_login_team_uuid_parses_string_and_array() {
         Some(ForceLoginTeam::AnyOf(vec![])),
     );
 }
-/// Pinning a team via `force_login_team_uuid` implies API-key auth is
-/// disabled even without an explicit `disable_api_key_auth` (team
-/// membership can't be verified from a bare API key, so it needs IdP login).
+/// The env override applies when config is empty and wins over a user/managed `config.toml` value.
+/// Requirements clamping is covered in `auth::config`.
+#[test]
+fn force_login_team_id_env_overrides_user_config() {
+    use crate::auth::ForceLoginTeam;
+    let _guard = crate::env::EnvVarGuard::set("GROK_FORCE_LOGIN_TEAM_ID", "env-team");
+    assert!(
+        xai_grok_login::force_login_team_from_requirements().is_none(),
+        "clear the force_login_team_uuid pin in requirements.toml to run this test",
+    );
+    let from_env = Config::new_from_toml_cfg(&toml::from_str("").unwrap()).unwrap();
+    assert_eq!(
+        from_env.grok_com_config.force_login_team_uuid,
+        Some(ForceLoginTeam::Single("env-team".into())),
+    );
+    let raw: toml::Value = toml::from_str(
+        r#"
+            [grok_com_config]
+            force_login_team_uuid = "admin-team"
+            "#,
+    )
+    .unwrap();
+    let overridden = Config::new_from_toml_cfg(&raw).expect("config should parse");
+    assert_eq!(
+        overridden.grok_com_config.force_login_team_uuid,
+        Some(ForceLoginTeam::Single("env-team".into())),
+    );
+}
+/// Env unset: `force_login_team_uuid` is taken from `config.toml` unchanged (the env override tier never clobbers the merged config value).
+#[test]
+fn force_login_team_id_env_unset_keeps_config_value() {
+    use crate::auth::ForceLoginTeam;
+    let _guard = crate::env::EnvVarGuard::remove("GROK_FORCE_LOGIN_TEAM_ID");
+    assert!(
+        xai_grok_login::force_login_team_from_requirements().is_none(),
+        "clear the force_login_team_uuid pin in requirements.toml to run this test",
+    );
+    let raw: toml::Value = toml::from_str(
+        r#"
+            [grok_com_config]
+            force_login_team_uuid = "admin-team"
+            "#,
+    )
+    .unwrap();
+    let cfg = Config::new_from_toml_cfg(&raw).expect("config should parse");
+    assert_eq!(
+        cfg.grok_com_config.force_login_team_uuid,
+        Some(ForceLoginTeam::Single("admin-team".into())),
+    );
+}
+/// Pinning a team via `force_login_team_uuid` implies API-key auth is disabled even without an explicit `disable_api_key_auth`.
+/// Team membership can't be verified from a bare API key, so it needs IdP login.
 #[test]
 fn force_login_team_uuid_implies_api_key_auth_disabled() {
-    use crate::auth::{ForceLoginTeam, GrokComConfig};
+    use xai_grok_login::{ForceLoginTeam, GrokComConfig};
     let base = GrokComConfig {
         disable_api_key_auth: None,
         force_login_team_uuid: None,
@@ -3489,9 +3755,9 @@ fn e2e_enterprise_endpoints_only_no_model_override() {
         "default model should use enterprise xai_api_base_url"
     );
 }
-/// Unset every env var that `EndpointsConfig::default()` reads for endpoints,
-/// so the cli-chat-proxy resolver tests below are deterministic regardless of
-/// the ambient environment. Gated behind `#[serial]`.
+/// Unset every env var that `EndpointsConfig::default()` reads for endpoints.
+/// The cli-chat-proxy resolver tests below are then deterministic regardless of the ambient environment.
+/// Gated behind `#[serial]`.
 fn unset_endpoint_env_vars() {
     for k in [
         "GROK_CLI_CHAT_PROXY_BASE_URL",
@@ -3511,9 +3777,8 @@ fn unset_endpoint_env_vars() {
         unsafe { std::env::remove_var(k) };
     }
 }
-/// INVARIANT: auxiliary-service resolvers resolve to the cli-chat-proxy, never
-/// `xai_api_base_url` — overriding ONLY inference keeps every aux endpoint on
-/// the proxy; explicit per-service overrides win verbatim.
+/// INVARIANT: auxiliary-service resolvers resolve to the cli-chat-proxy, never `xai_api_base_url`.
+/// Overriding ONLY inference keeps every aux endpoint on the proxy; explicit per-service overrides win verbatim.
 #[test]
 #[serial]
 fn aux_endpoints_resolve_to_proxy_never_inference() {
@@ -3569,10 +3834,8 @@ fn aux_endpoints_resolve_to_proxy_never_inference() {
         "https://trace.enterprise.example"
     );
 }
-/// REGRESSION: the managed-config URL never follows `xai_api_base_url`
-/// through the full loader `Config::new_from_toml_cfg` — a distinct construction
-/// path from `from_config_value`, so the deployment key never reaches the
-/// inference host on either.
+/// REGRESSION: the managed-config URL never follows `xai_api_base_url` through the full loader `Config::new_from_toml_cfg`.
+/// That is a distinct construction path from `from_config_value`, so the deployment key never reaches the inference host on either.
 #[test]
 #[serial]
 fn loader_managed_config_url_never_follows_inference_endpoint() {
@@ -3656,147 +3919,468 @@ fn e2e_config_models_parsed_directly_not_via_deep_merge() {
     );
 }
 #[test]
-#[serial]
-fn resolve_feedback_defaults_to_true_when_unset() {
-    unsafe { std::env::remove_var("GROK_FEEDBACK_ENABLED") };
-    unsafe { std::env::remove_var("GROK_TELEMETRY_ENABLED") };
-    let cfg = Config::default();
-    let r = cfg.resolve_feedback();
-    assert!(r.value, "feedback should be true by default");
-    assert_eq!(r.source, ConfigSource::Default);
-}
-#[test]
-#[serial]
-fn resolve_session_recap_defaults_to_true_when_unset() {
-    unsafe { std::env::remove_var("GROK_SESSION_RECAP") };
-    let cfg = Config::default();
-    let r = cfg.resolve_session_recap();
-    assert!(r.value, "session_recap should be true by default");
-    assert_eq!(r.source, ConfigSource::Default);
-}
-#[test]
-#[serial]
-fn resolve_session_recap_config_off_overrides_default() {
-    unsafe { std::env::remove_var("GROK_SESSION_RECAP") };
-    let cfg = Config {
-        features: Features {
-            session_recap: Some(false),
-            ..Default::default()
-        },
-        ..Default::default()
-    };
-    let r = cfg.resolve_session_recap();
-    assert!(!r.value);
-    assert_eq!(r.source, ConfigSource::Config);
-}
-#[test]
-#[serial]
-fn resolve_session_recap_env_off_overrides_default() {
-    unsafe { std::env::set_var("GROK_SESSION_RECAP", "0") };
-    let cfg = Config::default();
-    let r = cfg.resolve_session_recap();
-    assert!(!r.value);
-    assert_eq!(r.source, ConfigSource::Env);
-    unsafe { std::env::remove_var("GROK_SESSION_RECAP") };
-}
-#[test]
-#[serial]
-fn resolve_session_recap_remote_off_overrides_default() {
-    unsafe { std::env::remove_var("GROK_SESSION_RECAP") };
-    let cfg = Config {
-        remote_settings: Some(crate::util::config::RemoteSettings {
-            session_recap: Some(false),
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
-    let r = cfg.resolve_session_recap();
-    assert!(
-        !r.value,
-        "remote settings/remote false must kill-switch default on"
+fn model_mtls_cert_dir_flows_from_config_toml_to_sampler() {
+    let (_, models) = resolve_models_from_toml(
+        r#"
+            [model.secure-model]
+            model = "secure-upstream"
+            base_url = "https://inference.example.com/v1"
+            context_window = 200000
+            api_key = "test-key"
+            mtls_cert_dir = "/run/secrets/secure-model"
+            "#,
+        None,
     );
-    assert_eq!(r.source, ConfigSource::Remote);
+    let model = models
+        .get("secure-model")
+        .expect("configured model should resolve");
+    assert_eq!(
+        model.mtls_cert_dir.as_deref(),
+        Some(std::path::Path::new("/run/secrets/secure-model"))
+    );
+    let sampling = resolve_sampling(model, None);
+    assert_eq!(
+        sampling.mtls_cert_dir.as_deref(),
+        Some(std::path::Path::new("/run/secrets/secure-model"))
+    );
+    assert_eq!(sampling.base_url, "https://inference.example.com/v1");
 }
-/// Precedence: env > config.toml > remote settings > default(true). One
-/// test covers the full ladder (the `resolve_two_pass_compaction` pattern).
+#[test]
+fn model_mtls_configuration_requires_one_explicit_https_destination() {
+    for (config, expected_error) in [
+        (
+            r#"[model.secure]
+               mtls_cert_dir = "/run/secrets/secure-model""#,
+            "mtls_cert_dir requires base_url in the same model table",
+        ),
+        (
+            r#"[model.secure]
+               base_url = "http://inference.example.com/v1"
+               mtls_cert_dir = "/run/secrets/secure-model""#,
+            "base_url must be an HTTPS URL with a host",
+        ),
+        (
+            r#"[model.secure]
+               base_url = "not a URL"
+               mtls_cert_dir = "/run/secrets/secure-model""#,
+            "base_url is invalid",
+        ),
+        (
+            r#"[model.secure]
+               base_url = "https://inference.example.com/v1"
+               mtls_cert_dir = """#,
+            "mtls_cert_dir must not be empty",
+        ),
+        (
+            r#"[model.secure]
+               base_url = "https://inference.example.com/v1"
+               api_base_url = "https://api.example.com/v1"
+               mtls_cert_dir = "/run/secrets/secure-model""#,
+            "cannot set both mtls_cert_dir and api_base_url",
+        ),
+        (
+            r#"[model_providers.gateway]
+               api_base_url = "https://api.example.com/v1"
+
+               [model.secure]
+               base_url = "https://inference.example.com/v1"
+               model_provider = "gateway"
+               mtls_cert_dir = "/run/secrets/secure-model""#,
+            "cannot use model_providers.gateway.api_base_url with mtls_cert_dir",
+        ),
+    ] {
+        let raw: toml::Value = toml::from_str(config).expect("test config should parse as TOML");
+        let error = Config::new_from_toml_cfg(&raw).expect_err("invalid mTLS config must fail");
+        assert!(
+            error.contains(expected_error),
+            "expected {expected_error:?} in {error:?}"
+        );
+    }
+}
+/// A field holding a registered key is read as of whenever it was written, and these three are built before the value's last writer runs.
+/// `auto_wake` shipped that way and lost every pin.
+/// Catches the spelling, not the class: a mirror under another name still gets through.
+#[test]
+fn no_registered_feature_is_mirrored_by_a_config_field() {
+    const SRC: &str = include_str!("config.rs");
+    const AGENT: &str = include_str!("mvp_agent/mod.rs");
+    for (src, decl) in [
+        (SRC, "pub struct Config {"),
+        (SRC, "pub struct Features {"),
+        (AGENT, "pub struct MvpAgent {"),
+    ] {
+        let body = src
+            .split_once(decl)
+            .and_then(|(_, rest)| rest.split_once("\n}\n"))
+            .map(|(body, _)| body)
+            .unwrap_or_else(|| panic!("{decl} moved; this test needs its new shape"));
+        for spec in FEATURES {
+            for field in [
+                format!("{}: bool", spec.key),
+                format!("{}_enabled: bool", spec.key),
+                format!("{}: Option<bool>", spec.key),
+                format!("{}_enabled: Option<bool>", spec.key),
+            ] {
+                assert!(
+                    !body.contains(&field),
+                    "`{field}` mirrors the {} row; read the registry at use time \
+                     instead, so a pin applied after this field was written still counts",
+                    spec.key,
+                );
+            }
+        }
+    }
+}
+/// The tamper-resistance `25-enterprise.md` sells to administrators, for every key an administrator can pin.
 #[test]
 #[serial]
-fn resolve_turn_summary_precedence() {
+fn requirement_pin_outranks_a_hostile_environment() {
+    for spec in FEATURES {
+        let pinned = !spec.default_enabled;
+        let _env = EnvGuard::set(spec.env, if pinned { "0" } else { "1" });
+        let mut cfg = Config::default();
+        cfg.requirements
+            .pin_feature(spec.id, pinned, crate::config::RequirementSource::Unknown);
+        let r = cfg.feature(spec.id);
+        assert_eq!(r.value, pinned, "{} lost to {}", spec.key, spec.env);
+        assert_eq!(r.source, ConfigSource::Requirement, "{}", spec.key);
+    }
+}
+/// A registered key is a `&'static str` matched against the `[features]` table, not a serde field name, so every one of them is read back here.
+#[test]
+#[serial]
+fn every_registered_key_parses_out_of_the_features_table() {
+    for spec in FEATURES {
+        let configured = !spec.default_enabled;
+        let raw: toml::Value =
+            toml::from_str(&format!("[features]\n{} = {configured}\n", spec.key)).unwrap();
+        let cfg = Config::new_from_toml_cfg(&raw).unwrap();
+        {
+            let _env = EnvGuard::unset(spec.env);
+            let r = cfg.feature(spec.id);
+            assert_eq!(
+                r.value, configured,
+                "{} never reached the registry",
+                spec.key
+            );
+            assert_eq!(r.source, ConfigSource::Config, "{}", spec.key);
+        }
+        let _env = EnvGuard::set(spec.env, if configured { "0" } else { "1" });
+        let r = cfg.feature(spec.id);
+        assert_eq!(r.value, !configured, "config.toml outranked {}", spec.env);
+        assert_eq!(r.source, ConfigSource::Env, "{}", spec.key);
+    }
+}
+/// The keys the list names are read from the raw layers, so each must be one no field claims.
+/// A quoted `remote_fetch` used to read as absent and leave the egress gate open.
+#[test]
+fn non_boolean_value_fails_the_load_for_a_key_with_no_field() {
+    let features = include_str!("config.rs")
+        .split_once("pub struct Features {")
+        .and_then(|(_, rest)| rest.split_once("\n}\n"))
+        .map(|(body, _)| body)
+        .expect("`Features` moved; this test needs its new shape");
+    for key in UNMIRRORED_BOOLEAN_FEATURES {
+        assert!(
+            !FEATURES.iter().any(|spec| spec.key == *key),
+            "{key} is a registry row, which is already known"
+        );
+        assert!(
+            !features.contains(&format!("pub {key}:")),
+            "{key} has a `Features` field, so it is read through that instead"
+        );
+        let raw: toml::Value = toml::from_str(&format!("[features]\n{key} = \"false\"\n")).unwrap();
+        let err = Config::new_from_toml_cfg(&raw)
+            .expect_err(&format!("{key}: a quoted value must not read as absent"));
+        assert!(
+            err.contains(key) && err.contains("true or false"),
+            "{key}: the error names the key and the spelling that works: {err}"
+        );
+    }
+}
+/// What no list could cover: a key this build has never heard of is typed all the same.
+/// That means the next boolean added to `[features]` is checked before anyone writes it down.
+/// `image_edit` takes the same path, which is why it is kept out of the list that only suppresses the unrecognized-key warning.
+#[test]
+fn non_boolean_value_fails_the_load_for_an_unregistered_key() {
+    for key in ["image_edit", "a_key_no_build_has_ever_had"] {
+        let raw: toml::Value = toml::from_str(&format!("[features]\n{key} = \"false\"\n")).unwrap();
+        let err = Config::new_from_toml_cfg(&raw)
+            .expect_err(&format!("{key}: a quoted value must not read as absent"));
+        assert!(
+            err.contains(key) && err.contains("true or false"),
+            "{key}: the error names the key and the spelling that works: {err}"
+        );
+    }
+}
+/// The other half of the rule.
+/// A later release can add a `[features]` key that holds something other than a boolean.
+/// The build that predates its field has to start on that config rather than strand a fleet mid-rollout.
+#[test]
+fn a_value_that_reads_as_nothing_like_a_boolean_still_loads() {
+    for value in ["\"aggressive\"", "42", "[\"a\", \"b\"]", "1.5"] {
+        let entry = format!("[features]\na_later_release_key = {value}\n");
+        let raw: toml::Value = toml::from_str(&entry).unwrap();
+        Config::new_from_toml_cfg(&raw)
+            .unwrap_or_else(|e| panic!("{value} must not stop an older build: {e}"));
+        let unused = unused_keys_from_toml(&entry);
+        assert!(
+            unused
+                .iter()
+                .any(|key| key == "features.a_later_release_key"),
+            "{value}: ignored, and the operator still hears about it: {unused:?}"
+        );
+    }
+}
+/// Managed policy keys are workspace-resolved, not Config serde: every spelling must pass the unrecognized-key scan.
+#[test]
+fn managed_policy_keys_do_not_warn_as_unrecognized() {
+    let entry = r#"
+allow_managed_mcp_servers_only = true
+allowManagedMcpServersOnly = true
+enable_all_project_mcp_servers = false
+enableAllProjectMcpServers = false
+plugin_auto_update = false
+pluginAutoUpdate = false
+allow_managed_hooks_only = true
+allowManagedHooksOnly = true
+
+[[allowed_mcp_servers]]
+server_url = "https://mcp.example.com/*"
+
+[[allowedMcpServers]]
+serverCommand = ["npx", "@corp/mcp"]
+
+[[denied_mcp_servers]]
+server_name = "blocked"
+
+[[deniedMcpServers]]
+serverUrl = "https://evil.example.com/*"
+
+[[strict_known_marketplaces]]
+source = "git"
+url = "https://github.com/corp/approved.git"
+
+[[strictKnownMarketplaces]]
+source = "github"
+repo = "corp/more"
+
+[extra_known_marketplaces.corp]
+source = { source = "git", url = "https://github.com/corp/approved.git" }
+
+[extraKnownMarketplaces.corp2]
+source = { source = "git", url = "https://github.com/corp/other.git" }
+"#;
+    let unused = unused_keys_from_toml(entry);
+    let leaked: Vec<&String> = unused
+        .iter()
+        .filter(|key| {
+            xai_grok_workspace::permission::resolution::MANAGED_POLICY_CONFIG_KEYS
+                .iter()
+                .any(|policy_key| {
+                    key.as_str() == *policy_key || key.starts_with(&format!("{policy_key}."))
+                })
+        })
+        .collect();
+    assert!(
+        leaked.is_empty(),
+        "policy keys must not warn as unrecognized: {leaked:?}"
+    );
+}
+/// The non-row keys that do have a field are turned away by serde, whatever it words the failure as.
+#[test]
+fn non_boolean_value_fails_the_load_for_a_key_with_a_field() {
+    for key in ["title_refresh", "image_gen", "video_gen"] {
+        let raw: toml::Value = toml::from_str(&format!("[features]\n{key} = \"false\"\n")).unwrap();
+        Config::new_from_toml_cfg(&raw)
+            .expect_err(&format!("{key}: a quoted value must not read as absent"));
+    }
+}
+#[test]
+fn non_boolean_feature_value_fails_the_load() {
+    let raw: toml::Value = toml::from_str("[features]\nsession_search = \"no\"\n").unwrap();
+    let err = Config::new_from_toml_cfg(&raw)
+        .expect_err("a quoted value must not read as off and leave the index on");
+    assert!(
+        err.contains("features.session_search") && err.contains("true or false"),
+        "the error names the key and the spelling that works: {err}"
+    );
+}
+/// Title refresh defaults to the resolved `turn_summary` value, but each knob (env / config / remote) can flip it independently of turn summary.
+#[test]
+#[serial]
+fn resolve_title_refresh_defaults_to_turn_summary_but_decouples() {
+    unsafe { std::env::remove_var("GROK_TITLE_REFRESH") };
     unsafe { std::env::remove_var("GROK_TURN_SUMMARY") };
-    let r = Config::default().resolve_turn_summary();
-    assert!(r.value, "turn_summary defaults on");
-    assert_eq!(r.source, ConfigSource::Default);
-    let remote_off = Config {
+    let r = Config::default().resolve_title_refresh();
+    assert!(r.value, "title_refresh defaults to turn_summary (on)");
+    let ts_off = Config {
         remote_settings: Some(crate::util::config::RemoteSettings {
             turn_summary: Some(false),
             ..Default::default()
         }),
         ..Default::default()
     };
-    let r = remote_off.resolve_turn_summary();
-    assert!(!r.value, "remote false must kill-switch default on");
-    assert_eq!(r.source, ConfigSource::Remote);
-    let config_over_remote = Config {
+    assert!(
+        !ts_off.resolve_title_refresh().value,
+        "default follows turn_summary"
+    );
+    let decoupled = Config {
         features: Features {
-            turn_summary: Some(true),
+            title_refresh: Some(true),
             ..Default::default()
         },
-        ..remote_off
+        ..ts_off
     };
-    let r = config_over_remote.resolve_turn_summary();
-    assert!(r.value, "config.toml beats remote kill-switch");
+    let r = decoupled.resolve_title_refresh();
+    assert!(
+        r.value,
+        "title_refresh config overrides the turn_summary default"
+    );
     assert_eq!(r.source, ConfigSource::Config);
-    unsafe { std::env::set_var("GROK_TURN_SUMMARY", "0") };
-    let r = config_over_remote.resolve_turn_summary();
-    assert!(!r.value, "env wins over config + remote");
+    unsafe { std::env::set_var("GROK_TITLE_REFRESH", "0") };
+    let r = decoupled.resolve_title_refresh();
+    assert!(!r.value, "GROK_TITLE_REFRESH env wins");
     assert_eq!(r.source, ConfigSource::Env);
-    unsafe { std::env::remove_var("GROK_TURN_SUMMARY") };
+    unsafe { std::env::remove_var("GROK_TITLE_REFRESH") };
 }
-/// Precedence: env > config.toml > remote settings > default(false). One test
-/// covers the full ladder so we do not maintain a matrix of flag cases.
+/// A `turn_summary` pin lands in the title's default slot, so it moves the title with it.
+/// Only the default slot, so `GROK_TITLE_REFRESH` still outranks it and a user can turn the title back on.
+/// Pinning `title_refresh` is what closes that.
 #[test]
 #[serial]
-fn resolve_two_pass_compaction_precedence() {
-    unsafe { std::env::remove_var("GROK_TWO_PASS_COMPACTION") };
-    let default_cfg = Config::default();
-    let r = default_cfg.resolve_two_pass_compaction();
-    assert!(!r.value, "default is opt-in off");
-    assert_eq!(r.source, ConfigSource::Default);
+fn a_turn_summary_pin_moves_the_title_default_and_the_environment_lifts_it() {
+    let _env = EnvGuard::set("GROK_TURN_SUMMARY", "1");
+    let mut cfg = Config::default();
+    cfg.requirements.pin_feature(
+        Feature::TurnSummary,
+        false,
+        crate::config::RequirementSource::Unknown,
+    );
+    {
+        let _title = EnvGuard::unset("GROK_TITLE_REFRESH");
+        assert!(
+            !cfg.resolve_title_refresh().value,
+            "the pin outranks GROK_TURN_SUMMARY, and the title default follows the pin"
+        );
+    }
+    let _title = EnvGuard::set("GROK_TITLE_REFRESH", "1");
+    let r = cfg.resolve_title_refresh();
+    assert!(r.value, "the environment outranks a derived default");
+    assert_eq!(r.source, ConfigSource::Env);
+}
+/// The tier that closes it.
+/// Not a registry row, so the sweep in `requirement_pin_outranks_a_hostile_environment` never reaches this key.
+#[test]
+#[serial]
+fn a_title_refresh_pin_outranks_the_environment() {
+    let _env = EnvGuard::set("GROK_TITLE_REFRESH", "1");
+    let mut cfg = Config::default();
+    cfg.requirements
+        .title_refresh
+        .pin(false, crate::config::RequirementSource::Unknown);
+    let r = cfg.resolve_title_refresh();
+    assert!(!r.value, "the pin lost to GROK_TITLE_REFRESH");
+    assert_eq!(r.source, ConfigSource::Requirement);
+}
+#[test]
+#[serial]
+fn resolve_long_reasoning_reminder_precedence() {
+    use crate::session::long_reasoning_reminder::LongReasoningReminder;
+    use crate::util::config::LongReasoningReminderSettings;
+    let _env = EnvGuard::unset("GROK_LONG_REASONING_REMINDER");
+    assert_eq!(
+        LongReasoningReminder {
+            enabled: false,
+            tokens: 1000,
+            delay: 1
+        },
+        Config::default().resolve_long_reasoning_reminder(),
+        "default is OFF with default tuning"
+    );
     let remote_on = Config {
         remote_settings: Some(crate::util::config::RemoteSettings {
-            two_pass_compaction_enabled: Some(true),
+            long_reasoning_reminder: Some(LongReasoningReminderSettings {
+                enabled: Some(true),
+                tokens: Some(3000),
+                ..Default::default()
+            }),
             ..Default::default()
         }),
         ..Default::default()
     };
-    let r = remote_on.resolve_two_pass_compaction();
-    assert!(r.value);
-    assert_eq!(r.source, ConfigSource::Remote);
-    let config_over_remote = Config {
-        features: Features {
-            two_pass_compaction: Some(true),
+    assert_eq!(
+        LongReasoningReminder {
+            enabled: true,
+            tokens: 3000,
+            delay: 1
+        },
+        remote_on.resolve_long_reasoning_reminder(),
+        "remote gate enables; remote tokens apply, delay falls to the default"
+    );
+    let toml_off = Config {
+        long_reasoning_reminder: LongReasoningReminderSettings {
+            enabled: Some(false),
+            ..Default::default()
+        },
+        ..remote_on.clone()
+    };
+    assert_eq!(
+        LongReasoningReminder {
+            enabled: false,
+            tokens: 3000,
+            delay: 1
+        },
+        toml_off.resolve_long_reasoning_reminder(),
+        "TOML false beats a remote true; remote tuning still resolves for telemetry"
+    );
+    let toml_on = Config {
+        long_reasoning_reminder: LongReasoningReminderSettings {
+            enabled: Some(true),
+            tokens: Some(500),
             ..Default::default()
         },
         remote_settings: Some(crate::util::config::RemoteSettings {
-            two_pass_compaction_enabled: Some(false),
+            long_reasoning_reminder: Some(LongReasoningReminderSettings {
+                enabled: Some(false),
+                tokens: Some(3000),
+                delay: Some(4),
+            }),
             ..Default::default()
         }),
         ..Default::default()
     };
-    let r = config_over_remote.resolve_two_pass_compaction();
-    assert!(r.value);
-    assert_eq!(r.source, ConfigSource::Config);
-    unsafe { std::env::set_var("GROK_TWO_PASS_COMPACTION", "0") };
-    let r = config_over_remote.resolve_two_pass_compaction();
-    assert!(!r.value, "env wins over config + remote");
-    assert_eq!(r.source, ConfigSource::Env);
-    unsafe { std::env::remove_var("GROK_TWO_PASS_COMPACTION") };
+    assert_eq!(
+        LongReasoningReminder {
+            enabled: true,
+            tokens: 500,
+            delay: 4
+        },
+        toml_on.resolve_long_reasoning_reminder(),
+        "TOML true beats a remote false; TOML tokens beat remote, remote delay fills in"
+    );
+    let _env = EnvGuard::set("GROK_LONG_REASONING_REMINDER", "0");
+    assert!(
+        !toml_on.resolve_long_reasoning_reminder().enabled,
+        "env kill switch wins over TOML + remote"
+    );
+    let _env = EnvGuard::set(
+        "GROK_LONG_REASONING_REMINDER",
+        r#"{"enabled": true, "tokens": 9000}"#,
+    );
+    assert_eq!(
+        LongReasoningReminder {
+            enabled: true,
+            tokens: 9000,
+            delay: 1
+        },
+        toml_off.resolve_long_reasoning_reminder(),
+        "env JSON enables over a TOML false and its tokens win; delay falls through"
+    );
 }
-/// Gate precedence: env > `[doom_loop_recovery]` > remote settings >
-/// default(ON), with the remote layer merged PER-FIELD from the nested
-/// `doom_loop_recovery` object and each layer's `false` an independent
-/// kill switch. One test covers the full ladder (the
-/// `resolve_two_pass_compaction_precedence` pattern).
+/// Gate precedence: env > `[doom_loop_recovery]` > remote settings > default(ON).
+/// The remote layer merges PER-FIELD from the nested `doom_loop_recovery` object, and each layer's `false` is an independent kill switch.
+/// One test covers the full ladder.
 #[test]
 #[serial]
 fn resolve_doom_loop_recovery_precedence() {
@@ -3806,7 +4390,7 @@ fn resolve_doom_loop_recovery_precedence() {
     let p = default_cfg
         .resolve_doom_loop_recovery()
         .expect("default is ON");
-    assert_eq!(p.max_threshold, 32, "default tunables unchanged");
+    assert_eq!(p.max_threshold, 64, "default tunables unchanged");
     assert_eq!(p.max_retries, 2, "default tunables unchanged");
     assert_eq!(p.window_tokens, 1024, "default tunables unchanged");
     let toml_off = Config {
@@ -3902,8 +4486,7 @@ fn resolve_doom_loop_recovery_precedence() {
     );
     unsafe { std::env::remove_var("GROK_DOOM_LOOP_RECOVERY") };
 }
-/// The `[doom_loop_recovery]` TOML section deserializes through the
-/// standard config path (no bespoke parser).
+/// The `[doom_loop_recovery]` TOML section deserializes through the standard config path (no bespoke parser).
 #[test]
 #[serial]
 fn doom_loop_recovery_section_parses_from_toml() {
@@ -3927,11 +4510,7 @@ fn doom_loop_recovery_section_parses_from_toml() {
 #[test]
 #[serial]
 fn worktree_auto_gc_section_parses_from_toml() {
-    unsafe {
-        std::env::remove_var(xai_fast_worktree::ENV_AUTO_GC);
-        std::env::remove_var(xai_fast_worktree::ENV_AUTO_GC_DRY_RUN);
-        std::env::remove_var(xai_fast_worktree::ENV_AUTO_GC_MAX_AGE);
-    }
+    unsafe { xai_fast_worktree::clear_auto_gc_env_for_test() };
     let raw: toml::Value = toml::from_str(
         r#"
             [worktree.auto_gc]
@@ -4017,50 +4596,6 @@ fn resolve_doom_loop_recovery_clamps_tunables() {
 }
 #[test]
 #[serial]
-fn resolve_feedback_env_overrides_all() {
-    unsafe { std::env::set_var("GROK_FEEDBACK_ENABLED", "true") };
-    let mut cfg = Config::default();
-    cfg.features.feedback = Some(false);
-    cfg.remote_settings = Some(crate::util::config::RemoteSettings {
-        feedback_enabled: Some(false),
-        ..Default::default()
-    });
-    let r = cfg.resolve_feedback();
-    assert_eq!(r.source, ConfigSource::Env);
-    assert!(r.value);
-    unsafe { std::env::remove_var("GROK_FEEDBACK_ENABLED") };
-}
-#[test]
-#[serial]
-fn resolve_feedback_config_overrides_remote_settings() {
-    unsafe { std::env::remove_var("GROK_FEEDBACK_ENABLED") };
-    let mut cfg = Config::default();
-    cfg.features.feedback = Some(true);
-    cfg.remote_settings = Some(crate::util::config::RemoteSettings {
-        feedback_enabled: Some(false),
-        ..Default::default()
-    });
-    let r = cfg.resolve_feedback();
-    assert_eq!(r.source, ConfigSource::Config);
-    assert!(r.value);
-}
-#[test]
-#[serial]
-fn resolve_feedback_remote_settings_used_when_no_local() {
-    unsafe { std::env::remove_var("GROK_FEEDBACK_ENABLED") };
-    let cfg = Config {
-        remote_settings: Some(crate::util::config::RemoteSettings {
-            feedback_enabled: Some(true),
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
-    let r = cfg.resolve_feedback();
-    assert_eq!(r.source, ConfigSource::Remote);
-    assert!(r.value);
-}
-#[test]
-#[serial]
 fn resolve_trace_upload_disabled_when_telemetry_off_despite_remote_flag() {
     unsafe { std::env::remove_var("GROK_TELEMETRY_ENABLED") };
     unsafe { std::env::remove_var("GROK_TELEMETRY_TRACE_UPLOAD") };
@@ -4096,6 +4631,30 @@ fn resolve_trace_upload_explicit_config_wins_over_telemetry_off() {
 }
 #[test]
 #[serial]
+fn trace_upload_stays_off_under_a_requirements_pin_when_the_distribution_withholds_telemetry() {
+    unsafe { std::env::remove_var("GROK_TELEMETRY_ENABLED") };
+    unsafe { std::env::remove_var("GROK_TELEMETRY_TRACE_UPLOAD") };
+    let mut cfg = Config::default();
+    cfg.telemetry.trace_upload = Some(true);
+    cfg.requirements
+        .trace_upload
+        .pin(true, crate::config::RequirementSource::Unknown);
+    cfg.remote_settings = Some(crate::util::config::RemoteSettings {
+        trace_upload_enabled: Some(true),
+        ..Default::default()
+    });
+    let withheld = cfg.resolve_trace_upload_as(xai_grok_config::Distribution::withholding(&[
+        xai_grok_config::Capability::Telemetry,
+    ]));
+    assert!(!withheld.value);
+    assert_eq!(withheld.source, ConfigSource::Default);
+    assert!(
+        cfg.resolve_trace_upload_as(xai_grok_config::Distribution::STOCK)
+            .value
+    );
+}
+#[test]
+#[serial]
 fn trace_upload_decision_debug_reports_winning_source() {
     unsafe { std::env::remove_var("GROK_TELEMETRY_ENABLED") };
     unsafe { std::env::remove_var("GROK_TELEMETRY_TRACE_UPLOAD") };
@@ -4106,21 +4665,46 @@ fn trace_upload_decision_debug_reports_winning_source() {
         ..Default::default()
     });
     let d = cfg.trace_upload_decision_debug();
-    assert_eq!(d["trace_upload"], serde_json::json!(false));
-    assert_eq!(d["trace_upload_source"], serde_json::json!("default"));
-    assert_eq!(d["telemetry_mode"], serde_json::json!("false"));
-    assert_eq!(d["in_remote_trace_upload_enabled"], serde_json::json!(true));
-    assert_eq!(d["has_remote_settings"], serde_json::json!(true));
+    assert_eq!(
+        d.get("trace_upload"),
+        Some(&serde_json::json!(serde_json::json!(false)))
+    );
+    assert_eq!(
+        d.get("trace_upload_source"),
+        Some(&serde_json::json!(serde_json::json!("default")))
+    );
+    assert_eq!(
+        d.get("telemetry_mode"),
+        Some(&serde_json::json!(serde_json::json!("false")))
+    );
+    assert_eq!(
+        d.get("in_remote_trace_upload_enabled"),
+        Some(&serde_json::json!(serde_json::json!(true)))
+    );
+    assert_eq!(
+        d.get("has_remote_settings"),
+        Some(&serde_json::json!(serde_json::json!(true)))
+    );
     cfg.telemetry.trace_upload = Some(true);
     let d = cfg.trace_upload_decision_debug();
-    assert_eq!(d["trace_upload"], serde_json::json!(true));
-    assert_eq!(d["trace_upload_source"], serde_json::json!("config"));
-    assert_eq!(d["in_cfg_telemetry_trace_upload"], serde_json::json!(true));
+    assert_eq!(
+        d.get("trace_upload"),
+        Some(&serde_json::json!(serde_json::json!(true)))
+    );
+    assert_eq!(
+        d.get("trace_upload_source"),
+        Some(&serde_json::json!(serde_json::json!("config")))
+    );
+    assert_eq!(
+        d.get("in_cfg_telemetry_trace_upload"),
+        Some(&serde_json::json!(serde_json::json!(true)))
+    );
 }
 #[test]
 #[serial]
 fn resolve_trace_upload_honors_config_when_telemetry_on() {
     unsafe { std::env::remove_var("GROK_TELEMETRY_ENABLED") };
+    unsafe { std::env::remove_var("DISABLE_TELEMETRY") };
     unsafe { std::env::remove_var("GROK_TELEMETRY_TRACE_UPLOAD") };
     let mut cfg = Config::default();
     cfg.features.telemetry = Some(TelemetryMode::Enabled);
@@ -4182,8 +4766,7 @@ fn resolve_goal_remote_settings_used_when_no_local() {
     assert_eq!(r.source, ConfigSource::Remote);
     assert!(r.value);
 }
-/// The remote settings `goal_enabled: false` kill-switch must still win over
-/// the default-on fallback.
+/// The remote settings `goal_enabled: false` kill-switch must still win over the default-on fallback.
 #[test]
 #[serial]
 fn resolve_goal_remote_settings_kill_switch_overrides_default_on() {
@@ -4251,77 +4834,6 @@ fn resolve_workflows_env_wins() {
         "env must be able to kill the default-on workflows"
     );
     unsafe { std::env::remove_var("GROK_WORKFLOWS") };
-}
-#[test]
-#[serial]
-fn resolve_ask_user_question_defaults_to_true_when_unset() {
-    unsafe { std::env::remove_var("GROK_ASK_USER_QUESTION") };
-    let cfg = Config::default();
-    let r = cfg.resolve_ask_user_question();
-    assert!(r.value, "ask_user_question should be on by default");
-    assert_eq!(r.source, ConfigSource::Default);
-}
-#[test]
-#[serial]
-fn resolve_ask_user_question_remote_settings_enables() {
-    unsafe { std::env::remove_var("GROK_ASK_USER_QUESTION") };
-    let cfg = Config {
-        remote_settings: Some(crate::util::config::RemoteSettings {
-            ask_user_question_enabled: Some(true),
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
-    let r = cfg.resolve_ask_user_question();
-    assert_eq!(r.source, ConfigSource::Remote);
-    assert!(r.value);
-}
-#[test]
-#[serial]
-fn resolve_ask_user_question_env_overrides_remote_settings() {
-    unsafe { std::env::set_var("GROK_ASK_USER_QUESTION", "1") };
-    let cfg = Config {
-        remote_settings: Some(crate::util::config::RemoteSettings {
-            ask_user_question_enabled: Some(false),
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
-    let r = cfg.resolve_ask_user_question();
-    assert_eq!(r.source, ConfigSource::Env);
-    assert!(r.value);
-    unsafe { std::env::remove_var("GROK_ASK_USER_QUESTION") };
-}
-#[test]
-#[serial]
-fn resolve_ask_user_question_config_overrides_remote_settings() {
-    unsafe { std::env::remove_var("GROK_ASK_USER_QUESTION") };
-    let mut cfg = Config::default();
-    cfg.features.ask_user_question = Some(true);
-    cfg.remote_settings = Some(crate::util::config::RemoteSettings {
-        ask_user_question_enabled: Some(false),
-        ..Default::default()
-    });
-    let r = cfg.resolve_ask_user_question();
-    assert_eq!(r.source, ConfigSource::Config);
-    assert!(r.value);
-}
-/// remote settings `ask_user_question_enabled: false` is a kill-switch: it must
-/// win over the default-on fallback.
-#[test]
-#[serial]
-fn resolve_ask_user_question_remote_settings_kill_switch_overrides_default_on() {
-    unsafe { std::env::remove_var("GROK_ASK_USER_QUESTION") };
-    let cfg = Config {
-        remote_settings: Some(crate::util::config::RemoteSettings {
-            ask_user_question_enabled: Some(false),
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
-    let r = cfg.resolve_ask_user_question();
-    assert_eq!(r.source, ConfigSource::Remote);
-    assert!(!r.value);
 }
 #[test]
 #[serial]
@@ -4481,8 +4993,7 @@ fn resolve_video_gen_gates() {
         .value
     );
 }
-/// Clear every env var the goal/companion resolvers read so tests
-/// start from a known baseline regardless of run order.
+/// Clear every env var the goal/companion resolvers read so tests start from a known baseline regardless of run order.
 fn clear_goal_envs() {
     unsafe {
         std::env::remove_var("GROK_GOAL");
@@ -5107,14 +5618,16 @@ agent_type = "cursor"
         "cursor"
     );
     assert_eq!(cfg.goal.skeptic_models.len(), 2);
-    assert_eq!(cfg.goal.skeptic_models[0].model, "grok-build");
+    assert_eq!(
+        cfg.goal.skeptic_models.first().map(|m| m.model.as_str()),
+        Some("grok-build")
+    );
     assert_eq!(
         cfg.resolve_goal_planner_model(false).source,
         ConfigSource::Config
     );
 }
-/// A malformed pin must drop to `None`, not fail the whole parse (which
-/// would silently wipe every other setting).
+/// A malformed pin must drop to `None`, not fail the whole parse (which would silently wipe every other setting).
 #[test]
 fn goal_model_pin_malformed_is_dropped_not_fatal() {
     let toml_str = r#"
@@ -5149,11 +5662,16 @@ agent_type = "cursor"
     let raw: toml::Value = toml::from_str(toml_str).unwrap();
     let cfg = Config::new_from_toml_cfg(&raw).unwrap();
     assert_eq!(cfg.goal.skeptic_models.len(), 2);
-    assert_eq!(cfg.goal.skeptic_models[0].model, "grok-build");
-    assert_eq!(cfg.goal.skeptic_models[1].model, "test-model-fast");
+    assert_eq!(
+        cfg.goal.skeptic_models.first().map(|m| m.model.as_str()),
+        Some("grok-build")
+    );
+    assert_eq!(
+        cfg.goal.skeptic_models.get(1).map(|m| m.model.as_str()),
+        Some("test-model-fast")
+    );
 }
-/// Acceptance test: a full managed-config `[goal]` block resolves end-to-end,
-/// every value sourced from config (not remote/default).
+/// Acceptance test: a full managed-config `[goal]` block resolves end-to-end, every value sourced from config (not remote/default).
 #[test]
 #[serial]
 fn full_goal_managed_config_resolves_end_to_end() {
@@ -5217,9 +5735,8 @@ agent_type = "cursor"
     clear_goal_envs();
     clear_goal_model_env();
 }
-/// Run the production scan (`deserialize_collecting_unrecognized`) on a
-/// TOML string, mirroring the [model] removal + default-merge in
-/// `new_from_toml_cfg`.
+/// Run the production scan (`deserialize_collecting_unrecognized`) on a TOML string.
+/// Mirrors the [model] removal and default-merge in `new_from_toml_cfg`.
 fn unused_keys_from_toml(toml_str: &str) -> Vec<String> {
     let raw: toml::Value = toml::from_str(toml_str).unwrap();
     let raw_without_models = {
@@ -5263,9 +5780,17 @@ fn known_non_serde_config_paths_are_not_reported_unused() {
         r#"
             [features]
             remote_fetch = false
+            session_search = false
+            image_edit = true
             not_a_real_feature = true
             [slash_command_tags]
             workflows = "new"
+            [marketplace]
+            plugin_cta_marketplace = "Acme Marketplace"
+            [cli]
+            grove = true
+            grove_worktree = "grove"
+            nfs_worktree = true
         "#,
     );
     assert!(
@@ -5273,13 +5798,59 @@ fn known_non_serde_config_paths_are_not_reported_unused() {
         "features.remote_fetch must not be treated as a typo: {unused:?}"
     );
     assert!(
+        !unused
+            .iter()
+            .any(|k| k == "marketplace.plugin_cta_marketplace"),
+        "the pager-read CTA marketplace override must not warn: {unused:?}"
+    );
+    assert!(
+        !unused.iter().any(|k| k == "features.session_search"),
+        "a registered feature has no typed field and must not look like a typo: {unused:?}"
+    );
+    assert!(
         !unused.iter().any(|k| k == "slash_command_tags"),
         "slash_command_tags is a real table: {unused:?}"
+    );
+    assert!(
+        unused.iter().any(|k| k == "features.image_edit"),
+        "only a pin sets image_edit, so a config entry stays unrecognized: {unused:?}"
     );
     assert!(
         unused.iter().any(|k| k == "features.not_a_real_feature"),
         "real typos still surface: {unused:?}"
     );
+    for path in ["cli.grove", "cli.grove_worktree", "cli.nfs_worktree"] {
+        assert!(
+            !unused.iter().any(|k| k == path),
+            "{path} is a raw Grove CLI key and must not look like a typo: {unused:?}"
+        );
+    }
+}
+/// `[toolset.web_search]`'s domain keys are read from the raw layers, not from `ShellToolsetConfig::web_search` (a `SamplerConfig`).
+/// The scan must therefore not call the documented settings typos.
+#[test]
+fn web_search_domain_keys_are_not_reported_unused() {
+    for key in ["allowed_domains", "excluded_domains"] {
+        let unused = unused_keys_from_toml(&format!(
+            r#"
+                [toolset.web_search]
+                {key} = ["docs.x.ai"]
+                not_a_real_key = true
+            "#
+        ));
+        assert!(
+            !unused
+                .iter()
+                .any(|k| k == &format!("toolset.web_search.{key}")),
+            "toolset.web_search.{key} must not be treated as a typo: {unused:?}"
+        );
+        assert!(
+            unused
+                .iter()
+                .any(|k| k == "toolset.web_search.not_a_real_key"),
+            "real typos in the same section still surface: {unused:?}"
+        );
+    }
 }
 #[test]
 fn config_warns_on_field_typos() {
@@ -5378,6 +5949,8 @@ fn config_accepts_all_known_sections() {
             respect_gitignore = false
             [desktop]
             some_key = "value"
+            [file_acceleration]
+            routes = "fuse=on"
         "#,
     );
     assert!(
@@ -5400,9 +5973,8 @@ fn config_accepts_compact_permission_section() {
         "false positive on [permission] keys: {unused:?}"
     );
 }
-/// `prompt_policy` is not consumed from any TOML permission section (the
-/// verbose loader keeps only `rules`; prompt policy comes from .claude
-/// settings `defaultMode`), so it must warn rather than be a silent no-op.
+/// `prompt_policy` is not consumed from any TOML permission section, so it must warn rather than be a silent no-op.
+/// The verbose loader keeps only `rules`; prompt policy comes from .claude settings `defaultMode`.
 #[test]
 fn permission_prompt_policy_warns_as_unconsumed() {
     let unused = unused_keys_from_toml(
@@ -5418,8 +5990,7 @@ fn permission_prompt_policy_warns_as_unconsumed() {
         "an unconsumed key in a security section must be flagged"
     );
 }
-/// A typo'd `[permission]` sub-key must still warn — silently dropping a
-/// misspelled security rule would leave the user believing it's in force.
+/// A typo'd `[permission]` sub-key must still warn: silently dropping a misspelled security rule would leave the user believing it's in force.
 #[test]
 fn permission_unknown_subkey_still_warns() {
     let unused = unused_keys_from_toml(
@@ -5435,9 +6006,8 @@ fn permission_unknown_subkey_still_warns() {
         "exactly the typo'd sub-key must be flagged"
     );
 }
-/// Permission *values* are opaque: a malformed `[[permission.rules]]`
-/// entry neither warns nor fails Config load — the out-of-band loaders
-/// parse it tolerantly and warn per item.
+/// Permission *values* are opaque: a malformed `[[permission.rules]]` entry neither warns nor fails Config load.
+/// The out-of-band loaders parse it tolerantly and warn per item.
 #[test]
 fn malformed_permission_rules_do_not_fail_config_load() {
     let toml_str = r#"
@@ -5450,8 +6020,7 @@ fn malformed_permission_rules_do_not_fail_config_load() {
     let unused = unused_keys_from_toml(toml_str);
     assert!(unused.is_empty(), "got: {unused:?}");
 }
-/// A non-table `[permission]` value still fails Config load (pre-existing
-/// behavior): a fundamentally broken security section should be loud.
+/// A non-table `[permission]` value still fails Config load: a fundamentally broken security section should be loud.
 #[test]
 fn non_table_permission_value_fails_config_load() {
     let raw: toml::Value = toml::from_str(r#"permission = "foo""#).unwrap();
@@ -5460,9 +6029,8 @@ fn non_table_permission_value_fails_config_load() {
         "non-table [permission] must fail loudly"
     );
 }
-/// Wrong-typed values for the opaque passthrough keys must neither warn
-/// nor fail config load — an admin typo in a managed layer must not brick
-/// startup fleet-wide; the out-of-band consumers degrade gracefully.
+/// Wrong-typed values for the opaque passthrough keys must neither warn nor fail config load.
+/// An admin typo in a managed layer must not brick startup fleet-wide; the out-of-band consumers degrade gracefully.
 #[test]
 fn wrong_typed_passthrough_values_neither_warn_nor_fail() {
     let toml_str = r#"
@@ -5476,8 +6044,7 @@ fn wrong_typed_passthrough_values_neither_warn_nor_fail() {
     Config::new_from_toml_cfg(&raw)
         .expect("wrong-typed passthrough values must not fail config load");
 }
-/// Exempting `[permission]` and friends must not swallow warnings for
-/// genuinely unknown keys.
+/// Exempting `[permission]` and friends must not swallow warnings for genuinely unknown keys.
 #[test]
 fn unknown_key_still_warns_next_to_exempt_sections() {
     let unused = unused_keys_from_toml(
@@ -5516,257 +6083,6 @@ fn resolve_upload_method_accepts_deployment_key_without_oauth() {
         }
         other => panic!("expected Proxy upload method, got {other:?}"),
     }
-}
-#[test]
-fn otlp_traces_endpoint_precedence() {
-    let proxy = "https://inference.acme.com/v1".to_string();
-    let derived = EndpointsConfig {
-        cli_chat_proxy_base_url: Some(proxy.clone()),
-        ..Default::default()
-    };
-    assert_eq!(
-        derived.resolve_otlp_traces_endpoint(),
-        "https://inference.acme.com/v1/traces"
-    );
-    let base = EndpointsConfig {
-        cli_chat_proxy_base_url: Some(proxy.clone()),
-        otel_exporter_otlp_endpoint: Some("https://otel.acme.com".to_string()),
-        ..Default::default()
-    };
-    assert_eq!(
-        base.resolve_otlp_traces_endpoint(),
-        "https://otel.acme.com/v1/traces"
-    );
-    let full = EndpointsConfig {
-        cli_chat_proxy_base_url: Some(proxy),
-        otel_exporter_otlp_endpoint: Some("https://ignored.example".to_string()),
-        otel_exporter_otlp_traces_endpoint: Some("https://otel.acme.com/v1/traces".to_string()),
-        ..Default::default()
-    };
-    assert_eq!(
-        full.resolve_otlp_traces_endpoint(),
-        "https://otel.acme.com/v1/traces"
-    );
-}
-#[test]
-fn otlp_headers_parse() {
-    let cfg = EndpointsConfig {
-        otel_exporter_otlp_headers: Some("a=1, b = 2 ,=skip,c=".to_string()),
-        ..Default::default()
-    };
-    assert_eq!(
-        cfg.resolve_otlp_headers(),
-        vec![
-            ("a".to_string(), "1".to_string()),
-            ("b".to_string(), "2".to_string()),
-            ("c".to_string(), String::new()),
-        ]
-    );
-}
-/// Base config for the internal-OTLP tests: pinned proxy, every OTLP knob
-/// explicitly unset so ambient env (via `Default`) can't leak in.
-fn internal_otlp_test_config() -> EndpointsConfig {
-    EndpointsConfig {
-        cli_chat_proxy_base_url: Some("https://proxy.example/v1".to_string()),
-        otel_exporter_otlp_endpoint: None,
-        otel_exporter_otlp_traces_endpoint: None,
-        otel_exporter_otlp_headers: None,
-        grok_internal_otlp_traces_endpoint: None,
-        grok_internal_otlp_headers: None,
-        external_otel_master_switch: false,
-        ..Default::default()
-    }
-}
-/// `grok_internal_otlp_traces_endpoint` wins over the legacy `OTEL_*`
-/// fields regardless of the master switch.
-#[test]
-fn internal_otlp_endpoint_grok_internal_wins_regardless_of_switch() {
-    for switch in [false, true] {
-        let cfg = EndpointsConfig {
-            grok_internal_otlp_traces_endpoint: Some(
-                "https://internal.example/traces/".to_string(),
-            ),
-            otel_exporter_otlp_traces_endpoint: Some(
-                "https://legacy.example/v1/traces".to_string(),
-            ),
-            otel_exporter_otlp_endpoint: Some("https://legacy-base.example".to_string()),
-            external_otel_master_switch: switch,
-            ..internal_otlp_test_config()
-        };
-        assert_eq!(
-            cfg.resolve_otlp_traces_endpoint(),
-            "https://internal.example/traces",
-            "switch={switch}: GROK_INTERNAL_OTLP_TRACES_ENDPOINT must win verbatim (trailing / trimmed)"
-        );
-    }
-}
-/// Master switch unset → legacy fallback preserved (back-compat).
-#[test]
-fn internal_otlp_endpoint_legacy_fallback_when_switch_unset() {
-    let traces = EndpointsConfig {
-        otel_exporter_otlp_traces_endpoint: Some("https://legacy.example/v1/traces".to_string()),
-        ..internal_otlp_test_config()
-    };
-    assert_eq!(
-        traces.resolve_otlp_traces_endpoint(),
-        "https://legacy.example/v1/traces"
-    );
-    let base = EndpointsConfig {
-        otel_exporter_otlp_endpoint: Some("https://legacy-base.example/".to_string()),
-        ..internal_otlp_test_config()
-    };
-    assert_eq!(
-        base.resolve_otlp_traces_endpoint(),
-        "https://legacy-base.example/v1/traces"
-    );
-}
-/// Master switch SET → legacy `OTEL_*` endpoint/headers are completely
-/// ignored by the internal pipeline (the external stream owns them); the
-/// internal pipeline falls back to the proxy default and
-/// `internal_otlp_consumed_standard_vars()` is false.
-#[test]
-fn internal_otlp_ignores_legacy_vars_when_switch_set() {
-    let cfg = EndpointsConfig {
-        otel_exporter_otlp_traces_endpoint: Some(
-            "https://admin-collector.example/v1/traces".to_string(),
-        ),
-        otel_exporter_otlp_endpoint: Some("https://admin-collector.example".to_string()),
-        otel_exporter_otlp_headers: Some("authorization=Bearer admin".to_string()),
-        external_otel_master_switch: true,
-        ..internal_otlp_test_config()
-    };
-    assert_eq!(
-        cfg.resolve_otlp_traces_endpoint(),
-        "https://proxy.example/v1/traces",
-        "internal firehose must never follow OTEL_* to the external collector"
-    );
-    assert_eq!(cfg.resolve_otlp_headers(), Vec::<(String, String)>::new());
-    assert!(!cfg.internal_otlp_consumed_standard_vars());
-}
-/// `internal_otlp_consumed_standard_vars()` truth table.
-#[test]
-fn internal_otlp_consumed_standard_vars_cases() {
-    struct Case {
-        switch: bool,
-        legacy_traces_ep: bool,
-        legacy_base_ep: bool,
-        legacy_headers: bool,
-        internal_ep: bool,
-        internal_headers: bool,
-        expected: bool,
-        why: &'static str,
-    }
-    let unset = Case {
-        switch: false,
-        legacy_traces_ep: false,
-        legacy_base_ep: false,
-        legacy_headers: false,
-        internal_ep: false,
-        internal_headers: false,
-        expected: false,
-        why: "nothing set",
-    };
-    let cases = [
-        Case { ..unset },
-        Case {
-            legacy_traces_ep: true,
-            expected: true,
-            why: "legacy traces endpoint consumed",
-            ..unset
-        },
-        Case {
-            legacy_base_ep: true,
-            expected: true,
-            why: "legacy base endpoint consumed",
-            ..unset
-        },
-        Case {
-            legacy_headers: true,
-            expected: true,
-            why: "legacy headers consumed",
-            ..unset
-        },
-        Case {
-            legacy_traces_ep: true,
-            internal_ep: true,
-            expected: false,
-            why: "internal endpoint shadows legacy",
-            ..unset
-        },
-        Case {
-            legacy_headers: true,
-            internal_headers: true,
-            expected: false,
-            why: "internal headers shadow legacy",
-            ..unset
-        },
-        Case {
-            legacy_traces_ep: true,
-            legacy_headers: true,
-            internal_ep: true,
-            expected: true,
-            why: "endpoint shadowed but legacy headers still consumed (headers half)",
-            ..unset
-        },
-        Case {
-            switch: true,
-            legacy_traces_ep: true,
-            legacy_base_ep: true,
-            legacy_headers: true,
-            expected: false,
-            why: "switch set: legacy vars ignored",
-            ..unset
-        },
-    ];
-    for case in cases {
-        let cfg = EndpointsConfig {
-            external_otel_master_switch: case.switch,
-            otel_exporter_otlp_traces_endpoint: case
-                .legacy_traces_ep
-                .then(|| "https://legacy.example/v1/traces".to_string()),
-            otel_exporter_otlp_endpoint: case
-                .legacy_base_ep
-                .then(|| "https://legacy-base.example".to_string()),
-            otel_exporter_otlp_headers: case.legacy_headers.then(|| "k=v".to_string()),
-            grok_internal_otlp_traces_endpoint: case
-                .internal_ep
-                .then(|| "https://internal.example/traces".to_string()),
-            grok_internal_otlp_headers: case.internal_headers.then(|| "ik=iv".to_string()),
-            ..internal_otlp_test_config()
-        };
-        assert_eq!(
-            cfg.internal_otlp_consumed_standard_vars(),
-            case.expected,
-            "case: {}",
-            case.why
-        );
-    }
-}
-/// Headers precedence: `grok_internal_otlp_headers` wins; legacy
-/// `otel_exporter_otlp_headers` only when the master switch is unset.
-#[test]
-fn internal_otlp_headers_precedence() {
-    for switch in [false, true] {
-        let cfg = EndpointsConfig {
-            grok_internal_otlp_headers: Some("x-debug=1".to_string()),
-            otel_exporter_otlp_headers: Some("legacy=1".to_string()),
-            external_otel_master_switch: switch,
-            ..internal_otlp_test_config()
-        };
-        assert_eq!(
-            cfg.resolve_otlp_headers(),
-            vec![("x-debug".to_string(), "1".to_string())],
-            "switch={switch}"
-        );
-    }
-    let legacy = EndpointsConfig {
-        otel_exporter_otlp_headers: Some("legacy=1".to_string()),
-        ..internal_otlp_test_config()
-    };
-    assert_eq!(
-        legacy.resolve_otlp_headers(),
-        vec![("legacy".to_string(), "1".to_string())]
-    );
 }
 fn ext_env(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> + use<> {
     let map: std::collections::HashMap<String, String> = pairs
@@ -5827,7 +6143,8 @@ fn external_otel_file_table_layered_under_env() {
         false,
     )
     .expect("file table must activate");
-    assert_eq!(cfg.transport.as_protocol_str(), "grpc");
+    assert_eq!(cfg.logs_transport.as_protocol_str(), "grpc");
+    assert_eq!(cfg.metrics_transport.as_protocol_str(), "grpc");
     assert_eq!(cfg.logs_endpoint, "https://collector.corp.example:4318");
     let cfg = resolve_external_otel_config_with(
         Some(&effective),
@@ -5837,7 +6154,8 @@ fn external_otel_file_table_layered_under_env() {
         false,
     )
     .expect("env protocol must override file protocol");
-    assert_eq!(cfg.transport.as_protocol_str(), "http/protobuf");
+    assert_eq!(cfg.logs_transport.as_protocol_str(), "http/protobuf");
+    assert_eq!(cfg.metrics_transport.as_protocol_str(), "http/protobuf");
     assert_eq!(
         cfg.logs_endpoint,
         "https://collector.corp.example:4318/v1/logs"
@@ -5852,6 +6170,60 @@ fn external_otel_file_table_layered_under_env() {
         )
         .is_none()
     );
+}
+#[test]
+fn external_otel_file_table_carries_mtls_paths() {
+    let effective: toml::Value = toml::from_str(
+        r#"
+            [telemetry]
+            otel_enabled = true
+            otel_logs_exporter = "otlp"
+            otel_metrics_exporter = "otlp"
+            otel_endpoint = "https://collector.corp.example:4318"
+            otel_protocol = "grpc"
+            otel_certificate = "/etc/ssl/corp-ca.pem"
+            otel_client_certificate = "/etc/ssl/client.crt"
+            otel_client_key = "/etc/ssl/client.key"
+            "#,
+    )
+    .unwrap();
+    let cfg = resolve_external_otel_config_with(
+        Some(&effective),
+        None,
+        ext_env(&[]),
+        ext_client(),
+        false,
+    )
+    .expect("managed paths alone must activate");
+    assert_eq!(
+        cfg.logs_ca_certificate.as_deref(),
+        Some("/etc/ssl/corp-ca.pem")
+    );
+    assert_eq!(
+        cfg.logs_client_certificate.as_deref(),
+        Some("/etc/ssl/client.crt")
+    );
+    assert_eq!(cfg.logs_client_key.as_deref(), Some("/etc/ssl/client.key"));
+    assert_eq!(
+        cfg.metrics_client_certificate.as_deref(),
+        Some("/etc/ssl/client.crt")
+    );
+    let cfg = resolve_external_otel_config_with(
+        Some(&effective),
+        None,
+        ext_env(&[
+            ("OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE", "/env/client.crt"),
+            ("OTEL_EXPORTER_OTLP_CLIENT_KEY", "/env/client.key"),
+        ]),
+        ext_client(),
+        false,
+    )
+    .expect("env override must resolve");
+    assert_eq!(
+        cfg.logs_client_certificate.as_deref(),
+        Some("/env/client.crt")
+    );
+    assert_eq!(cfg.logs_client_key.as_deref(), Some("/env/client.key"));
 }
 #[test]
 fn external_otel_requirements_pin_wins_over_env() {
@@ -5877,6 +6249,7 @@ fn external_otel_requirements_pin_wins_over_env() {
             [telemetry]
             otel_log_user_prompts = false
             otel_log_tool_details = false
+            otel_log_tool_content = false
             "#,
     )
     .unwrap();
@@ -5888,6 +6261,7 @@ fn external_otel_requirements_pin_wins_over_env() {
             ("OTEL_LOGS_EXPORTER", "otlp"),
             ("OTEL_LOG_USER_PROMPTS", "1"),
             ("OTEL_LOG_TOOL_DETAILS", "1"),
+            ("OTEL_LOG_TOOL_CONTENT", "1"),
         ]),
         ext_client(),
         false,
@@ -5895,53 +6269,420 @@ fn external_otel_requirements_pin_wins_over_env() {
     .expect("stream still active; only gates pinned");
     assert!(!cfg.gates.log_user_prompts, "requirement pin must win");
     assert!(!cfg.gates.log_tool_details, "requirement pin must win");
+    assert!(!cfg.gates.log_tool_content, "requirement pin must win");
 }
-/// Regression: an org enable via `[telemetry].otel_enabled`
-/// (managed config / requirements — no `GROK_EXTERNAL_OTEL` env var) must
-/// flip the master switch the *internal* pipeline keys off, so legacy
-/// `OTEL_EXPORTER_OTLP_*` repointing shuts off in lockstep with the
-/// external stream activating. A desync would point the internally-authed
-/// firehose at the customer collector while
-/// `internal_pipeline_consumed_otel_vars` blocks the external stream.
 #[test]
-fn external_otel_master_switch_resolves_from_all_layers() {
-    let enabled_table: toml::Value = toml::from_str("[telemetry]\notel_enabled = true").unwrap();
-    let disabled_table: toml::Value = toml::from_str("[telemetry]\notel_enabled = false").unwrap();
-    assert!(external_otel_master_switch_from(
+fn external_otel_requirements_pin_endpoint_beats_env() {
+    let req: toml::Value = toml::from_str(
+        r#"
+            [telemetry]
+            otel_enabled = true
+            otel_logs_exporter = "otlp"
+            otel_endpoint = "http://corp:4318"
+            "#,
+    )
+    .unwrap();
+    let cfg = resolve_external_otel_config_with(
         None,
-        None,
-        Some(&enabled_table)
-    ));
-    assert!(!external_otel_master_switch_from(None, None, None));
-    assert!(!external_otel_master_switch_from(
-        None,
-        Some(false),
-        Some(&enabled_table)
-    ));
-    assert!(external_otel_master_switch_from(
-        None,
-        Some(true),
-        Some(&disabled_table)
-    ));
-    assert!(!external_otel_master_switch_from(
-        Some(&disabled_table),
-        Some(true),
-        Some(&enabled_table)
-    ));
-    assert!(external_otel_master_switch_from(
-        Some(&enabled_table),
-        Some(false),
-        None
-    ));
-    let cfg = EndpointsConfig {
-        otel_exporter_otlp_traces_endpoint: Some("https://collector.corp:4318/v1/traces".into()),
-        external_otel_master_switch: true,
-        ..internal_otlp_test_config()
-    };
-    assert!(!cfg.internal_otlp_consumed_standard_vars());
+        Some(&req),
+        ext_env(&[("OTEL_EXPORTER_OTLP_ENDPOINT", "http://127.0.0.1:9")]),
+        ext_client(),
+        false,
+    )
+    .expect("pin must keep the stream active");
     assert!(
-        !cfg.resolve_otlp_traces_endpoint()
-            .contains("collector.corp")
+        cfg.logs_endpoint.starts_with("http://corp:4318"),
+        "listed endpoint must beat env: {}",
+        cfg.logs_endpoint
+    );
+}
+#[test]
+fn external_otel_unset_endpoint_still_env_overridable() {
+    let req: toml::Value = toml::from_str(
+        r#"
+            [telemetry]
+            otel_enabled = true
+            otel_logs_exporter = "otlp"
+            "#,
+    )
+    .unwrap();
+    let cfg = resolve_external_otel_config_with(
+        None,
+        Some(&req),
+        ext_env(&[("OTEL_EXPORTER_OTLP_ENDPOINT", "http://127.0.0.1:4318")]),
+        ext_client(),
+        false,
+    )
+    .expect("unset endpoint stays developer-settable");
+    assert!(
+        cfg.logs_endpoint.contains("127.0.0.1:4318"),
+        "{}",
+        cfg.logs_endpoint
+    );
+}
+#[test]
+fn external_otel_pin_endpoint_strips_per_signal_env() {
+    let req: toml::Value = toml::from_str(
+        r#"
+            [telemetry]
+            otel_enabled = true
+            otel_logs_exporter = "otlp"
+            otel_endpoint = "http://corp:4318"
+            "#,
+    )
+    .unwrap();
+    let cfg = resolve_external_otel_config_with(
+        None,
+        Some(&req),
+        ext_env(&[(
+            "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT",
+            "http://127.0.0.1:9/v1/logs",
+        )]),
+        ext_client(),
+        false,
+    )
+    .expect("stream active");
+    assert!(
+        !cfg.logs_endpoint.contains("127.0.0.1:9"),
+        "unlisted per-signal endpoint env must not win: {}",
+        cfg.logs_endpoint
+    );
+    assert!(cfg.logs_endpoint.contains("corp:4318"));
+}
+#[test]
+fn external_otel_pin_endpoint_hides_unlisted_file_siblings() {
+    let req: toml::Value = toml::from_str(
+        r#"
+            [telemetry]
+            otel_enabled = true
+            otel_logs_exporter = "otlp"
+            otel_endpoint = "http://corp:4318"
+            "#,
+    )
+    .unwrap();
+    let effective: toml::Value = toml::from_str(
+        r#"
+            [telemetry]
+            otel_logs_endpoint = "http://127.0.0.1:9/v1/logs"
+            otel_metrics_endpoint = "http://127.0.0.1:9/v1/metrics"
+            "#,
+    )
+    .unwrap();
+    let cfg = resolve_external_otel_config_with(
+        Some(&effective),
+        Some(&req),
+        ext_env(&[]),
+        ext_client(),
+        false,
+    )
+    .expect("stream active");
+    assert!(
+        !cfg.logs_endpoint.contains("127.0.0.1:9"),
+        "unlisted file sibling must not retarget: {}",
+        cfg.logs_endpoint
+    );
+    assert!(
+        cfg.logs_endpoint.contains("corp:4318"),
+        "{}",
+        cfg.logs_endpoint
+    );
+}
+#[test]
+fn external_otel_pin_protocol_hides_unlisted_file_siblings() {
+    let req: toml::Value = toml::from_str(
+        r#"
+            [telemetry]
+            otel_enabled = true
+            otel_logs_exporter = "otlp"
+            otel_endpoint = "http://corp:4318"
+            otel_protocol = "http/protobuf"
+            "#,
+    )
+    .unwrap();
+    let effective: toml::Value = toml::from_str(
+        r#"
+            [telemetry]
+            otel_logs_protocol = "grpc"
+            "#,
+    )
+    .unwrap();
+    let cfg = resolve_external_otel_config_with(
+        Some(&effective),
+        Some(&req),
+        ext_env(&[]),
+        ext_client(),
+        false,
+    )
+    .expect("stream active");
+    assert_eq!(
+        cfg.logs_transport,
+        xai_grok_telemetry::external::config::OtlpTransport::HttpProtobuf,
+        "unlisted file protocol sibling must not win"
+    );
+}
+#[test]
+fn external_otel_pin_ca_keeps_file_endpoint() {
+    let req: toml::Value = toml::from_str(
+        r#"
+            [telemetry]
+            otel_enabled = true
+            otel_logs_exporter = "otlp"
+            otel_certificate = "/etc/ssl/corp-ca.pem"
+            "#,
+    )
+    .unwrap();
+    let effective: toml::Value = toml::from_str(
+        r#"
+            [telemetry]
+            otel_logs_endpoint = "http://logs:4318/v1/logs"
+            "#,
+    )
+    .unwrap();
+    let cfg = resolve_external_otel_config_with(
+        Some(&effective),
+        Some(&req),
+        ext_env(&[]),
+        ext_client(),
+        false,
+    )
+    .expect("stream active");
+    assert_eq!(
+        cfg.logs_endpoint, "http://logs:4318/v1/logs",
+        "CA pin must not lock destination"
+    );
+}
+#[test]
+fn external_otel_pin_client_cert_hides_file_endpoints() {
+    let req: toml::Value = toml::from_str(
+        r#"
+            [telemetry]
+            otel_enabled = true
+            otel_logs_exporter = "otlp"
+            otel_client_certificate = "/etc/ssl/client.crt"
+            otel_client_key = "/etc/ssl/client.key"
+            "#,
+    )
+    .unwrap();
+    let effective: toml::Value = toml::from_str(
+        r#"
+            [telemetry]
+            otel_logs_endpoint = "http://127.0.0.1:9/v1/logs"
+            "#,
+    )
+    .unwrap();
+    let cfg = resolve_external_otel_config_with(
+        Some(&effective),
+        Some(&req),
+        ext_env(&[]),
+        ext_client(),
+        false,
+    )
+    .expect("stream active");
+    assert!(
+        !cfg.logs_endpoint.contains("127.0.0.1:9"),
+        "client-identity pin must hide unlisted file endpoints: {}",
+        cfg.logs_endpoint
+    );
+}
+#[test]
+fn external_otel_pin_logs_endpoint_keeps_that_signal() {
+    let req: toml::Value = toml::from_str(
+        r#"
+            [telemetry]
+            otel_enabled = true
+            otel_logs_exporter = "otlp"
+            otel_endpoint = "http://corp:4318"
+            otel_logs_endpoint = "http://logs:4318/v1/logs"
+            "#,
+    )
+    .unwrap();
+    let cfg = resolve_external_otel_config_with(
+        None,
+        Some(&req),
+        ext_env(&[(
+            "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT",
+            "http://127.0.0.1:9/v1/logs",
+        )]),
+        ext_client(),
+        false,
+    )
+    .expect("stream active");
+    assert_eq!(cfg.logs_endpoint, "http://logs:4318/v1/logs");
+}
+#[test]
+fn external_otel_pin_exporter_beats_none() {
+    let req: toml::Value = toml::from_str(
+        r#"
+            [telemetry]
+            otel_enabled = true
+            otel_logs_exporter = "otlp"
+            otel_endpoint = "http://corp:4318"
+            "#,
+    )
+    .unwrap();
+    let cfg = resolve_external_otel_config_with(
+        None,
+        Some(&req),
+        ext_env(&[("OTEL_LOGS_EXPORTER", "none")]),
+        ext_client(),
+        false,
+    )
+    .expect("pinned exporter must beat OTEL_LOGS_EXPORTER=none");
+    assert_eq!(
+        cfg.logs_exporter,
+        xai_grok_telemetry::external::config::ExporterSelection::Otlp
+    );
+}
+#[test]
+fn external_otel_omit_exporter_still_allows_none() {
+    let req: toml::Value = toml::from_str(
+        r#"
+            [telemetry]
+            otel_enabled = true
+            otel_endpoint = "http://corp:4318"
+            "#,
+    )
+    .unwrap();
+    assert!(
+        resolve_external_otel_config_with(
+            None,
+            Some(&req),
+            ext_env(&[
+                ("OTEL_LOGS_EXPORTER", "none"),
+                ("OTEL_METRICS_EXPORTER", "none")
+            ]),
+            ext_client(),
+            false,
+        )
+        .is_none(),
+        "omitted exporter stays env-overridable to none"
+    );
+}
+#[test]
+fn external_otel_pin_client_cert_strips_developer_endpoints() {
+    let req: toml::Value = toml::from_str(
+        r#"
+            [telemetry]
+            otel_enabled = true
+            otel_logs_exporter = "otlp"
+            otel_endpoint = "http://corp:4318"
+            otel_client_certificate = "/etc/ssl/client.crt"
+            otel_client_key = "/etc/ssl/client.key"
+            "#,
+    )
+    .unwrap();
+    let cfg = resolve_external_otel_config_with(
+        None,
+        Some(&req),
+        ext_env(&[("OTEL_EXPORTER_OTLP_ENDPOINT", "http://127.0.0.1:9")]),
+        ext_client(),
+        false,
+    )
+    .expect("stream active");
+    assert!(
+        cfg.logs_endpoint.starts_with("http://corp:4318"),
+        "{}",
+        cfg.logs_endpoint
+    );
+}
+#[test]
+fn external_otel_pin_ca_does_not_strip_endpoints() {
+    let req: toml::Value = toml::from_str(
+        r#"
+            [telemetry]
+            otel_enabled = true
+            otel_logs_exporter = "otlp"
+            otel_certificate = "/etc/ssl/corp-ca.pem"
+            "#,
+    )
+    .unwrap();
+    let cfg = resolve_external_otel_config_with(
+        None,
+        Some(&req),
+        ext_env(&[("OTEL_EXPORTER_OTLP_ENDPOINT", "http://127.0.0.1:4318")]),
+        ext_client(),
+        false,
+    )
+    .expect("CA-only pin must not lock destination");
+    assert!(
+        cfg.logs_endpoint.contains("127.0.0.1:4318"),
+        "{}",
+        cfg.logs_endpoint
+    );
+}
+#[test]
+fn external_otel_pin_ca_hides_unlisted_per_signal_cert_env() {
+    let req: toml::Value = toml::from_str(
+        r#"
+            [telemetry]
+            otel_enabled = true
+            otel_logs_exporter = "otlp"
+            otel_endpoint = "http://corp:4318"
+            otel_certificate = "/etc/ssl/corp-ca.pem"
+            "#,
+    )
+    .unwrap();
+    let cfg = resolve_external_otel_config_with(
+        None,
+        Some(&req),
+        ext_env(&[(
+            "OTEL_EXPORTER_OTLP_LOGS_CERTIFICATE",
+            "/tmp/decoy-logs-ca.pem",
+        )]),
+        ext_client(),
+        false,
+    )
+    .expect("stream active");
+    assert_eq!(
+        cfg.logs_ca_certificate.as_deref(),
+        Some("/etc/ssl/corp-ca.pem"),
+        "generic CA pin must hide OTEL_EXPORTER_OTLP_LOGS_CERTIFICATE"
+    );
+}
+#[test]
+fn external_otel_pin_assistant_beats_env() {
+    let req: toml::Value = toml::from_str(
+        r#"
+            [telemetry]
+            otel_enabled = true
+            otel_logs_exporter = "otlp"
+            otel_log_assistant_responses = false
+            "#,
+    )
+    .unwrap();
+    let cfg = resolve_external_otel_config_with(
+        None,
+        Some(&req),
+        ext_env(&[("OTEL_LOG_ASSISTANT_RESPONSES", "1")]),
+        ext_client(),
+        false,
+    )
+    .expect("stream active");
+    assert!(!cfg.gates.log_assistant_responses);
+}
+#[test]
+fn external_otel_pin_prompts_true_omitted_assistant_stays_off() {
+    let req: toml::Value = toml::from_str(
+        r#"
+            [telemetry]
+            otel_enabled = true
+            otel_logs_exporter = "otlp"
+            otel_log_user_prompts = true
+            "#,
+    )
+    .unwrap();
+    let cfg =
+        resolve_external_otel_config_with(None, Some(&req), ext_env(&[]), ext_client(), false)
+            .expect("stream active");
+    assert!(cfg.gates.log_user_prompts);
+    assert!(
+        !cfg.gates.log_assistant_responses,
+        "omitted sibling gate must default off across the requirements boundary"
+    );
+    assert!(!cfg.gates.log_tool_details);
+    assert!(
+        !cfg.gates.log_tool_content,
+        "omitted CONTENT sibling must default off across the requirements boundary"
     );
 }
 #[test]
@@ -5980,245 +6721,10 @@ fn clear_managed_mcp_env_vars() {
     }
 }
 fn isolate_compat_env() -> Vec<EnvGuard> {
-    COMPAT_CELLS
+    xai_grok_tools::types::compat::COMPAT_CELLS
         .into_iter()
         .map(|cell| EnvGuard::unset(cell.env_var()))
         .collect()
-}
-fn parse_compat(source: &str) -> CompatConfigToml {
-    let raw: toml::Value = toml::from_str(source).unwrap();
-    raw.get("compat").unwrap().clone().try_into().unwrap()
-}
-fn assert_session_one_disabled(config: CompatConfig, expected: CompatVendor) {
-    for cell in COMPAT_CELLS {
-        if cell.surface() == CompatSurface::Sessions {
-            assert_eq!(
-                config.value(cell),
-                cell.vendor() != expected,
-                "{}.sessions",
-                cell.vendor().as_str()
-            );
-        }
-    }
-}
-fn remote_settings_with(key: CompatRemoteKey, value: bool) -> crate::util::config::RemoteSettings {
-    let mut remote = crate::util::config::RemoteSettings::default();
-    match key {
-        CompatRemoteKey::CursorSkills => remote.cursor_skills_enabled = Some(value),
-        CompatRemoteKey::CursorRules => remote.cursor_rules_enabled = Some(value),
-        CompatRemoteKey::CursorAgents => remote.cursor_agents_enabled = Some(value),
-        CompatRemoteKey::CursorMcps => remote.cursor_mcps_enabled = Some(value),
-        CompatRemoteKey::CursorHooks => remote.cursor_hooks_enabled = Some(value),
-        CompatRemoteKey::CursorSessions => remote.cursor_sessions_enabled = Some(value),
-        CompatRemoteKey::ClaudeSkills => remote.claude_skills_enabled = Some(value),
-        CompatRemoteKey::ClaudeRules => remote.claude_rules_enabled = Some(value),
-        CompatRemoteKey::ClaudeAgents => remote.claude_agents_enabled = Some(value),
-        CompatRemoteKey::ClaudeMcps => remote.claude_mcps_enabled = Some(value),
-        CompatRemoteKey::ClaudeHooks => remote.claude_hooks_enabled = Some(value),
-        CompatRemoteKey::ClaudeSessions => remote.claude_sessions_enabled = Some(value),
-        CompatRemoteKey::CodexSessions => remote.codex_sessions_enabled = Some(value),
-    }
-    remote
-}
-#[test]
-#[serial]
-fn resolve_compat_defaults_match_registry() {
-    let _env = isolate_compat_env();
-    assert_eq!(
-        resolve_compat_config(&CompatConfigToml::default(), None),
-        CompatConfig::default()
-    );
-}
-#[test]
-#[serial]
-fn resolve_compat_toml_sessions_disable_independently() {
-    let _env = isolate_compat_env();
-    for (vendor, section) in [
-        (CompatVendor::Cursor, "cursor"),
-        (CompatVendor::Claude, "claude"),
-        (CompatVendor::Codex, "codex"),
-    ] {
-        let config = parse_compat(&format!("[compat.{section}]\nsessions = false"));
-        assert_session_one_disabled(resolve_compat_config(&config, None), vendor);
-    }
-}
-#[test]
-#[serial]
-fn resolve_raw_compat_sessions_fails_closed_per_vendor() {
-    let _env = isolate_compat_env();
-    let raw: toml::Value = toml::from_str(
-        r#"
-[compat.cursor]
-sessions = "malformed"
-[compat.claude]
-sessions = false
-[compat.codex]
-hooks = "unrelated malformed field"
-"#,
-    )
-    .unwrap();
-    let resolved = resolve_compat_sessions_from_raw(Ok(&raw), None);
-    assert!(!resolved.cursor.sessions);
-    assert!(!resolved.claude.sessions);
-    assert!(resolved.codex.sessions);
-}
-#[test]
-#[serial]
-fn resolve_raw_compat_sessions_keeps_absent_and_valid_cells_independent() {
-    let _env = isolate_compat_env();
-    let raw: toml::Value = toml::from_str(
-        r#"
-[compat.cursor]
-sessions = false
-hooks = "malformed but irrelevant"
-[compat.claude]
-sessions = true
-"#,
-    )
-    .unwrap();
-    let remote = crate::util::config::RemoteSettings {
-        codex_sessions_enabled: Some(false),
-        ..Default::default()
-    };
-    let resolved = resolve_compat_sessions_from_raw(Ok(&raw), Some(&remote));
-    assert!(!resolved.cursor.sessions);
-    assert!(resolved.claude.sessions);
-    assert!(!resolved.codex.sessions);
-}
-#[test]
-fn compat_config_cell_is_tolerant_and_fail_closed_per_cell() {
-    let raw: toml::Value = toml::from_str(
-        r#"
-[compat.cursor]
-skills = false
-rules = "malformed"
-[compat.claude]
-hooks = true
-"#,
-    )
-    .unwrap();
-    let cell = |vendor, surface| {
-        COMPAT_CELLS
-            .into_iter()
-            .find(|cell| cell.vendor() == vendor && cell.surface() == surface)
-            .unwrap()
-    };
-    assert_eq!(
-        compat_config_cell(Ok(&raw), cell(CompatVendor::Cursor, CompatSurface::Skills)),
-        Ok(Some(false))
-    );
-    assert_eq!(
-        compat_config_cell(Ok(&raw), cell(CompatVendor::Cursor, CompatSurface::Rules)),
-        Err(CompatConfigCellError::Malformed)
-    );
-    assert_eq!(
-        compat_config_cell(Ok(&raw), cell(CompatVendor::Claude, CompatSurface::Hooks)),
-        Ok(Some(true))
-    );
-    assert_eq!(
-        compat_config_cell(Ok(&raw), cell(CompatVendor::Codex, CompatSurface::Sessions)),
-        Ok(None)
-    );
-    assert_eq!(
-        compat_config_cell(Err(()), cell(CompatVendor::Claude, CompatSurface::Sessions)),
-        Err(CompatConfigCellError::Unavailable)
-    );
-}
-#[test]
-#[serial]
-fn resolve_raw_compat_sessions_load_failure_fails_closed() {
-    let _env = isolate_compat_env();
-    let resolved = resolve_compat_sessions_from_raw(Err(()), None);
-    assert!(!resolved.cursor.sessions);
-    assert!(!resolved.claude.sessions);
-    assert!(!resolved.codex.sessions);
-}
-#[test]
-#[serial]
-fn resolve_raw_compat_sessions_load_failure_allows_env_override() {
-    let _env = isolate_compat_env();
-    let _codex = EnvGuard::set("GROK_CODEX_SESSIONS_ENABLED", "true");
-    let resolved = resolve_compat_sessions_from_raw(Err(()), None);
-    assert!(!resolved.cursor.sessions);
-    assert!(!resolved.claude.sessions);
-    assert!(resolved.codex.sessions);
-}
-#[test]
-#[serial]
-fn resolve_raw_compat_sessions_valid_empty_uses_remote_and_defaults() {
-    let _env = isolate_compat_env();
-    let raw = toml::Value::Table(Default::default());
-    let remote = crate::util::config::RemoteSettings {
-        claude_sessions_enabled: Some(false),
-        ..Default::default()
-    };
-    let resolved = resolve_compat_sessions_from_raw(Ok(&raw), Some(&remote));
-    assert!(resolved.cursor.sessions);
-    assert!(!resolved.claude.sessions);
-    assert!(resolved.codex.sessions);
-}
-#[test]
-#[serial]
-fn remote_keys_are_one_hot_and_false_overrides_default() {
-    let _env = isolate_compat_env();
-    for key in COMPAT_CELLS
-        .into_iter()
-        .filter_map(|cell| cell.remote_key())
-    {
-        let remote = remote_settings_with(key, false);
-        for cell in COMPAT_CELLS {
-            assert_eq!(
-                remote_compat_value(Some(&remote), cell.remote_key()),
-                (cell.remote_key() == Some(key)).then_some(false),
-                "{key:?} mapped to {}.{}",
-                cell.vendor().as_str(),
-                cell.surface().as_str()
-            );
-        }
-    }
-    let remote = remote_settings_with(CompatRemoteKey::CursorSkills, false);
-    assert!(CompatConfig::default().cursor.skills);
-    assert!(
-        !resolve_compat_config(&CompatConfigToml::default(), Some(&remote))
-            .cursor
-            .skills
-    );
-}
-#[test]
-#[serial]
-fn resolve_compat_env_sessions_disable_independently() {
-    let _env = isolate_compat_env();
-    for (vendor, env_var) in [
-        (CompatVendor::Cursor, "GROK_CURSOR_SESSIONS_ENABLED"),
-        (CompatVendor::Claude, "GROK_CLAUDE_SESSIONS_ENABLED"),
-        (CompatVendor::Codex, "GROK_CODEX_SESSIONS_ENABLED"),
-    ] {
-        let _disabled = EnvGuard::set(env_var, "false");
-        assert_session_one_disabled(
-            resolve_compat_config(&CompatConfigToml::default(), None),
-            vendor,
-        );
-    }
-}
-#[test]
-#[serial]
-fn resolve_compat_precedence_and_reserved_codex_hook() {
-    let _env = isolate_compat_env();
-    let config = parse_compat("[compat.cursor]\nsessions = false\n[compat.codex]\nhooks = false");
-    let remote = crate::util::config::RemoteSettings {
-        cursor_sessions_enabled: Some(true),
-        ..Default::default()
-    };
-    let resolved = resolve_compat_config(&config, Some(&remote));
-    assert!(!resolved.cursor.sessions);
-    assert!(!resolved.codex.hooks);
-    assert!(resolved.cursor.hooks);
-    assert!(resolved.claude.hooks);
-    let _session = EnvGuard::set("GROK_CURSOR_SESSIONS_ENABLED", "true");
-    let _hook = EnvGuard::set("GROK_CODEX_HOOKS_ENABLED", "true");
-    let resolved = resolve_compat_config(&config, Some(&remote));
-    assert!(resolved.cursor.sessions);
-    assert!(resolved.codex.hooks);
 }
 #[test]
 #[serial]
@@ -6242,8 +6748,7 @@ fn resolve_runtime_fields_compat_asymmetric_sources() {
         cli_subagents: None,
         cli_web_search_model: None,
         cli_session_summary_model: None,
-        cli_experimental_memory: false,
-        cli_no_memory: false,
+        memory_enabled_override: None,
         disable_web_search: false,
         todo_gate: false,
         laziness_debug_log: None,
@@ -6267,8 +6772,7 @@ fn resolve_runtime_fields_interactive_defaults() {
         cli_subagents: None,
         cli_web_search_model: None,
         cli_session_summary_model: None,
-        cli_experimental_memory: false,
-        cli_no_memory: false,
+        memory_enabled_override: None,
         disable_web_search: false,
         todo_gate: false,
         laziness_debug_log: None,
@@ -6302,8 +6806,7 @@ fn resolve_runtime_fields_headless_defaults() {
         cli_subagents: None,
         cli_web_search_model: None,
         cli_session_summary_model: None,
-        cli_experimental_memory: false,
-        cli_no_memory: false,
+        memory_enabled_override: None,
         disable_web_search: false,
         todo_gate: false,
         laziness_debug_log: None,
@@ -6333,8 +6836,7 @@ fn resolve_runtime_fields_managed_gateway_tools_from_remote() {
         cli_subagents: None,
         cli_web_search_model: None,
         cli_session_summary_model: None,
-        cli_experimental_memory: false,
-        cli_no_memory: false,
+        memory_enabled_override: None,
         disable_web_search: false,
         todo_gate: false,
         laziness_debug_log: None,
@@ -6355,8 +6857,7 @@ fn resolve_runtime_fields_subagents_from_config() {
         cli_subagents: None,
         cli_web_search_model: None,
         cli_session_summary_model: None,
-        cli_experimental_memory: false,
-        cli_no_memory: false,
+        memory_enabled_override: None,
         disable_web_search: false,
         todo_gate: false,
         laziness_debug_log: None,
@@ -6377,14 +6878,57 @@ fn resolve_runtime_fields_cli_subagents_override() {
         cli_subagents: Some(true),
         cli_web_search_model: None,
         cli_session_summary_model: None,
-        cli_experimental_memory: false,
-        cli_no_memory: false,
+        memory_enabled_override: None,
         disable_web_search: false,
         todo_gate: false,
         laziness_debug_log: None,
         storage_mode: None,
     });
     assert!(cfg.subagents_enabled);
+}
+#[test]
+#[serial]
+fn resolve_runtime_fields_cli_no_subagents_disables_over_config() {
+    clear_runtime_env_vars();
+    let raw: toml::Value = toml::from_str("[subagents]\nenabled = true").unwrap();
+    let mut cfg = Config::new_from_toml_cfg(&raw).unwrap();
+    cfg.resolve_runtime_fields(&RuntimeResolutionContext {
+        raw_config: &raw,
+        remote_settings: None,
+        is_headless: false,
+        cli_subagents: Some(false),
+        cli_web_search_model: None,
+        cli_session_summary_model: None,
+        memory_enabled_override: None,
+        disable_web_search: false,
+        todo_gate: false,
+        laziness_debug_log: None,
+        storage_mode: None,
+    });
+    assert!(!cfg.subagents_enabled);
+    assert_eq!(Some(false), cfg.cli_subagents);
+}
+#[test]
+#[serial]
+fn resolve_runtime_fields_partial_subagents_table_stays_enabled() {
+    clear_runtime_env_vars();
+    let raw: toml::Value = toml::from_str("[subagents]\nmax_depth = 2\n").unwrap();
+    let mut cfg = Config::new_from_toml_cfg(&raw).unwrap();
+    cfg.resolve_runtime_fields(&RuntimeResolutionContext {
+        raw_config: &raw,
+        remote_settings: None,
+        is_headless: true,
+        cli_subagents: None,
+        cli_web_search_model: None,
+        cli_session_summary_model: None,
+        memory_enabled_override: None,
+        disable_web_search: false,
+        todo_gate: false,
+        laziness_debug_log: None,
+        storage_mode: None,
+    });
+    assert!(cfg.subagents_enabled);
+    assert_eq!(2, cfg.subagents_max_depth);
 }
 #[test]
 #[serial]
@@ -6400,8 +6944,7 @@ fn resolve_runtime_fields_gitignore_from_env() {
         cli_subagents: None,
         cli_web_search_model: None,
         cli_session_summary_model: None,
-        cli_experimental_memory: false,
-        cli_no_memory: false,
+        memory_enabled_override: None,
         disable_web_search: false,
         todo_gate: false,
         laziness_debug_log: None,
@@ -6423,8 +6966,7 @@ fn resolve_runtime_fields_model_overrides_from_cli() {
         cli_subagents: None,
         cli_web_search_model: Some("custom-ws"),
         cli_session_summary_model: Some("custom-ss"),
-        cli_experimental_memory: false,
-        cli_no_memory: false,
+        memory_enabled_override: None,
         disable_web_search: false,
         todo_gate: false,
         laziness_debug_log: None,
@@ -6450,8 +6992,7 @@ fn resolve_runtime_fields_path_hints_from_remote() {
         cli_subagents: None,
         cli_web_search_model: None,
         cli_session_summary_model: None,
-        cli_experimental_memory: false,
-        cli_no_memory: false,
+        memory_enabled_override: None,
         disable_web_search: false,
         todo_gate: false,
         laziness_debug_log: None,
@@ -6472,8 +7013,7 @@ fn resolve_runtime_fields_idempotent() {
         cli_subagents: None,
         cli_web_search_model: None,
         cli_session_summary_model: None,
-        cli_experimental_memory: false,
-        cli_no_memory: false,
+        memory_enabled_override: None,
         disable_web_search: false,
         todo_gate: false,
         laziness_debug_log: None,
@@ -6536,6 +7076,67 @@ fn is_telemetry_explicitly_disabled_sync_env_signals() {
     unsafe { std::env::remove_var("DISABLE_TELEMETRY") };
 }
 #[test]
+#[serial]
+fn resolve_telemetry_mode_disable_env_beats_opt_in_but_not_requirements_pin() {
+    let home = tempfile::tempdir().unwrap();
+    let _home = EnvGuard::set("GROK_HOME", home.path());
+    let _enable = EnvGuard::set("GROK_TELEMETRY_ENABLED", "true");
+    let mut cfg = Config::default();
+    cfg.features.telemetry = Some(TelemetryMode::Enabled);
+    let _falsy = EnvGuard::set("DISABLE_TELEMETRY", "0");
+    let resolved = cfg.resolve_telemetry_mode();
+    assert_eq!(
+        (resolved.value, resolved.source),
+        (TelemetryMode::Enabled, ConfigSource::Env)
+    );
+    let _truthy = EnvGuard::set("DISABLE_TELEMETRY", "1");
+    let resolved = cfg.resolve_telemetry_mode();
+    assert_eq!(
+        (resolved.value, resolved.source),
+        (TelemetryMode::Disabled, ConfigSource::Env)
+    );
+    assert!(
+        is_telemetry_disabled_sync(),
+        "sync gate must agree with resolve_telemetry_mode"
+    );
+    cfg.requirements.telemetry.pin(
+        TelemetryMode::Enabled,
+        crate::config::RequirementSource::Unknown,
+    );
+    let resolved = cfg.resolve_telemetry_mode();
+    assert_eq!(
+        (resolved.value, resolved.source),
+        (TelemetryMode::Enabled, ConfigSource::Requirement)
+    );
+}
+#[test]
+#[serial]
+fn requirements_telemetry_pin_beats_user_config() {
+    unsafe { std::env::remove_var("DISABLE_TELEMETRY") };
+    unsafe { std::env::remove_var("GROK_TELEMETRY_ENABLED") };
+    let mut cfg = Config::default();
+    cfg.features.telemetry = Some(TelemetryMode::Enabled);
+    cfg.requirements.telemetry.pin(
+        TelemetryMode::Disabled,
+        crate::config::RequirementSource::Unknown,
+    );
+    let off = cfg.resolve_telemetry_mode();
+    assert_eq!(
+        (off.value, off.source),
+        (TelemetryMode::Disabled, ConfigSource::Requirement)
+    );
+    cfg.features.telemetry = Some(TelemetryMode::Disabled);
+    cfg.requirements.telemetry.pin(
+        TelemetryMode::Enabled,
+        crate::config::RequirementSource::Unknown,
+    );
+    let on = cfg.resolve_telemetry_mode();
+    assert_eq!(
+        (on.value, on.source),
+        (TelemetryMode::Enabled, ConfigSource::Requirement)
+    );
+}
+#[test]
 fn version_overrides_apply_into_typed_config() {
     let mut value: toml::Value = toml::from_str(
         r#"
@@ -6554,13 +7155,8 @@ default = "grok-4.5"
     let cfg = Config::new_from_toml_cfg(&value).unwrap();
     assert_eq!(cfg.models.default.as_deref(), Some("grok-4.5"));
 }
-/// Reproduce the enterprise managed config bug: [model.grok-build] sets
-/// context_window=500k for model="grok-4.5", but
-/// [models].default="grok-4.5" resolves to the bare
-/// prefetched entry (256k) because Layer 3 only overrides key
-/// "grok-build", not key "grok-4.5".
-///
-/// After the Layer 4 slug propagation fix, both keys should have 500k.
+/// Reproduce the enterprise managed config bug: [model.grok-build] sets context_window=500k for model="grok-4.5". [models].default="grok-4.5" still resolves to the bare prefetched entry (256k).
+/// Layer 3 only overrides key "grok-build", not key "grok-4.5". After the Layer 4 slug propagation fix, both keys should have 500k.
 #[test]
 fn slug_propagation_enterprise_managed_config_key_mismatch() {
     let default_cw = DEFAULT_CONTEXT_WINDOW;
@@ -6637,8 +7233,7 @@ fn slug_propagation_inherits_api_backend_but_not_agent_type() {
         "api_backend should be inherited from sibling"
     );
 }
-/// When the prefetched entry has an explicitly-set context_window
-/// (not the 256k default), slug propagation must NOT overwrite it.
+/// When the prefetched entry has an explicitly-set context_window (not the 256k default), slug propagation must NOT overwrite it.
 #[test]
 fn slug_propagation_does_not_overwrite_explicit_context_window() {
     let raw: toml::Value = toml::from_str(
@@ -6661,6 +7256,84 @@ fn slug_propagation_does_not_overwrite_explicit_context_window() {
         latest.info.context_window.get(),
         65_536,
         "explicitly-set context_window must not be overwritten by slug propagation"
+    );
+}
+/// Resolves a prefetched `custom-model` (default context window, ChatCompletions) against a same-slug `[model.alias]` donor at 500000 / `responses`, plus whatever `extra_toml` adds.
+/// The slug is absent from the built-in catalog so Layer 2 cannot pre-fill the prefetched entry and turn it into its own donor.
+fn resolve_custom_model_with_alias_donor(extra_toml: &str) -> ModelEntry {
+    let raw: toml::Value = toml::from_str(&format!(
+        r#"
+            [model.alias]
+            model = "custom-model"
+            context_window = 500000
+            base_url = "https://test.example.com/v1"
+            api_backend = "responses"
+
+            {extra_toml}
+            "#
+    ))
+    .unwrap();
+    let cfg = Config::new_from_toml_cfg(&raw).expect("config should parse");
+    let mut prefetched = IndexMap::new();
+    let mut entry = test_model_entry(
+        "custom-model",
+        "https://test.example.com/v1",
+        None,
+        None,
+        None,
+    );
+    entry.info.context_window = NonZeroU64::new(DEFAULT_CONTEXT_WINDOW).unwrap();
+    prefetched.insert("custom-model".to_owned(), entry);
+    resolve_model_list(&cfg, Some(prefetched))
+        .shift_remove("custom-model")
+        .expect("custom-model key must exist")
+}
+/// An explicit `chat_completions` equals the enum default, so propagation must tell it apart from
+/// a field that was never set. The context window still inherits from the donor.
+#[test]
+fn slug_propagation_keeps_explicit_chat_completions_api_backend() {
+    let entry = resolve_custom_model_with_alias_donor(
+        r#"
+            [model.custom-model]
+            api_backend = "chat_completions"
+            "#,
+    );
+    assert_eq!(
+        (entry.info.api_backend, entry.info.context_window.get()),
+        (ApiBackend::ChatCompletions, 500_000)
+    );
+}
+/// A backend inherited from `[model_providers.<id>]` counts as explicit for the model.
+#[test]
+fn slug_propagation_keeps_provider_chat_completions_api_backend() {
+    let entry = resolve_custom_model_with_alias_donor(
+        r#"
+            [model_providers.gateway]
+            base_url = "https://test.example.com/v1"
+            api_backend = "chat_completions"
+            api_key = "sk-provider"
+
+            [model.custom-model]
+            model_provider = "gateway"
+            "#,
+    );
+    assert_eq!(
+        (entry.info.api_backend, entry.info.context_window.get()),
+        (ApiBackend::ChatCompletions, 500_000)
+    );
+}
+/// A `[model.<id>]` override that leaves `api_backend` unset still inherits from the donor.
+#[test]
+fn slug_propagation_inherits_api_backend_into_config_entry_without_one() {
+    let entry = resolve_custom_model_with_alias_donor(
+        r#"
+            [model.custom-model]
+            name = "Custom Model"
+            "#,
+    );
+    assert_eq!(
+        (entry.info.api_backend, entry.info.context_window.get()),
+        (ApiBackend::Responses, 500_000)
     );
 }
 /// When no sibling has a real context_window, slug propagation is a no-op.
@@ -6690,39 +7363,14 @@ fn slug_propagation_noop_when_no_donor() {
 fn prefetch_model_entry(slug: &str, context_window: u64, api_backend: ApiBackend) -> ModelEntry {
     ModelEntry {
         info: ModelInfo {
-            user_selectable: true,
-            id: None,
             model: slug.to_owned(),
             base_url: "https://test.example.com/v1".to_owned(),
             name: Some(slug.to_owned()),
-            description: None,
-            max_completion_tokens: None,
-            temperature: None,
-            top_p: None,
             api_backend,
-            auth_scheme: Default::default(),
-            extra_headers: IndexMap::new(),
-            query_params: IndexMap::new(),
-            env_http_headers: IndexMap::new(),
             context_window: NonZeroU64::new(context_window).unwrap(),
-            use_concise: false,
-            agent_type: default_agent_type(),
-            inference_idle_timeout_secs: None,
-            max_retries: None,
-            hidden: false,
-            supported_in_api: true,
-            reasoning_effort: None,
-            supports_reasoning_effort: false,
-            reasoning_efforts: Vec::new(),
-            supports_backend_search: false,
-            compactions_remaining: None,
-            compaction_at_tokens: None,
-            show_model_fingerprint: false,
-            stream_tool_calls: None,
-            laziness_detector: LazinessDetectorPerModelConfig::default(),
-            auto_compact_threshold_percent: None,
-            system_prompt_label: None,
+            ..Default::default()
         },
+        mtls_cert_dir: None,
         api_key: None,
         env_key: None,
         auth_provider: None,
@@ -6846,6 +7494,7 @@ fn global_model_defaults_apply_to_model_without_override() {
     cfg.models.max_completion_tokens = Some(4096);
     cfg.models.max_retries = Some(9);
     cfg.models.inference_idle_timeout_secs = Some(600);
+    cfg.models.subagent_rate_limit_max_attempts = Some(12);
     cfg.models.stream_tool_calls = Some(true);
     let entry = prefetch_model_entry("remote-only-model", 200_000, ApiBackend::default());
     let mut prefetched = IndexMap::new();
@@ -6860,7 +7509,59 @@ fn global_model_defaults_apply_to_model_without_override() {
     assert_eq!(info.max_completion_tokens, Some(4096));
     assert_eq!(info.max_retries, Some(9));
     assert_eq!(info.inference_idle_timeout_secs, Some(600));
+    assert_eq!(info.subagent_rate_limit_max_attempts, Some(12));
     assert_eq!(info.stream_tool_calls, Some(true));
+}
+#[test]
+fn rate_limit_retry_threshold_resolves_toml_precedence_and_propagates() {
+    let global_only = prefetch_model_entry("global-only", 200_000, ApiBackend::default());
+    let mut prefetched = prefetch_model_entry("prefetched", 200_000, ApiBackend::default());
+    prefetched.info.rate_limit_retry_threshold = Some(5);
+    let mut overridden = prefetch_model_entry("per-model", 200_000, ApiBackend::default());
+    overridden.info.rate_limit_retry_threshold = Some(6);
+    let prefetched = IndexMap::from([
+        ("global-only".to_owned(), global_only),
+        ("prefetched".to_owned(), prefetched),
+        ("per-model".to_owned(), overridden),
+    ]);
+    let (_, models) = resolve_models_from_toml(
+        r#"
+            [models]
+            rate_limit_retry_threshold = 4
+
+            [model."per-model"]
+            rate_limit_retry_threshold = 7
+        "#,
+        Some(prefetched),
+    );
+    assert_eq!(
+        models
+            .get("global-only")
+            .and_then(|m| m.info.rate_limit_retry_threshold),
+        Some(4),
+        "the global scalar must fill an unset prefetched model"
+    );
+    assert_eq!(
+        models
+            .get("prefetched")
+            .and_then(|m| m.info.rate_limit_retry_threshold),
+        Some(5),
+        "a prefetched value must beat the global fallback"
+    );
+    assert_eq!(
+        models
+            .get("per-model")
+            .and_then(|m| m.info.rate_limit_retry_threshold),
+        Some(7),
+        "a per-model TOML value must beat prefetched and global values"
+    );
+    assert_eq!(
+        models
+            .get("per-model")
+            .and_then(|m| resolve_sampling(m, None).rate_limit_retry_threshold),
+        Some(7),
+        "the resolved model value must reach SamplerConfig"
+    );
 }
 #[test]
 fn per_model_value_overrides_global_model_default() {
@@ -6940,11 +7641,16 @@ fn config_model_reasoning_efforts_parses_inline_tables_and_bare_strings() {
     let cfg = Config::new_from_toml_cfg(&raw_config).expect("config should parse");
     let resolved = resolve_model_list(&cfg, None);
     let custom = &resolved.get("custom").expect("custom model").info;
-    assert_eq!(custom.reasoning_efforts.len(), 2);
-    assert_eq!(custom.reasoning_efforts[0].label, "High");
-    assert!(custom.reasoning_efforts[0].default);
-    assert_eq!(custom.reasoning_efforts[1].id, "deep");
-    assert_eq!(custom.reasoning_efforts[1].value, ReasoningEffort::Xhigh);
+    let [e0, e1] = custom.reasoning_efforts.as_slice() else {
+        panic!(
+            "expected two reasoning efforts: {:?}",
+            custom.reasoning_efforts
+        );
+    };
+    assert_eq!(e0.label, "High");
+    assert!(e0.default);
+    assert_eq!(e1.id, "deep");
+    assert_eq!(e1.value, ReasoningEffort::Xhigh);
     let shorthand = &resolved.get("shorthand").expect("shorthand model").info;
     let ids: Vec<_> = shorthand
         .reasoning_efforts
@@ -6952,7 +7658,13 @@ fn config_model_reasoning_efforts_parses_inline_tables_and_bare_strings() {
         .map(|o| o.id.as_str())
         .collect();
     assert_eq!(ids, ["low", "high"]);
-    assert_eq!(shorthand.reasoning_efforts[0].label, "Low");
+    assert_eq!(
+        shorthand
+            .reasoning_efforts
+            .first()
+            .map(|e| e.label.as_str()),
+        Some("Low")
+    );
 }
 #[test]
 fn resolve_model_list_config_reasoning_efforts_beats_remote() {
@@ -6982,9 +7694,161 @@ fn resolve_model_list_config_reasoning_efforts_beats_remote() {
         .reasoning_efforts;
     assert_eq!(efforts.len(), 1);
     assert_eq!(
-        efforts[0].id, "low",
+        efforts.first().map(|e| e.id.as_str()),
+        Some("low"),
         "config.toml list must override remote"
     );
+}
+/// The prefetched `grok-4.6-build` row: a `["low", "high"]` menu with `high` marked default plus the legacy `high` scalar.
+fn prefetched_menu_donor() -> ModelEntry {
+    let mut entry = prefetch_model_entry("grok-4.6-build", 200_000, ApiBackend::default());
+    entry.info.reasoning_efforts = ["low", "high"]
+        .into_iter()
+        .map(|id| ReasoningEffortOption {
+            id: id.to_string(),
+            value: id.parse().unwrap(),
+            label: id.to_string(),
+            description: None,
+            default: id == "high",
+        })
+        .collect();
+    entry.info.reasoning_effort = Some(ReasoningEffort::High);
+    entry
+}
+/// Resolves `config_toml` (rows pointing at `model = "grok-4.6-build"`) against `donor` prefetched under the wire id.
+/// A custom models endpoint keeps the built-in `grok-4.6` catalog row (which has its own menu) out of Layer 1.
+fn resolve_with_menu_donor(config_toml: &str, donor: ModelEntry) -> IndexMap<String, ModelEntry> {
+    let raw: toml::Value = toml::from_str(config_toml).unwrap();
+    let mut cfg = Config::new_from_toml_cfg(&raw).expect("config should parse");
+    cfg.endpoints.models_base_url = Some("https://test.example.com/v1".to_owned());
+    let mut prefetched = IndexMap::new();
+    prefetched.insert("grok-4.6-build".to_owned(), donor);
+    resolve_model_list(&cfg, Some(prefetched))
+}
+/// Resolves a single `[model."{key}"]` row (`model = "grok-4.6-build"`, no menu) against `donor`; `key` is the
+/// wire id itself or an alias of it.
+fn resolve_row_with_menu_donor(key: &str, extra_toml: &str, donor: ModelEntry) -> ModelEntry {
+    let config_toml = format!(
+        r#"
+            [model."{key}"]
+            model = "grok-4.6-build"
+            base_url = "https://test.example.com/v1"
+            {extra_toml}
+            "#
+    );
+    resolve_with_menu_donor(&config_toml, donor)
+        .shift_remove(key)
+        .expect("config key must exist")
+}
+fn effort_ids(info: &ModelInfo) -> Vec<&str> {
+    info.reasoning_efforts
+        .iter()
+        .map(|o| o.id.as_str())
+        .collect()
+}
+#[test]
+fn slug_propagation_inherits_reasoning_efforts_and_derives_legacy_fields() {
+    let info = resolve_row_with_menu_donor("grok-4.6", "", prefetched_menu_donor()).info;
+    assert_eq!(effort_ids(&info), ["low", "high"]);
+    assert!(info.supports_reasoning_effort);
+    assert_eq!(info.reasoning_effort, Some(ReasoningEffort::High));
+}
+/// A config alias with its own restricted menu is that row's choice, not a donor: the same-key fetched row
+/// keeps feeding the other empty aliases of the wire id.
+#[test]
+fn slug_propagation_prefers_same_key_menu_donor_over_restricted_alias() {
+    let resolved = resolve_with_menu_donor(
+        r#"
+            [model."grok-4.6"]
+            model = "grok-4.6-build"
+            base_url = "https://test.example.com/v1"
+
+            [model."grok-4.6-cheap"]
+            model = "grok-4.6-build"
+            base_url = "https://test.example.com/v1"
+            reasoning_efforts = ["low"]
+            "#,
+        prefetched_menu_donor(),
+    );
+    let info = |key: &str| &resolved.get(key).expect(key).info;
+    assert_eq!(effort_ids(info("grok-4.6-build")), ["low", "high"]);
+    assert_eq!(effort_ids(info("grok-4.6")), ["low", "high"]);
+    assert_eq!(
+        info("grok-4.6").reasoning_effort,
+        Some(ReasoningEffort::High)
+    );
+    assert_eq!(effort_ids(info("grok-4.6-cheap")), ["low"]);
+}
+/// Inheriting an unmarked `capabilities` menu must carry the server-default flag along, or the alias would
+/// derive `.first()` (`low`) where the same-key row sends nothing.
+#[test]
+fn slug_inherited_unmarked_capabilities_menu_keeps_no_default_effort() {
+    let row = serde_json::json!({
+        "id": "grok-4.6-build",
+        "capabilities": { "reasoning_effort": ["low", "medium", "high", "xhigh"] }
+    });
+    let parsed =
+        crate::remote::client::parse_remote_model_value(&row, "https://test.example.com/v1")
+            .expect("row parses");
+    let entry = resolve_row_with_menu_donor("grok-4.6", "", ModelEntry::from_config_entry(&parsed));
+    assert_eq!(effort_ids(&entry.info), ["low", "medium", "high", "xhigh"]);
+    assert!(entry.info.supports_reasoning_effort);
+    assert!(entry.info.reasoning_effort_server_default);
+    assert_eq!(entry.info.reasoning_effort, None);
+    assert_eq!(resolve_sampling(&entry, None).reasoning_effort, None);
+}
+/// An explicit `supports_reasoning_effort = false` in config discards the menu whether it arrives through the
+/// same-key base (wire-id key) or through slug propagation (alias key), and the scalar whether it came from the
+/// catalog row or from the config row itself, so nothing reaches the wire.
+#[test]
+fn explicit_supports_reasoning_effort_false_discards_inherited_menu() {
+    for key in ["grok-4.6-build", "grok-4.6"] {
+        let mut donor = prefetched_menu_donor();
+        donor.info.reasoning_effort_server_default = true;
+        let entry = resolve_row_with_menu_donor(
+            key,
+            r#"
+            supports_reasoning_effort = false
+            reasoning_effort = "high"
+            "#,
+            donor,
+        );
+        assert!(entry.info.reasoning_efforts.is_empty(), "{key}");
+        assert!(!entry.info.supports_reasoning_effort, "{key}");
+        assert!(!entry.info.reasoning_effort_server_default, "{key}");
+        assert_eq!(entry.info.reasoning_effort, None, "{key}");
+        assert_eq!(
+            resolve_sampling(&entry, None).reasoning_effort,
+            None,
+            "{key}"
+        );
+    }
+}
+/// A `/v1/models` row whose `capabilities` names no default keeps the menu but sends no effort, so the
+/// server applies its own instead of the lowest listed tier.
+#[test]
+fn capabilities_menu_without_default_resolves_to_no_reasoning_effort() {
+    let mut cfg = Config::default();
+    cfg.endpoints.models_base_url = Some("https://test.example.com/v1".to_owned());
+    let row = serde_json::json!({
+        "id": "grok-4.6-build",
+        "capabilities": { "reasoning_effort": ["low", "medium", "high", "xhigh"] }
+    });
+    let parsed =
+        crate::remote::client::parse_remote_model_value(&row, "https://test.example.com/v1")
+            .expect("row parses");
+    let mut prefetched = IndexMap::new();
+    prefetched.insert(
+        "grok-4.6-build".to_owned(),
+        ModelEntry::from_config_entry(&parsed),
+    );
+    let info = resolve_model_list(&cfg, Some(prefetched))
+        .shift_remove("grok-4.6-build")
+        .expect("grok-4.6-build key must exist")
+        .info;
+    assert_eq!(info.reasoning_efforts.len(), 4);
+    assert!(info.supports_reasoning_effort);
+    assert_eq!(info.reasoning_effort, None);
 }
 #[test]
 fn resolve_model_list_inherits_context_window_from_default_when_prefetched_has_fallback() {
@@ -7001,6 +7865,52 @@ fn resolve_model_list_inherits_context_window_from_default_when_prefetched_has_f
         default_cw,
         "context_window should have been inherited from hardcoded default, not left at DEFAULT_CONTEXT_WINDOW"
     );
+}
+#[test]
+fn choices_mark_the_window_explicit_and_donate_to_slug_siblings() {
+    let cfg = Config::default();
+    let dm = crate::models::default_model();
+    let choices = vec![
+        NonZeroU64::new(DEFAULT_CONTEXT_WINDOW).unwrap(),
+        NonZeroU64::new(500_000).unwrap(),
+    ];
+    let mut primary = prefetch_model_entry(dm, DEFAULT_CONTEXT_WINDOW, ApiBackend::default());
+    primary.info.context_windows = choices.clone();
+    let sibling = prefetch_model_entry(dm, DEFAULT_CONTEXT_WINDOW, ApiBackend::default());
+    let mut prefetched = IndexMap::new();
+    prefetched.insert(dm.to_owned(), primary);
+    prefetched.insert(format!("{dm}-alias"), sibling);
+    let resolved = resolve_model_list(&cfg, Some(prefetched));
+    let primary = resolved.get(dm).expect("primary must exist");
+    assert_eq!(primary.info.context_window.get(), DEFAULT_CONTEXT_WINDOW);
+    let sibling = resolved
+        .get(&format!("{dm}-alias"))
+        .expect("sibling must exist");
+    assert_eq!(sibling.info.context_windows, choices);
+}
+#[test]
+fn scalar_override_keeps_the_inherited_choices() {
+    let dm = crate::models::default_model();
+    let raw_config: toml::Value = toml::from_str(&format!(
+        r#"
+            [model."{dm}"]
+            context_window = 300000
+            "#
+    ))
+    .unwrap();
+    let cfg = Config::new_from_toml_cfg(&raw_config).expect("config should parse");
+    let mut entry = prefetch_model_entry(dm, DEFAULT_CONTEXT_WINDOW, ApiBackend::default());
+    entry.info.context_windows = vec![
+        NonZeroU64::new(DEFAULT_CONTEXT_WINDOW).unwrap(),
+        NonZeroU64::new(500_000).unwrap(),
+    ];
+    let mut prefetched = IndexMap::new();
+    prefetched.insert(dm.to_owned(), entry);
+    let resolved = resolve_model_list(&cfg, Some(prefetched));
+    let model = resolved.get(dm).expect("model must exist");
+    assert_eq!(model.info.context_window.get(), 300_000);
+    let windows: Vec<u64> = model.info.context_windows.iter().map(|w| w.get()).collect();
+    assert_eq!(windows, [300_000, DEFAULT_CONTEXT_WINDOW, 500_000]);
 }
 #[test]
 fn resolve_model_list_does_not_override_explicitly_set_context_window() {
@@ -7127,9 +8037,8 @@ fn resolve_model_list_empty_prefetch_yields_empty_base() {
     let resolved = resolve_model_list(&cfg, Some(IndexMap::new()));
     assert!(resolved.is_empty());
 }
-/// Regression: enterprise managed config overlays env_key on an oauth-only
-/// catalog entry. BYOK must force visibility for API-key users so a
-/// base `supported_in_api: false` does not leak into the overlay.
+/// Regression: enterprise managed config overlays env_key on an oauth-only catalog entry.
+/// BYOK must force visibility for API-key users so a base `supported_in_api: false` does not leak into the overlay.
 #[test]
 fn byok_config_overlay_visible_to_api_key_users() {
     let raw: toml::Value = toml::from_str(
@@ -7156,8 +8065,8 @@ fn byok_config_overlay_visible_to_api_key_users() {
          env_key must override base supported_in_api=false"
     );
 }
-/// Guard: config overlay WITHOUT credentials must NOT flip the
-/// bundled supported_in_api flag. Only BYOK triggers that override.
+/// Guard: a config overlay WITHOUT credentials must NOT flip the bundled supported_in_api flag.
+/// Only BYOK triggers that override.
 #[test]
 fn plain_config_overlay_preserves_bundled_visibility() {
     let dm = crate::models::default_model();
@@ -7276,6 +8185,48 @@ fn mcp_auto_restart_env_wins_over_config_and_below() {
     let r = resolve_mcp_auto_restart(None, None, Some(false), Some(false), Some(false));
     unsafe { std::env::remove_var("GROK_MCP_AUTO_RESTART") };
     assert!(r.value);
+    assert_eq!(r.source, ConfigSource::Env);
+}
+#[test]
+#[serial]
+fn turn_transient_retry_default_is_true() {
+    unsafe { std::env::remove_var("GROK_TURN_TRANSIENT_RETRY") };
+    let r = resolve_turn_transient_retry(None, None, None, None, None);
+    assert!(r.value, "transient retry is on by default");
+    assert_eq!(r.source, ConfigSource::Default);
+}
+#[test]
+#[serial]
+fn turn_transient_retry_config_kill_switch() {
+    unsafe { std::env::remove_var("GROK_TURN_TRANSIENT_RETRY") };
+    let r = resolve_turn_transient_retry(None, None, Some(false), None, None);
+    assert!(
+        !r.value,
+        "config `[features] turn_transient_retry = false` disables"
+    );
+    assert_eq!(r.source, ConfigSource::Config);
+}
+#[test]
+#[serial]
+fn turn_transient_retry_remote_flag_disables_below_config() {
+    unsafe { std::env::remove_var("GROK_TURN_TRANSIENT_RETRY") };
+    let r = resolve_turn_transient_retry(None, None, None, None, Some(false));
+    assert!(!r.value);
+    assert_eq!(r.source, ConfigSource::Remote);
+    let r = resolve_turn_transient_retry(None, None, Some(true), None, Some(false));
+    assert!(r.value);
+    assert_eq!(r.source, ConfigSource::Config);
+    let r = resolve_turn_transient_retry(None, None, Some(false), None, Some(true));
+    assert!(!r.value);
+    assert_eq!(r.source, ConfigSource::Config);
+}
+#[test]
+#[serial]
+fn turn_transient_retry_env_wins_over_config() {
+    unsafe { std::env::set_var("GROK_TURN_TRANSIENT_RETRY", "false") };
+    let r = resolve_turn_transient_retry(None, None, Some(true), None, None);
+    unsafe { std::env::remove_var("GROK_TURN_TRANSIENT_RETRY") };
+    assert!(!r.value);
     assert_eq!(r.source, ConfigSource::Env);
 }
 #[test]
@@ -7407,6 +8358,8 @@ fn mcp_recursive_config_watch_feature_flag_used_when_no_higher_layer() {
 #[test]
 #[serial_test::serial(remote_sig_disarm)]
 fn remote_settings_disarm_managed_config_signatures() {
+    let prod = crate::env::PROD_CLI_CHAT_PROXY_BASE_URL;
+    let _env = crate::env::EnvVarGuard::remove("GROK_CLI_CHAT_PROXY_BASE_URL");
     xai_grok_config::signed_policy::apply_remote_managed_config_signature_verification(
         Some(true),
         true,
@@ -7416,19 +8369,19 @@ fn remote_settings_disarm_managed_config_signatures() {
         managed_config_signature_verification: Some(false),
         ..Default::default()
     };
-    apply_remote_settings_side_effects(Some(&settings));
+    apply_remote_settings_side_effects(Some(&settings), prod);
     assert!(!xai_grok_config::signed_policy::verification_active());
     let settings = crate::util::config::RemoteSettings {
         managed_config_signature_verification: Some(true),
         ..Default::default()
     };
-    apply_remote_settings_side_effects(Some(&settings));
+    apply_remote_settings_side_effects(Some(&settings), prod);
     assert!(xai_grok_config::signed_policy::verification_active());
     xai_grok_config::signed_policy::apply_remote_managed_config_signature_verification(
         Some(false),
         true,
     );
-    apply_remote_settings_side_effects(None);
+    apply_remote_settings_side_effects(None, prod);
     assert!(!xai_grok_config::signed_policy::verification_active());
     xai_grok_config::signed_policy::apply_remote_managed_config_signature_verification(
         Some(true),
@@ -7436,10 +8389,91 @@ fn remote_settings_disarm_managed_config_signatures() {
     );
     assert!(xai_grok_config::signed_policy::verification_active());
 }
+/// A pass with no payload must keep the last applied policy (a cancelled
+/// first bootstrap followed by an offline fallback pass must not wipe it);
+/// a real payload still rewrites the caches, clearing omitted fields.
+#[test]
+#[serial_test::serial(remote_sig_disarm)]
+fn absent_settings_keep_previously_applied_remote_policy() {
+    let prod = crate::env::PROD_CLI_CHAT_PROXY_BASE_URL;
+    let settings = crate::util::config::RemoteSettings {
+        prompt_suggestions: Some(serde_json::json!({"enabled": true})),
+        ..Default::default()
+    };
+    apply_remote_settings_side_effects(Some(&settings), prod);
+    assert_eq!(
+        crate::util::config::cached_remote_prompt_suggestions_enabled(),
+        Some(true)
+    );
+    apply_remote_settings_side_effects(None, prod);
+    assert_eq!(
+        crate::util::config::cached_remote_prompt_suggestions_enabled(),
+        Some(true),
+        "a fetchless pass must not wipe the last applied payload"
+    );
+    apply_remote_settings_side_effects(Some(&crate::util::config::RemoteSettings::default()), prod);
+    assert_eq!(
+        crate::util::config::cached_remote_prompt_suggestions_enabled(),
+        None,
+        "a real payload clears the fields it omits"
+    );
+}
+/// Pins the wiring end to end: `apply_remote_settings_side_effects` caches the
+/// advertisement under the settings origin and `sampling_config_for_model`
+/// reads it per model route.
+#[test]
+#[serial_test::serial]
+#[serial_test::serial(remote_sig_disarm)]
+fn sampling_config_compresses_only_toward_the_advertising_proxy() {
+    use xai_grok_config_types::RemoteRequestEncoding;
+    use xai_grok_sampler::RequestCompression;
+    let compression_for = |base_url: &str| {
+        let model = test_model_entry("test-model", base_url, None, None, None);
+        sampling_config_for_model(
+            &model,
+            resolve_credentials(&model, None),
+            None,
+            None,
+            None,
+            None,
+        )
+        .request_compression
+    };
+    let proxy = crate::env::PROD_CLI_CHAT_PROXY_BASE_URL;
+    let env = crate::env::EnvVarGuard::remove("GROK_REQUEST_COMPRESSION");
+    apply_remote_settings_side_effects(
+        Some(&crate::util::config::RemoteSettings {
+            accept_request_encodings: vec![
+                RemoteRequestEncoding::Unknown,
+                RemoteRequestEncoding::Zstd,
+            ],
+            ..Default::default()
+        }),
+        proxy,
+    );
+    assert_eq!(compression_for(proxy), RequestCompression::Zstd);
+    for other in ["http://localhost:11434/v1", "https://api.openai.com/v1"] {
+        assert_eq!(compression_for(other), RequestCompression::None, "{other}");
+    }
+    env.set_value("0");
+    assert_eq!(
+        compression_for(proxy),
+        RequestCompression::None,
+        "the env kill switch wins over the advertisement"
+    );
+    env.set_value("1");
+    apply_remote_settings_side_effects(Some(&Default::default()), proxy);
+    assert_eq!(
+        compression_for(proxy),
+        RequestCompression::None,
+        "a payload without the advertisement disarms compression; the env cannot force it on"
+    );
+}
 /// Keyed path: prod proxy origin can disarm; env override cannot.
 #[test]
 #[serial_test::serial(remote_sig_disarm)]
 fn remote_settings_disarm_requires_prod_proxy_when_keys_embedded() {
+    let prod = crate::env::PROD_CLI_CHAT_PROXY_BASE_URL;
     xai_grok_config::signed_policy::apply_remote_managed_config_signature_verification(
         Some(true),
         true,
@@ -7449,10 +8483,8 @@ fn remote_settings_disarm_requires_prod_proxy_when_keys_embedded() {
         managed_config_signature_verification: Some(false),
         ..Default::default()
     };
-    unsafe {
-        std::env::remove_var("GROK_CLI_CHAT_PROXY_BASE_URL");
-    }
-    apply_remote_settings_side_effects(Some(&settings));
+    let env = crate::env::EnvVarGuard::remove("GROK_CLI_CHAT_PROXY_BASE_URL");
+    apply_remote_settings_side_effects(Some(&settings), prod);
     assert!(
         !xai_grok_config::signed_policy::verification_active(),
         "prod proxy origin must allow disarm when keys are embedded"
@@ -7462,1016 +8494,143 @@ fn remote_settings_disarm_requires_prod_proxy_when_keys_embedded() {
         true,
     );
     assert!(xai_grok_config::signed_policy::verification_active());
-    unsafe {
-        std::env::set_var(
-            "GROK_CLI_CHAT_PROXY_BASE_URL",
-            "https://attacker.example/v1",
-        );
-    }
-    apply_remote_settings_side_effects(Some(&settings));
+    env.set_value("https://attacker.example/v1");
+    apply_remote_settings_side_effects(Some(&settings), prod);
     assert!(
         xai_grok_config::signed_policy::verification_active(),
         "env-overridden proxy must not be able to disarm keyed verification"
     );
-    unsafe {
-        std::env::remove_var("GROK_CLI_CHAT_PROXY_BASE_URL");
-    }
     xai_grok_config::signed_policy::apply_remote_managed_config_signature_verification(
         Some(true),
         true,
     );
 }
-
-/// Named catalog contract: console is on the hop when the operator pins
-/// `preferred_method = "api_key"`, not because a client printout of included
-/// SuperGrok period remaining 0 is proof. Fail-open default stays SuperGrok
-/// until a real SuperGrok HTTP 402 or this pin. Do not accept an empty hop
-/// when the pin is set.
 #[test]
-#[serial]
-// Grok OSS: hop proof. sampling_config fills console failover after included SuperGrok period limits are full (or the operator pins preferred_method = api_key). Rank helpers are not this proof. SuperGrok is paid.
-fn sampling_config_auto_use_fills_console_hop_after_included_full() {
-    use crate::agent::auth_method::{LEGACY_XAI_API_KEY_ENV_VAR, XAI_API_KEY_ENV_VAR};
-    use crate::auth::{
-        PreferredAuthMethod, SupergrokAccountRole, SupergrokIdentityHeadroom,
-        SupergrokSessionCandidate,
-    };
-    use xai_grok_sampler::clear_all_including_durable;
+fn a_status_line_the_parser_could_not_read_in_full_reaches_grok_inspect() {
+    use super::super::config_model_override_parse::{ConfigWarningKind, WarningTarget};
+    let raw_config: toml::Value = toml::from_str(
+        r#"
+            [ui]
+            theme = "kanagawa"
 
-    clear_all_including_durable();
-    let home = tempfile::TempDir::new().unwrap();
-    let _home = EnvGuard::set("GROK_HOME", home.path());
-    let _force = EnvGuard::set(crate::auth::credentials_store::FORCE_FILE_ENV, "1");
-    let _xai = EnvGuard::set(XAI_API_KEY_ENV_VAR, "console-after-included-key");
-    let _legacy = EnvGuard::unset(LEGACY_XAI_API_KEY_ENV_VAR);
-
-    let session = "session-jwt-included-full";
-    let sessions = vec![SupergrokSessionCandidate {
-        headroom: SupergrokIdentityHeadroom {
-            identity_id: "personal-included-full".into(),
-            role: SupergrokAccountRole::Personal,
-            included_remaining: 0,
-            reset_at: None,
-        },
-        access_token: session.into(),
-        prepaid_balance_cents: None,
-        hard_expired: false,
-    }];
-    let proxy = crate::env::PROD_CLI_CHAT_PROXY_BASE_URL;
-    let model = test_model_entry("m", proxy, None, None, None);
-    let creds = resolve_credentials_preferring_with_supergrok_sessions(
-        &model,
-        &sessions,
-        Some(PreferredAuthMethod::ApiKey),
-        true,
-    );
-    let sampling = sampling_config_for_model(&model, creds, None, None, None, None);
-    let console_in_chain = sampling.api_key.as_deref() == Some("console-after-included-key")
-        || sampling
-            .failover_api_keys
-            .iter()
-            .any(|k| k == "console-after-included-key");
-    assert!(
-        console_in_chain,
-        "preferred_method=api_key must put the console key on the hop; primary={:?} failover={:?}",
-        sampling.api_key, sampling.failover_api_keys
-    );
-    assert_eq!(
-        sampling.api_key.as_deref(),
-        Some("console-after-included-key"),
-        "api_key pin must keep console primary; primary={:?} failover={:?}",
-        sampling.api_key,
-        sampling.failover_api_keys
-    );
-    clear_all_including_durable();
-}
-
-/// Fail-open default: an unproven client printout of included SuperGrok period
-/// remaining 0 and SuperGrok dollar credits $0 must keep SuperGrok primary.
-/// Operator Usage / Billing pages they can see win. Console hop is a real
-/// SuperGrok HTTP 402 or later `preferred_method = "api_key"` / use-console.
-#[test]
-#[serial]
-// Grok OSS: hop proof (fail-open). A client 100% / remaining 0 / SuperGrok dollar credits $0 printout must not hop to console. SuperGrok is paid.
-fn sampling_config_keeps_supergrok_primary_on_unproven_full_printout() {
-    use crate::agent::auth_method::{LEGACY_XAI_API_KEY_ENV_VAR, XAI_API_KEY_ENV_VAR};
-    use crate::auth::{
-        PreferredAuthMethod, SupergrokAccountRole, SupergrokIdentityHeadroom,
-        SupergrokSessionCandidate,
-    };
-    use xai_grok_sampler::clear_all_including_durable;
-
-    clear_all_including_durable();
-    let home = tempfile::TempDir::new().unwrap();
-    let _home = EnvGuard::set("GROK_HOME", home.path());
-    let _force = EnvGuard::set(crate::auth::credentials_store::FORCE_FILE_ENV, "1");
-    let _xai = EnvGuard::set(XAI_API_KEY_ENV_VAR, "console-must-not-win-printout");
-    let _legacy = EnvGuard::unset(LEGACY_XAI_API_KEY_ENV_VAR);
-
-    let session = "session-jwt-unproven-full-printout";
-    let sessions = vec![SupergrokSessionCandidate {
-        headroom: SupergrokIdentityHeadroom {
-            identity_id: "personal-unproven-full".into(),
-            role: SupergrokAccountRole::Personal,
-            included_remaining: 0,
-            reset_at: None,
-        },
-        access_token: session.into(),
-        prepaid_balance_cents: Some(0),
-        hard_expired: false,
-    }];
-    let proxy = crate::env::PROD_CLI_CHAT_PROXY_BASE_URL;
-    let model = test_model_entry("m", proxy, None, None, None);
-    let creds = resolve_credentials_preferring_with_supergrok_sessions(
-        &model,
-        &sessions,
-        Some(PreferredAuthMethod::Oidc),
-        true,
-    );
-    let sampling = sampling_config_for_model(&model, creds, None, None, None, None);
-    assert_eq!(
-        sampling.api_key.as_deref(),
-        Some(session),
-        "unproven remaining 0 / $0 SuperGrok dollar credits printout must keep SuperGrok primary; primary={:?} failover={:?}",
-        sampling.api_key,
-        sampling.failover_api_keys
-    );
-    assert_ne!(
-        sampling.api_key.as_deref(),
-        Some("console-must-not-win-printout"),
-        "must not hop to the console key from a lying client printout"
-    );
-    clear_all_including_durable();
-}
-
-/// After a real SuperGrok HTTP 402 mark, the next sampling_config uses the next
-/// source in spend order (console team prepaid / console API credits when that
-/// is the remaining source). Session stays usable. A top-up is not required.
-/// Fail-open printout of remaining 0 / SuperGrok dollar credits $0 does not
-/// mark and must not use this path.
-#[test]
-#[serial]
-// Grok OSS: hop proof. Real SuperGrok HTTP 402 after that request failed can still leave SuperGrok. SuperGrok is paid.
-fn sampling_config_next_request_uses_console_after_real_supergrok_http_402() {
-    use crate::agent::auth_method::{LEGACY_XAI_API_KEY_ENV_VAR, XAI_API_KEY_ENV_VAR};
-    use crate::auth::{
-        PreferredAuthMethod, SupergrokAccountRole, SupergrokIdentityHeadroom,
-        SupergrokSessionCandidate,
-    };
-    use grok_rate_limit::fingerprint_secret;
-    use xai_grok_sampler::{clear_all_including_durable, mark_exhausted};
-
-    clear_all_including_durable();
-    let home = tempfile::TempDir::new().unwrap();
-    let _home = EnvGuard::set("GROK_HOME", home.path());
-    let _force = EnvGuard::set(crate::auth::credentials_store::FORCE_FILE_ENV, "1");
-    let _xai = EnvGuard::set(XAI_API_KEY_ENV_VAR, "console-after-real-402");
-    let _legacy = EnvGuard::unset(LEGACY_XAI_API_KEY_ENV_VAR);
-
-    let session = "session-jwt-after-real-402";
-    mark_exhausted(&fingerprint_secret(session));
-    let sessions = vec![SupergrokSessionCandidate {
-        headroom: SupergrokIdentityHeadroom {
-            identity_id: "personal-after-402".into(),
-            role: SupergrokAccountRole::Personal,
-            included_remaining: 0,
-            reset_at: None,
-        },
-        access_token: session.into(),
-        prepaid_balance_cents: Some(0),
-        hard_expired: false,
-    }];
-    let proxy = crate::env::PROD_CLI_CHAT_PROXY_BASE_URL;
-    let model = test_model_entry("m", proxy, None, None, None);
-    let creds = resolve_credentials_preferring_with_supergrok_sessions(
-        &model,
-        &sessions,
-        Some(PreferredAuthMethod::Oidc),
-        true,
-    );
-    let sampling = sampling_config_for_model(&model, creds, None, None, None, None);
-    assert_eq!(
-        sampling.api_key.as_deref(),
-        Some("console-after-real-402"),
-        "next sampling_config after real SuperGrok HTTP 402 must use the console key; primary={:?} failover={:?}",
-        sampling.api_key,
-        sampling.failover_api_keys
-    );
-    assert_ne!(
-        sampling.api_key.as_deref(),
-        Some(session),
-        "must not keep the empty SuperGrok JWT as primary after real HTTP 402"
-    );
-    assert!(
-        sampling.base_url.contains("api.x.ai"),
-        "next request must use the console API host: {}",
-        sampling.base_url
-    );
-    clear_all_including_durable();
-}
-
-/// Fetched SuperGrok `prepaidBalance.val` 0 after that meter was the paying
-/// source (included SuperGrok period limits already remaining 0) plus a real
-/// HTTP 402 mark: next sampling_config uses console. Named JSON field, not a
-/// printout guess.
-#[test]
-#[serial]
-// Grok OSS: hop proof. SuperGrok dollar credits prepaidBalance.val 0 after that meter paid, plus HTTP 402, hops to console. SuperGrok is paid.
-fn sampling_config_next_request_uses_console_when_paying_prepaid_balance_is_zero_after_http_402() {
-    use crate::agent::auth_method::{LEGACY_XAI_API_KEY_ENV_VAR, XAI_API_KEY_ENV_VAR};
-    use crate::auth::{
-        PreferredAuthMethod, SupergrokAccountRole, SupergrokIdentityHeadroom,
-        SupergrokSessionCandidate,
-    };
-    use grok_rate_limit::fingerprint_secret;
-    use xai_grok_sampler::{clear_all_including_durable, mark_exhausted};
-
-    clear_all_including_durable();
-    let home = tempfile::TempDir::new().unwrap();
-    let _home = EnvGuard::set("GROK_HOME", home.path());
-    let _force = EnvGuard::set(crate::auth::credentials_store::FORCE_FILE_ENV, "1");
-    let _xai = EnvGuard::set(XAI_API_KEY_ENV_VAR, "console-after-prepaid-empty");
-    let _legacy = EnvGuard::unset(LEGACY_XAI_API_KEY_ENV_VAR);
-
-    let session = "session-jwt-prepaid-was-paying";
-    mark_exhausted(&fingerprint_secret(session));
-    let sessions = vec![SupergrokSessionCandidate {
-        headroom: SupergrokIdentityHeadroom {
-            identity_id: "personal-prepaid-empty".into(),
-            role: SupergrokAccountRole::Personal,
-            included_remaining: 0,
-            reset_at: None,
-        },
-        access_token: session.into(),
-        prepaid_balance_cents: Some(0),
-        hard_expired: false,
-    }];
-    let proxy = crate::env::PROD_CLI_CHAT_PROXY_BASE_URL;
-    let model = test_model_entry("m", proxy, None, None, None);
-    let creds = resolve_credentials_preferring_with_supergrok_sessions(
-        &model,
-        &sessions,
-        Some(PreferredAuthMethod::Oidc),
-        true,
-    );
-    let sampling = sampling_config_for_model(&model, creds, None, None, None, None);
-    assert_eq!(
-        sampling.api_key.as_deref(),
-        Some("console-after-prepaid-empty"),
-        "fetched prepaidBalance.val 0 after that meter paid, plus HTTP 402, must hop; primary={:?} failover={:?}",
-        sampling.api_key,
-        sampling.failover_api_keys
-    );
-    clear_all_including_durable();
-}
-
-/// Catalog name: while included SuperGrok period limits still have room,
-/// `resolve_model_to_sampling_config` must omit the console key from the hop.
-#[test]
-#[serial]
-// Grok OSS: hop proof. sampling_config omits console failover while included SuperGrok period limits still have room. Rank helpers are not this proof. SuperGrok is paid.
-fn sampling_config_auto_use_omits_console() {
-    use crate::agent::auth_method::{LEGACY_XAI_API_KEY_ENV_VAR, XAI_API_KEY_ENV_VAR};
-    use crate::auth::PreferredAuthMethod;
-    use xai_grok_sampler::clear_all_including_durable;
-
-    clear_all_including_durable();
-    let home = tempfile::TempDir::new().unwrap();
-    let _home = EnvGuard::set("GROK_HOME", home.path());
-    let _force = EnvGuard::set(crate::auth::credentials_store::FORCE_FILE_ENV, "1");
-    let _xai = EnvGuard::set(XAI_API_KEY_ENV_VAR, "console-must-omit-while-included");
-    let _legacy = EnvGuard::unset(LEGACY_XAI_API_KEY_ENV_VAR);
-
-    let proxy = crate::env::PROD_CLI_CHAT_PROXY_BASE_URL;
-    let model = test_model_entry("m", proxy, None, None, None);
-    let mut models = IndexMap::new();
-    models.insert("m".to_string(), model);
-    let sc = resolve_model_to_sampling_config(
-        "m",
-        &models,
-        Some("tok-session-included-headroom"),
-        None,
-        None,
-        None,
-        Some(PreferredAuthMethod::Oidc),
-        true,
+            [ui.status_line]
+            type = "disabled"
+            padding = "2"
+            colour = "red"
+            "#,
     )
-    .expect("model resolves");
-    assert_ne!(
-        sc.api_key.as_deref(),
-        Some("console-must-omit-while-included"),
-        "primary must not be console while included SuperGrok period limits have room"
-    );
-    assert!(sc.api_key.is_some());
-    assert!(
-        !sc.failover_api_keys
+    .unwrap();
+    let cfg = Config::new_from_toml_cfg(&raw_config).expect("a typo must not fail the config");
+    let warnings = |path: &str, kind: ConfigWarningKind| {
+        cfg.config_warnings
             .iter()
-            .any(|k| k == "console-must-omit-while-included"),
-        "must omit console while included SuperGrok period limits have room; failover={:?}",
-        sc.failover_api_keys
-    );
-    clear_all_including_durable();
-}
-
-/// Catalog name: `resolve_model_to_sampling_config` fills console when the
-/// operator pins `preferred_method = "api_key"`. Client remaining 0 printout
-/// is not the hop proof (fail-open). HTTP 402 rotate stays the live leave path.
-#[test]
-#[serial]
-// Grok OSS: hop proof. resolve_model_to_sampling_config uses the same auto-use hop policy as sampling_config. Rank helpers are not this proof. SuperGrok is paid.
-fn resolve_model_to_sampling_config_auto_use() {
-    use crate::agent::auth_method::{LEGACY_XAI_API_KEY_ENV_VAR, XAI_API_KEY_ENV_VAR};
-    use crate::auth::{
-        PreferredAuthMethod, SupergrokAccountRole, SupergrokIdentityHeadroom,
-        SupergrokSessionCandidate,
+            .filter(|w| {
+                w.kind == kind
+                    && matches!(&w.target, WarningTarget::ConfigKey { path: p } if p == path)
+            })
+            .count()
     };
-    use xai_grok_sampler::clear_all_including_durable;
-
-    clear_all_including_durable();
-    let home = tempfile::TempDir::new().unwrap();
-    let _home = EnvGuard::set("GROK_HOME", home.path());
-    let _force = EnvGuard::set(crate::auth::credentials_store::FORCE_FILE_ENV, "1");
-    let _xai = EnvGuard::set(XAI_API_KEY_ENV_VAR, "console-resolve-model-hop");
-    let _legacy = EnvGuard::unset(LEGACY_XAI_API_KEY_ENV_VAR);
-
-    let sessions = vec![SupergrokSessionCandidate {
-        headroom: SupergrokIdentityHeadroom {
-            identity_id: "personal-full".into(),
-            role: SupergrokAccountRole::Personal,
-            included_remaining: 0,
-            reset_at: None,
-        },
-        access_token: "tok-included-full-resolve-model".into(),
-        prepaid_balance_cents: None,
-        hard_expired: false,
-    }];
-    let proxy = crate::env::PROD_CLI_CHAT_PROXY_BASE_URL;
-    let model = test_model_entry("m", proxy, None, None, None);
-    let creds = resolve_credentials_preferring_with_supergrok_sessions(
-        &model,
-        &sessions,
-        Some(PreferredAuthMethod::ApiKey),
-        true,
-    );
-    let sc = sampling_config_for_model(&model, creds, None, None, None, None);
-    let console_in_chain = sc.api_key.as_deref() == Some("console-resolve-model-hop")
-        || sc
-            .failover_api_keys
-            .iter()
-            .any(|k| k == "console-resolve-model-hop");
-    assert!(
-        console_in_chain,
-        "preferred_method=api_key must include console on resolve_model / sampling hop; primary={:?} failover={:?}",
-        sc.api_key, sc.failover_api_keys
+    assert_eq!(
+        warnings("ui.status_line", ConfigWarningKind::InvalidValue),
+        1
     );
     assert_eq!(
-        sc.api_key.as_deref(),
-        Some("console-resolve-model-hop"),
-        "api_key pin must keep console primary; primary={:?} failover={:?}",
-        sc.api_key,
-        sc.failover_api_keys
+        warnings("ui.status_line.colour", ConfigWarningKind::UnknownField),
+        1
     );
-    clear_all_including_durable();
+    assert_eq!(cfg.ui.theme.as_deref(), Some("kanagawa"));
 }
-
-/// Included SuperGrok period limits full + SuperGrok dollar credits remain:
-/// SuperGrok session stays primary; console is failover only.
-#[test]
+/// A model's `env_key` credential, installed as the process static key, is served by the shared api-key provider.
+/// Lives agent-side because it resolves a model list from the full `Config`, which the auth layer never sees.
+#[tokio::test]
 #[serial]
-// Grok OSS: hop proof. SuperGrok dollar credits keep SuperGrok session primary with console failover. SuperGrok is paid.
-fn sampling_config_auto_use_dollar_credits_keep_session_console_failover() {
-    use crate::agent::auth_method::{LEGACY_XAI_API_KEY_ENV_VAR, XAI_API_KEY_ENV_VAR};
-    use crate::auth::{
-        PreferredAuthMethod, SupergrokAccountRole, SupergrokIdentityHeadroom,
-        SupergrokSessionCandidate,
-    };
-    use xai_chat_state::AuthType;
-    use xai_grok_sampler::clear_all_including_durable;
-
-    clear_all_including_durable();
-    let home = tempfile::TempDir::new().unwrap();
-    let _home = EnvGuard::set("GROK_HOME", home.path());
-    let _force = EnvGuard::set(crate::auth::credentials_store::FORCE_FILE_ENV, "1");
-    let _xai = EnvGuard::set(XAI_API_KEY_ENV_VAR, "console-afterburner-key");
-    let _legacy = EnvGuard::unset(LEGACY_XAI_API_KEY_ENV_VAR);
-
-    let sessions = vec![SupergrokSessionCandidate {
-        headroom: SupergrokIdentityHeadroom {
-            identity_id: "team-extras".into(),
-            role: SupergrokAccountRole::Business,
-            included_remaining: 0,
-            reset_at: None,
-        },
-        access_token: "tok-extras-afterburner".into(),
-        prepaid_balance_cents: Some(10_029),
-        hard_expired: false,
-    }];
-    let model = test_model_entry("m", "https://api.x.ai/v1", None, None, None);
-    let creds = resolve_credentials_preferring_with_supergrok_sessions(
-        &model,
-        &sessions,
-        Some(PreferredAuthMethod::Oidc),
-        true,
-    );
-    let sampling = sampling_config_for_model(&model, creds, None, None, None, None);
+async fn process_key_from_model_env_key() {
+    use std::sync::Arc;
+    use xai_grok_login::{AuthManager, GrokComConfig, shared_api_key_provider};
+    const ENV: &str = "TEST_MODEL_ENV_KEY";
+    const TOKEN: &str = "model-env-token";
+    let _xai = EnvGuard::unset("XAI_API_KEY");
+    let _legacy = EnvGuard::unset("GROK_CODE_XAI_API_KEY");
+    let _tok = EnvGuard::set(ENV, TOKEN);
+    let dm = xai_grok_models::default_model();
+    let cfg = Config::new_from_toml_cfg(
+        &toml::from_str(&format!(
+            r#"
+            [model."{dm}"]
+            model = "{dm}"
+            env_key = "{ENV}"
+            "#
+        ))
+        .unwrap(),
+    )
+    .unwrap();
+    let key = resolve_model_list(&cfg, None)
+        .get(dm)
+        .and_then(|m| m.own_credential())
+        .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let mgr = Arc::new(AuthManager::new(dir.path(), GrokComConfig::default()));
+    assert!(mgr.current().is_none());
+    mgr.set_process_static_api_key(Some(key));
     assert_eq!(
-        sampling.api_key.as_deref(),
-        Some("tok-extras-afterburner"),
-        "SuperGrok dollar credits keep SuperGrok session primary"
+        shared_api_key_provider(mgr)
+            .current_api_key_async()
+            .await
+            .as_deref(),
+        Some(TOKEN)
     );
-    assert!(
-        sampling
-            .failover_api_keys
-            .iter()
-            .any(|k| k == "console-afterburner-key"),
-        "console must be failover while SuperGrok dollar credits remain: {:?}",
-        sampling.failover_api_keys
-    );
-    let _ = AuthType::SessionToken;
-    clear_all_including_durable();
 }
-
-/// Named catalog contract: personal included SuperGrok period limits full with
-/// SuperGrok dollar credits remaining hops to a Business sibling that still
-/// has included remaining. Console stays off the hop list. Keep the
-/// single-identity SuperGrok dollar credits test above green (no sibling).
 #[test]
-#[serial]
-// Grok OSS: hop proof. Personal included SuperGrok period limits full hops to Business included before SuperGrok dollar credits. SuperGrok is paid.
-fn sampling_config_hops_to_sibling_included_before_dollar_credits() {
-    use crate::agent::auth_method::{LEGACY_XAI_API_KEY_ENV_VAR, XAI_API_KEY_ENV_VAR};
-    use crate::auth::{
-        PreferredAuthMethod, SupergrokAccountRole, SupergrokIdentityHeadroom,
-        SupergrokSessionCandidate,
+fn external_auth_with_a_models_endpoint_ignores_model_tables_and_allowed_models() {
+    let parse = |auth: &str| {
+        let raw: toml::Value = toml::from_str(&format!(
+            r#"
+            {auth}
+            [models]
+            default = "corp-build"
+            allowed_models = ["corp-build"]
+
+            [endpoints]
+            models_base_url = "https://proxy.example.com/v1"
+
+            [model.corp-build]
+            model = "corp-build"
+            base_url = "https://proxy.example.com/v1/"
+            context_window = 500000
+            "#
+        ))
+        .expect("parse test toml");
+        Config::new_from_toml_cfg(&raw).expect("config should parse")
     };
-    use xai_grok_sampler::clear_all_including_durable;
-
-    clear_all_including_durable();
-    let home = tempfile::TempDir::new().unwrap();
-    let _home = EnvGuard::set("GROK_HOME", home.path());
-    let _force = EnvGuard::set(crate::auth::credentials_store::FORCE_FILE_ENV, "1");
-    let _xai = EnvGuard::set(
-        XAI_API_KEY_ENV_VAR,
-        "console-must-wait-for-sibling-included",
-    );
-    let _legacy = EnvGuard::unset(LEGACY_XAI_API_KEY_ENV_VAR);
-
-    let sessions = vec![
-        SupergrokSessionCandidate {
-            headroom: SupergrokIdentityHeadroom {
-                identity_id: "personal-full-extras".into(),
-                role: SupergrokAccountRole::Personal,
-                included_remaining: 0,
-                reset_at: None,
-            },
-            access_token: "tok-personal-full-extras".into(),
-            prepaid_balance_cents: Some(10_029),
-            hard_expired: false,
-        },
-        SupergrokSessionCandidate {
-            headroom: SupergrokIdentityHeadroom {
-                identity_id: "business-included".into(),
-                role: SupergrokAccountRole::Business,
-                included_remaining: 55,
-                reset_at: None,
-            },
-            access_token: "tok-business-included".into(),
-            prepaid_balance_cents: None,
-            hard_expired: false,
-        },
-    ];
-    let proxy = crate::env::PROD_CLI_CHAT_PROXY_BASE_URL;
-    let model = test_model_entry("m", proxy, None, None, None);
-    let creds = resolve_credentials_preferring_with_supergrok_sessions(
-        &model,
-        &sessions,
-        Some(PreferredAuthMethod::Oidc),
-        true,
-    );
-    let sampling = sampling_config_for_model(&model, creds, None, None, None, None);
+    let external = parse("[auth]\nauth_provider_command = \"/usr/local/bin/provider\"");
+    let standard = parse("");
+    assert!(external.config_models.is_empty());
+    assert_eq!(None, external.models.allowed_models);
+    assert!(!resolve_model_list(&external, None).contains_key("corp-build"));
+    assert!(standard.config_models.contains_key("corp-build"));
     assert_eq!(
-        sampling.api_key.as_deref(),
-        Some("tok-personal-full-extras"),
-        "personal SuperGrok dollar credits stay primary; Team JWT is not the paying source; primary={:?} failover={:?}",
-        sampling.api_key,
-        sampling.failover_api_keys
+        Some(vec!["corp-build".to_owned()]),
+        standard.models.allowed_models
     );
-    assert!(
-        !sampling
-            .failover_api_keys
-            .iter()
-            .any(|k| k == "tok-business-included"),
-        "Team JWT omitted while personal SuperGrok dollar credits remain: {:?}",
-        sampling.failover_api_keys
-    );
-    assert!(
-        sampling
-            .failover_api_keys
-            .iter()
-            .any(|k| k == "console-must-wait-for-sibling-included"),
-        "console is failover after personal included exhaust while SuperGrok dollar credits remain: {:?}",
-        sampling.failover_api_keys
-    );
-    clear_all_including_durable();
 }
-
-/// Team remaining + personal exhausted: sampling hop uses Team SuperGrok,
-/// not personal SuperGrok dollar credits, not console.
-#[test]
-#[serial]
-// Grok OSS: hop proof. Team included remaining plus personal exhausted stays Team, not SuperGrok dollar credits or console. SuperGrok is paid.
-fn sampling_config_hop_team_remaining_personal_exhausted_not_dollars_or_console() {
-    use crate::agent::auth_method::{LEGACY_XAI_API_KEY_ENV_VAR, XAI_API_KEY_ENV_VAR};
-    use crate::auth::{
-        PreferredAuthMethod, SupergrokAccountRole, SupergrokIdentityHeadroom,
-        SupergrokSessionCandidate,
-    };
-    use xai_grok_sampler::clear_all_including_durable;
-
-    clear_all_including_durable();
-    let home = tempfile::TempDir::new().unwrap();
-    let _home = EnvGuard::set("GROK_HOME", home.path());
-    let _force = EnvGuard::set(crate::auth::credentials_store::FORCE_FILE_ENV, "1");
-    let _xai = EnvGuard::set(XAI_API_KEY_ENV_VAR, "console-must-wait");
-    let _legacy = EnvGuard::unset(LEGACY_XAI_API_KEY_ENV_VAR);
-
-    let sessions = vec![
-        SupergrokSessionCandidate {
-            headroom: SupergrokIdentityHeadroom {
-                identity_id: "personal-exhausted".into(),
-                role: SupergrokAccountRole::Personal,
-                included_remaining: 0,
-                reset_at: None,
-            },
-            access_token: "tok-personal-exhausted".into(),
-            prepaid_balance_cents: Some(10_029),
-            hard_expired: false,
+fn test_model_entry(
+    model: &str,
+    base_url: &str,
+    api_key: Option<&str>,
+    env_key: Option<&str>,
+    api_base_url: Option<&str>,
+) -> ModelEntry {
+    ModelEntry {
+        info: ModelInfo {
+            model: model.to_string(),
+            base_url: base_url.to_string(),
+            context_window: NonZeroU64::new(200_000).unwrap(),
+            ..Default::default()
         },
-        SupergrokSessionCandidate {
-            headroom: SupergrokIdentityHeadroom {
-                identity_id: "team-remaining".into(),
-                role: SupergrokAccountRole::Business,
-                included_remaining: 88,
-                reset_at: None,
-            },
-            access_token: "tok-team-included".into(),
-            prepaid_balance_cents: None,
-            hard_expired: false,
-        },
-    ];
-    let proxy = crate::env::PROD_CLI_CHAT_PROXY_BASE_URL;
-    let model = test_model_entry("m", proxy, None, None, None);
-    let creds = resolve_credentials_preferring_with_supergrok_sessions(
-        &model,
-        &sessions,
-        Some(PreferredAuthMethod::Oidc),
-        true,
-    );
-    let sampling = sampling_config_for_model(&model, creds, None, None, None, None);
-    assert_eq!(
-        sampling.api_key.as_deref(),
-        Some("tok-personal-exhausted"),
-        "personal SuperGrok dollar credits stay primary; Team JWT is not the paying source; primary={:?} failover={:?}",
-        sampling.api_key,
-        sampling.failover_api_keys
-    );
-    assert!(
-        !sampling
-            .failover_api_keys
-            .iter()
-            .any(|k| k == "tok-team-included"),
-        "Team JWT omitted while personal SuperGrok dollar credits remain: {:?}",
-        sampling.failover_api_keys
-    );
-    assert!(
-        sampling
-            .failover_api_keys
-            .iter()
-            .any(|k| k == "console-must-wait"),
-        "console is failover after personal included exhaust while SuperGrok dollar credits remain: {:?}",
-        sampling.failover_api_keys
-    );
-    clear_all_including_durable();
-}
-
-/// Personal remaining + Team exhausted: sampling hop uses personal SuperGrok.
-#[test]
-#[serial]
-// Grok OSS: hop proof. Personal included remaining plus Team exhausted stays personal SuperGrok. SuperGrok is paid.
-fn sampling_config_hop_personal_remaining_team_exhausted() {
-    use crate::agent::auth_method::{LEGACY_XAI_API_KEY_ENV_VAR, XAI_API_KEY_ENV_VAR};
-    use crate::auth::{
-        PreferredAuthMethod, SupergrokAccountRole, SupergrokIdentityHeadroom,
-        SupergrokSessionCandidate,
-    };
-    use xai_grok_sampler::clear_all_including_durable;
-
-    clear_all_including_durable();
-    let home = tempfile::TempDir::new().unwrap();
-    let _home = EnvGuard::set("GROK_HOME", home.path());
-    let _force = EnvGuard::set(crate::auth::credentials_store::FORCE_FILE_ENV, "1");
-    let _xai = EnvGuard::set(XAI_API_KEY_ENV_VAR, "console-must-wait");
-    let _legacy = EnvGuard::unset(LEGACY_XAI_API_KEY_ENV_VAR);
-
-    let sessions = vec![
-        SupergrokSessionCandidate {
-            headroom: SupergrokIdentityHeadroom {
-                identity_id: "team-exhausted".into(),
-                role: SupergrokAccountRole::Business,
-                included_remaining: 0,
-                reset_at: None,
-            },
-            access_token: "tok-team-exhausted".into(),
-            prepaid_balance_cents: Some(8_000),
-            hard_expired: false,
-        },
-        SupergrokSessionCandidate {
-            headroom: SupergrokIdentityHeadroom {
-                identity_id: "personal-remaining".into(),
-                role: SupergrokAccountRole::Personal,
-                included_remaining: 72,
-                reset_at: None,
-            },
-            access_token: "tok-personal-included".into(),
-            prepaid_balance_cents: None,
-            hard_expired: false,
-        },
-    ];
-    let proxy = crate::env::PROD_CLI_CHAT_PROXY_BASE_URL;
-    let model = test_model_entry("m", proxy, None, None, None);
-    let creds = resolve_credentials_preferring_with_supergrok_sessions(
-        &model,
-        &sessions,
-        Some(PreferredAuthMethod::Oidc),
-        true,
-    );
-    let sampling = sampling_config_for_model(&model, creds, None, None, None, None);
-    assert_eq!(
-        sampling.api_key.as_deref(),
-        Some("tok-personal-included"),
-        "sampling hop must use personal included SuperGrok period remaining; primary={:?} failover={:?}",
-        sampling.api_key,
-        sampling.failover_api_keys
-    );
-    assert!(
-        !sampling
-            .failover_api_keys
-            .iter()
-            .any(|k| k == "console-must-wait" || k == "tok-team-exhausted"),
-        "console and Team dollar credits stay off the hop list: {:?}",
-        sampling.failover_api_keys
-    );
-    clear_all_including_durable();
-}
-
-/// Both remaining: personal SuperGrok JWT first. Team JWT omitted. Console omitted.
-#[test]
-#[serial]
-// Grok OSS: hop proof. Both included remaining: Team first then personal; console omitted. SuperGrok is paid.
-fn sampling_config_hop_both_remaining_team_first_then_personal() {
-    use crate::agent::auth_method::{LEGACY_XAI_API_KEY_ENV_VAR, XAI_API_KEY_ENV_VAR};
-    use crate::auth::{
-        PreferredAuthMethod, SupergrokAccountRole, SupergrokIdentityHeadroom,
-        SupergrokSessionCandidate,
-    };
-    use xai_grok_sampler::clear_all_including_durable;
-
-    clear_all_including_durable();
-    let home = tempfile::TempDir::new().unwrap();
-    let _home = EnvGuard::set("GROK_HOME", home.path());
-    let _force = EnvGuard::set(crate::auth::credentials_store::FORCE_FILE_ENV, "1");
-    let _xai = EnvGuard::set(XAI_API_KEY_ENV_VAR, "console-must-wait");
-    let _legacy = EnvGuard::unset(LEGACY_XAI_API_KEY_ENV_VAR);
-
-    let sessions = vec![
-        SupergrokSessionCandidate {
-            headroom: SupergrokIdentityHeadroom {
-                identity_id: "personal-remaining".into(),
-                role: SupergrokAccountRole::Personal,
-                included_remaining: 94,
-                reset_at: None,
-            },
-            access_token: "tok-personal-included".into(),
-            prepaid_balance_cents: None,
-            hard_expired: false,
-        },
-        SupergrokSessionCandidate {
-            headroom: SupergrokIdentityHeadroom {
-                identity_id: "team-remaining".into(),
-                role: SupergrokAccountRole::Business,
-                included_remaining: 12,
-                reset_at: None,
-            },
-            access_token: "tok-team-included".into(),
-            prepaid_balance_cents: None,
-            hard_expired: false,
-        },
-    ];
-    let proxy = crate::env::PROD_CLI_CHAT_PROXY_BASE_URL;
-    let model = test_model_entry("m", proxy, None, None, None);
-    let creds = resolve_credentials_preferring_with_supergrok_sessions(
-        &model,
-        &sessions,
-        Some(PreferredAuthMethod::Oidc),
-        true,
-    );
-    let sampling = sampling_config_for_model(&model, creds, None, None, None, None);
-    assert_eq!(
-        sampling.api_key.as_deref(),
-        Some("tok-personal-included"),
-        "both remaining: personal SuperGrok included paying identity first; primary={:?} failover={:?}",
-        sampling.api_key,
-        sampling.failover_api_keys
-    );
-    assert!(
-        !sampling
-            .failover_api_keys
-            .iter()
-            .any(|k| k == "tok-team-included"),
-        "Team JWT omitted while personal SuperGrok included can pay: {:?}",
-        sampling.failover_api_keys
-    );
-    assert!(
-        !sampling
-            .failover_api_keys
-            .iter()
-            .any(|k| k == "console-must-wait"),
-        "console omitted while included SuperGrok period remains: {:?}",
-        sampling.failover_api_keys
-    );
-    clear_all_including_durable();
-}
-
-/// Both included SuperGrok period pools exhausted: SuperGrok dollar credits
-/// stay primary; console is failover only.
-#[test]
-#[serial]
-// Grok OSS: hop proof. Both included SuperGrok period pools exhausted: SuperGrok dollar credits before console. SuperGrok is paid.
-fn sampling_config_hop_both_included_exhausted_dollar_credits_before_console() {
-    use crate::agent::auth_method::{LEGACY_XAI_API_KEY_ENV_VAR, XAI_API_KEY_ENV_VAR};
-    use crate::auth::{
-        PreferredAuthMethod, SupergrokAccountRole, SupergrokIdentityHeadroom,
-        SupergrokSessionCandidate,
-    };
-    use xai_grok_sampler::clear_all_including_durable;
-
-    clear_all_including_durable();
-    let home = tempfile::TempDir::new().unwrap();
-    let _home = EnvGuard::set("GROK_HOME", home.path());
-    let _force = EnvGuard::set(crate::auth::credentials_store::FORCE_FILE_ENV, "1");
-    let _xai = EnvGuard::set(XAI_API_KEY_ENV_VAR, "console-after-dollars");
-    let _legacy = EnvGuard::unset(LEGACY_XAI_API_KEY_ENV_VAR);
-
-    let sessions = vec![
-        SupergrokSessionCandidate {
-            headroom: SupergrokIdentityHeadroom {
-                identity_id: "team-exhausted".into(),
-                role: SupergrokAccountRole::Business,
-                included_remaining: 0,
-                reset_at: None,
-            },
-            access_token: "tok-team-no-dollars".into(),
-            prepaid_balance_cents: Some(0),
-            hard_expired: false,
-        },
-        SupergrokSessionCandidate {
-            headroom: SupergrokIdentityHeadroom {
-                identity_id: "personal-dollars".into(),
-                role: SupergrokAccountRole::Personal,
-                included_remaining: 0,
-                reset_at: None,
-            },
-            access_token: "tok-personal-dollars".into(),
-            prepaid_balance_cents: Some(10_029),
-            hard_expired: false,
-        },
-    ];
-    let model = test_model_entry("m", "https://api.x.ai/v1", None, None, None);
-    let creds = resolve_credentials_preferring_with_supergrok_sessions(
-        &model,
-        &sessions,
-        Some(PreferredAuthMethod::Oidc),
-        true,
-    );
-    let sampling = sampling_config_for_model(&model, creds, None, None, None, None);
-    assert_eq!(
-        sampling.api_key.as_deref(),
-        Some("tok-personal-dollars"),
-        "SuperGrok dollar credits stay primary after both included pools are exhausted; primary={:?} failover={:?}",
-        sampling.api_key,
-        sampling.failover_api_keys
-    );
-    assert!(
-        sampling
-            .failover_api_keys
-            .iter()
-            .any(|k| k == "console-after-dollars"),
-        "console is failover only after SuperGrok dollar credits: {:?}",
-        sampling.failover_api_keys
-    );
-    clear_all_including_durable();
-}
-
-/// False 100% / missing SuperGrok Heavy: enrich must not flatten both
-/// identities to remaining 0 and hop to SuperGrok dollar credits.
-#[test]
-#[serial]
-// Grok OSS: hop proof. Missing SuperGrok Heavy plus false 100% must not flatten sibling included remaining. SuperGrok is paid.
-fn sampling_config_hop_missing_heavy_false_100_keeps_sibling_included() {
-    use crate::agent::auth_method::{LEGACY_XAI_API_KEY_ENV_VAR, XAI_API_KEY_ENV_VAR};
-    use crate::auth::{
-        IncludedBillingFields, PreferredAuthMethod, SupergrokAccountRole,
-        SupergrokIdentityHeadroom, SupergrokSessionCandidate,
-        enrich_candidates_with_included_billing,
-    };
-    use xai_grok_sampler::clear_all_including_durable;
-
-    clear_all_including_durable();
-    let home = tempfile::TempDir::new().unwrap();
-    let _home = EnvGuard::set("GROK_HOME", home.path());
-    let _force = EnvGuard::set(crate::auth::credentials_store::FORCE_FILE_ENV, "1");
-    let _xai = EnvGuard::set(XAI_API_KEY_ENV_VAR, "console-must-not-win");
-    let _legacy = EnvGuard::unset(LEGACY_XAI_API_KEY_ENV_VAR);
-
-    let mut sessions = vec![
-        SupergrokSessionCandidate {
-            headroom: SupergrokIdentityHeadroom {
-                identity_id: "personal-false-100".into(),
-                role: SupergrokAccountRole::Personal,
-                included_remaining: 1,
-                reset_at: None,
-            },
-            access_token: "tok-personal-false-100".into(),
-            prepaid_balance_cents: Some(10_029),
-            hard_expired: false,
-        },
-        SupergrokSessionCandidate {
-            headroom: SupergrokIdentityHeadroom {
-                identity_id: "team-had-remaining".into(),
-                role: SupergrokAccountRole::Business,
-                included_remaining: 94,
-                reset_at: None,
-            },
-            access_token: "tok-team-included".into(),
-            prepaid_balance_cents: None,
-            hard_expired: false,
-        },
-    ];
-    let mut fields = std::collections::BTreeMap::new();
-    fields.insert(
-        "personal-false-100".into(),
-        IncludedBillingFields {
-            usage_pct: Some(100.0),
-            reset_at: None,
-            period_type: None,
-            prepaid_balance_cents: Some(10_029),
-            grok_build_usage_pct: None,
-        },
-    );
-    fields.insert(
-        "team-had-remaining".into(),
-        IncludedBillingFields {
-            usage_pct: Some(100.0),
-            reset_at: None,
-            period_type: None,
-            prepaid_balance_cents: None,
-            grok_build_usage_pct: None,
-        },
-    );
-    let _ = enrich_candidates_with_included_billing(&mut sessions, &fields, |_| false);
-    let team = sessions
-        .iter()
-        .find(|s| s.headroom.identity_id == "team-had-remaining")
-        .expect("team session");
-    assert!(
-        team.headroom.included_remaining > 0,
-        "must not invent included SuperGrok period used 100% from creditUsagePercent without Heavy; remaining={}",
-        team.headroom.included_remaining
-    );
-
-    let proxy = crate::env::PROD_CLI_CHAT_PROXY_BASE_URL;
-    let model = test_model_entry("m", proxy, None, None, None);
-    let creds = resolve_credentials_preferring_with_supergrok_sessions(
-        &model,
-        &sessions,
-        Some(PreferredAuthMethod::Oidc),
-        true,
-    );
-    let sampling = sampling_config_for_model(&model, creds, None, None, None, None);
-    assert_eq!(
-        sampling.api_key.as_deref(),
-        Some("tok-personal-false-100"),
-        "missing Heavy / false 100% keeps personal SuperGrok paying JWT; primary={:?} failover={:?}",
-        sampling.api_key,
-        sampling.failover_api_keys
-    );
-    assert!(
-        !sampling
-            .failover_api_keys
-            .iter()
-            .any(|k| k == "tok-team-included" || k == "console-must-not-win"),
-        "Team JWT and console omitted while personal SuperGrok can pay: {:?}",
-        sampling.failover_api_keys
-    );
-    clear_all_including_durable();
-}
-
-/// SuperGrok dollar credits on both stored logins plus missing SuperGrok
-/// Heavy must not flatten Team remaining and hop to SuperGrok dollar credits.
-#[test]
-#[serial]
-// Grok OSS: hop proof. SuperGrok dollar credits on both plus missing SuperGrok Heavy keeps Team included remaining. SuperGrok is paid.
-fn sampling_config_hop_dollar_credits_on_both_missing_heavy_keeps_team() {
-    use crate::agent::auth_method::{LEGACY_XAI_API_KEY_ENV_VAR, XAI_API_KEY_ENV_VAR};
-    use crate::auth::{
-        IncludedBillingFields, PreferredAuthMethod, SupergrokAccountRole,
-        SupergrokIdentityHeadroom, SupergrokSessionCandidate,
-        enrich_candidates_with_included_billing,
-    };
-    use xai_grok_sampler::clear_all_including_durable;
-
-    clear_all_including_durable();
-    let home = tempfile::TempDir::new().unwrap();
-    let _home = EnvGuard::set("GROK_HOME", home.path());
-    let _force = EnvGuard::set(crate::auth::credentials_store::FORCE_FILE_ENV, "1");
-    let _xai = EnvGuard::set(XAI_API_KEY_ENV_VAR, "console-must-not-win");
-    let _legacy = EnvGuard::unset(LEGACY_XAI_API_KEY_ENV_VAR);
-
-    let mut sessions = vec![
-        SupergrokSessionCandidate {
-            headroom: SupergrokIdentityHeadroom {
-                identity_id: "personal-dollars".into(),
-                role: SupergrokAccountRole::Personal,
-                included_remaining: 1,
-                reset_at: None,
-            },
-            access_token: "tok-personal-dollars".into(),
-            prepaid_balance_cents: Some(10_029),
-            hard_expired: false,
-        },
-        SupergrokSessionCandidate {
-            headroom: SupergrokIdentityHeadroom {
-                identity_id: "team-had-remaining".into(),
-                role: SupergrokAccountRole::Business,
-                included_remaining: 88,
-                reset_at: None,
-            },
-            access_token: "tok-team-included".into(),
-            prepaid_balance_cents: Some(10_029),
-            hard_expired: false,
-        },
-    ];
-    let both = IncludedBillingFields {
-        usage_pct: Some(100.0),
-        reset_at: None,
-        period_type: None,
-        prepaid_balance_cents: Some(10_029),
-        grok_build_usage_pct: None,
-    };
-    let mut fields = std::collections::BTreeMap::new();
-    fields.insert("personal-dollars".into(), both.clone());
-    fields.insert("team-had-remaining".into(), both);
-    let _ = enrich_candidates_with_included_billing(&mut sessions, &fields, |_| false);
-    let team = sessions
-        .iter()
-        .find(|s| s.headroom.identity_id == "team-had-remaining")
-        .expect("team session");
-    assert!(
-        team.headroom.included_remaining > 0,
-        "must not invent included SuperGrok period exhaust from 100% + SuperGrok dollar credits + missing Heavy; remaining={}",
-        team.headroom.included_remaining
-    );
-
-    let proxy = crate::env::PROD_CLI_CHAT_PROXY_BASE_URL;
-    let model = test_model_entry("m", proxy, None, None, None);
-    let creds = resolve_credentials_preferring_with_supergrok_sessions(
-        &model,
-        &sessions,
-        Some(PreferredAuthMethod::Oidc),
-        true,
-    );
-    let sampling = sampling_config_for_model(&model, creds, None, None, None, None);
-    assert_eq!(
-        sampling.api_key.as_deref(),
-        Some("tok-personal-dollars"),
-        "100% + SuperGrok dollar credits on both + missing Heavy keeps personal SuperGrok paying JWT; primary={:?} failover={:?}",
-        sampling.api_key,
-        sampling.failover_api_keys
-    );
-    assert!(
-        !sampling
-            .failover_api_keys
-            .iter()
-            .any(|k| k == "tok-team-included"),
-        "Team JWT omitted while personal SuperGrok can pay: {:?}",
-        sampling.failover_api_keys
-    );
-    assert!(
-        !sampling
-            .failover_api_keys
-            .iter()
-            .any(|k| k == "console-must-not-win"),
-        "must not hop to console while any stored SuperGrok identity has included remaining"
-    );
-    clear_all_including_durable();
+        mtls_cert_dir: None,
+        api_key: api_key.map(|s| s.to_string()),
+        env_key: env_key.map(EnvKeys::single),
+        auth_provider: None,
+        api_base_url: api_base_url.map(|s| s.to_string()),
+    }
 }
