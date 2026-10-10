@@ -1301,6 +1301,11 @@ impl AcpUpdateTracker {
         if text.is_empty() {
             return false;
         }
+        // The optimistic paint already shows these words. Adopting that row
+        // as the streaming reply would glue the real answer onto them.
+        if agent_chunk_repeats_visible_agent_words(self.current_agent_msg, scrollback, &text) {
+            return false;
+        }
         self.peel_user_facing_draft_from_current_thinking(scrollback);
         self.finish_thinking(scrollback, false);
         let is_new = self.current_agent_msg.is_none();
@@ -1756,6 +1761,11 @@ impl AcpUpdateTracker {
             }
             return false;
         }
+        // Agent words do not take the green operator accent. This runs after
+        // the local-echo skip so an optimistic block stays the only copy.
+        if prompt_text_is_agent_authored(meta.prompt_id.as_deref(), &text) {
+            return paint_agent_authored_user_chunk(scrollback, &text);
+        }
         let prompt_index = chunk
             .meta
             .as_ref()
@@ -1765,9 +1775,17 @@ impl AcpUpdateTracker {
         if let Some(segments) = combined_display_texts_from_chunk(&chunk) {
             let mut last_id = None;
             for seg in &segments {
-                last_id = Some(scrollback.push_block(RenderBlock::UserPrompt(
-                    crate::scrollback::blocks::UserPromptBlock::new(seg.clone()),
-                )));
+                last_id = Some(
+                    if prompt_text_is_agent_authored(meta.prompt_id.as_deref(), seg) {
+                        let id = scrollback.push_block(RenderBlock::agent_message(seg.clone()));
+                        scrollback.set_entry_running(id, true);
+                        id
+                    } else {
+                        scrollback.push_block(RenderBlock::UserPrompt(
+                            crate::scrollback::blocks::UserPromptBlock::new(seg.clone()),
+                        ))
+                    },
+                );
             }
             if let (Some(pi), Some(id)) = (prompt_index, last_id)
                 && let Some(entry) = scrollback.get_by_id_mut(id)
@@ -1856,6 +1874,69 @@ impl AcpUpdateTracker {
         true
     }
 }
+/// Agent words do not take the green operator accent.
+/// `parent-message-` is the Operator. A scheduler-fired echo stays an operator prompt.
+pub(crate) fn prompt_text_is_agent_authored(prompt_id: Option<&str>, text: &str) -> bool {
+    if let Some(pid) = prompt_id.filter(|id| !id.is_empty()) {
+        match xai_grok_shell::session::PromptOrigin::from_prompt_id(pid) {
+            xai_grok_shell::session::PromptOrigin::ParentAgentMessage { .. }
+            | xai_grok_shell::session::PromptOrigin::PlanResume => return true,
+            _ => {}
+        }
+    }
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    let implement = crate::views::plan_approval_view::PLAN_APPROVED_IMPLEMENT_MESSAGE;
+    let review = crate::views::plan_approval_view::PLAN_APPROVED_REVIEW_COMMENTS_LEAD;
+    trimmed.starts_with(implement) || trimmed.starts_with(review)
+}
+
+/// Paint agent-authored words that arrived as a user chunk.
+/// White body. Magenta `accent_running` while this entry is running. No rail after finish.
+fn paint_agent_authored_user_chunk(scrollback: &mut ScrollbackState, text: &str) -> bool {
+    if let Some(idx) = scrollback.len().checked_sub(1)
+        && let Some(entry) = scrollback.get(idx)
+        && let RenderBlock::AgentMessage(block) = &entry.block
+        && block.text() == text
+    {
+        if !entry.is_running {
+            let id = entry.id;
+            scrollback.set_entry_running(id, true);
+        }
+        return false;
+    }
+    let entry_id = scrollback.push_block(RenderBlock::agent_message(text.to_string()));
+    scrollback.set_entry_running(entry_id, true);
+    true
+}
+
+/// True when this chunk is a second copy of agent words already on screen.
+fn agent_chunk_repeats_visible_agent_words(
+    current_agent_msg: Option<EntryId>,
+    scrollback: &ScrollbackState,
+    text: &str,
+) -> bool {
+    if let Some(id) = current_agent_msg
+        && let Some(entry) = scrollback.get_by_id(id)
+        && let RenderBlock::AgentMessage(block) = &entry.block
+        && block.text() == text
+    {
+        return true;
+    }
+    if current_agent_msg.is_none()
+        && let Some(idx) = scrollback.len().checked_sub(1)
+        && let Some(entry) = scrollback.get(idx)
+        && entry.is_running
+        && let RenderBlock::AgentMessage(block) = &entry.block
+        && block.text() == text
+    {
+        return true;
+    }
+    false
+}
+
 /// Per-prompt display strings from combine ([`user_prompt_meta::COMBINED_DISPLAY_TEXTS`]).
 fn combined_display_texts_from_chunk(chunk: &acp::ContentChunk) -> Option<Vec<String>> {
     let acp::ContentBlock::Text(t) = &chunk.content else {

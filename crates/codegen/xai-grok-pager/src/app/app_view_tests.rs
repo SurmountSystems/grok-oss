@@ -8803,13 +8803,22 @@ fn closed_plan_header_opens_limits_and_credits_without_a_false_percent() {
         let card = screen_of(&modal, modal_area);
         let tab_line = card
             .lines()
-            .find(|line| line.contains("Limits") && line.contains("Credits"))
+            .find(|line| line.contains("Personal") && line.contains("Business"))
             .unwrap_or("");
-        let limits_at = tab_line.find("Limits").unwrap_or(usize::MAX);
-        let credits_at = tab_line.find("Credits").unwrap_or(0);
+        let personal_at = tab_line.find("Personal").unwrap_or(usize::MAX);
+        let business_at = tab_line.find("Business").unwrap_or(0);
         assert!(
-            limits_at < credits_at,
-            "opening the card through dispatch_show_limits shows Limits before Credits:\n{card}"
+            personal_at < business_at,
+            "opening the card through dispatch_show_limits shows Personal before Business:\n{card}"
+        );
+        let limits_section = card.lines().position(|line| line.trim() == "Limits");
+        let credits_section = card.lines().position(|line| line.trim() == "Credits");
+        assert!(
+            matches!(
+                (limits_section, credits_section),
+                (Some(limits_at), Some(credits_at)) if limits_at < credits_at
+            ),
+            "Limits and Credits are sections inside the open tab, and Limits comes before Credits:\n{card}"
         );
         let Some(crate::views::modal::ActiveModal::Limits { state }) = opened.active_modal.as_ref()
         else {
@@ -9590,13 +9599,22 @@ fn clicking_the_header_credits_chip_switches_the_next_request_to_included_period
     let card = screen_of(&modal, modal_area);
     let tab_line = card
         .lines()
-        .find(|line| line.contains("Limits") && line.contains("Credits"))
+        .find(|line| line.contains("Personal") && line.contains("Business"))
         .unwrap_or("");
-    let limits_at = tab_line.find("Limits").unwrap_or(usize::MAX);
-    let credits_at = tab_line.find("Credits").unwrap_or(0);
+    let personal_at = tab_line.find("Personal").unwrap_or(usize::MAX);
+    let business_at = tab_line.find("Business").unwrap_or(0);
     assert!(
-        limits_at < credits_at,
-        "the card still opens with Limits before Credits:\n{card}"
+        personal_at < business_at,
+        "the card still opens with Personal before Business:\n{card}"
+    );
+    let limits_section = card.lines().position(|line| line.trim() == "Limits");
+    let credits_section = card.lines().position(|line| line.trim() == "Credits");
+    assert!(
+        matches!(
+            (limits_section, credits_section),
+            (Some(limits_at), Some(credits_at)) if limits_at < credits_at
+        ),
+        "Limits and Credits are sections inside the open tab, and Limits comes before Credits:\n{card}"
     );
     let Some(crate::views::modal::ActiveModal::Limits { state }) = opened.active_modal.as_ref()
     else {

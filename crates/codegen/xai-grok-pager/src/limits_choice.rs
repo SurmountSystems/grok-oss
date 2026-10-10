@@ -96,7 +96,7 @@ fn same_home(left: &Path, right: &Path) -> bool {
     if left == right {
         return true;
     }
-    match (left.canonicalize(), right.canonicalize()) {
+    match (dunce::canonicalize(left), dunce::canonicalize(right)) {
         (Ok(left_home), Ok(right_home)) => left_home == right_home,
         _ => false,
     }

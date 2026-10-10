@@ -4886,6 +4886,194 @@ fn replay_hides_user_echo_by_origin_type() {
     );
     assert_eq!(sb.len(), 3);
 }
+
+/// Agent words do not take the green operator accent.
+/// While that turn is active the left rail is magenta (`accent_running`).
+/// The words stay white (`text_primary`). A finished turn has no rail.
+/// The Operator's own rail stays green (`accent_user`) and those words stay white.
+#[test]
+fn agent_words_do_not_take_the_green_operator_accent() {
+    use crate::appearance::AppearanceConfig;
+    use crate::scrollback::block::BlockContent;
+    use crate::views::plan_approval_view::{
+        PLAN_APPROVED_IMPLEMENT_MESSAGE, PLAN_APPROVED_REVIEW_COMMENTS_LEAD,
+    };
+    use ratatui::style::Color;
+
+    let _lock = crate::theme::cache::test_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    crate::theme::cache::reset_for_test();
+    crate::theme::cache::set(crate::theme::ThemeKind::Doge);
+
+    let theme = crate::theme::Theme::current();
+    let magenta = Color::Rgb(255, 0, 255);
+    let green = Color::Rgb(0, 255, 0);
+    let white = theme.text_primary;
+    assert_eq!(theme.accent_running, magenta, "DOGE agent magenta");
+    assert_eq!(theme.accent_user, green, "DOGE operator green");
+    assert_eq!(white, Color::Rgb(255, 255, 255));
+    assert_ne!(theme.accent_running, theme.accent_user);
+
+    let appearance = AppearanceConfig::default();
+    let mut sb = ScrollbackState::new();
+    let mut tracker = AcpUpdateTracker::new();
+
+    assert!(
+        tracker.handle_update(
+            user_message(PLAN_APPROVED_IMPLEMENT_MESSAGE),
+            &meta(),
+            &mut sb
+        ),
+        "the inserted paraphrase stays visible"
+    );
+    assert_eq!(sb.len(), 1);
+    let paraphrase = sb.get(0).expect("paraphrase entry");
+    let RenderBlock::AgentMessage(block) = &paraphrase.block else {
+        panic!(
+            "agent words do not take the green operator accent, got {:?}",
+            std::mem::discriminant(&paraphrase.block)
+        );
+    };
+    assert_eq!(block.text(), PLAN_APPROVED_IMPLEMENT_MESSAGE);
+    assert!(paraphrase.is_running, "an active agent turn keeps a rail");
+    let running = paraphrase.context(80, &appearance, None);
+    let accent = paraphrase
+        .block
+        .accent(&running)
+        .expect("an active agent turn paints a left accent");
+    assert_eq!(accent.color, magenta);
+    assert_eq!(accent.color, theme.accent_running);
+    assert_ne!(accent.color, green);
+    assert_ne!(accent.color, theme.accent_user);
+    let mut finished = running.clone();
+    finished.is_running = false;
+    assert!(
+        paraphrase.block.accent(&finished).is_none(),
+        "a finished turn has no rail"
+    );
+    let out = paraphrase.block.output(&finished);
+    let mut saw_body = false;
+    for line in &out.lines {
+        for span in &line.content.spans {
+            if !span.content.contains("approved") {
+                continue;
+            }
+            saw_body = true;
+            assert_eq!(span.style.fg, Some(white), "agent words stay white");
+            assert_eq!(span.style.fg, Some(theme.text_primary));
+            assert_ne!(span.style.fg, Some(theme.accent_user));
+            assert_ne!(span.style.fg, Some(green));
+        }
+    }
+    assert!(saw_body, "the paraphrase body was painted");
+
+    assert!(
+        !tracker.handle_update(
+            agent_chunk(PLAN_APPROVED_IMPLEMENT_MESSAGE),
+            &meta(),
+            &mut sb,
+        ),
+        "a second copy of the same agent words is not another green prompt"
+    );
+    assert_eq!(sb.len(), 1, "the echo does not add a second block");
+
+    let review = format!("{PLAN_APPROVED_REVIEW_COMMENTS_LEAD}\nship it");
+    assert!(tracker.handle_update(user_message(&review), &meta(), &mut sb));
+    let review_entry = sb.get(sb.len() - 1).expect("review lead");
+    assert!(
+        matches!(review_entry.block, RenderBlock::AgentMessage(_)),
+        "the review-comments lead is not an operator prompt"
+    );
+
+    assert!(tracker.handle_update(
+        user_message("check the build"),
+        &meta_with_prompt_id("parent-agent-message-abc"),
+        &mut sb,
+    ));
+    let parent_agent = sb.get(sb.len() - 1).expect("parent agent words");
+    assert!(
+        matches!(parent_agent.block, RenderBlock::AgentMessage(_)),
+        "parent-agent text is not an operator prompt"
+    );
+    assert!(parent_agent.is_running);
+    let parent_accent = parent_agent
+        .block
+        .accent(&parent_agent.context(80, &appearance, None))
+        .expect("active parent-agent rail");
+    assert_eq!(parent_accent.color, magenta);
+    assert_ne!(parent_accent.color, theme.accent_user);
+
+    assert!(tracker.handle_update(
+        user_message("resume after approve"),
+        &meta_with_prompt_id("plan-resume-1"),
+        &mut sb,
+    ));
+    let plan_resume = sb.get(sb.len() - 1).expect("plan resume");
+    assert!(
+        matches!(plan_resume.block, RenderBlock::AgentMessage(_)),
+        "plan resume is not an operator prompt"
+    );
+
+    assert!(tracker.handle_update(user_message("hello from the operator"), &meta(), &mut sb,));
+    let operator = sb.get(sb.len() - 1).expect("operator message");
+    let RenderBlock::UserPrompt(op_block) = &operator.block else {
+        panic!("the operator message stays an operator prompt");
+    };
+    assert_eq!(op_block.text, "hello from the operator");
+    let op_accent = operator
+        .block
+        .accent(&operator.context(80, &appearance, None))
+        .expect("the operator prompt keeps a left accent");
+    assert_eq!(op_accent.color, green);
+    assert_eq!(op_accent.color, theme.accent_user);
+    assert_ne!(op_accent.color, magenta);
+    let op_out = operator
+        .block
+        .output(&operator.context(80, &appearance, None));
+    let mut saw_operator = false;
+    for line in &op_out.lines {
+        for span in &line.content.spans {
+            if !span.content.contains("hello from the operator") {
+                continue;
+            }
+            saw_operator = true;
+            assert_eq!(span.style.fg, Some(white), "operator words stay white");
+            assert_eq!(span.style.fg, Some(theme.text_primary));
+            assert_ne!(span.style.fg, Some(theme.accent_user));
+            assert_ne!(span.style.fg, Some(green));
+        }
+    }
+    assert!(saw_operator, "the operator message body was painted");
+
+    assert!(tracker.handle_update(
+        user_message("hello from the parent operator"),
+        &meta_with_prompt_id("parent-message-abc"),
+        &mut sb,
+    ));
+    let parent_human = sb.get(sb.len() - 1).expect("parent operator");
+    let RenderBlock::UserPrompt(parent_block) = &parent_human.block else {
+        panic!("parent-message- stays the operator prompt");
+    };
+    assert_eq!(parent_block.text, "hello from the parent operator");
+    let parent_human_accent = parent_human
+        .block
+        .accent(&parent_human.context(80, &appearance, None))
+        .expect("parent operator rail");
+    assert_eq!(parent_human_accent.color, green);
+    assert_eq!(parent_human_accent.color, theme.accent_user);
+
+    assert!(tracker.handle_update(
+        user_message("please check the CI status"),
+        &meta_with_prompt_id("scheduler-fired-abc"),
+        &mut sb,
+    ));
+    let scheduled = sb.get(sb.len() - 1).expect("scheduler echo");
+    assert!(
+        matches!(scheduled.block, RenderBlock::UserPrompt(_)),
+        "a scheduler-fired echo stays an operator prompt"
+    );
+}
 /// Helper: UserMessageChunk with `skillTokenRanges` in content-block meta.
 fn user_message_with_token_ranges(text: &str, ranges: serde_json::Value) -> acp::SessionUpdate {
     let mut meta_map = acp::Meta::new();

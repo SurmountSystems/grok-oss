@@ -451,8 +451,10 @@ fn blocking_account_billing(token: &str, user_id: &str) -> Option<AccountBilling
 /// That account's own `GET /v1/billing?format=credits` response.
 ///
 /// A fixture token is not a session JWT, so this does not call the proxy.
-/// A failed call is remembered as a failure. The section then uses that
-/// role's stored included percent and leaves prepaid empty.
+/// A failed call is remembered as a failure. The section then leaves
+/// included usage and prepaid empty. It does not copy a stored poll
+/// percent onto the section. The four cells still show each session's
+/// own stored poll.
 fn live_account_billing(
     role: xai_grok_shell::auth::SupergrokAccountRole,
 ) -> Option<AccountBillingFields> {
@@ -488,9 +490,10 @@ fn account_billing_fields(
     if let Some(live) = live_account_billing(role) {
         return live;
     }
-    let stored = xai_grok_shell::auth::limits_pins::stored_supergrok_reading_for_role(role);
+    // A stored poll percent belongs on that session's cell. Copying it
+    // here paints the same `limits N%` on the section and on the cell.
     AccountBillingFields {
-        usage_pct: stored.usage_pct,
+        usage_pct: None,
         prepaid_cents: None,
         unified: None,
     }
@@ -1010,10 +1013,7 @@ fn apply_account_limits_choice(state: &LimitsModalState) -> LimitsModalOutcome {
     if xai_grok_shell::auth::limits_pins::select_supergrok_meter_cell(cell).is_err() {
         return LimitsModalOutcome::Unchanged;
     }
-    xai_grok_pager::limits_choice::broadcast_included_limits_choice(
-        identity,
-        MeterSource::Included,
-    );
+    crate::limits_choice::broadcast_included_limits_choice(identity, MeterSource::Included);
     LimitsModalOutcome::Changed
 }
 
@@ -6495,6 +6495,23 @@ mod tests {
         .expect("write other account auth");
     }
 
+    /// Nix has `/bin/sh` and coreutils `sleep` on `PATH`. It does not have
+    /// `/bin/sleep`. A symlink named `grok-oss-peer` that points at coreutils
+    /// `sleep` exits at once, because that multi-call binary reads argv0.
+    /// This shell stays up, and the command line still contains `grok`.
+    #[cfg(unix)]
+    fn peer_shell() -> std::path::PathBuf {
+        let candidate = if std::path::Path::new("/bin/sh").is_file() {
+            std::path::PathBuf::from("/bin/sh")
+        } else {
+            std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+                .map(|dir| dir.join("sh"))
+                .find(|path| path.is_file())
+                .unwrap_or_else(|| std::path::PathBuf::from("/bin/sh"))
+        };
+        dunce::canonicalize(&candidate).unwrap_or(candidate)
+    }
+
     /// A live process whose command line contains `grok`. Its grok home is
     /// `home`. This is the other grok-oss process on the L0 list. It does not
     /// implement a limits command. The process group stays alive until this
@@ -6523,13 +6540,12 @@ mod tests {
             }
             #[cfg(unix)]
             {
-                let bin_dir = home.path().join("sleep-bin");
-                std::fs::create_dir_all(&bin_dir).expect("peer bin dir");
-                let exe = bin_dir.join("grok-oss-peer");
-                std::os::unix::fs::symlink("/bin/sleep", &exe).expect("grok sleeper name");
-                let mut command = std::process::Command::new(&exe);
+                let shell = peer_shell();
+                let mut command = std::process::Command::new(&shell);
                 command
-                    .arg("120")
+                    .arg("-c")
+                    .arg("while :; do sleep 120; done")
+                    .arg("grok-oss-peer")
                     .env("GROK_HOME", home.path())
                     .current_dir(home.path())
                     .stdin(std::process::Stdio::null())

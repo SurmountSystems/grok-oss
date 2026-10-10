@@ -1040,13 +1040,25 @@ Operator: remember to work on everything with parallel L2s. When a job has more 
 
 ## Plans do not queue disjoint work (pinned 2026-10-10)
 
-Operator: the plan kept assuming the work should run serially. That assumption is the mistake.
-
 When a plan has more than one contract, and the write sets do not share a file, the plan starts those contracts together. It does not number them so that one waits until the previous one finishes. A sentence such as "the product fix runs after the failing check" is that serial assumption. Do not write it.
 
 A live `just check-remote` is the one builder job. It does not freeze the other write sets. When the tests for a contract are in the tree, start one L2 per disjoint write set in that same turn. One check at a time. Implementors do not start that recipe. The green check runs once, when those writers have landed, because a second check on a half-written tree is another wait. The writers do not wait for `CHECK_EXIT`.
 
 This does not weaken red-then-green. The tests stay. Do not weaken them to match the code.
+
+## Stage the one new Rust file (pinned 2026-10-10)
+
+Do not attribute a sentence to the Operator unless the Operator said that sentence. A paraphrase labeled Operator is forbidden.
+
+Do not paste the module into a file git already tracks.
+
+Nix omits untracked Rust. The action is `git add` on that one path. Stage nothing else. Do not commit. Do not push. A rewrite that hides the module inside `lib.rs` is the mistake.
+
+## An L2 that compacts before 10 minutes did the edit (pinned 2026-10-10)
+
+An L2 coordinates. The file edit is an L3. An L2 that compacts before 10 minutes did the edit itself. That is the failure. Spawn an L3 for the edit instead of continuing the edit on the L2. There is no L4. An L3 implements, researches, or reviews. An L3 does not coordinate and does not spawn.
+
+The older sentence that easy work can stay on an L2 does not cover a file edit that fills the L2. When they disagree, the edit goes to an L3.
 
 ## Take the Operator seriously (pinned 2026-09-09)
 

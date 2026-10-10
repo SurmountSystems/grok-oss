@@ -1019,12 +1019,24 @@ impl SessionActor {
                     .is_some_and(|q| q.trim() == original_prompt_text.trim())
                 && !original_prompt_text.trim().is_empty();
             let echo_mode = user_echo_mode(prompt_id, &input_origin);
+            let agent_spoken = matches!(
+                input_origin.as_prompt_origin(),
+                PromptOrigin::ParentAgentMessage { .. } | PromptOrigin::PlanResume
+            );
             if !skip_duplicate_user_query {
                 for block in prompt_blocks.iter() {
-                    let update = acp::SessionUpdate::UserMessageChunk(
-                        acp::ContentChunk::new(block.clone()).meta(user_chunk_meta.clone()),
-                    );
-                    let notification_meta = self.build_notification_meta();
+                    let chunk = acp::ContentChunk::new(block.clone()).meta(user_chunk_meta.clone());
+                    // Agent words, plan reminders, and the implement paraphrase
+                    // are not an Operator message.
+                    let update = if agent_spoken {
+                        acp::SessionUpdate::AgentMessageChunk(chunk)
+                    } else {
+                        acp::SessionUpdate::UserMessageChunk(chunk)
+                    };
+                    let mut notification_meta = self.build_notification_meta();
+                    if agent_spoken && let Some(obj) = notification_meta.as_object_mut() {
+                        obj.insert("promptId".to_string(), prompt_id.into());
+                    }
                     let notification =
                         acp::SessionNotification::new(self.session_info.id.clone(), update)
                             .meta(notification_meta.as_object().cloned());
