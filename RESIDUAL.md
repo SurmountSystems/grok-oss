@@ -68,19 +68,17 @@ or code — not only here. Closed campaign history:
   processes were SIGKILL'd (`ld returned 137`, 128+9) while linking
   `xai-grok-shell` test binaries including `test_leader_death_repro`.
   That is not a rustc type error. Not a test to skip. The builder host
-  has about 256GiB RAM; nix-daemon MemoryMax is 32GiB. cargo-mem-guard
+  has about 256GiB RAM. The measured nix-daemon MemoryMax is 192G. This session did not lower it. cargo-mem-guard
   reads host `/proc/meminfo`, so wrapping quality nextest would not
   have restarted. **Landed in tree:** nextest `--build-jobs` (and
-  `cargo test --doc --jobs`, named-test `cargo test --jobs`) capped at
-  4 (`CARGO_LINK_JOBS`); clippy stays at 32; `just nix_retry` retries
+  `cargo test --doc --jobs`, named-test `cargo test --jobs`) link jobs are
+  32 (`CARGO_LINK_JOBS`); compile jobs are 64; `just nix_retry` retries
   `ld returned 137` instead of fail-fast could-not-compile. Quality
   clippy-as-check is workspace `--all-targets` (members include
   grok-nix-helper and cargo-mem-guard), so a helper `E0106` fails at
   clippy instead of a late `cargo test`. Named-test stays one
   cargo kind (no late helper `cargo test` there). **Leftover is
-  operator-owned:** retry `just check-remote` on this new drv. If
-  four parallel mold links still SIGKILL, raise nix-daemon MemoryMax
-  on the VPS (32GiB on a 256GiB host is the cgroup, not host RAM).
+  operator-owned:** retry `just check-remote` on this new drv. Link jobs are 32 and compile jobs are 64. The measured nix-daemon MemoryMax is 192G. This session did not lower it.
   Do not drop `--locked`. Named tests: `linker_sigkill_is_transient_even_when_could_not_compile`,
   `test-nix-retry-linker-sigkill-retries`, quality/named-test
   `--build-jobs` `$CARGO_LINK_JOBS` contracts,

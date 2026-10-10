@@ -116,7 +116,7 @@ less than product code and tests. Do not invent long essays or git nags.
    under 3b-remote-check (pinned 2026-09-02). That supersedes the
    2026-08-25 forbid on `just check-remote` and the 2026-08-22 "whenever
    useful" line. Force-remote recipe details (max-jobs 0, `--store`
-   ssh-ng, `--eval-store auto`, `--cores 64`, cargo jobs cap 32) still
+   ssh-ng, `--eval-store auto`, `--cores 64`, compile jobs are 64 and link jobs are 32) still
    describe how the operator's recipes work. Host dual-pin:
    `~/.grok/AGENTS.md`.
 3b-remote-check. **Agents may run just check-remote (pinned 2026-09-02).**
@@ -189,7 +189,7 @@ less than product code and tests. Do not invent long essays or git nags.
    inner `--jobs` is then ignored and the operator sees one clippy-driver
    with idle cores. Lint with builtin `cargo check` plus
    `RUSTC_WORKSPACE_WRAPPER=clippy-driver` under a GNU make jobserver with
-   `$CARGO_BUILD_JOBS` tokens (from `--cores 64`, cap 32). One
+   `$CARGO_BUILD_JOBS` tokens (from `--cores 64`). Compile jobs are 64 and link jobs are 32. The measured nix-daemon MemoryMax is 192G. This session did not lower it. One
    clippy-driver process is still one typeck thread; independent crates
    must run at once. Passing `--jobs` on `cargo clippy` is not the fix.
    Host dual-pin: `~/.grok/AGENTS.md`.
@@ -1599,7 +1599,7 @@ cannot fail a deleted catalog test. Catalog:
   it. `--option system-features` that omit `big-parallel` does not stop local
   nixbld: the daemon still advertises `big-parallel`. Force-remote nix also
   passes `--cores 64` so workspace rustc can use the builder's cores. Cargo
-  on that derivation passes `--jobs` from those cores, capped at 32
+  on that derivation passes `--jobs` from those cores. Compile jobs are 64
   (`cargo check --jobs`, never global `cargo --jobs`; cargo 1.97 has no
   global `--jobs`). Quality does not run `cargo clippy` (that external
   dispatcher plus a 1-token jobserver ignores `--jobs`). Workspace lint is
@@ -1618,11 +1618,12 @@ cannot fail a deleted catalog test. Catalog:
   rustc workers. Do not raise Nix max-jobs to fix a single busy rustc.
   Laptop local max-jobs stay this laptop's cores for `just check` / `just ci`.
   Host machines max-jobs is how many jobs we send to the remote. `--cores 64`
-  sets `NIX_BUILD_CORES` inside a derivation. Cargo jobs 32 is an OOM hedge
-  for clippy/check, not 64 Nix jobs. nextest compile/link uses
-  `--build-jobs` capped at 4 (`CARGO_LINK_JOBS`): 32 parallel mold links
-  were SIGKILL'd (`ld returned 137`) under the builder nix-daemon 32GiB
-  MemoryMax. Host MemAvailable is larger; cargo-mem-guard reads
+  sets `NIX_BUILD_CORES` inside a derivation. Compile jobs are 64 for
+  clippy/check, not 64 Nix jobs. nextest compile/link uses
+  `--build-jobs` with link jobs at 32 (`CARGO_LINK_JOBS`). 32 parallel mold links
+  were SIGKILL'd (`ld returned 137`) when that cgroup was described as 32GiB.
+  The measured nix-daemon MemoryMax is 192G. This session did not lower it.
+  Host MemAvailable is larger; cargo-mem-guard reads
   `/proc/meminfo` and would not restart. Force-remote recipes pass `--option max-jobs 0` on the
   caller so this laptop does not curl crates.io or static.rust-lang.org
   for that gate. They also pass `--store` ssh-ng (the machines-file
