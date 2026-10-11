@@ -3597,6 +3597,14 @@ impl PromptWidget {
             .cursor_pos_with_state(ta_area, self.textarea_state);
         // The software box caret is the insertion point. The hardware cursor stays hidden.
         let caret_cell = interim_caret.or(layout_cursor_pos);
+        // A full row keeps the caret on the last content cell (`col >= tw`).
+        // That cell is still the typed character. Ghost text starts at the
+        // unclamped insertion column, which is the row edge, so width is 0
+        // and an ellipsis is not painted over the last letter.
+        let ghost_anchor = self
+            .textarea
+            .screen_position_of(self.textarea.cursor(), ta_area, self.textarea_state)
+            .or(layout_cursor_pos);
 
         // Ghost suffixes (shell completion / predicted prompt)
         // Unfocused composers skip ghosts. Voice interim owns the end-of-text cells when shown.
@@ -3605,7 +3613,7 @@ impl PromptWidget {
                 && self.textarea.cursor() == self.textarea.text().len()
                 && !slash_active
                 && !slash_has_inline_ghost
-                && let Some((cx, cy)) = layout_cursor_pos
+                && let Some((cx, cy)) = ghost_anchor
             {
                 let avail = (ta_area.x + ta_area.width).saturating_sub(cx) as usize;
                 if avail > 0 {
@@ -3615,7 +3623,7 @@ impl PromptWidget {
             }
 
             if let Some(ghost) = self.prompt_suggestion_ghost()
-                && let Some((cx, cy)) = layout_cursor_pos
+                && let Some((cx, cy)) = ghost_anchor
             {
                 let avail = (ta_area.x + ta_area.width).saturating_sub(cx) as usize;
                 if avail > 0 {

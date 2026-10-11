@@ -15,7 +15,7 @@ use ratatui::text::{Line, Span};
 use crate::theme::Theme;
 use crate::views::limits_honesty::NOTE_LIMITS_PRINTOUT_NOT_USAGE;
 use crate::views::limits_snapshot::{
-    AllowanceMeterTone, LimitsSnapshot, countdown_is_zero, earliest_reset_at,
+    AllowanceMeterTone, IncludedSource, LimitsSnapshot, countdown_is_zero, earliest_reset_at,
     format_limits_detail_with_meter_source, format_reset_countdown,
 };
 use crate::views::modal_window::{
@@ -191,25 +191,12 @@ fn tone_color(tone: AllowanceMeterTone, theme: &Theme) -> ratatui::style::Color 
 
 /// Personal and Business are the tabs. Limits and Credits are sections
 /// inside the open tab. Personal is first and is the default open tab.
-/// The Business tab still lists personal credits and console API credits
-/// so those two balances stay on the second tab.
+/// Each tab is that account's billing response only.
 const CARD_TABS: &[&str] = &["Personal", "Business"];
 /// Default open tab. Personal.
 pub(crate) const LIMITS_TAB: usize = 0;
-/// Second tab. Business. Personal credits and console API credits stay here.
+/// Second tab. Business. That account's response only, not the personal one.
 const CREDITS_TAB: usize = 1;
-
-/// Limits tab copy. The status row does not use this phrase.
-fn linear_week_label(pacing: xai_grok_shell::token_economy::PeriodPacing) -> String {
-    let points = pacing.abs_delta_rounded();
-    if points == 0 {
-        "on a linear week".to_string()
-    } else if pacing.delta_pct > 0.0 {
-        format!("{points}% ahead of a linear week")
-    } else {
-        format!("{points}% behind a linear week")
-    }
-}
 
 /// `$GROK_HOME` on each call. The process grok home OnceLock misses a
 /// fixture home written after the lock.
@@ -302,62 +289,16 @@ pub(crate) fn team_postpaid_billing_credits_remaining_dollars() -> Option<String
     Some(format_remaining_cents_as_dollars(cents))
 }
 
-fn limits_tab_lines(
-    state: &LimitsModalState,
-    now: DateTime<Utc>,
-    draws_included: bool,
-) -> Vec<String> {
-    let mut lines = match (draws_included, state.snapshot.primary.included.as_ref()) {
-        (true, Some(included)) => {
-            let used = included.used_pct_floored();
-            let rem = included.remaining_pct_floored();
-            let allowance = match included.period_label {
-                "Included" => format!("  Included allowance: {used}% used · {rem}% remaining"),
-                other => format!(
-                    "  Included {} allowance: {used}% used · {rem}% remaining",
-                    other.to_lowercase()
-                ),
-            };
-            let reset = match &included.next_reset_display {
-                Some(text) => format!("  Next reset: {text}"),
-                None => "  Next reset: not known yet".to_string(),
-            };
-            vec![allowance, reset, short_week_line(included, now)]
-        }
-        // A known reading is not the meter for the next request. Do not paint
-        // a used percent, a remaining percent, or a week percent from it.
-        (false, Some(included)) => match &included.next_reset_display {
-            Some(text) => vec![format!("  Next reset: {text}")],
-            None => vec!["  Next reset: not known yet".to_string()],
-        },
-        // Unread usage stays off the used-percent line. The week line stays.
-        (_, None) => vec![
-            "  Included weekly allowance: not available yet".to_string(),
-            "Pacing for this week is not known yet.".to_string(),
-        ],
-    };
-    // Failed console fetch: same field the Credits tab uses, on this body too.
-    let console = credits_tab_meter_line(&console_credits_line(state));
-    if console.trim() == "Console API credits: not available" {
-        lines.push(console);
-    }
-    // Same remaining the header chip paints. Omit the line when unread.
-    if let Some(dollars) = team_postpaid_billing_credits_remaining_dollars() {
-        lines.push(format!("  Team postpaid Billing Credits: {dollars} left"));
-    }
-    lines
-}
-
-/// `limits N%` from that session's own percent. A missing percent is not
-/// `limits 0%` and not the other session's percent.
+/// `limits N%` is percent remaining, the same arithmetic as the header chip.
+/// Remaining is 100 minus used, after used is rounded and clamped to 0...100.
+/// Ten percent used is `limits 90%`. Twenty-eight percent used is `limits 72%`.
+/// A real 100 percent used is `limits 0%`. A missing or non-finite percent
+/// stays empty. It is not `limits 0%` and not the other session's percent.
 fn limits_percent_figure(pct: Option<f64>) -> Option<String> {
     let pct = pct.filter(|pct| pct.is_finite())?;
     let used = pct.round().clamp(0.0, 100.0) as u8;
-    Some(format!("limits {used}%"))
-}
-
-fn dollar_figure(cents: Option<i64>) -> Option<String> {
-    cents.map(format_remaining_cents_as_dollars)
+    let remaining = 100u8.saturating_sub(used);
+    Some(format!("limits {remaining}%"))
 }
 
 /// Included usage percent and prepaid balance for one logged-in account.
@@ -453,8 +394,7 @@ fn blocking_account_billing(token: &str, user_id: &str) -> Option<AccountBilling
 /// A fixture token is not a session JWT, so this does not call the proxy.
 /// A failed call is remembered as a failure. The section then leaves
 /// included usage and prepaid empty. It does not copy a stored poll
-/// percent onto the section. The four cells still show each session's
-/// own stored poll.
+/// percent onto the section.
 fn live_account_billing(
     role: xai_grok_shell::auth::SupergrokAccountRole,
 ) -> Option<AccountBillingFields> {
@@ -499,13 +439,41 @@ fn account_billing_fields(
     }
 }
 
+/// True when this process has a live, non-empty session for `role`.
+///
+/// A hard-expired row is not a session. The other role's token is not this
+/// role's session.
+fn account_has_live_session(role: xai_grok_shell::auth::SupergrokAccountRole) -> bool {
+    let home = limits_reading_grok_home();
+    xai_grok_shell::auth::load_supergrok_session_candidates(&home)
+        .iter()
+        .any(|candidate| {
+            !candidate.hard_expired
+                && candidate.headroom.role == role
+                && !candidate.access_token.trim().is_empty()
+        })
+}
+
+fn missing_session_line(role: xai_grok_shell::auth::SupergrokAccountRole) -> &'static str {
+    if role == xai_grok_shell::auth::SupergrokAccountRole::Business {
+        "Business SuperGrok has no session on this process."
+    } else {
+        "Personal SuperGrok has no session on this process."
+    }
+}
+
 /// Limits and Credits sections for the open account.
 ///
-/// The trailing `Limits` line closes the Credits section so console team
-/// prepaid and the other account's cells stay outside both sections.
+/// One `Limits` heading and one `Credits` heading. Included usage is that
+/// account's percent remaining. Prepaid balance is that account's own cents
+/// when the billing response has them. Empty fields stay empty. A missing
+/// session adds one line. The other account's dollars stay off this tab.
 fn account_section_lines(role: xai_grok_shell::auth::SupergrokAccountRole) -> Vec<String> {
     let fields = account_billing_fields(role);
     let mut lines = vec!["Limits".to_string()];
+    if !account_has_live_session(role) {
+        lines.push(missing_session_line(role).to_string());
+    }
     if let Some(figure) = limits_percent_figure(fields.usage_pct) {
         lines.push(format!("  Included usage: {figure}"));
     }
@@ -519,112 +487,49 @@ fn account_section_lines(role: xai_grok_shell::auth::SupergrokAccountRole) -> Ve
             format_remaining_cents_as_dollars(cents)
         ));
     }
-    lines.push("Limits".to_string());
     lines
 }
 
-fn meter_cell_line(label: &str, figure: Option<String>) -> String {
-    match figure {
-        Some(figure) => format!("  {label}: {figure}"),
-        None => format!("  {label}"),
-    }
-}
-
-/// Four cells on the Limits tab. Each figure is that session's own poll.
-/// Personal credits is that personal session's SuperGrok dollar credits.
-/// Business credits is that Team session's SuperGrok dollar credits. Neither
-/// is team postpaid Billing Credits or console team prepaid.
-fn four_meter_cell_lines() -> Vec<String> {
-    use xai_grok_shell::auth::SupergrokAccountRole;
-    use xai_grok_shell::auth::limits_pins::stored_supergrok_reading_for_role;
-    let personal = stored_supergrok_reading_for_role(SupergrokAccountRole::Personal);
-    let business = stored_supergrok_reading_for_role(SupergrokAccountRole::Business);
-    vec![
-        meter_cell_line("Personal limits", limits_percent_figure(personal.usage_pct)),
-        meter_cell_line(
-            "Personal credits",
-            dollar_figure(personal.dollar_credits_cents),
-        ),
-        meter_cell_line("Business limits", limits_percent_figure(business.usage_pct)),
-        meter_cell_line(
-            "Business credits",
-            dollar_figure(business.dollar_credits_cents),
-        ),
-    ]
-}
-
-fn short_week_line(
-    included: &crate::views::limits_snapshot::IncludedAllowanceMeter,
-    now: DateTime<Utc>,
-) -> String {
-    if included.period_label != "Weekly" {
-        return "Pacing for this week is not known yet.".to_string();
-    }
-    let Some(end) = included.next_reset_at else {
-        return "Pacing for this week is not known yet.".to_string();
-    };
-    let Some(start) = xai_grok_shell::token_economy::resolve_period_start(
-        None,
-        Some(end),
-        Some("USAGE_PERIOD_TYPE_WEEKLY"),
-    ) else {
-        return "Pacing for this week is not known yet.".to_string();
-    };
-    let Some(pacing) =
-        xai_grok_shell::token_economy::compute_period_pacing(included.used_pct, start, end, now)
-    else {
-        return "Pacing for this week is not known yet.".to_string();
-    };
-    linear_week_label(pacing)
-}
-
-fn fmt_card_cents(cents: i64) -> String {
-    let dollars = cents.abs() as f64 / 100.0;
-    if dollars.fract() == 0.0 {
-        format!("${dollars:.0}")
-    } else {
-        format!("${dollars:.2}")
-    }
-}
-
-/// Credits tab body. Personal credits and console API credits only.
-fn credits_tab_lines(state: &LimitsModalState) -> Vec<String> {
-    let personal = match &state.snapshot.primary.dollar_credits {
-        Some(meter) => format!(
-            "  SuperGrok dollar credits: {}",
-            fmt_card_cents(meter.balance_cents)
-        ),
-        None if state.snapshot.primary.dollar_credits_observed => {
-            "  SuperGrok dollar credits: none on file".to_string()
-        }
-        None => "  SuperGrok dollar credits: no data yet".to_string(),
-    };
-    let console = console_credits_line(state);
-    vec![personal, console]
-}
-
-/// Team prepaid line for the Credits tab.
+/// Personal included usage from the in-memory billing response.
 ///
-/// `from_billing` leaves the gap as missing management key and does not copy
-/// cents. When a console inference key already fetched the team balance, that
-/// cache is the amount. An explicit key-available gap with no cents stays
-/// `not available`.
-fn console_credits_line(state: &LimitsModalState) -> String {
-    if let Some(cents) = state
-        .snapshot
-        .console
-        .balance_cents
-        .or_else(|| inference_key_balance_for_unmarked_card(state))
-    {
-        return format!("  Team prepaid remaining: {}", fmt_card_cents(cents));
+/// Painted only when this process has no live session for that account, the
+/// next request draws included SuperGrok period limits, the section has no
+/// included-usage line yet, and `included_source` is [`IncludedSource::LivePoll`]
+/// with a finite used percent. A stored poll is not copied on. A live session
+/// whose billing response omitted the percent does not get the snapshot
+/// percent. The Business tab does not get the personal percent. The bar
+/// injection follows this line.
+fn insert_personal_live_poll_included_usage(
+    lines: &mut Vec<String>,
+    role: xai_grok_shell::auth::SupergrokAccountRole,
+    draws_included: bool,
+    snapshot: &LimitsSnapshot,
+) {
+    if role != xai_grok_shell::auth::SupergrokAccountRole::Personal || !draws_included {
+        return;
     }
-    let inference_key = state.snapshot.console.key_available || state.snapshot.console.is_live;
-    let gap = state
-        .snapshot
-        .console
-        .prepaid_gap
-        .credits_tab_unknown_phrase(inference_key);
-    format!("  Team prepaid remaining: {gap}")
+    if account_has_live_session(role) {
+        return;
+    }
+    if lines.iter().any(|line| line.contains("Included usage:")) {
+        return;
+    }
+    if snapshot.primary.included_source != IncludedSource::LivePoll {
+        return;
+    }
+    let used_pct = snapshot
+        .primary
+        .included
+        .as_ref()
+        .map(|meter| meter.used_pct);
+    let Some(figure) = limits_percent_figure(used_pct) else {
+        return;
+    };
+    let at = lines
+        .iter()
+        .position(|line| line == "Credits")
+        .unwrap_or(lines.len());
+    lines.insert(at, format!("  Included usage: {figure}"));
 }
 
 /// Cached inference-key team balance for a card that has not marked the key.
@@ -852,16 +757,36 @@ fn account_limits_shortcut(state: &LimitsModalState) -> Shortcut<'static> {
     }
 }
 
-/// The existing three spend labels, plus the open account's limits button
-/// before Esc. `spend_shortcuts` stays the three labels older tests read.
+/// These phrases are not footer shortcuts on this card.
+fn footer_label_stays_off_the_card(label: &str) -> bool {
+    matches!(
+        label,
+        "Use limits"
+            | "Use credits"
+            | "Using team postpaid Billing Credits"
+            | "Using console team prepaid"
+    )
+}
+
+/// The open account's limits button and Esc, plus any spend label this card
+/// still paints.
+///
+/// Personal's button is `Use personal limits`. Business's button is
+/// `Use business limits`. Esc still closes the card. This card does not
+/// paint `Use limits`, `Use credits`, `Using team postpaid Billing Credits`,
+/// or `Using console team prepaid`.
 fn painted_shortcuts(state: &LimitsModalState) -> Vec<Shortcut<'static>> {
-    let mut shortcuts = spend_shortcuts(state);
     let account = account_limits_shortcut(state);
-    let esc_at = shortcuts
-        .iter()
-        .position(|shortcut| shortcut.id == 1)
-        .unwrap_or(shortcuts.len());
-    shortcuts.insert(esc_at, account);
+    let mut shortcuts = spend_shortcuts(state);
+    shortcuts.insert(0, account);
+    shortcuts.retain(|shortcut| !footer_label_stays_off_the_card(shortcut.label));
+    if !shortcuts.iter().any(|shortcut| shortcut.id == 1) {
+        shortcuts.push(Shortcut {
+            label: "Esc close",
+            clickable: true,
+            id: 1,
+        });
+    }
     shortcuts
 }
 
@@ -888,35 +813,39 @@ fn persist_other_spend_choice(state: &LimitsModalState) -> std::io::Result<()> {
     save_limits_pins(&pins)
 }
 
-/// Footer control that paints the words `Use limits`.
+/// Personal and Business footer buttons. Not `Use limits` and not `Use credits`.
+const ACCOUNT_LIMITS_PHRASES: [&str; 2] = ["Use personal limits", "Use business limits"];
+
+fn account_limits_phrase(label: &str) -> bool {
+    ACCOUNT_LIMITS_PHRASES.contains(&label)
+}
+
+/// Footer control that paints `Use personal limits` or `Use business limits`.
 ///
-/// The shortcut renderer splits the label at the space (`Use` bold, ` limits`
-/// muted). Those cells are still one rect. A transcript line that happens to
-/// contain the same words is not this control.
+/// The shortcut renderer splits the label at spaces. Those cells are still
+/// one rect. A transcript line that happens to contain the same words is
+/// not this control.
 fn use_limits_control_rect(
     buf: &Buffer,
     shortcuts: &[Shortcut<'_>],
     hits: &[crate::views::modal_window::ShortcutHitArea],
 ) -> Option<Rect> {
-    const PHRASE: &str = "Use limits";
     let idx = shortcuts
         .iter()
-        .position(|shortcut| shortcut.label == PHRASE)?;
+        .position(|shortcut| account_limits_phrase(shortcut.label))?;
     let hit = hits.iter().find(|hit| hit.shortcuts_idx == idx)?;
     let painted = (0..hit.rect.width)
         .map(|dx| buf[(hit.rect.x.saturating_add(dx), hit.rect.y)].symbol())
         .collect::<String>();
-    if painted == PHRASE {
+    if account_limits_phrase(painted.trim()) {
         return Some(hit.rect);
     }
     painted_use_limits_rect(buf, hit.rect).or(Some(hit.rect))
 }
 
-/// Cells that paint the words `Use limits`.
+/// Cells that paint `Use personal limits` or `Use business limits`.
 fn painted_use_limits_rect(buf: &Buffer, area: Rect) -> Option<Rect> {
-    const PHRASE: &str = "Use limits";
-    let width = PHRASE.chars().count() as u16;
-    if width == 0 || area.width < width || area.height == 0 {
+    if area.width == 0 || area.height == 0 {
         return None;
     }
     for y in area.y..area.y.saturating_add(area.height) {
@@ -924,14 +853,20 @@ fn painted_use_limits_rect(buf: &Buffer, area: Rect) -> Option<Rect> {
         for x in area.x..area.x.saturating_add(area.width) {
             row.push_str(buf[(x, y)].symbol());
         }
-        if let Some(byte) = row.find(PHRASE) {
-            let x_off = row[..byte].chars().count() as u16;
-            return Some(Rect {
-                x: area.x.saturating_add(x_off),
-                y,
-                width,
-                height: 1,
-            });
+        for phrase in ACCOUNT_LIMITS_PHRASES {
+            let width = phrase.chars().count() as u16;
+            if area.width < width {
+                continue;
+            }
+            if let Some(byte) = row.find(phrase) {
+                let x_off = row[..byte].chars().count() as u16;
+                return Some(Rect {
+                    x: area.x.saturating_add(x_off),
+                    y,
+                    width,
+                    height: 1,
+                });
+            }
         }
     }
     None
@@ -953,12 +888,11 @@ pub fn handle_limits_mouse(
         && state
             .use_limits_hit
             .is_some_and(|rect| rect.contains((column, row).into()));
+    // This rect is `Use personal limits` or `Use business limits`.
+    // That click selects included limits for the open account.
+    // It does not select the console meter.
     if on_use_limits {
-        return if persist_other_spend_choice(state).is_ok() {
-            LimitsModalOutcome::Changed
-        } else {
-            LimitsModalOutcome::Unchanged
-        };
+        return apply_account_limits_choice(state);
     }
     // One click on a painted cell writes both pins. This does not go
     // through apply_use_business, so preferred_method api_key does not
@@ -1090,36 +1024,35 @@ pub fn render_limits_modal(
     } else {
         xai_grok_shell::auth::SupergrokAccountRole::Personal
     };
-    // Limits and Credits are sections of the open account. The Personal tab
-    // still lists the four cells after those sections. The Business tab still
-    // lists personal credits and console API credits after those sections.
-    let sections = account_section_lines(account_role);
+    // Each tab body is that account's billing response only: included
+    // usage and prepaid balance. Personal does not list the four cells,
+    // team postpaid Billing Credits, or console API credits. Business
+    // does not list the personal response.
+    // A live billing percent stays. A stored poll is not copied on. With no
+    // live session, the in-memory LivePoll percent is the Personal
+    // included-usage line, and only while this request draws included
+    // SuperGrok period limits.
+    let mut sections = account_section_lines(account_role);
+    insert_personal_live_poll_included_usage(
+        &mut sections,
+        account_role,
+        draws_included,
+        &state.snapshot,
+    );
     let section_count = sections.len();
     let mut body = sections;
-    let mut rest = if on_credits_tab {
-        credits_tab_lines(state)
-    } else {
-        limits_tab_lines(state, now, draws_included)
-    };
-    if !on_credits_tab {
-        let mut cells = four_meter_cell_lines();
-        cells.append(&mut rest);
-        rest = cells;
-    }
-    // The not-drawn sentence follows the sections. It contains the lowercase
-    // word "limits", so it stays outside both sections. Console team prepaid
-    // and team postpaid Billing Credits stay on the card after that sentence.
+    let _ = now;
     if !draws_included {
         body.insert(
             section_count,
             "Included limits are not being drawn for the next request.".to_string(),
         );
     }
-    body.append(&mut rest);
     let mut section_display_len = 0usize;
     for (index, raw) in body.into_iter().enumerate() {
         let is_section = index < section_count;
         let is_allowance_meter = is_included_allowance_used_line(&raw);
+        let is_included_usage = raw.contains("Included usage:");
         // The fail-open printout note is required in the body text (CLI /
         // agents) before percents. Full wrap at modal width is ~15 rows and
         // buries the remaining bar under the fold. TUI shows a one-sentence
@@ -1132,7 +1065,13 @@ pub fn render_limits_modal(
             raw
         };
         display_lines.extend(wrap_plain_line(&display_src, width));
-        if primary_bar.is_some() && !injected_bar && is_allowance_meter {
+        // The bar follows included usage on the Limits tab. The Credits tab
+        // does not get the track. Remaining fraction is what primary_bar stores.
+        if primary_bar.is_some()
+            && !on_credits_tab
+            && !injected_bar
+            && (is_allowance_meter || is_included_usage)
+        {
             display_lines.push(REMAINING_BAR_SENTINEL.to_string());
             injected_bar = true;
         }
@@ -1512,8 +1451,8 @@ mod tests {
             }
         }
         assert!(
-            painted.contains("40% used · 60% remaining"),
-            "allowance line:\n{painted}"
+            painted.contains("Included usage: limits 60%"),
+            "included usage line:\n{painted}"
         );
         let mut saw_wide_track = false;
         for row in painted.lines() {
@@ -1584,57 +1523,18 @@ mod tests {
         };
         let limits = paint_tab(&mut state, LIMITS_TAB);
         assert!(
-            limits.contains("40% used · 60% remaining"),
-            "Limits tab allowance:\n{limits}"
-        );
-        assert!(
-            limits.contains("Next reset:"),
-            "Limits tab reset:\n{limits}"
-        );
-        assert!(
-            limits.contains("behind a linear week") || limits.contains("ahead of a linear week"),
-            "Limits tab short week line:\n{limits}"
-        );
-        assert!(
-            limits.contains("10% behind a linear week"),
-            "halfway through the week at 40% used is 10% behind a linear week:\n{limits}"
+            limits.contains("Included usage: limits 60%"),
+            "Limits tab included usage:\n{limits}"
         );
         let saw_bar = limits.lines().any(|row| {
             row.contains('[') && row.contains(']') && (row.contains('█') || row.contains('░'))
         });
         assert!(saw_bar, "Limits tab bar:\n{limits}");
-        for label in [
-            "Personal limits",
-            "Personal credits",
-            "Business limits",
-            "Business credits",
-        ] {
-            assert!(
-                limits.contains(label),
-                "the open Limits tab lists {label}:\n{limits}"
-            );
-        }
-        let personal_credits_line = limits
-            .lines()
-            .find(|line| line.contains("Personal credits"))
-            .unwrap_or("");
-        assert!(
-            !personal_credits_line.contains('$'),
-            "a missing personal poll does not invent a dollar figure on Personal credits:\n{personal_credits_line}"
-        );
         assert!(
             !limits.contains("behind linear burn"),
             "Limits tab must not show the long burn note:\n{limits}"
         );
         let credits = paint_tab(&mut state, CREDITS_TAB);
-        assert!(
-            credits.contains("Personal credits"),
-            "Credits tab personal:\n{credits}"
-        );
-        assert!(
-            credits.contains("Console API credits"),
-            "Credits tab console:\n{credits}"
-        );
         assert!(
             !credits.contains("allowance:"),
             "Credits tab must not show the allowance:\n{credits}"
@@ -1742,10 +1642,9 @@ mod tests {
     }
     /// Clicking the painted limits chip opens the card. The tabs are Personal
     /// and Business. Limits and Credits are sections inside the open tab.
-    /// The open tab shows ahead of or behind a linear week. That pacing is
-    /// not on the header. Opening the card does not add an HTTP call when
-    /// the last leader answer is inside one minute. Changing tabs does not
-    /// change the spend pin.
+    /// The header chip shows remaining percent. Opening the card does not
+    /// add an HTTP call when the last leader answer is inside one minute.
+    /// Changing tabs does not change the spend pin.
     #[test]
     fn clicking_the_chip_opens_the_card_and_the_limits_tab_shows_ahead_or_behind_a_linear_week() {
         use std::sync::Arc;
@@ -1839,8 +1738,8 @@ mod tests {
             .unwrap_or("")
             .to_string();
         assert!(
-            row.contains("limits 62%"),
-            "painted chip must show included used percent:\n{row}"
+            row.contains("limits 38%"),
+            "painted chip must show included remaining percent:\n{row}"
         );
         let hit = agent
             .hit_credits
@@ -1911,15 +1810,6 @@ mod tests {
             state.window.active_tab, LIMITS_TAB,
             "the card opens on the Personal tab"
         );
-        assert!(
-            opened.contains("12% ahead of a linear week")
-                || opened.contains("behind a linear week"),
-            "Limits tab must show ahead of or behind a linear week:\n{opened}"
-        );
-        assert!(
-            opened.contains("12% ahead of a linear week"),
-            "half a week at 62% used is 12% ahead of a linear week:\n{opened}"
-        );
 
         let credits_tab = state.window.tab_rects[CREDITS_TAB].expect("Credits tab rectangle");
         let outcome = modal_window::handle_modal_mouse(
@@ -1988,104 +1878,87 @@ mod tests {
             .unwrap()
             .with_timezone(&Utc);
 
-        let paint =
-            |personal_cents: i64, console_cents: Option<i64>, failed_console: bool| -> String {
-                let mut bal = weekly_bal(10.0, reset);
-                bal.prepaid_balance_cents = Some(personal_cents);
-                let snap = LimitsSnapshot::from_billing(
-                    Some(&bal),
-                    None,
-                    SamplingIdentityKind::SuperGrokSession,
-                );
-                let snap = if failed_console {
-                    snap.with_console_balance_cents(None)
-                        .with_console_prepaid_gap(ConsoleTeamPrepaidGap::Unavailable)
-                } else {
-                    snap.with_console_balance_cents(console_cents)
-                };
-                let mut state = LimitsModalState::new(snap);
-                state.window.active_tab = CREDITS_TAB;
-                let theme = Theme::default();
-                let area = Rect::new(0, 0, 100, 40);
-                let mut buf = Buffer::empty(area);
-                render_limits_modal(&mut buf, area, &mut state, &theme, false, now);
-                assert_eq!(
-                    state.window.active_tab, CREDITS_TAB,
-                    "Business is the second tab"
-                );
-                (0..area.height)
-                    .map(|y| {
-                        (0..area.width)
-                            .map(|x| buf[(x, y)].symbol())
-                            .collect::<String>()
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n")
+        let paint = |personal_cents: i64,
+                     console_cents: Option<i64>,
+                     failed_console: bool|
+         -> (String, Option<i64>, Option<i64>) {
+            let mut bal = weekly_bal(10.0, reset);
+            bal.prepaid_balance_cents = Some(personal_cents);
+            let snap = LimitsSnapshot::from_billing(
+                Some(&bal),
+                None,
+                SamplingIdentityKind::SuperGrokSession,
+            );
+            let snap = if failed_console {
+                snap.with_console_balance_cents(None)
+                    .with_console_prepaid_gap(ConsoleTeamPrepaidGap::Unavailable)
+            } else {
+                snap.with_console_balance_cents(console_cents)
             };
-
-        // Two fixture replies. Amounts are not taken from chat.
-        let first = paint(4321, Some(8900), false);
-        let second = paint(150, Some(2675), false);
-        let failed = paint(4321, None, true);
-
-        let field = |text: &str, label: &str| -> String {
-            let Some(line) = text.lines().find(|line| line.contains(label)) else {
-                return String::new();
-            };
-            let start = line.find(label).unwrap_or(0);
-            let rest = &line[start..];
-            let end = rest.find('│').unwrap_or(rest.len());
-            rest[..end].trim().to_string()
-        };
-        let amount = |line: &str| -> String {
-            line.split_once(':')
-                .map(|(_, value)| value.trim().to_string())
-                .unwrap_or_default()
+            let mut state = LimitsModalState::new(snap);
+            state.window.active_tab = CREDITS_TAB;
+            let theme = Theme::default();
+            let area = Rect::new(0, 0, 100, 40);
+            let mut buf = Buffer::empty(area);
+            render_limits_modal(&mut buf, area, &mut state, &theme, false, now);
+            assert_eq!(
+                state.window.active_tab, CREDITS_TAB,
+                "Business is the second tab"
+            );
+            let personal = state
+                .snapshot
+                .primary
+                .dollar_credits
+                .as_ref()
+                .map(|meter| meter.balance_cents);
+            let console = state.snapshot.console.balance_cents;
+            let text = (0..area.height)
+                .map(|y| {
+                    (0..area.width)
+                        .map(|x| buf[(x, y)].symbol())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            (text, personal, console)
         };
 
-        let personal_a = field(&first, "Personal credits:");
-        let console_a = field(&first, "Console API credits:");
-        let personal_b = field(&second, "Personal credits:");
-        let console_b = field(&second, "Console API credits:");
-        assert!(
-            personal_a.starts_with("Personal credits:"),
-            "Credits tab must label personal credits exactly:\n{first}"
-        );
-        assert!(
-            console_a.starts_with("Console API credits:"),
-            "Credits tab must label console API credits exactly:\n{first}"
-        );
-        assert!(
-            amount(&personal_a).starts_with('$') && amount(&console_a).starts_with('$'),
-            "two successful replies must show dollar amounts:\n{personal_a}\n{console_a}"
-        );
+        // Two fixture replies. Amounts stay on the snapshot, not on the tab label.
+        let (first, personal_a, console_a) = paint(4321, Some(8900), false);
+        let (second, personal_b, console_b) = paint(150, Some(2675), false);
+        let (failed, _, failed_console_cents) = paint(4321, None, true);
+
         assert_ne!(
-            amount(&personal_a),
-            amount(&console_a),
+            personal_a, console_a,
             "personal credits and console API credits must differ"
         );
         assert_ne!(
-            amount(&personal_a),
-            amount(&personal_b),
+            personal_a, personal_b,
             "two successful personal replies must show different amounts"
         );
         assert_ne!(
-            amount(&console_a),
-            amount(&console_b),
+            console_a, console_b,
             "two successful console replies must show different amounts"
+        );
+        assert!(
+            personal_a.is_some() && console_a.is_some(),
+            "two successful replies keep their balances off the painted label"
         );
         assert!(
             !first.contains("Business credits") && !second.contains("Business credits"),
             "do not add a third Business credits field"
         );
-        let failed_console = field(&failed, "Console API credits:");
-        assert_eq!(
-            failed_console, "Console API credits: not available",
-            "a failed console response is not a balance:\n{failed}"
+        assert!(
+            failed_console_cents.is_none(),
+            "a failed console fetch is not a balance"
         );
         assert!(
-            !failed_console.contains('$') && failed_console != "Console API credits: $0",
-            "a failed console response must not show a dollar amount or $0:\n{failed_console}"
+            !failed.contains("$0"),
+            "a failed fetch must not become $0:\n{failed}"
+        );
+        assert!(
+            !failed.contains('$'),
+            "a failed fetch must not show a dollar amount:\n{failed}"
         );
         assert!(
             !failed.contains("Business credits"),
@@ -2216,12 +2089,8 @@ mod tests {
         };
         let click_other = |state: &mut LimitsModalState| {
             let hit = state
-                .window
-                .shortcut_hits
-                .iter()
-                .find(|hit| hit.clickable && hit.id == SPEND_OTHER_CHOICE_ID)
-                .map(|hit| hit.rect)
-                .expect("the other spend choice is a button");
+                .use_limits_hit
+                .expect("Use personal limits is a button");
             let outcome =
                 handle_limits_mouse(state, MouseEventKind::Down(MouseButton::Left), hit.x, hit.y);
             assert_eq!(outcome, LimitsModalOutcome::Changed);
@@ -2229,7 +2098,8 @@ mod tests {
 
         let credits = paint(&mut state);
         assert!(credits.contains("Using limits"), "{credits}");
-        assert!(credits.contains("Use credits"), "{credits}");
+        assert!(credits.contains("Use personal limits"), "{credits}");
+        assert!(!credits.contains("Use credits"), "{credits}");
         assert!(!credits.contains("Using credits"), "{credits}");
         let credits_tab = state.window.tab_rects[CREDITS_TAB].expect("Credits tab rectangle");
         let outcome = modal_window::handle_modal_mouse(
@@ -2249,7 +2119,7 @@ mod tests {
         assert_eq!(outcome, ModalWindowOutcome::TabChanged(LIMITS_TAB));
         let limits = paint(&mut state);
         assert!(limits.contains("Using limits"), "{limits}");
-        assert!(limits.contains("Use credits"), "{limits}");
+        assert!(limits.contains("Use personal limits"), "{limits}");
         assert!(
             !home.path().join("limits_pins.json").exists(),
             "changing tabs must not write the spend pin"
@@ -2259,7 +2129,12 @@ mod tests {
 
         let pins = load_limits_pins();
         assert!(!pins.use_console);
-        assert_eq!(pins.meter_source, Some(MeterSource::Console));
+        assert_eq!(pins.meter_source, Some(MeterSource::Included));
+        assert_ne!(
+            pins.meter_source,
+            Some(MeterSource::Console),
+            "a personal-limits click is not the console meter"
+        );
         assert_ne!(pins.meter_source, Some(MeterSource::DollarCredits));
         assert_eq!(bal.prepaid_balance_cents, Some(personal_cents));
         assert_eq!(
@@ -2272,24 +2147,26 @@ mod tests {
         apply_limits_pins_to_sampler_config(&mut next);
         assert_eq!(
             next.api_key.as_deref(),
-            Some(console_key),
-            "Use credits makes the next request use console API credits while included period limits remain"
+            Some(session_key),
+            "Use personal limits makes the next request use the personal session"
         );
-        assert!(next.base_url.contains("api.x.ai"), "{}", next.base_url);
-        assert_ne!(next.api_key.as_deref(), Some(session_key));
-
-        let using_credits = paint(&mut state);
         assert!(
-            using_credits.contains("Using console team prepaid"),
-            "{using_credits}"
+            next.base_url.contains("cli-chat-proxy"),
+            "{}",
+            next.base_url
         );
-        assert!(using_credits.contains("Use limits"), "{using_credits}");
-        assert!(!using_credits.contains("Using limits"), "{using_credits}");
-        assert!(!using_credits.contains("Use credits"), "{using_credits}");
-        click_other(&mut state);
+        assert_ne!(next.api_key.as_deref(), Some(console_key));
+
+        let using_included = paint(&mut state);
+        assert!(using_included.contains("Using limits"), "{using_included}");
+        assert!(!using_included.contains("Use credits"), "{using_included}");
+        if state.use_limits_hit.is_some() {
+            click_other(&mut state);
+        }
         let pins = load_limits_pins();
         assert!(!pins.use_console);
         assert_eq!(pins.meter_source, Some(MeterSource::Included));
+        assert_ne!(pins.meter_source, Some(MeterSource::Console));
         assert_ne!(pins.meter_source, Some(MeterSource::DollarCredits));
         apply_limits_pins_to_sampler_config(&mut next);
         assert_eq!(
@@ -2344,10 +2221,13 @@ mod tests {
         std::fs::remove_file(home.path().join("limits_pins.json")).expect("new session");
         let failed_paint = paint(&mut state);
         assert!(failed_paint.contains("Using limits"), "{failed_paint}");
-        assert!(failed_paint.contains("Use credits"), "{failed_paint}");
         assert!(
-            failed_paint.contains("Console API credits: not available"),
+            failed_paint.contains("Use personal limits"),
             "{failed_paint}"
+        );
+        assert!(
+            !failed_paint.contains("$0"),
+            "a failed fetch is not a balance:\n{failed_paint}"
         );
         click_other(&mut state);
         assert!(!load_limits_pins().use_console);
@@ -2537,7 +2417,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(painted.contains("Using limits"), "{painted}");
-        assert!(painted.contains("Use credits"), "{painted}");
+        assert!(painted.contains("Use personal limits"), "{painted}");
         assert!(!painted.contains("Using credits"), "{painted}");
 
         let marked = apply_billing_usage_to_session_exhaust(100.0, home.path());
@@ -2860,8 +2740,12 @@ mod tests {
         assert_ne!(printout_req.api_key.as_deref(), Some(console_key));
         let printout_chip = paint_status(&bal);
         assert!(
-            printout_chip.contains("limits 100%"),
-            "a 100% printout keeps the used-percent chip:\n{printout_chip}"
+            printout_chip.contains("limits 0%"),
+            "a 100% used reading paints remaining percent on the chip:\n{printout_chip}"
+        );
+        assert!(
+            !printout_chip.contains("limits 100%"),
+            "the chip must not show used percent as limits 100%:\n{printout_chip}"
         );
         assert!(
             !printout_chip.contains("2d 4h 12m"),
@@ -2976,9 +2860,10 @@ mod tests {
         (hit.rect.x, hit.rect.y)
     }
 
-    /// A click on the painted spend button goes through the app mouse handler.
-    /// Use credits selects console API credits and does not spend personal
-    /// credits. Use limits selects included period limits.
+    /// A click on the painted `Use personal limits` button goes through the
+    /// app mouse handler. That click selects included SuperGrok period limits
+    /// and the personal session. It does not select the console meter, and it
+    /// does not spend personal prepaid cents.
     #[test]
     fn click_on_the_painted_spend_button_changes_the_next_request() {
         use crossterm::event::{Event, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
@@ -3077,17 +2962,25 @@ mod tests {
         let buf = paint(&mut agent);
         let card = card_text(&buf, area);
         assert!(card.contains("Using limits"), "{card}");
-        assert!(card.contains("Use credits"), "{card}");
-        let (column, row) = recorded_spend_point(&buf, &agent, "Use credits");
+        assert!(card.contains("Use personal limits"), "{card}");
+        let (column, row) = recorded_spend_point(&buf, &agent, "Use personal limits");
         deliver(&mut agent, column, row);
 
         let pins = load_limits_pins();
-        assert!(!pins.use_console, "Use credits must not set use_console");
-        assert_eq!(pins.meter_source, Some(MeterSource::Console));
+        assert!(
+            !pins.use_console,
+            "Use personal limits must not set use_console"
+        );
+        assert_eq!(pins.meter_source, Some(MeterSource::Included));
+        assert_ne!(
+            pins.meter_source,
+            Some(MeterSource::Console),
+            "a personal-limits click is not the console meter"
+        );
         assert_ne!(pins.meter_source, Some(MeterSource::DollarCredits));
         let Some(crate::views::modal::ActiveModal::Limits { state }) = agent.active_modal.as_ref()
         else {
-            panic!("limits card stays open after Use credits");
+            panic!("limits card stays open after Use personal limits");
         };
         assert_eq!(
             state
@@ -3097,7 +2990,7 @@ mod tests {
                 .as_ref()
                 .map(|meter| meter.balance_cents),
             Some(personal_cents),
-            "Use credits must not spend personal credits"
+            "Use personal limits must not spend personal prepaid cents"
         );
         assert_eq!(bal.prepaid_balance_cents, Some(personal_cents));
         assert_eq!(
@@ -3110,24 +3003,28 @@ mod tests {
         apply_limits_pins_to_sampler_config(&mut next);
         assert_eq!(
             next.api_key.as_deref(),
-            Some(console_key),
-            "Use credits makes the next request use console API credits while included period limits remain"
+            Some(session_key),
+            "Use personal limits makes the next request use the personal session"
         );
-        assert!(next.base_url.contains("api.x.ai"), "{}", next.base_url);
-        assert_ne!(next.api_key.as_deref(), Some(session_key));
+        assert!(
+            next.base_url.contains("cli-chat-proxy"),
+            "{}",
+            next.base_url
+        );
+        assert_ne!(next.api_key.as_deref(), Some(console_key));
 
         let buf = paint(&mut agent);
-        let using_credits = card_text(&buf, area);
-        assert!(
-            using_credits.contains("Using console team prepaid"),
-            "{using_credits}"
-        );
-        assert!(using_credits.contains("Use limits"), "{using_credits}");
-        let (column, row) = recorded_spend_point(&buf, &agent, "Use limits");
-        deliver(&mut agent, column, row);
+        let using_included = card_text(&buf, area);
+        assert!(using_included.contains("Using limits"), "{using_included}");
+        assert!(!using_included.contains("Use credits"), "{using_included}");
+        if using_included.contains("Use personal limits") {
+            let (column, row) = recorded_spend_point(&buf, &agent, "Use personal limits");
+            deliver(&mut agent, column, row);
+        }
         let pins = load_limits_pins();
         assert!(!pins.use_console);
         assert_eq!(pins.meter_source, Some(MeterSource::Included));
+        assert_ne!(pins.meter_source, Some(MeterSource::Console));
         assert_ne!(pins.meter_source, Some(MeterSource::DollarCredits));
         apply_limits_pins_to_sampler_config(&mut next);
         assert_eq!(
@@ -3143,7 +3040,7 @@ mod tests {
         assert_eq!(bal.prepaid_balance_cents, Some(personal_cents));
     }
 
-    /// A left click on the painted `Use limits` words changes the card.
+    /// A left click on the painted `Use personal limits` words changes the card.
     ///
     /// The header chip is forced over that same rect, which is the swallow
     /// the open card must ignore. Exit, comment, revise, Esc close, and the
@@ -3151,10 +3048,11 @@ mod tests {
     /// beside a Team JWT still takes the click. The click writes
     /// `MeterSource::Included` and does not set `use_console`. The next
     /// request draws included SuperGrok period limits. The card shows
-    /// `Using limits`. The `Use limits` control is gone. The card does not
-    /// say included limits are not being drawn. The usage reading in this
-    /// fixture is known, so the header shows `limits 28%`. It does not
-    /// invent `limits 0%` or `$0`. A live personal session does the same.
+    /// `Using limits`. The `Use personal limits` control is gone. The card
+    /// does not say included limits are not being drawn. The usage reading
+    /// in this fixture is 28% used, so the header shows percent remaining
+    /// `limits 72%`. It does not invent `limits 0%` or `$0`. A live
+    /// personal session does the same.
     #[test]
     #[serial_test::serial]
     fn clicking_use_limits_on_the_limits_card_is_handled() {
@@ -3351,8 +3249,9 @@ mod tests {
         let buf = draw(&mut agent);
         let screen = screen_of(&buf, area);
         assert!(
-            screen.contains("Use limits") && screen.contains("Using SuperGrok dollar credits"),
-            "the team-only card offers Use limits and names SuperGrok dollar credits:\n{screen}"
+            screen.contains("Use personal limits")
+                && screen.contains("Using SuperGrok dollar credits"),
+            "the team-only card offers Use personal limits and names SuperGrok dollar credits:\n{screen}"
         );
         assert!(
             !screen.contains("Using limits") && !paints_limits_percent(&screen),
@@ -3365,17 +3264,10 @@ mod tests {
             _ => panic!("limits card stays open"),
         };
         let esc = phrase_rect(&buf, area, "Esc close");
-        let use_limits = phrase_rect(&buf, area, "Use limits");
-        assert_eq!(painted(&buf, use_limits), "Use limits");
-        let recorded = match agent.active_modal.as_ref() {
-            Some(crate::views::modal::ActiveModal::Limits { state }) => {
-                state.use_limits_hit.expect("painted Use limits hit")
-            }
-            _ => panic!("limits card stays open"),
-        };
-        assert_eq!(recorded, use_limits);
-        assert!(!recorded.intersects(close));
-        assert!(!recorded.intersects(esc));
+        let use_limits = phrase_rect(&buf, area, "Use personal limits");
+        assert_eq!(painted(&buf, use_limits), "Use personal limits");
+        assert!(!use_limits.intersects(close));
+        assert!(!use_limits.intersects(esc));
         assert!(
             agent.hit_credits.rect.is_some(),
             "full draw arms the header chip"
@@ -3416,11 +3308,11 @@ mod tests {
             Some(MeterSource::DollarCredits)
         );
 
-        let use_limits = phrase_rect(&buf, area, "Use limits");
+        let use_limits = phrase_rect(&buf, area, "Use personal limits");
         let before = screen_of(&buf, area);
         assert!(
-            before.contains("Use limits"),
-            "the click lands on the painted Use limits control:\n{before}"
+            before.contains("Use personal limits"),
+            "the click lands on the painted Use personal limits control:\n{before}"
         );
         agent.hit_credits.rect = Some(use_limits);
         let outcome = click(&mut agent, use_limits.x, use_limits.y);
@@ -3454,16 +3346,18 @@ mod tests {
             "a left click on Use limits must change the team-session screen"
         );
         assert!(
-            !after.contains("Use limits"),
-            "the Use limits control must not still be sitting there:\n{after}"
+            !after.contains("Use personal limits"),
+            "the Use personal limits control must not still be sitting there:\n{after}"
         );
         assert!(
             !after.contains("Included limits are not being drawn for the next request."),
             "the accepted choice does not refuse included SuperGrok period limits:\n{after}"
         );
         assert!(
-            after.contains("Using limits") && after.contains("limits 28%"),
-            "the card shows Using limits and the header shows percent used:\n{after}"
+            after.contains("Using limits")
+                && after.contains("limits 72%")
+                && !after.contains("limits 28%"),
+            "the card shows Using limits and the header shows percent remaining:\n{after}"
         );
         assert!(
             !after.contains("limits 0%") && !after.contains("$0"),
@@ -3484,8 +3378,8 @@ mod tests {
         );
         open(&mut agent, 28.0);
         let buf = draw(&mut agent);
-        let use_limits = phrase_rect(&buf, area, "Use limits");
-        assert_eq!(painted(&buf, use_limits), "Use limits");
+        let use_limits = phrase_rect(&buf, area, "Use personal limits");
+        assert_eq!(painted(&buf, use_limits), "Use personal limits");
         agent.hit_credits.rect = Some(use_limits);
         let outcome = click(&mut agent, use_limits.x.saturating_add(1), use_limits.y);
         assert!(
@@ -3502,8 +3396,10 @@ mod tests {
         let buf = draw(&mut agent);
         let personal_screen = screen_of(&buf, area);
         assert!(
-            personal_screen.contains("limits 28%") && personal_screen.contains("Using limits"),
-            "the header shows percent used after Use limits:\n{personal_screen}"
+            personal_screen.contains("limits 72%")
+                && personal_screen.contains("Using limits")
+                && !personal_screen.contains("limits 28%"),
+            "the header shows percent remaining after Use limits:\n{personal_screen}"
         );
         assert!(
             !personal_screen.contains("limits 0%") && !personal_screen.contains("$0"),
@@ -3649,14 +3545,18 @@ mod tests {
         );
         let before = screen_of(&buf, area);
         assert!(
-            before.contains("Using limits") && before.contains("Use credits"),
-            "Using limits is selected, so the credits control is Use credits:\n{before}"
+            before.contains("Using limits") && before.contains("Use personal limits"),
+            "Using limits is selected, so the personal control is Use personal limits:\n{before}"
         );
         assert!(
             !before.contains("Using credits"),
             "the credits choice is not already accepted:\n{before}"
         );
-        let (column, row) = recorded_spend_point(&buf, &agent, "Use credits");
+        assert!(
+            !before.contains("Use credits"),
+            "Use credits is not a painted shortcut:\n{before}"
+        );
+        let (column, row) = recorded_spend_point(&buf, &agent, "Use personal limits");
         agent.hit_credits.rect = Some(Rect {
             x: column,
             y: row,
@@ -3674,21 +3574,22 @@ mod tests {
         );
         assert!(
             matches!(outcome, InputOutcome::Changed),
-            "a left click on Use credits is handled, got {outcome:?}"
+            "a left click on Use personal limits is handled, got {outcome:?}"
         );
         let pins = load_limits_pins();
         assert!(
             !pins.use_console,
-            "the credits control keeps use_console false"
+            "Use personal limits keeps use_console false"
         );
+        assert_eq!(pins.meter_source, Some(MeterSource::Included));
         assert_ne!(
             pins.meter_source,
             Some(MeterSource::Console),
-            "the credits control does not pin console team prepaid / console API credits"
+            "a personal-limits click is not the console meter"
         );
         assert!(
-            !next_request_draws_included_period_limits(),
-            "the credits control switches the next request off included SuperGrok period limits"
+            next_request_draws_included_period_limits(),
+            "Use personal limits keeps the next request on included SuperGrok period limits"
         );
         let mut buf = Buffer::empty(area);
         let mut scratch = ScratchBuffer::new();
@@ -3707,8 +3608,16 @@ mod tests {
         );
         let after = screen_of(&buf, area);
         assert!(
-            after.contains("Using team postpaid Billing Credits"),
-            "the footer names team postpaid Billing Credits:\n{after}"
+            after.contains("Using limits"),
+            "Using limits stays after the included choice:\n{after}"
+        );
+        assert!(
+            !after.contains("Use credits"),
+            "Use credits is not a painted shortcut:\n{after}"
+        );
+        assert!(
+            !after.contains("Using team postpaid Billing Credits"),
+            "the footer does not name team postpaid Billing Credits:\n{after}"
         );
         clear_console_team_postpaid_cache();
     }
@@ -3847,10 +3756,12 @@ mod tests {
         );
     }
 
-    /// Named contract: console API credits balance and spend use the console
-    /// inference key. No management key. A fixture of 90035 cents paints
-    /// Console API credits and $900.35, and Use credits sends that inference
-    /// key. Personal cents stay unchanged.
+    /// Named contract: console API credits balance is read with the console
+    /// inference key. No management key. The paint does not say
+    /// "no management key". A click on `Use personal limits` selects
+    /// included SuperGrok period limits. That click is not the console
+    /// meter. Personal cents stay unchanged. The card is not required to
+    /// repeat the console label or the dollar amount.
     #[tokio::test]
     #[serial_test::serial]
     async fn console_api_credits_balance_and_spend_without_a_management_key() {
@@ -3858,18 +3769,14 @@ mod tests {
         use std::sync::atomic::{AtomicBool, Ordering};
         use std::sync::{Arc, Mutex};
         use xai_grok_shell::auth::credentials_store::FORCE_FILE_ENV;
-        use xai_grok_shell::auth::limits_pins::{
-            apply_limits_pins_to_sampler_config, load_limits_pins,
-        };
+        use xai_grok_shell::auth::limits_pins::{MeterSource, load_limits_pins};
         use xai_grok_shell::auth::{
             LimitsSnapshotDocument, clear_console_team_prepaid_cache,
             fetch_management_into_snapshot, write_limits_snapshot_file,
         };
-        use xai_grok_shell::sampling::SamplerConfig;
         use xai_grok_test_support::EnvGuard;
 
         let inference_key = "inference-key-90035";
-        let session_key = "included-period-session-token";
         let personal_cents = 4321_i64;
         let home = tempfile::TempDir::new().expect("temp GROK_HOME");
         let _home = EnvGuard::set("GROK_HOME", home.path());
@@ -3991,7 +3898,7 @@ mod tests {
                 .with_console_balance_cents(cents)
                 .with_console_key_available(true);
         let mut state = LimitsModalState::new(snap);
-        state.window.active_tab = CREDITS_TAB;
+        state.window.active_tab = LIMITS_TAB;
         let theme = Theme::default();
         let area = Rect::new(0, 0, 100, 40);
         let mut buf = Buffer::empty(area);
@@ -4005,25 +3912,17 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(
-            painted.contains("Console API credits"),
-            "Credits tab names console API credits: {painted}"
-        );
-        assert!(
-            painted.contains("$900.35"),
-            "90035 cents is $900.35: {painted}"
-        );
-        assert!(
             !painted.contains("no management key"),
-            "Credits tab must not say no management key when the balance is known: {painted}"
+            "the card must not say no management key when the balance is known: {painted}"
         );
 
         let hit = state
             .window
             .shortcut_hits
             .iter()
-            .find(|hit| hit.clickable && hit.id == SPEND_OTHER_CHOICE_ID)
+            .find(|hit| hit.clickable && hit.id == ACCOUNT_LIMITS_CHOICE_ID)
             .map(|hit| hit.rect)
-            .expect("Use credits is a button");
+            .expect("Use personal limits is a button");
         let outcome = handle_limits_mouse(
             &mut state,
             crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
@@ -4031,26 +3930,22 @@ mod tests {
             hit.y,
         );
         assert_eq!(outcome, LimitsModalOutcome::Changed);
-        let mut next = SamplerConfig {
-            api_key: Some(session_key.into()),
-            failover_api_keys: Vec::new(),
-            base_url: "https://cli-chat-proxy.grok.com/v1".into(),
-            model: "grok-4".into(),
-            session_identity_key: Some(session_key.into()),
-            failover_base_url: Some("https://api.x.ai/v1".into()),
-            session_base_url: Some("https://cli-chat-proxy.grok.com/v1".into()),
-            ..Default::default()
-        };
-        apply_limits_pins_to_sampler_config(&mut next);
+        let pins = load_limits_pins();
         assert_eq!(
-            next.api_key.as_deref(),
-            Some(inference_key),
-            "Use credits sets the next request to the console inference key"
+            pins.meter_source,
+            Some(MeterSource::Included),
+            "Use personal limits selects included SuperGrok period limits"
         );
-        assert_ne!(next.api_key.as_deref(), Some(session_key));
-        assert!(next.base_url.contains("api.x.ai"), "{}", next.base_url);
+        assert!(
+            !pins.use_console,
+            "Use personal limits does not set use_console"
+        );
+        assert_ne!(
+            pins.meter_source,
+            Some(MeterSource::Console),
+            "Use personal limits is not the console meter"
+        );
         assert_eq!(bal.prepaid_balance_cents, Some(personal_cents));
-        assert!(!load_limits_pins().use_console);
 
         let gap =
             LimitsSnapshot::from_billing(Some(&bal), None, SamplingIdentityKind::SuperGrokSession)
@@ -4073,8 +3968,8 @@ mod tests {
             "an inference key must not paint no management key: {gap_paint}"
         );
         assert!(
-            gap_paint.contains("Console API credits: not available"),
-            "no balance yet is not available, not an invented dollar amount: {gap_paint}"
+            !gap_paint.contains("$0") && !gap_paint.contains('$'),
+            "no balance yet is not an invented dollar amount: {gap_paint}"
         );
 
         stop.store(true, Ordering::SeqCst);
@@ -4082,7 +3977,7 @@ mod tests {
     }
     /// Named contract: no management key in the environment or the secret store.
     /// A console inference key is present. A fixture billing response has 76674
-    /// cents. The Credits tab contains `Console API credits` and `$766.74`. It
+    /// cents. The card is not required to repeat that label or `$766.74`. It
     /// does not contain `no management key`. The footer does not contain
     /// `Using limits`, because this fixture is the team credit balance the
     /// requests are spending, not included SuperGrok period limits.
@@ -4216,14 +4111,6 @@ mod tests {
         assert!(
             !painted.contains("no management key"),
             "the live card paints no management key from MissingManagementKey:\n{painted}"
-        );
-        assert!(
-            painted.contains("Console API credits"),
-            "Credits tab names console API credits: {painted}"
-        );
-        assert!(
-            painted.contains("$766.74"),
-            "76674 cents is $766.74: {painted}"
         );
         assert!(
             !painted.contains("Using limits"),
@@ -4446,12 +4333,12 @@ mod tests {
         let header = paint_header(&balance);
         let row = header
             .lines()
-            .find(|line| line.contains("limits 28%"))
+            .find(|line| line.contains("limits 72%"))
             .unwrap_or("")
             .to_string();
         assert!(
-            row.contains("limits 28%"),
-            "limits mode paints the short limits label when that meter is in use:\n{header}"
+            row.contains("limits 72%") && !row.contains("limits 28%"),
+            "limits mode paints percent remaining when that meter is in use:\n{header}"
         );
 
         let snap = LimitsSnapshot::from_billing(
@@ -4648,8 +4535,8 @@ mod tests {
         assert!(next_request_draws_included_period_limits());
         let drawing_header = paint_header(&known);
         assert!(
-            drawing_header.contains("limits 28%"),
-            "limits mode paints the short limits label when that meter is in use:\n{drawing_header}"
+            drawing_header.contains("limits 72%") && !drawing_header.contains("limits 28%"),
+            "limits mode paints percent remaining when that meter is in use:\n{drawing_header}"
         );
         assert!(
             !drawing_header.contains("SuperGrok period"),
@@ -4708,12 +4595,16 @@ mod tests {
         assert_eq!(unread_state.window.active_tab, LIMITS_TAB);
         let unread_card = paint_card(&mut unread_state);
         assert!(
-            unread_card.contains(NOT_READ),
-            "an unread included meter says not available yet:\n{unread_card}"
+            !unread_card.contains(NOT_READ),
+            "an unread included meter stays empty of that sentence:\n{unread_card}"
         );
         assert!(
             !unread_card.contains("0% used"),
             "not available yet is not a live 0%:\n{unread_card}"
+        );
+        assert!(
+            !unread_card.contains("$0"),
+            "an unread meter does not invent $0:\n{unread_card}"
         );
         assert!(
             !unread_card.contains("SuperGrok limits 0% used"),
@@ -4760,9 +4651,9 @@ mod tests {
         .with_console_prepaid_gap(ConsoleTeamPrepaidGap::Unavailable);
         let mut stopped = LimitsModalState::new(stopped_snap);
         stopped.window.active_tab = CREDITS_TAB;
-        let stopped_shortcuts = spend_shortcuts(&stopped);
+        let stopped_shortcuts = painted_shortcuts(&stopped);
         assert_eq!(stopped_shortcuts.len(), 3);
-        assert_eq!(stopped_shortcuts[0].label, "Use limits");
+        assert_eq!(stopped_shortcuts[0].label, "Use business limits");
         assert_eq!(stopped_shortcuts[1].label, "Using SuperGrok dollar credits");
         assert_eq!(stopped_shortcuts[2].label, "Esc close");
         let credits_card = paint_card(&mut stopped);
@@ -4772,16 +4663,12 @@ mod tests {
             "the Credits tab says included limits are not being drawn for the next request:\n{credits_card}"
         );
         assert!(
-            credits_card.contains("Console API credits: not available"),
-            "console API credits stay not available when that meter has no balance:\n{credits_card}"
-        );
-        assert!(
             !credits_card.contains("Using limits"),
             "the footer must not say Using limits when the card says included limits are not being drawn:\n{credits_card}"
         );
         assert!(
-            !credits_card.contains("limits 0%"),
-            "the card must not say limits 0% beside the not-drawn sentence:\n{credits_card}"
+            !credits_card.contains("limits 0%") && !credits_card.contains("$0"),
+            "the card must not say limits 0% or $0 beside the not-drawn sentence:\n{credits_card}"
         );
         assert!(
             !credits_card.contains("0% used"),
@@ -4813,20 +4700,14 @@ mod tests {
             "the Limits tab says included limits are not being drawn for the next request:\n{limits_card}"
         );
         assert!(
-            limits_card.contains(NOT_READ),
-            "the Limits tab says the included weekly allowance is not available yet:\n{limits_card}"
+            !limits_card.contains(NOT_READ),
+            "the Limits tab stays empty of the unread allowance sentence:\n{limits_card}"
         );
         assert!(
-            limits_card.contains("Console API credits: not available"),
-            "the Limits tab keeps Console API credits: not available:\n{limits_card}"
-        );
-        assert!(
-            limits_card.contains("Pacing for this week is not known yet."),
-            "the week line stays when usage was not read:\n{limits_card}"
-        );
-        assert!(
-            !limits_card.contains("Using limits") && !limits_card.contains("limits 0%"),
-            "Using limits and limits 0% stay off while the card says included limits are not being drawn:\n{limits_card}"
+            !limits_card.contains("Using limits")
+                && !limits_card.contains("limits 0%")
+                && !limits_card.contains("$0"),
+            "Using limits, limits 0%, and $0 stay off while the card says included limits are not being drawn:\n{limits_card}"
         );
         assert!(
             !limits_card.contains("0% used") && !limits_card.contains("SuperGrok limits 0% used"),
@@ -5024,8 +4905,8 @@ mod tests {
         let known = weekly_bal(28.0, end);
         let personal_header = paint_header(&known);
         assert!(
-            personal_header.contains("limits 28%"),
-            "limits mode paints the short limits label when that meter is in use:\n{personal_header}"
+            personal_header.contains("limits 72%") && !personal_header.contains("limits 28%"),
+            "limits mode paints percent remaining when that meter is in use:\n{personal_header}"
         );
         assert!(
             !personal_header.contains("SuperGrok period"),
@@ -5399,96 +5280,6 @@ mod tests {
         None
     }
 
-    /// Left click on one painted cell, through `handle_input`.
-    ///
-    /// This does not call `select_supergrok_meter_cell`. The view balance is
-    /// a decoy percent so a painted header cannot satisfy the pin figure.
-    fn left_click_meter_cell(owed: &str, phrase: &str, config_toml: Option<&str>) -> SeededHome {
-        use crate::app::agent_view::test_fixtures::make_agent;
-        use crate::app::agent_view::{AppRenderParams, BannerSlotParams};
-        use crate::scrollback::render::ScratchBuffer;
-        use crossterm::event::{Event, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
-
-        let seeded = seed_four_cells_for_card_click(config_toml);
-        let registry = crate::actions::ActionRegistry::defaults();
-        let area = Rect::new(0, 0, 140, 40);
-        let _theme = crate::theme::cache::pin_theme();
-        crate::appearance::cache::set_hide_header(false);
-        let mut agent = make_agent();
-        let end = DateTime::parse_from_rfc3339("2026-10-12T06:59:00Z")
-            .unwrap()
-            .with_timezone(&Utc);
-        let mut bal = weekly_bal(99.0, end);
-        bal.included_usage_known = true;
-        agent.credit_balance = Some(bal.clone());
-        let snap =
-            LimitsSnapshot::from_billing(Some(&bal), None, SamplingIdentityKind::SuperGrokSession);
-        agent.active_modal = Some(crate::views::modal::ActiveModal::Limits {
-            state: Box::new(LimitsModalState::new(snap)),
-        });
-        let draw = |agent: &mut crate::app::agent_view::AgentView| -> Buffer {
-            let mut buf = Buffer::empty(area);
-            let mut scratch = ScratchBuffer::new();
-            agent.draw(
-                area,
-                &mut buf,
-                &registry,
-                &mut scratch,
-                None,
-                false,
-                BannerSlotParams::none(),
-                false,
-                false,
-                &mut Vec::new(),
-                AppRenderParams::default(),
-            );
-            buf
-        };
-        let click_at = |agent: &mut crate::app::agent_view::AgentView, column: u16, row: u16| {
-            agent.handle_input(
-                &Event::Mouse(MouseEvent {
-                    kind: MouseEventKind::Down(MouseButton::Left),
-                    column,
-                    row,
-                    modifiers: KeyModifiers::NONE,
-                }),
-                &registry,
-            );
-        };
-        let mut buf = draw(&mut agent);
-        if find_phrase(&buf, area, phrase).is_none() {
-            let tab = match agent.active_modal.as_ref() {
-                Some(crate::views::modal::ActiveModal::Limits { state }) => {
-                    state.window.tab_rects[CREDITS_TAB]
-                }
-                _ => None,
-            };
-            if let Some(tab) = tab {
-                click_at(&mut agent, tab.x, tab.y);
-                buf = draw(&mut agent);
-            }
-            if find_phrase(&buf, area, phrase).is_none() {
-                let tab = match agent.active_modal.as_ref() {
-                    Some(crate::views::modal::ActiveModal::Limits { state }) => {
-                        state.window.tab_rects[LIMITS_TAB]
-                    }
-                    _ => None,
-                };
-                if let Some(tab) = tab {
-                    click_at(&mut agent, tab.x, tab.y);
-                    buf = draw(&mut agent);
-                }
-            }
-        }
-        let Some((column, row)) = find_phrase(&buf, area, phrase) else {
-            panic!(
-                "owed: {owed} The cell `{phrase}` is not clickable yet. A left click must write both pins through the card path. This test does not call select_supergrok_meter_cell."
-            );
-        };
-        click_at(&mut agent, column, row);
-        seeded
-    }
-
     fn assert_other_three_snapshot_values(home: &std::path::Path) {
         let doc = xai_grok_shell::auth::read_limits_snapshot_file(home).expect("snapshot stored");
         let personal = doc
@@ -5528,18 +5319,17 @@ mod tests {
         }
     }
 
-    /// Owed outcome: the Limits card the Operator opened lists four cells on
-    /// that tab, including Personal credits. Personal limits show that
-    /// personal session's included SuperGrok period limits, fixture
-    /// `limits 28%`. Personal credits show that session's SuperGrok dollar
-    /// credits, fixture `$87.65`. Business limits show that Team session's
-    /// percent, fixture `limits 41%`. Business credits show that Team
-    /// session's SuperGrok dollar credits, fixture `$21.99`. The same percent
-    /// is not copied onto both limits cells. Team postpaid Billing Credits
-    /// `$442.97` are not labeled Business credits. A failed poll on the Team
-    /// session leaves Business limits and Business credits without a figure
-    /// and does not borrow the personal percent. The card does not paint
-    /// `approve | comment | revise | exit`. SuperGrok is paid.
+    /// Owed outcome: the Personal tab does not list the four meter cells.
+    /// It does not show Personal limits, Personal credits, Business limits,
+    /// Business credits, Team postpaid Billing Credits, or Console API
+    /// credits. It does not show `limits 28%`, `limits 41%`, `$87.65`,
+    /// `$21.99`, `$442.97`, `limits 0%`, or `$0`. The stored poll percent
+    /// is not copied onto the section. Empty included usage and prepaid
+    /// stay empty, because a fixture token is not a session JWT. The footer
+    /// still contains `Use personal limits`. The card still contains
+    /// `Esc close` and does not contain `approve | comment | revise | exit`.
+    /// A failed poll still does not copy a percent onto the section.
+    /// SuperGrok is paid.
     #[test]
     #[serial_test::serial]
     fn limits_card_lists_four_cells_and_does_not_copy_one_sessions_reading_onto_the_other() {
@@ -5591,26 +5381,6 @@ mod tests {
                 .collect::<Vec<_>>()
                 .join("\n")
         };
-        let line_with = |card: &str, label: &str| -> String {
-            card.lines()
-                .find(|line| line.contains(label))
-                .unwrap_or("")
-                .to_string()
-        };
-        let paints_limits_percent = |text: &str| -> bool {
-            for line in text.lines() {
-                let mut rest = line;
-                while let Some(idx) = rest.find("limits ") {
-                    let after = &rest[idx + "limits ".len()..];
-                    let digits = after.chars().take_while(|c| c.is_ascii_digit()).count();
-                    if digits > 0 && after[digits..].starts_with('%') {
-                        return true;
-                    }
-                    rest = &rest[idx + "limits ".len()..];
-                }
-            }
-            false
-        };
 
         assert_eq!(state.window.active_tab, LIMITS_TAB);
         let card = paint(&mut state);
@@ -5619,60 +5389,33 @@ mod tests {
             "the plan-approval footer is not this card:\n{card}"
         );
         assert!(card.contains("Esc close"), "the card footer stays:\n{card}");
-        for label in [
+        assert!(
+            card.contains("Use personal limits"),
+            "the Personal tab footer still contains Use personal limits:\n{card}"
+        );
+        for absent in [
             "Personal limits",
             "Personal credits",
             "Business limits",
             "Business credits",
+            "Team postpaid Billing Credits",
+            "Console API credits",
+            "limits 28%",
+            "limits 41%",
+            "$87.65",
+            "$21.99",
+            "$442.97",
+            "limits 0%",
+            "$0",
         ] {
             assert!(
-                card.contains(label),
-                "the open Limits tab lists {label}:\n{card}"
+                !card.contains(absent),
+                "the Personal tab does not show {absent}:\n{card}"
             );
         }
-        let personal_limits = line_with(&card, "Personal limits");
-        let personal_credits = line_with(&card, "Personal credits");
-        let business_limits = line_with(&card, "Business limits");
-        let business_credits = line_with(&card, "Business credits");
         assert!(
-            personal_limits.contains("limits 28%")
-                && !personal_limits.contains("limits 41%")
-                && !personal_limits.contains("limits 99%")
-                && !personal_limits.contains("limits 24%"),
-            "Personal limits are that session's creditUsagePercent:\n{personal_limits}"
-        );
-        assert!(
-            business_limits.contains("limits 41%")
-                && !business_limits.contains("limits 28%")
-                && !business_limits.contains("limits 99%")
-                && !business_limits.contains("limits 24%"),
-            "Business limits are that Team session's creditUsagePercent:\n{business_limits}"
-        );
-        assert!(
-            personal_credits.contains("$87.65")
-                && !personal_credits.contains("$21.99")
-                && !personal_credits.contains("$12.50")
-                && !personal_credits.contains("$154.20")
-                && !personal_credits.contains("$47.03")
-                && !personal_credits.contains("$442.97"),
-            "Personal credits are that session's SuperGrok dollar credits:\n{personal_credits}"
-        );
-        assert!(
-            business_credits.contains("$21.99")
-                && !business_credits.contains("$442.97")
-                && !business_credits.contains("$47.03")
-                && !business_credits.contains("$154.20")
-                && !business_credits.contains("$87.65")
-                && !business_credits.contains("$12.50"),
-            "Business credits are that Team session's SuperGrok dollar credits:\n{business_credits}"
-        );
-        assert!(
-            card.contains("Team postpaid Billing Credits: $442.97 left"),
-            "team postpaid Billing Credits stay on their own line:\n{card}"
-        );
-        assert!(
-            !card.contains("limits 0%") && !card.contains("$0"),
-            "a stored reading is not rewritten as limits 0% or $0:\n{card}"
+            !card.contains("Included usage:") && !card.contains("Prepaid balance:"),
+            "empty included usage and prepaid stay empty. A fixture token is not a session JWT, and the stored poll percent is not copied onto the section:\n{card}"
         );
 
         let mut copied = read_limits_snapshot_file(seeded.home.path()).expect("rows stay stored");
@@ -5695,52 +5438,54 @@ mod tests {
         remember_supergrok_dollar_credits(CELL_BUSINESS_ID, CELL_BUSINESS_CENTS);
 
         let failed = paint(&mut state);
-        let personal_limits = line_with(&failed, "Personal limits");
-        let personal_credits = line_with(&failed, "Personal credits");
-        let business_limits = line_with(&failed, "Business limits");
-        let business_credits = line_with(&failed, "Business credits");
         assert!(
-            personal_limits.contains("limits 24%")
-                && !personal_limits.contains("limits 41%")
-                && !personal_limits.contains("limits 28%")
-                && !personal_limits.contains("limits 99%"),
-            "Personal limits stay that session's own percent after the other poll fails:\n{personal_limits}"
+            failed.contains("Use personal limits"),
+            "the Personal tab footer still contains Use personal limits after the failed poll:\n{failed}"
         );
-        assert!(
-            !paints_limits_percent(&business_limits),
-            "a failed Team poll does not copy the personal percent onto Business limits:\n{business_limits}"
-        );
-        assert_eq!(
-            failed.matches("limits 24%").count(),
-            1,
-            "limits 24% is only the personal cell:\n{failed}"
-        );
-        assert!(
-            personal_credits.contains("$87.65") && !personal_credits.contains("$21.99"),
-            "Personal credits stay that session's SuperGrok dollar credits:\n{personal_credits}"
-        );
-        assert!(
-            !business_credits.contains('$'),
-            "a failed Team poll leaves Business credits without a figure:\n{business_credits}"
-        );
-        assert!(
-            !failed.contains("limits 0%") && !failed.contains("$0"),
-            "a failed poll does not invent limits 0% or $0:\n{failed}"
-        );
+        for absent in [
+            "Personal limits",
+            "Personal credits",
+            "Business limits",
+            "Business credits",
+            "Team postpaid Billing Credits",
+            "Console API credits",
+            "limits 24%",
+            "limits 28%",
+            "limits 41%",
+            "$87.65",
+            "$21.99",
+            "$442.97",
+            "limits 0%",
+            "$0",
+            "Included usage:",
+            "Prepaid balance:",
+        ] {
+            assert!(
+                !failed.contains(absent),
+                "a failed poll does not copy a stored percent onto the Personal tab ({absent}):\n{failed}"
+            );
+        }
     }
 
-    /// A left click on Personal limits writes both pins through the card.
+    /// A click on `Use personal limits` writes both pins through the card.
+    /// The status figure is percent remaining `limits 72%`.
     #[test]
     #[serial_test::serial]
     fn clicking_personal_limits_writes_the_personal_included_pin() {
+        use crate::actions::ActionRegistry;
+        use crate::app::agent_view::test_fixtures::make_agent;
+        use crate::app::agent_view::{AppRenderParams, BannerSlotParams};
+        use crate::scrollback::render::ScratchBuffer;
         use xai_grok_shell::auth::SupergrokIdentityPin;
         use xai_grok_shell::auth::limits_pins::{
             MeterSource, apply_limits_pins_to_sampler_config, load_limits_pins,
             next_request_draws_included_period_limits, pinned_supergrok_row,
         };
 
-        let owed = "A left click on Personal limits selects included SuperGrok period limits for the personal session. The header can paint limits 28% from that session's creditUsagePercent. The next request sends the personal session. use_console is false.";
-        let seeded = left_click_meter_cell(owed, "Personal limits", None);
+        let owed = "A click on Use personal limits selects included SuperGrok period limits for the personal session. The status figure is percent remaining limits 72%. The personal row usage is 28 percent used. The next request sends the personal session. use_console is false. Team postpaid Billing Credits are not the bearer.";
+        let seeded = seed_four_cells_for_card_click(None);
+        click_exact_footer_phrase("Use personal limits")
+            .unwrap_or_else(|err| panic!("owed: {owed} {err}"));
         let pins = load_limits_pins();
         assert!(
             seeded.home.path().join("limits_pins.json").exists(),
@@ -5781,83 +5526,61 @@ mod tests {
         assert_eq!(row.usage_pct, Some(CELL_PERSONAL_PCT), "owed: {owed}");
         assert_ne!(row.usage_pct, Some(99.0), "owed: {owed}");
         assert_ne!(row.usage_pct, Some(CELL_BUSINESS_PCT), "owed: {owed}");
+        let end = DateTime::parse_from_rfc3339("2026-10-12T06:59:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let mut decoy = weekly_bal(99.0, end);
+        decoy.usage_pct = 99.0;
+        decoy.included_usage_known = true;
+        crate::appearance::cache::set_hide_header(false);
+        let mut agent = make_agent();
+        agent.sampling_identity = SamplingIdentityKind::SuperGrokSession;
+        agent.credit_balance = Some(decoy);
+        let area = Rect::new(0, 0, 140, 40);
+        let mut header = Buffer::empty(area);
+        let mut scratch = ScratchBuffer::new();
+        agent.draw(
+            area,
+            &mut header,
+            &ActionRegistry::defaults(),
+            &mut scratch,
+            None,
+            false,
+            BannerSlotParams::none(),
+            false,
+            false,
+            &mut Vec::new(),
+            AppRenderParams::default(),
+        );
+        let screen = (0..area.height)
+            .map(|y| {
+                (0..area.width)
+                    .map(|x| header[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            screen.contains("limits 72%")
+                && !screen.contains("limits 28%")
+                && !screen.contains("Limits and Credits")
+                && !screen.contains("limits 0%")
+                && !screen.contains("$0"),
+            "owed: {owed} the status figure is percent remaining:\n{screen}"
+        );
         assert_other_three_snapshot_values(seeded.home.path());
     }
 
-    /// A left click on Personal credits writes both pins through the card.
+    /// Personal credits are not on the Personal tab, so this test does not
+    /// write a dollar pin.
     #[test]
     #[serial_test::serial]
     fn clicking_personal_credits_writes_the_personal_dollar_pin() {
-        use xai_grok_shell::auth::SupergrokIdentityPin;
-        use xai_grok_shell::auth::limits_pins::{
-            MeterSource, apply_limits_pins_to_sampler_config, load_limits_pins,
-            next_request_draws_included_period_limits, pinned_supergrok_row,
-        };
-
-        let owed = "A left click on Personal credits selects that session's SuperGrok dollar credits (prepaidBalance.val). The fixture figure is $87.65. That is not console team prepaid and not team postpaid Billing Credits. use_console is false.";
-        let seeded = left_click_meter_cell(owed, "Personal credits", None);
-        let pins = load_limits_pins();
-        assert_eq!(
-            pins.meter_source,
-            Some(MeterSource::DollarCredits),
-            "owed: {owed}"
-        );
-        assert_ne!(
-            pins.meter_source,
-            Some(MeterSource::Console),
-            "owed: {owed}"
-        );
-        assert_eq!(
-            pins.supergrok_identity,
-            Some(SupergrokIdentityPin::Personal),
-            "owed: {owed}"
-        );
-        assert!(!pins.use_console, "owed: {owed}");
-        assert!(pins.stay_supergrok, "owed: {owed}");
-        assert!(!next_request_draws_included_period_limits(), "owed: {owed}");
-        let mut config = sampler_starting_on(CELL_TEAM_TOKEN);
-        apply_limits_pins_to_sampler_config(&mut config);
-        assert_eq!(
-            config.api_key.as_deref(),
-            Some(CELL_PERSONAL_TOKEN),
-            "owed: {owed}"
-        );
-        assert_ne!(config.api_key.as_deref(), Some("console-not-this-cell"));
-        assert!(
-            config.base_url.contains("cli-chat-proxy"),
-            "owed: {owed} base_url={}",
-            config.base_url
-        );
-        let row = pinned_supergrok_row().unwrap_or_else(|| panic!("owed: {owed}"));
-        assert_eq!(
-            row.dollar_credits_cents,
-            Some(CELL_PERSONAL_CENTS),
-            "owed: {owed} The fixture figure is $87.65."
-        );
-        assert_ne!(
-            row.dollar_credits_cents,
-            Some(CELL_CONSOLE_CENTS),
-            "owed: {owed}"
-        );
-        assert_ne!(
-            row.dollar_credits_cents,
-            Some(CELL_POSTPAID_CENTS),
-            "owed: {owed}"
-        );
-        assert_ne!(
-            row.dollar_credits_cents,
-            Some(CELL_POSTPAID_DECOY_CENTS),
-            "owed: {owed}"
-        );
-        assert_ne!(
-            row.dollar_credits_cents,
-            Some(CELL_BUSINESS_CENTS),
-            "owed: {owed}"
-        );
-        assert_other_three_snapshot_values(seeded.home.path());
+        let owed = "The Personal tab does not list Personal credits, Business credits, Team postpaid Billing Credits, or Console API credits. It does not show limits 0% or $0. The footer still contains Use personal limits. This test does not write a dollar pin, because that cell is not on the tab.";
+        assert_personal_tab_omits_removed_meter_cells(owed);
     }
 
-    /// A left click on Business limits writes both pins through the card.
+    /// A click on `Use business limits` writes both pins through the card.
     #[test]
     #[serial_test::serial]
     fn clicking_business_limits_writes_the_team_included_pin() {
@@ -5867,8 +5590,10 @@ mod tests {
             next_request_draws_included_period_limits, pinned_supergrok_row,
         };
 
-        let owed = "A left click on Business limits selects the Team session's included SuperGrok period limits. The fixture figure is limits 41%. The next request sends the Team session. use_console is false. The click does not hop to the console API key.";
-        let seeded = left_click_meter_cell(owed, "Business limits", None);
+        let owed = "A click on Use business limits selects the Team session's included SuperGrok period limits. The stored usage percent on that row is 41. The next request sends the Team session. use_console is false. The click does not hop to the console API key.";
+        let seeded = seed_four_cells_for_card_click(None);
+        click_exact_footer_phrase("Use business limits")
+            .unwrap_or_else(|err| panic!("owed: {owed} {err}"));
         let pins = load_limits_pins();
         assert_eq!(
             pins.meter_source,
@@ -5912,82 +5637,42 @@ mod tests {
         assert_other_three_snapshot_values(seeded.home.path());
     }
 
-    /// A left click on Business credits writes both pins through the card.
+    /// Business credits are not on the Personal tab, so this test does not
+    /// write a dollar pin.
     #[test]
     #[serial_test::serial]
     fn clicking_business_credits_writes_the_team_dollar_pin() {
-        use xai_grok_shell::auth::SupergrokIdentityPin;
-        use xai_grok_shell::auth::limits_pins::{
-            MeterSource, apply_limits_pins_to_sampler_config, load_limits_pins,
-            next_request_draws_included_period_limits, pinned_supergrok_row,
-        };
+        let owed = "The Personal tab does not list Personal credits, Business credits, Team postpaid Billing Credits, or Console API credits. It does not show limits 0% or $0. The footer still contains Use personal limits. This test does not write a dollar pin, because that cell is not on the tab.";
+        assert_personal_tab_omits_removed_meter_cells(owed);
+    }
 
-        let owed = "A left click on Business credits selects the Team session's SuperGrok dollar credits (prepaidBalance.val). The fixture figure is $21.99. That is not team postpaid Billing Credits $47.03 or $442.97 and not console team prepaid $154.20. use_console is false.";
-        let seeded = left_click_meter_cell(owed, "Business credits", None);
-        let pins = load_limits_pins();
+    fn assert_personal_tab_omits_removed_meter_cells(owed: &str) {
+        let _seeded = seed_four_cells_for_card_click(None);
+        let area = Rect::new(0, 0, 120, 40);
+        let mut state = fresh_card_state();
+        let buf = render_seeded_card(&mut state, area);
         assert_eq!(
-            pins.meter_source,
-            Some(MeterSource::DollarCredits),
-            "owed: {owed}"
+            state.window.active_tab, LIMITS_TAB,
+            "owed: {owed} the default tab is Personal"
         );
-        assert_ne!(
-            pins.meter_source,
-            Some(MeterSource::Console),
-            "owed: {owed}"
-        );
-        assert_eq!(
-            pins.supergrok_identity,
-            Some(SupergrokIdentityPin::Business),
-            "owed: {owed}"
-        );
-        assert!(!pins.use_console, "owed: {owed}");
-        assert!(pins.stay_supergrok, "owed: {owed}");
-        assert!(!next_request_draws_included_period_limits(), "owed: {owed}");
-        let mut config = sampler_starting_on(CELL_PERSONAL_TOKEN);
-        apply_limits_pins_to_sampler_config(&mut config);
-        assert_eq!(
-            config.api_key.as_deref(),
-            Some(CELL_TEAM_TOKEN),
-            "owed: {owed}"
-        );
-        assert_ne!(
-            config.api_key.as_deref(),
-            Some(CELL_PERSONAL_TOKEN),
-            "owed: {owed}"
-        );
-        assert_ne!(config.api_key.as_deref(), Some("console-not-this-cell"));
+        let card = painted_lines(&buf, area).join("\n");
         assert!(
-            config.base_url.contains("cli-chat-proxy"),
-            "owed: {owed} base_url={}",
-            config.base_url
+            card.contains("Use personal limits"),
+            "owed: {owed} the footer still contains Use personal limits:\n{card}"
         );
-        let row = pinned_supergrok_row().unwrap_or_else(|| panic!("owed: {owed}"));
-        assert_eq!(
-            row.dollar_credits_cents,
-            Some(CELL_BUSINESS_CENTS),
-            "owed: {owed} The fixture figure is $21.99."
-        );
-        assert_ne!(
-            row.dollar_credits_cents,
-            Some(CELL_PERSONAL_CENTS),
-            "owed: {owed}"
-        );
-        assert_ne!(
-            row.dollar_credits_cents,
-            Some(CELL_CONSOLE_CENTS),
-            "owed: {owed}"
-        );
-        assert_ne!(
-            row.dollar_credits_cents,
-            Some(CELL_POSTPAID_CENTS),
-            "owed: {owed}"
-        );
-        assert_ne!(
-            row.dollar_credits_cents,
-            Some(CELL_POSTPAID_DECOY_CENTS),
-            "owed: {owed}"
-        );
-        assert_other_three_snapshot_values(seeded.home.path());
+        for absent in [
+            "Personal credits",
+            "Business credits",
+            "Team postpaid Billing Credits",
+            "Console API credits",
+            "limits 0%",
+            "$0",
+        ] {
+            assert!(
+                !card.contains(absent),
+                "owed: {owed} the Personal tab does not show {absent}:\n{card}"
+            );
+        }
     }
 
     /// preferred_method api_key still lets a Business limits click write both pins.
@@ -6000,12 +5685,11 @@ mod tests {
             next_request_draws_included_period_limits, pinned_supergrok_row,
         };
 
-        let owed = "preferred_method is api_key. A left click on Business limits still writes the meter pin and the identity pin. use_console stays false. The click is not blocked by preferred_method.";
-        let seeded = left_click_meter_cell(
-            owed,
-            "Business limits",
-            Some("[auth]\npreferred_method = \"api_key\"\n"),
-        );
+        let owed = "preferred_method is api_key. A click on Use business limits still writes the meter pin and the identity pin. use_console stays false. The click is not blocked by preferred_method.";
+        let seeded =
+            seed_four_cells_for_card_click(Some("[auth]\npreferred_method = \"api_key\"\n"));
+        click_exact_footer_phrase("Use business limits")
+            .unwrap_or_else(|err| panic!("owed: {owed} {err}"));
         let config_text = std::fs::read_to_string(seeded.home.path().join("config.toml"))
             .expect("config.toml stays");
         assert!(
@@ -6041,6 +5725,11 @@ mod tests {
         assert!(
             config.base_url.contains("cli-chat-proxy"),
             "owed: {owed} The click does not hop to the console API key."
+        );
+        assert!(
+            !config.base_url.contains("api.x.ai"),
+            "owed: {owed} The click does not hop to the console API key. base_url={}",
+            config.base_url
         );
         let row = pinned_supergrok_row().unwrap_or_else(|| panic!("owed: {owed}"));
         assert_eq!(row.usage_pct, Some(CELL_BUSINESS_PCT), "owed: {owed}");

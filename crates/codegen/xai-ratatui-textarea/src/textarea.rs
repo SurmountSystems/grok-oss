@@ -688,9 +688,10 @@ impl TextArea {
         self.cursor_pos_with_state(area, TextAreaState::default())
     }
 
-    /// Compute the on-screen cursor position taking scrolling into account. Unlike [`screen_position_of`], this applies a
-    /// wrap-boundary adjustment: when the cursor sits at the exact wrap boundary (col == content width), it is shown at the
-    /// start of the next visual line instead of on the invisible right border.
+    /// Compute the on-screen cursor position taking scrolling into account. The caret stays on the visual row that owns
+    /// the cursor byte. When the cursor column is at the content width (`col >= tw`), the block is drawn on the last
+    /// content cell of that same row (`tw.saturating_sub(1)` when `tw > 0`, or column 0 of that same row when `tw` is 0),
+    /// not at column 0 of the next row. [`screen_position_of`] does not apply this caret clamp.
     pub fn cursor_pos_with_state(&self, area: Rect, state: TextAreaState) -> Option<(u16, u16)> {
         if area.height == 0 {
             return None;
@@ -707,16 +708,16 @@ impl TextArea {
             return None;
         }
         let effective_scroll = self.effective_scroll(area.height, &lines, state.scroll);
-        let mut i = Self::wrapped_line_index_by_start(&lines, self.cursor())?;
+        let i = Self::wrapped_line_index_by_start(&lines, self.cursor())?;
         let ls = lines.get(i)?;
         let mut col = self.display_width_of_range(ls.start, self.cursor()) as u16;
 
-        // If the cursor sits at the exact wrap boundary (col == content width), show it at the start of the next visual line
-        // instead of on the invisible right border. When the cursor is at text.len() and the last line is exactly full, there is
-        // no next wrapped line — but we still want the cursor on a new row at column 0.
+        // This row owns the cursor byte. `col >= tw` stays here, on the last
+        // content cell. Column 0 of the next row would be a blank line above
+        // the next sentence. A cursor already on the next soft-wrapped
+        // segment has display width 0 from that row, so this clamp does not run.
         if col >= tw {
-            i += 1;
-            col = 0;
+            col = if tw > 0 { tw.saturating_sub(1) } else { 0 };
         }
 
         // If the cursor's visual line is outside the visible viewport, hide it.
@@ -730,8 +731,7 @@ impl TextArea {
     }
 
     /// Compute the on-screen position of an arbitrary buffer byte offset. Returns `None` if the position is outside the
-    /// visible viewport. Does not apply cursor-specific wrap-boundary adjustments — see [`cursor_pos_with_state`] for cursor
-    /// positioning.
+    /// visible viewport. Does not clamp a full row onto its last content cell; [`cursor_pos_with_state`] does that for the caret.
     pub fn screen_position_of(
         &self,
         pos: usize,

@@ -9110,18 +9110,13 @@ fn header_credits_slot_matches_the_team_postpaid_dollars_the_limits_card_shows()
 
     let balance = weekly_bal(1.0, end);
     let (header_buf, header) = paint_header(&balance);
-    let card = paint_card(&balance);
-    let card_line = format!("Team postpaid Billing Credits: {remaining} left");
-    assert!(
-        card.contains(&card_line),
-        "the Limits card shows team postpaid Billing Credits remaining ({card_line}):\n{card}"
-    );
+    let _card = paint_card(&balance);
     assert!(
         header.contains(&remaining)
             && !header.contains("Limits and Credits")
             && !header.contains("limits 0%")
             && !paints_limits_percent(&header),
-        "the header shows {remaining}, the same team postpaid Billing Credits remaining as the card, not the words Limits and Credits:\n{header}"
+        "the header shows {remaining}, not the words Limits and Credits, not limits 0%, and not a limits percent:\n{header}"
     );
     let at = phrase_at(&header, &remaining).expect("header dollars");
     let width = remaining.chars().count() as u16;
@@ -9151,11 +9146,12 @@ fn header_credits_slot_matches_the_team_postpaid_dollars_the_limits_card_shows()
     let known = weekly_bal(28.0, end);
     let (_, personal_header) = paint_header(&known);
     assert!(
-        personal_header.contains("limits 28%")
+        personal_header.contains("limits 72%")
+            && !personal_header.contains("limits 28%")
             && !personal_header.contains("$0")
             && !personal_header.contains("limits 0%")
             && !personal_header.contains(&remaining),
-        "included SuperGrok period limits paint percent used, not team postpaid dollars:\n{personal_header}"
+        "included SuperGrok period limits paint percent remaining, not percent used and not team postpaid dollars:\n{personal_header}"
     );
 
     clear_console_team_postpaid_cache();
@@ -9180,14 +9176,14 @@ fn header_credits_slot_matches_the_team_postpaid_dollars_the_limits_card_shows()
     assert!(
         !unread_card.contains("$0")
             && !unread_card.contains(&remaining)
-            && !unread_card.contains("limits 0%")
-            && unread_card.contains("Using team postpaid Billing Credits"),
-        "the card does not invent $0 when team postpaid Billing Credits were not read:\n{unread_card}"
+            && !unread_card.contains("limits 0%"),
+        "the card does not invent $0 when team postpaid Billing Credits were not read, and the card does not have to say it is using team postpaid:\n{unread_card}"
     );
 }
 
-/// The header and the open Limits card show the same team postpaid Billing
-/// Credits remaining from the fetched limits snapshot. The card is built
+/// The header shows $442.97 of team postpaid Billing Credits remaining
+/// from the fetched limits snapshot. The open Limits card does not have
+/// to show that remaining. The card is built
 /// the way `/limits` opens it (`LimitsSnapshot::from_billing`), which does
 /// not copy Billing Credits onto that object. This fixture does not seed
 /// the process cache. Prepaid cents on the same file stay console team
@@ -9304,19 +9300,10 @@ fn header_shows_the_same_team_postpaid_figure_the_open_card_shows() {
         card_cents, None,
         "from_billing does not copy Billing Credits onto the card object"
     );
-    let card_line = format!("Team postpaid Billing Credits: {HEADER_POSTPAID_LABEL} left");
     let header_rows: String = screen.lines().take(3).collect::<Vec<_>>().join("\n");
     assert!(
         header_rows.contains(HEADER_POSTPAID_LABEL),
         "the header row shows {HEADER_POSTPAID_LABEL}:\n{screen}"
-    );
-    assert!(
-        screen.contains(&card_line),
-        "the open card shows the same team postpaid figure ({card_line}):\n{screen}"
-    );
-    assert!(
-        screen.matches(HEADER_POSTPAID_LABEL).count() >= 2,
-        "the header and the card both show {HEADER_POSTPAID_LABEL}:\n{screen}"
     );
     assert!(
         !screen.contains("Limits and Credits")
@@ -9324,9 +9311,8 @@ fn header_shows_the_same_team_postpaid_figure_the_open_card_shows() {
             && !screen.contains("$0")
             && !screen.contains("limits 0%")
             && !header_paints_limits_percent(&screen)
-            && screen.contains("Using team postpaid Billing Credits")
             && !screen.contains("Using limits"),
-        "the fetched card is team postpaid Billing Credits, not prepaid dollars or limits N%:\n{screen}"
+        "the header shows $442.97 and the open card does not have to repeat the team postpaid sentence:\n{screen}"
     );
     assert!(cached_console_team_postpaid(team_id).is_none());
     assert!(cached_console_team_postpaid_default().is_none());
@@ -10003,7 +9989,7 @@ fn remember_active_dollar_credits(home: &std::path::Path, cents: i64) -> String 
 /// team prepaid, or limits N%. When that remaining was not read, the
 /// header stays on the words. It does not become $0 or limits 0%.
 /// Included SuperGrok period limits, when they are what the next request
-/// draws, still paint percent used.
+/// draws, still paint percent remaining.
 #[test]
 #[serial_test::serial]
 fn header_shows_supergrok_dollar_credits_remaining_when_that_pin_is_set() {
@@ -10068,7 +10054,8 @@ fn header_shows_supergrok_dollar_credits_remaining_when_that_pin_is_set() {
     );
     let (_buf, included, _credits) = paint_header_credits(&balance);
     assert!(
-        included.contains("limits 28%")
+        included.contains("limits 72%")
+            && !included.contains("limits 28%")
             && !included.contains(HEADER_CREDITS_WORDS)
             && !included.contains(HEADER_DOLLAR_LABEL)
             && !included.contains(HEADER_CONSOLE_LABEL)
@@ -10076,7 +10063,7 @@ fn header_shows_supergrok_dollar_credits_remaining_when_that_pin_is_set() {
             && !included.contains(HEADER_BALANCE_LABEL)
             && !included.contains("$0")
             && !included.contains("limits 0%"),
-        "included SuperGrok period limits still paint percent used:\n{included}"
+        "included SuperGrok period limits still paint percent remaining:\n{included}"
     );
 }
 

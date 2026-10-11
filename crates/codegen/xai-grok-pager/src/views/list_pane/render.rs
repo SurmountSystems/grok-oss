@@ -183,28 +183,34 @@ impl<T: ListItem> ListPane<'_, T> {
             buf.set_line_safe(area.x, area.y, pfx, prefix_w);
         }
 
-        if area.height == 1 || wrap_mode == WrapMode::NoWrap {
-            // NoWrap / single row: paint content after prefix, truncated.
-            let content_x = area.x + prefix_w;
-            let content_w = area.width.saturating_sub(prefix_w);
+        // NoWrap stays one truncated row. Wrap paints every wrapped row, even
+        // when the passed height is 1 and the line wraps past that row.
+        let content_x = area.x + prefix_w;
+        let content_w = area.width.saturating_sub(prefix_w);
+        let wrapped = if wrap_mode == WrapMode::Wrap && content_w > 0 {
+            word_wrap_line(content, content_w as usize)
+        } else {
+            Vec::new()
+        };
+        let wrap_count = wrapped.len() as u16;
+        if wrap_mode == WrapMode::NoWrap || content_w == 0 || (area.height == 1 && wrap_count <= 1)
+        {
             if content_w > 0 {
                 // Content paint is bidi-aware; search highlights remap columns.
                 buf.set_line_safe_bidi(content_x, area.y, content, content_w);
             }
         } else {
-            // Wrap: word-wrap content into (area.width - prefix_w) columns.
-            let content_w = area.width.saturating_sub(prefix_w) as usize;
-            if content_w == 0 {
-                return;
-            }
-            let wrapped = word_wrap_line(content, content_w);
-            let content_x = area.x + prefix_w;
+            let row_limit = if wrap_count > 1 {
+                area.height.max(wrap_count)
+            } else {
+                area.height
+            };
             for (i, wl) in wrapped.iter().enumerate() {
                 let y = area.y + i as u16;
-                if y >= area.y + area.height {
+                if y >= area.y + row_limit {
                     break;
                 }
-                buf.set_line_safe_bidi(content_x, y, wl, content_w as u16);
+                buf.set_line_safe_bidi(content_x, y, wl, content_w);
                 // On continuation lines (i > 0), the prefix area is left blank; indentation happens via the column offset
             }
         }
@@ -237,7 +243,14 @@ impl<T: ListItem> ListPane<'_, T> {
             let Some(item) = self.items.get(pi) else {
                 continue;
             };
-            let item_h = state.layout().item_height(vi);
+            let item_h = if wrap_mode == WrapMode::Wrap {
+                state
+                    .layout()
+                    .item_height(vi)
+                    .max(item.desired_height(area.width))
+            } else {
+                state.layout().item_height(vi)
+            };
 
             // How many rows to skip at the top of this item (only for the first item).
             let skip = if vi == first_vi { skip_rows } else { 0 };

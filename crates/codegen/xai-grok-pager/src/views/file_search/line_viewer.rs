@@ -204,10 +204,9 @@ impl ListItem for SourceLine {
             let wrapped = word_wrap_line(line, text_w);
             total += (wrapped.len() as u16).max(1);
         }
-        // A rendered row can be width-clipped (`…two` with `tokens.` gone).
-        // Reserve a row for every word of the source line, not the clip.
-        if markdown_plain_needs_full_paint(&self.rendered_lines, &self.plain_text) {
-            let plain = visible_plan_line(&self.plain_text);
+        // Height follows the source sentence, including when the rendered row was clipped.
+        let plain = visible_plan_line(&self.plain_text);
+        if !plain.is_empty() {
             let plain_rows = word_wrap_line(&Line::from(plain), text_w).len() as u16;
             total = total.max(plain_rows);
         }
@@ -245,15 +244,27 @@ impl ListItem for SourceLine {
 
         let mut y = area.y;
         let mut is_first_visual = true;
-        // Paint the source sentence when the rendered row dropped its tail.
-        // Wrapped rows stay; characters must not.
-        let plain_paint = markdown_plain_needs_full_paint(&self.rendered_lines, &self.plain_text);
+        // Paint the source sentence when the rendered row dropped its tail,
+        // or when that sentence wraps onto more rows than the rendered lines.
+        let plain_sentence = visible_plan_line(&self.plain_text);
+        let plain_rows = if plain_sentence.is_empty() || text_w == 0 {
+            0
+        } else {
+            word_wrap_line(&Line::from(plain_sentence.as_str()), text_w as usize).len()
+        };
+        let rendered_rows: usize = if text_w == 0 {
+            0
+        } else {
+            self.rendered_lines
+                .iter()
+                .map(|line| word_wrap_line(line, text_w as usize).len())
+                .sum()
+        };
+        let plain_paint = markdown_plain_needs_full_paint(&self.rendered_lines, &self.plain_text)
+            || plain_rows > rendered_rows;
         let plain_line = if plain_paint {
             let style = Style::default().fg(theme.text_primary).bg(theme.bg_base);
-            Some(Line::from(Span::styled(
-                visible_plan_line(&self.plain_text),
-                style,
-            )))
+            Some(Line::from(Span::styled(plain_sentence, style)))
         } else {
             None
         };
@@ -274,8 +285,14 @@ impl ListItem for SourceLine {
             } else {
                 wrapped
             };
+            let wrap_count = visual_lines.len() as u16;
+            let row_limit = if wrap_count > 1 {
+                area.height.max(wrap_count)
+            } else {
+                area.height
+            };
             for wline in &visual_lines {
-                if y >= area.y + area.height {
+                if y >= area.y + row_limit {
                     break;
                 }
                 if let Some(bg) = bg {
@@ -4144,6 +4161,117 @@ mod tests {
             sentence_flat.contains(&flat),
             "the right-hand cells are not that sentence in order; visible={flat:?}"
         );
+    }
+
+    /// A sentence longer than the approval pane wraps onto a second row of
+    /// the same sentence. The first row ends on a word boundary. The next
+    /// row is not a different fragment.
+    #[test]
+    fn plan_approval_second_row_continues_the_same_sentence() {
+        use crate::views::list_pane::{ListItem, line_display_width};
+
+        let _pin = crate::theme::cache::pin_theme();
+        crate::theme::cache::set(crate::theme::ThemeKind::Doge);
+        let theme = crate::theme::Theme::doge();
+        let words = [
+            "Alpha", "Bravo", "Charlie", "Delta", "Echo", "Foxtrot", "Golf", "Hotel", "India",
+            "Juliet", "Kilo", "Lima", "Mike", "November", "Oscar", "Papa", "Quebec", "Romeo",
+            "Sierra", "Tango", "Uniform", "Victor", "Whiskey", "Xray", "Yankee", "Zulu",
+        ];
+        let mut sentence_words = Vec::new();
+        for _ in 0..12 {
+            sentence_words.extend_from_slice(&words);
+        }
+        let sentence = format!("{}.", sentence_words.join(" "));
+        let body = format!("# Proposed plan.\n\n{sentence}\nNEXTFRAGMENT\n");
+
+        for fullscreen in [false, true] {
+            let mut viewer = LineViewerState::open_markdown_content("plan.md", body.clone(), None)
+                .expect("open plan");
+            viewer.kind = LineViewerKind::PlanPreview;
+            viewer.fullscreen = fullscreen;
+            viewer.plan_mut().feedback_active = false;
+            viewer.plan_mut().show_action_buttons = true;
+
+            let full = Rect::new(0, 0, 100, 30);
+            let mut buf = Buffer::empty(full);
+            render_line_viewer(&mut buf, full, &mut viewer, Path::new("/tmp"), &theme, 0);
+
+            let sentence_idx = viewer
+                .lines
+                .iter()
+                .position(|item| {
+                    matches!(
+                        item,
+                        PlanViewerItem::Source(source) if source.plain_text.contains("Alpha Bravo")
+                    )
+                })
+                .expect("the long sentence is one source line");
+            let sentence_h = viewer.list_state.layout().item_height(sentence_idx);
+            assert!(
+                sentence_h >= 2,
+                "fullscreen={fullscreen} item height was {sentence_h}, want at least 2"
+            );
+
+            let content = viewer.last_popup_area.expect("plan text area");
+            let prefix_w = viewer
+                .lines
+                .get(sentence_idx)
+                .and_then(|item| item.prefix())
+                .map(|prefix| line_display_width(&prefix) as u16)
+                .unwrap_or(0);
+            let text_x = content.x.saturating_add(prefix_w);
+            let text_end = viewer
+                .list_state
+                .scrollbar_area()
+                .map(|track| track.x)
+                .unwrap_or(content.x.saturating_add(content.width));
+            assert!(text_end > text_x, "fullscreen={fullscreen} content column");
+
+            let row_string = |buffer: &Buffer, y: u16| -> String {
+                let mut out = String::new();
+                for x in text_x..text_end {
+                    if let Some(cell) = buffer.cell((x, y)) {
+                        out.push_str(cell.symbol());
+                    }
+                }
+                out.trim().to_string()
+            };
+
+            let sentence_y = viewer.list_state.layout().virtual_y(sentence_idx);
+            let scroll = viewer.list_state.scroll_offset();
+            let y0 = content
+                .y
+                .saturating_add(sentence_y.saturating_sub(scroll) as u16);
+            let y1 = y0.saturating_add(1);
+            let row0 = row_string(&buf, y0);
+            let row1 = row_string(&buf, y1);
+
+            assert!(
+                !row0.contains("NEXTFRAGMENT"),
+                "fullscreen={fullscreen} row 0 is a different fragment: {row0:?}"
+            );
+            assert!(
+                !row1.contains("NEXTFRAGMENT"),
+                "fullscreen={fullscreen} row 1 is a different fragment: {row1:?}"
+            );
+            let sentence_words_owned: Vec<&str> = sentence.split_whitespace().collect();
+            let row0_words: Vec<&str> = row0.split_whitespace().collect();
+            let row1_words: Vec<&str> = row1.split_whitespace().collect();
+            assert!(
+                !row0_words.is_empty() && !row1_words.is_empty(),
+                "fullscreen={fullscreen} blank wrap row row0={row0:?} row1={row1:?}"
+            );
+            assert!(
+                sentence_words_owned.starts_with(row0_words.as_slice()),
+                "fullscreen={fullscreen} first row is not a word-boundary prefix: {row0:?}"
+            );
+            let rest = &sentence_words_owned[row0_words.len()..];
+            assert!(
+                rest.starts_with(row1_words.as_slice()),
+                "fullscreen={fullscreen} second row does not continue the same sentence: {row1:?}"
+            );
+        }
     }
 
     /// Half-width plan pane (`PlanPreview`, fullscreen off). The title and

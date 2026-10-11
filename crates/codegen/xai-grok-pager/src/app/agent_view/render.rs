@@ -359,13 +359,13 @@ fn both_refused_status_chip_label(
 }
 
 /// Included percent the L1 chip paints, when the next request draws that
-/// meter. A set identity pin uses that row and does not substitute the
-/// view balance. An unset pin uses the stored percent of the session the
-/// next request sends. A Team bearer uses that business row. A personal
-/// bearer uses the personal row. When that stored percent is absent, or
-/// there is no sending session, a known view `CreditBalance` percent is
-/// the reading. An unread view balance stays missing. A missing reading
-/// is `None`, not `limits 0%`.
+/// meter. A set identity pin uses that row's stored percent and does not
+/// replace a stored percent with the view balance. An unset pin uses the
+/// stored percent of the session the next request sends. A Team bearer
+/// uses that business row. A personal bearer uses the personal row. When
+/// that stored percent is absent, or there is no sending session, a known
+/// view `CreditBalance` percent is the reading. An unread view balance
+/// stays missing. A missing reading is `None`, not `limits 0%`.
 fn included_chip_usage_pct(
     identity: crate::views::credit_bar::SamplingIdentityKind,
     balance: Option<&crate::views::credit_bar::CreditBalance>,
@@ -376,8 +376,10 @@ fn included_chip_usage_pct(
     if !xai_grok_shell::auth::limits_pins::next_request_draws_included_period_limits() {
         return None;
     }
-    if let Some(row) = xai_grok_shell::auth::limits_pins::pinned_supergrok_row() {
-        return row.usage_pct.filter(|pct| pct.is_finite());
+    if let Some(row) = xai_grok_shell::auth::limits_pins::pinned_supergrok_row()
+        && let Some(pct) = row.usage_pct.filter(|pct| pct.is_finite())
+    {
+        return Some(pct);
     }
     if let Some(pct) = xai_grok_shell::auth::limits_pins::included_usage_pct_of_sending_session()
         && let Some(value) = pct.filter(|value| value.is_finite())
@@ -478,17 +480,16 @@ fn credits_label_when_included_period_is_not_next_request() -> String {
 }
 
 /// Text of the L1 credits chip. Nested views do not call this.
-/// A known included SuperGrok period reading paints `limits N%`
-/// (hover paints percent left). When an identity pin is set, that
-/// percent is the selected row, not the other session's balance.
-/// When the pin is unset, a stored percent on the session the next
-/// request sends wins. When that session stored no percent, a known view
-/// balance percent is the reading. When that reading is missing and the
-/// next request still draws included SuperGrok period limits, the chip
-/// stays `Limits and Credits`.
-/// It does not become `limits 0%` or `$0`. When the next request does
-/// not draw that meter, the chip is the remaining for the meter that
-/// request spends.
+/// The status figure paints percent remaining as `limits N%`, where N
+/// is 100 minus the used percent. Hover paints that same remaining as
+/// `N% left`. When an identity pin is set, that percent is the selected
+/// row, not the other session's balance. When the pin is unset, a stored
+/// percent on the session the next request sends wins. When that session
+/// stored no percent, a known view balance percent is the reading. A
+/// missing reading stays `Limits and Credits`. It does not become
+/// `limits 0%` or `$0`. When the next request does not draw included
+/// SuperGrok period limits, the chip is the dollars remaining for the
+/// meter that request spends.
 fn l1_credits_chip_label(
     identity: crate::views::credit_bar::SamplingIdentityKind,
     balance: Option<&crate::views::credit_bar::CreditBalance>,
@@ -501,10 +502,11 @@ fn l1_credits_chip_label(
     }
     if let Some(pct) = included_chip_usage_pct(identity, balance) {
         let used = pct.round().clamp(0.0, 100.0) as u8;
+        let remaining = 100u8.saturating_sub(used);
         if hovered {
-            return format!("{}% left", 100u8.saturating_sub(used));
+            return format!("{remaining}% left");
         }
-        return format!("limits {used}%");
+        return format!("limits {remaining}%");
     }
     if xai_grok_shell::auth::limits_pins::next_request_draws_included_period_limits() {
         return "Limits and Credits".to_owned();
@@ -7486,10 +7488,11 @@ mod status_credits_meter_tests {
         );
     }
 
-    /// Included used percent is 28. The status row paints `limits 28%` and
-    /// arms a hit rectangle. Hover on that rectangle shows `72% left`.
-    /// The row and the hover do not paint the 15-minute window, the 24-hour
-    /// window, business, personal, SuperGrok period, or behind linear burn.
+    /// Included used percent is 28. The status row paints percent remaining
+    /// as `limits 72%` and arms a hit rectangle. It does not paint `limits 28%`.
+    /// Hover on that rectangle shows `72% left`. The row and the hover do not
+    /// paint the 15-minute window, the 24-hour window, business, personal,
+    /// SuperGrok period, or behind linear burn.
     #[test]
     fn status_row_paints_weekly_limits_used_and_hover_shows_percent_remaining() {
         use crate::views::credit_bar::SamplingIdentityKind;
@@ -7512,8 +7515,8 @@ mod status_credits_meter_tests {
             .unwrap_or("")
             .to_string();
         assert!(
-            row.contains("limits 28%"),
-            "status row must paint `limits 28%` when included used percent is 28:\n{row}\nfull:\n{text}"
+            row.contains("limits 72%") && !row.contains("limits 28%"),
+            "status row must paint percent remaining `limits 72%` when included used percent is 28, not `limits 28%`:\n{row}\nfull:\n{text}"
         );
         let hit = agent
             .hit_credits
@@ -7567,6 +7570,91 @@ mod status_credits_meter_tests {
         assert!(
             hover.contains("72% left"),
             "hover must show `72% left` when included used percent is 28:\n{hover}\nrow:\n{hover_row}"
+        );
+        forbid(&row, "status row");
+        forbid(&hover, "hover");
+    }
+
+    /// Included used percent is 10. The status row paints percent remaining
+    /// as `limits 90%`. It does not paint `limits 10%`. Hover on that
+    /// rectangle shows `90% left`.
+    #[test]
+    fn status_row_paints_limits_90_percent_remaining_when_included_usage_is_10_percent() {
+        use crate::views::credit_bar::SamplingIdentityKind;
+
+        crate::appearance::cache::set_hide_header(false);
+        let mut agent = make_agent();
+        agent.sampling_identity = SamplingIdentityKind::SuperGrokSession;
+        agent.credit_balance = Some(CreditBalance {
+            usage_pct: 10.0,
+            effective_usage_pct: 10.0,
+            included_usage_known: true,
+            period_type: Some("USAGE_PERIOD_TYPE_WEEKLY".into()),
+            ..CreditBalance::default()
+        });
+
+        let text = draw(&mut agent);
+        let row = text
+            .lines()
+            .find(|line| line.contains("/tmp"))
+            .unwrap_or("")
+            .to_string();
+        assert!(
+            row.contains("limits 90%") && !row.contains("limits 10%"),
+            "status row must paint percent remaining `limits 90%` when included used percent is 10, not `limits 10%`:\n{row}\nfull:\n{text}"
+        );
+        let hit = agent
+            .hit_credits
+            .rect
+            .expect("status row must arm a hit rectangle for the limits chip");
+        let forbid = |painted: &str, which: &str| {
+            let forbidden = [
+                "behind linear burn",
+                "15m",
+                "24h",
+                "business",
+                "personal",
+                "SuperGrok period",
+            ];
+            let found: Vec<&str> = forbidden
+                .into_iter()
+                .filter(|token| painted.contains(token))
+                .collect();
+            assert!(
+                found.is_empty(),
+                "{which} must not paint {found:?}:\n{painted}"
+            );
+        };
+        forbid(&row, "status row");
+
+        let _ = agent.handle_mouse(&MouseEvent {
+            kind: MouseEventKind::Moved,
+            column: hit.x,
+            row: hit.y,
+            modifiers: KeyModifiers::empty(),
+        });
+        assert!(
+            agent.hit_credits.hovered,
+            "moving onto the limits chip must hover that hit rectangle"
+        );
+        let hovered = draw(&mut agent);
+        let hover_row = hovered
+            .lines()
+            .find(|line| line.contains("/tmp"))
+            .unwrap_or("")
+            .to_string();
+        let hover = if hover_row.contains("90% left") {
+            hover_row.clone()
+        } else {
+            hovered
+                .lines()
+                .find(|line| line.contains("90% left"))
+                .unwrap_or(hover_row.as_str())
+                .to_string()
+        };
+        assert!(
+            hover.contains("90% left"),
+            "hover must show `90% left` when included used percent is 10:\n{hover}\nrow:\n{hover_row}"
         );
         forbid(&row, "status row");
         forbid(&hover, "hover");
@@ -7726,7 +7814,8 @@ mod status_credits_meter_tests {
         )
         .expect("personal limits");
         let label = chip_label(99.0);
-        assert_eq!(label, "limits 28%");
+        assert_eq!(label, "limits 72%");
+        assert!(!label.contains("limits 28%"));
         assert!(!label.contains("limits 99%"));
         assert!(!label.contains("limits 41%"));
         assert!(!xai_grok_shell::auth::limits_pins::load_limits_pins().use_console);
@@ -7760,6 +7849,45 @@ mod status_credits_meter_tests {
         assert_four_snapshot_values_still_stored(home.path());
     }
 
+    /// Personal credits of 7841 cents paint `$78.41` through the chip label.
+    /// `use_console` stays false. This is not the 8765-cent fixture.
+    #[test]
+    #[serial_test::serial]
+    fn personal_credits_chip_paints_7841_cents_as_78_dollars_and_41_cents() {
+        let home = tempfile::TempDir::new().expect("temp GROK_HOME");
+        let _env = xai_grok_test_support::EnvGuard::set("GROK_HOME", home.path());
+        let _caches = seed_four_meter_cells(home.path());
+        let mut doc =
+            xai_grok_shell::auth::read_limits_snapshot_file(home.path()).expect("snapshot");
+        {
+            let personal = doc
+                .identities
+                .iter_mut()
+                .find(|row| row.identity_id == CELL_PERSONAL_ID)
+                .expect("personal row");
+            personal.dollar_credits_cents = Some(7_841);
+        }
+        xai_grok_shell::auth::write_limits_snapshot_file(home.path(), &doc).expect("7841 cents");
+        xai_grok_shell::auth::limits_pins::select_supergrok_meter_cell(
+            xai_grok_shell::auth::limits_pins::SupergrokMeterCell::PersonalCredits,
+        )
+        .expect("personal credits");
+        let label = chip_label(28.0);
+        assert_eq!(label, "$78.41");
+        assert!(!label.contains("$87.65"));
+        assert!(!label.contains("$21.99"));
+        assert!(!label.contains("$154.20"));
+        assert!(!label.contains("$47.03"));
+        assert!(!label.contains("$442.97"));
+        assert!(!label.contains("limits "));
+        let pins = xai_grok_shell::auth::limits_pins::load_limits_pins();
+        assert!(!pins.use_console);
+        assert_eq!(
+            pins.meter_source,
+            Some(xai_grok_shell::auth::limits_pins::MeterSource::DollarCredits)
+        );
+    }
+
     /// Business limits paint that row's percent when a live personal session exists.
     #[test]
     #[serial_test::serial]
@@ -7772,7 +7900,8 @@ mod status_credits_meter_tests {
         )
         .expect("business limits");
         let label = chip_label(28.0);
-        assert_eq!(label, "limits 41%");
+        assert_eq!(label, "limits 59%");
+        assert!(!label.contains("limits 41%"));
         assert!(!label.contains("limits 28%"));
         assert!(!label.contains("$47.03"));
         assert!(!label.contains("$442.97"));
@@ -10184,8 +10313,9 @@ mod red_status_corners_tests {
 
     /// An Included pin with no identity, a Team session as the bearer the
     /// next request sends, and a stored business `usage_pct` of 41, paints
-    /// `limits 41%` on the L1 header. The words `Limits and Credits` are
-    /// absent. The personal percent is not substituted. This draws the
+    /// percent remaining `limits 59%` on the L1 header. The words `Limits
+    /// and Credits` are absent. The personal used percent is not substituted.
+    /// The row does not paint `limits 41%` or `limits 28%`. This draws the
     /// status row.
     #[test]
     #[serial_test::serial]
@@ -10300,23 +10430,23 @@ mod red_status_corners_tests {
         let symbols = row_symbols(&buf, credits.y);
         let row = symbols.concat();
         assert_eq!(credits.y, context.y);
-        let label = "limits 41%";
+        let label = "limits 59%";
         let label_x = find_on_row(&symbols, label).unwrap_or_else(|| {
             panic!(
                 "owed: an Included pin with no identity, a Team session as the bearer, \
-                 and a stored business usage percent of 41, paints `{label}` on the L1 header. \
-                 The words `Limits and Credits` are absent. The personal percent is not \
-                 substituted.\n{row}\n{text}"
+                 and a stored business usage percent of 41, paints percent remaining \
+                 `{label}` on the L1 header. The words `Limits and Credits` are absent. \
+                 The personal used percent is not substituted.\n{row}\n{text}"
             )
         });
-        assert_eq!(label_x, credits.x, "owed: `limits 41%` is the credits chip");
+        assert_eq!(label_x, credits.x, "owed: `limits 59%` is the credits chip");
         assert!(
             !row.contains("Limits and Credits"),
-            "owed: a known business percent is `limits 41%`, not the words `Limits and Credits`.\n{row}"
+            "owed: a known business percent remaining is `limits 59%`, not the words `Limits and Credits`.\n{row}"
         );
         assert!(
-            !row.contains("limits 28%"),
-            "owed: the personal percent is not substituted for the Team bearer.\n{row}"
+            !row.contains("limits 28%") && !row.contains("limits 41%"),
+            "owed: the personal used percent is not substituted, and the chip is not the used percent `limits 41%`.\n{row}"
         );
         assert!(
             !row.contains("limits 0%") && !row.contains("$0"),
