@@ -649,19 +649,19 @@ fn role_of_sending_session() -> Option<SupergrokAccountRole> {
         .map(|candidate| candidate.headroom.role)
 }
 
-/// Stored included usage of the other account when `role` is fully used.
+/// Included usage of the other account when `role` is fully used.
 ///
-/// `Some(other_usage_pct)` only when this role's stored `usage_pct` is
+/// `Some(other_usage_pct)` only when this role's included percent is
 /// finite and at least 100, the other role has a live session, and that
-/// other stored `usage_pct` is finite and below 100. Otherwise `None`.
-/// This keys off stored `usage_pct`, not ranker `included_remaining`.
-/// It does not select the console API key. SuperGrok is paid.
+/// other included percent is finite and below 100. Otherwise `None`.
+/// A finite stored `usage_pct` wins. A failed snapshot poll stays absent
+/// and is not filled from poll history. Otherwise the latest finite
+/// `creditUsagePercent` from that role's billing poll is the reading.
+/// This does not select the console API key. SuperGrok is paid.
 pub fn other_included_usage_when_this_account_is_fully_used(
     role: SupergrokAccountRole,
 ) -> Option<f64> {
-    let this_pct = stored_supergrok_reading_for_role(role)
-        .usage_pct
-        .filter(|pct| pct.is_finite())?;
+    let this_pct = included_pct_for_fully_used_switch(role)?;
     if this_pct < 100.0 {
         return None;
     }
@@ -669,17 +669,38 @@ pub fn other_included_usage_when_this_account_is_fully_used(
         SupergrokAccountRole::Personal => SupergrokAccountRole::Business,
         SupergrokAccountRole::Business => SupergrokAccountRole::Personal,
     };
-    if live_role_access_token(other).is_none() {
-        return None;
-    }
-    let other_pct = stored_supergrok_reading_for_role(other)
-        .usage_pct
-        .filter(|pct| pct.is_finite())?;
+    live_role_access_token(other)?;
+    let other_pct = included_pct_for_fully_used_switch(other)?;
     if other_pct < 100.0 {
         Some(other_pct)
     } else {
         None
     }
+}
+
+/// Stored `usage_pct` for `role`, else that role's billing poll history.
+///
+/// A failed snapshot poll is absent. Poll history does not replace it.
+fn included_pct_for_fully_used_switch(role: SupergrokAccountRole) -> Option<f64> {
+    let home = grok_home_path();
+    let identity_id = super::load_supergrok_session_candidates(&home)
+        .into_iter()
+        .find(|candidate| {
+            !candidate.hard_expired
+                && candidate.headroom.role == role
+                && !candidate.access_token.trim().is_empty()
+        })
+        .map(|candidate| candidate.headroom.identity_id)?;
+    if snapshot_poll_failed(&home, &identity_id) {
+        return None;
+    }
+    if let Some(pct) = stored_supergrok_reading_for_role(role)
+        .usage_pct
+        .filter(|pct| pct.is_finite())
+    {
+        return Some(pct);
+    }
+    finite_poll_history_usage_pct(&identity_id)
 }
 
 fn install_other_included_session_when_this_one_is_fully_used(
