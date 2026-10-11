@@ -359,9 +359,53 @@ fn poll_target_for_role(
     })
 }
 
+/// Proxy base for `GET /billing?format=credits`.
+///
+/// No test override uses the cli-chat proxy and performs that HTTP read.
+/// A test override is a base URL the test serves. Empty discovery returns
+/// before this function, so an override cannot paint a billing success
+/// when no session was stored.
+fn account_billing_proxy_base() -> String {
+    #[cfg(test)]
+    if let Some(base) = test_account_billing_proxy_base() {
+        return base;
+    }
+    "https://cli-chat-proxy.grok.com/v1".to_string()
+}
+
+#[cfg(test)]
+fn account_billing_proxy_override_slot() -> &'static std::sync::Mutex<Option<String>> {
+    static SLOT: std::sync::OnceLock<std::sync::Mutex<Option<String>>> = std::sync::OnceLock::new();
+    SLOT.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+#[cfg(test)]
+fn test_account_billing_proxy_base() -> Option<String> {
+    account_billing_proxy_override_slot()
+        .lock()
+        .ok()
+        .and_then(|guard| guard.clone())
+        .filter(|base| !base.trim().is_empty())
+}
+
+#[cfg(test)]
+fn set_account_billing_proxy_override(base: Option<String>) {
+    if let Ok(mut guard) = account_billing_proxy_override_slot().lock() {
+        *guard = base.filter(|value| !value.trim().is_empty());
+    }
+}
+
+#[cfg(test)]
+fn clear_account_billing_cache() {
+    if let Ok(mut guard) = account_billing_cache().lock() {
+        guard.clear();
+    }
+}
+
 fn blocking_account_billing(token: &str, user_id: &str) -> Option<AccountBillingFields> {
     let token = token.to_owned();
     let user_id = user_id.to_owned();
+    let proxy = account_billing_proxy_base();
     let handle = std::thread::Builder::new()
         .name("account-billing".to_owned())
         .spawn(move || {
@@ -372,9 +416,7 @@ fn blocking_account_billing(token: &str, user_id: &str) -> Option<AccountBilling
             let fetched = runtime
                 .block_on(
                     xai_grok_shell::extensions::billing::fetch_credits_config_with_session(
-                        "https://cli-chat-proxy.grok.com/v1",
-                        &token,
-                        &user_id,
+                        &proxy, &token, &user_id,
                     ),
                 )
                 .ok()?;
@@ -5736,9 +5778,6 @@ mod tests {
         assert_other_three_snapshot_values(seeded.home.path());
     }
 
-    const ACCOUNT_BILLING_URL: &str = "https://cli-chat-proxy.grok.com/v1/billing?format=credits";
-    const ACCOUNT_PROXY_BASE: &str = "https://cli-chat-proxy.grok.com/v1";
-
     fn painted_lines(buf: &Buffer, area: Rect) -> Vec<String> {
         (area.y..area.y.saturating_add(area.height))
             .map(|y| {
@@ -6370,12 +6409,10 @@ mod tests {
     }
 
     fn logged_in_account_home() -> Result<std::path::PathBuf, String> {
-        if let Some(env_home) = std::env::var_os("GROK_HOME").filter(|value| !value.is_empty()) {
-            return Ok(std::path::PathBuf::from(env_home));
-        }
-        xai_dirs::resolve_grok_home().ok_or_else(|| {
-            "account discovery found no grok home. This test does not invent a login.".to_string()
-        })
+        std::env::var_os("GROK_HOME")
+            .filter(|value| !value.is_empty())
+            .map(std::path::PathBuf::from)
+            .ok_or_else(|| "GROK_HOME is unset. The card reads that temp home.".to_string())
     }
 
     fn role_for_identity(
@@ -6399,8 +6436,10 @@ mod tests {
         target: &xai_grok_shell::auth::SupergrokBillingPollTarget,
         role: &'static str,
     ) -> Result<FetchedAccountBilling, String> {
+        let base = account_billing_proxy_base();
+        let url = format!("{}/billing?format=credits", base.trim_end_matches('/'));
         let fetched = xai_grok_shell::extensions::billing::fetch_credits_config_with_session(
-            ACCOUNT_PROXY_BASE,
+            &base,
             &target.access_token,
             &target.user_id,
         )
@@ -6408,13 +6447,13 @@ mod tests {
         .map_err(|err| {
             let shown = err.replace(&target.access_token, "[session]");
             format!(
-                "GET {ACCOUNT_BILLING_URL} for the {role} session {} failed: {shown}",
+                "GET {url} for the {role} session {} failed: {shown}",
                 target.identity_id
             )
         })?;
         let Some(config) = fetched.config else {
             return Err(format!(
-                "GET {ACCOUNT_BILLING_URL} for the {role} session {} returned no billing config",
+                "GET {url} for the {role} session {} returned no billing config",
                 target.identity_id
             ));
         };
@@ -6500,13 +6539,316 @@ mod tests {
         }
     }
 
+    const PERSONAL_BILLING_TOKEN: &str = "fixture.personal.session";
+    const BUSINESS_BILLING_TOKEN: &str = "fixture.business.session";
+    const PERSONAL_BILLING_USER: &str = "fixture-personal-user";
+    const BUSINESS_BILLING_USER: &str = "fixture-business-user";
+    const BUSINESS_BILLING_TEAM: &str = "fixture-business-team";
+    /// 37 percent used is `limits 63%`. Not 10 percent used.
+    const PERSONAL_USAGE_PCT: f64 = 37.0;
+    /// 54 percent used is `limits 46%`. Not 10 percent used.
+    const BUSINESS_USAGE_PCT: f64 = 54.0;
+    /// `$64.21`. Not `$78.41`.
+    const PERSONAL_PREPAID_CENTS: i64 = 6_421;
+    /// `$18.08`. Not `$78.41`.
+    const BUSINESS_PREPAID_CENTS: i64 = 1_808;
+    const PERSONAL_BILLING_BODY: &str = concat!(
+        r#"{"config":{"creditUsagePercent":37.0,"prepaidBalance":{"val":6421},"#,
+        r#""isUnifiedBillingUser":true}}"#
+    );
+    const BUSINESS_BILLING_BODY: &str = concat!(
+        r#"{"config":{"creditUsagePercent":54.0,"prepaidBalance":{"val":1808},"#,
+        r#""isUnifiedBillingUser":false}}"#
+    );
+
+    struct AccountBillingProxyGuard;
+
+    impl AccountBillingProxyGuard {
+        fn arm(base: &str) -> Self {
+            set_account_billing_proxy_override(Some(base.to_string()));
+            Self
+        }
+    }
+
+    impl Drop for AccountBillingProxyGuard {
+        fn drop(&mut self) {
+            set_account_billing_proxy_override(None);
+            clear_account_billing_cache();
+        }
+    }
+
+    struct AccountBillingFixture {
+        base: String,
+        hits: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        thread: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl AccountBillingFixture {
+        fn start() -> Self {
+            use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+            let listener =
+                std::net::TcpListener::bind("127.0.0.1:0").expect("billing fixture listen");
+            let port = listener.local_addr().expect("billing fixture port").port();
+            listener
+                .set_nonblocking(true)
+                .expect("billing fixture nonblocking");
+            let hits = std::sync::Arc::new(AtomicUsize::new(0));
+            let stop = std::sync::Arc::new(AtomicBool::new(false));
+            let hits_bg = std::sync::Arc::clone(&hits);
+            let stop_bg = std::sync::Arc::clone(&stop);
+            let thread = std::thread::Builder::new()
+                .name("account-billing-fixture".to_owned())
+                .spawn(move || {
+                    while !stop_bg.load(Ordering::SeqCst) {
+                        match listener.accept() {
+                            Ok((mut stream, _)) => {
+                                hits_bg.fetch_add(1, Ordering::SeqCst);
+                                let request = read_http_headers(&mut stream);
+                                let body = if request.contains(PERSONAL_BILLING_TOKEN) {
+                                    PERSONAL_BILLING_BODY
+                                } else if request.contains(BUSINESS_BILLING_TOKEN) {
+                                    BUSINESS_BILLING_BODY
+                                } else {
+                                    let _ = write_billing_http_response(
+                                        &mut stream,
+                                        401,
+                                        r#"{"error":"no billing fixture"}"#,
+                                    );
+                                    continue;
+                                };
+                                let _ = write_billing_http_response(&mut stream, 200, body);
+                            }
+                            Err(err)
+                                if err.kind() == std::io::ErrorKind::WouldBlock
+                                    || err.kind() == std::io::ErrorKind::Interrupted =>
+                            {
+                                std::thread::sleep(std::time::Duration::from_millis(5));
+                            }
+                            Err(_) => break,
+                        }
+                    }
+                })
+                .expect("billing fixture thread");
+            Self {
+                base: format!("http://127.0.0.1:{port}"),
+                hits,
+                stop,
+                thread: Some(thread),
+            }
+        }
+
+        fn hits(&self) -> usize {
+            self.hits.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    impl Drop for AccountBillingFixture {
+        fn drop(&mut self) {
+            self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+            if let Some(thread) = self.thread.take() {
+                let _ = thread.join();
+            }
+        }
+    }
+
+    fn read_http_headers(stream: &mut std::net::TcpStream) -> String {
+        use std::io::Read;
+
+        let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(2)));
+        let mut buf = Vec::new();
+        let mut tmp = [0u8; 1024];
+        while !buf.windows(4).any(|window| window == b"\r\n\r\n") && buf.len() < 8192 {
+            match stream.read(&mut tmp) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => buf.extend_from_slice(&tmp[..n]),
+            }
+        }
+        String::from_utf8_lossy(&buf).into_owned()
+    }
+
+    fn write_billing_http_response(
+        stream: &mut std::net::TcpStream,
+        status: u16,
+        body: &str,
+    ) -> std::io::Result<()> {
+        use std::io::Write;
+
+        let reason = if status == 200 { "OK" } else { "Unauthorized" };
+        let header = format!(
+            "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        stream.write_all(header.as_bytes())?;
+        stream.write_all(body.as_bytes())?;
+        stream.flush()
+    }
+
+    fn write_personal_and_business_sessions(home: &std::path::Path) {
+        use xai_grok_shell::auth::{AuthMode, GrokAuth, upsert_supergrok_session};
+
+        let live = Utc::now() + chrono::Duration::days(7);
+        let base = "https://auth.x.ai::account-billing-fixture";
+        let mut map = std::collections::BTreeMap::new();
+        upsert_supergrok_session(
+            &mut map,
+            base,
+            GrokAuth {
+                key: PERSONAL_BILLING_TOKEN.into(),
+                auth_mode: AuthMode::Oidc,
+                user_id: PERSONAL_BILLING_USER.into(),
+                principal_type: Some("User".into()),
+                principal_id: Some(PERSONAL_BILLING_USER.into()),
+                team_id: None,
+                expires_at: Some(live),
+                ..GrokAuth::default()
+            },
+        );
+        upsert_supergrok_session(
+            &mut map,
+            base,
+            GrokAuth {
+                key: BUSINESS_BILLING_TOKEN.into(),
+                auth_mode: AuthMode::Oidc,
+                user_id: BUSINESS_BILLING_USER.into(),
+                principal_type: Some("Team".into()),
+                principal_id: Some(BUSINESS_BILLING_TEAM.into()),
+                team_id: Some(BUSINESS_BILLING_TEAM.into()),
+                expires_at: Some(live),
+                ..GrokAuth::default()
+            },
+        );
+        std::fs::write(
+            home.join("auth.json"),
+            serde_json::to_vec_pretty(&map).expect("auth json"),
+        )
+        .expect("write auth.json");
+    }
+
+    fn collapsed_line(text: &str) -> String {
+        text.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+
+    fn assert_empty_discovery_paints_no_billing_success(server: &AccountBillingFixture) {
+        let area = Rect::new(0, 0, 120, 40);
+        let mut state = fresh_card_state();
+        let mut buf = render_seeded_card(&mut state, area);
+        let personal = account_body_lines(&buf, area, &state).join("\n");
+        assert!(
+            collapsed_line(&personal)
+                .contains("Personal SuperGrok has no session on this process."),
+            "an empty discovery names the missing personal session and does not paint a billing success:\n{personal}"
+        );
+        assert!(
+            select_account_tab(&mut state, &buf, "Business"),
+            "the Business tab stays on the card when no session is stored"
+        );
+        buf = render_seeded_card(&mut state, area);
+        let business = account_body_lines(&buf, area, &state).join("\n");
+        assert!(
+            collapsed_line(&business)
+                .contains("Business SuperGrok has no session on this process."),
+            "an empty discovery names the missing business session and does not paint a billing success:\n{business}"
+        );
+        for body in [&personal, &business] {
+            assert!(
+                !body.contains("Prepaid balance:"),
+                "an empty discovery does not paint a prepaid balance:\n{body}"
+            );
+            assert!(
+                !body.contains("is_unified_billing_user:"),
+                "an empty discovery does not paint a billing flag:\n{body}"
+            );
+            for absent in [
+                "limits 63%",
+                "limits 46%",
+                "$64.21",
+                "$18.08",
+                "$78.41",
+                "limits 90%",
+                "Console API credits",
+                "Billing Credits",
+            ] {
+                assert!(
+                    !body.contains(absent),
+                    "an empty discovery does not paint `{absent}`:\n{body}"
+                );
+            }
+        }
+        assert_eq!(
+            server.hits(),
+            0,
+            "an empty discovery does not call the billing HTTP endpoint"
+        );
+    }
+
+    fn push_owned_section(
+        misses: &mut Vec<String>,
+        lines: &[String],
+        kind: &str,
+        tab: &str,
+        own: &str,
+        other: &str,
+    ) {
+        let Some(section) = section_text(lines, kind) else {
+            misses.push(format!(
+                "the {tab} tab's {kind} section shows that account's billing response."
+            ));
+            return;
+        };
+        if !section.contains(own) {
+            misses.push(format!(
+                "the {tab} {kind} section shows `{own}` from that account's billing response."
+            ));
+        }
+        if section.contains(other) {
+            misses.push(format!(
+                "the {tab} {kind} section shows the other account's `{other}`."
+            ));
+        }
+        for absent in [
+            "$78.41",
+            "limits 90%",
+            "Console API credits",
+            "Billing Credits",
+            "no session on this process",
+        ] {
+            if section.contains(absent) {
+                misses.push(format!(
+                    "the {tab} {kind} section does not show `{absent}`."
+                ));
+            }
+        }
+    }
+
     /// Personal and Business sections show each logged-in account's own
-    /// `GET /v1/billing?format=credits` response.
+    /// `GET /billing?format=credits` body. The temp home stores one personal
+    /// session and one business session. Empty discovery does not panic and
+    /// does not paint either body.
     #[tokio::test]
     #[serial_test::serial]
     async fn personal_and_business_sections_show_each_logged_in_accounts_billing_response() {
-        let home = logged_in_account_home().unwrap_or_else(|err| panic!("{err}"));
+        let temp = tempfile::TempDir::new().expect("temp grok home");
+        let _home = xai_grok_test_support::EnvGuard::set("GROK_HOME", temp.path());
         let _cooldown = xai_grok_test_support::EnvGuard::set("GROK_DISABLE_SHARED_RATE_LIMIT", "1");
+        clear_account_billing_cache();
+        let server = AccountBillingFixture::start();
+        let _proxy = AccountBillingProxyGuard::arm(&server.base);
+        assert_empty_discovery_paints_no_billing_success(&server);
+        write_personal_and_business_sessions(temp.path());
+        clear_account_billing_cache();
+        let home = logged_in_account_home().unwrap_or_else(|err| panic!("{err}"));
+        assert_eq!(
+            home.as_path(),
+            temp.path(),
+            "discovery reads the temp home that stores the two sessions"
+        );
+        assert_eq!(
+            limits_reading_grok_home(),
+            temp.path(),
+            "the open card reads the same temp home as discovery"
+        );
         let targets = xai_grok_shell::auth::load_supergrok_billing_poll_targets(&home);
         let listings = xai_grok_shell::auth::read_auth_json(&home.join("auth.json"))
             .map(|map| xai_grok_shell::auth::list_supergrok_principal_listings(&map))
@@ -6514,7 +6856,7 @@ mod tests {
         let candidates = xai_grok_shell::auth::load_supergrok_session_candidates(&home);
         if targets.is_empty() {
             panic!(
-                "account discovery found no logged-in SuperGrok session under {}. This test does not invent a login, and an empty sandbox is not a pass.",
+                "account discovery found no logged-in SuperGrok session under {}. The temp home stores a personal session and a business session.",
                 home.display()
             );
         }
@@ -6543,35 +6885,38 @@ mod tests {
         }
         let Some(personal) = personal else {
             panic!(
-                "the personal session already logged in was not found under {}. Discovery uses the stored SuperGrok sessions. This test does not invent a login.\n{}",
+                "discovery did not accept the personal session under {}.\n{}",
                 home.display(),
                 misses.join("\n")
             );
         };
         let Some(business) = business else {
             panic!(
-                "the business session already logged in was not found under {}. Discovery uses the stored SuperGrok sessions. This test does not invent a login.\n{}",
+                "discovery did not accept the business session under {}.\n{}",
                 home.display(),
                 misses.join("\n")
             );
         };
-        if std::env::var_os("GROK_HOME").is_none() {
-            let card_home = xai_grok_shell::util::grok_home::grok_home();
-            if card_home != home {
-                misses.push(format!(
-                    "the open card reads {} while the logged-in accounts are under {}.",
-                    card_home.display(),
-                    home.display()
-                ));
-            }
-        }
+        assert_eq!(personal.usage_pct, Some(PERSONAL_USAGE_PCT));
+        assert_eq!(business.usage_pct, Some(BUSINESS_USAGE_PCT));
+        assert_eq!(personal.prepaid_cents, Some(PERSONAL_PREPAID_CENTS));
+        assert_eq!(business.prepaid_cents, Some(BUSINESS_PREPAID_CENTS));
+        assert_eq!(personal.unified, Some(true));
+        assert_eq!(business.unified, Some(false));
+        assert_ne!(personal.usage_pct, business.usage_pct);
+        assert_ne!(personal.prepaid_cents, business.prepaid_cents);
+        assert!(
+            server.hits() >= 2,
+            "the personal session and the business session each received their own billing HTTP response. hits={}",
+            server.hits()
+        );
         let area = Rect::new(0, 0, 120, 40);
         let mut state = fresh_card_state();
         for account in [&personal, &business] {
             let mut buf = render_seeded_card(&mut state, area);
             if !select_account_tab(&mut state, &buf, account_tab_title(account.role)) {
                 misses.push(format!(
-                    "the {} tab is not on the card. GET {ACCOUNT_BILLING_URL} for {} returned included usage {:?} and prepaid cents {:?}. is_unified_billing_user is {:?}.",
+                    "the {} tab is not on the card. GET /billing?format=credits for {} returned included usage {:?} and prepaid cents {:?}. is_unified_billing_user is {:?}.",
                     account_tab_title(account.role),
                     account.identity_id,
                     account.usage_pct,
@@ -6666,9 +7011,69 @@ mod tests {
                 }
             }
         }
+        let personal_limits =
+            limits_percent_figure(personal.usage_pct).expect("personal included percent");
+        let business_limits =
+            limits_percent_figure(business.usage_pct).expect("business included percent");
+        let personal_dollars = format_remaining_cents_as_dollars(
+            personal.prepaid_cents.expect("personal prepaid cents"),
+        );
+        let business_dollars = format_remaining_cents_as_dollars(
+            business.prepaid_cents.expect("business prepaid cents"),
+        );
+        assert_ne!(personal_limits, business_limits);
+        assert_ne!(personal_dollars, business_dollars);
+        let mut personal_state = fresh_card_state();
+        let mut personal_buf = render_seeded_card(&mut personal_state, area);
+        assert!(
+            select_account_tab(&mut personal_state, &personal_buf, "Personal"),
+            "the Personal tab is on the card"
+        );
+        personal_buf = render_seeded_card(&mut personal_state, area);
+        let personal_body = account_body_lines(&personal_buf, area, &personal_state);
+        push_owned_section(
+            &mut misses,
+            &personal_body,
+            "Limits",
+            "Personal",
+            &personal_limits,
+            &business_limits,
+        );
+        push_owned_section(
+            &mut misses,
+            &personal_body,
+            "Credits",
+            "Personal",
+            &personal_dollars,
+            &business_dollars,
+        );
+        let mut business_state = fresh_card_state();
+        let mut business_buf = render_seeded_card(&mut business_state, area);
+        assert!(
+            select_account_tab(&mut business_state, &business_buf, "Business"),
+            "the Business tab is on the card"
+        );
+        business_buf = render_seeded_card(&mut business_state, area);
+        let business_body = account_body_lines(&business_buf, area, &business_state);
+        push_owned_section(
+            &mut misses,
+            &business_body,
+            "Limits",
+            "Business",
+            &business_limits,
+            &personal_limits,
+        );
+        push_owned_section(
+            &mut misses,
+            &business_body,
+            "Credits",
+            "Business",
+            &business_dollars,
+            &personal_dollars,
+        );
         assert!(
             misses.is_empty(),
-            "the card shows each logged-in account's response from GET {ACCOUNT_BILLING_URL}. Fixture percents are not this proof.\n{}",
+            "the card shows each logged-in account's own GET /billing?format=credits body. One account's percent or prepaid balance is not copied onto the other account.\n{}",
             misses.join("\n")
         );
     }

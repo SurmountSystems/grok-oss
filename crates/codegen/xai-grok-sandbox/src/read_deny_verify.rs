@@ -55,10 +55,22 @@ struct PathStatus {
 /// `create_dir_all` would silently accept a symlink-to-directory, and bwrap would then mount onto its target.
 /// The re-exec must not proceed without it: the inner verification requires the read-only sentinel mount unconditionally.
 /// The parent is [`crate::bwrap_writable_state_parent`]: `grok_home` when that tree can be created, otherwise `/tmp`.
+/// The directory name is fixed and shared. Concurrent creators race `mkdir`; `EEXIST` is that race, not a missing mount.
 #[cfg(target_os = "linux")]
 pub(crate) fn ensure_bwrap_sentinel_dir() -> Result<PathBuf, String> {
     let parent = crate::bwrap_writable_state_parent()?;
     ensure_sentinel_dir_under(&parent)
+}
+
+/// `mkdir` does not follow a final symlink. `AlreadyExists` means another creator won this fixed path.
+/// That is not success: [`ensure_sentinel_dir_under`] still requires a real directory, so a file or symlink fails closed.
+#[cfg(target_os = "linux")]
+fn create_sentinel_dir(path: &Path) -> Result<(), String> {
+    match std::fs::create_dir(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+        Err(e) => Err(format!("could not create sentinel {}: {e}", path.display())),
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -74,12 +86,10 @@ fn ensure_sentinel_dir_under(parent: &Path) -> Result<PathBuf, String> {
                     path.display()
                 )
             })?;
-            std::fs::create_dir(&path)
-                .map_err(|e| format!("could not create sentinel {}: {e}", path.display()))?;
+            create_sentinel_dir(&path)?;
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            std::fs::create_dir(&path)
-                .map_err(|e| format!("could not create sentinel {}: {e}", path.display()))?;
+            create_sentinel_dir(&path)?;
         }
         Err(e) => {
             return Err(format!(
@@ -88,7 +98,8 @@ fn ensure_sentinel_dir_under(parent: &Path) -> Result<PathBuf, String> {
             ));
         }
     }
-    // Fail closed on a swap race; the inner O_NOFOLLOW verification is the authoritative gate either way
+    // Fail closed on a swap race. EEXIST is accepted only when this re-check sees a real directory.
+    // The inner O_NOFOLLOW verification is the authoritative gate either way.
     match std::fs::symlink_metadata(&path) {
         Ok(meta) if meta.file_type().is_dir() => Ok(path),
         _ => Err(format!(
