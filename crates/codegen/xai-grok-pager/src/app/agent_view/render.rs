@@ -360,7 +360,10 @@ fn both_refused_status_chip_label(
 
 /// Included percent the L1 chip paints, when the next request draws that
 /// meter. A set identity pin uses that row's stored percent and does not
-/// replace a stored percent with the view balance. An unset pin uses the
+/// replace a stored percent with the view balance. When that account's
+/// stored included usage is at or above 100 percent and the other live
+/// account's stored included usage is below 100 percent, this returns the
+/// other percent before the exhausted percent. An unset pin uses the
 /// stored percent of the session the next request sends. A Team bearer
 /// uses that business row. A personal bearer uses the personal row. When
 /// that stored percent is absent, or there is no sending session, a known
@@ -375,6 +378,15 @@ fn included_chip_usage_pct(
     }
     if !xai_grok_shell::auth::limits_pins::next_request_draws_included_period_limits() {
         return None;
+    }
+    if let Some(role) = xai_grok_shell::auth::limits_pins::role_the_next_request_would_use()
+        && let Some(pct) =
+            xai_grok_shell::auth::limits_pins::other_included_usage_when_this_account_is_fully_used(
+                role,
+            )
+            .filter(|pct| pct.is_finite())
+    {
+        return Some(pct);
     }
     if let Some(row) = xai_grok_shell::auth::limits_pins::pinned_supergrok_row()
         && let Some(pct) = row.usage_pct.filter(|pct| pct.is_finite())
@@ -482,12 +494,16 @@ fn credits_label_when_included_period_is_not_next_request() -> String {
 /// Text of the L1 credits chip. Nested views do not call this.
 /// The status figure paints percent remaining as `limits N%`, where N
 /// is 100 minus the used percent. Hover paints that same remaining as
-/// `N% left`. When an identity pin is set, that percent is the selected
-/// row, not the other session's balance. When the pin is unset, a stored
-/// percent on the session the next request sends wins. When that session
-/// stored no percent, a known view balance percent is the reading. A
-/// missing reading stays `Limits and Credits`. It does not become
-/// `limits 0%` or `$0`. When the next request does not draw included
+/// `N% left`. When an identity pin is set and that account is below 100
+/// percent used, that percent is the selected row, not the other
+/// session's balance. When the account the next request would use is at
+/// or above 100 percent used and the other live account is below 100
+/// percent used, the chip uses that other percent. When the pin is unset
+/// and that switch does not apply, a stored percent on the session the
+/// next request sends wins. When that session stored no percent, a known
+/// view balance percent is the reading. A missing reading stays `Limits
+/// and Credits`. It does not become `limits 0%` or `$0`. When the next
+/// request does not draw included
 /// SuperGrok period limits, the chip is the dollars remaining for the
 /// meter that request spends.
 fn l1_credits_chip_label(
@@ -7911,6 +7927,151 @@ mod status_credits_meter_tests {
             "Included plus Business still draws included SuperGrok period limits"
         );
         assert_four_snapshot_values_still_stored(home.path());
+    }
+
+    /// Business included usage at 100 percent and personal included usage at
+    /// 18 percent: the header paints `limits 82%` with no click. The next
+    /// request uses the personal session and included SuperGrok period
+    /// limits. Stock `preferred_method = "api_key"` stays and does not
+    /// select the console key. SuperGrok is paid.
+    #[test]
+    #[serial_test::serial]
+    fn when_business_included_is_fully_used_the_next_request_uses_personal_included_limits() {
+        let home = tempfile::TempDir::new().expect("temp GROK_HOME");
+        let _env = xai_grok_test_support::EnvGuard::set("GROK_HOME", home.path());
+        let _xai = xai_grok_test_support::EnvGuard::unset("XAI_API_KEY");
+        let _legacy = xai_grok_test_support::EnvGuard::unset("GROK_CODE_XAI_API_KEY");
+        xai_grok_shell::auth::clear_included_billing_cache();
+        let config_text = "[auth]\npreferred_method = \"api_key\"\n";
+        std::fs::write(home.path().join("config.toml"), config_text).expect("stock preferred");
+
+        let personal_token = "personal-session-token-still-included";
+        let business_token = "business-session-token-fully-used";
+        let console_key = "console-key-not-this-switch";
+        let personal_id = "u-fully-used-personal";
+        let business_id = "team-fully-used-business";
+        let live = chrono::Utc::now() + chrono::Duration::days(7);
+        let base = "https://auth.x.ai::fully-used-business-switch";
+        let mut map = std::collections::BTreeMap::new();
+        xai_grok_shell::auth::upsert_supergrok_session(
+            &mut map,
+            base,
+            xai_grok_shell::auth::GrokAuth {
+                key: personal_token.into(),
+                auth_mode: xai_grok_shell::auth::AuthMode::Oidc,
+                user_id: personal_id.into(),
+                principal_type: Some("User".into()),
+                principal_id: Some(personal_id.into()),
+                team_id: None,
+                expires_at: Some(live),
+                ..xai_grok_shell::auth::GrokAuth::default()
+            },
+        );
+        xai_grok_shell::auth::upsert_supergrok_session(
+            &mut map,
+            base,
+            xai_grok_shell::auth::GrokAuth {
+                key: business_token.into(),
+                auth_mode: xai_grok_shell::auth::AuthMode::Oidc,
+                user_id: "u-fully-used-business".into(),
+                principal_type: Some("Team".into()),
+                principal_id: Some(business_id.into()),
+                team_id: Some(business_id.into()),
+                expires_at: Some(live),
+                ..xai_grok_shell::auth::GrokAuth::default()
+            },
+        );
+        std::fs::write(
+            home.path().join("auth.json"),
+            serde_json::to_vec_pretty(&map).expect("auth.json"),
+        )
+        .expect("write auth.json");
+
+        let mut doc = xai_grok_shell::auth::LimitsSnapshotDocument::empty(1_700_000_000_000);
+        doc.identities
+            .push(xai_grok_shell::auth::LimitsSnapshotIdentity {
+                identity_id: personal_id.into(),
+                usage_pct: Some(18.0),
+                period_end: None,
+                period_type: None,
+                dollar_credits_cents: None,
+                grok_build_usage_pct: None,
+                is_unified_billing_user: None,
+                poll_outcome: xai_grok_shell::auth::POLL_OUTCOME_OK.to_owned(),
+            });
+        doc.identities
+            .push(xai_grok_shell::auth::LimitsSnapshotIdentity {
+                identity_id: business_id.into(),
+                usage_pct: Some(100.0),
+                period_end: None,
+                period_type: None,
+                dollar_credits_cents: None,
+                grok_build_usage_pct: None,
+                is_unified_billing_user: None,
+                poll_outcome: xai_grok_shell::auth::POLL_OUTCOME_OK.to_owned(),
+            });
+        xai_grok_shell::auth::write_limits_snapshot_file(home.path(), &doc)
+            .expect("usage percents");
+
+        xai_grok_shell::auth::limits_pins::save_limits_pins(
+            &xai_grok_shell::auth::limits_pins::LimitsPins {
+                stay_supergrok: false,
+                use_console: false,
+                meter_source: Some(xai_grok_shell::auth::limits_pins::MeterSource::Included),
+                supergrok_identity: Some(xai_grok_shell::auth::SupergrokIdentityPin::Business),
+            },
+        )
+        .expect("business included pin");
+
+        let mut config = xai_grok_shell::sampling::SamplerConfig {
+            api_key: Some(business_token.into()),
+            failover_api_keys: vec![console_key.into()],
+            base_url: "https://cli-chat-proxy.grok.com/v1".into(),
+            model: "grok-4".into(),
+            session_identity_key: Some(business_token.into()),
+            failover_base_url: Some("https://api.x.ai/v1".into()),
+            session_base_url: Some("https://cli-chat-proxy.grok.com/v1".into()),
+            ..Default::default()
+        };
+        let balance = CreditBalance {
+            usage_pct: 100.0,
+            effective_usage_pct: 100.0,
+            included_usage_known: true,
+            ..CreditBalance::default()
+        };
+        let label = super::l1_credits_chip_label(
+            crate::views::credit_bar::SamplingIdentityKind::SuperGrokSession,
+            Some(&balance),
+            false,
+        );
+        assert_eq!(label, "limits 82%");
+
+        xai_grok_shell::auth::limits_pins::apply_limits_pins_to_sampler_config(&mut config);
+        assert_eq!(config.api_key.as_deref(), Some(personal_token));
+        assert_eq!(config.session_identity_key.as_deref(), Some(personal_token));
+        assert_ne!(config.api_key.as_deref(), Some(business_token));
+        assert_ne!(config.api_key.as_deref(), Some(console_key));
+        assert_ne!(config.session_identity_key.as_deref(), Some(business_token));
+        assert_ne!(config.session_identity_key.as_deref(), Some(console_key));
+        let pins = xai_grok_shell::auth::limits_pins::load_limits_pins();
+        assert_eq!(
+            pins.meter_source,
+            Some(xai_grok_shell::auth::limits_pins::MeterSource::Included)
+        );
+        assert!(!pins.use_console);
+        assert_eq!(
+            pins.supergrok_identity,
+            Some(xai_grok_shell::auth::SupergrokIdentityPin::Personal)
+        );
+        assert!(
+            !config.base_url.contains("api.x.ai"),
+            "the switch stays on the SuperGrok session host: {}",
+            config.base_url
+        );
+        assert_eq!(
+            std::fs::read_to_string(home.path().join("config.toml")).expect("config stays"),
+            config_text
+        );
     }
 
     /// Business credits paint that row's dollar cents, not team postpaid or console prepaid.

@@ -350,10 +350,18 @@ fn use_console_api_credits_after_real_supergrok_http_402(
 /// A Console meter pin selects console API credits when snapshot team prepaid
 /// remaining is available, even when that stock key is set, and does not set
 /// `use_console`. An Included meter pin, or no meter pin, selects the
-/// included period session. When the identity pin is Business, that session
-/// is the Team session, including when a live personal session is also
-/// stored. Otherwise, when both a live personal SuperGrok session and a
-/// Team JWT are stored, that choice sends the personal session. A
+/// included period session. When the account the next request would use
+/// has stored included usage at or above 100 percent, and the other live
+/// account has stored included usage below 100 percent, this installs that
+/// other session and included SuperGrok period limits. `use_console` stays
+/// false. Stock `preferred_method = "api_key"` does not block that switch
+/// and does not select the console key. A missing other percent does not
+/// switch. Both stored included percents at or above 100 percent do not
+/// switch and do not hop to the console key. When that switch does not
+/// apply and the identity pin is Business, that session is the Team
+/// session, including when a live personal session is also stored.
+/// Otherwise, when both a live personal SuperGrok session and a Team JWT
+/// are stored, that choice sends the personal session. A
 /// hard-expired personal session is not that choice. When the personal
 /// included pin is set and no live personal session is stored, that pin
 /// is cleared and the sampler key stays. While the included choice
@@ -369,6 +377,15 @@ pub fn apply_limits_pins_to_sampler_config(config: &mut xai_grok_sampler::Sample
         return;
     }
     let pins = load_limits_pins();
+    // Stock `preferred_method = "api_key"` must not block this switch.
+    // An explicit `use_console` pin stays as it is.
+    if !pins.use_console
+        && let Some(role) = role_the_next_request_would_use_for(&pins)
+        && other_included_usage_when_this_account_is_fully_used(role).is_some()
+    {
+        install_other_included_session_when_this_one_is_fully_used(config, role);
+        return;
+    }
     let using_included_limits = pins.meter_source == Some(MeterSource::Included)
         || (pins.meter_source.is_none()
             && !pins.use_console
@@ -602,6 +619,86 @@ pub fn stored_supergrok_reading_for_role(role: SupergrokAccountRole) -> PinnedSu
         };
     }
     stored_pinned_row(&home, &chosen.headroom.identity_id)
+}
+
+/// Account the next request would use before a fully-used switch.
+///
+/// A Business pin is Business. A Personal pin is Personal. An unset pin is
+/// the role of the active base session. A missing identity does not invent
+/// a role.
+pub fn role_the_next_request_would_use() -> Option<SupergrokAccountRole> {
+    role_the_next_request_would_use_for(&load_limits_pins())
+}
+
+fn role_the_next_request_would_use_for(pins: &LimitsPins) -> Option<SupergrokAccountRole> {
+    match pins.supergrok_identity {
+        Some(SupergrokIdentityPin::Personal) => Some(SupergrokAccountRole::Personal),
+        Some(SupergrokIdentityPin::Business) => Some(SupergrokAccountRole::Business),
+        None => role_of_sending_session(),
+    }
+}
+
+fn role_of_sending_session() -> Option<SupergrokAccountRole> {
+    let home = grok_home_path();
+    let identity_id = sending_session_identity_id(&home)?;
+    super::load_supergrok_session_candidates(&home)
+        .into_iter()
+        .find(|candidate| {
+            candidate_is_live(candidate) && candidate.headroom.identity_id == identity_id
+        })
+        .map(|candidate| candidate.headroom.role)
+}
+
+/// Stored included usage of the other account when `role` is fully used.
+///
+/// `Some(other_usage_pct)` only when this role's stored `usage_pct` is
+/// finite and at least 100, the other role has a live session, and that
+/// other stored `usage_pct` is finite and below 100. Otherwise `None`.
+/// This keys off stored `usage_pct`, not ranker `included_remaining`.
+/// It does not select the console API key. SuperGrok is paid.
+pub fn other_included_usage_when_this_account_is_fully_used(
+    role: SupergrokAccountRole,
+) -> Option<f64> {
+    let this_pct = stored_supergrok_reading_for_role(role)
+        .usage_pct
+        .filter(|pct| pct.is_finite())?;
+    if this_pct < 100.0 {
+        return None;
+    }
+    let other = match role {
+        SupergrokAccountRole::Personal => SupergrokAccountRole::Business,
+        SupergrokAccountRole::Business => SupergrokAccountRole::Personal,
+    };
+    if live_role_access_token(other).is_none() {
+        return None;
+    }
+    let other_pct = stored_supergrok_reading_for_role(other)
+        .usage_pct
+        .filter(|pct| pct.is_finite())?;
+    if other_pct < 100.0 {
+        Some(other_pct)
+    } else {
+        None
+    }
+}
+
+fn install_other_included_session_when_this_one_is_fully_used(
+    config: &mut xai_grok_sampler::SamplerConfig,
+    this_role: SupergrokAccountRole,
+) {
+    match this_role {
+        SupergrokAccountRole::Business => {
+            install_live_personal_session_for_included_limits(config);
+        }
+        SupergrokAccountRole::Personal => {
+            apply_supergrok_identity_pin_to_sampler_config(config, SupergrokIdentityPin::Business);
+            let mut kept = load_limits_pins();
+            kept.meter_source = Some(MeterSource::Included);
+            kept.supergrok_identity = Some(SupergrokIdentityPin::Business);
+            kept.use_console = false;
+            let _ = save_limits_pins(&kept);
+        }
+    }
 }
 
 /// A failed poll is not a figure. `ok` and `never` are not this.
@@ -945,7 +1042,10 @@ fn next_request_sends_team_jwt_not_included_period(pins: &LimitsPins) -> bool {
 /// An explicit Included pin is that meter, including beside a Team JWT.
 /// Without that pin, a live Team JWT with no live personal SuperGrok session
 /// does not draw included SuperGrok period limits, so an unread meter must
-/// not paint `limits 0%`.
+/// not paint `limits 0%`. When the fully-used switch applies and
+/// `use_console` is false, this is true, including a DollarCredits pin and
+/// an unset meter pin while `preferred_method` is `api_key`. A missing
+/// other percent does not force `limits 0%`.
 pub fn next_request_draws_included_period_limits() -> bool {
     next_request_draws_included_period_limits_for(&load_limits_pins())
 }
@@ -954,6 +1054,11 @@ pub fn next_request_draws_included_period_limits() -> bool {
 pub fn next_request_draws_included_period_limits_for(pins: &LimitsPins) -> bool {
     if pins.use_console {
         return false;
+    }
+    if let Some(role) = role_the_next_request_would_use_for(pins)
+        && other_included_usage_when_this_account_is_fully_used(role).is_some()
+    {
+        return true;
     }
     let pins_allow = match pins.meter_source {
         // The operator chose included SuperGrok period limits. A Team JWT
