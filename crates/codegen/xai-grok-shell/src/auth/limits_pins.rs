@@ -764,9 +764,7 @@ fn clear_personal_included_token_pending() {
 /// Login stored a personal token after Personal + Included was cleared.
 /// Put that token on `api_key` and restore the pin. An explicit meter,
 /// identity, or `use_console` choice is left alone.
-fn reapply_personal_included_pin_after_login(
-    config: &mut xai_grok_sampler::SamplerConfig,
-) -> bool {
+fn reapply_personal_included_pin_after_login(config: &mut xai_grok_sampler::SamplerConfig) -> bool {
     if !personal_included_token_is_pending() {
         return false;
     }

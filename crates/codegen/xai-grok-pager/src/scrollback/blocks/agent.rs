@@ -584,7 +584,10 @@ mod tests {
         assert_ne!(letter.fg, green);
 
         let finished = ScrollbackEntry::new(RenderBlock::agent_message(text));
-        assert!(!finished.is_running, "a finished L1 agent turn is not running");
+        assert!(
+            !finished.is_running,
+            "a finished L1 agent turn is not running"
+        );
         let finished_renderer = EntryRenderer::new(&finished, &theme);
         let finished_height = finished_renderer.desired_height(width).max(4);
         let finished_area = Rect::new(0, 0, width, finished_height);

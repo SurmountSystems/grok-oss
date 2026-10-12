@@ -6055,10 +6055,8 @@ mod plan_approval_draw_contract_tests {
     #[serial_test::serial(GROK_HOME)]
     #[test]
     fn active_plan_mode_shows_the_plan_file_the_input_and_one_grok_build_title() {
-        let home = std::env::temp_dir().join(format!(
-            "grok-plan-pane-empty-{}",
-            std::process::id()
-        ));
+        let home =
+            std::env::temp_dir().join(format!("grok-plan-pane-empty-{}", std::process::id()));
         std::fs::create_dir_all(&home).expect("temp GROK_HOME");
         let prev = std::env::var("GROK_HOME").ok();
         struct RestoreGrokHome(Option<String>);
