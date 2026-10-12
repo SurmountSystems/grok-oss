@@ -502,14 +502,8 @@ fn remember_card_included_poll(
     let _ = xai_grok_shell::auth::write_limits_snapshot_file(&home, &doc);
 }
 
-fn blocking_account_billing(
-    identity_id: &str,
-    token: &str,
-    user_id: &str,
-) -> Option<AccountBillingFields> {
+fn blocking_account_billing(identity_id: &str) -> Option<AccountBillingFields> {
     let identity_id = identity_id.to_owned();
-    let token = token.to_owned();
-    let user_id = user_id.to_owned();
     let proxy = account_billing_proxy_base();
     let home = limits_reading_grok_home();
     let handle = std::thread::Builder::new()
@@ -519,16 +513,14 @@ fn blocking_account_billing(
                 .enable_all()
                 .build()
                 .ok()?;
-            let fresh = runtime.block_on(
+            // A None refresh is a rejected grant. Do not send the stored
+            // personal access token, and do not send the business token.
+            let (token, user_id) = runtime.block_on(
                 xai_grok_shell::auth::ensure_fresh_access_token_for_supergrok_billing_poll(
                     &home,
                     &identity_id,
                 ),
-            );
-            let (token, user_id) = match fresh {
-                Some((fresh_token, fresh_user)) => (fresh_token, fresh_user),
-                None => (token, user_id),
-            };
+            )?;
             let grpc_url = grok_credits_config_post_url();
             let config = if let Some(credits_url) = grpc_url.as_deref() {
                 runtime
@@ -592,8 +584,7 @@ fn live_account_billing(
             CachedAccountBilling::Failed => None,
         };
     }
-    let fetched =
-        blocking_account_billing(&target.identity_id, &target.access_token, &target.user_id);
+    let fetched = blocking_account_billing(&target.identity_id);
     let cached = match fetched {
         Some(fields) => CachedAccountBilling::Ready(fields),
         None => CachedAccountBilling::Failed,
@@ -648,11 +639,37 @@ fn missing_session_line(role: xai_grok_shell::auth::SupergrokAccountRole) -> &'s
 /// account's percent remaining. Prepaid balance is that account's own cents
 /// when the billing response has them. Empty fields stay empty. A missing
 /// session adds one line. The other account's dollars stay off this tab.
+fn personal_snapshot_poll_outcome_is_reauth() -> bool {
+    let home = limits_reading_grok_home();
+    let Some(doc) = xai_grok_shell::auth::read_limits_snapshot_file(&home) else {
+        return false;
+    };
+    let candidates = xai_grok_shell::auth::load_supergrok_session_candidates(&home);
+    let Some(personal) = candidates.iter().find(|candidate| {
+        !candidate.hard_expired
+            && candidate.headroom.role == xai_grok_shell::auth::SupergrokAccountRole::Personal
+            && !candidate.access_token.trim().is_empty()
+    }) else {
+        return false;
+    };
+    doc.identities
+        .iter()
+        .any(|row| row.identity_id == personal.headroom.identity_id && row.poll_outcome == "reauth")
+}
+
 fn account_section_lines(role: xai_grok_shell::auth::SupergrokAccountRole) -> Vec<String> {
     let fields = account_billing_fields(role);
     let mut lines = vec!["Limits".to_string()];
     if !account_has_live_session(role) {
         lines.push(missing_session_line(role).to_string());
+    }
+    if role == xai_grok_shell::auth::SupergrokAccountRole::Personal
+        && personal_snapshot_poll_outcome_is_reauth()
+    {
+        lines.push(
+            "Personal SuperGrok login expired. Run grok-oss login for the personal account. That login keeps the business login."
+                .to_string(),
+        );
     }
     if let Some(figure) = limits_percent_figure(fields.usage_pct) {
         lines.push(format!("  Included usage: {figure}"));
@@ -5563,6 +5580,99 @@ mod tests {
         }
     }
 
+    /// Owed outcome: when the personal identity row's pollOutcome is
+    /// `reauth`, the Personal tab contains this exact sentence and no other
+    /// wording for that failure. `auth` is not this case.
+    #[test]
+    #[serial_test::serial]
+    fn personal_tab_says_run_grok_oss_login_when_the_personal_refresh_token_is_rejected() {
+        use xai_grok_shell::auth::{
+            AuthMode, GrokAuth, LimitsSnapshotDocument, LimitsSnapshotIdentity,
+            clear_included_billing_cache, upsert_supergrok_session, write_limits_snapshot_file,
+        };
+
+        let owed = "Personal SuperGrok login expired. Run grok-oss login for the personal account. That login keeps the business login.";
+        let home = tempfile::TempDir::new().expect("temp GROK_HOME");
+        let _env = xai_grok_test_support::EnvGuard::set("GROK_HOME", home.path());
+        clear_included_billing_cache();
+        clear_account_billing_cache();
+        std::fs::write(
+            home.path().join("config.toml"),
+            "[auth]\npreferred_method = \"oidc\"\n",
+        )
+        .expect("preferred oidc");
+        let live = chrono::Utc::now() + chrono::Duration::days(7);
+        let base = "https://auth.x.ai::personal-reauth-tab";
+        let mut map = std::collections::BTreeMap::new();
+        upsert_supergrok_session(
+            &mut map,
+            base,
+            GrokAuth {
+                key: "personal-reauth-session".into(),
+                auth_mode: AuthMode::Oidc,
+                user_id: "u-personal-reauth".into(),
+                principal_type: Some("User".into()),
+                principal_id: Some("u-personal-reauth".into()),
+                team_id: None,
+                expires_at: Some(live),
+                ..GrokAuth::default()
+            },
+        );
+        std::fs::write(
+            home.path().join("auth.json"),
+            serde_json::to_vec_pretty(&map).expect("auth json"),
+        )
+        .expect("write auth.json");
+        let mut doc = LimitsSnapshotDocument::empty(1_700_000_000_000);
+        doc.identities.push(LimitsSnapshotIdentity {
+            identity_id: "u-personal-reauth".into(),
+            usage_pct: None,
+            period_end: None,
+            period_type: None,
+            dollar_credits_cents: None,
+            grok_build_usage_pct: None,
+            is_unified_billing_user: None,
+            poll_outcome: "reauth".to_owned(),
+        });
+        write_limits_snapshot_file(home.path(), &doc).expect("snapshot");
+
+        let end = DateTime::parse_from_rfc3339("2026-10-12T06:59:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let now = DateTime::parse_from_rfc3339("2026-10-06T22:08:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let bal = weekly_bal(99.0, end);
+        let snap =
+            LimitsSnapshot::from_billing(Some(&bal), None, SamplingIdentityKind::SuperGrokSession);
+        let mut state = LimitsModalState::new(snap);
+        assert_eq!(
+            state.window.active_tab, LIMITS_TAB,
+            "Personal is the open tab"
+        );
+        let theme = Theme::default();
+        let area = Rect::new(0, 0, 120, 40);
+        let mut buf = Buffer::empty(area);
+        render_limits_modal(&mut buf, area, &mut state, &theme, false, now);
+        let card = (0..area.height)
+            .map(|y| {
+                (0..area.width)
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let collapsed = card.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(
+            collapsed.contains(owed),
+            "the Personal tab must contain `{owed}` when pollOutcome is reauth:\n{card}"
+        );
+        assert!(
+            !collapsed.contains("Personal SuperGrok has no session on this process."),
+            "the Personal tab must not use other wording for that failure:\n{card}"
+        );
+    }
+
     /// Owed outcome: the Personal tab does not list the four meter cells.
     /// It does not show Personal limits, Personal credits, Business limits,
     /// Business credits, Team postpaid Billing Credits, or Console API
@@ -7458,6 +7568,182 @@ mod tests {
         assert_eq!(row.poll_outcome, xai_grok_shell::auth::POLL_OUTCOME_OK);
         assert_eq!(row.usage_pct, Some(37.0));
         assert_ne!(row.poll_outcome, "auth");
+    }
+
+    struct RejectedPersonalRefreshListener {
+        port: u16,
+        billing_authorizations: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+        billing_hits: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        thread: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl RejectedPersonalRefreshListener {
+        fn start() -> Self {
+            use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("rejected listen");
+            let port = listener.local_addr().expect("rejected port").port();
+            listener
+                .set_nonblocking(true)
+                .expect("rejected nonblocking");
+            let billing_authorizations = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let billing_hits = std::sync::Arc::new(AtomicUsize::new(0));
+            let stop = std::sync::Arc::new(AtomicBool::new(false));
+            let auths_bg = std::sync::Arc::clone(&billing_authorizations);
+            let hits_bg = std::sync::Arc::clone(&billing_hits);
+            let stop_bg = std::sync::Arc::clone(&stop);
+            let thread = std::thread::Builder::new()
+                .name("rejected-personal-refresh".to_owned())
+                .spawn(move || {
+                    let discovery = format!(
+                        r#"{{"authorization_endpoint":"http://127.0.0.1:{port}/authorize","token_endpoint":"http://127.0.0.1:{port}/token"}}"#
+                    );
+                    while !stop_bg.load(Ordering::SeqCst) {
+                        match listener.accept() {
+                            Ok((mut stream, _)) => {
+                                let _ = stream.set_nonblocking(false);
+                                let request = read_http_headers(&mut stream);
+                                let (status, body) = if request
+                                    .contains("/.well-known/openid-configuration")
+                                {
+                                    (200, discovery.clone())
+                                } else if request.contains("/token") {
+                                    (
+                                        400,
+                                        r#"{"error":"invalid_grant","error_description":"refresh token revoked"}"#
+                                            .to_owned(),
+                                    )
+                                } else if request.contains("/billing") {
+                                    hits_bg.fetch_add(1, Ordering::SeqCst);
+                                    let authorization = request
+                                        .lines()
+                                        .find(|line| {
+                                            line.to_ascii_lowercase().starts_with("authorization:")
+                                        })
+                                        .unwrap_or("")
+                                        .to_owned();
+                                    if let Ok(mut guard) = auths_bg.lock() {
+                                        guard.push(authorization);
+                                    }
+                                    (401, r#"{"error":"refused"}"#.to_owned())
+                                } else {
+                                    (404, r#"{"error":"unexpected"}"#.to_owned())
+                                };
+                                let _ = write_billing_http_response(&mut stream, status, &body);
+                            }
+                            Err(err)
+                                if err.kind() == std::io::ErrorKind::WouldBlock
+                                    || err.kind() == std::io::ErrorKind::Interrupted =>
+                            {
+                                std::thread::sleep(std::time::Duration::from_millis(5));
+                            }
+                            Err(_) => break,
+                        }
+                    }
+                })
+                .expect("rejected refresh listener thread");
+            Self {
+                port,
+                billing_authorizations,
+                billing_hits,
+                stop,
+                thread: Some(thread),
+            }
+        }
+
+        fn billing_hits(&self) -> usize {
+            self.billing_hits.load(std::sync::atomic::Ordering::SeqCst)
+        }
+
+        fn billing_authorizations(&self) -> Vec<String> {
+            self.billing_authorizations
+                .lock()
+                .map(|guard| guard.clone())
+                .unwrap_or_default()
+        }
+    }
+
+    impl Drop for RejectedPersonalRefreshListener {
+        fn drop(&mut self) {
+            self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+            if let Some(thread) = self.thread.take() {
+                let _ = thread.join();
+            }
+        }
+    }
+
+    /// Owed outcome: a None personal refresh does not place the stored
+    /// personal access token on the request and does not place the business
+    /// token on the request. That credits request is skipped.
+    #[test]
+    #[serial_test::serial]
+    fn none_personal_refresh_does_not_place_the_stored_personal_access_token_or_the_business_token_on_the_request()
+     {
+        use xai_grok_shell::auth::{AuthMode, GrokAuth, upsert_supergrok_session};
+
+        const STORED_PERSONAL: &str = "expired.personal.access";
+        const BUSINESS_TOKEN: &str = "live.business.session";
+
+        let home = tempfile::TempDir::new().expect("temp GROK_HOME");
+        let _env = xai_grok_test_support::EnvGuard::set("GROK_HOME", home.path());
+        let _cooldown = xai_grok_test_support::EnvGuard::set("GROK_DISABLE_SHARED_RATE_LIMIT", "1");
+        clear_account_billing_cache();
+        xai_grok_shell::auth::clear_included_billing_cache();
+        let server = RejectedPersonalRefreshListener::start();
+        let _proxy = AccountBillingProxyGuard::arm(&format!("http://127.0.0.1:{}/v1", server.port));
+        let issuer = format!("http://127.0.0.1:{}", server.port);
+        let expired = chrono::Utc::now() - chrono::Duration::days(1);
+        let live = chrono::Utc::now() + chrono::Duration::days(7);
+        let mut map = std::collections::BTreeMap::new();
+        upsert_supergrok_session(
+            &mut map,
+            &format!("{issuer}::none-personal"),
+            GrokAuth {
+                key: STORED_PERSONAL.into(),
+                auth_mode: AuthMode::Oidc,
+                user_id: "u-none-personal".into(),
+                principal_type: Some("User".into()),
+                principal_id: Some("u-none-personal".into()),
+                team_id: None,
+                expires_at: Some(expired),
+                refresh_token: Some("refresh-none-personal".into()),
+                oidc_issuer: Some(issuer),
+                oidc_client_id: Some("client-none-personal".into()),
+                ..GrokAuth::default()
+            },
+        );
+        upsert_supergrok_session(
+            &mut map,
+            "https://auth.x.ai::none-business",
+            GrokAuth {
+                key: BUSINESS_TOKEN.into(),
+                auth_mode: AuthMode::Oidc,
+                user_id: "u-none-business".into(),
+                principal_type: Some("Team".into()),
+                principal_id: Some("team-none-business".into()),
+                team_id: Some("team-none-business".into()),
+                expires_at: Some(live),
+                ..GrokAuth::default()
+            },
+        );
+        std::fs::write(
+            home.path().join("auth.json"),
+            serde_json::to_vec_pretty(&map).expect("auth json"),
+        )
+        .expect("write auth.json");
+
+        let _body =
+            account_section_lines(xai_grok_shell::auth::SupergrokAccountRole::Personal).join("\n");
+        let authorizations = server.billing_authorizations();
+        let hits = server.billing_hits();
+        assert!(
+            hits == 0
+                && authorizations.iter().all(|header| {
+                    !header.contains(STORED_PERSONAL) && !header.contains(BUSINESS_TOKEN)
+                }),
+            "a None personal refresh does not place the stored personal access token `{STORED_PERSONAL}` or the business token `{BUSINESS_TOKEN}` on the request; billing hits were {hits} and authorizations were {authorizations:?}"
+        );
     }
 
     struct LivePersonalBearerListener {

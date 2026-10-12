@@ -23,9 +23,10 @@ fn composer_cursor_at_end_of_last_line(prompt: &PromptWidget) -> bool {
 
 impl AgentView {
     /// Shift-Enter, the four bare arrows, Ctrl-Left, Ctrl-Right,
-    /// Ctrl-Backspace, Y, and Shift+Y on a plan prompt use the same
-    /// composer path as the main composer. Y is text in that prompt. It
-    /// is not the plan-pane copy command. Lowercase y on an empty plan
+    /// Ctrl-Backspace, Ctrl-A, Ctrl-E, Y, and Shift+Y on a plan prompt
+    /// use the same composer path as the main composer. Ctrl-A and Ctrl-E
+    /// are line start and line end on that path. Y is text in that prompt.
+    /// It is not the plan-pane copy command. Lowercase y on an empty plan
     /// preview still copies the plan. Bare Left and Right stay one cell.
     /// Control on those two keys is word motion. Up and Down stay bare,
     /// so a modified vertical arrow still belongs to the plan list.
@@ -54,6 +55,11 @@ impl AgentView {
         let word_arrow = matches!(key.code, KeyCode::Left | KeyCode::Right)
             && key.modifiers == KeyModifiers::CONTROL;
         if word_arrow {
+            return true;
+        }
+        let line_home_or_end =
+            matches!(key.code, KeyCode::Char('a' | 'e')) && key.modifiers == KeyModifiers::CONTROL;
+        if line_home_or_end {
             return true;
         }
         key.code == KeyCode::Backspace && key.modifiers == KeyModifiers::CONTROL
@@ -3048,8 +3054,34 @@ mod shared_prompt_key_tests {
             "Left" => KeyEvent::new(KeyCode::Left, KeyModifiers::NONE),
             "Right" => KeyEvent::new(KeyCode::Right, KeyModifiers::NONE),
             "Ctrl-Backspace" => KeyEvent::new(KeyCode::Backspace, KeyModifiers::CONTROL),
+            "Ctrl-A" => KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL),
+            "Ctrl-E" => KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL),
             other => panic!("unknown prompt key {other}"),
         }
+    }
+
+    /// Start of the seeded middle line. Ctrl-A must land here.
+    fn current_line_start() -> usize {
+        let cursor = caret();
+        SEED[..cursor]
+            .rfind('\n')
+            .map(|index| index + 1)
+            .unwrap_or(0)
+    }
+
+    /// End of the seeded middle line, on the newline. Ctrl-E must land here.
+    fn current_line_end() -> usize {
+        let cursor = caret();
+        SEED[cursor..]
+            .find('\n')
+            .map(|index| cursor + index)
+            .unwrap_or(SEED.len())
+    }
+
+    /// `handle_prompt_key` clears this at entry. A second match that only
+    /// calls `prompt.handle_key` leaves it set.
+    fn arm_composer_toast(agent: &mut super::AgentView) {
+        agent.toast = Some(("main-composer-key".to_string(), 1));
     }
 
     fn composer(agent: &super::AgentView) -> (String, usize) {
@@ -3101,24 +3133,45 @@ mod shared_prompt_key_tests {
         agent
     }
 
+    /// Plan mode with no plan pane. This is not the plan-approval prompt:
+    /// that screen keeps the line viewer open on Preview.
+    fn plan_mode_prompt() -> super::AgentView {
+        let mut agent = test_fixtures::make_agent();
+        seed(&mut agent);
+        agent.plan_mode_active = true;
+        agent.session_mode_pending = None;
+        agent.session_mode = xai_grok_tools::types::SessionMode::Plan;
+        agent.plan_approval_view = None;
+        agent.line_viewer = None;
+        agent
+    }
+
     fn oracle(key: &KeyEvent) -> (String, usize) {
         let mut agent = test_fixtures::make_agent();
         seed(&mut agent);
+        arm_composer_toast(&mut agent);
         let _ = agent.handle_prompt_key_for_test(key);
+        assert!(
+            agent.toast.is_none(),
+            "main composer handle_prompt_key clears the toast"
+        );
         composer(&agent)
     }
 
     fn press_screen(agent: &mut super::AgentView, key: &KeyEvent) -> (String, usize) {
+        arm_composer_toast(agent);
         let registry = ActionRegistry::non_vscode_for_test();
         let _ = agent.handle_input(&Event::Key(*key), &registry);
         composer(agent)
     }
 
-    /// Shift-Enter, Up, Down, Left, Right, and Ctrl-Backspace on the
-    /// plan-approval screen, on Ask, and on comment must match the main
-    /// composer (`AgentView::handle_prompt_key`). A dropped key is a failure.
-    /// The plan-approval screen does not call that function for these keys
-    /// while Preview focus is the default.
+    /// Shift-Enter, Up, Down, Left, Right, Ctrl-Backspace, Ctrl-A, and
+    /// Ctrl-E on the plan-mode prompt, the plan-approval prompt, Ask, and
+    /// comment must match the main composer (`AgentView::handle_prompt_key`).
+    /// A dropped key is a failure. Ctrl-A moves to the start of the current
+    /// line. Ctrl-E moves to the end of that line. The text stays. A surface
+    /// that skips `handle_prompt_key`, including one that only calls
+    /// `prompt.handle_key`, leaves the toast set.
     #[test]
     fn every_prompt_handles_shift_enter_arrows_and_ctrl_backspace_like_the_main_composer() {
         crate::appearance::cache::set_composer_multiline(true);
@@ -3129,6 +3182,8 @@ mod shared_prompt_key_tests {
             "Left",
             "Right",
             "Ctrl-Backspace",
+            "Ctrl-A",
+            "Ctrl-E",
         ];
         let seed_snap = (SEED.to_string(), caret());
         let mut misses = Vec::new();
@@ -3139,8 +3194,23 @@ mod shared_prompt_key_tests {
                 expected, seed_snap,
                 "main composer handle_prompt_key must change the prompt for {name}"
             );
-            let surfaces: [(&str, super::AgentView); 3] = [
-                ("plan approval", plan_approval_screen()),
+            if name == "Ctrl-A" {
+                assert_eq!(
+                    expected,
+                    (SEED.to_string(), current_line_start()),
+                    "Ctrl-A on the main composer moves to the start of the current line and keeps the text"
+                );
+            }
+            if name == "Ctrl-E" {
+                assert_eq!(
+                    expected,
+                    (SEED.to_string(), current_line_end()),
+                    "Ctrl-E on the main composer moves to the end of the current line and keeps the text"
+                );
+            }
+            let surfaces: [(&str, super::AgentView); 4] = [
+                ("plan-mode prompt", plan_mode_prompt()),
+                ("plan-approval prompt", plan_approval_screen()),
                 ("Ask", ask_prompt()),
                 ("comment", comment_prompt()),
             ];
@@ -3149,6 +3219,11 @@ mod shared_prompt_key_tests {
                 if got != expected {
                     misses.push(format!(
                         "{surface} dropped or diverged on {name}: composer {got:?}, main composer {expected:?}"
+                    ));
+                }
+                if agent.toast.is_some() {
+                    misses.push(format!(
+                        "{surface} kept the toast on {name}; the key did not reach AgentView::handle_prompt_key"
                     ));
                 }
             }

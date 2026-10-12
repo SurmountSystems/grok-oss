@@ -506,6 +506,24 @@ fn credits_label_when_included_period_is_not_next_request() -> String {
 /// request does not draw included
 /// SuperGrok period limits, the chip is the dollars remaining for the
 /// meter that request spends.
+fn personal_header_poll_is_reauth() -> bool {
+    let home = header_reading_grok_home();
+    let Some(doc) = xai_grok_shell::auth::read_limits_snapshot_file(&home) else {
+        return false;
+    };
+    let candidates = xai_grok_shell::auth::load_supergrok_session_candidates(&home);
+    let Some(personal) = candidates.iter().find(|candidate| {
+        !candidate.hard_expired
+            && candidate.headroom.role == xai_grok_shell::auth::SupergrokAccountRole::Personal
+            && !candidate.access_token.trim().is_empty()
+    }) else {
+        return false;
+    };
+    doc.identities
+        .iter()
+        .any(|row| row.identity_id == personal.headroom.identity_id && row.poll_outcome == "reauth")
+}
+
 fn l1_credits_chip_label(
     identity: crate::views::credit_bar::SamplingIdentityKind,
     balance: Option<&crate::views::credit_bar::CreditBalance>,
@@ -515,6 +533,9 @@ fn l1_credits_chip_label(
         && let Some(label) = both_refused_status_chip_label(balance)
     {
         return label;
+    }
+    if personal_header_poll_is_reauth() {
+        return "grok-oss login".to_owned();
     }
     if let Some(pct) = included_chip_usage_pct(identity, balance) {
         let used = pct.round().clamp(0.0, 100.0) as u8;
@@ -7767,6 +7788,95 @@ mod status_credits_meter_tests {
         assert!(!label.contains("limits 0%"));
         assert!(!label.contains("$0"));
         assert!(!label.contains("$78.41"));
+    }
+
+    /// When the personal row's pollOutcome is `reauth`, the header chip
+    /// contains `grok-oss login`. A usage_pct of 10, while the next request
+    /// draws that included period, paints `limits 90%` and does not contain
+    /// `grok-oss login`. pollOutcome `network` does not contain `grok-oss login`.
+    #[test]
+    #[serial_test::serial]
+    fn header_says_grok_oss_login_when_the_personal_refresh_token_is_rejected() {
+        let home = tempfile::TempDir::new().expect("temp GROK_HOME");
+        let _env = xai_grok_test_support::EnvGuard::set("GROK_HOME", home.path());
+        xai_grok_shell::auth::clear_included_billing_cache();
+        std::fs::write(
+            home.path().join("config.toml"),
+            "[auth]\npreferred_method = \"oidc\"\n",
+        )
+        .expect("preferred oidc");
+        let live = chrono::Utc::now() + chrono::Duration::days(7);
+        let base = "https://auth.x.ai::header-reauth";
+        let mut map = std::collections::BTreeMap::new();
+        xai_grok_shell::auth::upsert_supergrok_session(
+            &mut map,
+            base,
+            xai_grok_shell::auth::GrokAuth {
+                key: "header-personal-reauth-session".into(),
+                auth_mode: xai_grok_shell::auth::AuthMode::Oidc,
+                user_id: "u-header-reauth".into(),
+                principal_type: Some("User".into()),
+                principal_id: Some("u-header-reauth".into()),
+                team_id: None,
+                expires_at: Some(live),
+                ..xai_grok_shell::auth::GrokAuth::default()
+            },
+        );
+        std::fs::write(
+            home.path().join("auth.json"),
+            serde_json::to_vec_pretty(&map).expect("auth json"),
+        )
+        .expect("write auth.json");
+        let mut doc = xai_grok_shell::auth::LimitsSnapshotDocument::empty(1_700_000_000_000);
+        doc.identities
+            .push(xai_grok_shell::auth::LimitsSnapshotIdentity {
+                identity_id: "u-header-reauth".into(),
+                usage_pct: Some(10.0),
+                period_end: None,
+                period_type: None,
+                dollar_credits_cents: None,
+                grok_build_usage_pct: None,
+                is_unified_billing_user: None,
+                poll_outcome: "reauth".to_owned(),
+            });
+        xai_grok_shell::auth::write_limits_snapshot_file(home.path(), &doc).expect("snapshot");
+        let chip = || {
+            super::l1_credits_chip_label(
+                crate::views::credit_bar::SamplingIdentityKind::SuperGrokSession,
+                None,
+                false,
+            )
+        };
+        let reauth = chip();
+        assert!(
+            reauth.contains("grok-oss login"),
+            "when pollOutcome is reauth the header chip must contain `grok-oss login`:\n{reauth}"
+        );
+
+        doc.identities[0].poll_outcome = xai_grok_shell::auth::POLL_OUTCOME_OK.to_owned();
+        doc.identities[0].usage_pct = Some(10.0);
+        xai_grok_shell::auth::write_limits_snapshot_file(home.path(), &doc).expect("snapshot 10");
+        xai_grok_shell::auth::clear_included_billing_cache();
+        assert!(
+            xai_grok_shell::auth::limits_pins::next_request_draws_included_period_limits(),
+            "the usage_pct 10 fixture draws included SuperGrok period limits"
+        );
+        let remaining = chip();
+        assert_eq!(remaining, "limits 90%");
+        assert!(
+            !remaining.contains("grok-oss login"),
+            "usage_pct 10 must paint `limits 90%` and must not contain `grok-oss login`:\n{remaining}"
+        );
+
+        doc.identities[0].poll_outcome = xai_grok_shell::auth::POLL_OUTCOME_NETWORK.to_owned();
+        xai_grok_shell::auth::write_limits_snapshot_file(home.path(), &doc)
+            .expect("snapshot network");
+        xai_grok_shell::auth::clear_included_billing_cache();
+        let network = chip();
+        assert!(
+            !network.contains("grok-oss login"),
+            "pollOutcome network must not contain `grok-oss login`:\n{network}"
+        );
     }
 
     const CELL_PERSONAL_TOKEN: &str = "tok-personal-cell";

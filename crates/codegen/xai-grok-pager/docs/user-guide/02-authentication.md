@@ -30,7 +30,9 @@ To switch accounts or resolve an authentication problem, run:
 grok-oss login
 ```
 
-Running `grok-oss login` starts the sign-in flow again, replacing your cached session. By default, it opens your browser and signs in through SpaceXAI OAuth at `auth.x.ai`. Pass a flag to select a different flow:
+Running `grok-oss login` starts the sign-in flow again. A second `grok-oss login` keeps the first stored SuperGrok login. By default, it opens your browser and signs in through SpaceXAI OAuth at `auth.x.ai`. Pass a flag to select a different flow:
+
+`Personal SuperGrok login expired. Run grok-oss login for the personal account. That login keeps the business login.`
 
 | Flag | Description |
 |------|-------------|

@@ -96,11 +96,12 @@ No L4.
   `local_usage_events_for_session` in
   `crates/codegen/xai-grok-shell/src/token_economy/ledger.rs`.
   Do not use Python. Do not use bash. Do not use a `sqlite3` one-liner.
-  The reconcile cell is that row's `output_tokens`, not `total_tokens`,
+  The cost cell is `model_call_cost_for_sessions` (input + output), not `total_tokens`,
   and not the standing estimate.
+  The live status cell is the host context figure with +, labeled context, not the small output integer.
   Chain of thought is `reasoning_tokens` and is not added again.
-  When `output_tokens` is present, print that
-  integer. Do not write `not_fetched` when `output_tokens` is present.
+  A completion-notice `output_tokens` integer is the generated side only.
+  Do not write `not_fetched` when `output_tokens` is present.
   A null `output_tokens` is not printed as `0` and is not copied from
   the estimate. Omit the figure, or say the output total was not stored.
   Leave the Billing Credits card wire `not_fetched` alone. That is a

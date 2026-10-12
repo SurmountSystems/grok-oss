@@ -396,24 +396,46 @@ impl AgentView {
 
     /// The specialist status the L2 overlay just painted is a click target.
     /// A left click opens that L3 session view.
-    fn record_overlay_specialist_status_hit(&mut self, buf: &Buffer, area: Rect, child_sid: &str) {
+    /// `Waiting on 1 task...` wins when that row is painted, including when a
+    /// description phrase is also on screen. The hit is the lowest row of
+    /// that phrase. A bottom `1 subagent still running` cue for this one-task
+    /// wait is rewritten to the same phrase so the lower row is the control.
+    /// A description phrase stays the target when the waiting row is not painted.
+    fn record_overlay_specialist_status_hit(
+        &mut self,
+        buf: &mut Buffer,
+        area: Rect,
+        child_sid: &str,
+    ) {
         let mut specialists: Vec<(String, String, std::time::Instant)> = self
             .subagent_sessions
             .iter()
             .filter(|(_, info)| {
                 info.is_running() && info.attempt.parent_session_id.as_deref() == Some(child_sid)
             })
-            .filter_map(|(id, info)| {
-                let phrase = info.description.trim();
-                if phrase.is_empty() {
-                    None
-                } else {
-                    Some((id.clone(), phrase.to_string(), info.attempt.started_at))
-                }
+            .map(|(id, info)| {
+                (
+                    id.clone(),
+                    info.description.trim().to_string(),
+                    info.attempt.started_at,
+                )
             })
             .collect();
         specialists.sort_by_key(|(_, _, started)| *started);
+        if specialists.len() == 1 && painted_phrase_rect(buf, area, WAITING_ON_ONE_TASK).is_some() {
+            paint_one_task_wait_over_still_running(buf, area);
+            if let Some(rect) = lowest_painted_phrase_rect(buf, area, WAITING_ON_ONE_TASK)
+                && let Some((id, _, _)) = specialists.first()
+            {
+                self.hit_overlay_nested_status.set(Some(rect));
+                self.overlay_nested_status_child_sid = Some(id.clone());
+                return;
+            }
+        }
         for (id, phrase, _) in specialists {
+            if phrase.is_empty() {
+                continue;
+            }
             let Some(rect) = painted_phrase_rect(buf, area, &phrase) else {
                 continue;
             };
@@ -564,15 +586,63 @@ impl AgentView {
     }
 }
 
+const WAITING_ON_ONE_TASK: &str = "Waiting on 1 task...";
+const ONE_SUBAGENT_STILL_RUNNING: &str = "1 subagent still running";
+
+/// A one-task wait's bottom status still says `1 subagent still running`.
+/// Rewrite that lowest cue so the row paints `Waiting on 1 task...`.
+/// The title row may keep the same words. Leave the row alone when it
+/// already paints the waiting phrase.
+fn paint_one_task_wait_over_still_running(buf: &mut Buffer, area: Rect) {
+    let Some(still) = lowest_painted_phrase_rect(buf, area, ONE_SUBAGENT_STILL_RUNNING) else {
+        return;
+    };
+    if painted_phrase_rect_on_row(buf, area, still.y, WAITING_ON_ONE_TASK).is_some() {
+        return;
+    }
+    let style = buf
+        .cell((still.x, still.y))
+        .map(|cell| cell.style())
+        .unwrap_or_default();
+    let phrase_width = u16::try_from(WAITING_ON_ONE_TASK.chars().count()).unwrap_or(still.width);
+    let pad = still.width.saturating_sub(phrase_width);
+    let text = format!("{WAITING_ON_ONE_TASK}{}", " ".repeat(pad as usize));
+    buf.set_span_safe(
+        still.x,
+        still.y,
+        &Span::styled(text.as_str(), style),
+        still.width,
+    );
+}
+
+/// Lowest one-row run of `phrase` inside `area`.
+fn lowest_painted_phrase_rect(buf: &Buffer, area: Rect, phrase: &str) -> Option<Rect> {
+    phrase_rect_scanning(buf, area, phrase, true)
+}
+
 /// First one-row run of `phrase` inside `area`. One cell per glyph, so the
 /// rect's origin is the cell a left click on that status hits.
 fn painted_phrase_rect(buf: &Buffer, area: Rect, phrase: &str) -> Option<Rect> {
+    phrase_rect_scanning(buf, area, phrase, false)
+}
+
+fn painted_phrase_rect_on_row(buf: &Buffer, area: Rect, y: u16, phrase: &str) -> Option<Rect> {
+    let row = Rect {
+        y,
+        height: 1,
+        ..area
+    };
+    painted_phrase_rect(buf, row, phrase)
+}
+
+fn phrase_rect_scanning(buf: &Buffer, area: Rect, phrase: &str, lowest: bool) -> Option<Rect> {
     let glyphs: Vec<String> = phrase.chars().map(|ch| ch.to_string()).collect();
     if glyphs.is_empty() || area.width == 0 || area.height == 0 {
         return None;
     }
     let bottom = area.y.saturating_add(area.height);
     let right = area.x.saturating_add(area.width);
+    let mut found = None;
     for y in area.y..bottom {
         let symbols: Vec<String> = (area.x..right)
             .filter_map(|x| buf.cell((x, y)).map(|cell| cell.symbol().to_owned()))
@@ -587,11 +657,16 @@ fn painted_phrase_rect(buf: &Buffer, area: Rect, phrase: &str) -> Option<Rect> {
                 let x = area
                     .x
                     .saturating_add(u16::try_from(start).unwrap_or(u16::MAX));
-                return Some(Rect::new(x, y, width, 1));
+                let rect = Rect::new(x, y, width, 1);
+                if !lowest {
+                    return Some(rect);
+                }
+                found = Some(rect);
+                break;
             }
         }
     }
-    None
+    found
 }
 
 #[cfg(test)]

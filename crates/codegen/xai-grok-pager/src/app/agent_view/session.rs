@@ -1824,6 +1824,15 @@ impl AgentView {
                 let subject = self
                     .subject_for_wait_tasks(&task_ids)
                     .or_else(|| self.live_specialist_wait_subject());
+                // An empty description is not a subject. One task id with
+                // only that id fallback stays unlabeled so `label()` can
+                // read `Waiting on 1 task...`. A real description stays.
+                let subject = match subject {
+                    Some(name) if task_ids.len() == 1 && self.bare_specialist_id_subject(&name) => {
+                        None
+                    }
+                    other => other,
+                };
                 TurnActivity::Waiting(WaitingReason::TaskOutput {
                     task_ids,
                     subject,
@@ -2068,6 +2077,18 @@ impl AgentView {
         crate::acp::tracker::waiting_on_subagents_subject(
             self.running_foreground_subagents().count(),
         )
+    }
+    /// True when `name` is only the id of a running specialist whose
+    /// description is empty. That is not a resolved wait subject.
+    fn bare_specialist_id_subject(&self, name: &str) -> bool {
+        let name = name.trim();
+        if name.is_empty() {
+            return false;
+        }
+        self.running_live_specialists().any(|info| {
+            info.description.trim().is_empty()
+                && (info.subagent_id.as_ref() == name || info.child_session_id.as_ref() == name)
+        })
     }
     /// Name a live specialist (description, else id) plus last tool/progress
     /// when the registry has it. Used when a task-output wait has no resolved

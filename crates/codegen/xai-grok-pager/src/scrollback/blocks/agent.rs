@@ -515,6 +515,92 @@ mod tests {
         assert!(saw_body, "agent response body was not painted");
     }
 
+    /// The live L1 transcript draws the agent reply through EntryRenderer.
+    /// `accent()` returning magenta is not enough if that buffer paints
+    /// another color. While the turn is active the left `┃` is
+    /// `accent_running` (DOGE magenta). The body stays white. A finished
+    /// turn clears the rail.
+    #[test]
+    fn live_l1_agent_transcript_left_accent_is_magenta() {
+        use crate::render::Renderable;
+        use crate::scrollback::RenderBlock;
+        use crate::scrollback::entry::ScrollbackEntry;
+        use crate::scrollback::wrappers::EntryRenderer;
+        use ratatui::buffer::Buffer;
+        use ratatui::layout::Rect;
+        use ratatui::style::Color;
+
+        let _lock = crate::theme::cache::test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::theme::cache::reset_for_test();
+        crate::theme::cache::set(crate::theme::ThemeKind::Doge);
+
+        let theme = crate::theme::Theme::current();
+        let magenta = Color::Rgb(255, 0, 255);
+        let green = Color::Rgb(0, 255, 0);
+        let cyan = Color::Rgb(0, 255, 255);
+        let white = theme.text_primary;
+        assert_eq!(theme.accent_running, magenta);
+        assert_eq!(theme.accent_user, green);
+        assert_eq!(theme.accent_system, cyan);
+        assert_eq!(white, Color::Rgb(255, 255, 255));
+
+        let text = "I should not assume those token counts are accurate.";
+        let running = ScrollbackEntry::running(RenderBlock::agent_message(text));
+        assert!(running.is_running, "an active L1 agent turn is running");
+        let renderer = EntryRenderer::new(&running, &theme);
+        let width = 48u16;
+        let height = renderer.desired_height(width).max(4);
+        let area = Rect::new(0, 0, width, height);
+        let mut buf = Buffer::empty(area);
+        renderer.render(area, &mut buf);
+
+        let bar = crate::glyphs::accent_bar();
+        let rail = (0..area.height)
+            .find_map(|y| {
+                let cell = buf.cell((0, y))?;
+                (cell.symbol() == bar).then_some(cell.clone())
+            })
+            .expect("an active L1 agent reply must paint a left ┃ rail");
+        assert_eq!(rail.fg, magenta, "the live L1 agent rail is accent_running");
+        assert_eq!(rail.fg, theme.accent_running);
+        assert_ne!(rail.fg, green);
+        assert_ne!(rail.fg, theme.accent_user);
+        assert_ne!(rail.fg, cyan);
+        assert_ne!(rail.fg, theme.accent_system);
+        assert_ne!(rail.fg, white);
+
+        let letter = (0..area.height)
+            .flat_map(|y| (1..area.width).map(move |x| (x, y)))
+            .find_map(|(x, y)| {
+                let cell = buf.cell((x, y))?;
+                (cell.symbol() == "I").then_some(cell.clone())
+            })
+            .expect("the agent reply body is painted");
+        assert_eq!(letter.fg, white, "the agent reply body stays white");
+        assert_eq!(letter.fg, theme.text_primary);
+        assert_ne!(letter.fg, magenta);
+        assert_ne!(letter.fg, green);
+
+        let finished = ScrollbackEntry::new(RenderBlock::agent_message(text));
+        assert!(!finished.is_running, "a finished L1 agent turn is not running");
+        let finished_renderer = EntryRenderer::new(&finished, &theme);
+        let finished_height = finished_renderer.desired_height(width).max(4);
+        let finished_area = Rect::new(0, 0, width, finished_height);
+        let mut finished_buf = Buffer::empty(finished_area);
+        finished_renderer.render(finished_area, &mut finished_buf);
+        let finished_rail = (0..finished_area.height).any(|y| {
+            finished_buf
+                .cell((0, y))
+                .is_some_and(|cell| cell.symbol() == bar)
+        });
+        assert!(
+            !finished_rail,
+            "a finished L1 agent turn does not keep a left ┃ rail"
+        );
+    }
+
     #[test]
     fn mermaid_treatment_row_preserves_hyperlink_line_mapping() {
         // The inserted treatment row (caption or affordance) is a joiner-continuation line, so it must NOT add a logical (pre-wrap) line

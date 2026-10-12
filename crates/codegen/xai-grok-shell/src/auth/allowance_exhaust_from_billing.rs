@@ -673,13 +673,50 @@ pub fn persist_refreshed_supergrok_billing_auth(
     write_auth_json(&path, &map)
 }
 
+/// Record one identity's refresh poll outcome. No access tokens or refresh tokens.
+fn write_refresh_poll_outcome(grok_home: &Path, identity_id: &str, poll_outcome: &str) {
+    use super::limits_snapshot_hub::{
+        LimitsSnapshotDocument, LimitsSnapshotIdentity, now_unix_ms, read_limits_snapshot_file,
+        write_limits_snapshot_file,
+    };
+
+    let now = now_unix_ms();
+    let mut doc =
+        read_limits_snapshot_file(grok_home).unwrap_or_else(|| LimitsSnapshotDocument::empty(now));
+    if let Some(row) = doc
+        .identities
+        .iter_mut()
+        .find(|row| row.identity_id == identity_id)
+    {
+        row.poll_outcome = poll_outcome.to_owned();
+        row.usage_pct = None;
+    } else {
+        doc.identities.push(LimitsSnapshotIdentity {
+            identity_id: identity_id.to_owned(),
+            usage_pct: None,
+            period_end: None,
+            period_type: None,
+            dollar_credits_cents: None,
+            grok_build_usage_pct: None,
+            is_unified_billing_user: None,
+            poll_outcome: poll_outcome.to_owned(),
+        });
+    }
+    let _ = write_limits_snapshot_file(grok_home, &doc);
+}
+
 /// Ensure the SuperGrok principal has a usable access token for a billing poll.
 ///
 /// When the multi-slot (or base) JWT is past the early-invalidation buffer and
 /// still has OIDC refresh credentials, exchange the refresh token and write the
 /// new access token back to that `auth.json` scope **before** the credits HTTP
-/// call. On refresh failure, returns the existing token so the poll can record
-/// auth-fail honesty (and eventually N-fail demote). Never deletes secrets.
+/// call. A successful refresh returns the new token. A transport failure
+/// returns the stored token for a later retry. When that failure never reached
+/// the identity provider, the snapshot poll outcome is `network`, not `reauth`.
+/// A rejected grant (`TerminalError`, including `invalid_grant`) returns no
+/// token and records `reauth` with no usage percent. It does not return the
+/// stored access token. Other non-network failures still return the stored
+/// token and do not record `reauth`. Never deletes secrets.
 ///
 /// Returns `(access_token, user_id)`.
 pub async fn ensure_fresh_access_token_for_supergrok_billing_poll(
@@ -713,11 +750,34 @@ pub async fn ensure_fresh_access_token_for_supergrok_billing_poll(
             tracing::debug!(
                 identity_id = %identity_id,
                 ?reason,
-                "sibling SuperGrok billing: OIDC refresh terminal; polling with stored token"
+                "sibling SuperGrok billing: OIDC refresh rejected; not polling with the stored token"
+            );
+            write_refresh_poll_outcome(
+                grok_home,
+                identity_id,
+                super::limits_snapshot_hub::POLL_OUTCOME_REAUTH,
+            );
+            None
+        }
+        super::oidc::OidcRefreshResult::Failed {
+            network_unreachable: true,
+            ..
+        } => {
+            tracing::debug!(
+                identity_id = %identity_id,
+                "sibling SuperGrok billing: OIDC refresh did not reach the identity provider"
+            );
+            write_refresh_poll_outcome(
+                grok_home,
+                identity_id,
+                super::limits_snapshot_hub::POLL_OUTCOME_NETWORK,
             );
             Some((auth.key.clone(), auth.user_id.clone()))
         }
-        super::oidc::OidcRefreshResult::Failed { .. } => {
+        super::oidc::OidcRefreshResult::Failed {
+            network_unreachable: false,
+            ..
+        } => {
             tracing::debug!(
                 identity_id = %identity_id,
                 "sibling SuperGrok billing: OIDC refresh failed; polling with stored token"
@@ -1459,6 +1519,74 @@ mod tests {
             find_supergrok_auth_entry_for_billing(dir.path(), &sibling_id).expect("stored");
         assert_eq!(stored.key, "mock-billing-access-token");
         assert!(!session_needs_oidc_refresh_before_billing_poll(&stored));
+        clear_included_billing_cache();
+    }
+
+    /// A refresh that never reaches the identity provider keeps the stored
+    /// access token for a later retry. The poll outcome is `network`, not
+    /// `reauth`.
+    #[tokio::test]
+    async fn network_refresh_failure_keeps_the_stored_token_and_is_not_a_rejected_grant() {
+        use crate::auth::model::upsert_supergrok_session;
+        use chrono::{Duration, Utc};
+
+        const STORED: &str = "stored-personal-access-for-later-retry";
+        const USER: &str = "personal-network-refresh-user";
+
+        clear_included_billing_cache();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("closed-port bind");
+        let port = listener.local_addr().expect("closed port").port();
+        drop(listener);
+        let issuer = format!("http://127.0.0.1:{port}");
+
+        let dir = TempDir::new().unwrap();
+        let base = "https://auth.x.ai::network-refresh";
+        let mut map = AuthStore::default();
+        upsert_supergrok_session(
+            &mut map,
+            base,
+            GrokAuth {
+                key: STORED.into(),
+                auth_mode: AuthMode::Oidc,
+                user_id: USER.into(),
+                refresh_token: Some("rt-network".into()),
+                oidc_issuer: Some(issuer),
+                oidc_client_id: Some("personal-limits-client".into()),
+                expires_at: Some(Utc::now() - Duration::minutes(30)),
+                create_time: Utc::now() - Duration::hours(2),
+                ..Default::default()
+            },
+        );
+        write_auth_json(&dir.path().join("auth.json"), &map).unwrap();
+
+        let (token, user_id) =
+            ensure_fresh_access_token_for_supergrok_billing_poll(dir.path(), USER)
+                .await
+                .expect("network failure keeps the stored token");
+        assert_eq!(token, STORED);
+        assert_eq!(user_id, USER);
+        let (_, still_stored) =
+            find_supergrok_auth_entry_for_billing(dir.path(), USER).expect("stored entry");
+        assert_eq!(still_stored.key, STORED);
+
+        let doc = crate::auth::limits_snapshot_hub::read_limits_snapshot_file(dir.path())
+            .expect("network refresh writes a poll outcome");
+        let row = doc
+            .identities
+            .iter()
+            .find(|row| row.identity_id == USER)
+            .expect("personal identity row");
+        assert_eq!(
+            row.poll_outcome,
+            crate::auth::limits_snapshot_hub::POLL_OUTCOME_NETWORK
+        );
+        assert_ne!(
+            row.poll_outcome,
+            crate::auth::limits_snapshot_hub::POLL_OUTCOME_REAUTH,
+            "a network miss is not a rejected grant"
+        );
         clear_included_billing_cache();
     }
 

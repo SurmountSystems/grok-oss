@@ -927,6 +927,7 @@ impl ToolOutput {
                 // `ask` is named only so the model knows which tool not to use for that.
                 format!(
                     "{message}\n\n\
+                     The first section of the plan is Read this first. List every open question there as a plain bullet. A question that appears only under a later heading is incomplete.\n\n\
                      {plan_status}\n\n\
                      In plan mode, you should:\n\
                      1. Thoroughly explore the codebase to understand existing patterns\n\

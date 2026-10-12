@@ -324,16 +324,47 @@ less than product code and tests. Do not invent long essays or git nags.
    pad a guess. Name which meter and which workspace. SuperGrok Heavy
    is a distinct weekly pool from standard SuperGrok. Dual-pin: host
    `~/.grok/AGENTS.md` § *Limits and credits vocabulary*.
-   **Finished job output tokens (pinned 2026-10-09).** When
-   `local_usage_events_for_session` returns `output_tokens`, print that
-   integer. When it returns null, omit the figure or say the output total
-   was not stored. Do not copy the estimate. Do not print `0`. Do not
-   write `not_fetched` for that cell. Leave the Billing Credits card wire
-   alone. That wire's `not_fetched` is a different meter. The reconcile
-   cell is that row's `output_tokens`, not `total_tokens`, and not the
+   **Finished job output tokens (pinned 2026-10-09).** The cost cell is
+   input plus output from `model_call_cost_for_sessions` when both fields
+   are stored. `local_usage_events_for_session` reads the rows. A
+   completion-notice `output_tokens` integer is the generated side only.
+   When a field is null, omit the figure or say the output total was not
+   stored. Do not copy the estimate. Do not print `0`. Do not write
+   `not_fetched` for that cell when the figure is present. Leave the
+   Billing Credits card wire alone. That wire's `not_fetched` is a
+   different meter. The cost cell is not `total_tokens` and not the
    standing estimate. Chain of thought is `reasoning_tokens` and is not
    added again. Dual-pin: host `~/.grok/AGENTS.md` § *Comprehensive
    estimate and reconcile*.
+   **In-flight token counts use a trailing plus (pinned 2026-10-12).**
+   While a job is running, the live status cell prints the host context
+   figure with a trailing +, and labels it context. The host line
+   `152K/200K tokens (76% context)` is the current context window. That
+   window is input. It is not output. A live cell looks like
+   `152K/200K context+`. Do not write "not accepted". Do not withhold
+   that figure. Do not print 0 for a `0K/0K` reading when the agent
+   already did tool work. Say the context figure was not stored.
+   Cost is input plus output. On a model-call usage event the fields are
+   `input_tokens` and `output_tokens`. They do not already contain each
+   other. The job cost is the sum of those two fields for the coordinator
+   and every nested agent, once each. Spell the addition: input + output
+   = cost. The function is `model_call_cost_for_sessions`. Reasoning
+   tokens are included once, and only if they are not already inside
+   input or output. On these rows `reasoning_tokens` is already inside
+   `output_tokens`. Do not add it again. `cached_tokens` is already
+   inside `input_tokens`. Do not add it again. `total_tokens` is the
+   provider context length, not the cost. A completion-notice
+   `output_tokens` integer is generated tokens, not the cost. When the
+   event has both
+   fields, the cost cell is the sum, and the context figure stays
+   labeled context. A row with a null input or a null output is named
+   by event_ulid and left out of the sum. Do not print 0 for it. Do not
+   copy an estimate. Do not invent a number the events do not store.
+   When the job has finished and the host returns a context integer,
+   print that integer with no + and keep the label context. The finished
+   cost cell is the input-plus-output sum with no +, when both fields
+   were stored. The + means the context figure is still growing. Do not
+   delete that plus rule.
    **grok-oss limits printout is not xAI billing truth (pinned 2026-08-19).**
    grok-oss limits JSON and compact chrome are a client printout, not xAI
    billing truth. Distinguish "the CLI printed X" from "the account is X."
@@ -1046,6 +1077,16 @@ A live `just check-remote` is the one builder job. It does not freeze the other 
 
 This does not weaken red-then-green. The tests stay. Do not weaken them to match the code.
 
+## Personal limits selection refreshes or asks for grok-oss login (pinned 2026-10-12)
+
+Selecting personal included limits refreshes first. On success, the next request draws the personal included SuperGrok period, and the header shows percent remaining. The only Operator-visible failure is the grok-oss login sentence after TerminalError (invalid_grant or invalid_client). That login keeps the business login. A network failure retries and does not drop the personal pin.
+
+The Personal tab sentence is `Personal SuperGrok login expired. Run grok-oss login for the personal account. That login keeps the business login.` The header chip contains `grok-oss login` only when that personal row's pollOutcome is `reauth`.
+
+For this job, the named tests run on this laptop. The Operator runs the full suite on surmount-1. Agents do not run `just check-remote` or `just install` for this job.
+
+Reports go under `~/.agents/reports/`. Plans go under `~/.agents/plans/`.
+
 ## Stage the one new Rust file (pinned 2026-10-10)
 
 Do not attribute a sentence to the Operator unless the Operator said that sentence. A paraphrase labeled Operator is forbidden.
@@ -1215,6 +1256,12 @@ says do not kill a healthy in-flight L2. Dual-pin: this file and host
 ### Close a misaligned L2 (pinned 2026-09-22)
 
 Close a misaligned L2. A nudge is only when that L2 is already on the right job and is missing one fact. If the job changed, close it and start a new one.
+
+### End an L2 that started with the wrong instructions (pinned 2026-10-12)
+
+If an L2 was started with the wrong instructions, end that L2 and start a new one. Do not send a follow-up to correct those instructions. A follow-up is compacted away, and the L2 keeps the original job. A nudge is only when that L2 is already on the right job and is missing one fact.
+
+This pin does not weaken § *Close a misaligned L2*. Dual-pin: host `~/.grok/AGENTS.md` same heading.
 
 ## Subagents — parent is HITL UX only (hard)
 

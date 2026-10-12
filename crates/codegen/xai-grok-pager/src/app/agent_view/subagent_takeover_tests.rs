@@ -448,6 +448,30 @@ fn specialist_status_cell(buf: &Buffer, area: Rect, phrase: &str) -> Option<(u16
     None
 }
 
+/// One cell per row that paints `phrase`, top to bottom. The origin is the first glyph.
+fn phrase_row_cells(buf: &Buffer, area: Rect, phrase: &str) -> Vec<(u16, u16)> {
+    let glyphs: Vec<String> = phrase.chars().map(|ch| ch.to_string()).collect();
+    if glyphs.is_empty() {
+        return Vec::new();
+    }
+    let mut rows = Vec::new();
+    for y in area.y..area.y + area.height {
+        let symbols: Vec<String> = (area.x..area.x + area.width)
+            .filter_map(|x| buf.cell((x, y)).map(|cell| cell.symbol().to_owned()))
+            .collect();
+        if symbols.len() < glyphs.len() {
+            continue;
+        }
+        for start in 0..=symbols.len() - glyphs.len() {
+            if symbols[start..start + glyphs.len()] == glyphs[..] {
+                rows.push((area.x + start as u16, y));
+                break;
+            }
+        }
+    }
+    rows
+}
+
 /// A left click on the specialist status in the L2 overlay opens that L3 takeover.
 /// The status is on screen. `hit_overlay_nested_status` stays empty because nothing paints it, and the click is never read.
 #[test]
@@ -516,5 +540,123 @@ fn overlay_nested_status_click_opens_l3_session_view() {
         l1.active_subagent.as_deref(),
         Some(L3),
         "{OWED_OVERLAY_CLICK} The click is never read."
+    );
+}
+
+const WAITING_ONE_TASK: &str = "Waiting on 1 task...";
+const OWED_WAITING_ROW: &str =
+    "A left click on Waiting on 1 task... in the nested view opens that waited task.";
+
+/// The nested view's bottom `Waiting on 1 task...` row is the overlay status control.
+/// The takeover title also paints that phrase. The click is the lowest row, not the title.
+/// The specialist description is empty, so the row does not depend on that phrase.
+#[test]
+fn waiting_task_row_opens_the_waited_task() {
+    use agent_client_protocol as acp;
+    const L2: &str = "l2-coord";
+    const L3: &str = "l3-open";
+    let registry = ActionRegistry::defaults();
+    let mut l1 = make_agent();
+    let mut l2 = make_agent();
+    l2.session.state = crate::app::agent::AgentState::TurnRunning;
+    let meta = crate::acp::meta::NotificationMeta::default();
+    l2.session.handle_update(
+        acp::SessionUpdate::ToolCall(
+            acp::ToolCall::new(
+                acp::ToolCallId::new(Arc::from("wait-one")),
+                "get_command_or_subagent_output",
+            )
+            .kind(acp::ToolKind::Other)
+            .status(acp::ToolCallStatus::Pending)
+            .content(vec![])
+            .raw_input(Some(serde_json::json!({
+                "task_ids": [L3],
+                "timeout_ms": 30_000,
+            })))
+            .locations(vec![]),
+        ),
+        &meta,
+        &mut l2.scrollback,
+    );
+    let mut l2_info = running_subagent_info(L2);
+    l2_info.description = Arc::from("Coordinate the overlay");
+    l2_info.attempt.depth = Some(1);
+    l1.subagent_sessions.insert(L2.to_owned(), l2_info);
+    l1.subagent_views.insert(L2.to_owned(), Box::new(l2));
+    let mut specialist = running_subagent_info(L3);
+    specialist.description = Arc::from("");
+    specialist.attempt.is_background = true;
+    specialist.attempt.depth = Some(2);
+    specialist.attempt.parent_session_id = Some(Arc::from(L2));
+    l1.subagent_sessions.insert(L3.to_owned(), specialist);
+    l1.insert_test_child(L3.to_owned(), Box::new(make_agent()));
+    l1.active_subagent = Some(L2.to_owned());
+
+    let area = Rect::new(0, 0, 120, 30);
+    let mut buf = Buffer::empty(area);
+    let mut scratch = ScratchBuffer::new();
+    let _ = l1.draw(
+        area,
+        &mut buf,
+        &registry,
+        &mut scratch,
+        None,
+        false,
+        crate::app::agent_view::BannerSlotParams::none(),
+        true,
+        false,
+        &mut Vec::new(),
+        crate::app::agent_view::AppRenderParams::default(),
+    );
+    let painted = buffer_text(&buf, area);
+    assert!(
+        painted.contains(WAITING_ONE_TASK),
+        "{OWED_WAITING_ROW} The nested view must paint `{WAITING_ONE_TASK}`:\n{painted}"
+    );
+    let phrase_rows = phrase_row_cells(&buf, area, WAITING_ONE_TASK);
+    let title = phrase_rows.first().copied().unwrap_or_else(|| {
+        panic!("{OWED_WAITING_ROW} The takeover title must paint `{WAITING_ONE_TASK}`:\n{painted}")
+    });
+    let status = phrase_rows.last().copied().unwrap_or(title);
+    let lowest_y = phrase_rows
+        .iter()
+        .map(|cell| cell.1)
+        .max()
+        .unwrap_or(title.1);
+    assert_eq!(
+        status.1, lowest_y,
+        "{OWED_WAITING_ROW} The clicked cell must be the lowest row that contains `{WAITING_ONE_TASK}`."
+    );
+    assert!(
+        status.1 > title.1,
+        "{OWED_WAITING_ROW} The clicked y must be strictly below the takeover title row. The title also paints `{WAITING_ONE_TASK}`. Title y is {}, clicked y is {}. The bottom status row does not contain the phrase when these match. hit_overlay_nested_status is {:?}.\n{painted}",
+        title.1,
+        status.1,
+        l1.hit_overlay_nested_status.rect
+    );
+    assert!(
+        l1.hit_overlay_nested_status.contains(status.0, status.1),
+        "{OWED_WAITING_ROW} `{WAITING_ONE_TASK}` lowest row is at ({}, {}), below the takeover title at y {}. hit_overlay_nested_status is the title row: {:?}.",
+        status.0,
+        status.1,
+        title.1,
+        l1.hit_overlay_nested_status.rect
+    );
+    assert_eq!(
+        l1.overlay_nested_status_child_sid.as_deref(),
+        Some(L3),
+        "{OWED_WAITING_ROW}"
+    );
+    let click = Event::Mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: status.0,
+        row: status.1,
+        modifiers: KeyModifiers::NONE,
+    });
+    let _ = l1.handle_input(&click, &registry);
+    assert_eq!(
+        l1.active_subagent.as_deref(),
+        Some(L3),
+        "{OWED_WAITING_ROW} The click did not open the waited task."
     );
 }

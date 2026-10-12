@@ -10,8 +10,13 @@
 //! ([`apply_included_limits_choice`]) still writes when `preferred_method`
 //! is `api_key`, and it leaves `use_console` false. When no personal
 //! credential row is stored, that personal pin is cleared and the sampler
-//! key stays. A hard-expired personal row keeps Personal + Included and
-//! does not install that token. A stored Team session keeps a business
+//! key stays. A hard-expired personal row that still has refresh
+//! credentials is refreshed before this gives up. A successful refresh
+//! installs that fresh personal access token. A rejected grant does not
+//! install the expired token and does not leave the business token as the
+//! bearer. Personal + Included stays, and `use_console` stays false. A
+//! hard-expired row with no refresh credentials is not installed. A stored
+//! Team session keeps a business
 //! included pin. Stock
 //! `preferred_method` is not rewritten. A Console meter pin still spends console API
 //! credits when that balance is available. A client 100% / remaining 0 /
@@ -364,9 +369,11 @@ fn use_console_api_credits_after_real_supergrok_http_402(
 /// session, including when a live personal session is also stored.
 /// Otherwise, when both a live personal SuperGrok session and a Team JWT
 /// are stored, that choice sends the personal session. A hard-expired
-/// personal session is not installed as the bearer. When that personal
-/// row exists and every personal candidate is hard-expired, Personal +
-/// Included stays and the sampler key stays. When no personal credential
+/// personal session is refreshed when it still has refresh credentials.
+/// The expired token is not installed. A rejected grant does not leave
+/// the business token as the bearer. When that personal row exists and
+/// every personal candidate is still hard-expired after that refresh,
+/// Personal + Included stays. When no personal credential
 /// row is stored, that personal included pin is cleared and the sampler
 /// key stays. While the included choice
 /// is on, a real SuperGrok HTTP 402 and available console API credits
@@ -424,6 +431,7 @@ pub fn apply_limits_pins_to_sampler_config(config: &mut xai_grok_sampler::Sample
         // A miss that clears a personal included pin must not call prefer:
         // that would replace the team token. A hard-expired personal row
         // keeps Personal + Included and must not install that dead token.
+        // A rejected refresh also drops the business bearer.
         // An Included pin with no personal identity still selects the session
         // key already on the sampler. Stock `preferred_method = "api_key"`
         // does not veto this choice.
@@ -509,20 +517,38 @@ pub fn apply_limits_pins_to_sampler_config(config: &mut xai_grok_sampler::Sample
 /// Using limits spends included SuperGrok period limits on the personal
 /// session the product already stores. Install that live token as `api_key`
 /// and `session_identity_key`, and set the meter to included SuperGrok
-/// period limits for the personal session. A hard-expired personal session
-/// is not installed. When every personal candidate is hard-expired, Personal
-/// + Included stays and this returns without a bearer. When no personal
-/// credential row is stored, a personal included pin is cleared and
-/// `api_key` stays as it was. This does not write `[auth] preferred_method`.
-/// Stock `preferred_method = "api_key"` does not veto the choice and does
-/// not select the console API key. This does not set `use_console`.
+/// period limits for the personal session. A personal token that is already
+/// live does not need a refresh. A hard-expired personal row that still has
+/// refresh credentials is refreshed on a helper thread before this gives up.
+/// On success the fresh personal access token is installed. The business
+/// token is not the bearer. `meter_source` stays included, the identity pin
+/// stays personal, and `use_console` stays false. A rejected grant does not
+/// install the expired token and does not leave the business token as
+/// `api_key` or `session_identity_key`. Personal usage percent stays empty.
+/// When every personal candidate is still hard-expired and the grant was
+/// not rejected, Personal + Included stays and this returns without a
+/// bearer. When no personal credential row is stored, a personal included
+/// pin is cleared and `api_key` stays as it was. This does not write
+/// `[auth] preferred_method`. Stock `preferred_method = "api_key"` does not
+/// veto the choice and does not select the console API key. This does not
+/// set `use_console`.
 pub fn install_live_personal_session_for_included_limits(
     config: &mut xai_grok_sampler::SamplerConfig,
 ) {
+    let refresh_attempt = if live_role_access_token(SupergrokAccountRole::Personal).is_none()
+        && personal_credential_is_only_hard_expired()
+    {
+        refresh_hard_expired_personal_before_install()
+    } else {
+        PersonalRefreshAttempt::NotNeeded
+    };
     let Some(token) = live_role_access_token(SupergrokAccountRole::Personal) else {
         // A stored hard-expired personal row is still that account. Do not
         // drop Personal + Included, and do not copy the dead token.
         if personal_credential_is_only_hard_expired() {
+            if refresh_attempt == PersonalRefreshAttempt::Rejected {
+                clear_business_bearer_after_rejected_personal_refresh(config);
+            }
             return;
         }
         clear_personal_included_pin();
@@ -576,6 +602,112 @@ fn live_role_access_token(role: SupergrokAccountRole) -> Option<String> {
                 && !candidate.access_token.trim().is_empty()
         })
         .map(|candidate| candidate.access_token.trim().to_owned())
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PersonalRefreshAttempt {
+    NotNeeded,
+    Rejected,
+    KeptStored,
+}
+
+/// Refresh a hard-expired personal row that still has refresh credentials.
+///
+/// Runs on a helper thread with its own current-thread runtime. Does not
+/// `block_on` the calling runtime. A rejected grant is `Rejected`. A stored
+/// token kept for retry is `KeptStored`. No refresh credentials is `NotNeeded`.
+fn refresh_hard_expired_personal_before_install() -> PersonalRefreshAttempt {
+    let home = grok_home_path();
+    let mut refreshable = Vec::new();
+    for candidate in super::load_supergrok_session_candidates(&home) {
+        if candidate.headroom.role != SupergrokAccountRole::Personal || !candidate.hard_expired {
+            continue;
+        }
+        if candidate.access_token.trim().is_empty() {
+            continue;
+        }
+        let Some((_, auth)) =
+            super::find_supergrok_auth_entry_for_billing(&home, &candidate.headroom.identity_id)
+        else {
+            continue;
+        };
+        if super::session_needs_oidc_refresh_before_billing_poll(&auth) {
+            refreshable.push(candidate.headroom.identity_id);
+        }
+    }
+    if refreshable.is_empty() {
+        return PersonalRefreshAttempt::NotNeeded;
+    }
+    let home_for_thread = home;
+    let joined = std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .ok()?;
+        Some(runtime.block_on(async move {
+            let mut saw_token = false;
+            let mut saw_rejection = false;
+            for identity_id in refreshable {
+                match super::ensure_fresh_access_token_for_supergrok_billing_poll(
+                    &home_for_thread,
+                    &identity_id,
+                )
+                .await
+                {
+                    Some(_) => saw_token = true,
+                    None => saw_rejection = true,
+                }
+            }
+            (saw_token, saw_rejection)
+        }))
+    })
+    .join();
+    match joined {
+        Ok(Some((false, true))) => PersonalRefreshAttempt::Rejected,
+        Ok(Some(_)) => PersonalRefreshAttempt::KeptStored,
+        _ => PersonalRefreshAttempt::KeptStored,
+    }
+}
+
+/// A rejected personal grant must not keep the business token or the expired
+/// personal token as the request bearer. Personal + Included stays.
+/// `use_console` stays false. This does not write a usage percent.
+fn clear_business_bearer_after_rejected_personal_refresh(
+    config: &mut xai_grok_sampler::SamplerConfig,
+) {
+    let home = grok_home_path();
+    let blocked: Vec<String> = super::load_supergrok_session_candidates(&home)
+        .into_iter()
+        .filter(|candidate| {
+            if candidate.access_token.trim().is_empty() {
+                return false;
+            }
+            candidate.headroom.role == SupergrokAccountRole::Business
+                || (candidate.headroom.role == SupergrokAccountRole::Personal
+                    && candidate.hard_expired)
+        })
+        .map(|candidate| candidate.access_token.trim().to_owned())
+        .collect();
+    let blocked_token = |value: &str| blocked.iter().any(|token| token == value.trim());
+    if config
+        .api_key
+        .as_deref()
+        .is_some_and(|key| blocked_token(key))
+    {
+        config.api_key = None;
+    }
+    if config
+        .session_identity_key
+        .as_deref()
+        .is_some_and(|key| blocked_token(key))
+    {
+        config.session_identity_key = None;
+    }
+    let mut pins = load_limits_pins();
+    pins.meter_source = Some(MeterSource::Included);
+    pins.supergrok_identity = Some(SupergrokIdentityPin::Personal);
+    pins.use_console = false;
+    let _ = save_limits_pins(&pins);
 }
 
 fn personal_included_pin(pins: &LimitsPins) -> bool {
@@ -2103,6 +2235,148 @@ preferred_method = "api_key"
                     .as_deref()
                     == Some(personal),
             "a Team JWT bearer is not the personal session authorization"
+        );
+    }
+
+    /// After a successful personal refresh, the installed request token is the
+    /// fresh personal access token. `use_console` stays false. The business
+    /// token is not the bearer.
+    #[test]
+    #[serial_test::serial]
+    fn use_personal_limits_installs_a_fresh_personal_token_and_does_not_keep_the_business_bearer() {
+        use crate::auth::{AuthMode, GrokAuth, upsert_supergrok_session};
+
+        const EXPIRED_PERSONAL: &str = "expired-personal-access-token";
+        const FRESH_PERSONAL: &str = "fresh-personal-access-token";
+        const BUSINESS: &str = "business-session-bearer";
+        const PERSONAL_USER: &str = "personal-fresh-install-user";
+
+        let (issuer_tx, issuer_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("oidc runtime");
+            runtime.block_on(async move {
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                    .await
+                    .expect("oidc listener");
+                let port = listener.local_addr().expect("oidc port").port();
+                let issuer = format!("http://127.0.0.1:{port}");
+                issuer_tx.send(issuer.clone()).expect("issuer");
+                let issuer_disc = issuer.clone();
+                let app = axum::Router::new()
+                    .route(
+                        "/.well-known/openid-configuration",
+                        axum::routing::get(move || {
+                            let iss = issuer_disc.clone();
+                            async move {
+                                axum::Json(serde_json::json!({
+                                    "authorization_endpoint": format!("{iss}/authorize"),
+                                    "token_endpoint": format!("{iss}/token"),
+                                    "jwks_uri": format!("{iss}/jwks"),
+                                    "id_token_signing_alg_values_supported": ["RS256"],
+                                }))
+                            }
+                        }),
+                    )
+                    .route(
+                        "/token",
+                        axum::routing::post(|| async {
+                            axum::Json(serde_json::json!({
+                                "access_token": FRESH_PERSONAL,
+                                "refresh_token": "rotated-personal-refresh-token",
+                                "expires_in": 3600,
+                                "token_type": "Bearer",
+                            }))
+                        }),
+                    );
+                axum::serve(listener, app).await.ok();
+            });
+        });
+        let issuer = issuer_rx.recv().expect("mock issuer");
+
+        let home = TempDir::new().expect("temp grok home");
+        let _env = EnvGuard::set("GROK_HOME", home.path());
+        let live = chrono::Utc::now() + chrono::Duration::days(7);
+        let expired = chrono::Utc::now() - chrono::Duration::hours(1);
+        let base = "https://auth.x.ai::fresh-personal-install";
+        let mut map = std::collections::BTreeMap::new();
+        upsert_supergrok_session(
+            &mut map,
+            base,
+            GrokAuth {
+                key: EXPIRED_PERSONAL.into(),
+                auth_mode: AuthMode::Oidc,
+                user_id: PERSONAL_USER.into(),
+                principal_type: Some("User".into()),
+                principal_id: Some(PERSONAL_USER.into()),
+                refresh_token: Some("personal-refresh-token".into()),
+                oidc_issuer: Some(issuer),
+                oidc_client_id: Some("personal-limits-client".into()),
+                expires_at: Some(expired),
+                ..GrokAuth::default()
+            },
+        );
+        upsert_supergrok_session(
+            &mut map,
+            base,
+            GrokAuth {
+                key: BUSINESS.into(),
+                auth_mode: AuthMode::Oidc,
+                user_id: "u-business-fresh-install".into(),
+                principal_type: Some("Team".into()),
+                principal_id: Some("team-fresh-install".into()),
+                team_id: Some("team-fresh-install".into()),
+                expires_at: Some(live),
+                ..GrokAuth::default()
+            },
+        );
+        fs::write(
+            home.path().join("auth.json"),
+            serde_json::to_vec_pretty(&map).expect("auth.json"),
+        )
+        .expect("write auth.json");
+        save_limits_pins(&LimitsPins {
+            stay_supergrok: true,
+            use_console: false,
+            meter_source: Some(MeterSource::Included),
+            supergrok_identity: Some(SupergrokIdentityPin::Personal),
+        })
+        .expect("personal included pin");
+
+        let mut config = dual_auth_sampler(BUSINESS, "console-not-this-request");
+        config.api_key = Some(BUSINESS.into());
+        config.session_identity_key = Some(BUSINESS.into());
+        config.bearer_resolver = None;
+        install_live_personal_session_for_included_limits(&mut config);
+
+        assert_eq!(
+            config.api_key.as_deref(),
+            Some(FRESH_PERSONAL),
+            "the installed request token is the fresh personal access token"
+        );
+        assert_ne!(
+            config.api_key.as_deref(),
+            Some(BUSINESS),
+            "the business token is not the bearer"
+        );
+        assert_ne!(
+            config.session_identity_key.as_deref(),
+            Some(BUSINESS),
+            "the business token is not the session bearer"
+        );
+        assert_ne!(
+            config.api_key.as_deref(),
+            Some(EXPIRED_PERSONAL),
+            "the expired personal access token is not installed"
+        );
+        let pins = load_limits_pins();
+        assert!(!pins.use_console);
+        assert_eq!(pins.meter_source, Some(MeterSource::Included));
+        assert_eq!(
+            pins.supergrok_identity,
+            Some(SupergrokIdentityPin::Personal)
         );
     }
 

@@ -21,10 +21,11 @@ pub use implement_effort::{
     parse_implement_effort,
 };
 pub use ledger::{
-    IngestStats, LocalBookSummary, LocalUsageEvent, RemoteMeterSample, count_reconciliation_runs,
-    ingest_all_sessions_usage, ingest_usage_jsonl, insert_local_usage_event,
-    insert_reconciliation_run, insert_remote_meter_sample, latest_remote_sample,
-    local_usage_event_exists, parse_usage_jsonl, summarize_local_book,
+    IngestStats, LocalBookSummary, LocalUsageEvent, ModelCallCost, RemoteMeterSample,
+    broken_host_context_cell, count_reconciliation_runs, ingest_all_sessions_usage,
+    ingest_usage_jsonl, insert_local_usage_event, insert_reconciliation_run,
+    insert_remote_meter_sample, latest_remote_sample, local_usage_event_exists,
+    model_call_cost_for_sessions, parse_usage_jsonl, summarize_local_book,
     try_insert_local_usage_event, try_insert_remote_meter_sample,
 };
 pub use period_pacing::{

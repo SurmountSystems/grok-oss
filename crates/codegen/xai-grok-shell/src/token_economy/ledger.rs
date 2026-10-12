@@ -637,6 +637,75 @@ INSERT INTO reconciliation_run (
     Ok(store.connection().last_insert_rowid())
 }
 
+/// Sum of `input_tokens` and `output_tokens` on complete model-call rows.
+///
+/// `None` when no complete model-call row exists. Never a stand-in 0.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelCallCost {
+    /// Sum of input_tokens + output_tokens on complete model-call rows.
+    /// None when no complete model-call row exists. Never a stand-in 0.
+    pub input_plus_output: Option<i64>,
+    /// event_ulid values skipped because input_tokens or output_tokens is null.
+    pub missing_event_ulids: Vec<String>,
+}
+
+/// Job cost for these sessions. Session ids are deduped. Each `event_ulid` counts once.
+///
+/// Includes `turn_type` `main` and `agent_turn` only. A completion-notice row
+/// (`turn_type` `nested`) is left out.
+pub fn model_call_cost_for_sessions(
+    store: &GrokOssStore,
+    session_ids: &[&str],
+) -> Result<ModelCallCost, rusqlite::Error> {
+    let mut seen_sessions = std::collections::HashSet::new();
+    let mut seen_ulids = std::collections::HashSet::new();
+    let mut sum: i64 = 0;
+    let mut complete: u64 = 0;
+    let mut missing_event_ulids = Vec::new();
+    for session_id in session_ids {
+        if !seen_sessions.insert((*session_id).to_string()) {
+            continue;
+        }
+        for event in local_usage_events_for_session(store, session_id)? {
+            if !seen_ulids.insert(event.event_ulid.clone()) {
+                continue;
+            }
+            if event.turn_type != "main" && event.turn_type != "agent_turn" {
+                continue;
+            }
+            match (event.input_tokens, event.output_tokens) {
+                (Some(input), Some(output)) => {
+                    // Each row is one billed call; this call's input does not contain this call's output.
+                    sum = sum.saturating_add(input).saturating_add(output);
+                    complete += 1;
+                }
+                _ => missing_event_ulids.push(event.event_ulid),
+            }
+        }
+    }
+    Ok(ModelCallCost {
+        input_plus_output: if complete == 0 { None } else { Some(sum) },
+        missing_event_ulids,
+    })
+}
+
+/// Host chrome `0K/0K` after tool work is a broken context reading.
+///
+/// The cell says the context figure was not stored. It is not `0`, and it
+/// does not invent a token count from that chrome. A real input plus output
+/// cost is a separate figure.
+pub fn broken_host_context_cell(host_context: &str, did_tool_work: bool) -> Option<&'static str> {
+    if !did_tool_work {
+        return None;
+    }
+    let compact: String = host_context.split_whitespace().collect();
+    if compact.eq_ignore_ascii_case("0K/0K") {
+        Some("the context figure was not stored")
+    } else {
+        None
+    }
+}
+
 /// Rows in `local_usage_event` for one `session_id`, ordered by `event_ulid`.
 pub fn local_usage_events_for_session(
     store: &GrokOssStore,
@@ -783,5 +852,188 @@ mod tests {
             .unwrap()
             .expect("sample");
         assert_eq!(got.payload["api_class_usd"], 1.25);
+    }
+
+    fn model_call_row(
+        event_ulid: &str,
+        session_id: &str,
+        turn_type: &str,
+        agent_kind: &str,
+        input_tokens: Option<i64>,
+        output_tokens: Option<i64>,
+        cached_tokens: Option<i64>,
+        reasoning_tokens: Option<i64>,
+        total_tokens: Option<i64>,
+        incomplete: bool,
+    ) -> LocalUsageEvent {
+        LocalUsageEvent {
+            event_ulid: event_ulid.to_string(),
+            session_id: session_id.to_string(),
+            work_ulid: None,
+            timestamp_utc: "2026-10-12T00:00:00.000Z".into(),
+            turn_type: turn_type.to_string(),
+            agent_kind: agent_kind.to_string(),
+            model_id: None,
+            input_tokens,
+            output_tokens,
+            cached_tokens,
+            reasoning_tokens,
+            total_tokens,
+            cost_usd_ticks: None,
+            cost_missing: input_tokens.is_none() || output_tokens.is_none(),
+            incomplete,
+            sampling_identity: None,
+        }
+    }
+
+    #[test]
+    fn job_cost_is_input_plus_output_not_the_small_output_alone() {
+        let parent = model_call_row(
+            "01PARENTCALL00000000000001",
+            "parent-sess",
+            "agent_turn",
+            "general-purpose",
+            Some(183_190),
+            Some(292),
+            Some(179_968),
+            Some(289),
+            Some(183_486),
+            false,
+        );
+        let child = model_call_row(
+            "01CHILDCALL000000000000001",
+            "child-sess",
+            "agent_turn",
+            "general-purpose",
+            Some(1_000),
+            Some(40),
+            Some(10),
+            Some(30),
+            Some(50_000),
+            false,
+        );
+        let nested = model_call_row(
+            "01NESTEDL2ROW0000000000001",
+            "parent-sess",
+            "nested",
+            "l2",
+            None,
+            Some(10_498),
+            None,
+            Some(4_000),
+            Some(181_000),
+            false,
+        );
+        let missing = model_call_row(
+            "01MISSINGCALL0000000000001",
+            "child-sess",
+            "agent_turn",
+            "general-purpose",
+            None,
+            None,
+            None,
+            None,
+            None,
+            true,
+        );
+
+        let tmp = TempDir::new().unwrap();
+        let store = open_at(&tmp.path().join("grok_oss.db")).unwrap();
+        assert!(insert_local_usage_event(&store, &parent).unwrap());
+        assert!(insert_local_usage_event(&store, &child).unwrap());
+        assert!(insert_local_usage_event(&store, &nested).unwrap());
+        assert!(insert_local_usage_event(&store, &missing).unwrap());
+
+        let cost =
+            model_call_cost_for_sessions(&store, &["parent-sess", "child-sess", "parent-sess"])
+                .unwrap();
+        let got = cost.input_plus_output;
+        assert!(
+            got == Some(184_522),
+            "only-output is not the cost: got {got:?}, expected Some(184522); 332 or 292 is not 184522"
+        );
+        for forbidden in [
+            Some(292_i64),
+            Some(332),
+            Some(10_498),
+            Some(10_498 + 40),
+            Some(184_522 + 289 + 30),
+            Some(184_522 + 179_968 + 10),
+            Some(183_486),
+            Some(181_000),
+            Some(50_000),
+            Some(0),
+        ] {
+            assert_ne!(got, forbidden, "cost must not be {forbidden:?}");
+        }
+        assert_eq!(
+            cost.missing_event_ulids,
+            vec!["01MISSINGCALL0000000000001".to_string()]
+        );
+
+        let nested_only = TempDir::new().unwrap();
+        let nested_store = open_at(&nested_only.path().join("grok_oss.db")).unwrap();
+        assert!(insert_local_usage_event(&nested_store, &nested).unwrap());
+        let excluded = model_call_cost_for_sessions(&nested_store, &["parent-sess"]).unwrap();
+        assert_eq!(excluded.input_plus_output, None);
+        assert_ne!(excluded.input_plus_output, Some(10_498));
+        assert_ne!(excluded.input_plus_output, Some(0));
+    }
+
+    /// Input and output are disjoint. Reasoning is absent on this row, so it
+    /// is not a third addend. Cache reads stay inside input. Provider
+    /// `total_tokens` is context length, not the cost. Output alone is not
+    /// the cost. Broken host chrome `0K/0K` after tool work is not cost 0.
+    #[test]
+    fn large_input_180000_and_output_4000_cost_is_184000_not_4000() {
+        let row = model_call_row(
+            "01LARGEINPUTSMALL000000001",
+            "job-sess",
+            "agent_turn",
+            "general-purpose",
+            Some(180_000),
+            Some(4_000),
+            Some(12_000),
+            None,
+            Some(180_000),
+            false,
+        );
+        let tmp = TempDir::new().unwrap();
+        let store = open_at(&tmp.path().join("grok_oss.db")).unwrap();
+        assert!(insert_local_usage_event(&store, &row).unwrap());
+        let cost = model_call_cost_for_sessions(&store, &["job-sess"]).unwrap();
+        let got = cost.input_plus_output;
+        assert_ne!(
+            got,
+            Some(4_000),
+            "output alone is not the cost of input 180000 and output 4000, got {got:?}"
+        );
+        assert_eq!(
+            got,
+            Some(184_000),
+            "input 180000 + output 4000 = 184000 when those fields are disjoint, got {got:?}"
+        );
+        assert_ne!(got, Some(180_000), "context length is not the cost");
+        assert_ne!(
+            got,
+            Some(184_000 + 12_000),
+            "cached_tokens is already inside input_tokens"
+        );
+        assert_ne!(got, Some(0));
+
+        let bare = TempDir::new().unwrap();
+        let bare_store = open_at(&bare.path().join("grok_oss.db")).unwrap();
+        let unread = model_call_cost_for_sessions(&bare_store, &["did-tool-work"]).unwrap();
+        assert_ne!(unread.input_plus_output, Some(0));
+        assert!(unread.input_plus_output.is_none());
+
+        let cell = broken_host_context_cell("0K/0K", true).expect("sentence");
+        assert_eq!(cell, "the context figure was not stored");
+        assert_ne!(cell, "0");
+        assert!(!cell.contains("not stored yet"), "{cell}");
+        assert!(!cell.contains("not accepted"), "{cell}");
+        assert!(!cell.contains("not_fetched"), "{cell}");
+        assert!(broken_host_context_cell("168K/200K", true).is_none());
+        assert!(broken_host_context_cell("0K/0K", false).is_none());
     }
 }

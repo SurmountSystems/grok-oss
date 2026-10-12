@@ -13,6 +13,8 @@ metadata:
 
 # Plan
 
+The first section of the plan is Read this first. List every open question there as a plain bullet. A question that appears only under a later heading is incomplete.
+
 A new plan uses a thoughtful filename and does not replace an older plan.
 `plan.md` overwrites the previous plan. Two plans in one session must
 keep two files.

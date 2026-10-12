@@ -2807,6 +2807,21 @@ cargo test -p xai-grok-tools --lib -- \
   two_live_agents_with_the_same_write_paths_spawn_without_error_l2_and_l3_may_be_assigned_the_same_file
 ```
 
+### Personal refresh and plan instructions
+
+This list does not mark the tests passed.
+
+- `rejected_personal_refresh_does_not_send_the_expired_access_token`
+- `network_refresh_failure_keeps_the_stored_token_and_is_not_a_rejected_grant`
+- `use_personal_limits_installs_a_fresh_personal_token_and_does_not_keep_the_business_bearer`
+- `personal_tab_says_run_grok_oss_login_when_the_personal_refresh_token_is_rejected`
+- `header_says_grok_oss_login_when_the_personal_refresh_token_is_rejected`
+- `plan_reminder_puts_open_questions_in_read_this_first`
+- `named_home_agents_plans_path_is_writable_in_plan_mode`
+- `repo_agents_reports_path_stays_refused_in_plan_mode`
+- `personal_auth_poll_after_a_fresh_session_stores_credit_usage_percent_not_a_no_authorization_post`
+- `plan_instructions_start_disjoint_contracts_together`
+
 ---
 
 ## Related

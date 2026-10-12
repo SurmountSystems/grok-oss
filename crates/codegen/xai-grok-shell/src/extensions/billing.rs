@@ -406,9 +406,12 @@ fn row_has_finite_ok_usage(row: &crate::auth::LimitsSnapshotIdentity) -> bool {
 /// replaces that personal row through [`limits_identity_from_credits_config`].
 /// A POST with no `Authorization` is not this store. Another personal
 /// identity that also lacks a percent does not skip this row. Business-team
-/// rows and `management` stay. When refresh returns no token, the auth row
-/// stays and `usage_pct` stays empty. A percent below 100 does not store
-/// Extra Usage Credits cents on the row.
+/// rows and `management` stay. When refresh returns no token, do not POST.
+/// That personal row's poll outcome is `reauth`, not `auth`, and `usage_pct`
+/// stays empty. This does not set `use_console` and does not hop to the
+/// console API key, team postpaid Billing Credits, or SuperGrok dollar
+/// credits. A percent below 100 does not store Extra Usage Credits cents
+/// on the row.
 ///
 /// `credits_post_url` empty uses [`GET_GROK_CREDITS_CONFIG_URL`]. Tests pass
 /// a local URL so the store is not a live grok.com call.
@@ -436,6 +439,15 @@ async fn record_personal_credits_post_on_the_personal_row(
             )
             .await
         else {
+            if let Some(existing) = doc
+                .identities
+                .iter_mut()
+                .find(|existing| existing.identity_id == identity_id)
+            {
+                existing.poll_outcome =
+                    crate::auth::limits_snapshot_hub::POLL_OUTCOME_REAUTH.to_owned();
+                existing.usage_pct = None;
+            }
             continue;
         };
         let token = access_token.trim().to_owned();
@@ -535,7 +547,7 @@ pub async fn fetch_supergrok_credits_snapshot_document(
             .await
             {
                 Some((tok, uid)) => (tok, uid),
-                None => (target.access_token.clone(), target.user_id.clone()),
+                None => continue,
             };
         match fetch_credits_config_with_posted_included_percent(proxy_base, &access_token, &user_id)
             .await
@@ -1126,6 +1138,7 @@ pub async fn poll_and_remember_non_active_supergrok_included_billing(
     for target in targets {
         // Multi-slot OIDC refresh before sibling poll: AuthManager only keeps
         // the active base fresh; siblings can hold a stale multi-slot JWT.
+        // A rejected grant returns no token. Do not send the stored one.
         let (access_token, user_id) =
             match crate::auth::ensure_fresh_access_token_for_supergrok_billing_poll(
                 grok_home,
@@ -1134,7 +1147,7 @@ pub async fn poll_and_remember_non_active_supergrok_included_billing(
             .await
             {
                 Some((tok, uid)) => (tok, uid),
-                None => (target.access_token.clone(), target.user_id.clone()),
+                None => continue,
             };
         match fetch_credits_config_with_posted_included_percent(proxy_base, &access_token, &user_id)
             .await
@@ -1840,6 +1853,161 @@ mod tests {
             "the business-team row stays"
         );
         assert_eq!(doc.management, Some(management), "management stays");
+    }
+
+    /// A rejected personal refresh (`invalid_grant`) does not send the expired
+    /// access token. Personal `usage_pct` stays empty. The personal poll
+    /// outcome is `reauth`, not `auth`.
+    #[tokio::test]
+    async fn rejected_personal_refresh_does_not_send_the_expired_access_token() {
+        use axum::response::IntoResponse;
+        use std::sync::{Arc, Mutex};
+
+        const PERSONAL_USER: &str = "personal-rejected-refresh-user";
+        const EXPIRED_ACCESS: &str = "expired-personal-access-token";
+        const BUSINESS_ACCESS: &str = "business-session-not-this-bearer";
+
+        let seen = Arc::new(Mutex::new(Vec::<Option<String>>::new()));
+        let seen_for_handler = Arc::clone(&seen);
+        let credits = axum::Router::new().route(
+            "/GetGrokCreditsConfig",
+            axum::routing::post(move |headers: axum::http::HeaderMap| {
+                let seen = Arc::clone(&seen_for_handler);
+                async move {
+                    let authorization = headers
+                        .get(axum::http::header::AUTHORIZATION)
+                        .and_then(|value| value.to_str().ok())
+                        .map(str::to_owned);
+                    seen.lock().expect("authorization log").push(authorization);
+                    axum::http::StatusCode::OK.into_response()
+                }
+            }),
+        );
+        let credits_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("local credits listener");
+        let credits_addr = credits_listener
+            .local_addr()
+            .expect("local credits address");
+        tokio::spawn(async move {
+            axum::serve(credits_listener, credits)
+                .await
+                .expect("local credits server");
+        });
+        let credits_url = format!("http://{credits_addr}/GetGrokCreditsConfig");
+
+        let oidc_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("local oidc listener");
+        let issuer = format!(
+            "http://127.0.0.1:{}",
+            oidc_listener.local_addr().expect("oidc port").port()
+        );
+        let issuer_disc = issuer.clone();
+        let oidc = axum::Router::new()
+            .route(
+                "/.well-known/openid-configuration",
+                axum::routing::get(move || {
+                    let iss = issuer_disc.clone();
+                    async move {
+                        axum::Json(serde_json::json!({
+                            "authorization_endpoint": format!("{iss}/authorize"),
+                            "token_endpoint": format!("{iss}/token"),
+                            "jwks_uri": format!("{iss}/jwks"),
+                            "id_token_signing_alg_values_supported": ["RS256"],
+                        }))
+                    }
+                }),
+            )
+            .route(
+                "/token",
+                axum::routing::post(|| async {
+                    (
+                        axum::http::StatusCode::BAD_REQUEST,
+                        axum::Json(serde_json::json!({
+                            "error": "invalid_grant",
+                            "error_description": "refresh token revoked"
+                        })),
+                    )
+                }),
+            );
+        tokio::spawn(async move {
+            axum::serve(oidc_listener, oidc)
+                .await
+                .expect("local oidc server");
+        });
+
+        let home = tempfile::TempDir::new().expect("temp home");
+        let mut map = xai_grok_login::model::AuthStore::new();
+        let personal = GrokAuth {
+            key: EXPIRED_ACCESS.into(),
+            expires_at: Some(chrono::Utc::now() - chrono::Duration::hours(1)),
+            refresh_token: Some("personal-refresh-token".into()),
+            oidc_issuer: Some(issuer),
+            oidc_client_id: Some("personal-limits-client".into()),
+            ..sample_auth(PERSONAL_USER, None, None)
+        };
+        let business = GrokAuth {
+            key: BUSINESS_ACCESS.into(),
+            expires_at: Some(chrono::Utc::now() + chrono::Duration::hours(2)),
+            ..sample_auth("business-user", Some("business-team-kept"), Some("Team"))
+        };
+        crate::auth::upsert_supergrok_session(
+            &mut map,
+            "https://auth.example.invalid/rejected-personal",
+            personal,
+        );
+        crate::auth::upsert_supergrok_session(
+            &mut map,
+            "https://auth.example.invalid/rejected-personal",
+            business,
+        );
+        xai_grok_login::storage::write_auth_json(&home.path().join("auth.json"), &map)
+            .expect("auth.json");
+
+        let mut doc = crate::auth::LimitsSnapshotDocument::empty(1);
+        doc.identities.push(crate::auth::LimitsSnapshotIdentity {
+            identity_id: PERSONAL_USER.into(),
+            usage_pct: None,
+            period_end: None,
+            period_type: None,
+            dollar_credits_cents: None,
+            grok_build_usage_pct: None,
+            is_unified_billing_user: None,
+            poll_outcome: crate::auth::POLL_OUTCOME_AUTH.into(),
+        });
+
+        record_personal_credits_post_on_the_personal_row(home.path(), &mut doc, Some(&credits_url))
+            .await;
+
+        let posts = seen.lock().expect("authorization log").clone();
+        assert!(
+            posts.iter().all(|header| {
+                header.as_deref().is_none_or(|value| {
+                    !value.ends_with(EXPIRED_ACCESS) && !value.ends_with(BUSINESS_ACCESS)
+                })
+            }),
+            "TerminalError must not send the expired access token or the business token"
+        );
+        let personal_row = doc
+            .identities
+            .iter()
+            .find(|row| row.identity_id == PERSONAL_USER)
+            .expect("personal row");
+        assert_eq!(
+            personal_row.usage_pct, None,
+            "personal usage_pct stays empty"
+        );
+        assert_eq!(
+            personal_row.poll_outcome,
+            crate::auth::limits_snapshot_hub::POLL_OUTCOME_REAUTH,
+            "a rejected grant is reauth, not auth"
+        );
+        assert_ne!(
+            personal_row.poll_outcome,
+            crate::auth::POLL_OUTCOME_AUTH,
+            "auth stays a not-yet-decided or other auth miss"
+        );
     }
 
     #[tokio::test]

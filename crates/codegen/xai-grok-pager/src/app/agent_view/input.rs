@@ -667,10 +667,10 @@ impl AgentView {
                 return InputOutcome::Action(Action::VoiceToggle);
             }
             // Plan approval and comment share the main composer for
-            // Shift-Enter, the four arrows, and Ctrl-Backspace. Preview
-            // focus otherwise keeps those keys on the plan list. Ask has
-            // no line viewer and already reaches `handle_prompt_key`.
-            // The search bar keeps its own arrows.
+            // Shift-Enter, the four arrows, Ctrl-Backspace, Ctrl-A, and
+            // Ctrl-E. Preview focus otherwise keeps those keys on the plan
+            // list. Ask has no line viewer and already reaches
+            // `handle_prompt_key`. The search bar keeps its own arrows.
             if let Event::Key(key) = ev
                 && key.kind != KeyEventKind::Release
                 && self.plan_approval_view.is_some()

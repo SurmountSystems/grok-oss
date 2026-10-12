@@ -56,8 +56,11 @@ pub const SNAPSHOT_SCHEMA_VERSION: u32 = 1;
 
 /// Poll outcome class stored on disk (never a secret).
 pub const POLL_OUTCOME_OK: &str = "ok";
-/// Auth-class credits poll fail.
+/// Auth-class credits poll fail. Not a rejected refresh grant.
 pub const POLL_OUTCOME_AUTH: &str = "auth";
+/// The identity provider rejected the refresh grant (`invalid_grant` / `invalid_client`).
+/// Not [`POLL_OUTCOME_AUTH`].
+pub const POLL_OUTCOME_REAUTH: &str = "reauth";
 /// Transport / timeout class.
 pub const POLL_OUTCOME_NETWORK: &str = "network";
 /// Other non-auth fail.
@@ -106,7 +109,7 @@ pub struct LimitsSnapshotIdentity {
     pub grok_build_usage_pct: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub is_unified_billing_user: Option<bool>,
-    /// `ok` / `auth` / `network` / `other` / `never`.
+    /// `ok` / `auth` / `reauth` / `network` / `other` / `never`.
     #[serde(default)]
     pub poll_outcome: String,
 }
