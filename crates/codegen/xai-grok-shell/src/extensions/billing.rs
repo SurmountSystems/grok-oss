@@ -376,9 +376,107 @@ pub fn billing_response_from_limits_snapshot(
     }
 }
 
+fn personal_identity_ids_from_auth(grok_home: &std::path::Path) -> Vec<String> {
+    let Ok(map) = crate::auth::read_auth_json(&grok_home.join("auth.json")) else {
+        return Vec::new();
+    };
+    let mut ids = Vec::new();
+    for listing in crate::auth::list_supergrok_principal_listings(&map) {
+        if listing.role_label != "personal" {
+            continue;
+        }
+        let id = listing.identity_id.trim();
+        if id.is_empty() || ids.iter().any(|existing: &String| existing == id) {
+            continue;
+        }
+        ids.push(id.to_owned());
+    }
+    ids
+}
+
+fn row_has_finite_ok_usage(row: &crate::auth::LimitsSnapshotIdentity) -> bool {
+    row.poll_outcome == crate::auth::POLL_OUTCOME_OK
+        && row.usage_pct.is_some_and(|percent| percent.is_finite())
+}
+
+/// Personal rows this poll recorded as `auth` still have no finite used percent.
+///
+/// Refresh that personal session, then POST `GetGrokCreditsConfig` with
+/// `Authorization: Bearer`. A finite `credit_usage_percent` (percent used)
+/// replaces that personal row through [`limits_identity_from_credits_config`].
+/// A POST with no `Authorization` is not this store. Another personal
+/// identity that also lacks a percent does not skip this row. Business-team
+/// rows and `management` stay. When refresh returns no token, the auth row
+/// stays and `usage_pct` stays empty. A percent below 100 does not store
+/// Extra Usage Credits cents on the row.
+///
+/// `credits_post_url` empty uses [`GET_GROK_CREDITS_CONFIG_URL`]. Tests pass
+/// a local URL so the store is not a live grok.com call.
+async fn record_personal_credits_post_on_the_personal_row(
+    grok_home: &std::path::Path,
+    doc: &mut crate::auth::LimitsSnapshotDocument,
+    credits_post_url: Option<&str>,
+) {
+    let personal_ids = personal_identity_ids_from_auth(grok_home);
+    let targets: Vec<String> = doc
+        .identities
+        .iter()
+        .filter(|row| {
+            personal_ids.iter().any(|id| id == &row.identity_id)
+                && row.poll_outcome == crate::auth::POLL_OUTCOME_AUTH
+                && !row_has_finite_ok_usage(row)
+        })
+        .map(|row| row.identity_id.clone())
+        .collect();
+    for identity_id in targets {
+        let Some((access_token, _user_id)) =
+            crate::auth::ensure_fresh_access_token_for_supergrok_billing_poll(
+                grok_home,
+                &identity_id,
+            )
+            .await
+        else {
+            continue;
+        };
+        let token = access_token.trim().to_owned();
+        if token.is_empty() {
+            continue;
+        }
+        let Ok(mut config) = post_get_grok_credits_config(credits_post_url, Some(&token)).await
+        else {
+            continue;
+        };
+        let Some(percent) = finite_posted_credit_usage_percent(&config) else {
+            continue;
+        };
+        if percent < 100.0 {
+            config.prepaid_balance = None;
+        }
+        let row = limits_identity_from_credits_config(
+            &identity_id,
+            &config,
+            crate::auth::POLL_OUTCOME_OK,
+        );
+        if let Some(existing) = doc
+            .identities
+            .iter_mut()
+            .find(|existing| existing.identity_id == identity_id)
+        {
+            *existing = row;
+        } else {
+            doc.identities.push(row);
+        }
+    }
+}
+
 /// Leader-only: poll stored SuperGrok JWTs plus optional active token into a snapshot.
 ///
 /// Call only from a hub fetch callback. Does not remember (apply does that).
+/// A finite `GetGrokCreditsConfig` percent is that identity's `usage_pct`.
+/// A personal identity this poll recorded as `auth` can take a finite
+/// percent from a POST that sends that personal session. That POST does
+/// not replace the business-team row. A POST with no `Authorization` is
+/// not that store.
 pub async fn fetch_supergrok_credits_snapshot_document(
     grok_home: &std::path::Path,
     proxy_base: &str,
@@ -391,7 +489,7 @@ pub async fn fetch_supergrok_credits_snapshot_document(
     let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
 
     if let Some((token, user_id, identity_id)) = active {
-        match fetch_credits_config_with_session(proxy_base, token, user_id).await {
+        match fetch_credits_config_with_posted_included_percent(proxy_base, token, user_id).await {
             Ok(resp) => {
                 if let Some(config) = resp.config.as_ref() {
                     doc.identities.push(limits_identity_from_credits_config(
@@ -439,7 +537,9 @@ pub async fn fetch_supergrok_credits_snapshot_document(
                 Some((tok, uid)) => (tok, uid),
                 None => (target.access_token.clone(), target.user_id.clone()),
             };
-        match fetch_credits_config_with_session(proxy_base, &access_token, &user_id).await {
+        match fetch_credits_config_with_posted_included_percent(proxy_base, &access_token, &user_id)
+            .await
+        {
             Ok(resp) => {
                 if let Some(config) = resp.config.as_ref() {
                     doc.identities.push(limits_identity_from_credits_config(
@@ -464,6 +564,7 @@ pub async fn fetch_supergrok_credits_snapshot_document(
         }
     }
     doc.management = crate::auth::fetch_management_into_snapshot().await;
+    record_personal_credits_post_on_the_personal_row(grok_home, &mut doc, None).await;
     doc
 }
 
@@ -572,6 +673,71 @@ pub async fn post_get_grok_credits_config(
         .await
         .map_err(|e| format!("Failed to parse billing data: {e}"))?;
     decode_get_grok_credits_config_frame(&bytes)
+}
+
+fn finite_posted_credit_usage_percent(config: &BillingConfig) -> Option<f64> {
+    config
+        .credit_usage_percent
+        .filter(|percent| percent.is_finite())
+}
+
+/// Put a successful `GetGrokCreditsConfig` onto the legacy GET response.
+///
+/// A finite posted percent becomes `credit_usage_percent`, including when the
+/// GET omitted that field. Prepaid cents on the POST stay. A percent below
+/// 100 is not removed.
+fn apply_posted_credits_to_get_response(
+    response: &mut BillingConfigResponse,
+    posted: BillingConfig,
+) {
+    let posted_percent = finite_posted_credit_usage_percent(&posted);
+    if let Some(config) = response.config.as_mut() {
+        if let Some(percent) = posted_percent {
+            config.credit_usage_percent = Some(percent);
+        }
+        if let Some(prepaid) = posted.prepaid_balance {
+            config.prepaid_balance = Some(prepaid);
+        }
+        return;
+    }
+    if posted_percent.is_some() || posted.prepaid_balance.is_some() {
+        response.config = Some(posted);
+    }
+}
+
+/// Credits for one SuperGrok identity the snapshot or non-active poll targets.
+///
+/// Posts `GetGrokCreditsConfig` with that bearer and no `Cookie`. A finite
+/// percent on `Ok` is this identity's used percent. A failed POST keeps the
+/// legacy GET, so a GET that already carried a percent still stores it.
+async fn fetch_credits_config_with_posted_included_percent(
+    proxy_base: &str,
+    access_token: &str,
+    user_id: &str,
+) -> Result<BillingConfigResponse, String> {
+    let posted = post_get_grok_credits_config(None, Some(access_token)).await;
+    let Ok(posted) = posted else {
+        return fetch_credits_config_with_session(proxy_base, access_token, user_id).await;
+    };
+    match fetch_credits_config_with_session(proxy_base, access_token, user_id).await {
+        Ok(mut response) => {
+            apply_posted_credits_to_get_response(&mut response, posted);
+            Ok(response)
+        }
+        Err(get_error) => {
+            if finite_posted_credit_usage_percent(&posted).is_some()
+                || posted.prepaid_balance.is_some()
+            {
+                Ok(BillingConfigResponse {
+                    config: Some(posted),
+                    on_demand_enabled: None,
+                    subscription_tier: None,
+                })
+            } else {
+                Err(get_error)
+            }
+        }
+    }
 }
 
 fn decode_get_grok_credits_config_frame(bytes: &[u8]) -> Result<BillingConfig, String> {
@@ -944,6 +1110,7 @@ fn civil_from_unix_days(days: i64) -> (i32, u32, u32) {
 ///
 /// Best-effort: a failed sibling poll does not fail the active billing path.
 /// No-op when fewer than two SuperGrok principals are stored.
+/// A finite `GetGrokCreditsConfig` percent is remembered on that identity.
 ///
 /// Before each sibling credits request, OIDC-refreshes a multi-slot JWT that
 /// is past the early-invalidation buffer when refresh credentials are present
@@ -969,7 +1136,9 @@ pub async fn poll_and_remember_non_active_supergrok_included_billing(
                 Some((tok, uid)) => (tok, uid),
                 None => (target.access_token.clone(), target.user_id.clone()),
             };
-        match fetch_credits_config_with_session(proxy_base, &access_token, &user_id).await {
+        match fetch_credits_config_with_posted_included_percent(proxy_base, &access_token, &user_id)
+            .await
+        {
             Ok(resp) => {
                 let Some(config) = resp.config.as_ref() else {
                     tracing::debug!(
@@ -1452,6 +1621,225 @@ mod tests {
         let again = decode_get_grok_credits_config_frame(&frame_with_used_percent(28.0))
             .expect("28 percent frame");
         assert_eq!(again.credit_usage_percent, Some(28.0));
+    }
+
+    fn frame_with_used_percent_and_prepaid_cents(percent: f32, cents: u64) -> Vec<u8> {
+        let mut config = Vec::new();
+        config.push(0x0d);
+        config.extend_from_slice(&percent.to_le_bytes());
+        let mut cent = Vec::new();
+        cent.push(0x08);
+        let mut value = cents;
+        loop {
+            let mut byte = (value & 0x7f) as u8;
+            value >>= 7;
+            if value != 0 {
+                byte |= 0x80;
+            }
+            cent.push(byte);
+            if value == 0 {
+                break;
+            }
+        }
+        config.push(0x62);
+        config.push(cent.len() as u8);
+        config.extend_from_slice(&cent);
+        let mut outer = Vec::new();
+        outer.push(0x0a);
+        outer.push(config.len() as u8);
+        outer.extend_from_slice(&config);
+        grpc_web_frame(&outer)
+    }
+
+    /// A personal identity whose poll recorded `auth`, after a fresh personal
+    /// session, stores `usage_pct` from that session's finite
+    /// `GetGrokCreditsConfig` `credit_usage_percent`. The stored value is
+    /// percent used. A POST with no `Authorization` is not that store.
+    /// Another personal identity that also lacks a finite ok percent does
+    /// not skip this row. The business-team row and `management` stay.
+    #[tokio::test]
+    async fn personal_auth_poll_after_a_fresh_session_stores_credit_usage_percent_not_a_no_authorization_post()
+     {
+        use axum::response::IntoResponse;
+        use std::sync::{Arc, Mutex};
+
+        const PERSONAL_USER: &str = "personal-poll-auth-user";
+        const OTHER_PERSONAL_USER: &str = "other-personal-lacking-percent";
+        const BUSINESS_TEAM: &str = "business-team-kept";
+        const PERSONAL_SESSION: &str = "personal-session-for-credits-post";
+        const POSTED_USED_PERCENT: f64 = 37.0;
+        const NO_AUTHORIZATION_DECOY_PERCENT: f32 = 4.0;
+        const POSTED_PREPAID_CENTS: u64 = 3217;
+
+        let seen = Arc::new(Mutex::new(Vec::<Option<String>>::new()));
+        let seen_for_handler = Arc::clone(&seen);
+        let authorized_body = frame_with_used_percent_and_prepaid_cents(
+            POSTED_USED_PERCENT as f32,
+            POSTED_PREPAID_CENTS,
+        );
+        let no_authorization_body = frame_with_used_percent(NO_AUTHORIZATION_DECOY_PERCENT);
+        let router = axum::Router::new().route(
+            "/GetGrokCreditsConfig",
+            axum::routing::post(move |headers: axum::http::HeaderMap| {
+                let seen = Arc::clone(&seen_for_handler);
+                let authorized_body = authorized_body.clone();
+                let no_authorization_body = no_authorization_body.clone();
+                async move {
+                    let authorization = headers
+                        .get(axum::http::header::AUTHORIZATION)
+                        .and_then(|value| value.to_str().ok())
+                        .map(str::to_owned);
+                    seen.lock()
+                        .expect("authorization log")
+                        .push(authorization.clone());
+                    let body = if authorization.is_some() {
+                        authorized_body
+                    } else {
+                        no_authorization_body
+                    };
+                    (axum::http::StatusCode::OK, body).into_response()
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("local credits listener");
+        let addr = listener.local_addr().expect("local credits address");
+        tokio::spawn(async move {
+            axum::serve(listener, router)
+                .await
+                .expect("local credits server");
+        });
+        let credits_url = format!("http://{addr}/GetGrokCreditsConfig");
+
+        let home = tempfile::TempDir::new().expect("temp home");
+        let mut map = xai_grok_login::model::AuthStore::new();
+        let personal = GrokAuth {
+            key: PERSONAL_SESSION.into(),
+            expires_at: Some(chrono::Utc::now() + chrono::Duration::hours(2)),
+            ..sample_auth(PERSONAL_USER, None, None)
+        };
+        let other_personal = GrokAuth {
+            key: "other-personal-session-not-this-store".into(),
+            expires_at: Some(chrono::Utc::now() + chrono::Duration::hours(2)),
+            ..sample_auth(OTHER_PERSONAL_USER, None, None)
+        };
+        let business = GrokAuth {
+            key: "business-session-not-this-store".into(),
+            expires_at: Some(chrono::Utc::now() + chrono::Duration::hours(2)),
+            ..sample_auth("business-user", Some(BUSINESS_TEAM), Some("Team"))
+        };
+        crate::auth::upsert_supergrok_session(
+            &mut map,
+            "https://auth.example.invalid/personal-poll",
+            personal,
+        );
+        crate::auth::upsert_supergrok_session(
+            &mut map,
+            "https://auth.example.invalid/other-personal",
+            other_personal,
+        );
+        crate::auth::upsert_supergrok_session(
+            &mut map,
+            "https://auth.example.invalid/business",
+            business,
+        );
+        xai_grok_login::storage::write_auth_json(&home.path().join("auth.json"), &map)
+            .expect("auth.json");
+
+        let personal_ids = personal_identity_ids_from_auth(home.path());
+        assert!(
+            personal_ids.iter().any(|id| id == PERSONAL_USER),
+            "the auth personal identity must be listed"
+        );
+        assert!(
+            personal_ids.iter().any(|id| id == OTHER_PERSONAL_USER),
+            "another personal identity also lacks a finite ok percent"
+        );
+        assert!(
+            !personal_ids.iter().any(|id| id == BUSINESS_TEAM),
+            "the business-team id is not a personal identity"
+        );
+
+        let business_row = crate::auth::LimitsSnapshotIdentity {
+            identity_id: BUSINESS_TEAM.into(),
+            usage_pct: None,
+            period_end: None,
+            period_type: None,
+            dollar_credits_cents: None,
+            grok_build_usage_pct: None,
+            is_unified_billing_user: None,
+            poll_outcome: crate::auth::POLL_OUTCOME_OTHER.into(),
+        };
+        let management = crate::auth::LimitsSnapshotManagement {
+            team_id: Some("kept-management-team".into()),
+            ..crate::auth::LimitsSnapshotManagement::default()
+        };
+        let mut doc = crate::auth::LimitsSnapshotDocument::empty(1);
+        doc.identities.push(crate::auth::LimitsSnapshotIdentity {
+            identity_id: PERSONAL_USER.into(),
+            usage_pct: None,
+            period_end: None,
+            period_type: None,
+            dollar_credits_cents: None,
+            grok_build_usage_pct: None,
+            is_unified_billing_user: None,
+            poll_outcome: crate::auth::POLL_OUTCOME_AUTH.into(),
+        });
+        doc.identities.push(business_row.clone());
+        doc.management = Some(management.clone());
+
+        record_personal_credits_post_on_the_personal_row(home.path(), &mut doc, Some(&credits_url))
+            .await;
+
+        let personal_row = doc
+            .identities
+            .iter()
+            .find(|row| row.identity_id == PERSONAL_USER)
+            .expect("personal row");
+        assert_eq!(
+            personal_row.usage_pct,
+            Some(POSTED_USED_PERCENT),
+            "usage_pct is the posted credit_usage_percent, percent used"
+        );
+        assert_ne!(
+            personal_row.usage_pct,
+            Some(f64::from(NO_AUTHORIZATION_DECOY_PERCENT)),
+            "a POST with no Authorization is not the store"
+        );
+        assert_eq!(
+            personal_row.dollar_credits_cents, None,
+            "a finite used percent below 100 does not store Extra Usage Credits cents"
+        );
+        assert_eq!(personal_row.poll_outcome, crate::auth::POLL_OUTCOME_OK);
+        let posts = seen.lock().expect("authorization log").clone();
+        let expected_authorization = format!("Bearer {PERSONAL_SESSION}");
+        assert_eq!(posts.len(), 1, "one credits POST stores the percent");
+        assert_eq!(
+            posts[0].as_deref(),
+            Some(expected_authorization.as_str()),
+            "the request that stored usage_pct sent the personal session bearer"
+        );
+        assert!(
+            posts
+                .iter()
+                .all(|header| header.as_deref().is_some_and(|value| !value.is_empty())),
+            "a POST with no Authorization is not the store"
+        );
+        assert!(
+            !doc.identities
+                .iter()
+                .any(|row| row.identity_id == OTHER_PERSONAL_USER),
+            "the other personal identity that lacks a percent is not this poll's row"
+        );
+        assert_eq!(
+            doc.identities
+                .iter()
+                .find(|row| row.identity_id == BUSINESS_TEAM),
+            Some(&business_row),
+            "the business-team row stays"
+        );
+        assert_eq!(doc.management, Some(management), "management stays");
     }
 
     #[tokio::test]

@@ -8,9 +8,11 @@
 //! use-personal / use-business. It does not keep the console key when the
 //! card is Using limits. An already-chosen included-limits pin
 //! ([`apply_included_limits_choice`]) still writes when `preferred_method`
-//! is `api_key`, and it leaves `use_console` false. When no live personal
-//! session is stored, that personal pin is cleared and the sampler key
-//! stays. A stored Team session keeps a business included pin. Stock
+//! is `api_key`, and it leaves `use_console` false. When no personal
+//! credential row is stored, that personal pin is cleared and the sampler
+//! key stays. A hard-expired personal row keeps Personal + Included and
+//! does not install that token. A stored Team session keeps a business
+//! included pin. Stock
 //! `preferred_method` is not rewritten. A Console meter pin still spends console API
 //! credits when that balance is available. A client 100% / remaining 0 /
 //! $0 printout must not mark SuperGrok used up. Sampler
@@ -361,10 +363,12 @@ fn use_console_api_credits_after_real_supergrok_http_402(
 /// apply and the identity pin is Business, that session is the Team
 /// session, including when a live personal session is also stored.
 /// Otherwise, when both a live personal SuperGrok session and a Team JWT
-/// are stored, that choice sends the personal session. A
-/// hard-expired personal session is not that choice. When the personal
-/// included pin is set and no live personal session is stored, that pin
-/// is cleared and the sampler key stays. While the included choice
+/// are stored, that choice sends the personal session. A hard-expired
+/// personal session is not installed as the bearer. When that personal
+/// row exists and every personal candidate is hard-expired, Personal +
+/// Included stays and the sampler key stays. When no personal credential
+/// row is stored, that personal included pin is cleared and the sampler
+/// key stays. While the included choice
 /// is on, a real SuperGrok HTTP 402 and available console API credits
 /// select the console key for the next request. A client 100% printout does
 /// not. A missing console balance keeps the included session and does not
@@ -418,12 +422,20 @@ pub fn apply_limits_pins_to_sampler_config(config: &mut xai_grok_sampler::Sample
         // is already `session_identity_key`. A Team JWT in both fields would
         // stay. Point those fields at the live personal session first.
         // A miss that clears a personal included pin must not call prefer:
-        // that would replace the team token. An Included pin with no personal
-        // identity still selects the session key already on the sampler.
-        // Stock `preferred_method = "api_key"` does not veto this choice.
+        // that would replace the team token. A hard-expired personal row
+        // keeps Personal + Included and must not install that dead token.
+        // An Included pin with no personal identity still selects the session
+        // key already on the sampler. Stock `preferred_method = "api_key"`
+        // does not veto this choice.
         let personal_included_before = personal_included_pin(&pins);
         install_live_personal_session_for_included_limits(config);
-        if personal_included_before && !personal_included_pin(&load_limits_pins()) {
+        let personal_included_after = personal_included_pin(&load_limits_pins());
+        if personal_included_before && !personal_included_after {
+            return;
+        }
+        if personal_included_after
+            && live_role_access_token(SupergrokAccountRole::Personal).is_none()
+        {
             return;
         }
         xai_grok_sampler::prefer_supergrok_identity_for_stay_pin(config);
@@ -498,15 +510,21 @@ pub fn apply_limits_pins_to_sampler_config(config: &mut xai_grok_sampler::Sample
 /// session the product already stores. Install that live token as `api_key`
 /// and `session_identity_key`, and set the meter to included SuperGrok
 /// period limits for the personal session. A hard-expired personal session
-/// is not installed. When discovery finds no live personal session, a
-/// personal included pin is cleared and `api_key` stays as it was. This
-/// does not write `[auth] preferred_method`. Stock `preferred_method =
-/// "api_key"` does not veto the choice and does not select the console API
-/// key. This does not set `use_console`.
+/// is not installed. When every personal candidate is hard-expired, Personal
+/// + Included stays and this returns without a bearer. When no personal
+/// credential row is stored, a personal included pin is cleared and
+/// `api_key` stays as it was. This does not write `[auth] preferred_method`.
+/// Stock `preferred_method = "api_key"` does not veto the choice and does
+/// not select the console API key. This does not set `use_console`.
 pub fn install_live_personal_session_for_included_limits(
     config: &mut xai_grok_sampler::SamplerConfig,
 ) {
     let Some(token) = live_role_access_token(SupergrokAccountRole::Personal) else {
+        // A stored hard-expired personal row is still that account. Do not
+        // drop Personal + Included, and do not copy the dead token.
+        if personal_credential_is_only_hard_expired() {
+            return;
+        }
         clear_personal_included_pin();
         return;
     };
@@ -527,6 +545,27 @@ pub fn install_live_personal_session_for_included_limits(
     let _ = save_limits_pins(&pins);
 }
 
+/// True when at least one personal credential row is stored and every one
+/// of those rows is hard-expired. No personal row is false, so the caller
+/// still clears. A live personal row is false, so the caller installs it.
+fn personal_credential_is_only_hard_expired() -> bool {
+    let home = grok_home_path();
+    let mut saw_personal = false;
+    for candidate in super::load_supergrok_session_candidates(&home) {
+        if candidate.headroom.role != SupergrokAccountRole::Personal {
+            continue;
+        }
+        if candidate.access_token.trim().is_empty() {
+            continue;
+        }
+        saw_personal = true;
+        if !candidate.hard_expired {
+            return false;
+        }
+    }
+    saw_personal
+}
+
 fn live_role_access_token(role: SupergrokAccountRole) -> Option<String> {
     let home = grok_home_path();
     super::load_supergrok_session_candidates(&home)
@@ -544,8 +583,9 @@ fn personal_included_pin(pins: &LimitsPins) -> bool {
         && pins.supergrok_identity == Some(SupergrokIdentityPin::Personal)
 }
 
-/// Drop Personal + Included when no live personal session is stored.
-/// The sampler key is not changed here. `use_console` stays false.
+/// Drop Personal + Included when no personal credential row is stored.
+/// A hard-expired personal row does not call this. The sampler key is
+/// not changed here. `use_console` stays false.
 fn clear_personal_included_pin() {
     let mut pins = load_limits_pins();
     if !personal_included_pin(&pins) {
@@ -561,8 +601,9 @@ fn clear_personal_included_pin() {
 ///
 /// `None` when the pin is unset. The chip then asks
 /// [`included_usage_pct_of_sending_session`] for the session the next
-/// request sends. When the pin is set and that live session is missing,
-/// both readings stay `None`. The snapshot row wins when that field is
+/// request sends. A live candidate for the pinned role wins. A
+/// hard-expired stored row is still a reading. A missing credential row
+/// leaves both readings `None`. The snapshot row wins when that field is
 /// stored. The process cache fills a poll that has not been written yet.
 /// This does not read team postpaid Billing Credits or console team prepaid.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -580,11 +621,18 @@ pub fn pinned_supergrok_row() -> Option<PinnedSupergrokRow> {
     };
     let home = grok_home_path();
     let candidates = super::load_supergrok_session_candidates(&home);
-    let Some(chosen) = candidates.iter().find(|candidate| {
-        !candidate.hard_expired
-            && candidate.headroom.role == role
-            && !candidate.access_token.trim().is_empty()
-    }) else {
+    let same_role = |candidate: &&SupergrokSessionCandidate| {
+        candidate.headroom.role == role && !candidate.access_token.trim().is_empty()
+    };
+    let chosen = candidates
+        .iter()
+        .find(|candidate| same_role(candidate) && !candidate.hard_expired)
+        .or_else(|| {
+            candidates
+                .iter()
+                .find(|candidate| same_role(candidate) && candidate.hard_expired)
+        });
+    let Some(chosen) = chosen else {
         return Some(PinnedSupergrokRow {
             usage_pct: None,
             dollar_credits_cents: None,

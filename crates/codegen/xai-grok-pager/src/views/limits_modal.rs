@@ -763,6 +763,43 @@ const METER_CELL_PHRASES: [(&str, usize); 4] = [
     ("Business credits", CELL_HIT_BUSINESS_CREDITS),
 ];
 
+/// A click on the open tab's prepaid-balance dollars selects that account's
+/// SuperGrok dollar credits. The line is already painted. This does not add
+/// a footer label and does not paint the four cell names.
+fn record_prepaid_balance_credit_hit(
+    hits: &mut [Option<Rect>; 4],
+    content_x: u16,
+    y: u16,
+    text: &str,
+    business: bool,
+) {
+    const PHRASE: &str = "Prepaid balance:";
+    let Some(phrase_at) = text.find(PHRASE) else {
+        return;
+    };
+    let index = if business {
+        CELL_HIT_BUSINESS_CREDITS
+    } else {
+        CELL_HIT_PERSONAL_CREDITS
+    };
+    let Some(slot) = hits.get_mut(index) else {
+        return;
+    };
+    if slot.is_some() {
+        return;
+    }
+    let start = text[phrase_at..]
+        .find('$')
+        .map(|dollar| phrase_at.saturating_add(dollar))
+        .unwrap_or(phrase_at);
+    let x_off = text[..start].chars().count() as u16;
+    let width = text[start..].chars().count() as u16;
+    if width == 0 {
+        return;
+    }
+    *slot = Some(Rect::new(content_x.saturating_add(x_off), y, width, 1));
+}
+
 /// Record a painted meter phrase. The first column of the phrase is the hit.
 fn record_supergrok_meter_cell_hit(
     hits: &mut [Option<Rect>; 4],
@@ -1070,6 +1107,8 @@ fn painted_use_limits_rect(buf: &Buffer, area: Rect) -> Option<Rect> {
 
 /// Click on the limits card. The spend button writes the meter pin.
 /// A left click on the painted `Use limits` control is that button.
+/// A left click on the open tab's prepaid-balance dollars selects that
+/// account's SuperGrok dollar credits.
 pub fn handle_limits_mouse(
     state: &mut LimitsModalState,
     kind: crossterm::event::MouseEventKind,
@@ -1322,6 +1361,13 @@ pub fn render_limits_modal(
         let line = Line::from(Span::styled(text.clone(), style));
         buf.set_line(content.x, y, &line, content.width);
         record_supergrok_meter_cell_hit(&mut state.supergrok_meter_cell_hits, content.x, y, text);
+        record_prepaid_balance_credit_hit(
+            &mut state.supergrok_meter_cell_hits,
+            content.x,
+            y,
+            text,
+            on_credits_tab,
+        );
         y = y.saturating_add(1);
     }
     // The section parser drops any row that still has a frame glyph. Clear

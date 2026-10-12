@@ -3631,16 +3631,6 @@ impl PromptWidget {
                     buf.set_string(cx, cy, &truncated, theme.ghost_text_style().bg(bg));
                 }
             }
-
-            if let Some(ghost) = self.prompt_suggestion_ghost()
-                && let Some((cx, cy)) = ghost_anchor
-            {
-                let avail = (ta_area.x + ta_area.width).saturating_sub(cx) as usize;
-                if avail > 0 {
-                    let truncated = crate::render::line_utils::truncate_str(ghost, avail);
-                    buf.set_string(cx, cy, &truncated, theme.ghost_text_style().bg(bg));
-                }
-            }
         }
 
         // Ghost text owns the insertion cell. A block glyph must not replace it.
@@ -3651,8 +3641,7 @@ impl PromptWidget {
             && self.suggestions.ghost_text().is_some()
             && !slash_active
             && !slash_has_inline_ghost;
-        let prompt_ghost_at_caret =
-            style.focused && !voice_interim_shown && self.prompt_suggestion_ghost().is_some();
+        let prompt_ghost_at_caret = false;
         let ghost_covers_caret = shell_ghost_at_caret
             || prompt_ghost_at_caret
             || inline_ghost_at_cursor
