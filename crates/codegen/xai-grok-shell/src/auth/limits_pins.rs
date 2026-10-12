@@ -697,17 +697,13 @@ fn clear_business_bearer_after_rejected_personal_refresh(
         .map(|candidate| candidate.access_token.trim().to_owned())
         .collect();
     let blocked_token = |value: &str| blocked.iter().any(|token| token == value.trim());
-    if config
-        .api_key
-        .as_deref()
-        .is_some_and(|key| blocked_token(key))
-    {
+    if config.api_key.as_deref().is_some_and(&blocked_token) {
         config.api_key = None;
     }
     if config
         .session_identity_key
         .as_deref()
-        .is_some_and(|key| blocked_token(key))
+        .is_some_and(blocked_token)
     {
         config.session_identity_key = None;
     }

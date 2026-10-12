@@ -4124,6 +4124,11 @@ impl AgentView {
                         viewer.plan_mut().active_commenting_range =
                             self.casual_commenting_range.clone();
                     }
+                    if viewer.kind
+                        == crate::views::file_search::line_viewer::LineViewerKind::PlanPreview
+                    {
+                        viewer.plan_mut().revision_prompt_text = self.prompt.text().to_string();
+                    }
                     render_line_viewer(
                         buf,
                         overlay_area,

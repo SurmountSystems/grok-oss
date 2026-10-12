@@ -765,6 +765,11 @@ pub struct PlanViewerExtras {
     pub comment_close_areas: Vec<(u64, Rect)>,
     pub hovered_comment_id: Option<u64>,
     pub close_button_hovered: bool,
+    /// Draft shown in the revision prompt above the approval footer.
+    /// Empty paints the placeholder. The footer word `revise` is not this.
+    pub revision_prompt_text: String,
+    /// Hit target for that prompt input. None when the footer is not up.
+    pub revision_prompt_area: Option<Rect>,
 }
 
 /// Double-click detection threshold in milliseconds.
@@ -1977,6 +1982,71 @@ fn repaint_soft_plan_scrollbar(buf: &mut Buffer, viewer: &LineViewerState, conte
     );
 }
 
+/// Prompt input above the approval footer. The footer word `revise` is not
+/// this row. An empty draft paints the placeholder.
+fn paint_plan_revision_prompt(buf: &mut Buffer, area: Rect, draft: &str, theme: &Theme) {
+    if area.width < 6 || area.height < 3 {
+        return;
+    }
+    let border = Style::default()
+        .fg(theme.prompt_border_active)
+        .bg(theme.bg_base);
+    let text_style = Style::default().fg(theme.text_primary).bg(theme.bg_base);
+    let placeholder_style = Style::default().fg(theme.gray).bg(theme.bg_base);
+    let left = area.x;
+    let right = area.x + area.width - 1;
+    let top = area.y;
+    let bottom = area.y + area.height - 1;
+    let mid = top + 1;
+    let put = |buf: &mut Buffer, x: u16, y: u16, symbol: &str, style: Style| {
+        if let Some(cell) = buf.cell_mut((x, y)) {
+            cell.set_symbol(symbol);
+            cell.set_style(style);
+        }
+    };
+    for x in left..=right {
+        let top_symbol = if x == left {
+            "\u{250c}"
+        } else if x == right {
+            "\u{2510}"
+        } else {
+            "\u{2500}"
+        };
+        let bottom_symbol = if x == left {
+            "\u{2514}"
+        } else if x == right {
+            "\u{2518}"
+        } else {
+            "\u{2500}"
+        };
+        put(buf, x, top, top_symbol, border);
+        put(buf, x, bottom, bottom_symbol, border);
+    }
+    put(buf, left, mid, "\u{2502}", border);
+    put(buf, right, mid, "\u{2502}", border);
+    for x in left.saturating_add(1)..right {
+        put(buf, x, mid, " ", text_style);
+    }
+    let arrow = crate::glyphs::prompt_arrow();
+    let arrow_w = crate::glyphs::PROMPT_ARROW_WIDTH;
+    let text_x = left.saturating_add(1);
+    if text_x.saturating_add(arrow_w) < right {
+        buf.set_span(text_x, mid, &Span::styled(arrow, text_style), arrow_w);
+    }
+    let body_x = text_x.saturating_add(arrow_w);
+    let body_w = right.saturating_sub(body_x);
+    let trimmed = draft.trim();
+    let (shown, style) = if trimmed.is_empty() {
+        ("Type a revision...", placeholder_style)
+    } else {
+        (trimmed, text_style)
+    };
+    let shown: String = shown.chars().take(body_w as usize).collect();
+    if body_w > 0 && !shown.is_empty() {
+        buf.set_string(body_x, mid, &shown, style);
+    }
+}
+
 /// Render the line viewer popup. In normal mode, draws a 75% centered panel with dimmed background
 /// (modifiers reset). In fullscreen mode (`viewer.fullscreen`), fills the entire overlay area
 /// without dimming. Renders the ListPane inside the panel with syntax-highlighted lines.
@@ -2019,6 +2089,9 @@ pub fn render_line_viewer(
     // They therefore need a slightly taller minimum than ordinary file previews
     let min_height: u16 = if viewer.show_footer() { 7 } else { 5 };
     if popup_area.width < 10 || popup_area.height < min_height {
+        if let Some(plan) = viewer.plan.as_mut() {
+            plan.revision_prompt_area = None;
+        }
         viewer.last_popup_area = None;
         viewer.last_modal_area = None;
         return;
@@ -2058,8 +2131,22 @@ pub fn render_line_viewer(
     }
 
     // Plan modes reserve 2 rows at the bottom of `inner` for the divider and action-button row
-    // (rendered in step 8 below).
-    let footer_rows: u16 = if viewer.show_footer() { 2 } else { 0 };
+    // (rendered in step 8 below). The approval screen also reserves a prompt
+    // input above that footer. The footer word `revise` is not the prompt.
+    // A short pane keeps the footer and skips the prompt.
+    let revision_prompt_rows: u16 = if viewer.kind == LineViewerKind::PlanPreview
+        && viewer.show_footer()
+        && inner.height >= 9
+    {
+        3
+    } else {
+        0
+    };
+    let footer_rows: u16 = if viewer.show_footer() {
+        2 + revision_prompt_rows
+    } else {
+        0
+    };
     let mut content_area = Rect {
         x: inner.x,
         y: inner.y,
@@ -2446,6 +2533,27 @@ pub fn render_line_viewer(
             plan.send_button_area = None;
             plan.abandon_button_area = None;
             plan.approve_notes_button_area = None;
+        }
+    }
+
+    if let Some(plan) = viewer.plan.as_mut() {
+        plan.revision_prompt_area = None;
+    }
+    if revision_prompt_rows >= 3 && inner.height >= 2 {
+        let div_y = inner.y + inner.height - 2;
+        let prompt_area = Rect {
+            x: inner.x,
+            y: div_y.saturating_sub(revision_prompt_rows),
+            width: inner.width,
+            height: revision_prompt_rows,
+        };
+        let draft = viewer
+            .plan_ref()
+            .map(|plan| plan.revision_prompt_text.clone())
+            .unwrap_or_default();
+        paint_plan_revision_prompt(buf, prompt_area, &draft, theme);
+        if let Some(plan) = viewer.plan.as_mut() {
+            plan.revision_prompt_area = Some(prompt_area);
         }
     }
 
@@ -4595,6 +4703,82 @@ mod tests {
         assert!(search.x + search.width < copy.x);
         assert!(copy.x + copy.width < enlarge.x);
         assert!(enlarge.x + enlarge.width < close.x);
+    }
+
+    /// Approval screen: plan text is visible and the footer is
+    /// `approve | comment | revise | exit`. The footer word `revise` is
+    /// not a prompt. A prompt input is on this screen so the Operator can
+    /// type a revision. This is not the drafting screen, and it is not the
+    /// pane after Approve has started implement.
+    #[test]
+    fn plan_approval_screen_shows_a_prompt_input_while_the_revise_footer_is_up() {
+        let mut viewer = LineViewerState::open_markdown_content(
+            "plan.md",
+            "# Plan\n\nFile-backed approval\n".to_owned(),
+            None,
+        )
+        .expect("open plan");
+        viewer.kind = LineViewerKind::PlanPreview;
+        viewer.fullscreen = false;
+        viewer.plan_mut().feedback_active = true;
+        viewer.plan_mut().show_action_buttons = true;
+        viewer.plan_mut().comment_flow_active = false;
+        assert!(
+            viewer.feedback_active(),
+            "this is the approval screen, not the drafting screen"
+        );
+
+        let full = Rect::new(0, 0, 100, 30);
+        let mut buf = Buffer::empty(full);
+        let theme = crate::theme::Theme::current();
+        render_line_viewer(&mut buf, full, &mut viewer, Path::new("/tmp"), &theme, 0);
+
+        let screen = (0..full.height)
+            .map(|y| row_text(&buf, y))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            screen.contains("File-backed approval"),
+            "the approval screen shows the plan text:\n{screen}"
+        );
+        let footer_y = (0..full.height).find(|&y| {
+            let lower = row_text(&buf, y).to_ascii_lowercase();
+            ["approve", "comment", "revise", "exit"]
+                .iter()
+                .all(|word| lower.contains(word))
+        });
+        let footer_y = footer_y.unwrap_or_else(|| {
+            panic!("approval footer approve | comment | revise | exit is missing:\n{screen}")
+        });
+        let footer = row_text(&buf, footer_y);
+        assert!(
+            footer.contains('|'),
+            "approval footer is approve | comment | revise | exit; got {footer:?}"
+        );
+
+        let arrow = crate::glyphs::prompt_arrow().trim();
+        let prompt_y =
+            (0..full.height).find(|&y| y != footer_y && row_text(&buf, y).contains(arrow));
+        let prompt_row = prompt_y.map(|y| row_text(&buf, y)).unwrap_or_default();
+        assert!(
+            prompt_y.is_some(),
+            "the approval screen has the footer word revise and no prompt input; footer={footer:?}\n{screen}"
+        );
+        let prompt_lower = prompt_row.to_ascii_lowercase();
+        assert!(
+            !prompt_lower.contains("approve") && !prompt_lower.contains("exit"),
+            "the footer word revise is not the prompt; prompt row={prompt_row:?}"
+        );
+        assert!(
+            prompt_row.contains("Type a revision"),
+            "the prompt input is where the Operator types a revision; got {prompt_row:?}"
+        );
+        assert!(
+            viewer
+                .plan_ref()
+                .is_some_and(|plan| plan.revision_prompt_area.is_some()),
+            "the prompt input is a hit target on the approval screen"
+        );
     }
 
     /// Query `plan` matches `Plan` and `PLAN`. Reuse LineViewerState search.

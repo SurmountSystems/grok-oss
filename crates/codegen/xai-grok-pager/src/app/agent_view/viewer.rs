@@ -1054,6 +1054,7 @@ impl AgentView {
         let comment_btn_area = viewer.plan_ref().and_then(|p| p.comment_button_area);
         let copy_btn_area = viewer.plan_ref().and_then(|p| p.copy_button_area);
         let search_btn_area = viewer.plan_ref().and_then(|p| p.search_button_area);
+        let revision_prompt_area = viewer.plan_ref().and_then(|p| p.revision_prompt_area);
         let close_hit = viewer.comment_close_button_at(mouse.column, mouse.row);
         // Cached `is_plan_viewer()` so we don't need to call self while the line_viewer is mutably borrowed below
         let is_plan_preview =
@@ -1155,6 +1156,11 @@ impl AgentView {
                 }
                 if copy_btn_area.is_some_and(|a| a.contains((mouse.column, mouse.row).into())) {
                     return self.copy_plan_full();
+                }
+                if revision_prompt_area
+                    .is_some_and(|a| a.contains((mouse.column, mouse.row).into()))
+                {
+                    return self.focus_plan_prompt(PlanPromptIntent::Revise);
                 }
                 if send_area.is_some_and(|a| a.contains((mouse.column, mouse.row).into())) {
                     if self.plan_approval_view.is_some() {
