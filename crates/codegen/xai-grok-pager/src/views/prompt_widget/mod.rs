@@ -194,6 +194,10 @@ pub struct PromptStyle {
     /// Session title inlined in the top border, aligned and styled like the bottom info line.
     /// None (default) keeps the plain border. Set only by the agent view.
     pub title: Option<String>,
+    /// Columns kept clear on the right of the top rule so a control painted
+    /// after the title (the inset copy glyph) does not cover it. Zero keeps
+    /// the title on the info-line column.
+    pub title_reserve_right: u16,
     /// Paint image-chip overlay into `overlay_area` (default true).
     pub image_preview: bool,
 }
@@ -244,6 +248,7 @@ impl Default for PromptStyle {
             show_accent_line: false,
             show_borders: true,
             title: None,
+            title_reserve_right: 0,
             image_preview: true,
         }
     }
@@ -280,6 +285,7 @@ impl PromptStyle {
             show_accent_line: false,
             show_borders: false,
             title: None,
+            title_reserve_right: 0,
             image_preview: true,
         }
     }
@@ -3148,11 +3154,12 @@ impl PromptWidget {
 
         // Top divider: ┌──────────┐
         if vpad_top > 0 && style.chrome && style.show_borders {
-            // Session title uses chrome-caption (0.6 blend). On DOGE that
-            // solid-step stays `text_secondary` (white), same as the focused
-            // rule. Keep the frame on `prompt_border` (white on DOGE). Paint
-            // the session name as context chrome (`theme.gray` / yellow) so
-            // the title still contrasts. Do not yellow the whole box.
+            // Session title uses chrome-caption. Focused DOGE opacity 0.6
+            // stays `text_secondary` (white), the same as the rule. Unfocused
+            // opacity 0.4 steps to `bg` and would paint black on black.
+            // Either case paints the name `theme.gray` (yellow) when that
+            // color differs from both the rule and the canvas. Do not yellow
+            // the box, and do not blink the title.
             let caption_style = Self::chrome_caption_style(bg, &theme, style.focused);
             let caption_fg = caption_style.fg;
             let title_will_paint = style
@@ -3162,10 +3169,12 @@ impl PromptWidget {
                 .filter(|t| !t.is_empty())
                 .is_some()
                 && area.width.saturating_sub(6) >= 6;
-            let title_style = if title_will_paint && caption_fg == Some(border_color) {
-                if theme.gray != border_color {
+            let caption_matches_rule_or_canvas =
+                caption_fg == Some(border_color) || caption_fg == Some(bg);
+            let title_style = if title_will_paint && caption_matches_rule_or_canvas {
+                if theme.gray != border_color && theme.gray != bg {
                     Style::default().fg(theme.gray).bg(bg)
-                } else if theme.gray_dim != border_color {
+                } else if theme.gray_dim != border_color && theme.gray_dim != bg {
                     Style::default().fg(theme.gray_dim).bg(bg)
                 } else {
                     caption_style
@@ -3198,7 +3207,8 @@ impl PromptWidget {
                 .as_deref()
                 .map(str::trim)
                 .filter(|t| !t.is_empty());
-            let caption_right = content_area.x + content_area.width;
+            let caption_right =
+                (content_area.x + content_area.width).saturating_sub(style.title_reserve_right);
             // Room from the second dash through the column before the corner.
             let max_fit = caption_right.saturating_sub(area.x + 3);
             if let Some(caption) = caption {

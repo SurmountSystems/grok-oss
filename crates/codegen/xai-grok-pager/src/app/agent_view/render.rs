@@ -1285,6 +1285,9 @@ impl AgentView {
             show_accent_line: false,
             show_borders: true,
             title: self.prompt_caption(),
+            // Three copy columns plus one rule gap, so the full title stays
+            // left of `[` on this top rule. Other prompt styles stay at 0.
+            title_reserve_right: 4,
             image_preview: !self.resize_hides_prompt_preview(),
         };
         let next = crate::views::session_title::rename_source_title_raw(self)
@@ -1420,6 +1423,7 @@ impl AgentView {
             show_accent_line: false,
             show_borders: false,
             title: None,
+            title_reserve_right: 0,
             image_preview: !self.resize_hides_prompt_preview(),
         };
         let feedback_pane = self
@@ -1455,6 +1459,7 @@ impl AgentView {
                 show_accent_line: false,
                 show_borders: false,
                 title: None,
+                title_reserve_right: 0,
                 image_preview: !self.resize_hides_prompt_preview(),
             };
             let perm_text_w = crate::views::permission_view::inline_text_width(inner_width);
@@ -3152,6 +3157,7 @@ impl AgentView {
                         show_accent_line: false,
                         show_borders: false,
                         title: None,
+                        title_reserve_right: 0,
                         image_preview: !self.resize_hides_prompt_preview(),
                     };
                     let prompt_h = remaining_h.saturating_sub(1).max(1);
@@ -7674,6 +7680,93 @@ mod status_credits_meter_tests {
         );
         forbid(&row, "status row");
         forbid(&hover, "hover");
+    }
+
+    /// The header paints percent remaining for the sending session's stored
+    /// included used percent. 37 used is `limits 63%`. 10 used is `limits 90%`.
+    /// A missing percent stays `Limits and Credits`. It does not invent
+    /// `limits 0%`, `$0`, or the dollar-credits figure.
+    #[test]
+    #[serial_test::serial]
+    fn header_paints_limits_remaining_for_each_included_used_percent() {
+        let home = tempfile::TempDir::new().expect("temp GROK_HOME");
+        let _env = xai_grok_test_support::EnvGuard::set("GROK_HOME", home.path());
+        xai_grok_shell::auth::clear_included_billing_cache();
+        std::fs::write(
+            home.path().join("config.toml"),
+            "[auth]\npreferred_method = \"oidc\"\n",
+        )
+        .expect("preferred oidc");
+        let live = chrono::Utc::now() + chrono::Duration::days(7);
+        let base = "https://auth.x.ai::header-remaining";
+        let mut map = std::collections::BTreeMap::new();
+        xai_grok_shell::auth::upsert_supergrok_session(
+            &mut map,
+            base,
+            xai_grok_shell::auth::GrokAuth {
+                key: "header.personal.session".into(),
+                auth_mode: xai_grok_shell::auth::AuthMode::Oidc,
+                user_id: "u-header-personal".into(),
+                principal_type: Some("User".into()),
+                principal_id: Some("u-header-personal".into()),
+                team_id: None,
+                expires_at: Some(live),
+                ..xai_grok_shell::auth::GrokAuth::default()
+            },
+        );
+        std::fs::write(
+            home.path().join("auth.json"),
+            serde_json::to_vec_pretty(&map).expect("auth json"),
+        )
+        .expect("write auth.json");
+        let mut doc = xai_grok_shell::auth::LimitsSnapshotDocument::empty(1_700_000_000_000);
+        doc.identities
+            .push(xai_grok_shell::auth::LimitsSnapshotIdentity {
+                identity_id: "u-header-personal".into(),
+                usage_pct: Some(37.0),
+                period_end: None,
+                period_type: None,
+                dollar_credits_cents: Some(7841),
+                grok_build_usage_pct: None,
+                is_unified_billing_user: None,
+                poll_outcome: xai_grok_shell::auth::POLL_OUTCOME_OK.to_owned(),
+            });
+        xai_grok_shell::auth::write_limits_snapshot_file(home.path(), &doc).expect("snapshot");
+        let label = super::l1_credits_chip_label(
+            crate::views::credit_bar::SamplingIdentityKind::SuperGrokSession,
+            None,
+            false,
+        );
+        assert_eq!(label, "limits 63%");
+        assert!(!label.contains("limits 37%"));
+        assert!(!label.contains("$78.41"));
+        assert!(!label.contains("limits 0%"));
+        assert!(!label.contains("$0"));
+
+        doc.identities[0].usage_pct = Some(10.0);
+        xai_grok_shell::auth::write_limits_snapshot_file(home.path(), &doc).expect("snapshot 10");
+        let label = super::l1_credits_chip_label(
+            crate::views::credit_bar::SamplingIdentityKind::SuperGrokSession,
+            None,
+            false,
+        );
+        assert_eq!(label, "limits 90%");
+        assert!(!label.contains("limits 10%"));
+        assert!(!label.contains("$78.41"));
+
+        doc.identities[0].usage_pct = None;
+        xai_grok_shell::auth::write_limits_snapshot_file(home.path(), &doc)
+            .expect("snapshot unread");
+        xai_grok_shell::auth::clear_included_billing_cache();
+        let label = super::l1_credits_chip_label(
+            crate::views::credit_bar::SamplingIdentityKind::SuperGrokSession,
+            None,
+            false,
+        );
+        assert_eq!(label, "Limits and Credits");
+        assert!(!label.contains("limits 0%"));
+        assert!(!label.contains("$0"));
+        assert!(!label.contains("$78.41"));
     }
 
     const CELL_PERSONAL_TOKEN: &str = "tok-personal-cell";

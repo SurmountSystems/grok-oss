@@ -533,6 +533,413 @@ pub async fn fetch_credits_config_with_session(
         .map_err(|e| format!("Failed to parse billing data: {e}"))
 }
 
+/// Default POST target for `GetGrokCreditsConfig`.
+pub const GET_GROK_CREDITS_CONFIG_URL: &str =
+    "https://grok.com/grok_api_v2.GrokBuildBilling/GetGrokCreditsConfig";
+
+/// POST the five-byte grpc-web frame and decode `GetGrokCreditsConfig`.
+///
+/// `url` empty uses [`GET_GROK_CREDITS_CONFIG_URL`]. A bearer, when
+/// present, is `Authorization: Bearer`. This does not set `Cookie`.
+/// The decoded percent is percent used. Callers subtract that from 100.
+pub async fn post_get_grok_credits_config(
+    url: Option<&str>,
+    bearer: Option<&str>,
+) -> Result<BillingConfig, String> {
+    let target = url
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(GET_GROK_CREDITS_CONFIG_URL);
+    let mut request = crate::http::shared_client()
+        .post(target)
+        .header("content-type", "application/grpc-web+proto")
+        .header("x-grpc-web", "1")
+        .timeout(std::time::Duration::from_secs(15))
+        .body(vec![0u8; 5]);
+    if let Some(token) = bearer.map(str::trim).filter(|token| !token.is_empty()) {
+        request = request.header("Authorization", format!("Bearer {token}"));
+    }
+    let response = request
+        .send()
+        .await
+        .map_err(|e| format!("Failed to fetch billing data: {e}"))?;
+    if !response.status().is_success() {
+        let status = response.status().as_u16();
+        return Err(format!("Billing service error: HTTP {status}"));
+    }
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|e| format!("Failed to parse billing data: {e}"))?;
+    decode_get_grok_credits_config_frame(&bytes)
+}
+
+fn decode_get_grok_credits_config_frame(bytes: &[u8]) -> Result<BillingConfig, String> {
+    let mut offset = 0usize;
+    let mut payload = Vec::new();
+    let mut saw_ok = false;
+    if bytes.is_empty() {
+        return Err("empty GetGrokCreditsConfig frame".into());
+    }
+    while offset + 5 <= bytes.len() {
+        let flag = bytes
+            .get(offset)
+            .copied()
+            .ok_or_else(|| String::from("truncated GetGrokCreditsConfig frame"))?;
+        let len = u32::from_be_bytes([
+            bytes
+                .get(offset + 1)
+                .copied()
+                .ok_or_else(|| String::from("truncated GetGrokCreditsConfig frame"))?,
+            bytes
+                .get(offset + 2)
+                .copied()
+                .ok_or_else(|| String::from("truncated GetGrokCreditsConfig frame"))?,
+            bytes
+                .get(offset + 3)
+                .copied()
+                .ok_or_else(|| String::from("truncated GetGrokCreditsConfig frame"))?,
+            bytes
+                .get(offset + 4)
+                .copied()
+                .ok_or_else(|| String::from("truncated GetGrokCreditsConfig frame"))?,
+        ]) as usize;
+        offset += 5;
+        if offset + len > bytes.len() {
+            return Err("truncated GetGrokCreditsConfig frame".into());
+        }
+        let body = bytes
+            .get(offset..offset + len)
+            .ok_or_else(|| String::from("truncated GetGrokCreditsConfig frame"))?;
+        offset += len;
+        if flag & 0x80 != 0 {
+            let text = String::from_utf8_lossy(body);
+            if !grpc_status_is_zero(&text) {
+                return Err(format!("GetGrokCreditsConfig grpc-status is not 0: {text}"));
+            }
+            saw_ok = true;
+        } else if flag == 0 {
+            payload.extend_from_slice(body);
+        } else {
+            return Err(format!("unexpected grpc-web flag {flag}"));
+        }
+    }
+    if offset != bytes.len() {
+        return Err("truncated GetGrokCreditsConfig frame".into());
+    }
+    if !saw_ok {
+        return Err("GetGrokCreditsConfig response missing grpc-status 0".into());
+    }
+    let config_bytes = config_message_bytes(&payload)?;
+    billing_config_from_credits_proto(config_bytes)
+}
+
+fn grpc_status_is_zero(trailer: &str) -> bool {
+    trailer.split(['\n', '\r']).any(|line| {
+        let line = line.trim();
+        let Some((name, value)) = line.split_once(':') else {
+            return false;
+        };
+        name.trim().eq_ignore_ascii_case("grpc-status") && value.trim() == "0"
+    })
+}
+
+struct ProtoCursor<'a> {
+    data: &'a [u8],
+    pos: usize,
+}
+
+impl<'a> ProtoCursor<'a> {
+    fn remaining(&self) -> bool {
+        self.pos < self.data.len()
+    }
+
+    fn read_varint(&mut self) -> Result<u64, String> {
+        let mut value = 0u64;
+        let mut shift = 0u32;
+        while self.pos < self.data.len() {
+            let byte = self
+                .data
+                .get(self.pos)
+                .copied()
+                .ok_or_else(|| String::from("truncated varint"))?;
+            self.pos += 1;
+            let Some(part) = u64::from(byte & 0x7f).checked_shl(shift) else {
+                return Err("varint too long".into());
+            };
+            value |= part;
+            if byte & 0x80 == 0 {
+                return Ok(value);
+            }
+            shift += 7;
+            if shift > 63 {
+                return Err("varint too long".into());
+            }
+        }
+        Err("truncated varint".into())
+    }
+
+    fn read_fixed32(&mut self) -> Result<[u8; 4], String> {
+        if self.pos + 4 > self.data.len() {
+            return Err("truncated fixed32".into());
+        }
+        let mut raw = [0u8; 4];
+        raw.copy_from_slice(
+            self.data
+                .get(self.pos..self.pos + 4)
+                .ok_or_else(|| String::from("truncated fixed32"))?,
+        );
+        self.pos += 4;
+        Ok(raw)
+    }
+
+    fn read_len_bytes(&mut self) -> Result<&'a [u8], String> {
+        let len = self.read_varint()? as usize;
+        if self.pos + len > self.data.len() {
+            return Err("truncated length-delimited field".into());
+        }
+        let slice = self
+            .data
+            .get(self.pos..self.pos + len)
+            .ok_or_else(|| String::from("truncated length-delimited field"))?;
+        self.pos += len;
+        Ok(slice)
+    }
+
+    fn skip(&mut self, wire: u8) -> Result<(), String> {
+        match wire {
+            0 => {
+                self.read_varint()?;
+                Ok(())
+            }
+            1 => {
+                if self.pos + 8 > self.data.len() {
+                    return Err("truncated fixed64".into());
+                }
+                self.pos += 8;
+                Ok(())
+            }
+            2 => {
+                self.read_len_bytes()?;
+                Ok(())
+            }
+            5 => {
+                self.read_fixed32()?;
+                Ok(())
+            }
+            _ => Err(format!("unsupported wire type {wire}")),
+        }
+    }
+}
+
+fn config_message_bytes(payload: &[u8]) -> Result<&[u8], String> {
+    let mut cursor = ProtoCursor {
+        data: payload,
+        pos: 0,
+    };
+    while cursor.remaining() {
+        let tag = cursor.read_varint()?;
+        let field = tag >> 3;
+        let wire = (tag & 7) as u8;
+        if field == 1 && wire == 2 {
+            return cursor.read_len_bytes();
+        }
+        cursor.skip(wire)?;
+    }
+    Err("GetGrokCreditsConfig payload missing config message".into())
+}
+
+fn billing_config_from_credits_proto(bytes: &[u8]) -> Result<BillingConfig, String> {
+    let mut cursor = ProtoCursor {
+        data: bytes,
+        pos: 0,
+    };
+    let mut credit_usage_percent = None;
+    let mut product_usage = Vec::new();
+    let mut current_period = None;
+    let mut prepaid_balance = None;
+    while cursor.remaining() {
+        let tag = cursor.read_varint()?;
+        let field = tag >> 3;
+        let wire = (tag & 7) as u8;
+        match (field, wire) {
+            (1, 5) => {
+                let raw = cursor.read_fixed32()?;
+                credit_usage_percent = Some(f64::from(f32::from_le_bytes(raw)));
+            }
+            (7, 2) => {
+                let row = cursor.read_len_bytes()?;
+                if let Some(entry) = product_usage_from_proto(row)? {
+                    product_usage.push(entry);
+                }
+            }
+            (8, 2) => {
+                let row = cursor.read_len_bytes()?;
+                current_period = Some(usage_period_from_proto(row)?);
+            }
+            (12, 2) => {
+                let row = cursor.read_len_bytes()?;
+                prepaid_balance = prepaid_from_proto(row)?;
+            }
+            _ => cursor.skip(wire)?,
+        }
+    }
+    Ok(BillingConfig {
+        credit_usage_percent,
+        current_period,
+        monthly_limit: None,
+        used: None,
+        on_demand_cap: None,
+        on_demand_used: None,
+        prepaid_balance,
+        is_unified_billing_user: None,
+        product_usage,
+        billing_period_start: None,
+        billing_period_end: None,
+        history: vec![],
+    })
+}
+
+fn product_usage_from_proto(bytes: &[u8]) -> Result<Option<ProductUsageEntry>, String> {
+    let mut cursor = ProtoCursor {
+        data: bytes,
+        pos: 0,
+    };
+    let mut id = None;
+    let mut percent = None;
+    while cursor.remaining() {
+        let tag = cursor.read_varint()?;
+        let field = tag >> 3;
+        let wire = (tag & 7) as u8;
+        match (field, wire) {
+            (1, 0) => id = Some(cursor.read_varint()?),
+            (2, 5) => {
+                let raw = cursor.read_fixed32()?;
+                percent = Some(f64::from(f32::from_le_bytes(raw)));
+            }
+            _ => cursor.skip(wire)?,
+        }
+    }
+    let Some(percent) = percent else {
+        return Ok(None);
+    };
+    let name = match id {
+        Some(4) => "Chat".to_owned(),
+        Some(6) => "Voice".to_owned(),
+        Some(other) => other.to_string(),
+        None => return Ok(None),
+    };
+    Ok(Some(ProductUsageEntry {
+        product: Some(name),
+        usage_percent: Some(percent),
+    }))
+}
+
+fn usage_period_from_proto(bytes: &[u8]) -> Result<UsagePeriod, String> {
+    let mut cursor = ProtoCursor {
+        data: bytes,
+        pos: 0,
+    };
+    let mut kind = None;
+    let mut start = None;
+    let mut end = None;
+    while cursor.remaining() {
+        let tag = cursor.read_varint()?;
+        let field = tag >> 3;
+        let wire = (tag & 7) as u8;
+        match (field, wire) {
+            (1, 0) => kind = Some(cursor.read_varint()?),
+            (2, 2) => {
+                let row = cursor.read_len_bytes()?;
+                start = Some(timestamp_rfc3339(row)?);
+            }
+            (3, 2) => {
+                let row = cursor.read_len_bytes()?;
+                end = Some(timestamp_rfc3339(row)?);
+            }
+            _ => cursor.skip(wire)?,
+        }
+    }
+    let period_type = kind.map(|kind| match kind {
+        1 => "USAGE_PERIOD_TYPE_MONTHLY".to_owned(),
+        2 => "USAGE_PERIOD_TYPE_WEEKLY".to_owned(),
+        other => format!("USAGE_PERIOD_TYPE_{other}"),
+    });
+    Ok(UsagePeriod {
+        period_type,
+        start,
+        end,
+    })
+}
+
+fn timestamp_rfc3339(bytes: &[u8]) -> Result<String, String> {
+    let mut cursor = ProtoCursor {
+        data: bytes,
+        pos: 0,
+    };
+    let mut seconds = 0i64;
+    let mut nanos = 0u32;
+    while cursor.remaining() {
+        let tag = cursor.read_varint()?;
+        let field = tag >> 3;
+        let wire = (tag & 7) as u8;
+        match (field, wire) {
+            (1, 0) => seconds = cursor.read_varint()? as i64,
+            (2, 0) => nanos = cursor.read_varint()? as u32,
+            _ => cursor.skip(wire)?,
+        }
+    }
+    Ok(rfc3339_from_unix(seconds, nanos))
+}
+
+fn prepaid_from_proto(bytes: &[u8]) -> Result<Option<Cent>, String> {
+    let mut cursor = ProtoCursor {
+        data: bytes,
+        pos: 0,
+    };
+    let mut cents = None;
+    while cursor.remaining() {
+        let tag = cursor.read_varint()?;
+        let field = tag >> 3;
+        let wire = (tag & 7) as u8;
+        match (field, wire) {
+            (1, 0) => cents = Some(cursor.read_varint()? as i64),
+            _ => cursor.skip(wire)?,
+        }
+    }
+    Ok(cents.map(|val| Cent { val }))
+}
+
+fn rfc3339_from_unix(seconds: i64, nanos: u32) -> String {
+    let days = seconds.div_euclid(86_400);
+    let tod = seconds.rem_euclid(86_400) as u32;
+    let hour = tod / 3_600;
+    let min = (tod % 3_600) / 60;
+    let sec = tod % 60;
+    let (year, month, day) = civil_from_unix_days(days);
+    if nanos == 0 {
+        format!("{year:04}-{month:02}-{day:02}T{hour:02}:{min:02}:{sec:02}Z")
+    } else {
+        format!("{year:04}-{month:02}-{day:02}T{hour:02}:{min:02}:{sec:02}.{nanos:09}Z")
+    }
+}
+
+fn civil_from_unix_days(days: i64) -> (i32, u32, u32) {
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u64;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let mut year = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    if month <= 2 {
+        year += 1;
+    }
+    (year as i32, month as u32, day as u32)
+}
+
 /// Poll non-active SuperGrok principals and remember their included fields.
 ///
 /// Best-effort: a failed sibling poll does not fail the active billing path.
@@ -958,6 +1365,93 @@ mod tests {
             billing_period_end: None,
             history: vec![],
         }
+    }
+
+    fn decode_standard_base64(input: &str) -> Vec<u8> {
+        fn val(byte: u8) -> u8 {
+            match byte {
+                b'A'..=b'Z' => byte - b'A',
+                b'a'..=b'z' => byte - b'a' + 26,
+                b'0'..=b'9' => byte - b'0' + 52,
+                b'+' => 62,
+                b'/' => 63,
+                _ => 0,
+            }
+        }
+        let bytes = input.as_bytes();
+        let mut out = Vec::new();
+        let mut index = 0;
+        while index + 4 <= bytes.len() {
+            let packed = (u32::from(val(bytes[index])) << 18)
+                | (u32::from(val(bytes[index + 1])) << 12)
+                | (u32::from(val(bytes[index + 2])) << 6)
+                | u32::from(val(bytes[index + 3]));
+            out.push((packed >> 16) as u8);
+            if bytes[index + 2] != b'=' {
+                out.push((packed >> 8) as u8);
+            }
+            if bytes[index + 3] != b'=' {
+                out.push(packed as u8);
+            }
+            index += 4;
+        }
+        out
+    }
+
+    fn grpc_web_frame(payload: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.push(0);
+        out.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+        out.extend_from_slice(payload);
+        let trailer = b"grpc-status:0\r\n";
+        out.push(0x80);
+        out.extend_from_slice(&(trailer.len() as u32).to_be_bytes());
+        out.extend_from_slice(trailer);
+        out
+    }
+
+    fn frame_with_used_percent(percent: f32) -> Vec<u8> {
+        let mut config = Vec::new();
+        config.push(0x0d);
+        config.extend_from_slice(&percent.to_le_bytes());
+        let mut outer = Vec::new();
+        outer.push(0x0a);
+        outer.push(config.len() as u8);
+        outer.extend_from_slice(&config);
+        grpc_web_frame(&outer)
+    }
+
+    #[test]
+    fn get_grok_credits_config_fixture_decodes_percent_products_period_and_cents() {
+        const FIXTURE: &str = "AAAAAGoKaA0AACBBEgAaACIMCIyckdYGEMD//dcBKgwIjJG21gYQwP/91wE6BwgEFQAA4EA6BwgGFQAAQEA6AggFOgIICEIeCAISDAiMnJHWBhDA//3XARoMCIyRttYGEMD//dcBWAFiAwihPWgBgAAAAA9ncnBjLXN0YXR1czowDQo=";
+        let config = decode_get_grok_credits_config_frame(&decode_standard_base64(FIXTURE))
+            .expect("fixture frame");
+        assert_eq!(config.credit_usage_percent, Some(10.0));
+        let chat = config
+            .product_usage
+            .iter()
+            .find(|entry| entry.product.as_deref() == Some("Chat"))
+            .expect("Chat");
+        let voice = config
+            .product_usage
+            .iter()
+            .find(|entry| entry.product.as_deref() == Some("Voice"))
+            .expect("Voice");
+        assert_eq!(chat.usage_percent, Some(7.0));
+        assert_eq!(voice.usage_percent, Some(3.0));
+        assert_eq!(
+            config.prepaid_balance.as_ref().map(|cent| cent.val),
+            Some(7841)
+        );
+        let end = config
+            .current_period
+            .as_ref()
+            .and_then(|period| period.end.as_deref())
+            .unwrap_or("");
+        assert!(end.contains("2026-10-13T01:25:32"), "period end {end}");
+        let again = decode_get_grok_credits_config_frame(&frame_with_used_percent(28.0))
+            .expect("28 percent frame");
+        assert_eq!(again.credit_usage_percent, Some(28.0));
     }
 
     #[tokio::test]

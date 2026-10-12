@@ -1173,6 +1173,22 @@ impl AcpUpdateTracker {
         if let Some(agent_id) = self.current_agent_msg.take() {
             scrollback.finish_running(agent_id);
         }
+        // The task prompt is an AgentMessage set running before the reply
+        // exists. current_agent_msg is the reply, so finish that too or the
+        // magenta rail stays after the turn.
+        let stale_agent_rails: Vec<_> = (0..scrollback.len())
+            .filter_map(|idx| {
+                let entry = scrollback.get(idx)?;
+                if entry.is_running && matches!(entry.block, RenderBlock::AgentMessage(_)) {
+                    Some(entry.id)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        for id in stale_agent_rails {
+            scrollback.finish_running(id);
+        }
         for (_, pending) in self.pending_tools.drain() {
             if let Some(entry_id) = pending.entry_id {
                 scrollback.finish_running(entry_id);

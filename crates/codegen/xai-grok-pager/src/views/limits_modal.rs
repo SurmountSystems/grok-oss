@@ -345,6 +345,12 @@ fn role_label_for_billing_identity(
         .map(|candidate| xai_grok_shell::auth::role_label(candidate.headroom.role))
 }
 
+/// Poll target for `role`.
+///
+/// A candidate that is not hard-expired, with a non-empty access token, wins
+/// over an earlier hard-expired row of the same role. Identity-id order must
+/// not make that hard-expired row the bearer. The first role match is used
+/// only when no live candidate of that role is stored.
 fn poll_target_for_role(
     role: xai_grok_shell::auth::SupergrokAccountRole,
 ) -> Option<xai_grok_shell::auth::SupergrokBillingPollTarget> {
@@ -354,9 +360,24 @@ fn poll_target_for_role(
     let listings = xai_grok_shell::auth::list_supergrok_principal_listings(&map);
     let candidates = xai_grok_shell::auth::load_supergrok_session_candidates(&home);
     let want = xai_grok_shell::auth::role_label(role);
-    targets.into_iter().find(|target| {
+    let matches_role = |target: &xai_grok_shell::auth::SupergrokBillingPollTarget| {
         role_label_for_billing_identity(&target.identity_id, &listings, &candidates) == Some(want)
-    })
+    };
+    let live = |candidate: &xai_grok_shell::auth::SupergrokSessionCandidate| {
+        !candidate.hard_expired
+            && candidate.headroom.role == role
+            && !candidate.access_token.trim().is_empty()
+    };
+    if candidates.iter().any(&live) {
+        return targets.into_iter().find(|target| {
+            !target.access_token.trim().is_empty()
+                && matches_role(target)
+                && candidates.iter().any(|candidate| {
+                    live(candidate) && candidate.headroom.identity_id == target.identity_id
+                })
+        });
+    }
+    targets.into_iter().find(matches_role)
 }
 
 /// Proxy base for `GET /billing?format=credits`.
@@ -402,10 +423,95 @@ fn clear_account_billing_cache() {
     }
 }
 
-fn blocking_account_billing(token: &str, user_id: &str) -> Option<AccountBillingFields> {
+/// Process-local `GetGrokCreditsConfig` URL. Unset keeps the credits GET.
+#[cfg(test)]
+fn grok_credits_config_url_override_slot() -> &'static std::sync::Mutex<Option<String>> {
+    static SLOT: std::sync::OnceLock<std::sync::Mutex<Option<String>>> = std::sync::OnceLock::new();
+    SLOT.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+#[cfg(test)]
+fn test_grok_credits_config_url() -> Option<String> {
+    grok_credits_config_url_override_slot()
+        .lock()
+        .ok()
+        .and_then(|guard| guard.clone())
+        .filter(|url| !url.trim().is_empty())
+}
+
+#[cfg(test)]
+fn set_grok_credits_config_url_override(url: Option<String>) {
+    if let Ok(mut guard) = grok_credits_config_url_override_slot().lock() {
+        *guard = url.filter(|value| !value.trim().is_empty());
+    }
+}
+
+fn grok_credits_config_post_url() -> Option<String> {
+    #[cfg(test)]
+    if let Some(url) = test_grok_credits_config_url() {
+        return Some(url);
+    }
+    #[cfg(test)]
+    if test_account_billing_proxy_base().is_some() {
+        return None;
+    }
+    Some(xai_grok_shell::extensions::billing::GET_GROK_CREDITS_CONFIG_URL.to_owned())
+}
+
+/// Remember a successful card poll for this identity.
+///
+/// A missing or non-finite `credit_usage_percent` writes nothing. A finite
+/// percent updates the process cache and replaces this identity's snapshot
+/// row, or appends one. Other identities and `management` stay. This does
+/// not write poll outcome `auth`. The caller invokes it only after the GET
+/// returned a config.
+fn remember_card_included_poll(
+    identity_id: &str,
+    config: &xai_grok_shell::extensions::billing::BillingConfig,
+) {
+    let Some(percent) = config
+        .credit_usage_percent
+        .filter(|percent| percent.is_finite())
+    else {
+        return;
+    };
+    let period = config.current_period.as_ref();
+    xai_grok_shell::auth::remember_supergrok_included_billing(
+        identity_id,
+        percent,
+        period.and_then(|period| period.end.as_deref()),
+        period.and_then(|period| period.period_type.as_deref()),
+    );
+    let home = limits_reading_grok_home();
+    let mut doc = xai_grok_shell::auth::read_limits_snapshot_file(&home)
+        .unwrap_or_else(|| xai_grok_shell::auth::LimitsSnapshotDocument::empty(0));
+    let row = xai_grok_shell::extensions::billing::limits_identity_from_credits_config(
+        identity_id,
+        config,
+        xai_grok_shell::auth::POLL_OUTCOME_OK,
+    );
+    if let Some(existing) = doc
+        .identities
+        .iter_mut()
+        .find(|existing| existing.identity_id == row.identity_id)
+    {
+        *existing = row;
+    } else {
+        doc.identities.push(row);
+    }
+    let _ = xai_grok_shell::auth::write_limits_snapshot_file(&home, &doc);
+}
+
+fn blocking_account_billing(
+    identity_id: &str,
+    token: &str,
+    user_id: &str,
+) -> Option<AccountBillingFields> {
+    let identity_id = identity_id.to_owned();
     let token = token.to_owned();
     let user_id = user_id.to_owned();
     let proxy = account_billing_proxy_base();
+    let home = limits_reading_grok_home();
     let handle = std::thread::Builder::new()
         .name("account-billing".to_owned())
         .spawn(move || {
@@ -413,17 +519,48 @@ fn blocking_account_billing(token: &str, user_id: &str) -> Option<AccountBilling
                 .enable_all()
                 .build()
                 .ok()?;
-            let fetched = runtime
-                .block_on(
-                    xai_grok_shell::extensions::billing::fetch_credits_config_with_session(
-                        &proxy, &token, &user_id,
-                    ),
-                )
-                .ok()?;
-            let config = fetched.config?;
+            let fresh = runtime.block_on(
+                xai_grok_shell::auth::ensure_fresh_access_token_for_supergrok_billing_poll(
+                    &home,
+                    &identity_id,
+                ),
+            );
+            let (token, user_id) = match fresh {
+                Some((fresh_token, fresh_user)) => (fresh_token, fresh_user),
+                None => (token, user_id),
+            };
+            let grpc_url = grok_credits_config_post_url();
+            let config = if let Some(credits_url) = grpc_url.as_deref() {
+                runtime
+                    .block_on(
+                        xai_grok_shell::extensions::billing::post_get_grok_credits_config(
+                            Some(credits_url),
+                            Some(token.as_str()),
+                        ),
+                    )
+                    .ok()?
+            } else {
+                let fetched = runtime
+                    .block_on(
+                        xai_grok_shell::extensions::billing::fetch_credits_config_with_session(
+                            &proxy, &token, &user_id,
+                        ),
+                    )
+                    .ok()?;
+                fetched.config?
+            };
+            let mut published = config.clone();
+            if grpc_url.is_some()
+                && published
+                    .credit_usage_percent
+                    .is_some_and(|percent| percent.is_finite() && percent < 100.0)
+            {
+                published.prepaid_balance = None;
+            }
+            remember_card_included_poll(&identity_id, &published);
             Some(AccountBillingFields {
                 usage_pct: config.credit_usage_percent,
-                prepaid_cents: config.prepaid_balance.map(|cent| cent.val),
+                prepaid_cents: config.prepaid_balance.as_ref().map(|cent| cent.val),
                 unified: config.is_unified_billing_user,
             })
         })
@@ -455,7 +592,8 @@ fn live_account_billing(
             CachedAccountBilling::Failed => None,
         };
     }
-    let fetched = blocking_account_billing(&target.access_token, &target.user_id);
+    let fetched =
+        blocking_account_billing(&target.identity_id, &target.access_token, &target.user_id);
     let cached = match fetched {
         Some(fields) => CachedAccountBilling::Ready(fields),
         None => CachedAccountBilling::Failed,
@@ -813,14 +951,30 @@ fn footer_label_stays_off_the_card(label: &str) -> bool {
 /// The open account's limits button and Esc, plus any spend label this card
 /// still paints.
 ///
-/// Personal's button is `Use personal limits`. Business's button is
-/// `Use business limits`. Esc still closes the card. This card does not
-/// paint `Use limits`, `Use credits`, `Using team postpaid Billing Credits`,
-/// or `Using console team prepaid`.
+/// `Using personal limits` or `Using business limits` is inserted only when
+/// that account's session is live. A dead session keeps `Using limits` and
+/// does not paint `Use personal limits`. A live session does not also keep
+/// the shortcut whose label is exactly `Using limits`. Any other account
+/// label is inserted. Esc still closes the card. This card does not paint
+/// `Use limits`, `Use credits`, `Using team postpaid Billing Credits`, or
+/// `Using console team prepaid`.
 fn painted_shortcuts(state: &LimitsModalState) -> Vec<Shortcut<'static>> {
     let account = account_limits_shortcut(state);
     let mut shortcuts = spend_shortcuts(state);
-    shortcuts.insert(0, account);
+    match account.label {
+        "Using personal limits" | "Using business limits" => {
+            let role = if account.label == "Using business limits" {
+                xai_grok_shell::auth::SupergrokAccountRole::Business
+            } else {
+                xai_grok_shell::auth::SupergrokAccountRole::Personal
+            };
+            if account_has_live_session(role) {
+                shortcuts.insert(0, account);
+                shortcuts.retain(|shortcut| shortcut.label != "Using limits");
+            }
+        }
+        _ => shortcuts.insert(0, account),
+    }
     shortcuts.retain(|shortcut| !footer_label_stays_off_the_card(shortcut.label));
     if !shortcuts.iter().any(|shortcut| shortcut.id == 1) {
         shortcuts.push(Shortcut {
@@ -3094,7 +3248,8 @@ mod tests {
     /// does not say included limits are not being drawn. The usage reading
     /// in this fixture is 28% used, so the header shows percent remaining
     /// `limits 72%`. It does not invent `limits 0%` or `$0`. A live
-    /// personal session does the same.
+    /// personal session shows `Using personal limits` and does not show
+    /// `Using limits`.
     #[test]
     #[serial_test::serial]
     fn clicking_use_limits_on_the_limits_card_is_handled() {
@@ -3439,9 +3594,10 @@ mod tests {
         let personal_screen = screen_of(&buf, area);
         assert!(
             personal_screen.contains("limits 72%")
-                && personal_screen.contains("Using limits")
+                && personal_screen.contains("Using personal limits")
+                && !personal_screen.contains("Using limits")
                 && !personal_screen.contains("limits 28%"),
-            "the header shows percent remaining after Use limits:\n{personal_screen}"
+            "the header shows percent remaining and the live session shows Using personal limits:\n{personal_screen}"
         );
         assert!(
             !personal_screen.contains("limits 0%") && !personal_screen.contains("$0"),
@@ -7084,5 +7240,750 @@ mod tests {
         } else {
             "Personal"
         }
+    }
+
+    struct CardRefreshListener {
+        port: u16,
+        token_hits: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        thread: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl CardRefreshListener {
+        fn start() -> Self {
+            use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("refresh listen");
+            let port = listener.local_addr().expect("refresh port").port();
+            listener.set_nonblocking(true).expect("refresh nonblocking");
+            let token_hits = std::sync::Arc::new(AtomicUsize::new(0));
+            let stop = std::sync::Arc::new(AtomicBool::new(false));
+            let hits_bg = std::sync::Arc::clone(&token_hits);
+            let stop_bg = std::sync::Arc::clone(&stop);
+            let thread = std::thread::Builder::new()
+                .name("card-refresh-listener".to_owned())
+                .spawn(move || {
+                    let discovery = format!(
+                        r#"{{"authorization_endpoint":"http://127.0.0.1:{port}/authorize","token_endpoint":"http://127.0.0.1:{port}/token"}}"#
+                    );
+                    while !stop_bg.load(Ordering::SeqCst) {
+                        match listener.accept() {
+                            Ok((mut stream, _)) => {
+                                let _ = stream.set_nonblocking(false);
+                                let request = read_http_headers(&mut stream);
+                                let (status, body, count_token) = if request
+                                    .contains("/.well-known/openid-configuration")
+                                {
+                                    (200, discovery.clone(), false)
+                                } else if request.contains("/token") {
+                                    (
+                                        200,
+                                        r#"{"access_token":"new.personal.session","expires_in":3600}"#
+                                            .to_owned(),
+                                        true,
+                                    )
+                                } else if request.contains("/billing")
+                                    && request.contains("new.personal.session")
+                                {
+                                    (
+                                        200,
+                                        r#"{"config":{"creditUsagePercent":37.0,"prepaidBalance":{"val":1234}}}"#
+                                            .to_owned(),
+                                        false,
+                                    )
+                                } else if request.contains("expired.personal.jwt") {
+                                    (401, r#"{"error":"expired"}"#.to_owned(), false)
+                                } else {
+                                    (401, r#"{"error":"unexpected"}"#.to_owned(), false)
+                                };
+                                if count_token {
+                                    hits_bg.fetch_add(1, Ordering::SeqCst);
+                                }
+                                let _ = write_billing_http_response(&mut stream, status, &body);
+                            }
+                            Err(err)
+                                if err.kind() == std::io::ErrorKind::WouldBlock
+                                    || err.kind() == std::io::ErrorKind::Interrupted =>
+                            {
+                                std::thread::sleep(std::time::Duration::from_millis(5));
+                            }
+                            Err(_) => break,
+                        }
+                    }
+                })
+                .expect("refresh listener thread");
+            Self {
+                port,
+                token_hits,
+                stop,
+                thread: Some(thread),
+            }
+        }
+
+        fn token_hits(&self) -> usize {
+            self.token_hits.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    impl Drop for CardRefreshListener {
+        fn drop(&mut self) {
+            self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+            if let Some(thread) = self.thread.take() {
+                let _ = thread.join();
+            }
+        }
+    }
+
+    /// A hard-expired personal OIDC token is refreshed before the card GET.
+    /// The new session is the one this process uses. 37 percent used paints
+    /// `limits 63%`. The snapshot row for that identity is poll outcome ok.
+    #[test]
+    #[serial_test::serial]
+    fn expired_personal_refresh_becomes_the_session_this_process_uses() {
+        use xai_grok_shell::auth::{AuthMode, GrokAuth, upsert_supergrok_session};
+
+        let home = tempfile::TempDir::new().expect("temp GROK_HOME");
+        let _env = xai_grok_test_support::EnvGuard::set("GROK_HOME", home.path());
+        let _cooldown = xai_grok_test_support::EnvGuard::set("GROK_DISABLE_SHARED_RATE_LIMIT", "1");
+        clear_account_billing_cache();
+        xai_grok_shell::auth::clear_included_billing_cache();
+        let server = CardRefreshListener::start();
+        let _proxy = AccountBillingProxyGuard::arm(&format!("http://127.0.0.1:{}/v1", server.port));
+        let issuer = format!("http://127.0.0.1:{}", server.port);
+        let base = format!("{issuer}::refresh-card");
+        let expired = chrono::Utc::now() - chrono::Duration::days(1);
+        let mut map = std::collections::BTreeMap::new();
+        upsert_supergrok_session(
+            &mut map,
+            &base,
+            GrokAuth {
+                key: "expired.personal.jwt".into(),
+                auth_mode: AuthMode::Oidc,
+                user_id: "u-refresh-personal".into(),
+                principal_type: Some("User".into()),
+                principal_id: Some("u-refresh-personal".into()),
+                team_id: None,
+                expires_at: Some(expired),
+                refresh_token: Some("refresh-synthetic-personal".into()),
+                oidc_issuer: Some(issuer),
+                oidc_client_id: Some("client-synthetic-personal".into()),
+                ..GrokAuth::default()
+            },
+        );
+        std::fs::write(
+            home.path().join("auth.json"),
+            serde_json::to_vec_pretty(&map).expect("auth json"),
+        )
+        .expect("write auth.json");
+
+        let body =
+            account_section_lines(xai_grok_shell::auth::SupergrokAccountRole::Personal).join("\n");
+        assert!(
+            server.token_hits() >= 1,
+            "the expired personal session refreshed before the card GET"
+        );
+        let stored = xai_grok_shell::auth::read_auth_json(&home.path().join("auth.json"))
+            .expect("auth.json");
+        let personal_key = stored
+            .iter()
+            .find(|(scope, _)| scope.contains("::personal"))
+            .map(|(_, auth)| auth.key.as_str())
+            .expect("personal slot");
+        assert_eq!(personal_key, "new.personal.session");
+        assert!(
+            !body.contains("Personal SuperGrok has no session on this process."),
+            "a refreshed personal session is the session this process uses:\n{body}"
+        );
+        assert!(
+            body.contains("limits 63%") && !body.contains("limits 37%"),
+            "37 percent used is limits 63% remaining:\n{body}"
+        );
+        assert!(
+            !body.contains("$78.41"),
+            "this personal prepaid balance is not $78.41:\n{body}"
+        );
+        let doc =
+            xai_grok_shell::auth::read_limits_snapshot_file(home.path()).expect("limits snapshot");
+        let row = doc
+            .identities
+            .iter()
+            .find(|row| row.identity_id == "u-refresh-personal")
+            .expect("refreshed identity row");
+        assert_eq!(row.poll_outcome, xai_grok_shell::auth::POLL_OUTCOME_OK);
+        assert_eq!(row.usage_pct, Some(37.0));
+        assert_ne!(row.poll_outcome, "auth");
+    }
+
+    struct LivePersonalBearerListener {
+        base: String,
+        saw_live: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        saw_expired: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        hits: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        thread: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl LivePersonalBearerListener {
+        const LIVE_TOKEN: &'static str = "live.personal.login";
+        const EXPIRED_TOKEN: &'static str = "expired.personal.row";
+
+        fn start() -> Self {
+            use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("credits listen");
+            let port = listener.local_addr().expect("credits port").port();
+            listener.set_nonblocking(true).expect("credits nonblocking");
+            let saw_live = std::sync::Arc::new(AtomicBool::new(false));
+            let saw_expired = std::sync::Arc::new(AtomicBool::new(false));
+            let hits = std::sync::Arc::new(AtomicUsize::new(0));
+            let stop = std::sync::Arc::new(AtomicBool::new(false));
+            let live_bg = std::sync::Arc::clone(&saw_live);
+            let expired_bg = std::sync::Arc::clone(&saw_expired);
+            let hits_bg = std::sync::Arc::clone(&hits);
+            let stop_bg = std::sync::Arc::clone(&stop);
+            let thread = std::thread::Builder::new()
+                .name("live-personal-bearer".to_owned())
+                .spawn(move || {
+                    let live_body = r#"{"config":{"creditUsagePercent":10.0}}"#;
+                    let expired_body =
+                        r#"{"config":{"creditUsagePercent":100.0,"prepaidBalance":{"val":7841}}}"#;
+                    while !stop_bg.load(Ordering::SeqCst) {
+                        match listener.accept() {
+                            Ok((mut stream, _)) => {
+                                let _ = stream.set_nonblocking(false);
+                                let request = read_http_headers(&mut stream);
+                                if !request.contains("/billing") {
+                                    let _ = write_billing_http_response(
+                                        &mut stream,
+                                        404,
+                                        r#"{"error":"not billing"}"#,
+                                    );
+                                    continue;
+                                }
+                                hits_bg.fetch_add(1, Ordering::SeqCst);
+                                let authorization = request.lines().find(|line| {
+                                    line.to_ascii_lowercase().starts_with("authorization:")
+                                });
+                                let (status, body) = match authorization {
+                                    Some(line) if line.contains(Self::LIVE_TOKEN) => {
+                                        live_bg.store(true, Ordering::SeqCst);
+                                        (200, live_body)
+                                    }
+                                    Some(line) if line.contains(Self::EXPIRED_TOKEN) => {
+                                        expired_bg.store(true, Ordering::SeqCst);
+                                        (200, expired_body)
+                                    }
+                                    _ => (401, r#"{"error":"unexpected bearer"}"#),
+                                };
+                                let _ = write_billing_http_response(&mut stream, status, body);
+                            }
+                            Err(err)
+                                if err.kind() == std::io::ErrorKind::WouldBlock
+                                    || err.kind() == std::io::ErrorKind::Interrupted =>
+                            {
+                                std::thread::sleep(std::time::Duration::from_millis(5));
+                            }
+                            Err(_) => break,
+                        }
+                    }
+                })
+                .expect("live personal bearer thread");
+            Self {
+                base: format!("http://127.0.0.1:{port}"),
+                saw_live,
+                saw_expired,
+                hits,
+                stop,
+                thread: Some(thread),
+            }
+        }
+
+        fn saw_live(&self) -> bool {
+            self.saw_live.load(std::sync::atomic::Ordering::SeqCst)
+        }
+
+        fn saw_expired(&self) -> bool {
+            self.saw_expired.load(std::sync::atomic::Ordering::SeqCst)
+        }
+
+        fn hits(&self) -> usize {
+            self.hits.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    impl Drop for LivePersonalBearerListener {
+        fn drop(&mut self) {
+            self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+            if let Some(thread) = self.thread.take() {
+                let _ = thread.join();
+            }
+        }
+    }
+
+    /// One stored personal OAuth row is hard-expired. Another personal OAuth
+    /// login is live. The personal credits GET uses the live login.
+    /// `creditUsagePercent` 10 paints `limits 90%` on the Personal tab and
+    /// the header. `$78.41` stays off that body while the included percent
+    /// remains below 100.
+    #[test]
+    #[serial_test::serial]
+    fn live_personal_oauth_login_is_the_credits_bearer_when_another_personal_row_is_hard_expired() {
+        use crate::actions::ActionRegistry;
+        use crate::app::agent_view::test_fixtures::make_agent;
+        use crate::app::agent_view::{AppRenderParams, BannerSlotParams};
+        use crate::scrollback::render::ScratchBuffer;
+        use xai_grok_shell::auth::{AuthMode, GrokAuth, upsert_supergrok_session};
+
+        const OWED: &str = "one personal row hard-expired, another personal OAuth login live, the credits GET bearer is the live login, creditUsagePercent 10 paints `limits 90%`, and the body does not contain `$78.41` while that included percent remains";
+
+        let home = tempfile::TempDir::new().expect("temp GROK_HOME");
+        let _env = xai_grok_test_support::EnvGuard::set("GROK_HOME", home.path());
+        let _cooldown = xai_grok_test_support::EnvGuard::set("GROK_DISABLE_SHARED_RATE_LIMIT", "1");
+        clear_account_billing_cache();
+        xai_grok_shell::auth::clear_included_billing_cache();
+        let server = LivePersonalBearerListener::start();
+        let _proxy = AccountBillingProxyGuard::arm(&server.base);
+        let expired_at = chrono::Utc::now() - chrono::Duration::days(30);
+        let live_at = chrono::Utc::now() + chrono::Duration::days(7);
+        let mut map = std::collections::BTreeMap::new();
+        upsert_supergrok_session(
+            &mut map,
+            "https://auth.x.ai::aaa-hard-expired",
+            GrokAuth {
+                key: LivePersonalBearerListener::EXPIRED_TOKEN.into(),
+                auth_mode: AuthMode::Oidc,
+                user_id: "aaa-hard-expired-personal".into(),
+                principal_type: Some("User".into()),
+                principal_id: Some("aaa-hard-expired-personal".into()),
+                team_id: None,
+                expires_at: Some(expired_at),
+                refresh_token: None,
+                ..GrokAuth::default()
+            },
+        );
+        upsert_supergrok_session(
+            &mut map,
+            "https://auth.x.ai::zzz-live",
+            GrokAuth {
+                key: LivePersonalBearerListener::LIVE_TOKEN.into(),
+                auth_mode: AuthMode::Oidc,
+                user_id: "zzz-live-personal".into(),
+                principal_type: Some("User".into()),
+                principal_id: Some("zzz-live-personal".into()),
+                team_id: None,
+                expires_at: Some(live_at),
+                refresh_token: None,
+                ..GrokAuth::default()
+            },
+        );
+        std::fs::write(
+            home.path().join("auth.json"),
+            serde_json::to_vec_pretty(&map).expect("auth json"),
+        )
+        .expect("write auth.json");
+
+        let area = Rect::new(0, 0, 120, 40);
+        let mut state = fresh_card_state();
+        let buf = render_seeded_card(&mut state, area);
+        let personal = account_body_lines(&buf, area, &state).join("\n");
+        let end = DateTime::parse_from_rfc3339("2026-10-12T06:59:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let decoy = weekly_bal(99.0, end);
+        crate::appearance::cache::set_hide_header(false);
+        let mut agent = make_agent();
+        agent.sampling_identity = SamplingIdentityKind::SuperGrokSession;
+        agent.credit_balance = Some(decoy);
+        let mut header_buf = ratatui::buffer::Buffer::empty(area);
+        let mut scratch = ScratchBuffer::new();
+        agent.draw(
+            area,
+            &mut header_buf,
+            &ActionRegistry::defaults(),
+            &mut scratch,
+            None,
+            false,
+            BannerSlotParams::none(),
+            false,
+            false,
+            &mut Vec::new(),
+            AppRenderParams::default(),
+        );
+        let header = painted_lines(&header_buf, area).join("\n");
+        let body = format!("{personal}\n{header}");
+        assert_eq!(
+            limits_percent_figure(Some(10.0)).as_deref(),
+            Some("limits 90%"),
+            "{OWED}"
+        );
+        assert!(
+            server.hits() >= 1 && server.saw_live() && !server.saw_expired(),
+            "{OWED}"
+        );
+        assert!(
+            personal.contains("limits 90%")
+                && header.contains("limits 90%")
+                && !personal.contains("limits 10%")
+                && !header.contains("limits 10%")
+                && !header.contains("limits 1%")
+                && !body.contains("$78.41")
+                && !personal.contains("Personal SuperGrok has no session on this process."),
+            "{OWED}\npersonal:\n{personal}\nheader:\n{header}"
+        );
+    }
+
+    struct GrokCreditsConfigUrlGuard;
+
+    impl GrokCreditsConfigUrlGuard {
+        fn arm(url: &str) -> Self {
+            set_grok_credits_config_url_override(Some(url.to_string()));
+            Self
+        }
+    }
+
+    impl Drop for GrokCreditsConfigUrlGuard {
+        fn drop(&mut self) {
+            set_grok_credits_config_url_override(None);
+            clear_account_billing_cache();
+        }
+    }
+
+    struct GrokCreditsConfigListener {
+        url: String,
+        stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        thread: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl GrokCreditsConfigListener {
+        fn start() -> Self {
+            use std::sync::atomic::{AtomicBool, Ordering};
+
+            let listener =
+                std::net::TcpListener::bind("127.0.0.1:0").expect("credits config listen");
+            let port = listener.local_addr().expect("credits config port").port();
+            listener
+                .set_nonblocking(true)
+                .expect("credits config nonblocking");
+            let stop = std::sync::Arc::new(AtomicBool::new(false));
+            let stop_bg = std::sync::Arc::clone(&stop);
+            let body = grok_credits_config_fixture_bytes();
+            let thread = std::thread::Builder::new()
+                .name("grok-credits-config".to_owned())
+                .spawn(move || {
+                    while !stop_bg.load(Ordering::SeqCst) {
+                        match listener.accept() {
+                            Ok((mut stream, _)) => {
+                                let _ = stream.set_nonblocking(false);
+                                let _ = read_http_headers(&mut stream);
+                                let _ = write_grpc_web_http_response(&mut stream, &body);
+                            }
+                            Err(err)
+                                if err.kind() == std::io::ErrorKind::WouldBlock
+                                    || err.kind() == std::io::ErrorKind::Interrupted =>
+                            {
+                                std::thread::sleep(std::time::Duration::from_millis(5));
+                            }
+                            Err(_) => break,
+                        }
+                    }
+                })
+                .expect("grok credits config thread");
+            Self {
+                url: format!(
+                    "http://127.0.0.1:{port}/grok_api_v2.GrokBuildBilling/GetGrokCreditsConfig"
+                ),
+                stop,
+                thread: Some(thread),
+            }
+        }
+    }
+
+    impl Drop for GrokCreditsConfigListener {
+        fn drop(&mut self) {
+            self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+            if let Some(thread) = self.thread.take() {
+                let _ = thread.join();
+            }
+        }
+    }
+
+    fn grok_credits_config_fixture_bytes() -> Vec<u8> {
+        const FIXTURE: &str = "AAAAAGoKaA0AACBBEgAaACIMCIyckdYGEMD//dcBKgwIjJG21gYQwP/91wE6BwgEFQAA4EA6BwgGFQAAQEA6AggFOgIICEIeCAISDAiMnJHWBhDA//3XARoMCIyRttYGEMD//dcBWAFiAwihPWgBgAAAAA9ncnBjLXN0YXR1czowDQo=";
+        fn val(byte: u8) -> u8 {
+            match byte {
+                b'A'..=b'Z' => byte - b'A',
+                b'a'..=b'z' => byte - b'a' + 26,
+                b'0'..=b'9' => byte - b'0' + 52,
+                b'+' => 62,
+                b'/' => 63,
+                _ => 0,
+            }
+        }
+        let bytes = FIXTURE.as_bytes();
+        let mut out = Vec::new();
+        let mut index = 0;
+        while index + 4 <= bytes.len() {
+            let packed = (u32::from(val(bytes[index])) << 18)
+                | (u32::from(val(bytes[index + 1])) << 12)
+                | (u32::from(val(bytes[index + 2])) << 6)
+                | u32::from(val(bytes[index + 3]));
+            out.push((packed >> 16) as u8);
+            if bytes[index + 2] != b'=' {
+                out.push((packed >> 8) as u8);
+            }
+            if bytes[index + 3] != b'=' {
+                out.push(packed as u8);
+            }
+            index += 4;
+        }
+        out
+    }
+
+    fn write_grpc_web_http_response(
+        stream: &mut std::net::TcpStream,
+        body: &[u8],
+    ) -> std::io::Result<()> {
+        use std::io::Write;
+
+        let header = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/grpc-web+proto\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        stream.write_all(header.as_bytes())?;
+        stream.write_all(body)?;
+        stream.flush()
+    }
+
+    /// GetGrokCreditsConfig with 10% used paints `limits 90%` on the Personal
+    /// tab and the header. The header does not show `$78.41` while that
+    /// included percent remains.
+    #[test]
+    #[serial_test::serial]
+    fn get_grok_credits_config_ten_percent_used_paints_limits_ninety_on_personal_tab_and_header() {
+        use crate::actions::ActionRegistry;
+        use crate::app::agent_view::test_fixtures::make_agent;
+        use crate::app::agent_view::{AppRenderParams, BannerSlotParams};
+        use crate::scrollback::render::ScratchBuffer;
+        use xai_grok_shell::auth::{AuthMode, GrokAuth, upsert_supergrok_session};
+
+        const OWED: &str = "GetGrokCreditsConfig with 10% used paints limits 90% on the Personal tab and the header, and the header does not show $78.41 while that included percent remains.";
+
+        let home = tempfile::TempDir::new().expect("temp GROK_HOME");
+        let _env = xai_grok_test_support::EnvGuard::set("GROK_HOME", home.path());
+        let _cooldown = xai_grok_test_support::EnvGuard::set("GROK_DISABLE_SHARED_RATE_LIMIT", "1");
+        clear_account_billing_cache();
+        xai_grok_shell::auth::clear_included_billing_cache();
+        set_grok_credits_config_url_override(None);
+        crate::appearance::cache::set_hide_header(false);
+
+        let unread_area = Rect::new(0, 0, 200, 40);
+        let mut unread_agent = make_agent();
+        unread_agent.sampling_identity = SamplingIdentityKind::SuperGrokSession;
+        unread_agent.credit_balance = None;
+        let mut unread_buf = ratatui::buffer::Buffer::empty(unread_area);
+        let mut unread_scratch = ScratchBuffer::new();
+        unread_agent.draw(
+            unread_area,
+            &mut unread_buf,
+            &ActionRegistry::defaults(),
+            &mut unread_scratch,
+            None,
+            false,
+            BannerSlotParams::none(),
+            false,
+            false,
+            &mut Vec::new(),
+            AppRenderParams::default(),
+        );
+        let unread = painted_lines(&unread_buf, unread_area).join("\n");
+        assert!(
+            unread.contains("Limits and Credits")
+                && !unread.contains("limits 0%")
+                && !unread.contains("$0"),
+            "{OWED}\nunread:\n{unread}"
+        );
+        assert_eq!(
+            limits_percent_figure(Some(28.0)).as_deref(),
+            Some("limits 72%"),
+            "{OWED}"
+        );
+
+        let server = GrokCreditsConfigListener::start();
+        let _url = GrokCreditsConfigUrlGuard::arm(&server.url);
+        let expired_at = chrono::Utc::now() - chrono::Duration::days(30);
+        let live_at = chrono::Utc::now() + chrono::Duration::days(7);
+        let mut map = std::collections::BTreeMap::new();
+        upsert_supergrok_session(
+            &mut map,
+            "https://auth.x.ai::aaa-hard-expired",
+            GrokAuth {
+                key: LivePersonalBearerListener::EXPIRED_TOKEN.into(),
+                auth_mode: AuthMode::Oidc,
+                user_id: "aaa-hard-expired-personal".into(),
+                principal_type: Some("User".into()),
+                principal_id: Some("aaa-hard-expired-personal".into()),
+                team_id: None,
+                expires_at: Some(expired_at),
+                refresh_token: None,
+                ..GrokAuth::default()
+            },
+        );
+        upsert_supergrok_session(
+            &mut map,
+            "https://auth.x.ai::zzz-live",
+            GrokAuth {
+                key: LivePersonalBearerListener::LIVE_TOKEN.into(),
+                auth_mode: AuthMode::Oidc,
+                user_id: "zzz-live-personal".into(),
+                principal_type: Some("User".into()),
+                principal_id: Some("zzz-live-personal".into()),
+                team_id: None,
+                expires_at: Some(live_at),
+                refresh_token: None,
+                ..GrokAuth::default()
+            },
+        );
+        std::fs::write(
+            home.path().join("auth.json"),
+            serde_json::to_vec_pretty(&map).expect("auth json"),
+        )
+        .expect("write auth.json");
+
+        let area = Rect::new(0, 0, 120, 40);
+        let mut state = fresh_card_state();
+        let buf = render_seeded_card(&mut state, area);
+        let personal = account_body_lines(&buf, area, &state).join("\n");
+        let end = DateTime::parse_from_rfc3339("2026-10-12T06:59:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let decoy = weekly_bal(99.0, end);
+        let mut agent = make_agent();
+        agent.sampling_identity = SamplingIdentityKind::SuperGrokSession;
+        agent.credit_balance = Some(decoy);
+        let mut header_buf = ratatui::buffer::Buffer::empty(area);
+        let mut scratch = ScratchBuffer::new();
+        agent.draw(
+            area,
+            &mut header_buf,
+            &ActionRegistry::defaults(),
+            &mut scratch,
+            None,
+            false,
+            BannerSlotParams::none(),
+            false,
+            false,
+            &mut Vec::new(),
+            AppRenderParams::default(),
+        );
+        let header = painted_lines(&header_buf, area).join("\n");
+        assert!(
+            personal.contains("limits 90%") && !personal.contains("limits 10%"),
+            "{OWED}\npersonal:\n{personal}"
+        );
+        assert!(
+            header.contains("limits 90%")
+                && !header.contains("$78.41")
+                && !header.contains("limits 0%")
+                && !header.contains("limits 10%"),
+            "{OWED}\nheader:\n{header}"
+        );
+    }
+
+    /// `Using personal limits` and `Using limits` are not both footer labels.
+    /// A dead session keeps `Using limits`. A live session paints
+    /// `Using personal limits` and drops the exact `Using limits` label.
+    #[test]
+    #[serial_test::serial]
+    fn footer_does_not_pair_using_personal_limits_with_using_limits() {
+        use xai_grok_shell::auth::limits_pins::{LimitsPins, MeterSource, save_limits_pins};
+        use xai_grok_shell::auth::{
+            AuthMode, GrokAuth, SupergrokIdentityPin, upsert_supergrok_session,
+        };
+
+        fn labels() -> Vec<&'static str> {
+            painted_shortcuts(&fresh_card_state())
+                .into_iter()
+                .map(|shortcut| shortcut.label)
+                .collect()
+        }
+        fn has_label(labels: &[&str], want: &str) -> bool {
+            labels.contains(&want)
+        }
+        fn write_session(home: &std::path::Path, auth: GrokAuth) {
+            let base = "https://auth.x.ai::footer-using-personal";
+            let mut map = std::collections::BTreeMap::new();
+            upsert_supergrok_session(&mut map, base, auth);
+            std::fs::write(
+                home.join("auth.json"),
+                serde_json::to_vec_pretty(&map).expect("auth json"),
+            )
+            .expect("write auth.json");
+        }
+
+        let home = tempfile::TempDir::new().expect("temp GROK_HOME");
+        let _env = xai_grok_test_support::EnvGuard::set("GROK_HOME", home.path());
+        let expired = chrono::Utc::now() - chrono::Duration::days(1);
+        write_session(
+            home.path(),
+            GrokAuth {
+                key: "not-a-jwt".into(),
+                auth_mode: AuthMode::Oidc,
+                user_id: "u-dead-personal".into(),
+                principal_type: Some("User".into()),
+                principal_id: Some("u-dead-personal".into()),
+                team_id: None,
+                expires_at: Some(expired),
+                refresh_token: None,
+                ..GrokAuth::default()
+            },
+        );
+        save_limits_pins(&LimitsPins {
+            meter_source: Some(MeterSource::Included),
+            supergrok_identity: Some(SupergrokIdentityPin::Personal),
+            use_console: false,
+            stay_supergrok: true,
+        })
+        .expect("included personal pin");
+        let body =
+            account_section_lines(xai_grok_shell::auth::SupergrokAccountRole::Personal).join("\n");
+        assert!(
+            body.contains("Personal SuperGrok has no session on this process."),
+            "a hard-expired personal session is not a session on this process:\n{body}"
+        );
+        let dead = labels();
+        assert!(
+            !has_label(&dead, "Using personal limits") && !has_label(&dead, "Use personal limits"),
+            "a dead personal session does not paint Using personal limits or Use personal limits: {dead:?}"
+        );
+        assert!(
+            has_label(&dead, "Using limits"),
+            "a dead personal session keeps Using limits: {dead:?}"
+        );
+
+        let live = chrono::Utc::now() + chrono::Duration::days(7);
+        write_session(
+            home.path(),
+            GrokAuth {
+                key: "live.personal.session".into(),
+                auth_mode: AuthMode::Oidc,
+                user_id: "u-dead-personal".into(),
+                principal_type: Some("User".into()),
+                principal_id: Some("u-dead-personal".into()),
+                team_id: None,
+                expires_at: Some(live),
+                refresh_token: None,
+                ..GrokAuth::default()
+            },
+        );
+        // A two-dot key would HTTP the proxy. This half only reads the footer.
+        let live_labels = labels();
+        assert!(
+            has_label(&live_labels, "Using personal limits"),
+            "a live personal session paints Using personal limits: {live_labels:?}"
+        );
+        assert!(
+            !has_label(&live_labels, "Using limits"),
+            "a live personal session does not also paint Using limits: {live_labels:?}"
+        );
     }
 }

@@ -1756,14 +1756,17 @@ async fn run_shell_child_body(
         &child_handle.force_compact,
         force_compact_on_first_turn,
     );
+    // A first task prompt is the spawning agent's words. A bare id is
+    // PromptOrigin::User, so the child paints a permanent Operator green rail.
+    // parent-agent-message- is the existing agent-authored id. A human
+    // follow-up still arrives as parent-message- on the wake path.
     let child_prompt_id = wake_message_id.unwrap_or_else(|| match wake_message_source {
-        Some(ActiveAgentMessageSource::Agent) => {
+        Some(ActiveAgentMessageSource::Agent) | None => {
             format!("parent-agent-message-{}", uuid::Uuid::now_v7())
         }
         Some(ActiveAgentMessageSource::Human) => {
             format!("parent-message-{}", uuid::Uuid::now_v7())
         }
-        None => uuid::Uuid::now_v7().to_string(),
     });
     // The next box moves the originals. This attempt borrows these copies instead.
     let attempt_child_handle = child_handle.clone();

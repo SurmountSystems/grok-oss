@@ -509,8 +509,11 @@ impl std::fmt::Debug for SupergrokBillingPollTarget {
 
 /// All SuperGrok principals that can be billed (deduped by identity_id).
 ///
-/// Prefer multi-slot scopes over a duplicate base for the same identity.
-/// Empty when no SuperGrok session tokens are stored.
+/// When one identity has more than one store entry, keep the entry
+/// [`prefer_supergrok_store_entry`] already prefers: not memoized out of
+/// allowance, then later `expires_at`, then later `create_time`. Multi-slot
+/// wins only when those are tied. A stale multi-slot does not hide a later
+/// token for that identity. Empty when no SuperGrok session tokens are stored.
 pub fn load_supergrok_billing_poll_targets(grok_home: &Path) -> Vec<SupergrokBillingPollTarget> {
     use super::model::{is_supergrok_session_mode, supergrok_identity_id_from_auth};
 
@@ -518,8 +521,9 @@ pub fn load_supergrok_billing_poll_targets(grok_home: &Path) -> Vec<SupergrokBil
     let Ok(map) = read_auth_json(&path) else {
         return Vec::new();
     };
-    // identity_id → (is_multi, target)
-    let mut by_id: BTreeMap<String, (bool, SupergrokBillingPollTarget)> = BTreeMap::new();
+    // identity_id → (is_multi, auth, target). Same preference as session candidates.
+    let mut by_id: BTreeMap<String, (bool, super::model::GrokAuth, SupergrokBillingPollTarget)> =
+        BTreeMap::new();
     for (scope, auth) in &map {
         if scope == API_KEY_SCOPE {
             continue;
@@ -538,18 +542,17 @@ pub fn load_supergrok_billing_poll_targets(grok_home: &Path) -> Vec<SupergrokBil
             access_token: token.to_owned(),
             user_id: auth.user_id.clone(),
         };
-        match by_id.get(&identity_id) {
-            None => {
-                by_id.insert(identity_id, (is_multi, target));
+        let replace = match by_id.get(&identity_id) {
+            None => true,
+            Some((prev_multi, prev_auth, _)) => {
+                prefer_supergrok_store_entry(prev_auth, *prev_multi, auth, is_multi)
             }
-            Some((prev_multi, _)) => {
-                if is_multi && !*prev_multi {
-                    by_id.insert(identity_id, (is_multi, target));
-                }
-            }
+        };
+        if replace {
+            by_id.insert(identity_id, (is_multi, auth.clone(), target));
         }
     }
-    by_id.into_values().map(|(_, t)| t).collect()
+    by_id.into_values().map(|(_, _, target)| target).collect()
 }
 
 /// SuperGrok principals other than the active base identity.
@@ -606,11 +609,11 @@ pub fn session_needs_oidc_refresh_before_billing_poll(auth: &super::model::GrokA
     has_rt && has_issuer && has_client && is_expired(auth)
 }
 
-/// Prefer multi-slot store entry for `identity_id` (same policy as poll targets).
+/// Store entry for `identity_id`, using [`prefer_supergrok_store_entry`].
 ///
-/// Returns `(auth.json scope key, GrokAuth)`. Used so sibling OIDC refresh can
-/// write back the multi-slot without clobbering the active base of another
-/// principal.
+/// Same order as poll targets and session candidates. A later token replaces
+/// a stale multi-slot for this identity. Returns `(auth.json scope key, GrokAuth)`.
+/// Refresh writes that scope only. It does not replace another principal's base.
 pub fn find_supergrok_auth_entry_for_billing(
     grok_home: &Path,
     identity_id: &str,
@@ -639,13 +642,14 @@ pub fn find_supergrok_auth_entry_for_billing(
             continue;
         }
         let is_multi = scope.contains("::personal") || scope.contains("::team::");
-        match &best {
-            None => best = Some((is_multi, scope.clone(), auth.clone())),
-            Some((prev_multi, _, _)) => {
-                if is_multi && !*prev_multi {
-                    best = Some((is_multi, scope.clone(), auth.clone()));
-                }
+        let replace = match &best {
+            None => true,
+            Some((prev_multi, _, prev_auth)) => {
+                prefer_supergrok_store_entry(prev_auth, *prev_multi, auth, is_multi)
             }
+        };
+        if replace {
+            best = Some((is_multi, scope.clone(), auth.clone()));
         }
     }
     best.map(|(_, scope, auth)| (scope, auth))
