@@ -10,7 +10,8 @@
 //! ([`apply_included_limits_choice`]) still writes when `preferred_method`
 //! is `api_key`, and it leaves `use_console` false. When no personal
 //! credential row is stored, that personal pin is cleared and the sampler
-//! key stays. A hard-expired personal row that still has refresh
+//! key stays. A later login that stores a fresh personal token reapplies
+//! that pin on the next sampler apply in this process. A hard-expired personal row that still has refresh
 //! credentials is refreshed before this gives up. A successful refresh
 //! installs that fresh personal access token. A rejected grant does not
 //! install the expired token and does not leave the business token as the
@@ -459,6 +460,13 @@ pub fn apply_limits_pins_to_sampler_config(config: &mut xai_grok_sampler::Sample
     if disk_preferred_is_console_primary() {
         return;
     }
+    // The personal included pin was cleared because the token was not stored
+    // yet. A login has now written a live personal token. Reapply that pin
+    // before the next request. Stock `preferred_method = "api_key"` already
+    // returned above.
+    if reapply_personal_included_pin_after_login(config) {
+        return;
+    }
     match pins.meter_source {
         Some(MeterSource::Console) => {
             if console_team_prepaid_available() {
@@ -717,7 +725,8 @@ fn personal_included_pin(pins: &LimitsPins) -> bool {
 
 /// Drop Personal + Included when no personal credential row is stored.
 /// A hard-expired personal row does not call this. The sampler key is
-/// not changed here. `use_console` stays false.
+/// not changed here. `use_console` stays false. The pending marker asks
+/// the next apply to install a personal token a later login stores.
 fn clear_personal_included_pin() {
     let mut pins = load_limits_pins();
     if !personal_included_pin(&pins) {
@@ -727,6 +736,56 @@ fn clear_personal_included_pin() {
     pins.supergrok_identity = None;
     pins.use_console = false;
     let _ = save_limits_pins(&pins);
+    mark_personal_included_token_pending();
+}
+
+const PERSONAL_INCLUDED_TOKEN_PENDING_FILE: &str = "personal_included_token_pending";
+
+fn personal_included_token_pending_path() -> PathBuf {
+    grok_home_path().join(PERSONAL_INCLUDED_TOKEN_PENDING_FILE)
+}
+
+fn mark_personal_included_token_pending() {
+    let path = personal_included_token_pending_path();
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let _ = fs::write(&path, b"pending\n");
+}
+
+fn personal_included_token_is_pending() -> bool {
+    personal_included_token_pending_path().is_file()
+}
+
+fn clear_personal_included_token_pending() {
+    let _ = fs::remove_file(personal_included_token_pending_path());
+}
+
+/// Login stored a personal token after Personal + Included was cleared.
+/// Put that token on `api_key` and restore the pin. An explicit meter,
+/// identity, or `use_console` choice is left alone.
+fn reapply_personal_included_pin_after_login(
+    config: &mut xai_grok_sampler::SamplerConfig,
+) -> bool {
+    if !personal_included_token_is_pending() {
+        return false;
+    }
+    let pins = load_limits_pins();
+    if pins.use_console || pins.meter_source.is_some() || pins.supergrok_identity.is_some() {
+        return false;
+    }
+    if live_role_access_token(SupergrokAccountRole::Personal).is_none() {
+        return false;
+    }
+    apply_supergrok_identity_pin_to_sampler_config(config, SupergrokIdentityPin::Personal);
+    let mut restored = load_limits_pins();
+    restored.meter_source = Some(MeterSource::Included);
+    restored.supergrok_identity = Some(SupergrokIdentityPin::Personal);
+    restored.use_console = false;
+    restored.stay_supergrok = true;
+    let _ = save_limits_pins(&restored);
+    clear_personal_included_token_pending();
+    true
 }
 
 /// Included percent and SuperGrok dollar cents for the identity pin.
@@ -3026,6 +3085,70 @@ preferred_method = "api_key"
             fs::read_to_string(home.path().join("config.toml")).expect("config stays"),
             config_text
         );
+    }
+
+    /// Personal included pin, `use_console` false. The first apply finds no
+    /// personal candidate and leaves the business key. A login then stores
+    /// `personal-access-token`. Reapplying the pin in this process sets the
+    /// sampler key to that token. A credits poll is not this switch.
+    #[test]
+    #[serial_test::serial]
+    fn personal_pin_sets_the_sampler_api_key_to_the_personal_token() {
+        const BUSINESS: &str = "business-access-token";
+        const PERSONAL: &str = "personal-access-token";
+
+        let home = TempDir::new().expect("temp grok home");
+        let _env = EnvGuard::set("GROK_HOME", home.path());
+        let _xai = EnvGuard::unset("XAI_API_KEY");
+        let _legacy = EnvGuard::unset("GROK_CODE_XAI_API_KEY");
+
+        let base = "https://auth.x.ai::personal-pin-sampler-switch";
+        let mut map = std::collections::BTreeMap::new();
+        store_live_oidc_session(&mut map, base, BUSINESS, "u-business-pin-switch", true);
+        fs::write(
+            home.path().join("auth.json"),
+            serde_json::to_vec_pretty(&map).expect("auth.json"),
+        )
+        .expect("write auth.json");
+        save_limits_pins(&LimitsPins {
+            stay_supergrok: true,
+            use_console: false,
+            meter_source: Some(MeterSource::Included),
+            supergrok_identity: Some(SupergrokIdentityPin::Personal),
+        })
+        .expect("personal included pin");
+
+        let mut config = dual_auth_sampler(BUSINESS, "console-not-this-request");
+        config.api_key = Some(BUSINESS.into());
+        config.session_identity_key = Some(BUSINESS.into());
+        config.failover_api_keys = vec!["console-not-this-request".into()];
+        config.bearer_resolver = None;
+        apply_limits_pins_to_sampler_config(&mut config);
+        assert_eq!(
+            config.api_key.as_deref(),
+            Some(BUSINESS),
+            "no personal candidate yet, so the sampler key stays the business token"
+        );
+
+        store_live_oidc_session(&mut map, base, PERSONAL, "u-personal-pin-switch", false);
+        fs::write(
+            home.path().join("auth.json"),
+            serde_json::to_vec_pretty(&map).expect("login writes the personal token"),
+        )
+        .expect("rewrite auth.json");
+        apply_limits_pins_to_sampler_config(&mut config);
+
+        assert_eq!(
+            config.api_key.as_deref(),
+            Some(PERSONAL),
+            "the personal included pin sets the sampler key to the personal token"
+        );
+        assert_ne!(
+            config.api_key.as_deref(),
+            Some(BUSINESS),
+            "the business token is not the sampler key"
+        );
+        assert!(!load_limits_pins().use_console);
     }
 
     /// Use business limits loads the stored Team session and sets included

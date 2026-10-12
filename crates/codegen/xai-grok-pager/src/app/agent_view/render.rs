@@ -1226,6 +1226,7 @@ impl AgentView {
             }
         });
         let effective_plan = self.plan_mode_pending.unwrap_or(self.plan_mode_active);
+        self.show_active_resolved_plan_file_if_hidden();
         let casual_commenting = self.is_casual_commenting();
         let mode_accent = if effective_plan || casual_commenting {
             Some(theme.accent_plan)
@@ -6046,6 +6047,56 @@ mod plan_approval_draw_contract_tests {
         assert!(plan.comment_button_area.is_some());
         assert!(plan.send_button_area.is_some());
         assert!(plan.abandon_button_area.is_some());
+    }
+
+    /// Active plan mode with a resolved decision still shows the plan file,
+    /// the plan input, and one "Grok Build" title. Opening the pane by hand
+    /// is not this screen.
+    #[serial_test::serial(GROK_HOME)]
+    #[test]
+    fn active_plan_mode_shows_the_plan_file_the_input_and_one_grok_build_title() {
+        let home = std::env::temp_dir().join(format!(
+            "grok-plan-pane-empty-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&home).expect("temp GROK_HOME");
+        let prev = std::env::var("GROK_HOME").ok();
+        struct RestoreGrokHome(Option<String>);
+        impl Drop for RestoreGrokHome {
+            fn drop(&mut self) {
+                match &self.0 {
+                    Some(value) => unsafe { std::env::set_var("GROK_HOME", value) },
+                    None => unsafe { std::env::remove_var("GROK_HOME") },
+                }
+            }
+        }
+        let _restore = RestoreGrokHome(prev);
+        // Test-only home. Do not read or write the live plan.md.
+        unsafe { std::env::set_var("GROK_HOME", &home) };
+
+        let mut agent = make_agent();
+        agent.plan_mode_active = true;
+        agent.plan_decision_resolved = true;
+        agent.plan_approved_implement = false;
+        agent.plan_approval_view = None;
+        agent.line_viewer = None;
+        agent.display_name = Some("Grok Build".into());
+        agent.latest_inline_plan_content = Some("pane-sentinel-plan-body".into());
+
+        let text = render_text(&mut agent, false);
+        assert!(
+            text.contains("pane-sentinel-plan-body"),
+            "active plan mode must show the plan file text:\n{text}"
+        );
+        assert!(
+            agent.pane_areas.prompt.width > 4 && agent.pane_areas.prompt.height > 2,
+            "plan input must be on screen; prompt={:?}",
+            agent.pane_areas.prompt
+        );
+        assert!(
+            text.contains("Grok Build") && !text.contains("Grok Grok"),
+            "title must contain Grok Build once and must not contain Grok Grok:\n{text}"
+        );
     }
 
     /// Local idle park (`/view-plan` and other idle parks) first-paints

@@ -1100,6 +1100,28 @@ impl AgentView {
         self.show_plan_preview_after_decision(false);
     }
 
+    /// Draw does not open the plan pane by itself. A resolved decision used
+    /// to return before any open, so active plan mode painted an empty
+    /// screen. Open the file when it is still hidden. Do not clear
+    /// `plan_decision_resolved`, do not set `plan_approved_implement`, and
+    /// do not arm a Plan ready waiter (`park_local_idle_plan_decision_if_needed`
+    /// already returns when the decision is resolved).
+    pub(crate) fn show_active_resolved_plan_file_if_hidden(&mut self) {
+        let mode_on = self.plan_mode_pending.unwrap_or(self.plan_mode_active);
+        if !mode_on
+            || !self.plan_decision_resolved
+            || self.plan_approved_implement
+            || self.plan_feedback_in_flight.is_some()
+            || self.session.state.is_turn_running()
+            || self.is_post_turn_build_starting()
+            || self.line_viewer.is_some()
+            || self.plan_body_for_preview().is_none()
+        {
+            return;
+        }
+        self.show_plan_preview();
+    }
+
     /// `reopen_after_decision` is `/view-plan` after Approve or Exit.
     /// Any other open stays shut only after Approve starts implement, and
     /// while a post-turn build is still waiting on the worker, so the side
