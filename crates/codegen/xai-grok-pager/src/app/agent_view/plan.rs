@@ -474,6 +474,7 @@ impl AgentView {
     /// and after Revise/Clarify in-flight.
     pub(crate) fn clear_plan_loop_flags_for_new_present(&mut self) {
         self.plan_decision_resolved = false;
+        self.operator_closed_plan_pane = false;
         self.plan_approved_implement = false;
         self.plan_feedback_in_flight = None;
         self.isolated_preview_rewrite_wait_prompt = None;
@@ -608,6 +609,7 @@ impl AgentView {
     /// Reopens a parked review, including a live `exit_plan_mode` waiter.
     /// With no park, falls through to the saved preview.
     pub(crate) fn open_plan_from_view_plan_or_status(&mut self) {
+        self.operator_closed_plan_pane = false;
         self.clear_leftover_view_plan_slash_palette();
         self.view_plan_requested = true;
         self.snapshot_or_clear_plan_feedback_draft();
@@ -1107,6 +1109,9 @@ impl AgentView {
     /// do not arm a Plan ready waiter (`park_local_idle_plan_decision_if_needed`
     /// already returns when the decision is resolved).
     pub(crate) fn show_active_resolved_plan_file_if_hidden(&mut self) {
+        if self.operator_closed_plan_pane {
+            return;
+        }
         let mode_on = self.plan_mode_pending.unwrap_or(self.plan_mode_active);
         if !mode_on
             || !self.plan_decision_resolved
@@ -1618,6 +1623,7 @@ impl AgentView {
     }
 
     pub(crate) fn abandon_plan(&mut self) -> InputOutcome {
+        self.operator_closed_plan_pane = true;
         let Some(pav) = self.plan_approval_view.as_ref() else {
             // Exit after a dead park: the pane can still be covering with no
             // waiter. Leave it. Empty Enter never Approves.
@@ -1950,6 +1956,7 @@ impl AgentView {
     }
 
     pub(crate) fn reopen_plan_approval(&mut self) {
+        self.operator_closed_plan_pane = false;
         // Composer text typed while the plan pane was closed is the next
         // user prompt. Do not snapshot it as plan review notes.
         if self.line_viewer.is_some() {

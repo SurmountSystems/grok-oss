@@ -959,6 +959,7 @@ impl AgentView {
             session_mode: xai_grok_tools::types::SessionMode::Default,
             session_mode_pending: None,
             plan_decision_resolved: false,
+            operator_closed_plan_pane: false,
             plan_approved_implement: false,
             paste_chip_approval_not_wire_interject: false,
             plan_feedback_in_flight: None,

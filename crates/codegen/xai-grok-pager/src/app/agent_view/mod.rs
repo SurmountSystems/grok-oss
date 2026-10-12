@@ -1408,6 +1408,10 @@ pub struct AgentView {
     /// active and turn-end re-arms Approve for a plan the operator already
     /// decided.
     pub(crate) plan_decision_resolved: bool,
+    /// The Operator closed this plan pane (Escape, the close control, Exit,
+    /// or Ctrl-C). Draw must not open the file again on the next frame.
+    /// A new plan present or an explicit `/view-plan` clears it.
+    pub(crate) operator_closed_plan_pane: bool,
     /// True only after Approve starts implement. That path keeps the side
     /// panel shut. Plan Exit and abandon leave this false so a leftover
     /// covering can reopen view-only and `/plan` can dock covering exclusive

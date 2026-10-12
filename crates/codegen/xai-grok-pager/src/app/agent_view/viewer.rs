@@ -828,18 +828,37 @@ impl AgentView {
             }
             return InputOutcome::Changed;
         }
-        // Two-stage Ctrl+C on every Isolated Preview prompt: first press
-        // with a draft clears; empty second press Exits / abandons. Do not
-        // map first Ctrl+C to leftover close.
+        // Ctrl-C matches the composer outside the pane. A draft clears
+        // first and the pane stays. An empty chord on a running turn
+        // cancels that turn. An empty chord on a live plan approval
+        // still abandons. An empty chord on the idle file pane closes
+        // it and returns Unchanged so the app can arm quit.
         if key!('c', CONTROL).matches(key) {
-            return self.handle_plan_feedback_key(key);
+            let draft = !self.prompt.text().is_empty() || !self.prompt.images.is_empty();
+            if draft {
+                return self.handle_plan_feedback_key(key);
+            }
+            if self.stoppable_activity_running() {
+                if self.plan_approval_view.is_none() && self.is_plan_viewer() {
+                    self.cancel_line_viewer();
+                }
+                self.cancel_trigger_hint = Some(crate::app::actions::CancelTrigger::CtrlC);
+                return InputOutcome::Action(crate::app::actions::Action::CancelTurn);
+            }
+            if self.plan_approval_view.is_some() {
+                return self.handle_plan_feedback_key(key);
+            }
+            if self.is_plan_viewer() {
+                self.cancel_line_viewer();
+            }
+            return InputOutcome::Unchanged;
         }
         if key!(Esc).matches(key) || key!('q').matches(key) {
             if in_plan_approval {
                 return InputOutcome::Changed;
             }
-            // In the plan viewer, Esc first clears visual selection / search before closing
-            // q and Ctrl-C always close immediately
+            // In the plan viewer, Esc first clears visual selection / search before closing.
+            // q closes immediately. Ctrl-C is handled above.
             if key!(Esc).matches(key)
                 && let Some(ref mut viewer) = self.line_viewer
             {
@@ -907,6 +926,7 @@ impl AgentView {
 
     /// Cancel line viewer: revert all changes.
     pub(crate) fn cancel_line_viewer(&mut self) {
+        let closing_plan = self.is_plan_viewer();
         self.line_viewer = None;
         self.view_plan_requested = false;
         self.persist_session_plan_dock_open(false);
@@ -916,6 +936,13 @@ impl AgentView {
                 sid.0.as_ref(),
                 false,
             );
+        }
+        if closing_plan {
+            self.operator_closed_plan_pane = true;
+            if self.plan_approval_view.is_none() {
+                self.plan_mode_active = false;
+                self.plan_mode_pending = Some(false);
+            }
         }
         if self.plan_approval_view.is_some() {
             // Keep Revise / Comment box text. `cancel_undo_group` reverts the

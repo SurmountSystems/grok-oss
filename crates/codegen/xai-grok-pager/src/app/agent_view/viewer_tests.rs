@@ -2790,3 +2790,166 @@ fn isolated_preview_handle_input_n_jumps_hits_after_search() {
         agent.prompt.text()
     );
 }
+
+/// While the plan pane is open, Approve approves, Exit and Escape leave
+/// plan mode, the close control leaves plan mode, Ctrl-C is not eaten,
+/// and composer input works after close.
+///
+/// The pane body is already on screen. Draw must not open that file again
+/// after the Operator dismisses it.
+#[test]
+fn while_the_plan_pane_is_open_approve_exit_escape_close_and_ctrl_c_release_the_composer() {
+    let registry = ActionRegistry::defaults();
+
+    let mut escape = open_stuck_resolved_plan_pane();
+    let _ = escape.handle_input(
+        &Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+        &registry,
+    );
+    escape.show_active_resolved_plan_file_if_hidden();
+    assert!(
+        escape.line_viewer.is_none(),
+        "Escape leaves plan mode: the pane stays closed"
+    );
+    assert!(
+        !escape.plan_mode_active && escape.plan_mode_pending == Some(false),
+        "Escape leaves plan mode"
+    );
+    let _ = escape.handle_input(
+        &Event::Key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE)),
+        &registry,
+    );
+    assert!(
+        escape.prompt.text().contains('h'),
+        "composer input works after close, got {:?}",
+        escape.prompt.text()
+    );
+
+    let mut close = open_stuck_resolved_plan_pane();
+    plant_plan_pane_hits(&mut close);
+    let _ = close.handle_input(
+        &mouse(MouseEventKind::Down(MouseButton::Left), 70, 0),
+        &registry,
+    );
+    close.show_active_resolved_plan_file_if_hidden();
+    assert!(
+        close.line_viewer.is_none(),
+        "the close control leaves plan mode: the pane stays closed"
+    );
+    assert!(
+        !close.plan_mode_active,
+        "the close control leaves plan mode"
+    );
+
+    let mut exit = open_stuck_resolved_plan_pane();
+    plant_plan_pane_hits(&mut exit);
+    let _ = exit.handle_input(
+        &mouse(MouseEventKind::Down(MouseButton::Left), 40, 8),
+        &registry,
+    );
+    exit.show_active_resolved_plan_file_if_hidden();
+    assert!(
+        exit.line_viewer.is_none(),
+        "Exit leaves plan mode: the pane stays closed"
+    );
+    assert!(!exit.plan_mode_active, "Exit leaves plan mode");
+
+    let mut approve = open_stuck_resolved_plan_pane();
+    plant_plan_pane_hits(&mut approve);
+    let approved = approve.handle_input(
+        &mouse(MouseEventKind::Down(MouseButton::Left), 10, 8),
+        &registry,
+    );
+    match approved {
+        InputOutcome::Action(Action::SendPrompt(text)) => {
+            assert!(
+                text.contains("The user approved the plan. Implement the plan in plan.md."),
+                "Approve approves the plan, got {text:?}"
+            );
+        }
+        other => panic!("Approve approves the plan, not a no-op, got {other:?}"),
+    }
+    assert!(
+        approve.plan_approved_implement,
+        "Approve is the real plan CTA"
+    );
+    approve.show_active_resolved_plan_file_if_hidden();
+    assert!(
+        approve.line_viewer.is_none(),
+        "Approve closes the pane and draw must not reopen it"
+    );
+
+    let mut ctrl_c = open_stuck_resolved_plan_pane();
+    let idle = ctrl_c.handle_input(
+        &Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+        &registry,
+    );
+    assert!(
+        matches!(idle, InputOutcome::Unchanged),
+        "Ctrl-C is not eaten by the plan pane, got {idle:?}"
+    );
+    ctrl_c.show_active_resolved_plan_file_if_hidden();
+    assert!(
+        ctrl_c.line_viewer.is_none(),
+        "Ctrl-C must not leave the pane locked"
+    );
+
+    let mut running = open_stuck_resolved_plan_pane();
+    running.session.state = AgentState::TurnRunning;
+    let cancel = running.handle_input(
+        &Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+        &registry,
+    );
+    assert!(
+        matches!(cancel, InputOutcome::Action(Action::CancelTurn)),
+        "Ctrl-C still cancels a running turn, got {cancel:?}"
+    );
+
+    let mut comment = open_stuck_resolved_plan_pane();
+    plant_plan_pane_hits(&mut comment);
+    let _ = comment.handle_input(
+        &mouse(MouseEventKind::Down(MouseButton::Left), 20, 8),
+        &registry,
+    );
+    assert!(!comment.plan_approved_implement, "Comment must not Approve");
+    assert!(
+        comment.line_viewer.is_some(),
+        "Comment stays on the plan pane"
+    );
+
+    let mut revise = open_stuck_resolved_plan_pane();
+    plant_plan_pane_hits(&mut revise);
+    let _ = revise.handle_input(
+        &mouse(MouseEventKind::Down(MouseButton::Left), 30, 8),
+        &registry,
+    );
+    assert!(!revise.plan_approved_implement, "Revise must not Approve");
+}
+
+fn open_stuck_resolved_plan_pane() -> AgentView {
+    let mut agent = make_agent();
+    agent.plan_mode_active = true;
+    agent.plan_decision_resolved = true;
+    agent.plan_approved_implement = false;
+    agent.plan_approval_view = None;
+    agent.operator_closed_plan_pane = false;
+    agent.latest_inline_plan_content =
+        Some("Plan: Use personal included limits when selected\n".into());
+    agent.show_active_resolved_plan_file_if_hidden();
+    assert!(
+        agent.line_viewer.is_some(),
+        "the plan file is on screen before dismiss"
+    );
+    agent
+}
+
+fn plant_plan_pane_hits(agent: &mut AgentView) {
+    let viewer = agent.line_viewer.as_mut().expect("plan pane");
+    viewer.close_button_area = Some(Rect::new(70, 0, 3, 1));
+    viewer.last_modal_area = Some(Rect::new(0, 0, 80, 12));
+    let plan = viewer.plan_mut();
+    plan.approve_button_area = Some(Rect::new(10, 8, 8, 1));
+    plan.comment_button_area = Some(Rect::new(20, 8, 8, 1));
+    plan.send_button_area = Some(Rect::new(30, 8, 8, 1));
+    plan.abandon_button_area = Some(Rect::new(40, 8, 6, 1));
+}
