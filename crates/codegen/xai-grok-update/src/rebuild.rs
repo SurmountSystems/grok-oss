@@ -1608,7 +1608,7 @@ pub fn exec_installed_binary_for_peer_rebuild() -> bool {
     {
         use std::os::unix::process::CommandExt;
         let _err = cmd.exec();
-        return false;
+        false
     }
     #[cfg(not(unix))]
     {

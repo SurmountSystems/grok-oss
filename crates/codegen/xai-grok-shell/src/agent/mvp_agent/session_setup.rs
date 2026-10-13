@@ -1911,6 +1911,20 @@ impl MvpAgent {
                 })),
             );
             persisted_model
+        } else if let Some(reason) =
+            crate::agent::remote_config::refused_grok_4_7_substitution(persisted_model.0.as_ref())
+        {
+            tracing::warn!(
+                session_id = %session_id.0,
+                previous = %persisted_model.0,
+                "Persisted grok-4.7 is not in the catalog; refusing substitution"
+            );
+            let empty_id = acp::ModelId::new(String::new());
+            self.send_model_auto_switched(session_id, &persisted_model, &empty_id, &reason)
+                .await;
+            self.session_registry
+                .set_unavailable_model(session_id, persisted_model.clone());
+            persisted_model
         } else if let Some(fallback) = same_family_fallback {
             tracing::warn!(
                 session_id = %session_id.0,

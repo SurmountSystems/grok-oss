@@ -156,7 +156,7 @@ impl AgentView {
 
     /// A painted specialist count on the L1 list opens that running L3.
     /// Esc or q returns to the L2. This does not send KillSubagent.
-    pub(super) fn open_running_l3_from_list(&mut self, l2_sid: &str) -> bool {
+    pub(crate) fn open_running_l3_from_list(&mut self, l2_sid: &str) -> bool {
         if !self.subagent_views.contains_key(l2_sid) {
             return false;
         }

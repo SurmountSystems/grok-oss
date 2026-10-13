@@ -862,6 +862,11 @@ async fn run_shell_child_body(
                 .values()
                 .any(|e| e.info().has_model_id(model_str));
         if model_unknown {
+            if let Some(reason) =
+                crate::agent::remote_config::refused_grok_4_7_substitution(model_str)
+            {
+                return child_run_output(failure_result(&request, &reason), completion_data, None);
+            }
             let (parent_config, parent_mid) = read_parent_sampling_config(&ctx).await;
             tracing::warn!(
                 subagent_id = %request.id,

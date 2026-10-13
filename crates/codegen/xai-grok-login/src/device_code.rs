@@ -548,6 +548,95 @@ pub mod tests {
         assert!(auth_manager.current().is_some());
     }
 
+    /// grok-oss login authorizes a second account and keeps the first.
+    /// A business login keeps the personal login. A personal login keeps the business login.
+    #[tokio::test]
+    async fn grok_oss_login_authorizes_a_second_account_and_keeps_the_first() {
+        let owed = "grok-oss login authorizes a second account and keeps the first. A business login keeps the personal login. A personal login keeps the business login.";
+        let personal_email = "first-personal@example.test";
+        let temp_dir = tempfile::tempdir().unwrap();
+        let grok_home = temp_dir.path().join(".grok");
+        std::fs::create_dir_all(&grok_home).unwrap();
+        let auth_manager = auth_manager_with_grok_home(&grok_home, "http://127.0.0.1:9");
+        let scope = crate::GrokComConfig::default().auth_scope();
+        let mut map = crate::model::AuthStore::new();
+        map.insert(
+            scope,
+            crate::GrokAuth {
+                key: "personal-session-do-not-print".into(),
+                auth_mode: AuthMode::Oidc,
+                user_id: "first-personal".into(),
+                email: Some(personal_email.into()),
+                principal_type: Some("User".into()),
+                expires_at: Some(chrono::Utc::now() + chrono::Duration::days(1)),
+                ..crate::GrokAuth::default()
+            },
+        );
+        let auth_path = grok_home.join("auth.json");
+        crate::storage::write_auth_json(&auth_path, &map).unwrap();
+
+        auth_manager
+            .keep_other_identity_then_clear_active_base()
+            .expect("reauth keeps the stored personal login");
+        let kept = crate::storage::read_auth_json(&auth_path).expect("auth store");
+        assert!(
+            kept.iter().any(|(key, auth)| {
+                key.ends_with("::personal") && auth.email.as_deref() == Some(personal_email)
+            }),
+            "{owed} clearing the active base before device login keeps the personal login"
+        );
+
+        build_auth(
+            &team_access_token("team-kept"),
+            "http://localhost:22255",
+            "client-id",
+            &auth_manager,
+        )
+        .await
+        .expect("business device login");
+        let after_business = crate::storage::read_auth_json(&auth_path).expect("auth store");
+        assert!(
+            after_business.iter().any(|(key, auth)| {
+                key.ends_with("::personal") && auth.email.as_deref() == Some(personal_email)
+            }),
+            "{owed} a business login keeps the personal login"
+        );
+        assert!(
+            after_business.keys().any(|key| key.contains("::team::")),
+            "{owed} the business login is stored"
+        );
+
+        let personal_tokens = super::TokenOk {
+            access_token: "second-personal-session-do-not-print".into(),
+            refresh_token: Some("second-personal-refresh-do-not-print".into()),
+            expires_in: Some(900),
+            scope: Some("openid email offline_access grok-cli:access".into()),
+            id_token: Some(
+                "eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJzdWIiOiJmaXJzdC1wZXJzb25hbCIsImVtYWlsIjoiZmlyc3QtcGVyc29uYWxAZXhhbXBsZS50ZXN0In0.sig"
+                    .into(),
+            ),
+        };
+        build_auth(
+            &personal_tokens,
+            "http://localhost:22255",
+            "client-id",
+            &auth_manager,
+        )
+        .await
+        .expect("personal device login");
+        let after_personal = crate::storage::read_auth_json(&auth_path).expect("auth store");
+        assert!(
+            after_personal.keys().any(|key| key.contains("::team::")),
+            "{owed} a personal login keeps the business login"
+        );
+        assert!(
+            after_personal.iter().any(|(key, auth)| {
+                key.ends_with("::personal") && auth.user_id == "first-personal"
+            }),
+            "{owed} the personal login stays stored"
+        );
+    }
+
     /// jsonwebtoken needs a process-level CryptoProvider; tests that encode JWTs can't rely on another test having installed it first.
     fn ensure_crypto_provider() {
         let _ = jsonwebtoken::crypto::aws_lc::DEFAULT_PROVIDER.install_default();

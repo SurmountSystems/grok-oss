@@ -480,7 +480,7 @@ less than product code and tests. Do not invent long essays or git nags.
    as the speaker label for the operator or the machine. Do not globally
    rename Rust identifiers such as `accent_user` or `UserPrompt` unless a
    user-visible string is attached. Product names grok-oss
-   and Grok 4.6 stay. Host dual-pin: `~/.grok/AGENTS.md` § Prose +
+   and Grok 4.6 stay. A requested grok-4.7 turn does not become grok-4.6, and the Operator-visible sentence names the unavailability instead of claiming a switch. Host dual-pin: `~/.grok/AGENTS.md` § Prose +
    tone.
    **Wait times in minutes (pinned 2026-08-16):** When reporting a wait of a
    minute or more to the operator, write minutes (or hours and leftover

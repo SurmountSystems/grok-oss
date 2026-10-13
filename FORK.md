@@ -441,7 +441,7 @@ identifier that has no matching `fn`.
   `show_spend_ingests_usage_jsonl_and_is_not_empty_default`
   (`xai-grok-pager` `app/dispatch/tests/status.rs`). Schema v1 without ingest
   is a failed land.
-- [x] **Baked default is Grok 4.6 at medium reasoning effort** (fork
+- [x] **Baked default is Grok 4.6 at medium reasoning effort** A requested grok-4.7 turn does not become grok-4.6, and the Operator-visible sentence names the unavailability instead of claiming a switch. (fork
   contract change; enabled by default; `[models].default_reasoning_effort`
   is the operator override). Test:
   `baked_default_is_grok_46_medium_fork_contract`

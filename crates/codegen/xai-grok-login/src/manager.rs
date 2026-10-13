@@ -526,6 +526,30 @@ impl AuthManager {
     pub fn clear(&self) -> std::io::Result<()> {
         self.remove_scope(&self.scope)
     }
+    /// Copy the active base login into its personal or team slot, then remove
+    /// only that base key. The other stored identity stays. Logout does not
+    /// call this.
+    pub(crate) fn keep_other_identity_then_clear_active_base(&self) -> std::io::Result<()> {
+        self.preserve_base_identity_slot()?;
+        self.clear()
+    }
+    fn preserve_base_identity_slot(&self) -> std::io::Result<()> {
+        let Ok(mut map) = read_auth_json(&self.path) else {
+            return Ok(());
+        };
+        let Some(current) = map.get(&self.scope).cloned() else {
+            return Ok(());
+        };
+        if !is_supergrok_session_mode(current.auth_mode) {
+            return Ok(());
+        }
+        let slot = crate::model::multi_slot_scope_for_auth(&self.scope, &current);
+        if map.contains_key(&slot) {
+            return Ok(());
+        }
+        map.insert(slot, current);
+        write_auth_json(&self.path, &map)
+    }
     /// Remove a scope entry from auth.json. When `scope == self.scope`, also drops in-memory auth so a later `auth()` reports `NotLoggedIn`, not stale `invalid_grant`. (The scoped verdict reads inert with no credential.)
     /// When the last scope goes, the file is deleted. Best-effort: takes a non-blocking lock and skips the disk write if another process holds it (the stale entry is cleaned up on next launch).
     pub fn remove_scope(&self, scope: &str) -> std::io::Result<()> {

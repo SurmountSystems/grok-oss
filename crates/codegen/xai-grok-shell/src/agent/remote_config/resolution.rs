@@ -132,6 +132,19 @@ pub(crate) fn selectable_catalog_key_for_persisted(
     resolve_catalog_key(models, id).filter(|key| available.contains_key(key))
 }
 
+/// A requested grok-4.7 id must not be replaced when the catalog omits it.
+/// Other ids return None and keep the same-family path. An explicit grok-4.6
+/// request returns None.
+pub(crate) fn refused_grok_4_7_substitution(persisted: &str) -> Option<String> {
+    if persisted != "grok-4.7" {
+        return None;
+    }
+    Some(
+        "Model \"grok-4.7\" is no longer available for your account. This turn was not switched to \"grok-4.6\"."
+            .to_string(),
+    )
+}
+
 /// Keep a persisted session model that is not in this catalog and is not a
 /// `grok-*` catalog slug. Those custom / seeded ids must not remap to the
 /// default Responses model on `session/load`. Vanished `grok-*` ids still
