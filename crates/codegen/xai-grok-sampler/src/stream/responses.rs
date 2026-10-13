@@ -31,6 +31,15 @@ const INCOMPLETE_REASON_MAX_PROMPT_TOKENS: &str = "max_prompt_tokens";
 /// A server-side time limit cut generation short (xAI extension).
 const INCOMPLETE_REASON_MAX_TIME_LIMIT: &str = "max_time_limit";
 
+/// Wire token for a Responses error code.
+/// The enum has no `Display` and no `as_str`. Serde is the snake_case form `ApiErrorCode::parse` already takes.
+fn response_error_code_wire(code: &rs::ResponseErrorCode) -> String {
+    match serde_json::to_value(code) {
+        Ok(serde_json::Value::String(text)) => text,
+        _ => String::new(),
+    }
+}
+
 /// Returns whether a Responses API event reflects real model progress rather than a liveness-only heartbeat or status transition.
 pub(crate) fn responses_event_has_meaningful_content(event: &rs::ResponseStreamEvent) -> bool {
     use rs::ResponseStreamEvent;
@@ -94,6 +103,8 @@ pub(crate) fn responses_event_has_meaningful_content(event: &rs::ResponseStreamE
         | ResponseStreamEvent::ResponseCodeInterpreterCallCompleted(_)
         | ResponseStreamEvent::ResponseOutputTextAnnotationAdded(_)
         | ResponseStreamEvent::ResponseError(_) => true,
+        // Not a heartbeat. Same residual as the arm above: count it as progress.
+        _ => true,
     }
 }
 
@@ -505,7 +516,7 @@ pub(crate) fn stream_responses_tracked<'a>(
                     let error_message = response
                         .error
                         .as_ref()
-                        .map(|e| format!("{}: {}", e.code, e.message))
+                        .map(|e| format!("{}: {}", response_error_code_wire(&e.code), e.message))
                         .unwrap_or_else(|| "Response failed with unknown error".to_string());
                     let err = SamplingError::Api {
                         status: reqwest::StatusCode::INTERNAL_SERVER_ERROR,
@@ -513,10 +524,11 @@ pub(crate) fn stream_responses_tracked<'a>(
                         model_metadata: None,
                         retry_after_secs: None,
                         should_retry: None,
-                        error_code: response
-                            .error
-                            .as_ref()
-                            .map(|e| xai_grok_sampling_types::ApiErrorCode::parse(&e.code)),
+                        error_code: response.error.as_ref().map(|e| {
+                            xai_grok_sampling_types::ApiErrorCode::parse(&response_error_code_wire(
+                                &e.code,
+                            ))
+                        }),
                     };
                     yield SamplingEvent::Failed {
                         request_id: request_id.clone(),
@@ -881,7 +893,11 @@ mod tests {
             previous_response_id: None,
             prompt: None,
             prompt_cache_key: None,
+            #[allow(deprecated)]
             prompt_cache_retention: None,
+            prompt_cache_options: None,
+            prompt_cache_diagnostics: None,
+            moderation: None,
             reasoning: None,
             safety_identifier: None,
             service_tier: None,
@@ -903,9 +919,10 @@ mod tests {
 
     fn failed_response_with_error(message: &str) -> rs_types::Response {
         let mut r = build_response(rs_types::Status::Failed);
-        r.error = Some(rs_types::ErrorObject {
-            code: "server_error".into(),
+        r.error = Some(rs_types::ResponseError {
+            code: rs_types::ResponseErrorCode::ServerError,
             message: message.into(),
+            misalignment: None,
         });
         r
     }
@@ -947,7 +964,7 @@ mod tests {
             sequence_number: 0,
             output_index: 0,
             item: rs_types::OutputItem::Reasoning(rs_types::ReasoningItem {
-                id: "reasoning_1".into(),
+                id: Some("reasoning_1".to_string()),
                 summary: vec![],
                 content: None,
                 encrypted_content: None,
@@ -1166,6 +1183,9 @@ mod tests {
                 name: "do_thing".into(),
                 id: None,
                 status: None,
+                namespace: None,
+                caller: None,
+                r#async: None,
             },
         )];
         let event =
@@ -1647,6 +1667,9 @@ mod tests {
                 name: name.into(),
                 id: None,
                 status: None,
+                namespace: None,
+                caller: None,
+                r#async: None,
             }),
         })
     }

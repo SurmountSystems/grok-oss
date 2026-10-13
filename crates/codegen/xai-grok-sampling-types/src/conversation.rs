@@ -2836,7 +2836,7 @@ mod tests {
         };
         assert_eq!(f.name, STRUCTURED_OUTPUT_SCHEMA_NAME);
         assert_eq!(f.strict, Some(true));
-        assert_eq!(f.schema, Some(schema.clone()));
+        assert_eq!(f.schema, schema.clone());
 
         // Messages API: json_schema becomes output_config.format
         let msgs_req = build_messages_request(&req);

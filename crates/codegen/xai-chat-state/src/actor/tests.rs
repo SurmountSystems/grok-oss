@@ -4992,7 +4992,7 @@ fn assert_prefix_stable_pair(
 fn reasoning_sibling(id: &str, encrypted: Option<&str>) -> ConversationItem {
     use xai_grok_sampling_types::rs;
     ConversationItem::Reasoning(rs::ReasoningItem {
-        id: id.to_string(),
+        id: Some(id.to_string()),
         summary: vec![rs::SummaryPart::SummaryText(rs::SummaryTextContent {
             text: format!("thinking for {id}"),
         })],
@@ -5570,11 +5570,15 @@ async fn prefix_stable_with_backend_tool_calls() {
         .push_tool_result(ConversationItem::BackendToolCall(BackendToolCallItem {
             kind: BackendToolKind::WebSearch(rs::WebSearchToolCall {
                 id: "ws_capybara".to_string(),
-                status: rs::WebSearchToolCallStatus::Completed,
-                action: rs::WebSearchToolCallAction::Search(rs::WebSearchActionSearch {
-                    query: "capybara facts".to_string(),
-                    sources: Some(vec![]),
-                }),
+                status: rs::WebSearchCallStatus::Completed,
+                action: Some(rs::WebSearchToolCallAction::Search(
+                    #[allow(deprecated)]
+                    rs::WebSearchActionSearch {
+                        query: None,
+                        queries: Some(vec!["capybara facts".to_string()]),
+                        sources: Some(vec![]),
+                    },
+                )),
             }),
         }));
     h.handle

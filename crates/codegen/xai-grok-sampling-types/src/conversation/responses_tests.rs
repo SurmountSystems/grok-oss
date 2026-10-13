@@ -445,7 +445,7 @@ fn test_tool_result_to_responses_api() {
     let Some(rs::InputItem::Item(rs::Item::FunctionCallOutput(fco))) = fco_items.first() else {
         panic!("Expected FunctionCallOutput item: {fco_items:?}");
     };
-    assert_eq!(fco.call_id, "call_1");
+    assert_eq!(fco.call_id, Some("call_1".to_string()));
     let rs::FunctionCallOutput::Text(text) = &fco.output else {
         panic!("Expected Text output");
     };
@@ -491,8 +491,8 @@ fn test_multiple_tool_results_to_responses_api() {
     let [f0, f1] = fco_items.as_slice() else {
         panic!("expected two function call outputs: {fco_items:?}");
     };
-    assert_eq!(f0.call_id, "call_1");
-    assert_eq!(f1.call_id, "call_2");
+    assert_eq!(f0.call_id, Some("call_1".to_string()));
+    assert_eq!(f1.call_id, Some("call_2".to_string()));
 }
 
 #[test]
@@ -1040,7 +1040,7 @@ fn test_btw_cross_api_responses_no_regressions() {
         "completed FunctionCall call_1 must survive; got calls: {function_calls:?}"
     );
     assert!(
-        function_outputs.contains(&"call_1".to_string()),
+        function_outputs.contains(&Some("call_1".to_string())),
         "completed FunctionCallOutput call_1 must survive; got outputs: {function_outputs:?}"
     );
 
@@ -1146,7 +1146,7 @@ fn test_tool_result_with_images_to_responses_api() {
     let [fco] = fco_items.as_slice() else {
         panic!("expected one function call output: {fco_items:?}");
     };
-    assert_eq!(fco.call_id, "call_1");
+    assert_eq!(fco.call_id, Some("call_1".to_string()));
 
     // Should be Content variant, not Text
     let rs::FunctionCallOutput::Content(parts) = &fco.output else {

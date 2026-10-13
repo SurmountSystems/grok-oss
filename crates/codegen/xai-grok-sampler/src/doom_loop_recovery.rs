@@ -428,7 +428,10 @@ impl FailedResponseCapture {
             match item {
                 CapturedItem::Reasoning(reasoning) => {
                     let mut reasoning = *reasoning;
-                    let streamed_text = take_streamed(&mut streamed, &reasoning.id);
+                    let streamed_text = reasoning
+                        .id
+                        .as_deref()
+                        .and_then(|id| take_streamed(&mut streamed, id));
                     fit_reasoning(&mut reasoning, streamed_text, &mut reasoning_budget);
                     if reasoning_has_text(&reasoning) || reasoning.encrypted_content.is_some() {
                         items.push(ConversationItem::Reasoning(reasoning));
@@ -455,9 +458,11 @@ impl FailedResponseCapture {
                 continue;
             }
             items.push(ConversationItem::Reasoning(rs::ReasoningItem {
-                id: item_id,
+                id: Some(item_id),
                 summary: Vec::new(),
-                content: Some(vec![rs::ReasoningTextContent { text }]),
+                content: Some(vec![rs::ReasoningItemContent::ReasoningText(
+                    rs::ReasoningTextContent { text },
+                )]),
                 encrypted_content: None,
                 status: None,
             }));
@@ -502,7 +507,9 @@ fn fit_reasoning(
         .take()
         .unwrap_or_default()
         .into_iter()
-        .map(|part| part.text)
+        .filter_map(|part| match part {
+            rs::ReasoningItemContent::ReasoningText(part) => Some(part.text),
+        })
         .filter(|text| !text.is_empty())
         .collect();
     let content = if typed_content.is_empty() {
@@ -510,12 +517,16 @@ fn fit_reasoning(
     } else {
         typed_content
     };
-    let content: Vec<rs::ReasoningTextContent> = content
+    let content: Vec<rs::ReasoningItemContent> = content
         .into_iter()
-        .map(|text| rs::ReasoningTextContent {
-            text: budget.fit(&text),
+        .map(|text| {
+            rs::ReasoningItemContent::ReasoningText(rs::ReasoningTextContent {
+                text: budget.fit(&text),
+            })
         })
-        .filter(|part| !part.text.is_empty())
+        .filter(|part| match part {
+            rs::ReasoningItemContent::ReasoningText(part) => !part.text.is_empty(),
+        })
         .collect();
     reasoning.content = (!content.is_empty()).then_some(content);
 
@@ -535,11 +546,11 @@ fn fit_reasoning(
 }
 
 fn reasoning_has_text(reasoning: &rs::ReasoningItem) -> bool {
-    reasoning
-        .content
-        .as_ref()
-        .is_some_and(|parts| parts.iter().any(|part| !part.text.is_empty()))
-        || !reasoning.summary.is_empty()
+    reasoning.content.as_ref().is_some_and(|parts| {
+        parts.iter().any(|part| match part {
+            rs::ReasoningItemContent::ReasoningText(part) => !part.text.is_empty(),
+        })
+    }) || !reasoning.summary.is_empty()
 }
 
 pub(crate) fn append_recovery_context(
