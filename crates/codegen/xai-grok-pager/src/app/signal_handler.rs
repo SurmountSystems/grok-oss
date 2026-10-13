@@ -126,9 +126,10 @@ fn spawn_async_signal_task() {
     {
         let mut streams = SignalStreams::install();
         tokio::spawn(async move {
-            // First signal requests the graceful quit; a second forces exit.
+            // First signal requests the graceful quit, or SIGUSR1 arms peer re-exec.
+            // A second signal forces exit.
             let code = streams.next_code().await;
-            request_graceful_or_exit(code);
+            dispatch_first_lifecycle_code(code);
             let code2 = streams.next_code().await;
             shutdown_with_terminal_restore(code2);
         });
@@ -199,6 +200,16 @@ define_recv_optional_windows_signal!(
     recv_optional_ctrl_shutdown,
     tokio::signal::windows::CtrlShutdown
 );
+
+/// First signal: SIGUSR1 arms peer re-exec. SIGINT, SIGTERM, and SIGHUP still quit.
+#[cfg(unix)]
+fn dispatch_first_lifecycle_code(code: i32) {
+    if crate::signal_streams::peer_rebuild_code_arms_reexec(code) {
+        apply_unix_lifecycle_signal(UnixLifecycleSignal::User1);
+    } else {
+        request_graceful_or_exit(code);
+    }
+}
 
 /// Request the event loop's graceful quit when it is registered and the TUI still owns the terminal.
 /// Otherwise hard-exit (agent mode, or a signal after teardown already started).

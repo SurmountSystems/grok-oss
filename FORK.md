@@ -1045,7 +1045,12 @@ Upstream may allow a peer coordinator spawn. Surmount rejects that so an L2 cann
   soft-stop button; mid-sample freeze without cancel. FORK claims plus
   these named tests; not a land class. User-guide `17-sessions`.
 - [x] **`/rebuild` resume is fork-owned**: relaunch must preserve work the
-  same way a network disconnect does. Mid-turn `/rebuild` does not cancel
+  same way a network disconnect does. `/rebuild` gracefully restarts every
+  running grok-oss process, including peers that did not receive the
+  command. Every peer resumes every in-flight task the same way a network
+  interruption resumes it. The relaunch continues that task. A session that
+  has restored its context still continues the task that was in flight.
+  Mid-turn `/rebuild` does not cancel
   the parent; the new TUI adopts the live turn (`runningPromptId`). Unsent
   composer draft (`unsent_prompt_draft`), queued prompts including
   mid-turn interject text (`pending_prompts.json`), plan Operator-box
@@ -1094,6 +1099,9 @@ Upstream may allow a peer coordinator spawn. Surmount rejects that so an L2 cann
   turn is still busy, with no five-second cap. Named drain tests:
   `relaunch_drain_keeps_nested_ids_alive_after_grace_like_disconnect`,
   `relaunch_drain_keeps_parent_turn_until_idle_like_disconnect`.
+  Peer processes claim SIGUSR1 and re-exec onto the new binary. They do
+  not die on that signal and drop the turn. Named test:
+  `rebuild_restarts_every_running_grok_oss_process_and_resumes_in_flight_tasks_like_a_network_interruption`.
   Not a land class. User-guide `04-slash-commands`.
 - [x] **Prompt write-ahead log (`prompt_wal.jsonl`)**: session-local
   append-only file next to `unsent_prompt_draft`. Enter send, mid-turn
@@ -1489,7 +1497,7 @@ User-guide [`06-theming`](crates/codegen/xai-grok-pager/docs/user-guide/06-themi
   (`app/subagent.rs`),
   `l2_row_shows_live_l3_count_not_specialist_names`
   (`views/tasks_pane.rs`).
-  `[clear]` on the Subagents list removes completed rows and leaves a running row (`clear_button_on_the_subagent_list_removes_completed_rows_and_leaves_a_running_row`).
+  `[clear]` on the Subagents list removes completed rows and leaves a running row (`clear_button_on_the_subagent_list_removes_completed_rows_and_leaves_a_running_row`). A left click on the painted control is `clicking_clear_removes_completed_subagent_rows_and_leaves_the_running_row`. Hover from yellow to white is `clear_button_turns_from_yellow_to_white_on_hover`. A left click on `1 specialist` is `clicking_the_specialist_count_opens_that_l3`.
   The Subagents list paints a scrollbar when the rows are taller than the panel, and scrolling reaches every row, including the last one (`subagent_list_scrolls_when_rows_overflow_the_panel`).
 - [x] **Live Subagents list is still-running only; already_exited drops the paused Implementer overlay**: the live Subagents list, header `:: N`, Subagents N, and footer N subagents share one running-only filter (`listed_live_subagents`). Host exit sets `finished = true` the same turn and the timer stops. Kill `already_exited` / `AlreadyFinished` still dismisses the paused Implementer overlay (`finalize_killed_subagent` idles leftover chrome and calls `dismiss_nested_overlay`). Paused closeout is not live. `/rebuild` occupancy restore (`restore_nested_occupancy_from_disk`) must not un-finish or revive a dead host from a snapshot that always has `finished: false`; Occupied rows stay as-is; vacant insert is still-running resume (`retain_still_running_nested_occupancy`). Grok OSS: SpaceXAI list paint does not encode this already_exited overlay closeout. Tests: `kill_already_exited_dismisses_paused_implementer_overlay`, `restore_nested_occupancy_does_not_unfinish_or_revive_dead_host`, `running_count_matches_listed_live_l2_not_l3`, `kill_already_completed_drops_live_list_responding_and_still_running_cue`.
 - [x] **Compacting Subagents row `[↗]` still opens**: Operator `[↗]` must open the L2 window while that row is Compacting, on any painted row including the top and the last. Compact chrome must not swallow the open hit target. `[X]` on a Compacting row still kills. AutoCompactStarted still clears `active_subagent` so compact does not auto-steal the parent TUI. Operator `[↗]` may set `visible_nested_overlay_sid` while AutoCompacting. Keywords: `open_subagent_fullscreen` versus AutoCompactStarted auto-steal. Grok OSS: SpaceXAI auto-compact steal is not this Operator open path. Tests: `click_tasks_open_on_compacting_row_opens_subagent`, `click_tasks_open_on_last_painted_row_opens_subagent`, `click_tasks_kill_on_compacting_row_emits_kill`, `open_subagent_fullscreen_sets_active_while_child_is_auto_compacting`. KEEP `nested_compact_chrome_does_not_steal_parent_fullscreen_overlay`. `nested_compact_chrome_must_not_steal_parent_tui_scroll` is the AutoCompactStarted path (`active_subagent` None).
@@ -2410,9 +2418,10 @@ is not live TUI dogfood. This file does **not** claim a rebuilt interactive
      cancels turns; soft stop only stops queue drain after the current
      turn). Do not invent a media-player freeze metaphor.
    - **CLI `grok-oss rebuild`**: clap-wired (`Command::Rebuild`,
-     `rebuild_subcommand_parses`). Compiles and signals live instances.
-     Does not re-exec this process. TUI `/rebuild` still owns persist
-     plus self re-exec.
+     `rebuild_subcommand_parses`). Compiles and restarts every running
+     grok-oss process. Those peers resume in-flight tasks the same way a
+     network interruption does. This CLI process is not re-execed. TUI
+     `/rebuild` still owns persist plus self re-exec.
    - **`/economic-mode` slash**: pager queues the text only. No
      BuiltinAction. Economic cap at spawn / model switch / header is
      shipped.
@@ -2903,6 +2912,11 @@ that drops them while keeping the seven is still a seam loss):
   windows on the same session both get a signal). SHA-aware fail-does-not-signal
   is not this list. Named tests: `rebuild_signals_each_pid_after_composite_key`,
   `peer_pids_to_signal_excludes_self_dead_and_non_grok` (`xai-grok-update --lib`).
+- `/rebuild` restarts every running grok-oss process and each peer resumes
+  every in-flight task the same way a network interruption does. The peer
+  claims SIGUSR1, re-execs onto the new binary, and continues the task.
+  A restored context still continues that task. Named test:
+  `rebuild_restarts_every_running_grok_oss_process_and_resumes_in_flight_tasks_like_a_network_interruption`.
 - `/rebuild` TUI persist like a network interrupt (fork-owned drafts, queue,
   plan notes, WAL, and nested ids in this TUI). Named tests:
   `handle_rebuild_done_persists_unsent_composer_draft_and_session_load_restores_it`,
@@ -3373,6 +3387,10 @@ cargo test -p xai-grok-shell --lib -- leader_is_older_than_same_semver_git_sha_i
 # Extra: /rebuild signals every live grok-oss PID (SHA-aware is not this list)
 cargo test -p xai-grok-update --lib -- rebuild_signals_each_pid_after_composite_key \
   peer_pids_to_signal_excludes_self_dead_and_non_grok
+
+# Extra: /rebuild restarts every running grok-oss process and resumes in-flight tasks
+cargo test -p xai-grok-pager --lib -- \
+  rebuild_restarts_every_running_grok_oss_process_and_resumes_in_flight_tasks_like_a_network_interruption
 
 # Extra: /rebuild TUI persist like a network interrupt (fork-owned)
 # Leader drain is not that persist path.

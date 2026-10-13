@@ -2732,10 +2732,20 @@ impl AgentView {
             self.hit_queue_close.clear();
         }
         self.dock_stop_button = None;
+        self.dock_clear_rect = None;
+        self.dock_specialist_hits.clear();
         if let Some(dock) = &dock_data
             && layout.dock.height > 0
         {
-            crate::views::dock::render(buf, layout.dock, &theme, dock);
+            let chrome = crate::views::dock::render_with_clear_hover(
+                buf,
+                layout.dock,
+                &theme,
+                dock,
+                self.dock_clear_hovered,
+            );
+            self.dock_clear_rect = chrome.clear_rect;
+            self.dock_specialist_hits = chrome.specialist_hits;
             self.cache_dock_stop_at(layout.dock, dock);
             let queue_body = crate::views::dock::queue_body_rect(layout.dock, dock);
             if queue_body.height > 0 {
@@ -10063,7 +10073,7 @@ mod plan_turn_row_revising_copy_tests {
             if plan_wrap_ends_with_token_fragment(&left, "AlphabetWrapToken") {
                 panic!("AlphabetWrapToken cut at the pane edge on row {y}: {left:?}");
             }
-            if let Some(last) = left.trim_end().split_whitespace().last() {
+            if let Some(last) = left.split_whitespace().last() {
                 assert!(
                     last != "que" && last != "emp" && last != "th",
                     "row {y} left of the pane ends with mid-word fragment {last}: {left:?}"

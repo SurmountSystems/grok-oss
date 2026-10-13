@@ -12,7 +12,7 @@ use crate::app::actions::{Action, Effect};
 use crate::app::app_view::InputOutcome;
 use crate::scrollback::render::ScratchBuffer;
 use crate::views::tasks_pane::TaskEntryId;
-use crossterm::event::{Event, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+use crossterm::event::{Event, KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 fn cell_symbol(buf: &Buffer, x: u16, y: u16) -> String {
@@ -542,6 +542,291 @@ fn clear_button_on_the_subagent_list_removes_completed_rows_and_leaves_a_running
     );
     assert!(agent.subagent_sessions.contains_key("running-job"));
     assert!(agent.subagent_sessions.contains_key("completed-job"));
+
+    crate::views::dock::set_enabled_for_test(true);
+    insert_described_subagent(&mut agent, "dock-completed-job", "dock-completed-job", true);
+    let buf = draw_frame(&mut agent, area);
+    let rows = buffer_text_rows(&buf);
+    let painted = rows.join("\n");
+    assert!(
+        painted.contains("dock-completed-job"),
+        "the dock must show the completed row: {painted}"
+    );
+    assert!(
+        painted.contains("running-job"),
+        "the dock must keep the running row: {painted}"
+    );
+    let (row, column) = rows
+        .iter()
+        .enumerate()
+        .find_map(|(y, text)| text.find("[clear]").map(|x| (y as u16, x as u16)))
+        .expect("dock [clear] painted");
+    assert!(
+        agent
+            .pane_areas
+            .dock
+            .contains(ratatui::layout::Position::new(column, row)),
+        "the painted [clear] cell is on the dock"
+    );
+    let outcome = agent.handle_input(
+        &Event::Mouse(mouse(MouseEventKind::Down(MouseButton::Left), column, row)),
+        &ActionRegistry::defaults(),
+    );
+    assert!(
+        matches!(outcome, InputOutcome::Changed),
+        "clicking the dock [clear] removes completed rows, got {outcome:?}"
+    );
+    assert!(
+        !matches!(outcome, InputOutcome::Action(Action::KillSubagent(_))),
+        "clicking the dock [clear] must not send KillSubagent"
+    );
+    let buf = draw_frame(&mut agent, area);
+    let painted = buffer_text_rows(&buf).join("\n");
+    assert!(
+        !painted.contains("dock-completed-job"),
+        "the dock completed row must leave the list: {painted}"
+    );
+    assert!(
+        painted.contains("running-job"),
+        "the running row must stay on the dock: {painted}"
+    );
+    assert!(agent.subagent_sessions.contains_key("dock-completed-job"));
+    assert!(agent.subagent_sessions.contains_key("running-job"));
+    crate::views::dock::set_enabled_for_test(false);
+}
+
+fn find_phrase(buf: &Buffer, phrase: &str) -> Option<(u16, u16)> {
+    let chars: Vec<char> = phrase.chars().collect();
+    if chars.is_empty() {
+        return None;
+    }
+    let area = *buf.area();
+    for y in area.y..area.bottom() {
+        let mut col = area.x;
+        while col as usize + chars.len() <= area.right() as usize {
+            let matched = chars
+                .iter()
+                .enumerate()
+                .all(|(index, ch)| cell_symbol(buf, col + index as u16, y) == ch.to_string());
+            if matched {
+                return Some((col, y));
+            }
+            col += 1;
+        }
+    }
+    None
+}
+
+fn click_left(agent: &mut AgentView, column: u16, row: u16) -> InputOutcome {
+    agent.handle_input(
+        &Event::Mouse(mouse(MouseEventKind::Down(MouseButton::Left), column, row)),
+        &ActionRegistry::defaults(),
+    )
+}
+
+/// A left click on the painted dock `[clear]` removes completed rows and leaves the running row.
+#[test]
+fn clicking_clear_removes_completed_subagent_rows_and_leaves_the_running_row() {
+    crate::views::dock::set_enabled_for_test(true);
+    let mut agent = make_agent();
+    agent.tasks.toggle_show_done();
+    insert_described_subagent(&mut agent, "running-job", "running-job", false);
+    insert_described_subagent(&mut agent, "completed-job", "completed-job", true);
+    let area = Rect::new(0, 0, 80, 30);
+    let buf = draw_frame(&mut agent, area);
+    let (column, row) = find_phrase(&buf, "[clear]").expect("painted [clear]");
+    assert!(
+        agent
+            .pane_areas
+            .dock
+            .contains(ratatui::layout::Position::new(column, row)),
+        "the click is the painted dock [clear], not a helper"
+    );
+    let outcome = click_left(&mut agent, column, row);
+    assert!(
+        matches!(outcome, InputOutcome::Changed),
+        "clicking [clear] removes completed rows, got {outcome:?}"
+    );
+    assert!(
+        !matches!(outcome, InputOutcome::Action(Action::KillSubagent(_))),
+        "clicking [clear] must not send KillSubagent, got {outcome:?}"
+    );
+    assert!(
+        !agent
+            .pending_effects
+            .iter()
+            .any(|effect| { matches!(effect, Effect::KillSubagent { .. }) }),
+        "clear must not kill"
+    );
+    let buf = draw_frame(&mut agent, area);
+    let painted = buffer_text_rows(&buf).join("\n");
+    assert!(
+        !painted.contains("completed-job"),
+        "the completed row must leave the list: {painted}"
+    );
+    assert!(
+        painted.contains("running-job"),
+        "the running row must stay on the list: {painted}"
+    );
+    assert!(agent.subagent_sessions.contains_key("running-job"));
+    assert!(agent.subagent_sessions.contains_key("completed-job"));
+    crate::views::dock::set_enabled_for_test(false);
+}
+
+/// `[clear]` rests yellow and turns white on hover. It does not become Operator green or magenta.
+#[test]
+fn clear_button_turns_from_yellow_to_white_on_hover() {
+    let _pin = crate::theme::cache::pin_theme();
+    crate::theme::cache::set(crate::theme::ThemeKind::Doge);
+    crate::views::dock::set_enabled_for_test(true);
+    let mut agent = make_agent();
+    agent.tasks.toggle_show_done();
+    insert_described_subagent(&mut agent, "running-job", "running-job", false);
+    insert_described_subagent(&mut agent, "completed-job", "completed-job", true);
+    let area = Rect::new(0, 0, 80, 30);
+    let buf = draw_frame(&mut agent, area);
+    let (column, row) = find_phrase(&buf, "[clear]").expect("painted [clear]");
+    let theme = crate::theme::Theme::current();
+    let rest = buf.cell((column, row)).expect("[clear] cell").fg;
+    assert_eq!(rest, theme.gray);
+    assert_eq!(rest, ratatui::style::Color::Rgb(255, 255, 0));
+    assert_ne!(rest, theme.accent_user);
+    assert_ne!(rest, theme.accent_running);
+    let _ = agent.handle_input(
+        &Event::Mouse(mouse(MouseEventKind::Moved, column, row)),
+        &ActionRegistry::defaults(),
+    );
+    let buf = draw_frame(&mut agent, area);
+    let hovered = buf.cell((column, row)).expect("[clear] cell").fg;
+    assert_eq!(hovered, ratatui::style::Color::Rgb(255, 255, 255));
+    assert_eq!(hovered, theme.text_primary);
+    assert_ne!(hovered, theme.accent_user);
+    assert_ne!(hovered, theme.accent_running);
+    let _ = agent.handle_input(
+        &Event::Mouse(mouse(MouseEventKind::Moved, 0, 0)),
+        &ActionRegistry::defaults(),
+    );
+    let buf = draw_frame(&mut agent, area);
+    let (column, row) = find_phrase(&buf, "[clear]").expect("painted [clear] after hover");
+    let rest = buf.cell((column, row)).expect("[clear] cell").fg;
+    assert_eq!(rest, ratatui::style::Color::Rgb(255, 255, 0));
+    crate::theme::cache::set(crate::theme::ThemeKind::GrokNight);
+    crate::views::dock::set_enabled_for_test(false);
+}
+
+/// A left click on `1 specialist` opens that running L3. Esc or q returns to the L2.
+#[test]
+fn clicking_the_specialist_count_opens_that_l3() {
+    use agent_client_protocol as acp;
+    use std::sync::Arc;
+    const L2: &str = "l2-session";
+    const L3: &str = "l3-session";
+    const LINE: &str = "L3_TRANSCRIPT_FROM_SPECIALIST_COUNT";
+    crate::views::dock::set_enabled_for_test(true);
+    let registry = ActionRegistry::defaults();
+    let mut agent = make_agent();
+    agent.session.session_id = Some(acp::SessionId::new("l1-session"));
+    let mut l2_info = super::test_fixtures::running_subagent_info(L2);
+    l2_info.description = Arc::from("coordinator-row-stays");
+    l2_info.attempt.depth = Some(1);
+    l2_info.attempt.parent_session_id = Some(Arc::from("l1-session"));
+    agent.subagent_sessions.insert(L2.to_owned(), l2_info);
+    agent.insert_subagent_view(
+        L2.to_owned(),
+        Box::new(super::test_fixtures::make_agent()),
+        super::ChildLink::l2_coordinator(acp::SessionId::new("l1-session")),
+    );
+    let mut l3 = super::test_fixtures::make_agent();
+    l3.session.session_id = Some(acp::SessionId::new(L3));
+    l3.scrollback
+        .push_block(crate::scrollback::block::RenderBlock::user_prompt(LINE));
+    let mut l3_info = super::test_fixtures::running_subagent_info(L3);
+    l3_info.attempt.depth = Some(2);
+    l3_info.attempt.parent_session_id = Some(Arc::from(L2));
+    l3_info.description = Arc::from("specialist-name-must-not-be-the-row");
+    agent.subagent_sessions.insert(L3.to_owned(), l3_info);
+    agent.insert_test_child(L3.to_owned(), Box::new(l3));
+    let area = Rect::new(0, 0, 120, 40);
+    let buf = draw_frame(&mut agent, area);
+    let painted = buffer_text_rows(&buf).join("\n");
+    assert!(
+        painted.contains("coordinator-row-stays"),
+        "the L2 row is on the list: {painted}"
+    );
+    assert!(
+        painted.contains("1 specialist"),
+        "the live count is on the L2 row: {painted}"
+    );
+    let (column, row) = find_phrase(&buf, "1 specialist").expect("painted 1 specialist");
+    assert!(
+        agent
+            .pane_areas
+            .dock
+            .contains(ratatui::layout::Position::new(column + 2, row)),
+        "the count click is on the dock"
+    );
+    let outcome = click_left(&mut agent, column + 2, row);
+    assert!(
+        matches!(outcome, InputOutcome::Changed),
+        "clicking the count opens the L3, got {outcome:?}"
+    );
+    assert!(
+        !matches!(outcome, InputOutcome::Action(Action::KillSubagent(_))),
+        "the count click must not send KillSubagent, got {outcome:?}"
+    );
+    assert_eq!(agent.active_subagent.as_deref(), Some(L3));
+    assert_eq!(agent.overlay_return_sid.as_deref(), Some(L2));
+    let buf = draw_frame(&mut agent, area);
+    let painted = buffer_text_rows(&buf).join("\n");
+    assert!(
+        painted.contains(LINE),
+        "the open L3 view must show its transcript: {painted}"
+    );
+    assert_eq!(
+        crate::app::subagent::live_l3_count(agent.subagent_sessions.values(), L2),
+        1
+    );
+    assert_eq!(
+        crate::app::subagent::format_live_l3_count(1).as_deref(),
+        Some("1 specialist")
+    );
+    assert!(agent.subagent_sessions.contains_key(L2));
+    let back = agent.handle_input(&super::test_fixtures::key(KeyCode::Char('q')), &registry);
+    assert!(
+        !matches!(back, InputOutcome::Action(Action::KillSubagent(_))),
+        "q from the L3 must not send KillSubagent, got {back:?}"
+    );
+    assert_eq!(agent.active_subagent.as_deref(), Some(L2));
+    let back = agent.handle_input(&super::test_fixtures::key(KeyCode::Esc), &registry);
+    assert!(
+        !matches!(back, InputOutcome::Action(Action::KillSubagent(_))),
+        "{back:?}"
+    );
+    assert!(agent.active_subagent.is_none());
+    let buf = draw_frame(&mut agent, area);
+    let painted = buffer_text_rows(&buf).join("\n");
+    assert!(
+        painted.contains("coordinator-row-stays"),
+        "the L2 row stays: {painted}"
+    );
+    assert!(
+        painted.contains("1 specialist"),
+        "the count stays: {painted}"
+    );
+    let (column, row) = find_phrase(&buf, "1 specialist").expect("painted 1 specialist");
+    let outcome = click_left(&mut agent, column + 2, row);
+    assert_eq!(agent.active_subagent.as_deref(), Some(L3));
+    assert!(
+        !matches!(outcome, InputOutcome::Action(Action::KillSubagent(_))),
+        "{outcome:?}"
+    );
+    let back = agent.handle_input(&super::test_fixtures::key(KeyCode::Esc), &registry);
+    assert!(
+        !matches!(back, InputOutcome::Action(Action::KillSubagent(_))),
+        "Esc from the L3 must not send KillSubagent, got {back:?}"
+    );
+    assert_eq!(agent.active_subagent.as_deref(), Some(L2));
+    crate::views::dock::set_enabled_for_test(false);
 }
 
 /// The Subagents list paints a scrollbar when the rows are taller than the panel.

@@ -902,6 +902,11 @@ pub struct AgentView {
     /// Hover is independent of dock keyboard focus.
     pub dock_hovered: Option<crate::views::dock::DockItem>,
     pub dock_stop_button: Option<CachedDockStop>,
+    /// Painted `[clear]` from the last dock frame. The click uses this rect.
+    pub dock_clear_rect: Option<Rect>,
+    pub dock_clear_hovered: bool,
+    /// Painted `N specialist` spans, each with the L2 child session id.
+    pub dock_specialist_hits: Vec<(Rect, String)>,
     /// Sticky: render enforces the queue overlay's visibility from this each
     /// frame, so the queue's auto-show can't re-open a manual collapse.
     pub dock_queued_expanded: bool,

@@ -333,6 +333,7 @@ impl AgentView {
                         killable: run.can_stop(),
                         openable: true,
                         spinning: run.is_active(),
+                        list_session_id: None,
                     },
                 )
             })
@@ -412,6 +413,7 @@ impl AgentView {
                         killable: running && !info.attempt.pending_kill,
                         openable: true,
                         spinning: running,
+                        list_session_id: Some(info.child_session_id.to_string()),
                     },
                 )
             })
@@ -466,6 +468,7 @@ impl AgentView {
                         killable: !t.pending_kill,
                         openable: true,
                         spinning: true,
+                        list_session_id: None,
                     },
                 )
             })
@@ -499,6 +502,7 @@ impl AgentView {
                         killable: !t.pending_kill,
                         openable: true,
                         spinning: true,
+                        list_session_id: None,
                     },
                 )
             })
@@ -527,6 +531,7 @@ impl AgentView {
                         })
                     }),
                     spinning: false,
+                    list_session_id: None,
                 },
             )
         }));

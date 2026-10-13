@@ -154,6 +154,32 @@ impl AgentView {
         true
     }
 
+    /// A painted specialist count on the L1 list opens that running L3.
+    /// Esc or q returns to the L2. This does not send KillSubagent.
+    pub(super) fn open_running_l3_from_list(&mut self, l2_sid: &str) -> bool {
+        if !self.subagent_views.contains_key(l2_sid) {
+            return false;
+        }
+        let mut running: Vec<String> = self
+            .subagent_sessions
+            .iter()
+            .filter(|(id, info)| {
+                info.is_running()
+                    && info.attempt.workflow_run_id.is_none()
+                    && info.attempt.parent_session_id.as_deref() == Some(l2_sid)
+                    && self.subagent_views.contains_key(id.as_str())
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        running.sort();
+        let Some(target) = running.into_iter().next() else {
+            return false;
+        };
+        self.overlay_return_sid = Some(l2_sid.to_string());
+        self.active_subagent = Some(target);
+        true
+    }
+
     /// Floor Enter sends to that L2. Missing session id does not target L1.
     fn l2_floor_send_interject(&mut self, l2_sid: &str, text: String) -> bool {
         let trimmed = text.trim().to_string();

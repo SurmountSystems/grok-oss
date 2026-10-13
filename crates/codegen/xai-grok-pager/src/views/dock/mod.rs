@@ -74,6 +74,8 @@ pub struct DockRow {
     /// Active work (subagents, background commands, monitors) animates the
     /// leading dot spinner; scheduled loops keep a static diamond.
     pub spinning: bool,
+    /// L2 child session id when this row's meta can include `N specialist`.
+    pub list_session_id: Option<String>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -256,15 +258,36 @@ pub fn queue_body_rect(area: Rect, data: &DockData) -> Rect {
     }
 }
 
-pub fn render(buf: &mut Buffer, area: Rect, theme: &Theme, data: &DockData) {
+/// Cells painted this frame for `[clear]` and for each `N specialist` count.
+pub struct PaintedDockChrome {
+    pub clear_rect: Option<Rect>,
+    pub specialist_hits: Vec<(Rect, String)>,
+}
+
+pub fn render(buf: &mut Buffer, area: Rect, theme: &Theme, data: &DockData) -> PaintedDockChrome {
+    render_with_clear_hover(buf, area, theme, data, false)
+}
+
+pub fn render_with_clear_hover(
+    buf: &mut Buffer,
+    area: Rect,
+    theme: &Theme,
+    data: &DockData,
+    clear_hovered: bool,
+) -> PaintedDockChrome {
     if area.width == 0 || area.height == 0 {
-        return;
+        return PaintedDockChrome {
+            clear_rect: None,
+            specialist_hits: Vec::new(),
+        };
     }
     let counts = data.counts();
     let layout = DockLayout::with_cap(&counts, area.height as usize);
     let clear_rect = subagent_clear_rect(area, data);
     let bottom = area.bottom();
     let mut y = area.y;
+    let mut painted_clear = None;
+    let mut specialist_hits = Vec::new();
     let action_item = action_item(data, layout.rows());
     let selected_at = |idx: usize| data.focused && idx == data.cursor;
     let highlight = |buf: &mut Buffer, y: u16, selected: bool, hovered: bool| {
@@ -277,7 +300,7 @@ pub fn render(buf: &mut Buffer, area: Rect, theme: &Theme, data: &DockData) {
 
     for (item_index, item) in layout.rows().iter().copied().enumerate() {
         if y >= bottom {
-            return;
+            break;
         }
         match item {
             DockItem::Header(section) => {
@@ -300,12 +323,18 @@ pub fn render(buf: &mut Buffer, area: Rect, theme: &Theme, data: &DockData) {
                     && let Some(rect) = clear_rect
                     && rect.y == y
                 {
+                    let fg = if clear_hovered {
+                        theme.text_primary
+                    } else {
+                        theme.gray
+                    };
                     buf.set_span(
                         rect.x,
                         y,
-                        &Span::styled(CLEAR_LABEL, Style::default().fg(theme.gray)),
+                        &Span::styled(CLEAR_LABEL, Style::default().fg(fg)),
                         rect.width,
                     );
+                    painted_clear = Some(rect);
                 }
             }
             DockItem::Row(section, i) => {
@@ -316,7 +345,7 @@ pub fn render(buf: &mut Buffer, area: Rect, theme: &Theme, data: &DockData) {
                 let Some(row) = data.rows(section).get(i) else {
                     continue;
                 };
-                paint_row(
+                if let Some(hit) = paint_row(
                     buf,
                     area,
                     y,
@@ -326,7 +355,9 @@ pub fn render(buf: &mut Buffer, area: Rect, theme: &Theme, data: &DockData) {
                     kill_hovered,
                     data.spinner_tick,
                     section,
-                );
+                ) {
+                    specialist_hits.push(hit);
+                }
                 highlight(buf, y, selected, hovered);
             }
             DockItem::RevealRemaining(section) => {
@@ -354,6 +385,10 @@ pub fn render(buf: &mut Buffer, area: Rect, theme: &Theme, data: &DockData) {
             }
         }
         y += 1;
+    }
+    PaintedDockChrome {
+        clear_rect: painted_clear,
+        specialist_hits,
     }
 }
 
@@ -397,6 +432,42 @@ fn section_header(
     ])
 }
 
+fn specialist_suffix(meta: &str) -> Option<&str> {
+    let marker = if meta.contains(" specialists") {
+        " specialists"
+    } else if meta.contains(" specialist") {
+        " specialist"
+    } else {
+        return None;
+    };
+    let marker_at = meta.rfind(marker)?;
+    let start = meta[..marker_at]
+        .rfind(char::is_whitespace)
+        .map(|index| index + 1)
+        .unwrap_or(0);
+    let suffix = &meta[start..];
+    suffix
+        .chars()
+        .next()
+        .is_some_and(|ch| ch.is_ascii_digit())
+        .then_some(suffix)
+}
+
+fn specialist_hit(row: &DockRow, meta_x: u16, y: u16) -> Option<(Rect, String)> {
+    let sid = row.list_session_id.clone()?;
+    let suffix = specialist_suffix(&row.meta)?;
+    let start = row.meta.len() - suffix.len();
+    let prefix_w = row.meta[..start].width() as u16;
+    let suffix_w = suffix.width() as u16;
+    if suffix_w == 0 {
+        return None;
+    }
+    Some((
+        Rect::new(meta_x.saturating_add(prefix_w), y, suffix_w, 1),
+        sid,
+    ))
+}
+
 fn paint_row(
     buf: &mut Buffer,
     area: Rect,
@@ -407,7 +478,7 @@ fn paint_row(
     kill_hovered: bool,
     spinner_tick: u64,
     section: Section,
-) {
+) -> Option<(Rect, String)> {
     let accent = Style::default().fg(theme.accent_running);
     let kill_color = if kill_hovered {
         theme.accent_error
@@ -463,7 +534,9 @@ fn paint_row(
         }
     }
     let mut meta_line = Line::from(meta_spans);
+    let mut meta_intact = true;
     if meta_line.width() > area.width as usize {
+        meta_intact = false;
         let kill = section.kill_label();
         meta_line = if show_actions && row.killable && area.width as usize >= kill.width() {
             Line::from(Span::styled(kill, Style::default().fg(kill_color)))
@@ -479,10 +552,15 @@ fn paint_row(
         buf.set_line(area.x, y, &left, left_budget);
     }
 
+    let mut specialist = None;
     if meta_width > 0 && meta_width <= area.width {
         let x = area.x + area.width - meta_width;
         buf.set_line(x, y, &meta_line, meta_width);
+        if meta_intact && section == Section::Subagents {
+            specialist = specialist_hit(row, x, y);
+        }
     }
+    specialist
 }
 
 fn dock_row_is_completed(row: &DockRow) -> bool {
@@ -577,6 +655,7 @@ mod tests {
             killable,
             openable: true,
             spinning: false,
+            list_session_id: None,
         }
     }
 
@@ -592,6 +671,7 @@ mod tests {
                     killable: true,
                     openable: true,
                     spinning: false,
+                    list_session_id: None,
                 },
                 row("Subagent", "fix flaky pty scroll test", "12s", true),
                 row("Subagent", "third", "1s", true),

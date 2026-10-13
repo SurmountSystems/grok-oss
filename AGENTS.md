@@ -258,7 +258,12 @@ less than product code and tests. Do not invent long essays or git nags.
    operator may `/rebuild` while nested agents are running. That is why
    Grok exists: important work must not wait on chrome polish such as a
    sparkler. `/rebuild` must resume interrupted sessions the same way a
-   network interruption does. Do not tell the operator they are blocked
+   network interruption does. `/rebuild` gracefully restarts every
+   running grok-oss process, including peers that did not receive the
+   command. Every peer process resumes every in-flight task the same
+   way that network interruption resumes it. The relaunch continues
+   the in-flight task. A session that has restored its context still
+   continues the task that was in flight. Do not tell the operator they are blocked
    until L2s finish. The operator stages what they intend to build.
    Unstaged work in progress must not be the rebuild source. See
    § *L1 must not rewrite process law* and [`FORK.md`](FORK.md)

@@ -815,6 +815,7 @@ pub struct TasksPane {
     cleared_completed_ids: HashSet<String>,
     /// Hit target for `[clear]` on the Subagents header.
     pub clear_button_rect: Option<Rect>,
+    pub clear_hovered: bool,
     pub hovered_kill: Option<TaskEntryId>,
     pub hovered_view: Option<TaskEntryId>,
     prev_running_count: usize,
@@ -966,6 +967,7 @@ impl TasksPane {
             row_hit_rects: Vec::new(),
             cleared_completed_ids: HashSet::new(),
             clear_button_rect: None,
+            clear_hovered: false,
             hovered_kill: None,
             hovered_view: None,
             prev_running_count: 0,
@@ -1678,12 +1680,12 @@ impl TasksPane {
         }
         let y = area.y + vis_row as u16;
         let x = area.x + area.width - width;
-        buf.set_span(
-            x,
-            y,
-            &Span::styled(label, Style::default().fg(theme.gray)),
-            width,
-        );
+        let fg = if self.clear_hovered {
+            theme.text_primary
+        } else {
+            theme.gray
+        };
+        buf.set_span(x, y, &Span::styled(label, Style::default().fg(fg)), width);
         self.clear_button_rect = Some(Rect::new(x, y, width, 1));
     }
     fn render_workflow_overlay(

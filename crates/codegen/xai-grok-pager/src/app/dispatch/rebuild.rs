@@ -2972,4 +2972,47 @@ mod tests {
             PostRestoreRelaunch::BlockedScreenMode
         );
     }
+
+    #[test]
+    fn rebuild_restarts_every_running_grok_oss_process_and_resumes_in_flight_tasks_like_a_network_interruption()
+     {
+        // `/rebuild` gracefully restarts every running grok-oss process, and every
+        // in-flight task resumes the same way a network interruption resumes it.
+        // The relaunch is not a fresh idle session and it is not a kill that drops the turn.
+        // A session that shows context restored still continues the task that was in flight.
+        use crate::signal_streams::{
+            PEER_REBUILD_SIGNAL_CODE, claimed_lifecycle_signal_names, peer_rebuild_code_arms_reexec,
+        };
+
+        assert!(
+            claimed_lifecycle_signal_names().contains(&"SIGUSR1"),
+            "every running grok-oss process must claim SIGUSR1 so /rebuild restarts it instead of killing it"
+        );
+        assert!(
+            peer_rebuild_code_arms_reexec(PEER_REBUILD_SIGNAL_CODE),
+            "SIGUSR1 must arm peer re-exec onto the new binary"
+        );
+        assert!(
+            !peer_rebuild_code_arms_reexec(130),
+            "SIGINT must quit and must not re-exec peers"
+        );
+        assert!(
+            !xai_grok_shell::leader::leader_exits_after_last_client_disconnect(
+                true, true, false, true, false,
+            ),
+            "a last-client disconnect during an in-flight turn must keep the leader, like a network interruption, so session load can continue the task"
+        );
+        assert!(
+            !xai_grok_shell::leader::leader_exits_after_last_client_disconnect(
+                true, true, false, false, true,
+            ),
+            "an accepted rebuild relaunch must keep the leader until the in-flight task can resume"
+        );
+        assert!(
+            xai_grok_shell::leader::leader_exits_after_last_client_disconnect(
+                true, true, false, false, false,
+            ),
+            "an idle last client still lets the leader shut down"
+        );
+    }
 }

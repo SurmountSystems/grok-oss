@@ -927,6 +927,26 @@ cargo test -p xai-grok-update --lib -- rebuild_signals_each_pid_after_composite_
   peer_pids_to_signal_excludes_self_dead_and_non_grok
 ```
 
+#### `/rebuild` restarts every running grok-oss process and resumes in-flight tasks
+
+Sending SIGUSR1 is not enough when the peer never claims that signal. The
+default action kills the process. `/rebuild` gracefully restarts every
+running grok-oss process, including peers that did not receive the command.
+Each peer claims SIGUSR1, re-execs onto the new binary, and resumes every
+in-flight task the same way a network interruption resumes it. The relaunch
+continues that task. A session that has restored its context still continues
+the task that was in flight. Prompt write-ahead log, unsent composer draft,
+and `pending_prompts.json` stay. Unstaged work is not the rebuild source.
+This test was not executed in the session that added it.
+
+| path::test | Contract |
+|------------|----------|
+| `rebuild_restarts_every_running_grok_oss_process_and_resumes_in_flight_tasks_like_a_network_interruption` | `/rebuild` restarts every running grok-oss process and each in-flight task resumes like a network interruption |
+
+```bash
+cargo test -p xai-grok-pager --lib -- rebuild_restarts_every_running_grok_oss_process_and_resumes_in_flight_tasks_like_a_network_interruption
+```
+
 #### Nucleo reuse-per-root
 
 Per-matcher pool size `NUM_NUCLEO_THREADS = 2` is shipped in code. No `fn`

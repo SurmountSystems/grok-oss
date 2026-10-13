@@ -1536,6 +1536,22 @@ fn spawn_relaunch_drain(
     );
 }
 
+/// Last-client disconnect shuts the leader down only when nothing is in flight.
+/// A live turn or an accepted `RelaunchForUpdate` keeps this process, the same way a network interruption does.
+pub fn leader_exits_after_last_client_disconnect(
+    had_clients: bool,
+    clients_empty: bool,
+    no_exit_on_disconnect: bool,
+    turn_in_flight: bool,
+    relaunch_in_progress: bool,
+) -> bool {
+    clients_empty
+        && had_clients
+        && !no_exit_on_disconnect
+        && !turn_in_flight
+        && !relaunch_in_progress
+}
+
 fn spawn_relaunch_drain_with_grace(
     shutdown_tx: watch::Sender<super::protocol::ShutdownReason>,
     cancel: CancellationToken,
@@ -1813,9 +1829,26 @@ pub async fn run_leader_server(
                         );
                     }
                     debug!(client_id = id.0, "Client removed");
-                    if clients.is_empty() && had_clients && !no_exit_on_disconnect {
+                    let turn_in_flight =
+                        agent_busy.load(Ordering::Relaxed) || agent_activity.is_busy();
+                    let relaunch_in_progress = relaunching.load(Ordering::SeqCst);
+                    if leader_exits_after_last_client_disconnect(
+                        had_clients,
+                        clients.is_empty(),
+                        no_exit_on_disconnect,
+                        turn_in_flight,
+                        relaunch_in_progress,
+                    ) {
                         info!("Leader server shutting down (all clients disconnected)");
                         break;
+                    } else if clients.is_empty()
+                        && had_clients
+                        && !no_exit_on_disconnect
+                        && turn_in_flight
+                    {
+                        info!(
+                            "Leader stays up because a turn is still in flight (same as a network interruption)"
+                        );
                     }
                 }
                 ServerEvent::Message(

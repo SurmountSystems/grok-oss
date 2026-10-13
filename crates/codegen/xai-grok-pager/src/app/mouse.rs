@@ -132,6 +132,29 @@ impl AgentView {
         self.show_toast("Opened the session directory.");
     }
 
+    /// Painted dock `[clear]` and `N specialist`, from the last frame's cells.
+    fn try_painted_dock_chrome_click(&mut self, column: u16, row: u16) -> Option<InputOutcome> {
+        let point = (column, row);
+        if self
+            .dock_clear_rect
+            .is_some_and(|rect| rect.contains(point.into()))
+        {
+            self.clear_completed_subagent_rows();
+            return Some(InputOutcome::Changed);
+        }
+        let sid = self
+            .dock_specialist_hits
+            .iter()
+            .find(|(rect, _)| rect.contains(point.into()))
+            .map(|(_, sid)| sid.clone());
+        if let Some(sid) = sid
+            && self.open_running_l3_from_list(&sid)
+        {
+            return Some(InputOutcome::Changed);
+        }
+        None
+    }
+
     /// Tasks kill and open chrome, before Clear finished, so a misplaced Clear
     /// hit cannot steal subagent open or close.
     fn try_tasks_chrome_click(&mut self, column: u16, row: u16) -> Option<InputOutcome> {
@@ -282,6 +305,9 @@ impl AgentView {
                 // Tasks kill / open chrome first (before Clear finished) so a
                 // mis-placed Clear hit can never steal subagent open/close.
                 if let Some(out) = self.try_tasks_chrome_click(mouse.column, mouse.row) {
+                    return out;
+                }
+                if let Some(out) = self.try_painted_dock_chrome_click(mouse.column, mouse.row) {
                     return out;
                 }
                 // Clear finished: hit when open todo chrome painted it
@@ -1308,6 +1334,22 @@ impl AgentView {
                         changed = true;
                     }
                 } else if self.dock_hovered.take().is_some() {
+                    changed = true;
+                }
+                let pointer = (mouse.column, mouse.row);
+                let dock_clear = self
+                    .dock_clear_rect
+                    .is_some_and(|rect| rect.contains(pointer.into()));
+                let tasks_clear = self
+                    .tasks
+                    .clear_button_rect
+                    .is_some_and(|rect| rect.contains(pointer.into()));
+                if dock_clear != self.dock_clear_hovered {
+                    self.dock_clear_hovered = dock_clear;
+                    changed = true;
+                }
+                if tasks_clear != self.tasks.clear_hovered {
+                    self.tasks.clear_hovered = tasks_clear;
                     changed = true;
                 }
                 changed |= self
