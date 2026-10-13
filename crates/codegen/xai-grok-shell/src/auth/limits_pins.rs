@@ -754,7 +754,7 @@ fn clear_business_bearer_after_rejected_personal_refresh(
         .map(|candidate| candidate.access_token.trim().to_owned())
         .collect();
     let blocked_token = |value: &str| blocked.iter().any(|token| token == value.trim());
-    if config.api_key.as_deref().is_some_and(&blocked_token) {
+    if config.api_key.as_deref().is_some_and(blocked_token) {
         config.api_key = None;
     }
     if config
@@ -2115,7 +2115,7 @@ preferred_method = "api_key"
             },
         );
         fs::write(
-            home.join("auth.json"),
+            home.path().join("auth.json"),
             serde_json::to_vec_pretty(&map).expect("auth.json"),
         )
         .expect("write auth.json");
@@ -2146,7 +2146,8 @@ preferred_method = "api_key"
             "the next request uses the Team session for hunter@surmount.systems"
         );
 
-        let stored = crate::auth::read_auth_json(&home.join("auth.json")).expect("read auth");
+        let stored =
+            crate::auth::read_auth_json(&home.path().join("auth.json")).expect("read auth");
         let personal_scope = format!("{base}::personal");
         let team_scope = format!("{base}::team::team-surmount");
         assert_eq!(

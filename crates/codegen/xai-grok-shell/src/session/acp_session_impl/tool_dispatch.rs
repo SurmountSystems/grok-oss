@@ -399,13 +399,18 @@ mod tests {
     use super::*;
     use xai_grok_sampling_types::rs;
 
-    fn web_search_payload(status: rs::WebSearchToolCallStatus) -> serde_json::Value {
+    fn web_search_payload(status: rs::WebSearchCallStatus) -> serde_json::Value {
         // The exact serialized `web_search_call` payload the sampler forwards on `BackendToolCallCompleted` (via `serde_json::to_value(ws)`)
+        // `WebSearchActionSearch::query` is still a required field. The search text lives in `queries`.
         serde_json::to_value(rs::WebSearchToolCall {
-            action: rs::WebSearchToolCallAction::Search(rs::WebSearchActionSearch {
-                query: "rust async runtime".to_string(),
-                sources: None,
-            }),
+            action: Some(rs::WebSearchToolCallAction::Search(
+                #[allow(deprecated)]
+                rs::WebSearchActionSearch {
+                    query: None,
+                    queries: Some(vec!["rust async runtime".to_string()]),
+                    sources: None,
+                },
+            )),
             id: "ws1".to_string(),
             status,
         })
@@ -417,7 +422,7 @@ mod tests {
     /// Exercises the real payload shape, not a hand-built status.
     #[test]
     fn backend_failed_web_search_maps_to_failed_status() {
-        let failed = web_search_payload(rs::WebSearchToolCallStatus::Failed);
+        let failed = web_search_payload(rs::WebSearchCallStatus::Failed);
         assert_eq!(
             failed
                 .pointer("/status")
@@ -430,7 +435,7 @@ mod tests {
             acp::ToolCallStatus::Failed
         );
 
-        let completed = web_search_payload(rs::WebSearchToolCallStatus::Completed);
+        let completed = web_search_payload(rs::WebSearchCallStatus::Completed);
         assert_eq!(
             backend_tool_call_status(Some(&completed)),
             acp::ToolCallStatus::Completed

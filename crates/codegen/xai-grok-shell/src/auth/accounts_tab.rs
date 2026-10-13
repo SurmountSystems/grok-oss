@@ -59,7 +59,7 @@ pub fn accounts_tab_lines(
     if rows.is_empty() {
         return Vec::new();
     }
-    rows.sort_by(|left, right| left.order.cmp(&right.order));
+    rows.sort_by_key(|left| left.order);
     mark_next_request_row(&mut rows, map, pin, use_console);
     let count = rows.len();
     let mut lines = Vec::with_capacity(count + 2);

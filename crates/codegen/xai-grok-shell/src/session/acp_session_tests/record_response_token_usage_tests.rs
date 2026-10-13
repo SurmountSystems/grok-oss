@@ -57,7 +57,7 @@ async fn response_reasoning_does_not_inflate_model_reported_context() {
             let response = ConversationResponse {
                 items: vec![
                     ConversationItem::Reasoning(rs::ReasoningItem {
-                        id: "reasoning-1".to_string(),
+                        id: Some("reasoning-1".to_string()),
                         summary: vec![],
                         content: None,
                         encrypted_content: Some("r".repeat(984_000)),
@@ -66,13 +66,15 @@ async fn response_reasoning_does_not_inflate_model_reported_context() {
                     ConversationItem::BackendToolCall(BackendToolCallItem {
                         kind: BackendToolKind::WebSearch(rs::WebSearchToolCall {
                             id: "search-1".to_string(),
-                            status: rs::WebSearchToolCallStatus::Completed,
-                            action: rs::WebSearchToolCallAction::Search(
+                            status: rs::WebSearchCallStatus::Completed,
+                            action: Some(rs::WebSearchToolCallAction::Search(
+                                #[allow(deprecated)]
                                 rs::WebSearchActionSearch {
-                                    query: "context accounting".to_string(),
+                                    query: None,
+                                    queries: Some(vec!["context accounting".to_string()]),
                                     sources: Some(vec![]),
                                 },
-                            ),
+                            )),
                         }),
                     }),
                     ConversationItem::assistant("ok"),
@@ -151,7 +153,7 @@ async fn response_without_usage_keeps_model_output_as_estimated_growth() {
             let response = ConversationResponse {
                 items: vec![
                     ConversationItem::Reasoning(rs::ReasoningItem {
-                        id: "reasoning-1".to_string(),
+                        id: Some("reasoning-1".to_string()),
                         summary: vec![],
                         content: None,
                         encrypted_content: Some("r".repeat(4_000)),

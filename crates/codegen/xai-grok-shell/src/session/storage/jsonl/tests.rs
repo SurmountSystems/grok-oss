@@ -1892,7 +1892,7 @@ fn read_chat_history_upgrades_legacy_singular_reasoning_to_sibling() {
     };
     match item {
         ConversationItem::Reasoning(r) => {
-            assert_eq!(r.id, "rs_legacy");
+            assert_eq!(r.id.as_deref(), Some("rs_legacy"));
             assert_eq!(r.encrypted_content.as_deref(), Some("enc-blob"));
             let Some(xai_grok_sampling_types::rs::SummaryPart::SummaryText(s)) = r
                 .summary
@@ -1941,14 +1941,14 @@ fn read_chat_history_upgrades_raw_output_parallel_tco_reasoning() {
                 "assistant",
             ],
         );
-    let reasoning_ids: Vec<&str> = items
+    let reasoning_ids: Vec<Option<&str>> = items
         .iter()
         .filter_map(|i| match i {
-            ConversationItem::Reasoning(r) => Some(r.id.as_str()),
+            ConversationItem::Reasoning(r) => Some(r.id.as_deref()),
             _ => None,
         })
         .collect();
-    assert_eq!(reasoning_ids, vec!["tco_1", "tco_2", "rs_main"]);
+    assert_eq!(reasoning_ids, vec![Some("tco_1"), Some("tco_2"), Some("rs_main")]);
 }
 /// The legacy turn's `reasoning` field is reconstructed as a sibling *before* the legacy assistant.
 /// The post-PR sibling Reasoning row passes through unchanged and lands before the post-PR assistant (no double-emission).
@@ -1996,14 +1996,14 @@ fn read_chat_history_handles_hybrid_legacy_and_post_pr_lines() {
             "hybrid file produces uniform sibling-shape output with no \
              cross-boundary corruption"
         );
-    let reasoning_ids: Vec<&str> = items
+    let reasoning_ids: Vec<Option<&str>> = items
         .iter()
         .filter_map(|i| match i {
-            ConversationItem::Reasoning(r) => Some(r.id.as_str()),
+            ConversationItem::Reasoning(r) => Some(r.id.as_deref()),
             _ => None,
         })
         .collect();
-    assert_eq!(reasoning_ids, vec!["rs_legacy", "rs_postpr"]);
+    assert_eq!(reasoning_ids, vec![Some("rs_legacy"), Some("rs_postpr")]);
     let btc_ids: Vec<&str> = items
         .iter()
         .filter_map(|i| match i {
@@ -2024,7 +2024,7 @@ fn read_chat_history_handles_hybrid_legacy_and_post_pr_lines() {
     let Some(ConversationItem::Reasoning(reconstructed)) = items.get(3) else {
         panic!("expected reconstructed Reasoning at index 3");
     };
-    assert_eq!(reconstructed.id, "rs_legacy");
+    assert_eq!(reconstructed.id.as_deref(), Some("rs_legacy"));
     assert_eq!(reconstructed.encrypted_content.as_deref(), Some("enc"));
     let Some(xai_grok_sampling_types::rs::SummaryPart::SummaryText(s)) = reconstructed
         .summary

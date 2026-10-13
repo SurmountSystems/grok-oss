@@ -229,7 +229,7 @@ async fn chat_completions_compaction_does_not_panic_on_reasoning_sibling() {
         ConversationItem::system("You are a helpful assistant."),
         ConversationItem::user("<user_query>\nfix the bug\n</user_query>"),
         ConversationItem::Reasoning(rs::ReasoningItem {
-            id: "r1".to_string(),
+            id: Some("r1".to_string()),
             summary: vec![rs::SummaryPart::SummaryText(rs::SummaryTextContent {
                 text: "thinking about the bug".to_string(),
             })],
