@@ -507,8 +507,8 @@ fn fit_reasoning(
         .take()
         .unwrap_or_default()
         .into_iter()
-        .filter_map(|part| match part {
-            rs::ReasoningItemContent::ReasoningText(part) => Some(part.text),
+        .map(|part| match part {
+            rs::ReasoningItemContent::ReasoningText(part) => part.text,
         })
         .filter(|text| !text.is_empty())
         .collect();
