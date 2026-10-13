@@ -349,6 +349,9 @@ pub struct SupergrokPrincipalListing {
     /// Billing identity: team id, else user id, else the store scope.
     pub identity_id: String,
     pub fingerprint: String,
+    /// Stored account email. Absent when the login did not record one.
+    /// Not a token, and not inferred from `identity_id`.
+    pub email: Option<String>,
 }
 
 /// Personal multi-slot suffix. A personal session is also stored at `{base}::personal`.
@@ -421,9 +424,20 @@ pub fn list_supergrok_principal_listings(map: &AuthStore) -> Vec<SupergrokPrinci
             mode_label,
             identity_id: supergrok_identity_id_from_auth(auth, key),
             fingerprint: fingerprint_session_token(&auth.key),
+            email: stored_account_email(auth),
         });
     }
     listings
+}
+
+/// Account email stored on the login. Empty and whitespace are absent.
+/// This does not treat `user_id` or `team_id` as an email.
+fn stored_account_email(auth: &GrokAuth) -> Option<String> {
+    auth.email
+        .as_deref()
+        .map(str::trim)
+        .filter(|email| !email.is_empty())
+        .map(str::to_owned)
 }
 
 /// SHA-256 hex of the session token. The digest does not contain the token text.

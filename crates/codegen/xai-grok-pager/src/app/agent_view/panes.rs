@@ -356,6 +356,12 @@ impl AgentView {
             .values()
             .filter(|info| info.attempt.workflow_run_id.is_none())
             .filter(|info| show_done || info.is_running())
+            .filter(|info| {
+                info.is_running()
+                    || !self
+                        .tasks
+                        .completed_subagent_is_hidden(info.child_session_id.as_ref())
+            })
             .filter(|info| crate::app::subagent::is_l2_list_row(info, &child_ids))
             .collect();
         if show_done {
@@ -411,6 +417,27 @@ impl AgentView {
             })
             .collect()
     }
+
+    /// Hide completed subagent rows that are on the list now. A running row stays.
+    /// The registry row stays so a later resume can still find it. This does not kill.
+    pub(crate) fn clear_completed_subagent_rows(&mut self) {
+        let ids: Vec<String> = self
+            .subagent_sessions
+            .values()
+            .filter(|info| !info.is_running() && info.terminal_status_is_completed())
+            .map(|info| info.child_session_id.to_string())
+            .collect();
+        for id in &ids {
+            self.tasks.hide_completed_subagent(id);
+        }
+        self.tasks.sync(
+            &self.session.bg_tasks,
+            &self.subagent_sessions,
+            &self.session.scheduled_tasks,
+            &self.workflow_runs,
+        );
+    }
+
     /// Running background commands (non-monitor): `(task_id, row)`.
     pub(crate) fn dock_task_rows(&self) -> Vec<(String, crate::views::dock::DockRow)> {
         let mut tasks: Vec<&crate::app::agent::BgTaskState> = self

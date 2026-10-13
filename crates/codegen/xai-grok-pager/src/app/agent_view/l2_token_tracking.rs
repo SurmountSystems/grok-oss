@@ -7,8 +7,11 @@
 //! dollar credits, and not console team prepaid / console API credits.
 //! Operator-visible Subagents list chrome omits the word `tokens`. The unit
 //! is implicit (`90k`, `112.9k`). Each nested session id is its own window.
+//! An L2 row adds that window's present and past to each specialist once.
+//! [`format_subagents_row_figure`] appends `+` while the row is running.
+//! The L1 `NK/500K` window is not that sum.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
@@ -154,10 +157,14 @@ pub fn on_nested_l2_spawn(nested_session_id: &str, description: &str) {
 
 /// Production usage-tick hook (session usage tokens, not billing meters).
 ///
-/// Always stores the live sample with `store_current`, including when the new
+/// Stores the live sample with `store_current`, including when the new
 /// count is below the in-memory high-water. `record_usage` still `fetch_max`s
-/// `measured_tokens` and does not lower that high-water.
+/// `measured_tokens` and does not lower that high-water. A zero tick is not
+/// a count: it is not stored, and it does not replace a real sample with 0.
 pub fn on_nested_l2_usage(nested_session_id: &str, measured_tokens: u64) {
+    if measured_tokens == 0 {
+        return;
+    }
     with_process_tracker(|t| {
         t.record_usage(nested_session_id, measured_tokens);
         if let Some(row) = t.get(nested_session_id) {
@@ -270,9 +277,13 @@ impl L2TokenTracker {
     /// ACP `SubagentProgress` `tokens_used` is that nested session's live
     /// sampling window (`context_tokens_used`). `fetch_max` keeps an in-memory
     /// high-water so concurrent ticks cannot lose a later count. The current
-    /// sample is stored separately and can go down after compact. Subagents
-    /// list paint reads that current sample, not the high-water.
+    /// sample is stored separately and can go down after compact. A zero tick
+    /// is ignored so it cannot replace a real count with 0. Subagents list
+    /// paint reads that current sample, not the high-water.
     pub fn record_usage(&mut self, nested_session_id: &str, measured_tokens: u64) {
+        if measured_tokens == 0 {
+            return;
+        }
         if let Some(row) = self.by_id.get_mut(nested_session_id) {
             let _previous = row
                 .measured_tokens
@@ -300,7 +311,7 @@ impl L2TokenTracker {
     pub fn format_subagents_list_token_suffix(&self, nested_session_id: &str) -> Option<String> {
         let row = self.get(nested_session_id)?;
         let measured = row.measured_tokens();
-        if row.status == NestedL2Status::Spawned && measured == 0 {
+        if measured == 0 {
             return None;
         }
         Some(format_measured_tokens_suffix(measured))
@@ -387,7 +398,8 @@ pub fn format_live_subagents_list_suffix(
 /// `past` already keeps the dropped units, so that larger sample is not added
 /// on top of `past`. `None` when the host has no present sample and no past.
 pub fn shown_nested_count(session_id: &str, present: Option<u64>, past: u64) -> Option<u64> {
-    let live = current_live_sample(session_id);
+    // A stored 0 is not a count. Do not let it replace a real present window.
+    let live = current_live_sample(session_id).filter(|count| *count > 0);
     let present_window = match (live, present) {
         (Some(live), Some(snapshot)) if past > 0 && live > snapshot => Some(snapshot),
         (Some(live), _) => Some(live),
@@ -415,6 +427,56 @@ pub fn sum_shown_counts_once(own: Option<u64>, l3_counts: &[Option<u64>]) -> Opt
         any = true;
     }
     any.then_some(total)
+}
+
+/// L2 Subagents row: that session's present plus past, plus each specialist once.
+///
+/// A live sample replaces a stale present window, then past is added once.
+/// The same cumulative `tokens_used` tick does not increase the total: usage
+/// recording stores the tick (`fetch_max` on the high-water), it does not
+/// `fetch_add`. A repeated specialist id is counted once. `None` when every
+/// count is missing. A real count is returned as itself, never as 0.
+/// This reads the existing per-session atomics. It does not keep a second counter.
+pub fn l2_row_count_present_past_and_each_specialist_once(
+    l2_id: &str,
+    l2_present: Option<u64>,
+    l2_past: u64,
+    specialists: &[(&str, Option<u64>, u64)],
+) -> Option<u64> {
+    let own = shown_nested_count(l2_id, l2_present, l2_past).filter(|count| *count > 0);
+    let mut seen = HashSet::new();
+    let mut l3_counts = Vec::new();
+    for (id, present, past) in specialists {
+        if *id == l2_id || !seen.insert(*id) {
+            continue;
+        }
+        l3_counts.push(shown_nested_count(id, *present, *past).filter(|count| *count > 0));
+    }
+    sum_shown_counts_once(own, &l3_counts).filter(|count| *count > 0)
+}
+
+/// Specialist row: that specialist's present plus past only.
+///
+/// Not the parent L2 total. `None` when the count is missing. A real count is
+/// not returned as 0.
+pub fn specialist_row_count(session_id: &str, present: Option<u64>, past: u64) -> Option<u64> {
+    shown_nested_count(session_id, present, past).filter(|count| *count > 0)
+}
+
+/// Compact figure for one Subagents row.
+///
+/// `10.2k` for 10232. A running row is `10.2k+`. A finished row has no `+`.
+/// A missing count is `None`. A real count is that compact figure, never `0`.
+/// The word `measured` is not part of this figure. Cached tokens are not added
+/// here, and `total_tokens` from one usage event is not this figure.
+pub fn format_subagents_row_figure(count: Option<u64>, running: bool) -> Option<String> {
+    let count = count.filter(|n| *n > 0)?;
+    let compact = format_measured_tokens_suffix(count);
+    if running {
+        Some(format!("{compact}+"))
+    } else {
+        Some(compact)
+    }
 }
 
 /// Grok 4.6-era wrap average. It stays an estimate until the host returns a figure.
@@ -1036,6 +1098,221 @@ mod tests {
             "must not paint a stale concurrent tick, got {row:?}"
         );
         assert_eq!(format_measured_tokens_suffix(HIGH_WATER), "10.2k");
+    }
+
+    /// An L2 Subagents row is that L2's present plus past, plus each specialist
+    /// once. The same cumulative tick does not increase the total. The specialist
+    /// row is that specialist only. The L1 window is not that sum.
+    #[test]
+    fn each_l2_row_counts_present_and_past_and_each_specialist_once() {
+        xai_grok_shell::token_economy::reset_token_economy_live_to_defaults();
+        struct ClearLiveTokenEconomy;
+        impl Drop for ClearLiveTokenEconomy {
+            fn drop(&mut self) {
+                xai_grok_shell::token_economy::clear_token_economy_live();
+            }
+        }
+        let _clear_live_token_economy = ClearLiveTokenEconomy;
+
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let l2 = format!("l2-present-past-{}-{stamp}", std::process::id());
+        let l3 = format!("l3-present-past-{}-{stamp}", std::process::id());
+        on_nested_l2_spawn(&l2, "Residual");
+        on_nested_l2_spawn(&l3, "specialist");
+        on_nested_l2_usage(&l2, 25_000);
+        on_nested_l2_usage(&l3, 50_000);
+
+        let specialists = [(l3.as_str(), Some(50_000u64), 0u64)];
+        let total = l2_row_count_present_past_and_each_specialist_once(
+            &l2,
+            Some(25_000),
+            65_000,
+            &specialists,
+        );
+        assert_eq!(total, Some(140_000));
+        assert_eq!(current_live_sample(&l2), Some(25_000));
+        assert_eq!(current_live_sample(&l3), Some(50_000));
+        assert_eq!(
+            peek_process_tracker(|t| t.get(&l2).map(|row| row.measured_tokens())),
+            Some(25_000)
+        );
+
+        on_nested_l2_usage(&l2, 25_000);
+        on_nested_l2_usage(&l3, 50_000);
+        let again = l2_row_count_present_past_and_each_specialist_once(
+            &l2,
+            Some(25_000),
+            65_000,
+            &specialists,
+        );
+        assert_eq!(again, Some(140_000));
+        assert_eq!(
+            current_live_sample(&l2),
+            Some(25_000),
+            "the same cumulative tick must not be added a second time"
+        );
+        assert_eq!(current_live_sample(&l3), Some(50_000));
+        assert_eq!(
+            peek_process_tracker(|t| t.get(&l2).map(|row| row.measured_tokens())),
+            Some(25_000)
+        );
+
+        assert_eq!(specialist_row_count(&l3, Some(50_000), 0), Some(50_000));
+        assert_ne!(specialist_row_count(&l3, Some(50_000), 0), total);
+
+        let duplicated = [
+            (l3.as_str(), Some(50_000u64), 0u64),
+            (l3.as_str(), Some(50_000u64), 0u64),
+            (l2.as_str(), Some(25_000u64), 65_000u64),
+        ];
+        assert_eq!(
+            l2_row_count_present_past_and_each_specialist_once(
+                &l2,
+                Some(25_000),
+                65_000,
+                &duplicated,
+            ),
+            Some(140_000),
+            "a repeated specialist id is counted once, and the L2 id is not added as its own specialist"
+        );
+
+        assert_eq!(
+            format_subagents_row_figure(total, true).as_deref(),
+            Some("140k+")
+        );
+        assert_eq!(
+            format_subagents_row_figure(total, false).as_deref(),
+            Some("140k")
+        );
+        assert_eq!(
+            format_subagents_row_figure(Some(50_000), true).as_deref(),
+            Some("50k+")
+        );
+        assert_eq!(
+            format_subagents_row_figure(Some(50_000), false).as_deref(),
+            Some("50k")
+        );
+        assert_eq!(format_measured_tokens_suffix(10_232), "10.2k");
+        assert_eq!(
+            format_subagents_row_figure(Some(10_232), true).as_deref(),
+            Some("10.2k+")
+        );
+        assert_eq!(
+            format_subagents_row_figure(Some(10_232), false).as_deref(),
+            Some("10.2k")
+        );
+        let running = format_subagents_row_figure(total, true).expect("running figure");
+        assert!(!running.contains("measured"));
+        assert!(!running.contains("tokens"));
+        assert_ne!(running, "0");
+
+        let input_plus_cached = 20_000u64.saturating_add(5_000);
+        let output_plus_reasoning = 8_000u64.saturating_add(2_000);
+        assert_ne!(total, Some(input_plus_cached));
+        assert_ne!(total, Some(output_plus_reasoning));
+        assert_ne!(total, Some(30_000));
+
+        let l1_before = crate::views::context_bar::context_chip_token_text(
+            239_000,
+            Some(500_000),
+            Some(500_000),
+        );
+        let l1_after = crate::views::context_bar::context_chip_token_text(
+            239_000,
+            Some(500_000),
+            Some(500_000),
+        );
+        assert_eq!(l1_before.as_deref(), Some("239K / 500K"));
+        assert_eq!(l1_after, l1_before);
+        let summed = crate::views::context_bar::context_chip_token_text(
+            239_000u64.saturating_add(140_000),
+            Some(500_000),
+            Some(500_000),
+        );
+        assert_ne!(l1_before, summed);
+        assert_eq!(summed.as_deref(), Some("379K / 500K"));
+
+        let mut goal = crate::app::agent::GoalDisplayState::test_stub();
+        goal.tokens_used = 1_000;
+        goal.token_baseline = 0;
+        goal.status = crate::app::agent::GoalDisplayStatus::Active;
+        assert_eq!(
+            goal.live_tokens_used(Some(239_000), 0),
+            goal.live_tokens_used(Some(239_000), 140_000)
+        );
+        assert_eq!(goal.live_tokens_used(Some(239_000), 140_000), 239_000);
+
+        on_nested_l2_usage(&l2, 0);
+        on_nested_l2_usage(&l3, 0);
+        assert_eq!(current_live_sample(&l2), Some(25_000));
+        assert_eq!(current_live_sample(&l3), Some(50_000));
+        assert_eq!(
+            l2_row_count_present_past_and_each_specialist_once(
+                &l2,
+                Some(25_000),
+                65_000,
+                &specialists,
+            ),
+            Some(140_000),
+            "a zero tick must not replace a real count"
+        );
+        assert_eq!(format_subagents_row_figure(Some(0), true), None);
+        assert_eq!(format_subagents_row_figure(None, true), None);
+
+        let quiet = format!("l2-present-past-quiet-{}-{stamp}", std::process::id());
+        on_nested_l2_spawn(&quiet, "quiet");
+        assert_eq!(
+            l2_row_count_present_past_and_each_specialist_once(&quiet, None, 0, &[]),
+            None
+        );
+        assert_eq!(specialist_row_count(&quiet, None, 0), None);
+
+        on_nested_l2_usage(&l2, 30_000);
+        let grew = l2_row_count_present_past_and_each_specialist_once(
+            &l2,
+            Some(30_000),
+            65_000,
+            &specialists,
+        );
+        assert_eq!(grew, Some(145_000));
+        assert_eq!(
+            format_subagents_row_figure(grew, true).as_deref(),
+            Some("145k+")
+        );
+        on_nested_l2_usage(&l2, 30_000);
+        assert_eq!(current_live_sample(&l2), Some(30_000));
+        assert_eq!(
+            l2_row_count_present_past_and_each_specialist_once(
+                &l2,
+                Some(30_000),
+                65_000,
+                &specialists,
+            ),
+            Some(145_000)
+        );
+
+        let stale = format!("l2-present-past-stale-{}-{stamp}", std::process::id());
+        on_nested_l2_spawn(&stale, "before compact");
+        on_nested_l2_usage(&stale, 90_000);
+        assert_eq!(
+            l2_row_count_present_past_and_each_specialist_once(&stale, Some(20_000), 65_000, &[]),
+            Some(85_000),
+            "a live sample above the post-compact present is not added on top of past"
+        );
+
+        let src = include_str!("l2_token_tracking.rs");
+        let record = fn_body(src, "pub fn record_usage", "pub fn record_exit");
+        assert!(
+            record.contains("fetch_max"),
+            "a cumulative tokens_used tick keeps each token once with fetch_max"
+        );
+        assert!(
+            !record.contains("fetch_add"),
+            "adding a cumulative tick on every sample would count the same tokens twice"
+        );
     }
 
     /// Operator: when the host has a real token count, the row shows that

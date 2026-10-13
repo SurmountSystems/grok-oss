@@ -135,6 +135,14 @@ impl AgentView {
     /// Tasks kill and open chrome, before Clear finished, so a misplaced Clear
     /// hit cannot steal subagent open or close.
     fn try_tasks_chrome_click(&mut self, column: u16, row: u16) -> Option<InputOutcome> {
+        if self
+            .tasks
+            .clear_button_rect
+            .is_some_and(|rect| rect.contains((column, row).into()))
+        {
+            self.clear_completed_subagent_rows();
+            return Some(InputOutcome::Changed);
+        }
         let kill = self
             .tasks
             .kill_button_rects
@@ -159,54 +167,109 @@ impl AgentView {
             .iter()
             .find(|(_, rect)| rect.contains((column, row).into()))
             .map(|(entry_id, _)| entry_id.clone());
-        let entry_id = view?;
-        match entry_id {
-            TaskEntryId::BgTask(tid) => {
-                let already_open = self
-                    .block_viewer
-                    .as_ref()
-                    .and_then(|v| v.bg_task_id.as_deref())
-                    == Some(tid.as_str());
-                if already_open {
-                    self.dismiss_block_viewer();
-                    return Some(InputOutcome::Changed);
+        if let Some(entry_id) = view {
+            match entry_id {
+                TaskEntryId::BgTask(tid) => {
+                    let already_open = self
+                        .block_viewer
+                        .as_ref()
+                        .and_then(|v| v.bg_task_id.as_deref())
+                        == Some(tid.as_str());
+                    if already_open {
+                        self.dismiss_block_viewer();
+                        return Some(InputOutcome::Changed);
+                    }
+                    if self.show_bg_task_viewer(&tid) {
+                        return Some(InputOutcome::Changed);
+                    }
                 }
-                if self.show_bg_task_viewer(&tid) {
-                    return Some(InputOutcome::Changed);
-                }
-            }
-            TaskEntryId::Agent(sid) => {
-                if let Some(child_sid) = self
-                    .subagent_sessions
-                    .iter()
-                    .find(|(_, info)| info.subagent_id.as_ref() == sid.as_str())
-                    .map(|(k, _)| k.clone())
-                    && self.subagent_views.contains_key(&child_sid)
-                {
-                    self.open_subagent_fullscreen(child_sid);
-                    return Some(InputOutcome::Changed);
-                }
-            }
-            TaskEntryId::Scheduled(tid) => {
-                if let Some(sid) = self
-                    .session
-                    .scheduled_tasks
-                    .get(&tid)
-                    .and_then(|info| info.last_subagent_id.clone())
-                    && let Some(child_sid) = self
+                TaskEntryId::Agent(sid) => {
+                    if let Some(child_sid) = self
                         .subagent_sessions
                         .iter()
                         .find(|(_, info)| info.subagent_id.as_ref() == sid.as_str())
                         .map(|(k, _)| k.clone())
-                    && self.subagent_views.contains_key(&child_sid)
-                {
-                    self.open_subagent_fullscreen(child_sid);
-                    return Some(InputOutcome::Changed);
+                        && self.subagent_views.contains_key(&child_sid)
+                    {
+                        self.open_subagent_fullscreen(child_sid);
+                        return Some(InputOutcome::Changed);
+                    }
                 }
+                TaskEntryId::Scheduled(tid) => {
+                    if let Some(sid) = self
+                        .session
+                        .scheduled_tasks
+                        .get(&tid)
+                        .and_then(|info| info.last_subagent_id.clone())
+                        && let Some(child_sid) = self
+                            .subagent_sessions
+                            .iter()
+                            .find(|(_, info)| info.subagent_id.as_ref() == sid.as_str())
+                            .map(|(k, _)| k.clone())
+                        && self.subagent_views.contains_key(&child_sid)
+                    {
+                        self.open_subagent_fullscreen(child_sid);
+                        return Some(InputOutcome::Changed);
+                    }
+                }
+                TaskEntryId::Workflow(_) => {}
             }
-            TaskEntryId::Workflow(_) => {}
+        }
+        let row_id = self
+            .tasks
+            .row_hit_rects
+            .iter()
+            .find(|(_, rect)| rect.contains((column, row).into()))
+            .map(|(entry_id, _)| entry_id.clone());
+        if let Some(entry_id) = row_id
+            && let Some(out) = self.open_task_row(entry_id)
+        {
+            return Some(out);
         }
         None
+    }
+
+    /// Open the task whose row was clicked. Does not kill and does not close
+    /// a viewer that is already showing that task.
+    fn open_task_row(&mut self, entry_id: TaskEntryId) -> Option<InputOutcome> {
+        match entry_id {
+            TaskEntryId::BgTask(tid) => self
+                .show_bg_task_viewer(&tid)
+                .then_some(InputOutcome::Changed),
+            TaskEntryId::Agent(sid) => {
+                let child_sid = self
+                    .subagent_sessions
+                    .iter()
+                    .find(|(_, info)| info.subagent_id.as_ref() == sid.as_str())
+                    .map(|(k, _)| k.clone())?;
+                if !self.subagent_views.contains_key(&child_sid) {
+                    return None;
+                }
+                self.open_subagent_fullscreen(child_sid);
+                Some(InputOutcome::Changed)
+            }
+            TaskEntryId::Scheduled(tid) => {
+                let sid = self
+                    .session
+                    .scheduled_tasks
+                    .get(&tid)
+                    .and_then(|info| info.last_subagent_id.clone())?;
+                let child_sid = self
+                    .subagent_sessions
+                    .iter()
+                    .find(|(_, info)| info.subagent_id.as_ref() == sid.as_str())
+                    .map(|(k, _)| k.clone())?;
+                if !self.subagent_views.contains_key(&child_sid) {
+                    return None;
+                }
+                self.open_subagent_fullscreen(child_sid);
+                Some(InputOutcome::Changed)
+            }
+            TaskEntryId::Workflow(name) => {
+                self.open_workflow_detail(&name);
+                Some(InputOutcome::Changed)
+            }
+        }
     }
 
     /// Handle mouse events: click-to-focus, forward to prompt textarea.
@@ -632,6 +695,16 @@ impl AgentView {
                 }
                 match self.pane_areas.hit_test(mouse.column, mouse.row) {
                     Some(AgentPane::Dock) => {
+                        let clear_rect = crate::views::dock::subagent_clear_rect(
+                            self.pane_areas.dock,
+                            &self.dock_snapshot(),
+                        );
+                        if clear_rect
+                            .is_some_and(|rect| rect.contains((mouse.column, mouse.row).into()))
+                        {
+                            self.clear_completed_subagent_rows();
+                            return InputOutcome::Changed;
+                        }
                         let item = self.dock_item_at(self.pane_areas.dock, mouse.row);
                         if let Some(hit) = self
                             .dock_stop_button

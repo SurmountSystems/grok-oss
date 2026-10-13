@@ -227,6 +227,21 @@ pub fn parse_limits_named_args(args: &str) -> Result<LimitsNamedAction, String> 
     }
 }
 
+/// Append the stored account email when that login recorded one.
+/// A missing email leaves `base` unchanged. This does not add a second switch.
+fn with_stored_oauth_account(
+    base: &str,
+    pin: xai_grok_shell::auth::SupergrokIdentityPin,
+) -> String {
+    match xai_grok_shell::auth::limits_pins::stored_oauth_email_for_pin(pin) {
+        Some(email) => format!(
+            "{base} {}",
+            xai_grok_shell::auth::limits_pins::next_request_oauth_account_line(&email)
+        ),
+        None => base.to_owned(),
+    }
+}
+
 /// Persist a named pin action. Refresh/show/json do not persist.
 pub fn apply_limits_named_action(action: LimitsNamedAction) -> Result<String, String> {
     use xai_grok_shell::auth::limits_pins::{
@@ -256,10 +271,10 @@ pub fn apply_limits_named_action(action: LimitsNamedAction) -> Result<String, St
             })
             .map_err(|e| format!("Could not write use-console pin: {e}")),
         LimitsNamedAction::UsePersonal => match apply_use_personal() {
-            Ok(IdentityPinApply::Applied) => Ok(
-                "Use personal SuperGrok: next request uses the personal SuperGrok session JWT on the cli-chat-proxy host. Sidecar pin, not a new [auth] key. Stock [auth] preferred_method = api_key still pins console."
-                    .into(),
-            ),
+            Ok(IdentityPinApply::Applied) => Ok(with_stored_oauth_account(
+                "Use personal SuperGrok: next request uses the personal SuperGrok session JWT on the cli-chat-proxy host. Sidecar pin, not a new [auth] key. Stock [auth] preferred_method = api_key still pins console.",
+                xai_grok_shell::auth::SupergrokIdentityPin::Personal,
+            )),
             Ok(IdentityPinApply::BlockedByPreferredApiKey) => Err(
                 "Console is pinned by [auth] preferred_method = api_key. use-personal does not override that stock key."
                     .into(),
@@ -267,10 +282,10 @@ pub fn apply_limits_named_action(action: LimitsNamedAction) -> Result<String, St
             Err(e) => Err(format!("Could not write use-personal pin: {e}")),
         },
         LimitsNamedAction::UseBusiness => match apply_use_business() {
-            Ok(IdentityPinApply::Applied) => Ok(
-                "Use Business SuperGrok: next request uses the Team / Business SuperGrok session JWT on the cli-chat-proxy host. Sidecar pin, not a new [auth] key. Stock [auth] preferred_method = api_key still pins console."
-                    .into(),
-            ),
+            Ok(IdentityPinApply::Applied) => Ok(with_stored_oauth_account(
+                "Use Business SuperGrok: next request uses the Team / Business SuperGrok session JWT on the cli-chat-proxy host. Sidecar pin, not a new [auth] key. Stock [auth] preferred_method = api_key still pins console.",
+                xai_grok_shell::auth::SupergrokIdentityPin::Business,
+            )),
             Ok(IdentityPinApply::BlockedByPreferredApiKey) => Err(
                 "Console is pinned by [auth] preferred_method = api_key. use-business does not override that stock key."
                     .into(),
@@ -1596,7 +1611,13 @@ async fn collect_limits_report_at(grok_home: &Path) -> Result<(LimitsCliReport, 
     };
     // Overlay stored SuperGrok roles + fingerprints (no secrets). Slot
     // inference has no JWT; doctor listings are the source of truth.
-    let snap = snap.with_discovered_identities(DiscoveredIdentities::from_dual_auth(&dual));
+    let mut discovered = DiscoveredIdentities::from_dual_auth(&dual);
+    if let Ok(map) = xai_grok_shell::auth::read_auth_json(&grok_home.join("auth.json")) {
+        let pin = xai_grok_shell::auth::limits_pins::load_limits_pins().supergrok_identity;
+        discovered.next_request_oauth_email =
+            xai_grok_shell::auth::limits_pins::oauth_email_for_next_request(&map, pin);
+    }
+    let snap = snap.with_discovered_identities(discovered);
     let mut report = report_from_snapshot_with_meter_source(
         &snap,
         report.notes,
@@ -3935,11 +3956,13 @@ mod tests {
                     role: "personal".into(),
                     fingerprint: Some(fp_p.clone()),
                     mode: Some("oidc".into()),
+                    email: None,
                 },
                 DiscoveredSupergrokSession {
                     role: "business".into(),
                     fingerprint: Some(fp_b.clone()),
                     mode: Some("oidc".into()),
+                    email: None,
                 },
             ],
             vec![fp_c.clone()],

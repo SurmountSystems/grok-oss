@@ -1,7 +1,8 @@
 //! Dual-auth discoverability: session? N console keys? env wins?
 //!
-//! Counts and fingerprints only — never raw keys, tokens, emails, or secret
-//! identifiers. Used by `grok login --list-api-keys`, doctor, and tests.
+//! Counts, fingerprints, and the stored account email. Never raw keys,
+//! tokens, or secret identifiers. The email is a label. A missing email
+//! stays absent. Used by `grok login --list-api-keys`, doctor, and tests.
 
 use std::path::Path;
 
@@ -279,7 +280,8 @@ pub fn collect_dual_auth_status_with(
 /// `grok-oss login` is stored at the OAuth base scope with no slot suffix.
 /// That login is one personal principal. A base key that already has slots
 /// is the mirror and must not become a third listing.
-fn listings_including_lone_base_session(
+/// The accounts tab reads this so a lone base login still counts as one row.
+pub(super) fn listings_including_lone_base_session(
     map: &super::model::AuthStore,
 ) -> Vec<SupergrokPrincipalListing> {
     let listings = list_supergrok_principal_listings(map);
@@ -303,6 +305,12 @@ fn listings_including_lone_base_session(
             mode_label,
             identity_id: supergrok_identity_id_from_auth(auth, scope),
             fingerprint: fingerprint_session_token(&auth.key),
+            email: auth
+                .email
+                .as_deref()
+                .map(str::trim)
+                .filter(|email| !email.is_empty())
+                .map(str::to_owned),
         }];
     }
     Vec::new()

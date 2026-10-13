@@ -2660,6 +2660,9 @@ impl AgentView {
             )
             .and_then(|sel| sel.close_button_rect());
             self.hit_bg_close.set(close_rect);
+        } else {
+            self.tasks.clear_button_rect = None;
+            self.tasks.row_hit_rects.clear();
         }
         if todo_height > 0 {
             let todo_focused = self.active_pane == ActivePane::Todo && !overlay_focused;

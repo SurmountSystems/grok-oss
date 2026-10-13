@@ -400,6 +400,9 @@ pub struct DiscoveredSupergrokSession {
     /// `oidc` or `external` when known.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mode: Option<String>,
+    /// Stored account email when the login recorded one. Not a token.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
 }
 
 /// Combined **what we can see**: stored SuperGrok logins and console keys.
@@ -417,6 +420,10 @@ pub struct DiscoveredIdentities {
     /// limits can only be checked for that login until a second grok-oss login.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub honesty: Option<String>,
+    /// Email of the SuperGrok session the next request uses, when stored.
+    /// Absent when that login did not record an email. Not a token.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_request_oauth_email: Option<String>,
 }
 
 impl DiscoveredIdentities {
@@ -438,6 +445,7 @@ impl DiscoveredIdentities {
             only_one_supergrok_session: only_one,
             supergrok_sessions,
             console_key_fingerprints,
+            next_request_oauth_email: None,
         }
     }
 
@@ -450,6 +458,7 @@ impl DiscoveredIdentities {
                 role: p.role_label.to_string(),
                 fingerprint: Some(p.fingerprint.clone()),
                 mode: Some(p.mode_label.to_string()),
+                email: p.email.clone(),
             })
             .collect();
         let mut out = Self::from_sessions(sessions, dual.stored_fingerprints.clone());
@@ -476,6 +485,7 @@ impl DiscoveredIdentities {
                 role: discovered_role_from_principal(p),
                 fingerprint: None,
                 mode: None,
+                email: None,
             })
             .collect();
         Self::from_sessions(sessions, Vec::new())
@@ -491,12 +501,14 @@ impl DiscoveredIdentities {
             role: discovered_role_from_label(&primary.label, live_role),
             fingerprint: None,
             mode: None,
+            email: None,
         });
         for extra in extras {
             sessions.push(DiscoveredSupergrokSession {
                 role: discovered_role_from_label(&extra.label, None),
                 fingerprint: None,
                 mode: None,
+                email: None,
             });
         }
         Self::from_sessions(sessions, Vec::new())
@@ -585,6 +597,7 @@ impl LimitsSnapshot {
                     role: "personal".into(),
                     fingerprint: None,
                     mode: None,
+                    email: None,
                 }],
                 Vec::new(),
             )
@@ -1117,6 +1130,14 @@ fn format_discovered_identities(lines: &mut Vec<String>, discovered: &Discovered
         {
             bits.push(mode.to_string());
         }
+        if let Some(email) = session
+            .email
+            .as_deref()
+            .map(str::trim)
+            .filter(|email| !email.is_empty())
+        {
+            bits.push(email.to_string());
+        }
         if let Some(fp) = session
             .fingerprint
             .as_deref()
@@ -1126,6 +1147,14 @@ fn format_discovered_identities(lines: &mut Vec<String>, discovered: &Discovered
             bits.push(format!("fingerprint {fp}"));
         }
         lines.push(format!("- {}", bits.join(" · ")));
+    }
+    if let Some(email) = discovered
+        .next_request_oauth_email
+        .as_deref()
+        .map(str::trim)
+        .filter(|email| !email.is_empty())
+    {
+        lines.push(xai_grok_shell::auth::limits_pins::next_request_oauth_account_line(email));
     }
     for fp in &discovered.console_key_fingerprints {
         lines.push(format!("- console API key fingerprint {fp}"));
@@ -1776,6 +1805,52 @@ mod tests {
         assert!(
             !one_pool.to_ascii_lowercase().contains("combined"),
             "combined pin with one honest pool must not name combined: {one_pool}"
+        );
+    }
+
+    /// Named contract: `/limits` names the stored email of the session the
+    /// next request uses, and still lists the other login. The email is a
+    /// label. This does not invent an email from an id.
+    #[test]
+    fn limits_detail_names_the_oauth_email_the_next_request_uses() {
+        let bal = weekly(24.0, "Jul 30, 12:00", Some(1250));
+        let snap =
+            LimitsSnapshot::from_billing(Some(&bal), None, SamplingIdentityKind::SuperGrokSession);
+        let mut discovered = DiscoveredIdentities::from_sessions(
+            vec![
+                DiscoveredSupergrokSession {
+                    role: "personal".into(),
+                    fingerprint: None,
+                    mode: Some("oidc".into()),
+                    email: Some("other@example.com".into()),
+                },
+                DiscoveredSupergrokSession {
+                    role: "business".into(),
+                    fingerprint: None,
+                    mode: Some("oidc".into()),
+                    email: Some("hunter@surmount.systems".into()),
+                },
+            ],
+            Vec::new(),
+        );
+        discovered.next_request_oauth_email = Some("hunter@surmount.systems".into());
+        let snap = snap.with_discovered_identities(discovered);
+        let out = format_limits_detail(&snap);
+        assert!(
+            out.contains("Next request OAuth account: hunter@surmount.systems"),
+            "the active account label must name the email the next request uses:\n{out}"
+        );
+        assert!(
+            !out.contains("Next request OAuth account: other@example.com"),
+            "the other login must not be labeled as the next request:\n{out}"
+        );
+        assert!(
+            out.contains("other@example.com"),
+            "the other stored login stays visible:\n{out}"
+        );
+        assert!(
+            out.contains("SuperGrok (business)") && out.contains("hunter@surmount.systems"),
+            "the business row keeps its stored email:\n{out}"
         );
     }
 

@@ -8,7 +8,7 @@
 use super::test_fixtures::make_agent;
 use super::{AgentView, BannerSlotParams};
 use crate::actions::ActionRegistry;
-use crate::app::actions::Action;
+use crate::app::actions::{Action, Effect};
 use crate::app::app_view::InputOutcome;
 use crate::scrollback::render::ScratchBuffer;
 use crate::views::tasks_pane::TaskEntryId;
@@ -193,6 +193,79 @@ fn tasks_pane_view_click_opens_viewer_without_scrollback_entry() {
         "the viewer header must show the task command: {painted}"
     );
 }
+/// A left click on the task row itself opens that task. The second of two
+/// rows is the one that opens. The row stays, and the click does not kill.
+#[test]
+fn clicking_a_task_row_opens_that_task() {
+    let mut agent = make_agent();
+    insert_running_task(&mut agent, "bg-review");
+    insert_running_task(&mut agent, "bg-sampler");
+    let older = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1);
+    let newer = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(2);
+    if let Some(task) = agent.session.bg_tasks.get_mut("bg-review") {
+        task.description = Some("Review implementation".into());
+        task.start_time = older;
+    }
+    if let Some(task) = agent.session.bg_tasks.get_mut("bg-sampler") {
+        task.description = Some("Fix sampler filter_map clippy deny".into());
+        task.start_time = newer;
+    }
+    let area = Rect::new(0, 0, 80, 30);
+    let _ = draw_frame(&mut agent, area);
+    let _ = draw_frame(&mut agent, area);
+    let mut rows: Vec<(TaskEntryId, Rect)> = agent
+        .tasks
+        .row_hit_rects
+        .iter()
+        .filter(|(id, _)| matches!(id, TaskEntryId::BgTask(_)))
+        .cloned()
+        .collect();
+    rows.sort_by_key(|(_, rect)| rect.y);
+    assert!(
+        rows.len() >= 2,
+        "two task rows must be hit targets, got {}",
+        rows.len()
+    );
+    let (second_id, second_rect) = rows[1].clone();
+    let TaskEntryId::BgTask(opened_id) = second_id else {
+        panic!("second row must be a background task");
+    };
+    let outcome = agent.handle_mouse(&mouse(
+        MouseEventKind::Down(MouseButton::Left),
+        second_rect.x,
+        second_rect.y,
+    ));
+    assert!(
+        matches!(outcome, InputOutcome::Changed),
+        "clicking the second task row must open it, got {outcome:?}"
+    );
+    assert!(
+        !matches!(
+            outcome,
+            InputOutcome::Action(Action::KillBgTask(_))
+                | InputOutcome::Action(Action::KillSubagent(_))
+        ),
+        "a row click must not kill, got {outcome:?}"
+    );
+    let shown = agent
+        .block_viewer
+        .as_ref()
+        .and_then(|viewer| viewer.bg_task_id.clone());
+    assert_eq!(
+        shown.as_deref(),
+        Some(opened_id.as_str()),
+        "the opened viewer must be the second row"
+    );
+    assert!(
+        agent.session.bg_tasks.contains_key("bg-review"),
+        "the review row must stay"
+    );
+    assert!(
+        agent.session.bg_tasks.contains_key("bg-sampler"),
+        "the sampler row must stay"
+    );
+}
+
 fn insert_running_subagent(agent: &mut AgentView, child_session_id: &str) {
     let info = super::test_fixtures::running_subagent_info(child_session_id);
     agent
@@ -374,4 +447,154 @@ fn ctrl_g_hides_and_shows_painted_dock() {
     let buf = draw_frame(&mut agent, area);
     assert!(agent.dock_shown && !agent.dock_hidden);
     assert!(dock_row_has_tasks(&buf, agent.pane_areas.dock));
+}
+
+fn buffer_text_rows(buf: &Buffer) -> Vec<String> {
+    let area = *buf.area();
+    (area.y..area.bottom())
+        .map(|y| {
+            (area.x..area.right())
+                .map(|x| cell_symbol(buf, x, y))
+                .collect()
+        })
+        .collect()
+}
+
+fn insert_described_subagent(
+    agent: &mut AgentView,
+    child_session_id: &str,
+    description: &str,
+    completed: bool,
+) {
+    let mut info = super::test_fixtures::running_subagent_info(child_session_id);
+    info.description = std::sync::Arc::from(description);
+    if completed {
+        info.finished = true;
+        info.set_finished_for_test(true);
+        info.status = Some(std::sync::Arc::from("completed"));
+        info.attempt.status = Some(std::sync::Arc::from("completed"));
+    }
+    agent
+        .subagent_sessions
+        .insert(child_session_id.to_string(), info);
+    agent.insert_test_child(
+        child_session_id.to_string(),
+        Box::new(super::test_fixtures::make_agent()),
+    );
+}
+
+/// `[clear]` on the Subagents list removes completed rows and leaves a running row.
+#[test]
+fn clear_button_on_the_subagent_list_removes_completed_rows_and_leaves_a_running_row() {
+    let mut agent = make_agent();
+    agent.tasks.toggle_show_done();
+    insert_described_subagent(&mut agent, "running-job", "running-job", false);
+    insert_described_subagent(&mut agent, "completed-job", "completed-job", true);
+    let area = Rect::new(0, 0, 80, 30);
+    let buf = draw_frame(&mut agent, area);
+    let rows = buffer_text_rows(&buf);
+    let painted = rows.join("\n");
+    assert!(
+        painted.contains("running-job"),
+        "the list must show the running row: {painted}"
+    );
+    assert!(
+        painted.contains("completed-job"),
+        "the list must show the completed row: {painted}"
+    );
+    let (row, column) = rows
+        .iter()
+        .enumerate()
+        .find_map(|(y, text)| text.find("[clear]").map(|x| (y as u16, x as u16)))
+        .expect("[clear] painted on the Subagents list");
+    let theme = crate::theme::Theme::current();
+    let clear_fg = buf.cell((column, row)).expect("[clear] cell").fg;
+    assert_eq!(clear_fg, theme.gray, "[clear] uses quiet secondary gray");
+    assert_ne!(clear_fg, theme.accent_user);
+    assert_ne!(clear_fg, theme.accent_running);
+    let outcome = agent.handle_mouse(&mouse(MouseEventKind::Down(MouseButton::Left), column, row));
+    assert!(
+        matches!(outcome, InputOutcome::Changed),
+        "clicking [clear] removes completed rows, got {outcome:?}"
+    );
+    assert!(
+        !matches!(outcome, InputOutcome::Action(Action::KillSubagent(_))),
+        "clicking [clear] must not send KillSubagent"
+    );
+    assert!(
+        !agent.pending_effects.iter().any(|effect| {
+            matches!(
+                effect,
+                Effect::KillSubagent { subagent_id, .. } if subagent_id == "sa-running-job"
+            )
+        }),
+        "clear must not kill the running subagent"
+    );
+    let buf = draw_frame(&mut agent, area);
+    let painted = buffer_text_rows(&buf).join("\n");
+    assert!(
+        !painted.contains("completed-job"),
+        "the completed row must leave the list: {painted}"
+    );
+    assert!(
+        painted.contains("running-job"),
+        "the running row must stay on the list: {painted}"
+    );
+    assert!(agent.subagent_sessions.contains_key("running-job"));
+    assert!(agent.subagent_sessions.contains_key("completed-job"));
+}
+
+/// The Subagents list paints a scrollbar when the rows are taller than the panel.
+/// Scrolling reaches every row, including the last one.
+#[test]
+fn subagent_list_scrolls_when_rows_overflow_the_panel() {
+    let mut agent = make_agent();
+    let started = std::time::Instant::now();
+    for index in 0..16 {
+        let id = format!("scroll-row-{index:02}");
+        insert_described_subagent(&mut agent, &id, &id, false);
+        let info = agent
+            .subagent_sessions
+            .get_mut(&id)
+            .expect("inserted subagent");
+        info.attempt.started_at = started + std::time::Duration::from_secs(index);
+    }
+    let area = Rect::new(0, 0, 80, 30);
+    let buf = draw_frame(&mut agent, area);
+    let tasks = agent.pane_areas.tasks;
+    assert!(tasks.height > 0, "the Subagents list must be on screen");
+    let painted = buffer_text_rows(&buf).join("\n");
+    assert!(
+        painted.contains("scroll-row-00"),
+        "the first row must be on screen before scrolling: {painted}"
+    );
+    assert!(
+        !painted.contains("scroll-row-15"),
+        "the last row starts below the panel: {painted}"
+    );
+    let thumb = (tasks.x..tasks.right())
+        .flat_map(|x| (tasks.y..tasks.bottom()).map(move |y| (x, y)))
+        .find(|(x, y)| {
+            buf.cell((*x, *y))
+                .is_some_and(|cell| cell.symbol() == "\u{2588}")
+        });
+    let (thumb_x, thumb_y) = thumb.expect("a scrollbar thumb on the Subagents list");
+    let theme = crate::theme::Theme::current();
+    let thumb_fg = buf.cell((thumb_x, thumb_y)).expect("thumb cell").fg;
+    assert_ne!(thumb_fg, theme.accent_user);
+    assert_ne!(thumb_fg, theme.accent_running);
+    let scroll_at = (tasks.x + 1, tasks.y);
+    for _ in 0..24 {
+        agent.handle_scroll(1, scroll_at.0, scroll_at.1);
+    }
+    let buf = draw_frame(&mut agent, area);
+    let painted = buffer_text_rows(&buf).join("\n");
+    assert!(
+        painted.contains("scroll-row-15"),
+        "scrolling must reach the last row: {painted}"
+    );
+    assert!(
+        !painted.contains("scroll-row-00"),
+        "scrolling past the top leaves the first row above the panel: {painted}"
+    );
 }

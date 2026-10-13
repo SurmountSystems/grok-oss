@@ -224,10 +224,18 @@ pub(crate) fn render_pdf_pages(
         ..hayro::RenderSettings::default()
     };
 
+    let pages = doc.pages();
     let mut page_images = Vec::with_capacity(page_indices.len());
     for &page_idx in &page_indices {
+        let page = pages.get(page_idx).ok_or_else(|| {
+            format!(
+                "page {} out of range (document has {} pages)",
+                page_idx + 1,
+                pages.len()
+            )
+        })?;
         let pixmap = hayro::render(
-            &doc.pages()[page_idx],
+            page,
             &hayro::RenderCache::new(),
             &hayro::hayro_interpret::InterpreterSettings::default(),
             &render_settings,
@@ -330,6 +338,7 @@ fn extract_page_texts(
     page_indices: &[usize],
     style: PageTextStyle,
 ) -> Result<String, String> {
+    let pages = doc.pages();
     let mut text = String::new();
     for (i, &page_idx) in page_indices.iter().enumerate() {
         if i > 0 {
@@ -341,7 +350,14 @@ fn extract_page_texts(
             }
             PageTextStyle::Cursor { .. } => {}
         }
-        append_page_body(&mut text, &doc.pages()[page_idx], page_idx + 1);
+        let page = pages.get(page_idx).ok_or_else(|| {
+            format!(
+                "page {} out of range (document has {} pages)",
+                page_idx + 1,
+                pages.len()
+            )
+        })?;
+        append_page_body(&mut text, page, page_idx + 1);
         if let PageTextStyle::Cursor { total_pages } = style {
             text.push_str("\n\n");
             let _ = writeln!(&mut text, "-- {} of {} --", page_idx + 1, total_pages);

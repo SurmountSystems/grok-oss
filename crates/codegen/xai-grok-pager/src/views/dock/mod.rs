@@ -30,6 +30,8 @@ const MORE_INDENT: &str = "   ";
 /// already insets its own content by two, so the dock adds the last one.
 const QUEUE_BODY_INDENT: u16 = 1;
 const STOP_LABEL: &str = "[stop]";
+/// Subagents header control. Removes completed rows from this list.
+pub const CLEAR_LABEL: &str = "[clear]";
 
 /// Seeded at startup and on `x.ai/settings/update` from Feature::Dock.
 static ENABLED: AtomicBool = AtomicBool::new(false);
@@ -260,6 +262,7 @@ pub fn render(buf: &mut Buffer, area: Rect, theme: &Theme, data: &DockData) {
     }
     let counts = data.counts();
     let layout = DockLayout::with_cap(&counts, area.height as usize);
+    let clear_rect = subagent_clear_rect(area, data);
     let bottom = area.bottom();
     let mut y = area.y;
     let action_item = action_item(data, layout.rows());
@@ -293,6 +296,17 @@ pub fn render(buf: &mut Buffer, area: Rect, theme: &Theme, data: &DockData) {
                     selected_at(item_index),
                     data.hovered == Some(DockItem::Header(section)),
                 );
+                if section == Section::Subagents
+                    && let Some(rect) = clear_rect
+                    && rect.y == y
+                {
+                    buf.set_span(
+                        rect.x,
+                        y,
+                        &Span::styled(CLEAR_LABEL, Style::default().fg(theme.gray)),
+                        rect.width,
+                    );
+                }
             }
             DockItem::Row(section, i) => {
                 let selected = selected_at(item_index);
@@ -469,6 +483,35 @@ fn paint_row(
         let x = area.x + area.width - meta_width;
         buf.set_line(x, y, &meta_line, meta_width);
     }
+}
+
+fn dock_row_is_completed(row: &DockRow) -> bool {
+    !row.spinning
+        && row
+            .activity
+            .as_deref()
+            .is_some_and(|activity| activity.eq_ignore_ascii_case("completed"))
+}
+
+/// Right edge of the Subagents header when that section lists a completed row.
+pub fn subagent_clear_rect(area: Rect, data: &DockData) -> Option<Rect> {
+    let width = CLEAR_LABEL.width() as u16;
+    if area.width < width || area.height == 0 {
+        return None;
+    }
+    if !data.subagents.iter().any(dock_row_is_completed) {
+        return None;
+    }
+    let layout = DockLayout::with_cap(&data.counts(), area.height as usize);
+    let idx = layout
+        .rows()
+        .iter()
+        .position(|item| matches!(item, DockItem::Header(Section::Subagents)))?;
+    let y = area.y.saturating_add(idx as u16);
+    if y >= area.bottom() {
+        return None;
+    }
+    Some(Rect::new(area.x + area.width - width, y, width, 1))
 }
 
 pub fn stop_button_rect(area: Rect, y: u16, section: Section) -> Option<Rect> {

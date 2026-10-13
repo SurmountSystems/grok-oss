@@ -6,7 +6,7 @@ use crate::app::agent::{BgTaskState, BgTaskStatus};
 use crate::app::agent_view::AgentView;
 use crate::app::agent_view::l2_token_tracking::{
     LiveJobRowInput, STANDING_WRAP_ESTIMATE_TOKENS, STANDING_WRAP_ESTIMATE_WALL,
-    display_live_job_row,
+    display_live_job_row, format_subagents_row_figure,
 };
 use crate::app::subagent::{
     format_live_l3_count, format_subagent_label, format_subagent_label_among, is_l2_list_row,
@@ -47,8 +47,10 @@ pub(crate) fn queue_block_text(agent: &AgentView) -> String {
         join_header_rows(header, rows)
     }
 }
-/// `106.8k`, `140k`, `1.5M`, or a bare count under 1000. Not a word in parentheses.
+/// `106.8k`, `140k`, `1.5M`, `42`, or the same figure with one trailing `+`.
+/// Not a word in parentheses.
 fn is_compact_token_figure(figure: &str) -> bool {
+    let figure = figure.strip_suffix('+').unwrap_or(figure);
     if figure.is_empty() {
         return false;
     }
@@ -185,18 +187,30 @@ pub(crate) fn tasks_block_text(agent: &AgentView) -> String {
         // Same formatter as the tasks pane. One host figure on the label.
         // No host figure omits the count. The labeled estimate is not
         // painted. Do not add the figure to the L1 total or grok-oss sqlite.
+        let host_tokens = subagent_list_row_usage(info, &all);
         let shown = display_live_job_row(LiveJobRowInput {
             job: &desc,
             estimate_wall: STANDING_WRAP_ESTIMATE_WALL,
             estimate_tokens: STANDING_WRAP_ESTIMATE_TOKENS,
             elapsed: &elapsed_text,
-            host_tokens: subagent_list_row_usage(info, &all),
+            host_tokens,
         });
         debug_assert_eq!(shown.l1_tokens_added, 0);
         debug_assert!(!shown.wrote_grok_oss_sqlite);
         let _labeled_estimate_not_painted = (shown.estimate_wall, shown.estimate_tokens);
-        if !shown.actual_tokens.is_empty() {
-            desc = keep_one_trailing_token_figure(&desc, &shown.actual_tokens);
+        let row_figure = format_subagents_row_figure(host_tokens, info.is_running());
+        let painted = row_figure.filter(|text| text != "0").or_else(|| {
+            let actual = shown.actual_tokens.trim();
+            if actual.is_empty() || actual == "0" {
+                None
+            } else if info.is_running() {
+                Some(format!("{actual}+"))
+            } else {
+                Some(actual.to_string())
+            }
+        });
+        if let Some(figure) = painted {
+            desc = keep_one_trailing_token_figure(&desc, &figure);
         }
         let label = if desc.is_empty() {
             format!("{type_label}{l3}")

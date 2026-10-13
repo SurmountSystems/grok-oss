@@ -10,7 +10,7 @@ use super::overlay::OverlayState;
 use crate::app::agent::{BgTaskState, BgTaskStatus, ScheduledTaskInfo};
 use crate::app::agent_view::l2_token_tracking::{
     LiveJobRowInput, STANDING_WRAP_ESTIMATE_TOKENS, STANDING_WRAP_ESTIMATE_WALL,
-    display_live_job_row, format_measured_tokens_suffix, shown_nested_count,
+    display_live_job_row, format_subagents_row_figure, shown_nested_count,
     spawned_with_no_sample_yet, sum_shown_counts_once,
 };
 use crate::app::subagent::{
@@ -29,7 +29,7 @@ use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::StatefulWidget;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::time::{Instant, SystemTime};
 use unicode_width::UnicodeWidthStr;
@@ -267,14 +267,22 @@ fn host_tokens_for_painted_row(info: &SubagentInfo, all: &[&SubagentInfo]) -> Op
 }
 
 /// Drop a trailing ` (106.8k)` when that compact count is painted on its own.
+/// A running figure `106.8k+` also strips the tail written without the plus.
 /// Unrelated parentheses, such as `(review notes)`, stay.
 fn strip_duplicate_compact_tail(description: &str, compact: Option<&str>) -> String {
     let Some(compact) = compact.filter(|text| !text.is_empty()) else {
         return description.to_string();
     };
-    let suffix = format!(" ({compact})");
+    let exact = format!(" ({compact})");
+    if let Some(stripped) = description.strip_suffix(&exact) {
+        return stripped.to_string();
+    }
+    let Some(without_plus) = compact.strip_suffix('+') else {
+        return description.to_string();
+    };
+    let without_plus_suffix = format!(" ({without_plus})");
     description
-        .strip_suffix(&suffix)
+        .strip_suffix(&without_plus_suffix)
         .unwrap_or(description)
         .to_string()
 }
@@ -461,8 +469,7 @@ impl TaskEntry {
         });
         let host_figure =
             host_tokens_for_painted_row(info, all).or_else(|| subagent_list_row_usage(info, all));
-        let compact = host_figure
-            .map(format_measured_tokens_suffix)
+        let compact = format_subagents_row_figure(host_figure, info.is_running())
             .filter(|text| !text.is_empty());
         let display_description = strip_duplicate_compact_tail(&description, compact.as_deref());
         let shown_desc = match activity {
@@ -801,6 +808,13 @@ pub struct TasksPane {
     tick: u64,
     pub kill_button_rects: Vec<(TaskEntryId, Rect)>,
     pub view_button_rects: Vec<(TaskEntryId, Rect)>,
+    /// Full row hit targets for a single left click that opens the task.
+    /// Kill and view buttons are smaller rects checked first.
+    pub row_hit_rects: Vec<(TaskEntryId, Rect)>,
+    /// Completed child sessions hidden from this list. A running attempt shows again.
+    cleared_completed_ids: HashSet<String>,
+    /// Hit target for `[clear]` on the Subagents header.
+    pub clear_button_rect: Option<Rect>,
     pub hovered_kill: Option<TaskEntryId>,
     pub hovered_view: Option<TaskEntryId>,
     prev_running_count: usize,
@@ -949,6 +963,9 @@ impl TasksPane {
             tick: 0,
             kill_button_rects: Vec::new(),
             view_button_rects: Vec::new(),
+            row_hit_rects: Vec::new(),
+            cleared_completed_ids: HashSet::new(),
+            clear_button_rect: None,
             hovered_kill: None,
             hovered_view: None,
             prev_running_count: 0,
@@ -1014,6 +1031,13 @@ impl TasksPane {
                 continue;
             }
             if skip_duplicate_running.contains(info.child_session_id.as_ref()) {
+                continue;
+            }
+            if !info.is_running()
+                && self
+                    .cleared_completed_ids
+                    .contains(info.child_session_id.as_ref())
+            {
                 continue;
             }
             if self.show_done || info.is_running() {
@@ -1209,6 +1233,15 @@ impl TasksPane {
                 .count(),
         }
     }
+    pub fn hide_completed_subagent(&mut self, child_session_id: &str) {
+        self.cleared_completed_ids
+            .insert(child_session_id.to_string());
+    }
+
+    pub fn completed_subagent_is_hidden(&self, child_session_id: &str) -> bool {
+        self.cleared_completed_ids.contains(child_session_id)
+    }
+
     pub fn show_done(&self) -> bool {
         self.show_done
     }
@@ -1330,6 +1363,8 @@ impl TasksPane {
         subagents: &HashMap<String, SubagentInfo>,
         scheduled: &HashMap<String, ScheduledTaskInfo>,
     ) {
+        self.clear_button_rect = None;
+        self.row_hit_rects.clear();
         let inner = Self::content_area(area, layout_cfg);
         if self.entries.is_empty() {
             if inner.height > 0 && inner.width > 0 {
@@ -1356,6 +1391,29 @@ impl TasksPane {
             return;
         }
         let total = self.entries.len();
+        // Subagent rows taller than this panel get their own track. The Tasks
+        // group keeps the centered arrows. The track sits in the last column
+        // so the chip strip cannot cover it.
+        let subagent_list_overflows = inner.width > 2
+            && total > inner.height as usize
+            && self
+                .entries
+                .iter()
+                .any(|entry| matches!(entry, TaskEntry::Agent { .. }));
+        let scrollbar_track = subagent_list_overflows.then(|| Rect {
+            x: inner.x + inner.width - 1,
+            y: inner.y,
+            width: 1,
+            height: inner.height,
+        });
+        let inner = if scrollbar_track.is_some() {
+            Rect {
+                width: inner.width - 1,
+                ..inner
+            }
+        } else {
+            inner
+        };
         let scrollable = total > inner.height as usize && inner.height >= 3;
         let scroll = self.list_state.scroll_offset();
         let reserve_top = scrollable && scroll > 0;
@@ -1447,7 +1505,50 @@ impl TasksPane {
             ..list_area
         };
         self.render_overlay(overlay_area, buf, bg_tasks, subagents, scheduled);
+        if let Some(track) = scrollbar_track {
+            self.paint_subagent_list_scrollbar(
+                buf,
+                track,
+                total,
+                list_area.height,
+                self.list_state.scroll_offset(),
+            );
+            self.list_state.set_scrollbar_area(Some(track));
+        }
     }
+
+    /// Quiet track for the Subagents list.
+    fn paint_subagent_list_scrollbar(
+        &self,
+        buf: &mut Buffer,
+        track: Rect,
+        total: usize,
+        viewport: u16,
+        offset: usize,
+    ) {
+        let theme = Theme::current();
+        let track_style = Style::default().bg(theme.scrollbar_bg);
+        let thumb_style = Style::default()
+            .fg(theme.scrollbar_fg)
+            .bg(theme.scrollbar_bg);
+        crate::render::scrollbar::render_scrollbar_styled(
+            buf,
+            Some(track),
+            u16::try_from(total).unwrap_or(u16::MAX),
+            viewport.max(1),
+            u16::try_from(offset).unwrap_or(u16::MAX),
+            track_style,
+            thumb_style,
+        );
+    }
+    fn push_row_hit(&mut self, id: TaskEntryId, area: Rect, y: u16) {
+        if area.width == 0 {
+            return;
+        }
+        self.row_hit_rects
+            .push((id, Rect::new(area.x, y, area.width, 1)));
+    }
+
     fn render_overlay(
         &mut self,
         area: Rect,
@@ -1460,6 +1561,7 @@ impl TasksPane {
         let scroll_offset = self.list_state.scroll_offset();
         self.kill_button_rects.clear();
         self.view_button_rects.clear();
+        self.row_hit_rects.clear();
         let visible: Vec<(u16, OverlayEntryData)> = self
             .entries
             .iter()
@@ -1492,15 +1594,18 @@ impl TasksPane {
                     let Some(task) = bg_tasks.get(task_id) else {
                         continue;
                     };
+                    self.push_row_hit(TaskEntryId::BgTask(task_id.clone()), area, y);
                     self.render_bg_task_overlay(area, buf, y, task_id, task, &theme);
                 }
                 OverlayEntryData::Agent(ref subagent_id, ref child_session_id) => {
                     let Some(info) = subagents.get(child_session_id) else {
                         continue;
                     };
+                    self.push_row_hit(TaskEntryId::Agent(subagent_id.clone()), area, y);
                     self.render_agent_overlay(area, buf, y, subagent_id, info, &theme);
                 }
                 OverlayEntryData::Scheduled(ref task_id, ref linked_subagent) => {
+                    self.push_row_hit(TaskEntryId::Scheduled(task_id.clone()), area, y);
                     self.render_scheduled_overlay(
                         area,
                         buf,
@@ -1515,10 +1620,71 @@ impl TasksPane {
                     else {
                         continue;
                     };
+                    self.push_row_hit(TaskEntryId::Workflow(name.clone()), area, y);
                     self.render_workflow_overlay(area, buf, y, &run, &theme);
                 }
             }
         }
+        self.paint_subagent_clear(area, buf, subagents, &theme);
+    }
+
+    fn listed_completed_subagent(&self, subagents: &HashMap<String, SubagentInfo>) -> bool {
+        self.items.iter().any(|entry| match entry {
+            TaskEntry::Agent {
+                running: false,
+                child_session_id,
+                ..
+            } => subagents
+                .get(child_session_id)
+                .is_some_and(SubagentInfo::terminal_status_is_completed),
+            _ => false,
+        })
+    }
+
+    fn paint_subagent_clear(
+        &mut self,
+        area: Rect,
+        buf: &mut Buffer,
+        subagents: &HashMap<String, SubagentInfo>,
+        theme: &Theme,
+    ) {
+        if area.width == 0 || area.height == 0 || !self.listed_completed_subagent(subagents) {
+            return;
+        }
+        let scroll_offset = self.list_state.scroll_offset();
+        let Some(vis_row) = self
+            .entries
+            .iter()
+            .skip(scroll_offset)
+            .enumerate()
+            .take_while(|(vis_row, _)| area.y + (*vis_row as u16) < area.y + area.height)
+            .find_map(|(vis_row, entry)| {
+                matches!(
+                    entry,
+                    TaskEntry::Header {
+                        group: GroupKind::Subagents,
+                        ..
+                    }
+                )
+                .then_some(vis_row)
+            })
+        else {
+            return;
+        };
+        let label = crate::views::dock::CLEAR_LABEL;
+        let width = label.width() as u16;
+        if area.width < width {
+            return;
+        }
+        let y = area.y + vis_row as u16;
+        let x = area.x + area.width - width;
+        buf.set_span(
+            x,
+            y,
+            &Span::styled(label, Style::default().fg(theme.gray)),
+            width,
+        );
+        self.clear_button_rect = Some(Rect::new(x, y, width, 1));
     }
     fn render_workflow_overlay(
         &mut self,
@@ -3006,6 +3172,39 @@ mod tests {
         assert!(
             !l3_joined.contains("140k"),
             "specialist row must not paint the L2 atomic total, got {l3_joined:?}"
+        );
+        assert!(
+            joined.contains("140k+"),
+            "a running L2 row paints 140k with a trailing plus, got {joined:?}"
+        );
+        assert!(
+            l3_joined.contains("50k+"),
+            "a running specialist row paints 50k with a trailing plus, got {l3_joined:?}"
+        );
+        assert!(
+            !joined.contains("measured"),
+            "the running L2 row must not say measured, got {joined:?}"
+        );
+        assert!(
+            !l3_joined.contains("measured"),
+            "the running specialist row must not say measured, got {l3_joined:?}"
+        );
+
+        l2.finished = true;
+        let finished_l2 = styled_agent_line(&TaskEntry::from_subagent_with_l3_count(&l2, 1, &all));
+        assert!(
+            finished_l2.contains("140k"),
+            "a finished L2 row still paints 140k, got {finished_l2:?}"
+        );
+        assert!(
+            !finished_l2.contains("140k+") && !finished_l2.contains('+'),
+            "a finished L2 row has no trailing plus, got {finished_l2:?}"
+        );
+        l3.finished = true;
+        let finished_l3 = styled_agent_line(&TaskEntry::from_subagent_with_l3_count(&l3, 0, &all));
+        assert!(
+            finished_l3.contains("50k") && !finished_l3.contains("50k+"),
+            "a finished specialist row paints 50k with no trailing plus, got {finished_l3:?}"
         );
     }
 

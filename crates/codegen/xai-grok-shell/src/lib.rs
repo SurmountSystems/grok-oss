@@ -38,6 +38,8 @@ pub mod auth {
     };
     pub use xai_grok_login::*;
 
+    #[path = "accounts_tab.rs"]
+    pub mod accounts_tab;
     #[path = "allowance_exhaust_from_billing.rs"]
     pub mod allowance_exhaust_from_billing;
     #[path = "dual_auth_status.rs"]
@@ -55,6 +57,7 @@ pub mod auth {
     #[path = "xai_management.rs"]
     pub mod xai_management;
 
+    pub use accounts_tab::accounts_tab_lines;
     pub use allowance_exhaust_from_billing::{
         SIBLING_BILLING_AUTH_FAIL_SKIP_THRESHOLD, SupergrokBillingPollOutcome,
         SupergrokBillingPollOutcomeKind, SupergrokBillingPollTarget, active_supergrok_identity_id,

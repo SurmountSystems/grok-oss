@@ -383,7 +383,7 @@ For blocking subagents the single entry updates its bullet color when the child 
 
 ### Tasks pane (Ctrl+G)
 
-As noted above — grouped under "Subagents", with spinners, elapsed times, and quick access to kill or inspect. Press `h` to toggle hide-completed / show-all.
+As noted above — grouped under "Subagents", with spinners, elapsed times, and quick access to kill or inspect. Press `h` to toggle hide-completed / show-all. `[clear]` on the Subagents list removes completed rows and leaves a running row.
 
 ### Dock (when enabled)
 

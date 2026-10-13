@@ -335,6 +335,15 @@ impl SubagentInfo {
         !self.finished && !self.attempt.lifecycle.is_finished()
     }
 
+    /// Host exit status is `completed` on the attempt or the info row.
+    pub(crate) fn terminal_status_is_completed(&self) -> bool {
+        fn completed(status: &str) -> bool {
+            status.eq_ignore_ascii_case("completed")
+        }
+        self.attempt.status.as_deref().is_some_and(completed)
+            || self.status.as_deref().is_some_and(completed)
+    }
+
     pub(crate) fn is_finished(&self) -> bool {
         self.attempt.lifecycle.is_finished()
     }

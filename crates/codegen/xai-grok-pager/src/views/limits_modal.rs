@@ -1292,17 +1292,22 @@ pub fn render_limits_modal(
         &state.snapshot,
     );
     let section_count = sections.len();
-    let mut body = sections;
+    let account_lines = super::accounts_tab::accounts_tab_lines_from_home();
+    let account_count = account_lines.len();
+    let mut body = account_lines;
+    body.append(&mut sections);
     let _ = now;
     if !draws_included {
         body.insert(
-            section_count,
+            account_count + section_count,
             "Included limits are not being drawn for the next request.".to_string(),
         );
     }
+    let mut account_display_len = 0usize;
     let mut section_display_len = 0usize;
     for (index, raw) in body.into_iter().enumerate() {
-        let is_section = index < section_count;
+        let is_account = index < account_count;
+        let is_section = index >= account_count && index < account_count + section_count;
         let is_allowance_meter = is_included_allowance_used_line(&raw);
         let is_included_usage = raw.contains("Included usage:");
         // The fail-open printout note is required in the body text (CLI /
@@ -1317,6 +1322,9 @@ pub fn render_limits_modal(
             raw
         };
         display_lines.extend(wrap_plain_line(&display_src, width));
+        if is_account {
+            account_display_len = display_lines.len();
+        }
         // The bar follows included usage on the Limits tab. The Credits tab
         // does not get the track. Remaining fraction is what primary_bar stores.
         if primary_bar.is_some()
@@ -1350,7 +1358,8 @@ pub fn render_limits_modal(
         if y >= content.y + content.height {
             break;
         }
-        let section_row = display_index < section_display_len;
+        let section_row =
+            display_index >= account_display_len && display_index < section_display_len;
         display_index = display_index.saturating_add(1);
         if section_row {
             section_rows.push(y);

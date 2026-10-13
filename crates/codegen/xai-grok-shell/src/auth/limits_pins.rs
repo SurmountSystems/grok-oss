@@ -179,6 +179,63 @@ pub fn apply_use_business() -> Result<IdentityPinApply, std::io::Error> {
     Ok(IdentityPinApply::Applied)
 }
 
+/// Email stored on the SuperGrok session the next request uses.
+///
+/// A Business pin reads the Team slot (`::team::`). Any other pin reads the
+/// personal slot, then a lone base login that is not a Team principal.
+/// The base mirror is not a third account. A missing email stays absent.
+/// This does not treat a user id or team id as an email, and it does not
+/// remove the other login.
+pub fn oauth_email_for_next_request(
+    map: &super::model::AuthStore,
+    pin: Option<SupergrokIdentityPin>,
+) -> Option<String> {
+    let business = pin == Some(SupergrokIdentityPin::Business);
+    let mut lone_personal: Option<String> = None;
+    for (scope, auth) in map {
+        if scope.as_str() == super::model::API_KEY_SCOPE {
+            continue;
+        }
+        let email = auth
+            .email
+            .as_deref()
+            .map(str::trim)
+            .filter(|email| !email.is_empty())
+            .map(str::to_owned);
+        let Some(email) = email else {
+            continue;
+        };
+        if business {
+            if scope.contains("::team::") {
+                return Some(email);
+            }
+            continue;
+        }
+        if scope.ends_with("::personal") {
+            return Some(email);
+        }
+        let is_multi = scope.contains("::personal") || scope.contains("::team::");
+        if !is_multi && !auth.is_team_principal() && lone_personal.is_none() {
+            lone_personal = Some(email);
+        }
+    }
+    if business { None } else { lone_personal }
+}
+
+/// Operator-facing label for the email the next request uses.
+/// `email` is the stored account label, not a token.
+pub fn next_request_oauth_account_line(email: &str) -> String {
+    format!("Next request OAuth account: {email}")
+}
+
+/// Email for `pin` in the auth file under the live grok home.
+/// Missing file or missing email is `None`.
+pub fn stored_oauth_email_for_pin(pin: SupergrokIdentityPin) -> Option<String> {
+    let path = grok_home_path().join("auth.json");
+    let map = super::read_auth_json(&path).ok()?;
+    oauth_email_for_next_request(&map, Some(pin))
+}
+
 /// One of the four stored SuperGrok meter cells.
 ///
 /// Personal and business included SuperGrok period limits are separate
@@ -2015,6 +2072,103 @@ preferred_method = "api_key"
         assert!(
             !home.path().join("config.toml").exists(),
             "use-business must not write [auth] preferred_method"
+        );
+    }
+
+    /// Named contract: use-business selects the Team login whose stored
+    /// email is hunter@surmount.systems and keeps the other login.
+    /// The base slot may still be the personal session. The email is the
+    /// label. A user id is not that email.
+    #[test]
+    #[serial_test::serial]
+    fn use_business_selects_hunter_surmount_email_and_keeps_the_other_login() {
+        use crate::auth::{AuthMode, GrokAuth, upsert_supergrok_session};
+
+        let home = TempDir::new().expect("temp grok home");
+        let _env = EnvGuard::set("GROK_HOME", home.path());
+        let base = "https://auth.x.ai::client-email-label";
+        let mut map = std::collections::BTreeMap::new();
+        upsert_supergrok_session(
+            &mut map,
+            base,
+            GrokAuth {
+                key: "fixture-business-token".into(),
+                auth_mode: AuthMode::Oidc,
+                user_id: "user-business".into(),
+                email: Some("hunter@surmount.systems".into()),
+                principal_type: Some("Team".into()),
+                principal_id: Some("team-surmount".into()),
+                team_id: Some("team-surmount".into()),
+                ..Default::default()
+            },
+        );
+        upsert_supergrok_session(
+            &mut map,
+            base,
+            GrokAuth {
+                key: "fixture-personal-token".into(),
+                auth_mode: AuthMode::Oidc,
+                user_id: "user-personal".into(),
+                email: Some("other@example.com".into()),
+                principal_type: Some("User".into()),
+                ..Default::default()
+            },
+        );
+        fs::write(
+            home.join("auth.json"),
+            serde_json::to_vec_pretty(&map).expect("auth.json"),
+        )
+        .expect("write auth.json");
+
+        assert_eq!(
+            apply_use_business().expect("use-business"),
+            IdentityPinApply::Applied
+        );
+        assert_eq!(
+            oauth_email_for_next_request(&map, Some(SupergrokIdentityPin::Business)).as_deref(),
+            Some("hunter@surmount.systems")
+        );
+        let line = next_request_oauth_account_line("hunter@surmount.systems");
+        assert_eq!(line, "Next request OAuth account: hunter@surmount.systems");
+        assert!(!line.contains("other@example.com"));
+        assert_ne!(
+            oauth_email_for_next_request(&map, Some(SupergrokIdentityPin::Personal)).as_deref(),
+            Some("hunter@surmount.systems")
+        );
+
+        let mut config = dual_auth_sampler("fixture-personal-token", "console-left-alone");
+        config.failover_api_keys =
+            vec!["fixture-business-token".into(), "console-left-alone".into()];
+        apply_limits_pins_to_sampler_config(&mut config);
+        assert_eq!(
+            config.api_key.as_deref(),
+            Some("fixture-business-token"),
+            "the next request uses the Team session for hunter@surmount.systems"
+        );
+
+        let stored = crate::auth::read_auth_json(&home.join("auth.json")).expect("read auth");
+        let personal_scope = format!("{base}::personal");
+        let team_scope = format!("{base}::team::team-surmount");
+        assert_eq!(
+            stored
+                .get(&personal_scope)
+                .and_then(|auth| auth.email.as_deref()),
+            Some("other@example.com"),
+            "the other login stays"
+        );
+        assert_eq!(
+            stored.get(&personal_scope).map(|auth| auth.key.as_str()),
+            Some("fixture-personal-token")
+        );
+        assert_eq!(
+            stored
+                .get(&team_scope)
+                .and_then(|auth| auth.email.as_deref()),
+            Some("hunter@surmount.systems")
+        );
+        assert_eq!(
+            stored.get(&team_scope).map(|auth| auth.key.as_str()),
+            Some("fixture-business-token")
         );
     }
 
