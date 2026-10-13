@@ -60,7 +60,7 @@ impl ScriptedScenario {
     pub fn from_yaml_file(path: &Path) -> Result<Self> {
         let text = fs::read_to_string(path)
             .with_context(|| format!("read scenario file {}", path.display()))?;
-        serde_yaml::from_str(&text)
+        serde_saphyr::from_str(&text)
             .with_context(|| format!("parse scenario YAML {}", path.display()))
     }
 
@@ -2060,16 +2060,17 @@ mod tests {
     #[test]
     fn image_fixture_defaults_to_standard_kind() {
         let f: ImageFixture =
-            serde_yaml::from_str("name: legacy\nextension: png\n").expect("parse fixture");
+            serde_saphyr::from_str("name: legacy\nextension: png\n").expect("parse fixture");
         assert_eq!(f.kind, ImageFixtureKind::Standard);
     }
 
     #[test]
     fn image_fixture_parses_explicit_kind() {
-        let f: ImageFixture = serde_yaml::from_str("name: tiny\nkind: tiny_1x1\n").expect("parse");
+        let f: ImageFixture =
+            serde_saphyr::from_str("name: tiny\nkind: tiny_1x1\n").expect("parse");
         assert_eq!(f.kind, ImageFixtureKind::Tiny1x1);
         let f: ImageFixture =
-            serde_yaml::from_str("name: bad\nkind: crc_corrupt_png\n").expect("parse");
+            serde_saphyr::from_str("name: bad\nkind: crc_corrupt_png\n").expect("parse");
         assert_eq!(f.kind, ImageFixtureKind::CrcCorruptPng);
     }
 
@@ -2098,23 +2099,23 @@ mod tests {
 
     #[test]
     fn dimension_assertion_parses_exact_and_range() {
-        let exact: DimensionAssertion = serde_yaml::from_str("28").expect("parse exact");
+        let exact: DimensionAssertion = serde_saphyr::from_str("28").expect("parse exact");
         assert!(matches!(exact, DimensionAssertion::Exact(28)));
         assert!(exact.matches(28));
         assert!(!exact.matches(29));
 
-        let lo: DimensionAssertion = serde_yaml::from_str("min: 28").expect("parse min");
+        let lo: DimensionAssertion = serde_saphyr::from_str("min: 28").expect("parse min");
         assert!(lo.matches(28));
         assert!(lo.matches(1024));
         assert!(!lo.matches(27));
 
-        let hi: DimensionAssertion = serde_yaml::from_str("max: 100").expect("parse max");
+        let hi: DimensionAssertion = serde_saphyr::from_str("max: 100").expect("parse max");
         assert!(hi.matches(0));
         assert!(hi.matches(100));
         assert!(!hi.matches(101));
 
         let both: DimensionAssertion =
-            serde_yaml::from_str("{min: 10, max: 20}").expect("parse range");
+            serde_saphyr::from_str("{min: 10, max: 20}").expect("parse range");
         assert!(both.matches(15));
         assert!(!both.matches(9));
         assert!(!both.matches(21));
@@ -2161,14 +2162,14 @@ mod tests {
     #[test]
     fn parses_assert_no_temp_artifacts_action() {
         let step: ScenarioStep =
-            serde_yaml::from_str("action: assert_no_temp_artifacts").expect("parse");
+            serde_saphyr::from_str("action: assert_no_temp_artifacts").expect("parse");
         assert!(matches!(step, ScenarioStep::AssertNoTempArtifacts {}));
     }
 
     #[test]
     fn parses_assert_request_contains_action() {
         let step: ScenarioStep =
-            serde_yaml::from_str("action: assert_request_contains\ntext: hello").expect("parse");
+            serde_saphyr::from_str("action: assert_request_contains\ntext: hello").expect("parse");
         match step {
             ScenarioStep::AssertRequestContains {
                 text,
@@ -2205,13 +2206,13 @@ mod tests {
     #[test]
     fn parses_assert_kitty_graphics_with_default_min() {
         let step: ScenarioStep =
-            serde_yaml::from_str("action: assert_kitty_graphics\n").expect("parse");
+            serde_saphyr::from_str("action: assert_kitty_graphics\n").expect("parse");
         match step {
             ScenarioStep::AssertKittyGraphics { min } => assert_eq!(min, 1),
             other => panic!("unexpected step: {other:?}"),
         }
         let step: ScenarioStep =
-            serde_yaml::from_str("action: assert_kitty_graphics\nmin: 3\n").expect("parse");
+            serde_saphyr::from_str("action: assert_kitty_graphics\nmin: 3\n").expect("parse");
         match step {
             ScenarioStep::AssertKittyGraphics { min } => assert_eq!(min, 3),
             other => panic!("unexpected step: {other:?}"),
@@ -2221,14 +2222,14 @@ mod tests {
     #[test]
     fn parses_assert_no_kitty_graphics() {
         let step: ScenarioStep =
-            serde_yaml::from_str("action: assert_no_kitty_graphics\n").expect("parse");
+            serde_saphyr::from_str("action: assert_no_kitty_graphics\n").expect("parse");
         assert!(matches!(step, ScenarioStep::AssertNoKittyGraphics {}));
         assert_eq!(action_name(&step), "assert_no_kitty_graphics");
     }
 
     #[test]
     fn parses_assert_inline_images_with_min_form() {
-        let step: ScenarioStep = serde_yaml::from_str(
+        let step: ScenarioStep = serde_saphyr::from_str(
             "action: assert_inline_images\nmin: 1\nwidth: { min: 28 }\nheight: { min: 28 }\n",
         )
         .expect("parse");

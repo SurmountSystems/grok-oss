@@ -5,7 +5,6 @@ use std::sync::Arc;
 
 use std::sync::Mutex;
 
-use bm25::{Language, SearchEngineBuilder};
 use xai_grok_tools::types::tool_index::{
     SearchSnapshot, ServerSummary, ToolSearchIndex, ToolSearchResult,
 };
@@ -180,11 +179,8 @@ impl ToolSearchIndex for Bm25ToolSearchIndex {
 
         let documents: Vec<String> = snapshot.tools.iter().map(|t| t.to_document()).collect();
 
-        let search_engine =
-            SearchEngineBuilder::<u32>::with_corpus(Language::English, documents).build();
-
         let normalized = normalize_query(query);
-        let bm25_results = search_engine.search(&normalized, limit);
+        let bm25_results = search_okapi_bm25(&documents, &normalized, limit);
 
         let results = bm25_results
             .into_iter()
@@ -244,6 +240,92 @@ impl ToolSearchIndex for Bm25ToolSearchIndex {
             })
             .collect()
     }
+}
+
+const BM25_K1: f64 = 1.2;
+const BM25_B: f64 = 0.75;
+
+struct Bm25DocId {
+    id: u32,
+}
+
+struct Bm25Hit {
+    document: Bm25DocId,
+    score: f32,
+}
+
+/// Split on non-ASCII-alphanumeric, ASCII-lowercase, drop empty tokens.
+fn tokenize_bm25(text: &str) -> Vec<String> {
+    text.split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .map(|token| token.to_ascii_lowercase())
+        .collect()
+}
+
+/// In-tree Okapi BM25. Document id is the corpus index.
+/// idf = ln((N - df + 0.5) / (df + 0.5) + 1). k1 = 1.2, b = 0.75.
+fn search_okapi_bm25(documents: &[String], query: &str, limit: usize) -> Vec<Bm25Hit> {
+    if limit == 0 || documents.is_empty() {
+        return Vec::new();
+    }
+    let query_tokens = tokenize_bm25(query);
+    if query_tokens.is_empty() {
+        return Vec::new();
+    }
+    let docs: Vec<Vec<String>> = documents.iter().map(|doc| tokenize_bm25(doc)).collect();
+    let n = docs.len() as f64;
+    let total_len: usize = docs.iter().map(|doc| doc.len()).sum();
+    let avgdl = if n == 0.0 { 0.0 } else { total_len as f64 / n };
+    let mut df: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for doc in &docs {
+        let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        for token in doc {
+            if seen.insert(token.as_str()) {
+                *df.entry(token.clone()).or_insert(0) += 1;
+            }
+        }
+    }
+    let mut hits = Vec::new();
+    for (id, doc) in docs.iter().enumerate() {
+        let mut tf: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+        for token in doc {
+            *tf.entry(token.as_str()).or_insert(0) += 1;
+        }
+        let dl = doc.len() as f64;
+        let mut score = 0.0_f64;
+        for query_token in &query_tokens {
+            let Some(&doc_freq) = df.get(query_token.as_str()) else {
+                continue;
+            };
+            let Some(&freq) = tf.get(query_token.as_str()) else {
+                continue;
+            };
+            let idf = ((n - doc_freq as f64 + 0.5) / (doc_freq as f64 + 0.5) + 1.0).ln();
+            let freq = freq as f64;
+            let norm = if avgdl == 0.0 {
+                0.0
+            } else {
+                BM25_B * dl / avgdl
+            };
+            let denom = freq + BM25_K1 * (1.0 - BM25_B + norm);
+            let tf_term = (freq * (BM25_K1 + 1.0)) / denom;
+            score += idf * tf_term;
+        }
+        if score > 0.0 {
+            hits.push(Bm25Hit {
+                document: Bm25DocId { id: id as u32 },
+                score: score as f32,
+            });
+        }
+    }
+    hits.sort_by(|left, right| {
+        right
+            .score
+            .total_cmp(&left.score)
+            .then_with(|| left.document.id.cmp(&right.document.id))
+    });
+    hits.truncate(limit);
+    hits
 }
 
 pub(crate) fn extract_parameter_names(schema: &serde_json::Value) -> Vec<String> {

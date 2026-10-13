@@ -866,7 +866,7 @@ impl std::fmt::Display for AgentScope {
     }
 }
 /// Controls which parent MCP servers a subagent inherits.
-/// Custom `Deserialize` because `serde_yaml` 0.9 uses YAML tags for externally-tagged enums.
+/// Custom `Deserialize` because externally-tagged enums would not match frontmatter maps.
 /// Frontmatter uses the mapping style that JSON also expects.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1029,7 +1029,7 @@ where
     D: serde::Deserializer<'de>,
 {
     use std::str::FromStr;
-    let Some(value) = Option::<serde_yaml::Value>::deserialize(deserializer)? else {
+    let Some(value) = Option::<serde_json::Value>::deserialize(deserializer)? else {
         return Ok(None);
     };
     let parsed = value
@@ -1252,7 +1252,7 @@ impl AgentDefinition {
         let yaml_content = after_opening.get(..closing_idx).ok_or_else(|| {
             AgentBuildError::ParseError("missing closing frontmatter delimiter".to_string())
         })?;
-        let mut def: AgentDefinition = serde_yaml::from_str(yaml_content)
+        let mut def: AgentDefinition = serde_saphyr::from_str(yaml_content)
             .map_err(|e| AgentBuildError::ParseError(e.to_string()))?;
         def.prompt_body = None;
         def.system_prompt = TemplateOverride::None;
@@ -1288,7 +1288,7 @@ impl AgentDefinition {
         } else {
             Some(body.to_string())
         };
-        let mut def: AgentDefinition = serde_yaml::from_str(yaml_content)
+        let mut def: AgentDefinition = serde_saphyr::from_str(yaml_content)
             .map_err(|e| AgentBuildError::ParseError(e.to_string()))?;
         def.prompt_body = prompt_body;
         def.plugin_name = None;
@@ -2469,19 +2469,19 @@ description: Test default tool config
     #[test]
     fn test_model_override_serde_inherit() {
         let yaml = "\"inherit\"";
-        let m: ModelOverride = serde_yaml::from_str(yaml).unwrap();
+        let m: ModelOverride = serde_saphyr::from_str(yaml).unwrap();
         assert_eq!(m, ModelOverride::Inherit);
     }
     #[test]
     fn test_model_override_serde_inherit_case_insensitive() {
         let yaml = "\"Inherit\"";
-        let m: ModelOverride = serde_yaml::from_str(yaml).unwrap();
+        let m: ModelOverride = serde_saphyr::from_str(yaml).unwrap();
         assert_eq!(m, ModelOverride::Inherit);
     }
     #[test]
     fn test_model_override_serde_explicit_model_id() {
         let yaml = "\"grok-3-fast\"";
-        let m: ModelOverride = serde_yaml::from_str(yaml).unwrap();
+        let m: ModelOverride = serde_saphyr::from_str(yaml).unwrap();
         assert_eq!(m, ModelOverride::Override("grok-3-fast".to_string()));
     }
     #[test]

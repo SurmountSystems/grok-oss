@@ -74,7 +74,7 @@ impl AuthFileLock {
 /// continuously).
 pub(crate) struct LiveAuthFileLock<'a>(#[allow(dead_code)] &'a AuthFileLock);
 
-pub fn read_auth_json(auth_file: &Path) -> std::io::Result<AuthStore> {
+fn read_auth_json(auth_file: &Path) -> std::io::Result<AuthStore> {
     let mut file = File::open(auth_file)?;
     let mut contents = String::new();
     file.read_to_string(&mut contents)?;
@@ -549,7 +549,7 @@ fn restore_prior_bytes(auth_file: &Path, bytes: &[u8]) -> std::io::Result<()> {
 }
 
 /// Read the API key from the `xai::api_key` scope in auth.json.
-pub fn read_api_key(grok_home: &Path) -> Option<String> {
+fn read_api_key(grok_home: &Path) -> Option<String> {
     let path = grok_home.join("auth.json");
     let map = read_auth_json(&path).ok()?;
     map.get(API_KEY_SCOPE).map(|a| a.key.clone())
@@ -563,7 +563,7 @@ pub fn read_api_key(grok_home: &Path) -> Option<String> {
 /// Also best-effort mirrors into the Grok secret store (keyring /
 /// `provider_credentials.json`) for dual-auth console-key failover when
 /// `XAI_API_KEY` is not set (env wins; store write is skipped).
-pub fn store_api_key(grok_home: &Path, api_key: &str) -> std::io::Result<()> {
+fn store_api_key(grok_home: &Path, api_key: &str) -> std::io::Result<()> {
     let path = grok_home.join("auth.json");
     let mut map = read_auth_json_or_empty_recovering_corrupt(&path)?;
     map.insert(
@@ -591,7 +591,7 @@ pub fn store_api_key(grok_home: &Path, api_key: &str) -> std::io::Result<()> {
 }
 
 /// Remove the `xai::api_key` scope from auth.json.
-pub fn clear_api_key(grok_home: &Path) -> std::io::Result<()> {
+fn clear_api_key(grok_home: &Path) -> std::io::Result<()> {
     let path = grok_home.join("auth.json");
     if let Ok(mut map) = read_auth_json(&path) {
         map.remove(API_KEY_SCOPE);

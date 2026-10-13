@@ -2150,9 +2150,7 @@ fn to_document_baseline(t: &ToolMetadata) -> String {
 
 /// Search BM25 and return the score for `target`, or 0.0 if not found.
 fn bm25_score_for(tools: &[ToolMetadata], docs: Vec<String>, query: &str, target: &str) -> f32 {
-    let engine = SearchEngineBuilder::<u32>::with_corpus(Language::English, docs).build();
-    engine
-        .search(query, 10)
+    search_okapi_bm25(&docs, query, 10)
         .iter()
         .find(|r| {
             tools

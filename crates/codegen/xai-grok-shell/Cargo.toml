@@ -45,8 +45,6 @@ xai-grok-version = { workspace = true }
 async-openai = { workspace = true }
 async-trait = { workspace = true }
 blake3 = { workspace = true }
-# crates.io bm25 2.3 (delayed index).
-bm25 = "2.3"
 bytes = { workspace = true }
 chrono = { workspace = true }
 indexmap = { workspace = true, features = ["serde"] }

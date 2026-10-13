@@ -1794,7 +1794,8 @@ impl AgentView {
                 layout.scrollback_content,
                 area,
             );
-            self.scrollback.prepare_layout(session_width, layout.scrollback_content.height);
+            self.scrollback
+                .prepare_layout(session_width, layout.scrollback_content.height);
             let viewport = crate::views::timeline::RailViewport {
                 active: self.scrollback.active_turn_for_viewport(),
                 up_target: self.scrollback.turn_above_viewport_top(),
@@ -6197,7 +6198,9 @@ mod plan_approval_draw_contract_tests {
             agent.pane_areas.prompt
         );
         assert!(
-            text.contains("Grok OSS") && !text.contains("Grok Build") && !text.contains("Grok Grok"),
+            text.contains("Grok OSS")
+                && !text.contains("Grok Build")
+                && !text.contains("Grok Grok"),
             "title must contain Grok OSS and must not contain Grok Build or Grok Grok:\n{text}"
         );
     }
@@ -6207,10 +6210,8 @@ mod plan_approval_draw_contract_tests {
     #[serial_test::serial(GROK_HOME)]
     #[test]
     fn plan_pane_title_says_grok_oss() {
-        let home = std::env::temp_dir().join(format!(
-            "grok-plan-pane-title-{}",
-            std::process::id()
-        ));
+        let home =
+            std::env::temp_dir().join(format!("grok-plan-pane-title-{}", std::process::id()));
         std::fs::create_dir_all(&home).expect("temp GROK_HOME");
         let prev = std::env::var("GROK_HOME").ok();
         struct RestoreGrokHome(Option<String>);
@@ -6236,13 +6237,9 @@ mod plan_approval_draw_contract_tests {
 
         let text = render_text(&mut agent, false);
         assert!(
-            agent
-                .line_viewer
-                .as_ref()
-                .is_some_and(|viewer| {
-                    viewer.kind
-                        == crate::views::file_search::line_viewer::LineViewerKind::PlanPreview
-                }),
+            agent.line_viewer.as_ref().is_some_and(|viewer| {
+                viewer.kind == crate::views::file_search::line_viewer::LineViewerKind::PlanPreview
+            }),
             "the plan pane must be open"
         );
         assert!(
@@ -8092,8 +8089,8 @@ mod status_credits_meter_tests {
     /// 10 percent must not paint `limits 90%`.
     #[test]
     #[serial_test::serial]
-    fn header_chip_says_grok_oss_login_when_the_personal_access_token_is_hard_expired_and_poll_is_reauth(
-    ) {
+    fn header_chip_says_grok_oss_login_when_the_personal_access_token_is_hard_expired_and_poll_is_reauth()
+     {
         let home = tempfile::TempDir::new().expect("temp GROK_HOME");
         let _env = xai_grok_test_support::EnvGuard::set("GROK_HOME", home.path());
         xai_grok_shell::auth::clear_included_billing_cache();
@@ -8186,9 +8183,7 @@ mod status_credits_meter_tests {
             !chip.contains("limits 100%"),
             "the chip must not contain `limits 100%`:\n{chip}"
         );
-        assert!(
-            !xai_grok_shell::auth::limits_pins::load_limits_pins().use_console
-        );
+        assert!(!xai_grok_shell::auth::limits_pins::load_limits_pins().use_console);
     }
 
     const CELL_PERSONAL_TOKEN: &str = "tok-personal-cell";
@@ -9999,8 +9994,8 @@ mod plan_turn_row_revising_copy_tests {
                     .chars()
                     .all(|ch| !ch.is_ascii_alphanumeric());
             let end = start + parts.len();
-            let after_ok = end == symbols.len()
-                || symbols[end].chars().all(|ch| !ch.is_ascii_alphanumeric());
+            let after_ok =
+                end == symbols.len() || symbols[end].chars().all(|ch| !ch.is_ascii_alphanumeric());
             if before_ok && after_ok {
                 hits.push(start as u16);
             }
@@ -10031,9 +10026,9 @@ mod plan_turn_row_revising_copy_tests {
             session.push_str(sentence);
         }
         assert!(session.chars().count() > 120);
-        agent.scrollback.push_block(crate::scrollback::RenderBlock::agent_message(
-            session,
-        ));
+        agent
+            .scrollback
+            .push_block(crate::scrollback::RenderBlock::agent_message(session));
         let revise = "Revise sentence QueEmpTh stays once.";
         agent.prompt.set_text(revise);
         let area = ratatui::layout::Rect::new(0, 0, 120, 40);
@@ -10089,7 +10084,9 @@ mod plan_turn_row_revising_copy_tests {
             "AlphabetWrapToken must appear at x >= {pane_x} as a whole word"
         );
         assert!(
-            left_blob.contains("session") || left_blob.contains("queue") || left_blob.contains("wrap"),
+            left_blob.contains("session")
+                || left_blob.contains("queue")
+                || left_blob.contains("wrap"),
             "session line should paint left of the pane"
         );
         assert!(

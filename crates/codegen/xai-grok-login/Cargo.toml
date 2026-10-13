@@ -24,7 +24,7 @@ base64 = { workspace = true }
 blake3 = { workspace = true }
 chrono = { workspace = true }
 fs2 = { workspace = true }
-jsonwebtoken = { version = "10", features = ["rust_crypto"] }
+jsonwebtoken = { version = "10", default-features = false, features = ["aws_lc_rs", "use_pem"] }
 keyring = { workspace = true }
 obfstr = { workspace = true }
 parking_lot = { workspace = true }
@@ -88,7 +88,6 @@ linux-keyutils-keyring-store = "1"
 tempfile = { workspace = true }
 serial_test = { workspace = true }
 filetime = { workspace = true }
-rsa = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter", "fmt", "json", "time"] }
 tokio = { workspace = true, features = ["test-util"] }
 xai-grok-test-support = { workspace = true }

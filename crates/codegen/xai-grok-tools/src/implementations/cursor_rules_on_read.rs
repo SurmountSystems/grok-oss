@@ -310,7 +310,7 @@ fn parse_rule(scope_dir: PathBuf, full_path: PathBuf, content: &str) -> ParsedCu
 }
 
 fn parse_frontmatter(yaml: &str) -> Option<CursorRuleFrontmatter> {
-    if let Ok(parsed) = serde_yaml::from_str::<CursorRuleFrontmatter>(yaml) {
+    if let Ok(parsed) = serde_saphyr::from_str::<CursorRuleFrontmatter>(yaml) {
         return Some(parsed);
     }
 

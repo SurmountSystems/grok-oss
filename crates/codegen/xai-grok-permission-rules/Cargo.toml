@@ -9,7 +9,7 @@ description = "Grok's permission rule engine, apart from the session and tool co
 agent-client-protocol = { workspace = true }
 dunce = { workspace = true }
 fs2 = { workspace = true }
-git2 = { version = "0.20", default-features = false, features = ["vendored-libgit2"] }
+git2 = { version = "0.21", default-features = false, features = ["vendored-libgit2"] }
 glob = "0.3"
 rusqlite = { version = "0.37", features = ["bundled"] }
 serde = { workspace = true }
