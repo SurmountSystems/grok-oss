@@ -34,8 +34,11 @@ workspace = true
 optional = true
 
 [build-dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
 syntect = { workspace = true }
 two-face = { workspace = true }
+yaml-rust2 = { workspace = true }
 
 [dev-dependencies]
 criterion = { workspace = true }

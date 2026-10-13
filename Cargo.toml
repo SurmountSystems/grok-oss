@@ -5,7 +5,6 @@
 # index. Official git tag, not a grok-oss path copy. rand 0.10.x needs
 # ChaCha12Rng. Do not cargo update against crates.io to skip the wait.
 chacha20 = { git = "https://github.com/RustCrypto/stream-ciphers", tag = "chacha20-v0.10.2" }
-syntect = { git = "https://github.com/trishume/syntect", rev = "69c0544beb3774e54e6d7f7b5288697a70a78864" }
 
 [workspace]
 resolver = "2"
@@ -193,6 +192,7 @@ gix = { version = "0.83", default-features = false, features = ["sha1"] }
 glob = "0.3"
 globset = "0.4"
 grep = "0.4"
+hayro = "0.7.1"
 hmac = "0.12"
 htmd = "0.5.4"
 html-escape = "0.2"
@@ -242,7 +242,6 @@ opentelemetry-proto = { version = "0.32", features = ["gen-tonic"] }
 opentelemetry_sdk = { version = "0.32.1", features = ["spec_unstable_metrics_views"] }
 parking_lot = "0.12.4"
 pbjson-build = "0.9"
-pdf_oxide = { version = "0.3.43", features = ["rendering"] }
 petgraph = { version = "0.6.5", default-features = false, features = ["serde-1", "stable_graph"] }
 portable-pty = "0.9"
 pprof = "0.15"
@@ -291,7 +290,7 @@ strip-ansi-escapes = "0.2.1"
 strum = { version = "0.27", features = ["derive"] }
 subtle = "2"
 supports-color = "3.0"
-syntect = { version = "5.3", default-features = false, features = ["default-onig"] }
+syntect = { version = "5.3", default-features = false, features = ["parsing", "regex-onig", "plist-load"] }
 tar = "0.4"
 tempfile = "3"
 terminput = "0.3"
@@ -412,6 +411,7 @@ xai-tool-runtime = { path = "crates/common/xai-tool-runtime" }
 xai-tool-types = { path = "crates/common/xai-tool-types" }
 xai-tracing = { path = "crates/common/xai-tracing" }
 xai-tty-utils = { path = "crates/codegen/xai-tty-utils" }
+yaml-rust2 = "0.13"
 zbus = { version = "5" }
 zip = "3"
 zstd = "0.13"

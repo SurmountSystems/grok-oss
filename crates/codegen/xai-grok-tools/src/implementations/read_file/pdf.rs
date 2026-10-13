@@ -175,14 +175,11 @@ pub fn parse_page_range(spec: &str, page_count: usize) -> Result<Vec<usize>, Str
     Ok(pages)
 }
 
-fn open_pdf_document(bytes: Vec<u8>) -> Result<(pdf_oxide::PdfDocument, usize), String> {
-    let doc = pdf_oxide::PdfDocument::from_bytes(bytes)
-        .map_err(|e| format!("Failed to open PDF: {e}"))?;
+fn open_pdf_document(bytes: Vec<u8>) -> Result<(hayro::hayro_syntax::Pdf, usize), String> {
+    let doc =
+        hayro::hayro_syntax::Pdf::new(bytes).map_err(|e| format!("Failed to open PDF: {e:?}"))?;
 
-    let page_count = doc
-        .page_count()
-        .map_err(|e| format!("Failed to read PDF page count: {e}"))?;
-
+    let page_count = doc.pages().len();
     if page_count == 0 {
         return Err("PDF has no pages".to_string());
     }
@@ -193,7 +190,7 @@ fn open_pdf_document(bytes: Vec<u8>) -> Result<(pdf_oxide::PdfDocument, usize), 
 fn open_pdf_and_resolve_pages(
     bytes: Vec<u8>,
     pages_spec: Option<&str>,
-) -> Result<(pdf_oxide::PdfDocument, usize, Vec<usize>), String> {
+) -> Result<(hayro::hayro_syntax::Pdf, usize, Vec<usize>), String> {
     let (doc, page_count) = open_pdf_document(bytes)?;
 
     let page_indices = match pages_spec {
@@ -220,16 +217,34 @@ pub(crate) fn render_pdf_pages(
     file_size: usize,
 ) -> Result<ReadFileOutput, String> {
     let (doc, page_count, page_indices) = open_pdf_and_resolve_pages(bytes, pages_spec)?;
-
-    let opts = pdf_oxide::rendering::RenderOptions::with_dpi(PDF_RENDER_DPI)
-        .as_jpeg(PDF_RENDER_JPEG_QUALITY);
+    let render_settings = hayro::RenderSettings {
+        x_scale: PDF_RENDER_DPI as f32 / 72.0,
+        y_scale: PDF_RENDER_DPI as f32 / 72.0,
+        bg_color: hayro::vello_cpu::color::palette::css::WHITE,
+        ..hayro::RenderSettings::default()
+    };
 
     let mut page_images = Vec::with_capacity(page_indices.len());
     for &page_idx in &page_indices {
-        let image = pdf_oxide::rendering::render_page(&doc, page_idx, &opts)
-            .map_err(|e| format!("Failed to render page {}: {e}", page_idx + 1))?;
+        let pixmap = hayro::render(
+            &doc.pages()[page_idx],
+            &hayro::RenderCache::new(),
+            &hayro::hayro_interpret::InterpreterSettings::default(),
+            &render_settings,
+        );
+        let width = pixmap.width() as u32;
+        let height = pixmap.height() as u32;
+        let mut jpeg = Vec::new();
+        image::ImageEncoder::write_image(
+            image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, PDF_RENDER_JPEG_QUALITY),
+            pixmap.data_as_u8_slice(),
+            width,
+            height,
+            image::ExtendedColorType::Rgba8,
+        )
+        .map_err(|e| format!("Failed to render page {}: {e}", page_idx + 1))?;
 
-        let b64 = general_purpose::STANDARD.encode(&image.data);
+        let b64 = general_purpose::STANDARD.encode(&jpeg);
         page_images.push(PdfPageImage {
             data: b64,
             mime_type: "image/jpeg".to_string(),
@@ -271,22 +286,47 @@ enum PageTextStyle {
     Cursor { total_pages: usize },
 }
 
-fn append_page_body(text: &mut String, doc: &pdf_oxide::PdfDocument, page_idx: usize) {
-    match doc.extract_text(page_idx) {
-        Ok(page_text) => text.push_str(&page_text),
-        Err(e) => {
-            writeln!(
-                text,
-                "[Failed to extract text from page {}: {e}]",
-                page_idx + 1
-            )
-            .ok();
+fn append_pdf_string(text: &mut String, bytes: &[u8]) {
+    text.push_str(&String::from_utf8_lossy(bytes));
+}
+
+fn append_show_texts(text: &mut String, array: &hayro::hayro_syntax::object::Array<'_>) {
+    for item in array.iter::<hayro::hayro_syntax::object::Object>() {
+        if let hayro::hayro_syntax::object::Object::String(s) = item {
+            append_pdf_string(text, s.as_bytes());
+        }
+    }
+}
+
+fn append_page_body(
+    text: &mut String,
+    page: &hayro::hayro_syntax::page::Page<'_>,
+    page_number: usize,
+) {
+    if page.page_stream().is_none() {
+        let _ = write!(
+            text,
+            "[Failed to extract text from page {page_number}: content stream could not be decoded]"
+        );
+        return;
+    }
+    use hayro::hayro_syntax::content::ops::TypedInstruction;
+    let mut ops = page.typed_operations();
+    while let Some(inst) = ops.next() {
+        match inst {
+            TypedInstruction::ShowText(op) => append_pdf_string(text, op.0.as_bytes()),
+            TypedInstruction::NextLineAndShowText(op) => append_pdf_string(text, op.0.as_bytes()),
+            TypedInstruction::ShowTextWithParameters(op) => {
+                append_pdf_string(text, op.2.as_bytes())
+            }
+            TypedInstruction::ShowTexts(op) => append_show_texts(text, op.0),
+            _ => {}
         }
     }
 }
 
 fn extract_page_texts(
-    doc: &pdf_oxide::PdfDocument,
+    doc: &hayro::hayro_syntax::Pdf,
     page_indices: &[usize],
     style: PageTextStyle,
 ) -> Result<String, String> {
@@ -301,7 +341,7 @@ fn extract_page_texts(
             }
             PageTextStyle::Cursor { .. } => {}
         }
-        append_page_body(&mut text, doc, page_idx);
+        append_page_body(&mut text, &doc.pages()[page_idx], page_idx + 1);
         if let PageTextStyle::Cursor { total_pages } = style {
             text.push_str("\n\n");
             let _ = writeln!(&mut text, "-- {} of {} --", page_idx + 1, total_pages);
