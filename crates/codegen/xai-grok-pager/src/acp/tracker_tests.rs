@@ -5074,6 +5074,177 @@ fn agent_words_do_not_take_the_green_operator_accent() {
         "a scheduler-fired echo stays an operator prompt"
     );
 }
+
+/// The reply that starts "The sums I printed" is not a thought.
+/// While that turn is active the left rail is magenta (`accent_running`).
+/// The body stays white. A finished turn has no rail.
+/// "Need the file path." stays a thought with a cyan rail.
+/// The operator rail stays green. This test does not build an agent message
+/// by hand. The words arrive as thought chunks.
+#[test]
+fn active_reply_the_sums_i_printed_left_accent_is_magenta_not_green() {
+    use crate::render::Renderable;
+    use crate::scrollback::block::BlockContent;
+    use crate::scrollback::types::DisplayMode;
+    use crate::scrollback::wrappers::EntryRenderer;
+    use ratatui::buffer::Buffer;
+    use ratatui::layout::Rect;
+    use ratatui::style::Color;
+
+    let _lock = crate::theme::cache::test_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    crate::theme::cache::reset_for_test();
+    crate::theme::cache::set(crate::theme::ThemeKind::Doge);
+    crate::appearance::cache::set_show_thinking_blocks(true);
+
+    let theme = crate::theme::Theme::current();
+    let magenta = Color::Rgb(255, 0, 255);
+    let green = Color::Rgb(0, 255, 0);
+    let cyan = Color::Rgb(0, 255, 255);
+    let white = theme.text_primary;
+    assert_eq!(theme.accent_running, magenta);
+    assert_eq!(theme.accent_user, green);
+    assert_eq!(theme.accent_system, cyan);
+    assert_eq!(white, Color::Rgb(255, 255, 255));
+
+    let mut sb = ScrollbackState::new();
+    let mut tracker = AcpUpdateTracker::new();
+    assert!(
+        tracker.handle_update(thought_chunk("Need the file path."), &meta(), &mut sb),
+        "the file-path thought must stay visible"
+    );
+    assert!(
+        tracker.handle_update(
+            thought_chunk("The sums I printed are the live totals."),
+            &meta(),
+            &mut sb
+        ),
+        "the sums reply arrives as a thought chunk and must stay visible"
+    );
+
+    let block_text = |block: &RenderBlock| -> String {
+        match block {
+            RenderBlock::Thinking(thought) => thought.text(),
+            RenderBlock::AgentMessage(message) => message.text(),
+            RenderBlock::UserPrompt(prompt) => prompt.text.clone(),
+            _ => String::new(),
+        }
+    };
+    let sums_idx = (0..sb.len()).find(|&idx| {
+        sb.get(idx)
+            .is_some_and(|entry| block_text(&entry.block).contains("The sums I printed"))
+    });
+    let sums_idx = sums_idx.expect("an entry contains The sums I printed");
+    if let Some(entry) = sb.get_mut(sums_idx)
+        && matches!(entry.block, RenderBlock::Thinking(_))
+    {
+        entry.display_mode = DisplayMode::Expanded;
+    }
+    let sums = sb.get(sums_idx).expect("sums entry");
+    assert!(
+        sums.is_running,
+        "the sums reply is an active turn while the rail is painted"
+    );
+    assert!(
+        !block_text(&sums.block).contains("Need the file path."),
+        "the file-path thought stays its own entry, not the sums reply"
+    );
+
+    let renderer = EntryRenderer::new(sums, &theme);
+    let width = 64u16;
+    let height = renderer.desired_height(width).max(4);
+    let area = Rect::new(0, 0, width, height);
+    let mut buf = Buffer::empty(area);
+    renderer.render(area, &mut buf);
+
+    let bar = crate::glyphs::accent_bar();
+    let rail = (0..area.height)
+        .find_map(|y| {
+            let cell = buf.cell((0, y))?;
+            (cell.symbol() == bar).then_some(cell.clone())
+        })
+        .expect("an active sums reply must paint a left ┃ rail");
+    assert_eq!(
+        rail.fg, magenta,
+        "the sums reply rail is accent_running, not the thought rail and not operator green"
+    );
+    assert_eq!(rail.fg, theme.accent_running);
+    assert_ne!(rail.fg, green);
+    assert_ne!(rail.fg, theme.accent_user);
+    assert_ne!(rail.fg, cyan);
+    assert_ne!(rail.fg, theme.accent_system);
+
+    let letter = (0..area.height)
+        .flat_map(|y| (1..area.width).map(move |x| (x, y)))
+        .find_map(|(x, y)| {
+            let cell = buf.cell((x, y))?;
+            (cell.symbol() == "T").then_some(cell.clone())
+        })
+        .expect("the sums reply body is painted");
+    assert_eq!(letter.fg, white, "the sums reply body stays white");
+    assert_eq!(letter.fg, theme.text_primary);
+    assert_ne!(letter.fg, magenta);
+    assert_ne!(letter.fg, green);
+    assert_ne!(letter.fg, cyan);
+
+    let path_idx = (0..sb.len()).find(|&idx| {
+        sb.get(idx).is_some_and(|entry| {
+            matches!(entry.block, RenderBlock::Thinking(_))
+                && block_text(&entry.block).contains("Need the file path.")
+        })
+    });
+    let path_idx = path_idx.expect("Need the file path. stays a thought");
+    if let Some(entry) = sb.get_mut(path_idx) {
+        entry.display_mode = DisplayMode::Expanded;
+    }
+    let path = sb.get(path_idx).expect("file-path thought");
+    let path_accent = path
+        .block
+        .accent(&path.context(width, &crate::appearance::AppearanceConfig::default(), None))
+        .expect("the file-path thought keeps a cyan rail");
+    assert_eq!(path_accent.color, cyan);
+    assert_eq!(path_accent.color, theme.accent_system);
+    assert_ne!(path_accent.color, green);
+    assert_ne!(path_accent.color, magenta);
+    let path_renderer = EntryRenderer::new(path, &theme);
+    let path_height = path_renderer.desired_height(width).max(4);
+    let path_area = Rect::new(0, 0, width, path_height);
+    let mut path_buf = Buffer::empty(path_area);
+    path_renderer.render(path_area, &mut path_buf);
+    let path_rail = (0..path_area.height)
+        .find_map(|y| {
+            let cell = path_buf.cell((0, y))?;
+            (cell.symbol() == bar).then_some(cell.clone())
+        })
+        .expect("the file-path thought paints a left ┃ rail");
+    assert_ne!(path_rail.fg, green);
+    assert_ne!(path_rail.fg, magenta);
+    assert_ne!(path_rail.fg, theme.accent_user);
+    assert_ne!(path_rail.fg, theme.accent_running);
+
+    tracker.finish_turn(&mut sb);
+    let finished = sb.get(sums_idx).expect("finished sums entry");
+    assert!(
+        !finished.is_running,
+        "a finished sums reply is not an active turn"
+    );
+    let finished_renderer = EntryRenderer::new(finished, &theme);
+    let finished_height = finished_renderer.desired_height(width).max(4);
+    let finished_area = Rect::new(0, 0, width, finished_height);
+    let mut finished_buf = Buffer::empty(finished_area);
+    finished_renderer.render(finished_area, &mut finished_buf);
+    let finished_rail = (0..finished_area.height).any(|y| {
+        finished_buf
+            .cell((0, y))
+            .is_some_and(|cell| cell.symbol() == bar)
+    });
+    assert!(
+        !finished_rail,
+        "a finished sums reply has no left accent bar"
+    );
+}
+
 /// Helper: UserMessageChunk with `skillTokenRanges` in content-block meta.
 fn user_message_with_token_ranges(text: &str, ranges: serde_json::Value) -> acp::SessionUpdate {
     let mut meta_map = acp::Meta::new();

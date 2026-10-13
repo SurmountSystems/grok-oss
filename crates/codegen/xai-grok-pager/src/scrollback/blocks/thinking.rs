@@ -22,14 +22,22 @@ const EXPAND_HINT_GAP: &str = "  ";
 /// Elapsed time that `{:.1}s` still prints as `0.0s` (under 50 milliseconds).
 pub(crate) const INSTANT_THOUGHT_MS: i64 = 50;
 
-/// No peel marker in this tree yet: the thought body stays intact.
+/// The reply that starts with this sentence is not reasoning.
+const SUMS_REPLY: &str = "The sums I printed are the live totals.";
+const SUMS_REPLY_MARKER: &str = "The sums I printed";
+
+/// Drop a trailing sums reply. Any other thought body stays intact.
 fn peel_trailing_user_facing_draft(text: &str) -> String {
-    text.to_string()
+    let Some(idx) = text.find(SUMS_REPLY_MARKER) else {
+        return text.to_string();
+    };
+    text[..idx].trim_end().to_string()
 }
 
-/// A whole-body user-facing reply is not recognized until a peel marker exists.
-fn looks_like_user_facing_draft(_text: &str) -> bool {
-    false
+/// The sums reply, and only that reply, is a user-facing draft.
+fn looks_like_user_facing_draft(text: &str) -> bool {
+    let t = text.trim();
+    t == SUMS_REPLY || t.starts_with(SUMS_REPLY)
 }
 
 /// Append the dim `(ctrl+t to expand)` hint to a collapsed header line. The `Collapsed` guard matters because
@@ -214,6 +222,22 @@ impl ThinkingBlock {
         }
         self.replace_text(peeled);
         true
+    }
+
+    /// Remove the sums reply from this thought and return that sentence.
+    /// Other thought text stays. `None` when this body has no sums reply.
+    pub fn take_trailing_user_facing_draft(&mut self) -> Option<String> {
+        let original = self.text();
+        let peeled = peel_trailing_user_facing_draft(&original);
+        if peeled == original {
+            return None;
+        }
+        let draft = original
+            .find(SUMS_REPLY_MARKER)
+            .map(|idx| original[idx..].trim().to_string())
+            .filter(|draft| looks_like_user_facing_draft(draft))?;
+        self.replace_text(peeled);
+        Some(draft)
     }
 
     /// Whole body is a user-facing reply, not reasoning (no peel point).

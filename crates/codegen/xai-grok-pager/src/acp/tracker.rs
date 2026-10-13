@@ -1228,11 +1228,27 @@ impl AcpUpdateTracker {
         let Some(thinking_id) = self.current_thinking else {
             return;
         };
-        if let Some(entry) = scrollback.get_by_id_mut(thinking_id)
-            && let RenderBlock::Thinking(thought) = &mut entry.block
-        {
-            thought.strip_trailing_user_facing_draft();
-        }
+        let draft = {
+            let Some(entry) = scrollback.get_by_id_mut(thinking_id) else {
+                return;
+            };
+            let RenderBlock::Thinking(thought) = &mut entry.block else {
+                return;
+            };
+            thought.take_trailing_user_facing_draft()
+        };
+        let Some(draft) = draft else {
+            return;
+        };
+        let id = if let Some(id) = self.current_agent_msg {
+            id
+        } else {
+            let entry_id = scrollback.start_streaming_agent();
+            scrollback.set_last_running(true);
+            self.current_agent_msg = Some(entry_id);
+            entry_id
+        };
+        scrollback.push_chunk_to_agent(id, &draft);
     }
     fn finish_thinking(&mut self, scrollback: &mut ScrollbackState, aborted: bool) {
         if let Some(thinking_id) = self.current_thinking.take() {

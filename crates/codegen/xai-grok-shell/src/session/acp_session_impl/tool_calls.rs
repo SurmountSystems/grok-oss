@@ -201,9 +201,11 @@ fn access_kind_for_resolved_tool(tool_name: &str, tool_input: &ToolInput) -> Acc
 /// - **Every other edit tool** (`AccessKind::Edit`) uses the same predicate
 ///   that auto-approves those edits
 ///   ([`PlanModeTracker::should_auto_approve_edit`]) so the gate and the
-///   permission bypass can never disagree. plan.md stays the main plan file,
-///   and a living document the plan names under `.agents/reports/` is allowed
-///   beside it.
+///   permission bypass can never disagree. plan.md stays the main plan file.
+///   Every file under the home `.agents/plans/` directory and every file
+///   under the home `.agents/reports/` directory outside the workspace may
+///   be written, even when the plan does not name that path. A path inside
+///   the workspace stays refused. Rust source stays refused.
 ///
 /// `apply_patch` maps to a placeholder `AccessKind::Edit("apply_patch")` and
 /// therefore never matches the plan file: it is always rejected in plan mode
@@ -1884,7 +1886,13 @@ impl SessionActor {
                 source = "plan_mode",
                 wait_ms = 0_i64,
             );
-            let msg = self.plan_mode_edit_rejected_message().await;
+            let msg = match (&tool_input, &access_kind) {
+                (ToolInput::ApplyPatch(_), _) => self.plan_mode_edit_rejected_message(None),
+                (_, AccessKind::Edit(path)) => {
+                    self.plan_mode_edit_rejected_message(Some(Path::new(path)))
+                }
+                _ => self.plan_mode_edit_rejected_message(None),
+            };
             self.handle_tool_not_executed(&call.id, &tool_call_id, msg)
                 .await?;
             return Ok(Err(ToolLoop::Continue));
@@ -3716,26 +3724,14 @@ impl SessionActor {
         self.chat_state_handle.push_tool_result(tool_chat);
         vec![]
     }
-    /// Model-facing rejection for a non-plan-file edit while plan mode is active.
-    /// Rendered via the session's `TemplateRenderer` so `${{ plan_path }}` resolves; falls back if rendering fails.
-    pub(super) async fn plan_mode_edit_rejected_message(&self) -> String {
-        let tracked = self.plan_mode.lock().plan_file_path().to_path_buf();
-        // Name `plan.md` in the session directory. A thoughtful
-        // `plan-<ulid>.md` is also editable, and it does not replace this path.
-        let plan_path = crate::session::plan_mode::main_plan_file_path(&tracked);
-        self.render_plan_template(
-            crate::session::plan_mode::plan_mode_edit_rejected_template(),
-            &plan_path,
-            false,
-        )
-        .await
-        .unwrap_or_else(|| {
-            format!(
-                "Rejected: file edits are not allowed in plan mode - the only editable \
-                 file is the plan file ({}).",
-                plan_path.display()
-            )
-        })
+    /// One sentence when plan mode blocks a write. An edit path is the full
+    /// path the tool tried to write. A patch with no single path does not
+    /// invent one.
+    pub(super) fn plan_mode_edit_rejected_message(&self, edit_path: Option<&Path>) -> String {
+        match edit_path {
+            Some(path) => crate::session::plan_mode::plan_mode_blocked_write_sentence(path),
+            None => "Rejected: plan mode blocked this patch write.".to_owned(),
+        }
     }
     pub(super) async fn handle_tool_not_executed(
         &self,

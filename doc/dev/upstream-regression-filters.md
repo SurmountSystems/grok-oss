@@ -2239,6 +2239,20 @@ cargo test -p xai-grok-update --lib -- failed_install_must_not_replace_or_signal
 cargo test -p xai-grok-pager-bin --test version_without_tty
 ```
 
+### SuperGrok session secret omitted from auth.json
+
+The shell row is the duplicate writer in `xai-grok-shell` `src/auth/storage.rs`. It is not a re-export of login `storage`. This catalog entry is the named filter. It is not a claim that the full suite passed.
+
+| path::test | Contract |
+|------------|----------|
+| `xai-grok-login` `storage::write_fallback_tests::supergrok_session_secret_is_not_written_to_auth_json` | A successful `CredentialsStore` write omits the SuperGrok session secret from `auth.json`. A failed store write leaves the file unchanged, secret included. A Grok Build file that still has `key` or `refresh_token` still loads. The service label stays `grok-build`. `write_auth_json` does not return an error solely because a secret was present. |
+| `xai-grok-shell` `auth::shell_auth_storage::write_fallback_tests::supergrok_session_secret_is_not_written_to_auth_json` | The shell duplicate writer follows the same contract. |
+
+```bash
+cargo test -p xai-grok-login --lib -- supergrok_session_secret_is_not_written_to_auth_json
+cargo test -p xai-grok-shell --lib -- supergrok_session_secret_is_not_written_to_auth_json
+```
+
 ---
 
 ## Residual-aligned filter blocks (Validate honesty mirror)

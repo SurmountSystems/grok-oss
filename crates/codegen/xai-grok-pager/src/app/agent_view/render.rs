@@ -193,6 +193,81 @@ fn seal_prompt_bottom_rule(
     }
 }
 
+/// Session wrap width while the soft plan pane covers the right side.
+///
+/// A long session line wraps in the columns left of the pane. It does not
+/// run under the pane and end mid-word. The pane still paints on the right.
+fn scrollback_layout_width_left_of_soft_plan(
+    viewer: Option<&crate::views::file_search::line_viewer::LineViewerState>,
+    content: Rect,
+    full_area: Rect,
+) -> u16 {
+    let Some(viewer) = viewer else {
+        return content.width;
+    };
+    if !viewer.is_soft_plan_side_pane() || full_area.width == 0 {
+        return content.width;
+    }
+    let pane_w = crate::views::file_search::line_viewer::LineViewerState::soft_plan_pane_width(
+        full_area.width,
+    );
+    let pane_x = full_area
+        .x
+        .saturating_add(full_area.width.saturating_sub(pane_w));
+    let left = pane_x.saturating_sub(content.x);
+    if left == 0 {
+        content.width
+    } else {
+        left.min(content.width)
+    }
+}
+
+/// Paint rect for that same left column. Scrollback render wraps to the
+/// rect it is given, so prepare_layout width alone still lets a line run
+/// under the pane.
+fn scrollback_rect_left_of_soft_plan(
+    viewer: Option<&crate::views::file_search::line_viewer::LineViewerState>,
+    content: Rect,
+    full_area: Rect,
+) -> Rect {
+    let width = scrollback_layout_width_left_of_soft_plan(viewer, content, full_area);
+    Rect { width, ..content }
+}
+
+/// The plan box keeps the revise sentence. The bottom composer does not
+/// paint that same sentence while the soft plan pane is open.
+fn blank_draft_painted_in_rect(buf: &mut Buffer, area: Rect, draft: &str) {
+    if draft.is_empty() || area.width == 0 || area.height == 0 {
+        return;
+    }
+    for y in area.y..area.y.saturating_add(area.height) {
+        let mut symbols: Vec<(u16, String)> = Vec::new();
+        let mut flat = String::new();
+        for x in area.x..area.x.saturating_add(area.width) {
+            let Some(cell) = buf.cell((x, y)) else {
+                continue;
+            };
+            let sym = cell.symbol().to_string();
+            flat.push_str(&sym);
+            symbols.push((x, sym));
+        }
+        let Some(start) = flat.find(draft) else {
+            continue;
+        };
+        let end = start + draft.len();
+        let mut byte_at = 0usize;
+        for (x, sym) in &symbols {
+            let next = byte_at + sym.len();
+            if next > start && byte_at < end {
+                if let Some(cell) = buf.cell_mut((*x, y)) {
+                    cell.set_symbol(" ");
+                }
+            }
+            byte_at = next;
+        }
+    }
+}
+
 /// Status chips the soft plan pane cleared.
 ///
 /// The context figure ends at the pane. The unread placeholder
@@ -513,8 +588,8 @@ fn personal_header_poll_is_reauth() -> bool {
     };
     let candidates = xai_grok_shell::auth::load_supergrok_session_candidates(&home);
     let Some(personal) = candidates.iter().find(|candidate| {
-        !candidate.hard_expired
-            && candidate.headroom.role == xai_grok_shell::auth::SupergrokAccountRole::Personal
+        // A hard-expired personal access token still counts when that row's poll outcome is reauth.
+        candidate.headroom.role == xai_grok_shell::auth::SupergrokAccountRole::Personal
             && !candidate.access_token.trim().is_empty()
     }) else {
         return false;
@@ -1306,7 +1381,17 @@ impl AgentView {
             },
             show_accent_line: false,
             show_borders: true,
-            title: self.prompt_caption(),
+            title: self.prompt_caption().map(|caption| {
+                let plan_pane_open = self.line_viewer.as_ref().is_some_and(|viewer| {
+                    viewer.kind
+                        == crate::views::file_search::line_viewer::LineViewerKind::PlanPreview
+                });
+                if plan_pane_open && caption == "Grok Build" {
+                    "Grok OSS".to_string()
+                } else {
+                    caption
+                }
+            }),
             // Three copy columns plus one rule gap, so the full title stays
             // left of `[` on this top rule. Other prompt styles stay at 0.
             title_reserve_right: 4,
@@ -1704,10 +1789,12 @@ impl AgentView {
         if layout.timeline_width > 0 {
             self.sync_pending_user_input_marks();
             self.scrollback.set_cwd(Some(self.session.cwd.clone()));
-            self.scrollback.prepare_layout(
-                layout.scrollback_content.width,
-                layout.scrollback_content.height,
+            let session_width = scrollback_layout_width_left_of_soft_plan(
+                self.line_viewer.as_ref(),
+                layout.scrollback_content,
+                area,
             );
+            self.scrollback.prepare_layout(session_width, layout.scrollback_content.height);
             let viewport = crate::views::timeline::RailViewport {
                 active: self.scrollback.active_turn_for_viewport(),
                 up_target: self.scrollback.turn_above_viewport_top(),
@@ -1749,10 +1836,13 @@ impl AgentView {
                             .height
                             .saturating_sub(search_reserved_rows);
                     }
-                    self.scrollback.prepare_layout(
-                        layout.scrollback_content.width,
-                        layout.scrollback_content.height,
+                    let session_width = scrollback_layout_width_left_of_soft_plan(
+                        self.line_viewer.as_ref(),
+                        layout.scrollback_content,
+                        area,
                     );
+                    self.scrollback
+                        .prepare_layout(session_width, layout.scrollback_content.height);
                 }
             }
         } else {
@@ -2217,10 +2307,13 @@ impl AgentView {
         {
             self.sync_pending_user_input_marks();
             self.scrollback.set_cwd(Some(self.session.cwd.clone()));
-            self.scrollback.prepare_layout(
-                layout.scrollback_content.width,
-                layout.scrollback_content.height,
+            let session_area = scrollback_rect_left_of_soft_plan(
+                self.line_viewer.as_ref(),
+                layout.scrollback_content,
+                area,
             );
+            self.scrollback
+                .prepare_layout(session_area.width, session_area.height);
             let rewind_dim_from = self.rewind_dim_from_entry();
             let sb_focused = self.active_pane == ActivePane::Scrollback && !overlay_focused;
             let search_highlight = if search_active {
@@ -2240,7 +2333,7 @@ impl AgentView {
                 .with_media_paths(self.media_link_paths.clone())
                 .with_activity_row_clocks(self.activity_row_clocks)
                 .render_with_scratch_and_selection_boundaries(
-                    layout.scrollback_content,
+                    session_area,
                     buf,
                     &self.scrollback,
                     scratch,
@@ -3647,6 +3740,10 @@ impl AgentView {
             } else {
                 None
             };
+            let soft_plan_hides_bottom_draft = self
+                .line_viewer
+                .as_ref()
+                .is_some_and(|viewer| viewer.is_soft_plan_side_pane());
             let prompt_result_inner = self.prompt.draw(
                 buf,
                 layout.prompt,
@@ -3655,6 +3752,9 @@ impl AgentView {
                 Some(&info),
                 voice_overlay,
             );
+            if soft_plan_hides_bottom_draft {
+                blank_draft_painted_in_rect(buf, layout.prompt, self.prompt.text());
+            }
             let copy_button = paint_inset_composer_copy(buf, layout.prompt, &theme);
             self.set_composer_copy_button(copy_button);
             if self.plan_approval_view.is_some() {
@@ -6055,7 +6155,7 @@ mod plan_approval_draw_contract_tests {
     }
 
     /// Active plan mode with a resolved decision still shows the plan file,
-    /// the plan input, and one "Grok Build" title. Opening the pane by hand
+    /// the plan input, and one "Grok OSS" title. Opening the pane by hand
     /// is not this screen.
     #[serial_test::serial(GROK_HOME)]
     #[test]
@@ -6097,8 +6197,61 @@ mod plan_approval_draw_contract_tests {
             agent.pane_areas.prompt
         );
         assert!(
-            text.contains("Grok Build") && !text.contains("Grok Grok"),
-            "title must contain Grok Build once and must not contain Grok Grok:\n{text}"
+            text.contains("Grok OSS") && !text.contains("Grok Build") && !text.contains("Grok Grok"),
+            "title must contain Grok OSS and must not contain Grok Build or Grok Grok:\n{text}"
+        );
+    }
+
+    /// The plan pane title is this product's chrome. It says Grok OSS.
+    /// A display name of Grok Build is the wrong product name on that title.
+    #[serial_test::serial(GROK_HOME)]
+    #[test]
+    fn plan_pane_title_says_grok_oss() {
+        let home = std::env::temp_dir().join(format!(
+            "grok-plan-pane-title-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&home).expect("temp GROK_HOME");
+        let prev = std::env::var("GROK_HOME").ok();
+        struct RestoreGrokHome(Option<String>);
+        impl Drop for RestoreGrokHome {
+            fn drop(&mut self) {
+                match &self.0 {
+                    Some(value) => unsafe { std::env::set_var("GROK_HOME", value) },
+                    None => unsafe { std::env::remove_var("GROK_HOME") },
+                }
+            }
+        }
+        let _restore = RestoreGrokHome(prev);
+        unsafe { std::env::set_var("GROK_HOME", &home) };
+
+        let mut agent = make_agent();
+        agent.plan_mode_active = true;
+        agent.plan_decision_resolved = true;
+        agent.plan_approved_implement = false;
+        agent.plan_approval_view = None;
+        agent.line_viewer = None;
+        agent.display_name = Some("Grok Build".into());
+        agent.latest_inline_plan_content = Some("pane-sentinel-plan-body".into());
+
+        let text = render_text(&mut agent, false);
+        assert!(
+            agent
+                .line_viewer
+                .as_ref()
+                .is_some_and(|viewer| {
+                    viewer.kind
+                        == crate::views::file_search::line_viewer::LineViewerKind::PlanPreview
+                }),
+            "the plan pane must be open"
+        );
+        assert!(
+            text.contains("Grok OSS"),
+            "plan pane title must say Grok OSS:\n{text}"
+        );
+        assert!(
+            !text.contains("Grok Build"),
+            "plan pane title must not say Grok Build:\n{text}"
         );
     }
 
@@ -7933,6 +8086,111 @@ mod status_credits_meter_tests {
         );
     }
 
+    /// A hard-expired personal access token whose poll outcome is reauth
+    /// makes the header chip contain `grok-oss login`. A live business row
+    /// at 100 percent used must not paint `limits 0%`. Personal usage of
+    /// 10 percent must not paint `limits 90%`.
+    #[test]
+    #[serial_test::serial]
+    fn header_chip_says_grok_oss_login_when_the_personal_access_token_is_hard_expired_and_poll_is_reauth(
+    ) {
+        let home = tempfile::TempDir::new().expect("temp GROK_HOME");
+        let _env = xai_grok_test_support::EnvGuard::set("GROK_HOME", home.path());
+        xai_grok_shell::auth::clear_included_billing_cache();
+        std::fs::write(
+            home.path().join("config.toml"),
+            "[auth]\npreferred_method = \"oidc\"\n",
+        )
+        .expect("preferred oidc");
+        let expired = chrono::Utc::now() - chrono::Duration::days(1);
+        let live = chrono::Utc::now() + chrono::Duration::days(7);
+        let base = "https://auth.x.ai::header-reauth-expired";
+        let personal_id = "u-header-reauth-expired";
+        let business_id = "team-header-reauth-expired";
+        let mut map = std::collections::BTreeMap::new();
+        xai_grok_shell::auth::upsert_supergrok_session(
+            &mut map,
+            base,
+            xai_grok_shell::auth::GrokAuth {
+                key: "header-personal-reauth-expired-session".into(),
+                auth_mode: xai_grok_shell::auth::AuthMode::Oidc,
+                user_id: personal_id.into(),
+                principal_type: Some("User".into()),
+                principal_id: Some(personal_id.into()),
+                team_id: None,
+                expires_at: Some(expired),
+                ..xai_grok_shell::auth::GrokAuth::default()
+            },
+        );
+        xai_grok_shell::auth::upsert_supergrok_session(
+            &mut map,
+            base,
+            xai_grok_shell::auth::GrokAuth {
+                key: "header-business-reauth-expired-session".into(),
+                auth_mode: xai_grok_shell::auth::AuthMode::Oidc,
+                user_id: "u-header-reauth-expired-business".into(),
+                principal_type: Some("Team".into()),
+                principal_id: Some(business_id.into()),
+                team_id: Some(business_id.into()),
+                expires_at: Some(live),
+                ..xai_grok_shell::auth::GrokAuth::default()
+            },
+        );
+        std::fs::write(
+            home.path().join("auth.json"),
+            serde_json::to_vec_pretty(&map).expect("auth json"),
+        )
+        .expect("write auth.json");
+        let mut doc = xai_grok_shell::auth::LimitsSnapshotDocument::empty(1_700_000_000_000);
+        doc.identities
+            .push(xai_grok_shell::auth::LimitsSnapshotIdentity {
+                identity_id: personal_id.into(),
+                usage_pct: Some(10.0),
+                period_end: None,
+                period_type: None,
+                dollar_credits_cents: None,
+                grok_build_usage_pct: None,
+                is_unified_billing_user: None,
+                poll_outcome: "reauth".to_owned(),
+            });
+        doc.identities
+            .push(xai_grok_shell::auth::LimitsSnapshotIdentity {
+                identity_id: business_id.into(),
+                usage_pct: Some(100.0),
+                period_end: None,
+                period_type: None,
+                dollar_credits_cents: None,
+                grok_build_usage_pct: None,
+                is_unified_billing_user: None,
+                poll_outcome: xai_grok_shell::auth::POLL_OUTCOME_OK.to_owned(),
+            });
+        xai_grok_shell::auth::write_limits_snapshot_file(home.path(), &doc).expect("snapshot");
+        let chip = super::l1_credits_chip_label(
+            crate::views::credit_bar::SamplingIdentityKind::SuperGrokSession,
+            None,
+            false,
+        );
+        assert!(
+            chip.contains("grok-oss login"),
+            "when the personal access token is hard-expired and poll outcome is reauth the header chip must contain `grok-oss login`:\n{chip}"
+        );
+        assert!(
+            !chip.contains("limits 0%"),
+            "the chip must not contain `limits 0%`:\n{chip}"
+        );
+        assert!(
+            !chip.contains("limits 90%"),
+            "the chip must not contain `limits 90%`:\n{chip}"
+        );
+        assert!(
+            !chip.contains("limits 100%"),
+            "the chip must not contain `limits 100%`:\n{chip}"
+        );
+        assert!(
+            !xai_grok_shell::auth::limits_pins::load_limits_pins().use_console
+        );
+    }
+
     const CELL_PERSONAL_TOKEN: &str = "tok-personal-cell";
     const CELL_TEAM_TOKEN: &str = "tok-team-cell";
     const CELL_PERSONAL_ID: &str = "u-personal-cell";
@@ -9701,6 +9959,163 @@ mod plan_turn_row_revising_copy_tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    fn draw_agent_like_draw_screen(agent: &mut AgentView, area: Rect, buf: &mut Buffer) {
+        let mut scratch = ScratchBuffer::new();
+        let _ = agent.draw(
+            area,
+            buf,
+            &ActionRegistry::defaults(),
+            &mut scratch,
+            None,
+            false,
+            crate::app::agent_view::BannerSlotParams::none(),
+            false,
+            false,
+            &mut Vec::new(),
+            super::AppRenderParams::default(),
+        );
+    }
+
+    fn plan_wrap_row_symbols(buf: &ratatui::buffer::Buffer, y: u16, width: u16) -> Vec<String> {
+        (0..width)
+            .map(|x| buf[(x, y)].symbol().to_string())
+            .collect()
+    }
+
+    fn plan_wrap_word_starts(symbols: &[String], word: &str) -> Vec<u16> {
+        let parts: Vec<String> = word.chars().map(|ch| ch.to_string()).collect();
+        if symbols.len() < parts.len() {
+            return Vec::new();
+        }
+        let mut hits = Vec::new();
+        for start in 0..=symbols.len() - parts.len() {
+            if symbols[start..start + parts.len()] != parts[..] {
+                continue;
+            }
+            let before_ok = start == 0
+                || symbols[start - 1]
+                    .chars()
+                    .all(|ch| !ch.is_ascii_alphanumeric());
+            let end = start + parts.len();
+            let after_ok = end == symbols.len()
+                || symbols[end].chars().all(|ch| !ch.is_ascii_alphanumeric());
+            if before_ok && after_ok {
+                hits.push(start as u16);
+            }
+        }
+        hits
+    }
+
+    fn plan_wrap_ends_with_token_fragment(left: &str, token: &str) -> bool {
+        let trimmed = left.trim_end();
+        (4..token.len()).any(|n| trimmed.ends_with(&token[..n]))
+    }
+
+    #[test]
+    fn plan_text_wraps_inside_the_pane_and_is_not_sliced_by_a_second_copy() {
+        let mut agent = make_agent();
+        let plan_line = "AlphabetWrapToken is a whole word that must stay inside the soft plan pane and must not be sliced at the pane edge by a full width session layout.";
+        assert!(
+            plan_line.len() > 80,
+            "plan body line must be longer than 80 characters"
+        );
+        present_new_exit_plan_mode(&mut agent, plan_line);
+        let sentence = "The session queue empty the words must wrap before the plan pane and must not end mid-word under the pane.";
+        let mut session = String::new();
+        while session.chars().count() <= 120 {
+            if !session.is_empty() {
+                session.push(' ');
+            }
+            session.push_str(sentence);
+        }
+        assert!(session.chars().count() > 120);
+        agent.scrollback.push_block(crate::scrollback::RenderBlock::agent_message(
+            session,
+        ));
+        let revise = "Revise sentence QueEmpTh stays once.";
+        agent.prompt.set_text(revise);
+        let area = ratatui::layout::Rect::new(0, 0, 120, 40);
+        let mut buf = ratatui::buffer::Buffer::empty(area);
+        draw_agent_like_draw_screen(&mut agent, area, &mut buf);
+        let pane_w =
+            crate::views::file_search::line_viewer::LineViewerState::soft_plan_pane_width(120);
+        let pane_x = 120u16.saturating_sub(pane_w);
+        assert!(pane_w > 0 && pane_x > 0, "soft plan pane should be open");
+        let mut token_in_pane = false;
+        let mut revise_in_pane = false;
+        let mut revise_left = false;
+        let mut left_blob = String::new();
+        let mut painted = String::new();
+        for y in 0..area.height {
+            let symbols = plan_wrap_row_symbols(&buf, y, area.width);
+            let row = symbols.concat();
+            painted.push_str(&row);
+            painted.push('\n');
+            let left = symbols[..pane_x as usize].concat();
+            left_blob.push_str(&left);
+            left_blob.push('\n');
+            for x in plan_wrap_word_starts(&symbols, "AlphabetWrapToken") {
+                if x < pane_x {
+                    panic!("AlphabetWrapToken at x {x} < pane_x {pane_x} on row {y}: {row:?}");
+                }
+                token_in_pane = true;
+            }
+            if plan_wrap_ends_with_token_fragment(&left, "AlphabetWrapToken") {
+                panic!("AlphabetWrapToken cut at the pane edge on row {y}: {left:?}");
+            }
+            if let Some(last) = left.trim_end().split_whitespace().last() {
+                assert!(
+                    last != "que" && last != "emp" && last != "th",
+                    "row {y} left of the pane ends with mid-word fragment {last}: {left:?}"
+                );
+            }
+            let pane_has = plan_wrap_word_starts(&symbols[pane_x as usize..], "QueEmpTh")
+                .is_empty()
+                .eq(&false);
+            if pane_has {
+                revise_in_pane = true;
+            }
+            if plan_wrap_word_starts(&symbols[..pane_x as usize], "QueEmpTh")
+                .is_empty()
+                .eq(&false)
+            {
+                revise_left = true;
+            }
+        }
+        assert!(
+            token_in_pane,
+            "AlphabetWrapToken must appear at x >= {pane_x} as a whole word"
+        );
+        assert!(
+            left_blob.contains("session") || left_blob.contains("queue") || left_blob.contains("wrap"),
+            "session line should paint left of the pane"
+        );
+        assert!(
+            !(revise_in_pane && revise_left),
+            "Revise sentence QueEmpTh stays once. painted in both the plan box and the bottom composer"
+        );
+        assert!(
+            revise_in_pane || painted.contains("Type a revision"),
+            "approval screen should show a prompt input"
+        );
+        assert!(
+            painted.contains("approve | comment | revise | exit"),
+            "footer approve | comment | revise | exit missing:\n{painted}"
+        );
+        let _ = agent.approve_plan();
+        let mut after = ratatui::buffer::Buffer::empty(area);
+        draw_agent_like_draw_screen(&mut agent, area, &mut after);
+        let mut revise_copies = 0usize;
+        for y in 0..area.height {
+            let symbols = plan_wrap_row_symbols(&after, y, area.width);
+            revise_copies += plan_wrap_word_starts(&symbols, "QueEmpTh").len();
+        }
+        assert!(
+            revise_copies <= 1,
+            "approve put the revise sentence in the transcript twice ({revise_copies})"
+        );
     }
 
     /// After decisive Revise, idle turn-status paints Revising plan..., not

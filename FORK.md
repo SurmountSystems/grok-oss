@@ -228,6 +228,21 @@ identifier that has no matching `fn`.
 - [x] **OpenRouter**: separate model option (`openrouter-grok-4.5`);
   login/logout; secret store; optional Zed credential probe (read-only).
   Neighbor (not class 1): `referer_is_surmount_*`, `title_is_grok_oss`.
+- [x] **SuperGrok session secrets use the existing grok-build secret store**:
+  This is not the OpenRouter key. A new or refreshed OIDC or web-login
+  session secret (`key` and `refresh_token`) is stored in `CredentialsStore`.
+  The OS service label stays `grok-build`. `auth.json` stays a parseable
+  `AuthStore`. Account id, user id, auth mode, and the other non-secret
+  fields stay, and the field names stay, so Grok Build can parse the file.
+  A Grok Build file that still has `key` or `refresh_token` still loads.
+  After the store write succeeds, those secret strings are omitted from
+  the file, and a later read restores them from the store. A failed store
+  write leaves the file bytes unchanged, secret included. `write_auth_json`
+  returns Ok after a successful store write. It does not return an error
+  solely because a secret was present. Tests:
+  `supergrok_session_secret_is_not_written_to_auth_json` in
+  `xai-grok-login` and in the duplicate writer
+  `xai-grok-shell` `src/auth/storage.rs` (not a re-export).
 - [x] **Multi-key OpenRouter**: comma lists / failover keys for credit +
   rate-limit rotation. FORK claims; not a land class.
 - [x] **Dual-auth hop after included SuperGrok period limits are full**:

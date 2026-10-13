@@ -162,6 +162,10 @@ pub mod auth {
         usage_analytics_path, validate_management_key, validate_management_key_at,
         validate_management_key_outcome, validate_management_key_outcome_at,
     };
+
+    // Duplicate auth.json writer. Not a re-export of `xai_grok_login::storage`.
+    #[path = "storage.rs"]
+    mod shell_auth_storage;
 }
 pub mod builtin;
 pub mod shared_http_rate_limit;

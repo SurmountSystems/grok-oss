@@ -2415,9 +2415,15 @@ pub fn render_line_viewer(
                 viewer.plan_ref().is_some_and(|p| p.abandon_hovered),
             ];
             let selected = viewer.plan_ref().and_then(|p| p.selected_cta);
-            let pad = PLAN_APPROVAL_ACTION_PAD;
+            // The soft side pane footer is `approve | comment | revise | exit`.
+            // Fullscreen review keeps the wider pad. That wider row is
+            // ` approve  |  comment  |  revise  |  exit `.
+            let (pad, mut between): (&str, &str) = if viewer.is_soft_plan_side_pane() {
+                ("", " | ")
+            } else {
+                (PLAN_APPROVAL_ACTION_PAD, PLAN_APPROVAL_ACTION_BETWEEN)
+            };
             let pad_w = pad.width() as u16;
-            let mut between = PLAN_APPROVAL_ACTION_BETWEEN;
             let mut between_w = between.width() as u16;
             let word_widths = [
                 labels[0].width() as u16,

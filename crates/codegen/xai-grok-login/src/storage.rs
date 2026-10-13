@@ -91,8 +91,9 @@ fn read_auth_json_as(distribution: Distribution, auth_file: &Path) -> std::io::R
         return Ok(AuthStore::new());
     }
 
-    let map = serde_json::from_str(trimmed)
+    let mut map = serde_json::from_str(trimmed)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    restore_session_secrets(auth_file, &mut map);
     Ok(map)
 }
 
@@ -206,7 +207,132 @@ fn write_auth_json_as(
             "this build keeps no stored login",
         ));
     }
-    write_auth_json_with(auth_file, auth_store, write_auth_json_atomic)
+    let disk = prepare_auth_store_for_disk(auth_file, auth_store)?;
+    write_auth_json_with(auth_file, &disk, write_auth_json_atomic)
+}
+
+fn session_secret_store_error() -> std::io::Error {
+    std::io::Error::other("session secret store write failed")
+}
+
+fn is_supergrok_session(auth: &GrokAuth) -> bool {
+    matches!(auth.auth_mode, AuthMode::Oidc | AuthMode::WebLogin)
+}
+
+fn session_key_url(account: &str) -> String {
+    format!("supergrok-session:{account}")
+}
+
+fn session_refresh_url(account: &str) -> String {
+    format!("supergrok-session:{account}#refresh_token")
+}
+
+fn session_credential_store(auth_file: &Path) -> crate::credentials_store::CredentialsStore {
+    #[cfg(test)]
+    {
+        crate::credentials_store::CredentialsStore::at_path(
+            auth_file.with_file_name("provider_credentials.json"),
+        )
+    }
+    #[cfg(not(test))]
+    {
+        let home = auth_file.parent().unwrap_or_else(|| Path::new("."));
+        crate::credentials_store::CredentialsStore::at_grok_home(home)
+    }
+}
+
+fn session_store_fault(auth_file: &Path) -> bool {
+    #[cfg(test)]
+    {
+        SESSION_SECRET_STORE_FAULT_PATH
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .as_deref()
+            == Some(auth_file)
+    }
+    #[cfg(not(test))]
+    {
+        let _ = auth_file;
+        false
+    }
+}
+
+/// Store SuperGrok session secrets, then return the `AuthStore` copy to write.
+/// The copy omits those secrets only after the store write succeeds.
+/// A store failure returns before `auth.json` is rewritten.
+fn prepare_auth_store_for_disk(
+    auth_file: &Path,
+    auth_store: &AuthStore,
+) -> std::io::Result<AuthStore> {
+    let has_session = auth_store.values().any(is_supergrok_session);
+    if !has_session {
+        return Ok(auth_store.clone());
+    }
+    let needs_store = auth_store.values().any(|auth| {
+        is_supergrok_session(auth) && (!auth.key.is_empty() || auth.refresh_token.is_some())
+    });
+    if needs_store && session_store_fault(auth_file) {
+        return Err(session_secret_store_error());
+    }
+    let store = session_credential_store(auth_file);
+    let mut disk = auth_store.clone();
+    for (account, auth) in disk.iter_mut() {
+        if !is_supergrok_session(auth) {
+            continue;
+        }
+        let key_url = session_key_url(account);
+        let refresh_url = session_refresh_url(account);
+        if auth.key.is_empty() {
+            store
+                .delete(&key_url)
+                .map_err(|_| session_secret_store_error())?;
+        } else {
+            store
+                .write(&key_url, "key", &auth.key)
+                .map_err(|_| session_secret_store_error())?;
+            auth.key.clear();
+        }
+        if let Some(refresh) = auth.refresh_token.clone() {
+            store
+                .write(&refresh_url, "refresh_token", &refresh)
+                .map_err(|_| session_secret_store_error())?;
+            auth.refresh_token = None;
+        } else {
+            store
+                .delete(&refresh_url)
+                .map_err(|_| session_secret_store_error())?;
+        }
+    }
+    Ok(disk)
+}
+
+fn restore_session_secrets(auth_file: &Path, map: &mut AuthStore) {
+    let needs_restore = map.values().any(|auth| {
+        is_supergrok_session(auth) && (auth.key.is_empty() || auth.refresh_token.is_none())
+    });
+    if !needs_restore {
+        return;
+    }
+    let store = session_credential_store(auth_file);
+    for (account, auth) in map.iter_mut() {
+        if !is_supergrok_session(auth) {
+            continue;
+        }
+        if auth.key.is_empty() {
+            if let Ok(Some((username, secret))) = store.read(&session_key_url(account)) {
+                if username == "key" {
+                    auth.key = secret;
+                }
+            }
+        }
+        if auth.refresh_token.is_none() {
+            if let Ok(Some((username, secret))) = store.read(&session_refresh_url(account)) {
+                if username == "refresh_token" {
+                    auth.refresh_token = Some(secret);
+                }
+            }
+        }
+    }
 }
 
 /// Dispatch helper: run `atomic`, and on `StorageFull` fall back to an in-place write.
@@ -271,6 +397,12 @@ fn write_store_to(path: &Path, auth_store: &AuthStore) -> std::io::Result<()> {
 /// Path-scoped so parallel tests in the same process do not sabotage each other.
 #[cfg(test)]
 pub(super) static WRITE_FAULT_PATH: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
+
+/// Test-only fault: the session-secret store write fails for this `auth.json` path before the file is rewritten.
+/// Path-scoped so parallel tests in the same process do not sabotage each other.
+#[cfg(test)]
+pub(super) static SESSION_SECRET_STORE_FAULT_PATH: std::sync::Mutex<Option<PathBuf>> =
+    std::sync::Mutex::new(None);
 
 /// Atomic write: a temp file, then a rename, through a symlinked `auth.json` (dotfiles, `GROK_HOME` overlays).
 fn write_auth_json_atomic(auth_file: &Path, auth_store: &AuthStore) -> std::io::Result<()> {
@@ -642,5 +774,247 @@ mod write_fallback_tests {
         let _ = write_auth_json_in_place_with(&path, &sample_store(), fake_truncate_then_fail);
         let mode = std::fs::metadata(&path).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600, "restored file must stay 0o600");
+    }
+
+    const PLACEHOLDER_ACCOUNT: &str = "placeholder-account";
+    const PLACEHOLDER_SESSION_KEY: &str = "placeholder-session-key";
+    const PLACEHOLDER_REFRESH: &str = "placeholder-refresh-token";
+
+    fn session_store(key: &str, refresh: Option<&str>) -> AuthStore {
+        let mut map = AuthStore::new();
+        map.insert(
+            PLACEHOLDER_ACCOUNT.to_owned(),
+            GrokAuth {
+                key: key.to_owned(),
+                refresh_token: refresh.map(str::to_owned),
+                auth_mode: AuthMode::Oidc,
+                user_id: "placeholder-user".to_owned(),
+                ..Default::default()
+            },
+        );
+        map
+    }
+
+    fn credentials_beside(auth_file: &Path) -> crate::credentials_store::CredentialsStore {
+        crate::credentials_store::CredentialsStore::at_path(
+            auth_file.with_file_name("provider_credentials.json"),
+        )
+    }
+
+    fn file_hides_session_secret(path: &Path, secret: &str) {
+        let bytes = std::fs::read(path).unwrap_or_default();
+        assert!(
+            secret.is_empty()
+                || !bytes
+                    .windows(secret.len())
+                    .any(|window| window == secret.as_bytes()),
+            "auth.json contains a session secret"
+        );
+    }
+
+    fn dir_hides_session_secret(dir: &Path, secret: &str) {
+        let entries = std::fs::read_dir(dir).expect("temp dir readable");
+        for entry in entries {
+            let path = entry.expect("temp entry").path();
+            if !path.is_file() {
+                continue;
+            }
+            if path.file_name().and_then(|name| name.to_str()) == Some("provider_credentials.json")
+            {
+                continue;
+            }
+            file_hides_session_secret(&path, secret);
+        }
+    }
+
+    fn store_has_username_secret(
+        store: &crate::credentials_store::CredentialsStore,
+        url: &str,
+        username: &str,
+        secret: &str,
+    ) {
+        let read = store.read(url).expect("credentials store readable");
+        let Some((stored_user, stored_secret)) = read else {
+            panic!("session secret missing from credentials store");
+        };
+        assert_eq!(stored_user, username, "credentials username");
+        assert!(
+            stored_secret == secret,
+            "credentials store missing the session secret"
+        );
+    }
+
+    fn read_restores_session(path: &Path, key: &str, refresh: Option<&str>) {
+        let loaded = read_auth_json(path).expect("read finds the session");
+        let session = loaded
+            .get(PLACEHOLDER_ACCOUNT)
+            .expect("account entry remains");
+        assert!(session.key == key, "read path restores the session secret");
+        assert!(
+            session.refresh_token.as_deref() == refresh,
+            "read path restores the refresh token"
+        );
+    }
+
+    fn fresh_auth_file() -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+        (dir, path)
+    }
+
+    fn grok_build_session_json() -> String {
+        format!(
+            r#"{{"{PLACEHOLDER_ACCOUNT}":{{"key":"{PLACEHOLDER_SESSION_KEY}","auth_mode":"oidc","create_time":"2026-01-01T00:00:00Z","user_id":"placeholder-user","refresh_token":"{PLACEHOLDER_REFRESH}"}}}}"#
+        )
+    }
+
+    fn bytes_contain(bytes: &[u8], secret: &str) -> bool {
+        !secret.is_empty()
+            && bytes
+                .windows(secret.len())
+                .any(|window| window == secret.as_bytes())
+    }
+
+    struct ClearSessionStoreFault;
+    impl Drop for ClearSessionStoreFault {
+        fn drop(&mut self) {
+            *super::SESSION_SECRET_STORE_FAULT_PATH
+                .lock()
+                .unwrap_or_else(|err| err.into_inner()) = None;
+        }
+    }
+
+    /// A SuperGrok session secret is stored in CredentialsStore. `write_auth_json` returns Ok. `auth.json` keeps the account and omits the secret strings. A Grok Build file that still has the secrets still loads. A failed store write leaves that file unchanged.
+    #[test]
+    fn supergrok_session_secret_is_not_written_to_auth_json() {
+        let key_url = format!("supergrok-session:{PLACEHOLDER_ACCOUNT}");
+        let refresh_url = format!("supergrok-session:{PLACEHOLDER_ACCOUNT}#refresh_token");
+
+        let (dir, path) = fresh_auth_file();
+        let key_only = session_store(PLACEHOLDER_SESSION_KEY, None);
+        write_auth_json(&path, &key_only).expect("session secret store write returns Ok");
+        file_hides_session_secret(&path, PLACEHOLDER_SESSION_KEY);
+        dir_hides_session_secret(dir.path(), PLACEHOLDER_SESSION_KEY);
+        let store = credentials_beside(&path);
+        store_has_username_secret(&store, &key_url, "key", PLACEHOLDER_SESSION_KEY);
+        read_restores_session(&path, PLACEHOLDER_SESSION_KEY, None);
+        assert!(
+            path.exists()
+                && std::fs::read_to_string(&path)
+                    .unwrap()
+                    .contains(PLACEHOLDER_ACCOUNT),
+            "account entry remains on disk"
+        );
+
+        let (dir, path) = fresh_auth_file();
+        let refresh_only = session_store("", Some(PLACEHOLDER_REFRESH));
+        write_auth_json(&path, &refresh_only).expect("session secret store write returns Ok");
+        file_hides_session_secret(&path, PLACEHOLDER_REFRESH);
+        dir_hides_session_secret(dir.path(), PLACEHOLDER_REFRESH);
+        let store = credentials_beside(&path);
+        store_has_username_secret(&store, &refresh_url, "refresh_token", PLACEHOLDER_REFRESH);
+        read_restores_session(&path, "", Some(PLACEHOLDER_REFRESH));
+
+        let (dir, path) = fresh_auth_file();
+        let both = session_store(PLACEHOLDER_SESSION_KEY, Some(PLACEHOLDER_REFRESH));
+        write_auth_json(&path, &both).expect("session secret store write returns Ok");
+        file_hides_session_secret(&path, PLACEHOLDER_SESSION_KEY);
+        file_hides_session_secret(&path, PLACEHOLDER_REFRESH);
+        dir_hides_session_secret(dir.path(), PLACEHOLDER_SESSION_KEY);
+        dir_hides_session_secret(dir.path(), PLACEHOLDER_REFRESH);
+        assert!(
+            std::fs::read_to_string(&path)
+                .unwrap()
+                .contains(PLACEHOLDER_ACCOUNT),
+            "account id remains in auth.json"
+        );
+        let store = credentials_beside(&path);
+        store_has_username_secret(&store, &key_url, "key", PLACEHOLDER_SESSION_KEY);
+        store_has_username_secret(&store, &refresh_url, "refresh_token", PLACEHOLDER_REFRESH);
+        read_restores_session(&path, PLACEHOLDER_SESSION_KEY, Some(PLACEHOLDER_REFRESH));
+
+        let (_dir, path) = fresh_auth_file();
+        let empty_refresh = session_store("", Some(""));
+        write_auth_json(&path, &empty_refresh).expect("empty refresh token may be written");
+        let store = credentials_beside(&path);
+        store_has_username_secret(&store, &refresh_url, "refresh_token", "");
+        read_restores_session(&path, "", Some(""));
+
+        let (_dir, path) = fresh_auth_file();
+        let seeded = grok_build_session_json();
+        std::fs::write(&path, &seeded).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let loaded = read_auth_json(&path).expect("Grok Build auth.json still loads");
+        let session = loaded
+            .get(PLACEHOLDER_ACCOUNT)
+            .expect("account entry remains");
+        assert_eq!(session.auth_mode, AuthMode::Oidc, "auth mode still loads");
+        assert_eq!(session.user_id, "placeholder-user", "user id still loads");
+        assert_eq!(
+            session.key, PLACEHOLDER_SESSION_KEY,
+            "Grok Build file still loads the session key"
+        );
+        assert_eq!(
+            session.refresh_token.as_deref(),
+            Some(PLACEHOLDER_REFRESH),
+            "Grok Build file still loads the refresh token"
+        );
+        let after_read = std::fs::read(&path).unwrap();
+        assert_eq!(
+            before, after_read,
+            "reading a Grok Build auth.json must not rewrite it"
+        );
+        assert!(
+            bytes_contain(&after_read, PLACEHOLDER_SESSION_KEY)
+                && bytes_contain(&after_read, PLACEHOLDER_REFRESH),
+            "Grok Build auth.json still contains the session secret"
+        );
+
+        let (_dir, path) = fresh_auth_file();
+        let seeded = grok_build_session_json();
+        std::fs::write(&path, &seeded).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let _clear_fault = ClearSessionStoreFault;
+        *super::SESSION_SECRET_STORE_FAULT_PATH
+            .lock()
+            .unwrap_or_else(|err| err.into_inner()) = Some(path.clone());
+        let write_result = write_auth_json(&path, &both_from_seed());
+        let after = std::fs::read(&path).unwrap();
+        assert_eq!(
+            before, after,
+            "failed store write leaves auth.json bytes unchanged"
+        );
+        assert!(
+            bytes_contain(&after, PLACEHOLDER_SESSION_KEY)
+                && bytes_contain(&after, PLACEHOLDER_REFRESH),
+            "failed store write keeps the session secret in auth.json"
+        );
+        let omitted = write_result.is_ok()
+            && !bytes_contain(&after, PLACEHOLDER_SESSION_KEY)
+            && !bytes_contain(&after, PLACEHOLDER_REFRESH);
+        assert!(
+            !omitted,
+            "a failed store write must not succeed at a migration that omitted the secret"
+        );
+        drop(_clear_fault);
+
+        let (_dir, path) = fresh_auth_file();
+        let clear = session_store("", None);
+        write_auth_json(&path, &clear).expect("empty key and no refresh token may be written");
+        file_hides_session_secret(&path, PLACEHOLDER_SESSION_KEY);
+        file_hides_session_secret(&path, PLACEHOLDER_REFRESH);
+        let loaded = read_auth_json(&path).expect("read finds the session");
+        let session = loaded
+            .get(PLACEHOLDER_ACCOUNT)
+            .expect("account entry remains");
+        assert!(session.key.is_empty(), "cleared session key stays empty");
+        assert!(
+            session.refresh_token.is_none(),
+            "cleared refresh token stays absent"
+        );
+    }
+
+    fn both_from_seed() -> AuthStore {
+        session_store(PLACEHOLDER_SESSION_KEY, Some(PLACEHOLDER_REFRESH))
     }
 }

@@ -365,6 +365,21 @@ less than product code and tests. Do not invent long essays or git nags.
    cost cell is the input-plus-output sum with no +, when both fields
    were stored. The + means the context figure is still growing. Do not
    delete that plus rule.
+   **Status cell prints the host context line (pinned 2026-10-12).**
+   The Operator corrected this several times. The status cell prints the
+   host context line. A live cell is the host text plus a trailing plus.
+   When the host says `196K/200K tokens (98% context)`, the cell is
+   `196K/200K context+`. That window is input. If the status tool prints
+   `0K/0K` after the agent did tool work, read that session's
+   `usage.jsonl` and print the last event `input_tokens` as the context
+   integer. A finished job prints that integer with no plus and keeps
+   the label context. Do not replace the cell with a sentence. Do not
+   print 0. Do not write not_fetched, not accepted, or not stored. Cost
+   stays inputTokens plus outputTokens from that session's `usage.json`.
+   Cached tokens are already inside input. Reasoning tokens are already
+   inside output. Do not add either again. `total_tokens` on one event
+   is not the cost. Do not delete the trailing-plus rule above.
+   Dual-pin: host `~/.grok/AGENTS.md` same heading.
    **grok-oss limits printout is not xAI billing truth (pinned 2026-08-19).**
    grok-oss limits JSON and compact chrome are a client printout, not xAI
    billing truth. Distinguish "the CLI printed X" from "the account is X."
@@ -1086,6 +1101,10 @@ The Personal tab sentence is `Personal SuperGrok login expired. Run grok-oss log
 For this job, the named tests run on this laptop. The Operator runs the full suite on surmount-1. Agents do not run `just check-remote` or `just install` for this job.
 
 Reports go under `~/.agents/reports/`. Plans go under `~/.agents/plans/`.
+
+## SuperGrok session secrets stay out of auth.json after the store write succeeds (pinned 2026-10-12)
+
+Session secrets migrate into the existing grok-build secret store (`CredentialsStore`, service label `grok-build`). `auth.json` stays a parseable `AuthStore`. A Grok Build file that still has `key` or `refresh_token` still loads. A failed store write leaves the file alone.
 
 ## Stage the one new Rust file (pinned 2026-10-10)
 

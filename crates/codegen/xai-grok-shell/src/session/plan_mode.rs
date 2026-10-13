@@ -17,8 +17,12 @@ pub enum PlanModeState {
     Pending,
     /// Plan mode is active. The model has received plan mode instructions
     /// (either via system-reminder injection or via EnterPlanMode tool result).
-    /// Write tools are blocked except for plan.md and a living document the
-    /// plan names under `.agents/reports/`. Rust source stays refused.
+    /// Write tools are blocked except the session plan file and every non-Rust
+    /// file under a home `.agents/plans/` directory or a home `.agents/reports/`
+    /// directory outside the workspace. Those two homes stay writable even when
+    /// plan.md does not name the path. Replacing plan.md does not revoke that
+    /// exemption. A path inside the workspace stays refused. Rust source stays
+    /// refused.
     ///
     /// Transitions:
     ///   -> Inactive    (ExitPlanMode approved, or user toggles off when idle)
@@ -140,8 +144,9 @@ impl PlanModeTracker {
             workspace_root: None,
         }
     }
-    /// Workspace root the write gate uses. A named home `.agents/plans/` path
-    /// outside this root may be written. A path inside this root stays refused
+    /// Workspace root the write gate uses. A home `.agents/plans/` or
+    /// `.agents/reports/` path outside this root may be written even when
+    /// plan.md does not name it. A path inside this root stays refused
     /// except the session plan file.
     pub(crate) fn set_workspace_root(&mut self, workspace_root: PathBuf) {
         self.workspace_root = Some(workspace_root);
@@ -191,11 +196,15 @@ impl PlanModeTracker {
         &self.plan_file_path
     }
     /// Returns `true` when plan mode is active and this edit may proceed
-    /// without a permission prompt. plan.md stays the main plan file. A
-    /// named home `.agents/plans/` path outside the workspace may be written.
-    /// A named `.agents/reports/` path outside the workspace may be written.
-    /// A path inside the workspace stays refused, except the session plan
-    /// file. A Rust source edit stays refused.
+    /// without a permission prompt. The session plan file stays writable.
+    /// A non-Rust write under the home reports directory
+    /// (`/home/hunter/.agents/reports/` or `~/.agents/reports/`) proceeds
+    /// even when plan.md does not name that path. The home plans directory
+    /// stays writable the same way. Replacing plan.md does not revoke either
+    /// directory. A living document the plan names under `.agents/reports/`
+    /// or `.agents/plans/` outside the workspace may still be written. A path
+    /// inside the workspace stays refused, except the session plan file. A
+    /// Rust source edit stays refused.
     pub(crate) fn should_auto_approve_edit(&self, edit_path: &Path) -> bool {
         if !self.is_active() {
             return false;
@@ -208,6 +217,9 @@ impl PlanModeTracker {
         }
         if path_is_inside_workspace(edit_path, self.workspace_root.as_deref()) {
             return false;
+        }
+        if is_home_agents_plans_or_reports(edit_path) {
+            return true;
         }
         living_report_the_plan_names(edit_path, &self.plan_file_path)
     }
@@ -377,7 +389,7 @@ using the ${{ tools.by_kind.edit }} tool.
 ${%- endif %}
 
 You should build your plan by writing to or editing this file. \
-plan.md stays the main plan file. You may also write or update a living document this plan names when that path is under .agents/reports/. Do not edit any other path. Do not edit Rust source. A named home .agents/plans/ path outside the workspace may be written. A reports path inside the workspace stays refused.
+plan.md stays the main plan file. Every file under the home .agents/plans/ directory and every file under the home .agents/reports/ directory may be written while plan mode is active, even when this plan does not name that path. Replacing plan.md does not revoke that exemption. A path inside the workspace stays refused. Do not edit Rust source.
 
 Put open questions as plain bullets in the plan file or freeform chat. \
 Do not use ${{ tools.by_kind.ask_user }} multi-choice questionnaires for plan \
@@ -394,7 +406,7 @@ Plan mode is still active.
 
 The first section of the plan is Read this first. List every open question there as a plain bullet. A question that appears only under a later heading is incomplete.
 
-Do not make any edits or writes except the plan file, a living document the plan names under .agents/reports/ outside the workspace, or a named home .agents/plans/ path outside the workspace. A reports path inside the workspace stays refused. Other paths stay refused."
+Do not make any edits or writes except the plan file or a file under the home .agents/plans/ directory or the home .agents/reports/ directory outside the workspace. Those two homes stay writable after this plan is replaced, even when the plan does not name the path. A path inside the workspace stays refused. Other paths stay refused."
 }
 /// Returns a MiniJinja template string injected when entering plan mode for the second or later time in the same session.
 /// Render via `TemplateRenderer::render_with_extra()` with `{ "plan_path": "..." }`.
@@ -414,17 +426,14 @@ to present it for approval.
 
 When the work has more than one contract and those contracts do not share a file, the plan starts them together. Do not number them so one waits until the previous one finishes. Do not write that a product fix runs after a failing check. A check is the one builder job. The writers do not wait for it. The green check runs once, after those writers have landed."
 }
-/// Rejection message for an edit plan mode refuses. plan.md stays the main
-/// plan file. A named home `.agents/plans/` path outside the workspace may
-/// be written. A living document the plan names under `.agents/reports/`
-/// may also be written when that path is outside the workspace. A reports
-/// path inside the workspace stays refused. Other paths, including Rust
-/// source, stay refused.
-///
-/// Render via `TemplateRenderer::render_with_extra()` with
-/// `{ "plan_path": "..." }`.
-pub(crate) fn plan_mode_edit_rejected_template() -> &'static str {
-    "Rejected: file edits are not allowed in plan mode. The main plan file is ${{ plan_path }}. A named home .agents/plans/ path outside the workspace may be written. A living document the plan names under .agents/reports/ may also be written when that path is outside the workspace. A reports path inside the workspace stays refused. Other paths, including Rust source, stay refused."
+/// One complete sentence naming the full path plan mode blocked.
+/// The sentence does not shorten the path and does not say the tool
+/// misclassified it.
+pub(crate) fn plan_mode_blocked_write_sentence(edit_path: &Path) -> String {
+    format!(
+        "Rejected: plan mode blocked the write to {}.",
+        edit_path.display()
+    )
 }
 /// Returns a MiniJinja template string injected once after exiting plan mode (user-initiated exit via toggle).
 /// Contains no placeholders.
@@ -452,25 +461,6 @@ pub(crate) fn main_plan_file_path(plan_file: &Path) -> PathBuf {
 /// `plan.md`.
 pub(crate) fn is_plan_file_write(target_path: &Path, plan_file: &Path) -> bool {
     target_path == plan_file || target_path == main_plan_file_path(plan_file)
-}
-
-/// A living document beside plan.md: the plan names this exact path, the
-/// path is under `.agents/reports/` or `.agents/plans/`, and it is not Rust
-/// source. The caller refuses a path inside the workspace before this runs.
-///
-/// Directory and extension are checked before `plan.md` is read, so a Rust
-/// source path never becomes allowed because the plan mentions it.
-fn living_report_the_plan_names(edit_path: &Path, plan_file: &Path) -> bool {
-    if !has_agents_plans_or_reports(edit_path) || extension_is_rs(edit_path) {
-        return false;
-    }
-    let Some(path_token) = edit_path.to_str() else {
-        return false;
-    };
-    let Ok(plan_text) = std::fs::read_to_string(plan_file) else {
-        return false;
-    };
-    plan_text_names_bounded_path(&plan_text, path_token)
 }
 
 fn path_is_inside_workspace(edit_path: &Path, workspace_root: Option<&Path>) -> bool {
@@ -507,8 +497,71 @@ fn extension_is_rs(path: &Path) -> bool {
         .is_some_and(|ext| ext.eq_ignore_ascii_case("rs"))
 }
 
-/// Characters that keep a path token going. A sentence period is not this:
-/// `.` then whitespace or end of text ends the token.
+/// The home plans directory and the home reports directory. On this machine
+/// the reports directory is `/home/hunter/.agents/reports/`. `~/.agents/reports/`
+/// is that same directory when `HOME` is `/home/hunter`, and a path that still
+/// starts with `~/.agents/reports/` counts too. Replacing plan.md does not
+/// revoke this. A reports path inside the workspace is refused before this runs.
+fn is_home_agents_plans_or_reports(edit_path: &Path) -> bool {
+    if is_under_directory(edit_path, Path::new("/home/hunter/.agents/reports"))
+        || is_under_directory(edit_path, Path::new("/home/hunter/.agents/plans"))
+    {
+        return true;
+    }
+    if let Some(home) = nonempty_home_dir() {
+        if is_under_directory(edit_path, &home.join(".agents").join("reports"))
+            || is_under_directory(edit_path, &home.join(".agents").join("plans"))
+        {
+            return true;
+        }
+    }
+    is_tilde_home_agents(edit_path)
+}
+
+fn nonempty_home_dir() -> Option<PathBuf> {
+    let home = std::env::var_os("HOME")?;
+    if home.is_empty() {
+        return None;
+    }
+    Some(PathBuf::from(home))
+}
+
+fn is_under_directory(path: &Path, dir: &Path) -> bool {
+    path.starts_with(dir) && path != dir
+}
+
+fn is_tilde_home_agents(path: &Path) -> bool {
+    let Some(text) = path.to_str() else {
+        return false;
+    };
+    for prefix in ["~/.agents/reports/", "~/.agents/plans/"] {
+        if let Some(rest) = text.strip_prefix(prefix) {
+            if !rest.is_empty() {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// A living document beside plan.md: the plan names this exact path, the
+/// path is under `.agents/reports/` or `.agents/plans/`, and it is not Rust
+/// source. The home directories are allowed before this runs, so those writes
+/// do not need the plan to name the path. The caller refuses a path inside
+/// the workspace before this runs.
+fn living_report_the_plan_names(edit_path: &Path, plan_file: &Path) -> bool {
+    if !has_agents_plans_or_reports(edit_path) || extension_is_rs(edit_path) {
+        return false;
+    }
+    let Some(path_token) = edit_path.to_str() else {
+        return false;
+    };
+    let Ok(plan_text) = std::fs::read_to_string(plan_file) else {
+        return false;
+    };
+    plan_text_names_bounded_path(&plan_text, path_token)
+}
+
 fn is_path_char(c: char) -> bool {
     c.is_alphanumeric() || matches!(c, '/' | '\\' | '.' | '_' | '-' | '~' | '+' | '@' | '%')
 }
@@ -538,9 +591,6 @@ fn plan_text_names_bounded_path(plan_text: &str, path: &str) -> bool {
     false
 }
 
-/// The path does not continue after `end`. A sentence period (`.` then
-/// whitespace or end of text) is allowed. `.` then a path character, such
-/// as `.bak`, means the plan named a longer path.
 fn path_token_does_not_continue(text: &str, end: usize) -> bool {
     let mut chars = text[end..].chars();
     match chars.next() {
@@ -980,7 +1030,7 @@ mod tests {
             true,
         );
         assert!(with_plan.contains(
-            "plan.md stays the main plan file. You may also write or update a living document this plan names when that path is under .agents/reports/. Do not edit any other path. Do not edit Rust source."
+            "plan.md stays the main plan file. Every file under the home .agents/plans/ directory and every file under the home .agents/reports/ directory may be written while plan mode is active, even when this plan does not name that path. Replacing plan.md does not revoke that exemption. A path inside the workspace stays refused. Do not edit Rust source."
         ));
         let without_plan = render(
             &r,
@@ -1032,7 +1082,7 @@ mod tests {
         );
         assert_eq!(
             text,
-            "Plan mode is still active.\n\nThe first section of the plan is Read this first. List every open question there as a plain bullet. A question that appears only under a later heading is incomplete.\n\nDo not make any edits or writes except the plan file, a living document the plan names under .agents/reports/ outside the workspace, or a named home .agents/plans/ path outside the workspace. A reports path inside the workspace stays refused. Other paths stay refused."
+            "Plan mode is still active.\n\nThe first section of the plan is Read this first. List every open question there as a plain bullet. A question that appears only under a later heading is incomplete.\n\nDo not make any edits or writes except the plan file or a file under the home .agents/plans/ directory or the home .agents/reports/ directory outside the workspace. Those two homes stay writable after this plan is replaced, even when the plan does not name the path. A path inside the workspace stays refused. Other paths stay refused."
         );
         assert!(!text.contains("/tmp/plan.md"));
         assert!(!text.contains("exit_plan_mode"));
@@ -1241,6 +1291,90 @@ mod tests {
             workspace.display()
         );
     }
+    /// A write under `/home/hunter/.agents/reports/` and a write under
+    /// `/home/hunter/.agents/plans/` stay allowed after plan.md is replaced
+    /// with text that does not name either path. A path inside the repo
+    /// stays refused.
+    #[test]
+    fn plan_mode_home_report_write_survives_replacing_the_plan() {
+        let report = Path::new("/home/hunter/.agents/reports/plan-mode-home-report-probe.md");
+        let home_plan = Path::new("/home/hunter/.agents/plans/plan-mode-home-plan-probe.md");
+        let workspace = Path::new("/home/hunter/Projects/surmount/grok-build");
+        let repo_path = workspace.join("RESIDUAL.md");
+        let dir = tempfile::tempdir().expect("session dir");
+        let session = dir.path().to_path_buf();
+        let plan_path = session.join("plan.md");
+        std::fs::write(
+            &plan_path,
+            format!(
+                "# Plan\n\nThe report is {}.\nThe plan note is {}.\n",
+                report.display(),
+                home_plan.display()
+            ),
+        )
+        .expect("write plan");
+        let mut tracker = PlanModeTracker::new(session);
+        tracker.set_workspace_root(workspace.to_path_buf());
+        assert!(tracker.enter_pending());
+        assert!(tracker.activate());
+        assert_eq!(
+            tracker.plan_file_path(),
+            plan_path.as_path(),
+            "the tracker must read the plan file that this test replaces"
+        );
+        let replacement =
+            "# Plan\n\nShip the composer outline. This file does not point at a home report.\n";
+        assert!(!replacement.contains("/home/hunter/.agents/reports/"));
+        assert!(!replacement.contains("plan-mode-home-report-probe.md"));
+        assert!(!replacement.contains("/home/hunter/.agents/plans/"));
+        assert!(!replacement.contains("plan-mode-home-plan-probe.md"));
+        std::fs::write(&plan_path, replacement).expect("replace plan");
+        let plan_text = std::fs::read_to_string(&plan_path).expect("read replaced plan");
+        assert!(!plan_text.contains("/home/hunter/.agents/reports/"));
+        assert!(!plan_text.contains("plan-mode-home-report-probe.md"));
+        assert!(!plan_text.contains("/home/hunter/.agents/plans/"));
+        assert!(!plan_text.contains("plan-mode-home-plan-probe.md"));
+        assert!(
+            tracker.should_auto_approve_edit(report),
+            "home report write was blocked after the plan text no longer contains the path: {}",
+            report.display()
+        );
+        assert!(
+            tracker.should_auto_approve_edit(home_plan),
+            "home plans write was blocked after the plan text no longer contains the path: {}",
+            home_plan.display()
+        );
+        assert!(
+            tracker.should_auto_approve_edit(Path::new(
+                "~/.agents/reports/plan-mode-home-report-probe.md"
+            )),
+            "a ~/.agents/reports/ write stays allowed when the plan does not name it"
+        );
+        assert!(
+            !tracker.should_auto_approve_edit(&repo_path),
+            "{} stays refused while plan mode is on",
+            repo_path.display()
+        );
+        let refused = plan_mode_blocked_write_sentence(&repo_path);
+        assert!(
+            refused.contains(&repo_path.display().to_string()),
+            "refusal must name the full path: {refused}"
+        );
+        assert!(
+            refused.ends_with('.'),
+            "refusal must be one complete sentence: {refused}"
+        );
+        assert!(!refused.contains("misclassified"), "{refused}");
+        assert!(
+            !refused.contains("under ~/. "),
+            "refusal must not stop at a broken home prefix: {refused}"
+        );
+        assert_eq!(
+            refused.matches(". ").count(),
+            0,
+            "refusal must be one sentence, not several: {refused}"
+        );
+    }
     fn body_after_frontmatter(text: &str) -> &str {
         let start = text.trim_start();
         let Some(rest) = start
@@ -1306,19 +1440,14 @@ mod tests {
     }
     #[test]
     fn edit_rejected_template_renders() {
-        let r = test_renderer();
-        let text = render(
-            &r,
-            plan_mode_edit_rejected_template(),
-            "/tmp/session/plan.md",
-            false,
-        );
+        let path = Path::new("/tmp/workspace/src/lib.rs");
+        let text = plan_mode_blocked_write_sentence(path);
         assert_eq!(
             text,
-            "Rejected: file edits are not allowed in plan mode. The main plan file is /tmp/session/plan.md. A named home .agents/plans/ path outside the workspace may be written. A living document the plan names under .agents/reports/ may also be written when that path is outside the workspace. A reports path inside the workspace stays refused. Other paths, including Rust source, stay refused."
+            "Rejected: plan mode blocked the write to /tmp/workspace/src/lib.rs."
         );
-        assert!(text.contains("/tmp/session/plan.md"));
-        assert!(!text.contains("${{"));
+        assert!(!text.contains("under ~/."));
+        assert!(!text.contains("misclassified"));
     }
     #[test]
     fn templates_are_static_with_no_hardcoded_tool_names() {
@@ -1335,7 +1464,6 @@ mod tests {
             plan_mode_reminder_sparse_template(),
             plan_mode_reentry_reminder_template(),
             plan_mode_exit_reminder_template(),
-            plan_mode_edit_rejected_template(),
         ];
         for template in &templates {
             for name in &hardcoded_names {
