@@ -154,7 +154,7 @@ pub(super) fn reasoning_sibling(
     encrypted: Option<&str>,
 ) -> ConversationItem {
     ConversationItem::Reasoning(rs::ReasoningItem {
-        id: id.to_string(),
+        id: Some(id.to_string()),
         summary: vec![rs::SummaryPart::SummaryText(rs::SummaryTextContent {
             text: summary_text.to_string(),
         })],

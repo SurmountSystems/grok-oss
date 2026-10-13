@@ -397,7 +397,7 @@ When you open a subagent (from a scrollback block or the tasks pane), a bordered
 - The child's own scrollback, thinking, and tool calls render inside the frame.
 - The parent tasks pane, todos pane, and dock hide for the duration of the view.
 
-This view is observational. The composer is hidden (zero rows). You cannot focus it, type a prompt, stash a draft, or send a follow-up from here. The parent session still owns prompts. To steer a running child, close the view and use `send_subagent_message` from the parent (see [Sending messages to subagents](#sending-messages-to-subagents)).
+An L2 coordinator view has a floor prompt. That prompt is the Operator box on that view. Enter with text in that box sends the text to that L2 and does not start a new L1 turn. An L3 specialist view has no prompt. Empty Enter on the L2 floor opens the live L3 view. The L1 Subagents list stays L2 rows plus a live L3 count and does not list specialist names in place of that count. Enter:open stays when the floor is empty.
 
 **What still works**
 
@@ -421,7 +421,8 @@ If a prompt-queue overlay appears, it is a **read-only mirror**. You cannot edit
 
 **How to leave**
 
-- `q` or `Esc` from bare scrollback, or click [✗].
+- `q` or `Esc` from an L3 returns to the L2 and does not cancel the L2.
+- `q` or `Esc` from the L2 returns to L1 and leaves the L2 running.
 - If scrollback search is open, `q` / `Esc` closes search first. A later press closes the view.
 - `Ctrl+Q` always quits Grok. It is never swallowed here.
 

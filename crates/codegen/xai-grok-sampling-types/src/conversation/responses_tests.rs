@@ -187,6 +187,7 @@ fn function_web_search_kept_when_no_hosted_tools() {
 }
 
 #[test]
+#[allow(deprecated)]
 fn test_responses_api_response_to_conversation_item() {
     use crate::rs;
 
@@ -215,6 +216,7 @@ fn test_responses_api_response_to_conversation_item() {
             )],
             id: "msg_123".to_string(),
             role: rs::AssistantRole::Assistant,
+            phase: None,
             status: rs::OutputStatus::Completed,
         })],
         parallel_tool_calls: None,
@@ -234,6 +236,9 @@ fn test_responses_api_response_to_conversation_item() {
         top_p: None,
         truncation: None,
         usage: None,
+        prompt_cache_options: None,
+        prompt_cache_diagnostics: None,
+        moderation: None,
     };
 
     let items = response_to_conversation_items(response);
@@ -272,6 +277,9 @@ fn test_responses_api_response_to_conversation_item() {
             name: "read_file".to_string(),
             id: None,
             status: None,
+            namespace: None,
+            caller: None,
+            r#async: None,
         })],
         parallel_tool_calls: None,
         previous_response_id: None,
@@ -290,6 +298,9 @@ fn test_responses_api_response_to_conversation_item() {
         top_p: None,
         truncation: None,
         usage: None,
+        prompt_cache_options: None,
+        prompt_cache_diagnostics: None,
+        moderation: None,
     };
 
     let items = response_to_conversation_items(response_with_fc);
@@ -308,6 +319,7 @@ fn test_responses_api_response_to_conversation_item() {
 }
 
 #[test]
+#[allow(deprecated)]
 fn test_response_reasoning_effort_stamped_on_assistant() {
     use crate::rs;
 
@@ -334,6 +346,8 @@ fn test_response_reasoning_effort_stamped_on_assistant() {
         reasoning: Some(rs::Reasoning {
             effort: Some(rs::ReasoningEffort::Xhigh),
             summary: None,
+            context: None,
+            mode: None,
         }),
         safety_identifier: None,
         service_tier: None,
@@ -346,6 +360,9 @@ fn test_response_reasoning_effort_stamped_on_assistant() {
         top_p: None,
         truncation: None,
         usage: None,
+        prompt_cache_options: None,
+        prompt_cache_diagnostics: None,
+        moderation: None,
     };
 
     let items = response_to_conversation_items(response);
@@ -479,6 +496,7 @@ fn test_multiple_tool_results_to_responses_api() {
 }
 
 #[test]
+#[allow(deprecated)]
 fn test_responses_api_with_encrypted_reasoning() {
     let response = rs::Response {
         background: None,
@@ -496,7 +514,7 @@ fn test_responses_api_with_encrypted_reasoning() {
         object: "response".to_string(),
         output: vec![
             rs::OutputItem::Reasoning(rs::ReasoningItem {
-                id: "reasoning_enc".to_string(),
+                id: Some("reasoning_enc".to_string()),
                 summary: vec![rs::SummaryPart::SummaryText(rs::SummaryTextContent {
                     text: "Visible thinking summary".to_string(),
                 })],
@@ -514,6 +532,7 @@ fn test_responses_api_with_encrypted_reasoning() {
                 )],
                 id: "msg_456".to_string(),
                 role: rs::AssistantRole::Assistant,
+                phase: None,
                 status: rs::OutputStatus::Completed,
             }),
         ],
@@ -534,6 +553,9 @@ fn test_responses_api_with_encrypted_reasoning() {
         top_p: None,
         truncation: None,
         usage: None,
+        prompt_cache_options: None,
+        prompt_cache_diagnostics: None,
+        moderation: None,
     };
 
     // Exercise the flat-list path: reasoning lives as a sibling
@@ -568,6 +590,7 @@ fn test_responses_api_with_encrypted_reasoning() {
 }
 
 #[test]
+#[allow(deprecated)]
 fn test_responses_api_with_only_encrypted_reasoning() {
     let response = rs::Response {
         background: None,
@@ -585,7 +608,7 @@ fn test_responses_api_with_only_encrypted_reasoning() {
         object: "response".to_string(),
         output: vec![
             rs::OutputItem::Reasoning(rs::ReasoningItem {
-                id: "reasoning_only_enc".to_string(),
+                id: Some("reasoning_only_enc".to_string()),
                 summary: vec![],
                 content: None,
                 encrypted_content: Some("enc_only_encrypted_no_visible_summary".to_string()),
@@ -601,6 +624,7 @@ fn test_responses_api_with_only_encrypted_reasoning() {
                 )],
                 id: "msg_789".to_string(),
                 role: rs::AssistantRole::Assistant,
+                phase: None,
                 status: rs::OutputStatus::Completed,
             }),
         ],
@@ -621,6 +645,9 @@ fn test_responses_api_with_only_encrypted_reasoning() {
         top_p: None,
         truncation: None,
         usage: None,
+        prompt_cache_options: None,
+        prompt_cache_diagnostics: None,
+        moderation: None,
     };
 
     // Flat-list path: reasoning sibling carries the encrypted blob, empty summary maps to an empty `Vec<SummaryPart>`
@@ -647,7 +674,7 @@ fn test_encrypted_reasoning_included_in_responses_api_request() {
         ConversationItem::user("What is 2+2?"),
         // Previous reasoning and assistant: reasoning is a sibling
         ConversationItem::Reasoning(rs::ReasoningItem {
-            id: "r1".to_string(),
+            id: Some("r1".to_string()),
             summary: vec![rs::SummaryPart::SummaryText(rs::SummaryTextContent {
                 text: "Let me calculate 2+2...".to_string(),
             })],
@@ -707,7 +734,7 @@ fn test_only_encrypted_reasoning_included_in_request() {
     let req = ConversationRequest::from_items(vec![
         ConversationItem::user("Hello"),
         ConversationItem::Reasoning(rs::ReasoningItem {
-            id: String::new(),
+            id: Some(String::new()),
             summary: vec![],
             content: None,
             encrypted_content: Some("enc_hidden_thoughts".to_string()),
@@ -806,7 +833,7 @@ fn test_tool_choice_to_responses_api() {
     let responses_req: rs::CreateResponse = (&req).into();
     assert_matches!(
         responses_req.tool_choice,
-        Some(rs::ToolChoiceParam::Mode(rs::ToolChoiceOptions::Auto))
+        Some(rs::ToolChoiceParam::Option(rs::ToolChoiceOptions::Auto))
     );
 
     // Test Required
@@ -815,7 +842,7 @@ fn test_tool_choice_to_responses_api() {
     let responses_req: rs::CreateResponse = (&req).into();
     assert_matches!(
         responses_req.tool_choice,
-        Some(rs::ToolChoiceParam::Mode(rs::ToolChoiceOptions::Required))
+        Some(rs::ToolChoiceParam::Option(rs::ToolChoiceOptions::Required))
     );
 
     // Test Function
@@ -1043,7 +1070,7 @@ fn test_transform_cwd_rewrites_reasoning_sibling() {
 
     let mut items = vec![
         ConversationItem::Reasoning(rs::ReasoningItem {
-            id: "rs_1".to_string(),
+            id: Some("rs_1".to_string()),
             summary: vec![rs::SummaryPart::SummaryText(rs::SummaryTextContent {
                 text: format!("thinking about {worktree}"),
             })],
@@ -1165,6 +1192,7 @@ fn test_tool_result_without_images_stays_text() {
 }
 
 #[test]
+#[allow(deprecated)]
 fn responses_api_conversion_preserves_model_fingerprint() {
     use std::collections::HashMap;
 
@@ -1195,6 +1223,7 @@ fn responses_api_conversion_preserves_model_fingerprint() {
             )],
             id: "msg_test".into(),
             role: rs::AssistantRole::Assistant,
+            phase: None,
             status: rs::OutputStatus::Completed,
         })],
         parallel_tool_calls: None,
@@ -1214,6 +1243,9 @@ fn responses_api_conversion_preserves_model_fingerprint() {
         top_p: None,
         truncation: None,
         usage: None,
+        prompt_cache_options: None,
+        prompt_cache_diagnostics: None,
+        moderation: None,
     };
 
     let items = response_to_conversation_items(response);
@@ -1234,7 +1266,7 @@ fn empty_reason_reasoning_only() {
     let response = ConversationResponse {
         items: vec![
             ConversationItem::Reasoning(rs::ReasoningItem {
-                id: "r1".to_string(),
+                id: Some("r1".to_string()),
                 summary: vec![rs::SummaryPart::SummaryText(rs::SummaryTextContent {
                     text: "thinking but no text output".to_string(),
                 })],
@@ -1274,7 +1306,7 @@ fn build_responses_input_preserves_multi_turn_ordering() {
     // [Sys, U1, U2, U3, U4, U5, R, A1, R, A2, ...] which would shift the cache prefix every turn.
     fn r(text: &str) -> ConversationItem {
         ConversationItem::Reasoning(rs::ReasoningItem {
-            id: text.to_string(),
+            id: Some(text.to_string()),
             summary: vec![rs::SummaryPart::SummaryText(rs::SummaryTextContent {
                 text: text.to_string(),
             })],
@@ -1344,7 +1376,7 @@ fn upgrade_legacy_reasoning_singular_chat_completions_text_only() {
     let Some(ConversationItem::Reasoning(r)) = siblings.first() else {
         panic!("expected Reasoning sibling: {siblings:?}");
     };
-    assert_eq!(r.id, "");
+    assert_eq!(r.id.as_deref(), Some(""));
     assert!(r.encrypted_content.is_none());
     let Some(rs::SummaryPart::SummaryText(s)) = r.summary.first() else {
         panic!("expected summary text: {:?}", r.summary)
@@ -1585,25 +1617,32 @@ fn build_responses_input_multi_turn_reasoning_ordering() {
 }
 
 #[test]
+#[allow(deprecated)]
 fn backend_tool_call_position_stable() {
     let ws_a = ConversationItem::BackendToolCall(BackendToolCallItem {
         kind: BackendToolKind::WebSearch(rs::WebSearchToolCall {
             id: "ws_a".to_string(),
-            status: rs::WebSearchToolCallStatus::Completed,
-            action: rs::WebSearchToolCallAction::Search(rs::WebSearchActionSearch {
-                query: "alpha".to_string(),
-                sources: Some(vec![]),
-            }),
+            status: rs::WebSearchCallStatus::Completed,
+            action: Some(rs::WebSearchToolCallAction::Search(
+                rs::WebSearchActionSearch {
+                    query: None,
+                    queries: Some(vec!["alpha".to_string()]),
+                    sources: Some(vec![]),
+                },
+            )),
         }),
     });
     let ws_b = ConversationItem::BackendToolCall(BackendToolCallItem {
         kind: BackendToolKind::WebSearch(rs::WebSearchToolCall {
             id: "ws_b".to_string(),
-            status: rs::WebSearchToolCallStatus::Completed,
-            action: rs::WebSearchToolCallAction::Search(rs::WebSearchActionSearch {
-                query: "beta".to_string(),
-                sources: Some(vec![]),
-            }),
+            status: rs::WebSearchCallStatus::Completed,
+            action: Some(rs::WebSearchToolCallAction::Search(
+                rs::WebSearchActionSearch {
+                    query: None,
+                    queries: Some(vec!["beta".to_string()]),
+                    sources: Some(vec![]),
+                },
+            )),
         }),
     });
 

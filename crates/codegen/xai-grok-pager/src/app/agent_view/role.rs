@@ -28,6 +28,14 @@ impl ChildLink {
         }
     }
 
+    /// An L2 coordinator. The Operator addresses it from the floor prompt.
+    pub(crate) fn l2_coordinator(parent_session_id: acp::SessionId) -> Self {
+        Self {
+            parent_session_id,
+            messaging: ChildMessaging::L2Coordinator,
+        }
+    }
+
     pub(crate) fn parent_session_id(&self) -> &acp::SessionId {
         &self.parent_session_id
     }
@@ -37,6 +45,8 @@ impl ChildLink {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ChildMessaging {
     Unaddressable,
+    /// An L2 coordinator the Operator can address from the floor prompt.
+    L2Coordinator,
 }
 
 /// Which chrome the view paints: its own session's, or the framed takeover a parent draws around a child.
@@ -50,6 +60,8 @@ pub(crate) enum ViewSurface {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ComposerRoute {
     RootSession,
+    /// Floor prompt on an open L2 coordinator. Enter sends to that L2.
+    L2Floor,
     /// No route exists, so the composer gets zero rows and can't take focus.
     Hidden,
 }
@@ -73,6 +85,10 @@ impl AgentView {
     pub(crate) fn composer_route(&self) -> ComposerRoute {
         match &self.role {
             AgentRole::Root => ComposerRoute::RootSession,
+            AgentRole::Child(ChildLink {
+                messaging: ChildMessaging::L2Coordinator,
+                ..
+            }) => ComposerRoute::L2Floor,
             AgentRole::Child(ChildLink {
                 messaging: ChildMessaging::Unaddressable,
                 ..

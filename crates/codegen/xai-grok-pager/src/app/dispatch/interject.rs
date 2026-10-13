@@ -564,6 +564,58 @@ mod tests {
         );
     }
 
+    #[test]
+    fn l1_mid_turn_enter_soft_interjects_and_empty_enter_does_not_approve_a_plan() {
+        use crate::app::agent::AgentState;
+        use crate::app::agent_view::ActivePane;
+        let mut app = test_app_with_agent();
+        let id = AgentId(0);
+        let body = "interject this turn from the Operator box";
+        let l1_sid = app.agents[&id]
+            .session
+            .session_id
+            .clone()
+            .expect("l1 session");
+        let action = {
+            let agent = app.agents.get_mut(&id).unwrap();
+            agent.session.state = AgentState::TurnRunning;
+            agent.set_active_pane(ActivePane::Prompt, true);
+            agent.prompt.set_text(body);
+            match agent
+                .handle_prompt_key_for_test(&KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            {
+                InputOutcome::Action(action) => action,
+                other => panic!("mid-turn Enter with text must soft-interject, got {other:?}"),
+            }
+        };
+        assert!(
+            matches!(&action, Action::SendPrompt(text) if text == body),
+            "{action:?}"
+        );
+        let effects = dispatch(action, &mut app);
+        match effects.as_slice() {
+            [
+                Effect::SendInterject {
+                    session_id, text, ..
+                },
+            ] => {
+                assert_eq!(session_id, &l1_sid);
+                assert_eq!(text, body);
+            }
+            other => panic!("expected SendInterject on the L1 session, got {other:?}"),
+        }
+        assert!(app.agents[&id].prompt.text().is_empty());
+        assert!(app.agents[&id].session.state.is_turn_running());
+        let empty = {
+            let agent = app.agents.get_mut(&id).unwrap();
+            agent.handle_prompt_key_for_test(&KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        };
+        assert!(
+            !matches!(empty, InputOutcome::Action(Action::ExecutePlan { .. })),
+            "empty Enter must not approve a plan, got {empty:?}"
+        );
+    }
+
     /// Enter on `[Pasted: 15 lines]` sends or interjects; it does not only expand the chip.
     ///
     /// Expand stays paste-again or double-click. Composer clears only after

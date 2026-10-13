@@ -17,7 +17,7 @@ use crate::scrollback::render::ScratchBuffer;
 use crate::theme::Theme;
 use crate::views::agent;
 use crate::views::shortcuts_bar::PendingHint;
-use crossterm::event::{Event, KeyCode, KeyEventKind, MouseButton, MouseEventKind};
+use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
@@ -53,6 +53,13 @@ impl AgentView {
             ?replay_outcome,
             "opened subagent fullscreen"
         );
+        let open_l2_floor = self
+            .subagent_views
+            .get(&child_sid)
+            .is_some_and(|child| child.composer_route() == super::ComposerRoute::L2Floor);
+        if open_l2_floor && let Some(child) = self.subagent_views.get_mut(&child_sid) {
+            let _ = child.set_active_pane(super::AgentPane::Prompt, true);
+        }
         self.active_subagent = Some(child_sid);
     }
     /// Open the takeover for the child the selected row links to (`RenderBlock::child_session_id`). `false`, so the
@@ -79,9 +86,99 @@ impl AgentView {
     /// See [`crate::app::subagent::evict_finished_child_view`] for rationale and guards.
     /// All close sites route through here.
     pub(crate) fn close_subagent_fullscreen(&mut self) {
+        if let Some(return_sid) = self.overlay_return_sid.clone()
+            && self.subagent_views.contains_key(&return_sid)
+            && self
+                .active_subagent
+                .as_deref()
+                .is_some_and(|active| active != return_sid.as_str())
+        {
+            if let Some(active_sid) = self.active_subagent.clone() {
+                let _ = crate::app::subagent::evict_finished_child_view(self, &active_sid);
+            }
+            self.overlay_return_sid = None;
+            self.active_subagent = Some(return_sid);
+            return;
+        }
+        self.overlay_return_sid = None;
         if let Some(child_sid) = self.active_subagent.take() {
             let _ = crate::app::subagent::evict_finished_child_view(self, &child_sid);
         }
+    }
+
+    /// Empty Enter on an L2 floor opens the L3 and remembers the L2.
+    /// A selected child row wins. Otherwise the single running specialist
+    /// whose parent session is this L2. Does not close or cancel the L2.
+    fn open_l3_from_l2(&mut self) -> bool {
+        let Some(l2_sid) = self.active_subagent.clone() else {
+            return false;
+        };
+        let is_floor = self
+            .subagent_views
+            .get(&l2_sid)
+            .is_some_and(|view| view.composer_route() == super::ComposerRoute::L2Floor);
+        if !is_floor {
+            return false;
+        }
+        let from_row = self.subagent_views.get(&l2_sid).and_then(|l2| {
+            l2.scrollback
+                .selected()
+                .and_then(|idx| l2.scrollback.entry(idx))
+                .and_then(|entry| entry.block.child_session_id())
+                .map(str::to_owned)
+        });
+        let target = from_row
+            .filter(|sid| sid != &l2_sid && self.subagent_views.contains_key(sid))
+            .or_else(|| {
+                let mut running: Vec<String> = self
+                    .subagent_sessions
+                    .iter()
+                    .filter(|(id, info)| {
+                        info.is_running()
+                            && info.attempt.parent_session_id.as_deref() == Some(l2_sid.as_str())
+                            && self.subagent_views.contains_key(id.as_str())
+                    })
+                    .map(|(id, _)| id.clone())
+                    .collect();
+                if running.len() == 1 {
+                    running.pop()
+                } else {
+                    None
+                }
+            });
+        let Some(target) = target else {
+            return false;
+        };
+        self.overlay_return_sid = Some(l2_sid);
+        self.active_subagent = Some(target);
+        true
+    }
+
+    /// Floor Enter sends to that L2. Missing session id does not target L1.
+    fn l2_floor_send_interject(&mut self, l2_sid: &str, text: String) -> bool {
+        let trimmed = text.trim().to_string();
+        if trimmed.is_empty() {
+            return false;
+        }
+        let Some(session_id) = self
+            .subagent_views
+            .get(l2_sid)
+            .and_then(|view| view.session.session_id.clone())
+        else {
+            return false;
+        };
+        self.pending_effects
+            .push(crate::app::actions::Effect::SendInterject {
+                agent_id: self.session.id,
+                session_id,
+                text: trimmed,
+                interjection_id: uuid::Uuid::new_v4().to_string(),
+                blocks: None,
+            });
+        if let Some(child) = self.subagent_views.get_mut(l2_sid) {
+            child.prompt.set_text("");
+        }
+        true
     }
     /// Fetch a child view for applying a live update, hydrating a resumed child's inherited transcript first.
     /// The incoming block then never closes the replay window (see [`crate::app::subagent::replay_resumed_child_before_live_block`]).
@@ -499,7 +596,7 @@ impl AgentView {
     }
     /// `None` when no takeover is open, so the caller continues its normal routing. Otherwise all input goes to the
     /// child view; `q`/`Esc` from bare scrollback closes the view and Ctrl+Q always bubbles to the global quit.
-    /// Rung order is fixed: Ctrl+Q, `[✗]` click, specialist status click, hover, bare-scrollback close, idle-quote, forward + filter.
+    /// Rung order is fixed: Ctrl+Q, `[✗]` click, specialist status click, hover, bare-scrollback close, L2 floor, idle-quote, forward + filter.
     pub(super) fn intercept_takeover_input(
         &mut self,
         ev: &Event,
@@ -541,7 +638,16 @@ impl AgentView {
             && let Some(sid) = self.overlay_nested_status_child_sid.clone()
             && self.subagent_views.contains_key(&sid)
         {
-            self.open_subagent_fullscreen(sid);
+            let open_is_l2_floor = self
+                .subagent_views
+                .get(&child_sid)
+                .is_some_and(|view| view.composer_route() == super::ComposerRoute::L2Floor);
+            if open_is_l2_floor {
+                self.overlay_return_sid = Some(child_sid.clone());
+                self.active_subagent = Some(sid);
+            } else {
+                self.open_subagent_fullscreen(sid);
+            }
             return Some(InputOutcome::Changed);
         }
         if let Event::Mouse(mouse) = ev
@@ -562,6 +668,45 @@ impl AgentView {
             self.close_subagent_fullscreen();
             return Some(InputOutcome::Changed);
         }
+        let l2_floor = self
+            .subagent_views
+            .get(&child_sid)
+            .is_some_and(|view| view.composer_route() == super::ComposerRoute::L2Floor);
+        if l2_floor {
+            if key
+                .is_some_and(|key| key.code == KeyCode::Esc && key.modifiers == KeyModifiers::NONE)
+            {
+                self.close_subagent_fullscreen();
+                return Some(InputOutcome::Changed);
+            }
+            if key.is_some_and(|key| key!('q').matches(key)) {
+                let draft_empty = self
+                    .subagent_views
+                    .get(&child_sid)
+                    .map(|view| view.prompt.text().trim().is_empty())
+                    .unwrap_or(true);
+                if draft_empty {
+                    self.close_subagent_fullscreen();
+                    return Some(InputOutcome::Changed);
+                }
+            }
+            if key.is_some_and(|key| {
+                key.code == KeyCode::Enter && key.modifiers == KeyModifiers::NONE
+            }) {
+                let draft = self
+                    .subagent_views
+                    .get(&child_sid)
+                    .map(|view| view.prompt.text().to_string())
+                    .unwrap_or_default();
+                if !draft.trim().is_empty() {
+                    let _ = self.l2_floor_send_interject(&child_sid, draft);
+                    return Some(InputOutcome::Changed);
+                }
+                if self.open_l3_from_l2() {
+                    return Some(InputOutcome::Changed);
+                }
+            }
+        }
         let child_quote = key.and_then(|key| {
             self.subagent_views
                 .get_mut(&child_sid)
@@ -576,12 +721,30 @@ impl AgentView {
             Some(IdleEnterQuote::ConsumedEmpty) => return Some(InputOutcome::Changed),
             Some(IdleEnterQuote::NotHandled) | None => {}
         }
-        let Some(child_view) = self.subagent_views.get_mut(&child_sid) else {
-            return Some(InputOutcome::Unchanged);
+        let outcome = {
+            let Some(child_view) = self.subagent_views.get_mut(&child_sid) else {
+                return Some(InputOutcome::Unchanged);
+            };
+            let outcome = child_view.handle_input_inner(ev, registry, prompt_paging);
+            let mut child_effects = std::mem::take(&mut child_view.pending_effects);
+            self.pending_effects.append(&mut child_effects);
+            outcome
         };
-        let outcome = child_view.handle_input_inner(ev, registry, prompt_paging);
-        let mut child_effects = std::mem::take(&mut child_view.pending_effects);
-        self.pending_effects.append(&mut child_effects);
+        if l2_floor {
+            let redirected = match &outcome {
+                InputOutcome::Action(Action::SendPrompt(text)) if !text.trim().is_empty() => {
+                    Some(text.clone())
+                }
+                InputOutcome::Action(Action::Interject { text, .. }) if !text.trim().is_empty() => {
+                    Some(text.clone())
+                }
+                _ => None,
+            };
+            if let Some(text) = redirected {
+                let _ = self.l2_floor_send_interject(&child_sid, text);
+                return Some(InputOutcome::Changed);
+            }
+        }
         Some(filter_child_outcome(outcome))
     }
 }

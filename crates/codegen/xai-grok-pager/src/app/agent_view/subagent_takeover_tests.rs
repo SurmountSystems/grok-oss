@@ -660,3 +660,187 @@ fn waiting_task_row_opens_the_waited_task() {
         "{OWED_WAITING_ROW} The click did not open the waited task."
     );
 }
+
+#[test]
+fn l2_nested_view_prompt_enter_sends_to_that_l2_and_does_not_start_an_l1_turn() {
+    use agent_client_protocol as acp;
+    let registry = ActionRegistry::defaults();
+    let mut l1 = make_agent();
+    l1.session.session_id = Some(acp::SessionId::new("l1-session"));
+    let mut l2 = make_agent();
+    l2.session.session_id = Some(acp::SessionId::new("l2-session"));
+    l2.session.state = crate::app::agent::AgentState::TurnRunning;
+    l1.insert_subagent_view(
+        "l2-session".to_owned(),
+        Box::new(l2),
+        crate::app::agent_view::ChildLink::l2_coordinator(acp::SessionId::new("l1-session")),
+    );
+    l1.open_subagent_fullscreen("l2-session".to_owned());
+    {
+        let child = l1.subagent_view("l2-session").expect("l2");
+        assert_eq!(
+            child.composer_route(),
+            crate::app::agent_view::ComposerRoute::L2Floor
+        );
+        assert_eq!(child.active_pane, AgentPane::Prompt);
+    }
+    l1.subagent_view_mut("l2-session")
+        .expect("l2")
+        .prompt
+        .set_text("steer this coordinator");
+    let area = Rect::new(0, 0, 120, 40);
+    let mut buf = Buffer::empty(area);
+    let mut scratch = ScratchBuffer::new();
+    let _ = l1.draw(
+        area,
+        &mut buf,
+        &registry,
+        &mut scratch,
+        None,
+        false,
+        crate::app::agent_view::BannerSlotParams::none(),
+        true,
+        false,
+        &mut Vec::new(),
+        crate::app::agent_view::AppRenderParams::default(),
+    );
+    let painted = buffer_text(&buf, area);
+    assert!(
+        painted.contains("steer this coordinator"),
+        "the L2 floor must paint the draft:\n{painted}"
+    );
+    let outcome = l1.handle_input(&key(KeyCode::Enter), &registry);
+    assert!(matches!(outcome, InputOutcome::Changed), "{outcome:?}");
+    let sent = l1.pending_effects.iter().any(|effect| {
+        matches!(
+            effect,
+            crate::app::actions::Effect::SendInterject { session_id, text, .. }
+                if session_id.0.as_ref() == "l2-session" && text == "steer this coordinator"
+        )
+    });
+    assert!(
+        sent,
+        "Enter must SendInterject to the L2, got {:?}",
+        l1.pending_effects
+    );
+    assert!(
+        !l1.pending_effects
+            .iter()
+            .any(|effect| { matches!(effect, crate::app::actions::Effect::SendPrompt { .. }) }),
+        "the L2 floor must not start an L1 SendPrompt"
+    );
+    assert!(
+        l1.subagent_view("l2-session")
+            .expect("l2")
+            .prompt
+            .text()
+            .is_empty()
+    );
+    assert_eq!(
+        l1.session.session_id.as_ref().map(|sid| sid.0.as_ref()),
+        Some("l1-session")
+    );
+
+    let mut hidden = make_agent();
+    hidden.insert_test_child("hidden-child".to_owned(), Box::new(make_agent()));
+    hidden.open_subagent_fullscreen("hidden-child".to_owned());
+    hidden
+        .subagent_view_mut("hidden-child")
+        .expect("child")
+        .prompt
+        .set_text("must not send");
+    let _ = hidden.handle_input(&key(KeyCode::Enter), &registry);
+    assert!(!hidden.pending_effects.iter().any(|effect| {
+        matches!(
+            effect,
+            crate::app::actions::Effect::SendInterject { .. }
+                | crate::app::actions::Effect::SendPrompt { .. }
+        )
+    }));
+}
+
+#[test]
+fn enter_on_l2_opens_the_l3_view_and_the_l1_list_stays_l2_rows_plus_a_live_l3_count() {
+    use agent_client_protocol as acp;
+    use std::sync::Arc;
+    const L2: &str = "l2-session";
+    const L3: &str = "l3-session";
+    const LINE: &str = "L3_TRANSCRIPT_LINE_FLOOR_OPEN";
+    let registry = ActionRegistry::defaults();
+    let mut l1 = make_agent();
+    l1.session.session_id = Some(acp::SessionId::new("l1-session"));
+    let mut l2 = make_agent();
+    l2.session.session_id = Some(acp::SessionId::new(L2));
+    l2.session.state = crate::app::agent::AgentState::TurnRunning;
+    let mut l2_info = running_subagent_info(L2);
+    l2_info.attempt.depth = Some(1);
+    l2_info.attempt.parent_session_id = Some(Arc::from("l1-session"));
+    l1.subagent_sessions.insert(L2.to_owned(), l2_info);
+    l1.insert_subagent_view(
+        L2.to_owned(),
+        Box::new(l2),
+        crate::app::agent_view::ChildLink::l2_coordinator(acp::SessionId::new("l1-session")),
+    );
+    let mut l3 = make_agent();
+    l3.session.session_id = Some(acp::SessionId::new(L3));
+    l3.scrollback
+        .push_block(crate::scrollback::block::RenderBlock::user_prompt(LINE));
+    let mut l3_info = running_subagent_info(L3);
+    l3_info.attempt.depth = Some(2);
+    l3_info.attempt.parent_session_id = Some(Arc::from(L2));
+    l3_info.description = Arc::from("specialist-name-must-not-be-the-row");
+    l1.subagent_sessions.insert(L3.to_owned(), l3_info);
+    l1.insert_test_child(L3.to_owned(), Box::new(l3));
+    l1.open_subagent_fullscreen(L2.to_owned());
+    assert!(l1.subagent_view(L2).expect("l2").prompt.text().is_empty());
+    let outcome = l1.handle_input(&key(KeyCode::Enter), &registry);
+    assert!(matches!(outcome, InputOutcome::Changed), "{outcome:?}");
+    assert_eq!(l1.active_subagent.as_deref(), Some(L3));
+    assert_eq!(l1.overlay_return_sid.as_deref(), Some(L2));
+    let area = Rect::new(0, 0, 120, 40);
+    let mut buf = Buffer::empty(area);
+    let mut scratch = ScratchBuffer::new();
+    let _ = l1.draw(
+        area,
+        &mut buf,
+        &registry,
+        &mut scratch,
+        None,
+        false,
+        crate::app::agent_view::BannerSlotParams::none(),
+        true,
+        false,
+        &mut Vec::new(),
+        crate::app::agent_view::AppRenderParams::default(),
+    );
+    let painted = buffer_text(&buf, area);
+    assert!(
+        painted.contains(LINE),
+        "the open L3 view must show its transcript:\n{painted}"
+    );
+    let child_ids: std::collections::HashSet<&str> = l1
+        .subagent_sessions
+        .values()
+        .map(|row| row.child_session_id.as_ref())
+        .collect();
+    let l2_row = l1.subagent_sessions.get(L2).expect("l2 row");
+    let l3_row = l1.subagent_sessions.get(L3).expect("l3 row");
+    assert!(crate::app::subagent::is_l2_list_row(l2_row, &child_ids));
+    assert!(!crate::app::subagent::is_l2_list_row(l3_row, &child_ids));
+    assert_eq!(
+        crate::app::subagent::live_l3_count(l1.subagent_sessions.values(), L2),
+        1
+    );
+    assert_eq!(
+        crate::app::subagent::format_live_l3_count(1).as_deref(),
+        Some("1 specialist")
+    );
+    let back = l1.handle_input(&key(KeyCode::Esc), &registry);
+    assert!(
+        !matches!(back, InputOutcome::Action(Action::KillSubagent(_))),
+        "{back:?}"
+    );
+    assert_eq!(l1.active_subagent.as_deref(), Some(L2));
+    assert!(l1.overlay_return_sid.is_none());
+    assert!(l1.subagent_sessions.get(L2).expect("l2").is_running());
+}

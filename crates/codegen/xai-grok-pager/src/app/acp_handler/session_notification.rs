@@ -790,9 +790,15 @@ pub(super) fn handle_session_notification_with_origin(
                     .registry()
                     .restricted_commands();
                 child_view.set_restricted_commands(&restricted);
-                let link = crate::app::agent_view::ChildLink::unaddressable(acp::SessionId::new(
-                    parent_session_id.clone(),
-                ));
+                let spawner_is_nested = agent
+                    .subagent_sessions
+                    .contains_key(parent_session_id.as_str());
+                let parent_sid = acp::SessionId::new(parent_session_id.clone());
+                let link = if workflow_run_id.is_some() || spawner_is_nested {
+                    crate::app::agent_view::ChildLink::unaddressable(parent_sid)
+                } else {
+                    crate::app::agent_view::ChildLink::l2_coordinator(parent_sid)
+                };
                 agent.insert_subagent_view(child_session_id.clone(), Box::new(child_view), link);
             }
             let is_l3 = agent

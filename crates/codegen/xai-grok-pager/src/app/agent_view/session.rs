@@ -1013,6 +1013,7 @@ impl AgentView {
             finished_nested_wait_ids: HashSet::new(),
             subagent_views: HashMap::new(),
             active_subagent: None,
+            overlay_return_sid: None,
             role: AgentRole::Root,
             activity_row_clocks: false,
             hit_subagent_frame_close: Default::default(),

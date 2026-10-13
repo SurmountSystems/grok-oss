@@ -1566,6 +1566,9 @@ pub struct AgentView {
     /// Currently open subagent view (child_session_id). When Some, the scrollback area is replaced by the subagent's framed view.
     /// scrollback area is replaced by the subagent's framed view.
     pub active_subagent: Option<String>,
+    /// L2 to restore when the Operator leaves an L3 opened from that L2.
+    /// `None` means close dismisses the open view.
+    pub(crate) overlay_return_sid: Option<String>,
     /// Root of its session, or a child mirrored under a parent's takeover; every child-specific gate derives from it.
     role: AgentRole,
     /// Paint local clocks on thought, tool, and specialist rows.
