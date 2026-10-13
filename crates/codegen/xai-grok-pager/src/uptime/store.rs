@@ -5,8 +5,8 @@
 
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 use parquet::basic::{Compression, Encoding};
 use parquet::data_type::{BoolType, ByteArray, ByteArrayType, DataType, Int64Type};
@@ -20,7 +20,7 @@ use parquet::schema::parser::parse_message_type;
 use parquet::schema::types::{ColumnPath, TypePtr};
 
 use super::window::{
-    LONG_WINDOW_MS, LONG_WINDOW_WORDS, SHORT_WINDOW_MS, SHORT_WINDOW_WORDS, WindowPair, WindowStats,
+    WindowPair, WindowStats, LONG_WINDOW_MS, LONG_WINDOW_WORDS, SHORT_WINDOW_MS, SHORT_WINDOW_WORDS,
 };
 
 /// Banner the product already shows when model serving is failing.
@@ -360,7 +360,7 @@ pub fn column_encodings(path: &Path) -> Result<Vec<(String, Vec<Encoding>)>, Sto
     let mut found = Vec::new();
     for row_group in metadata.row_groups() {
         for column in row_group.columns() {
-            found.push((column.column_path().string(), column.encodings().to_vec()));
+            found.push((column.column_path().string(), column.encodings().collect()));
         }
     }
     Ok(found)
