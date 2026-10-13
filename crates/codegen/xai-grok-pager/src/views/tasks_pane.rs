@@ -9,13 +9,13 @@ use super::list_pane::{
 use super::overlay::OverlayState;
 use crate::app::agent::{BgTaskState, BgTaskStatus, ScheduledTaskInfo};
 use crate::app::agent_view::l2_token_tracking::{
+    LiveJobRowInput, STANDING_WRAP_ESTIMATE_TOKENS, STANDING_WRAP_ESTIMATE_WALL,
     display_live_job_row, format_subagents_row_figure, shown_nested_count,
-    spawned_with_no_sample_yet, sum_shown_counts_once, LiveJobRowInput,
-    STANDING_WRAP_ESTIMATE_TOKENS, STANDING_WRAP_ESTIMATE_WALL,
+    spawned_with_no_sample_yet, sum_shown_counts_once,
 };
 use crate::app::subagent::{
-    format_context_badge, format_live_l3_count, format_subagent_label, is_l2_list_row,
-    live_l3_count, subagent_list_row_usage, SubagentInfo,
+    SubagentInfo, format_context_badge, format_live_l3_count, format_subagent_label,
+    is_l2_list_row, live_l3_count, subagent_list_row_usage,
 };
 use crate::appearance::LayoutConfig;
 use crate::scrollback::layout::HorizontalLayout;
@@ -3880,10 +3880,11 @@ mod tests {
         subagents.insert("cs-1".to_string(), child);
         let runs = vec![make_workflow_run("deep-research", "active")];
         pane.sync(&BTreeMap::new(), &subagents, &HashMap::new(), &runs);
-        assert!(pane
-            .items
-            .iter()
-            .all(|e| !matches!(e, TaskEntry::Agent { .. })));
+        assert!(
+            pane.items
+                .iter()
+                .all(|e| !matches!(e, TaskEntry::Agent { .. }))
+        );
         assert_eq!(
             pane.status_counts(&BTreeMap::new(), &subagents, &HashMap::new(), &runs),
             TaskStatusCounts {
