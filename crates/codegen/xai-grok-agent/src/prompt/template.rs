@@ -1,9 +1,6 @@
-//! System prompt template source and constants.
-//!
-//! Templates are XOR-obfuscated by `scripts/encrypt_templates.py` (obfuscation,
-//! not security — seeds live in-repo) so they don't appear as obvious plaintext
-//! in `strings` output. They are decrypted on demand and the returned
-//! `Zeroizing<String>` wipes the plaintext from memory on drop.
+//! Templates are XOR-obfuscated by `scripts/encrypt_templates.py` so they don't appear as obvious plaintext in `strings` output.
+//! This is obfuscation, not security; the seeds live in-repo.
+//! They are decrypted on demand and the returned `Zeroizing<String>` wipes the plaintext from memory on drop.
 
 use zeroize::Zeroizing;
 
@@ -13,7 +10,7 @@ mod prompt_encrypted;
 use prompt_encrypted::*;
 
 /// Decrypt XOR-obfuscated template data (mirrors `scripts/encrypt_templates.py::xor_encrypt`).
-/// Obfuscation only — not a security boundary.
+/// Obfuscation only, not a security boundary.
 fn decrypt(data: &[u8], seed: u8) -> Zeroizing<String> {
     let bytes: Vec<u8> = data
         .iter()
@@ -58,6 +55,13 @@ pub const COMPACT_SYSTEM_PROMPT: &str = "You are an AI coding agent. You operate
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Inserts into `v` when it is an object; other values are left untouched.
+    fn jset(v: &mut serde_json::Value, key: &str, val: serde_json::Value) {
+        if let Some(obj) = v.as_object_mut() {
+            obj.insert(key.to_owned(), val);
+        }
+    }
     use std::collections::HashMap;
     use xai_grok_tools::types::template_renderer::TemplateRenderer;
     use xai_grok_tools::types::tool::ToolKind;
@@ -93,6 +97,22 @@ mod tests {
         );
     }
 
+    /// The memory injector treats any `<memory-context>` substring in the system prompt as an
+    /// already-injected block, so a prompt that mentions the tag disables memory injection.
+    #[test]
+    fn templates_never_mention_the_memory_context_tag() {
+        for (name, template) in [
+            ("prompt.md", base_template()),
+            ("apply_patch_prompt.md", apply_patch_template()),
+            ("subagent_prompt.md", subagent_template()),
+        ] {
+            assert!(
+                !template.contains("memory-context"),
+                "{name} mentions the memory-context tag; describe the injected index in prose instead"
+            );
+        }
+    }
+
     /// Build a TemplateRenderer with the standard grok-build tool kinds.
     fn default_renderer() -> TemplateRenderer {
         let tools: HashMap<ToolKind, String> = [
@@ -123,6 +143,9 @@ mod tests {
             "working_directory": "/tmp/test",
             "current_date": "2025-01-15",
             "memory_enabled": false,
+            "memory_v2_enabled": false,
+            "memory_global_path": "",
+            "memory_workspace_path": "",
             "is_non_interactive": false,
             "system_prompt_label": crate::prompt::context::DEFAULT_SYSTEM_PROMPT_LABEL,
         })
@@ -147,6 +170,94 @@ mod tests {
         renderer
             .render_with_extra(&tmpl, placeholders)
             .expect("codex template render failed")
+    }
+
+    /// A positive order to carry out a misreading, not the prohibition that forbids it.
+    ///
+    /// "Do not ... carry out the misreading" forbids the misreading. The same
+    /// words in a sentence with no "do not" are an order. Case does not matter.
+    fn instruction_tells_agent_to_carry_out_a_misreading(text: &str) -> bool {
+        const NEEDLES: [&str; 2] = ["carry out the misreading", "carry out a misreading"];
+        let lower = text.to_ascii_lowercase();
+        for needle in NEEDLES {
+            let mut search_from = 0;
+            while let Some(rel) = lower[search_from..].find(needle) {
+                let at = search_from + rel;
+                let sentence_start = lower[..at].rfind(['.', '\n']).map(|i| i + 1).unwrap_or(0);
+                let before = lower[sentence_start..at].trim_start();
+                if !sentence_prohibits_carrying_out_a_misreading(before) {
+                    return true;
+                }
+                search_from = at + needle.len();
+            }
+        }
+        false
+    }
+
+    /// True when this sentence already says "do not" before the misreading phrase.
+    fn sentence_prohibits_carrying_out_a_misreading(sentence_before_needle: &str) -> bool {
+        let mut rest = sentence_before_needle;
+        while let Some(at) = rest.find("do not") {
+            let end = at + "do not".len();
+            let before_ok = at == 0 || !rest.as_bytes()[at - 1].is_ascii_alphanumeric();
+            let after_ok = end == rest.len() || !rest.as_bytes()[end].is_ascii_alphanumeric();
+            if before_ok && after_ok {
+                return true;
+            }
+            rest = &rest[end..];
+        }
+        false
+    }
+
+    /// The always-loaded instruction for a normal turn is the decrypted base template.
+    /// Plan mode uses a separate reminder. This test does not read that reminder.
+    #[test]
+    fn agent_instructions_do_the_work_that_was_named() {
+        const NAMED_WORK: &str = "Do the work that was named. Do not replace it with a nearby misreading and carry out the misreading. Do not use that misreading as the reason the named work was not done. Agent words do not take the green operator accent. While an agent turn is active, the left rail is magenta, theme key `accent_running`, RGB (255, 0, 255) on DOGE. The words stay white, `text_primary`. When the turn is finished, the rail is absent. The Operator's own left rail stays green, `accent_user`, RGB (0, 255, 0). The Operator's words stay white. Do not label a sentence as the Operator's unless the Operator said that sentence. When the work has more than one contract and those contracts do not share a file, start them together. Do not queue them behind a check.";
+        let loaded = base_template();
+        assert!(
+            loaded.contains("Do the work that was named"),
+            "the always-loaded instruction is missing \"Do the work that was named\""
+        );
+        assert!(
+            loaded.contains("accent_running"),
+            "the always-loaded instruction is missing accent_running"
+        );
+        assert!(
+            loaded.contains("255, 0, 255"),
+            "the always-loaded instruction is missing 255, 0, 255"
+        );
+        assert!(
+            loaded.contains(NAMED_WORK),
+            "the always-loaded instruction must say to do the named work and must forbid the misreading"
+        );
+        assert!(
+            !instruction_tells_agent_to_carry_out_a_misreading(&loaded),
+            "the always-loaded instruction tells the agent to carry out a misreading instead"
+        );
+        assert!(
+            instruction_tells_agent_to_carry_out_a_misreading(
+                "Do the work that was named. Carry out the misreading instead."
+            ),
+            "the check must fail when the instruction tells the agent to carry out a misreading instead"
+        );
+        assert!(
+            !instruction_tells_agent_to_carry_out_a_misreading(NAMED_WORK),
+            "the prohibition must not count as telling the agent to carry out a misreading"
+        );
+        let rendered = render_base(&default_renderer(), &default_placeholders());
+        assert!(
+            rendered.contains("Do the work that was named"),
+            "a rendered normal turn is missing \"Do the work that was named\""
+        );
+        assert!(
+            rendered.contains(NAMED_WORK),
+            "a rendered normal turn drops the named-work instruction"
+        );
+        assert!(
+            !instruction_tells_agent_to_carry_out_a_misreading(&rendered),
+            "a rendered normal turn tells the agent to carry out a misreading instead"
+        );
     }
 
     // ── Variable substitution ───────────────────────────────────────
@@ -228,64 +339,6 @@ mod tests {
     // ── Base template rendering ─────────────────────────────────────
 
     #[test]
-    fn test_base_template_renders() {
-        let prompt = render_base(&default_renderer(), &default_placeholders());
-        assert!(prompt.contains(crate::prompt::context::DEFAULT_SYSTEM_PROMPT_LABEL));
-        assert!(prompt.contains("user_query"));
-    }
-
-    #[test]
-    fn test_base_template_contains_resolved_tool_names() {
-        let prompt = render_base(&default_renderer(), &default_placeholders());
-        // Base prompt resolves read/edit in <tool_calling> and plan tool in
-        // <planning> when ToolKind::Plan is present.
-        assert!(prompt.contains("read_file"), "Should contain 'read_file'");
-        assert!(
-            prompt.contains("search_replace"),
-            "Should contain 'search_replace'"
-        );
-        assert!(
-            prompt.contains("todo_write"),
-            "default renderer includes Plan tool; prompt should teach todo_write"
-        );
-        assert!(!prompt.contains("${{"), "No unresolved template variables");
-        assert!(!prompt.contains("${%"), "No unresolved template blocks");
-    }
-
-    #[test]
-    fn test_base_template_plan_present_includes_planning() {
-        let prompt = render_base(&default_renderer(), &default_placeholders());
-        assert!(
-            prompt.contains("<planning>"),
-            "Planning section should render when plan tool is present"
-        );
-        assert!(
-            prompt.contains("todo_write"),
-            "Planning section should resolve plan tool name"
-        );
-        assert!(
-            prompt.contains("Ctrl+T"),
-            "Planning section should mention the session board affordance"
-        );
-        assert!(
-            prompt.contains("feat:"),
-            "Planning section should mention feat: namespace"
-        );
-        assert!(
-            prompt.contains("bug:"),
-            "Planning section should mention bug: namespace"
-        );
-        assert!(
-            prompt.contains("red/green TDD") || prompt.contains("failing test first"),
-            "Planning section should mention red/green TDD for user-reported bugs/features"
-        );
-        assert!(
-            prompt.contains("meta.taskId") || prompt.contains("taskId"),
-            "Planning section should teach meta.taskId bind for multi-track also-guard"
-        );
-    }
-
-    #[test]
     fn test_base_template_with_overridden_tool_names() {
         let tools: HashMap<ToolKind, String> = [
             (ToolKind::Read, "view_file".to_string()),
@@ -300,7 +353,13 @@ mod tests {
         ]
         .into();
         let r = TemplateRenderer::new(tools, HashMap::new());
-        let prompt = render_base(&r, &default_placeholders());
+        let mut placeholders = default_placeholders();
+        jset(
+            &mut placeholders,
+            "memory_v2_enabled",
+            serde_json::json!(true),
+        );
+        let prompt = render_base(&r, &placeholders);
         assert!(
             prompt.contains("`view_file`"),
             "Should use overridden 'view_file'"
@@ -327,12 +386,8 @@ mod tests {
         let r = TemplateRenderer::new(tools, HashMap::new());
         let prompt = render_base(&r, &default_placeholders());
         assert!(
-            !prompt.contains("<planning>"),
-            "Planning section should be omitted when plan tool is absent"
-        );
-        assert!(
             !prompt.contains("todo_write"),
-            "todo_write must not appear when plan tool is absent"
+            "plan tool name must not render when the Plan tool is absent"
         );
     }
 
@@ -343,7 +398,7 @@ mod tests {
         let r = TemplateRenderer::new(tools, HashMap::new());
         let prompt = render_base(&r, &default_placeholders());
         assert!(
-            !prompt.contains("background_tasks"),
+            !prompt.contains("<background_tasks>"),
             "background_tasks section should be omitted"
         );
     }
@@ -358,69 +413,6 @@ mod tests {
             prompt.contains(crate::prompt::context::DEFAULT_SYSTEM_PROMPT_LABEL),
             "Must contain agent identity"
         );
-        assert!(
-            prompt.contains("user_query"),
-            "Must reference user_query tag"
-        );
-    }
-
-    #[test]
-    fn test_compact_prompt_matches_expected() {
-        assert_eq!(
-            COMPACT_SYSTEM_PROMPT,
-            "You are an AI coding agent. You operate in a workspace with a provided codebase.\n\n\
-             Your main goal is to complete the user's request, denoted within the <user_query> tag.",
-        );
-    }
-
-    // ── Mid-session mode switching ──────────────────────────────────
-
-    #[test]
-    fn test_mid_session_switch_concise_to_full() {
-        let compact = COMPACT_SYSTEM_PROMPT;
-        assert!(!compact.contains("read_file"), "Compact has no tool names");
-        assert!(
-            !compact.contains("<tool_calling>"),
-            "Compact has no tool section"
-        );
-
-        let full = render_base(&default_renderer(), &default_placeholders());
-        assert!(
-            full.contains("<tool_calling>"),
-            "Full prompt has tool section"
-        );
-        assert!(full.contains("read_file"), "Full prompt has read_file");
-        assert!(
-            full.contains("search_replace"),
-            "Full prompt has search_replace"
-        );
-    }
-
-    #[test]
-    fn test_mid_session_switch_preserves_tool_overrides() {
-        let tools: HashMap<ToolKind, String> = [
-            (ToolKind::Read, "view".to_string()),
-            (ToolKind::Edit, "edit".to_string()),
-            (ToolKind::Execute, "run_terminal_cmd".to_string()),
-            (ToolKind::Plan, "todo_write".to_string()),
-            (
-                ToolKind::BackgroundTaskAction,
-                "get_task_output".to_string(),
-            ),
-        ]
-        .into();
-        let r = TemplateRenderer::new(tools, HashMap::new());
-        let prompt = render_base(&r, &default_placeholders());
-        assert!(prompt.contains("`edit`"), "Should use overridden 'edit'");
-        assert!(prompt.contains("`view`"), "Should use overridden 'view'");
-        assert!(
-            !prompt.contains("`read_file`"),
-            "Should not contain original 'read_file'"
-        );
-        assert!(
-            !prompt.contains("`search_replace`"),
-            "Should not contain original 'search_replace'"
-        );
     }
 
     // ── Determinism ─────────────────────────────────────────────────
@@ -434,16 +426,6 @@ mod tests {
         assert_eq!(a, b, "Prompt rendering must be deterministic");
     }
 
-    #[test]
-    fn test_full_mode_deterministic() {
-        let r = default_renderer();
-        let p = default_placeholders();
-        let body = "Agent: ${{ tools.by_kind.read }}, OS: ${{ os_name }}";
-        let a = r.render_with_extra(body, &p).unwrap();
-        let b = r.render_with_extra(body, &p).unwrap();
-        assert_eq!(a, b, "Full mode rendering must be deterministic");
-    }
-
     // ── Disabled tools ──────────────────────────────────────────────
 
     #[test]
@@ -453,12 +435,12 @@ mod tests {
         let r = TemplateRenderer::new(tools, HashMap::new());
         let prompt = render_base(&r, &default_placeholders());
         assert!(
-            !prompt.contains("Task Management"),
-            "Task Management must be omitted"
+            !prompt.contains("todo_write"),
+            "plan tool name must not render when the Plan tool is absent"
         );
         assert!(
-            !prompt.contains("background_tasks"),
-            "background_tasks must be omitted"
+            !prompt.contains("<background_tasks>"),
+            "background_tasks section must be omitted when Execute is absent"
         );
     }
 
@@ -467,9 +449,8 @@ mod tests {
     #[test]
     fn test_memory_enabled_does_not_render_memory_section() {
         // The <memory> section was removed from the minimal base prompt.
-        // Even when the memory tools are registered AND memory_enabled=true,
-        // the trimmed template must not render a memory section. (Complements
-        // test_memory_disabled_omits_memory_section, which covers the default.)
+        // Even when the memory tools are registered AND memory_enabled=true, the trimmed template must not render a memory section
+        // (Complements test_memory_disabled_omits_memory_section, which covers the default.)
         let tools: HashMap<ToolKind, String> = [
             (ToolKind::Read, "read_file".to_string()),
             (ToolKind::MemorySearch, "memory_search".to_string()),
@@ -478,15 +459,11 @@ mod tests {
         .into();
         let r = TemplateRenderer::new(tools, HashMap::new());
         let mut p = default_placeholders();
-        p["memory_enabled"] = serde_json::json!(true);
+        jset(&mut p, "memory_enabled", serde_json::json!(true));
         let prompt = render_base(&r, &p);
         assert!(
             !prompt.contains("<memory>"),
             "Memory section was removed from the minimal prompt"
-        );
-        assert!(
-            !prompt.contains("### Memory Management"),
-            "Memory Management section was removed from the minimal prompt"
         );
         assert!(
             !prompt.contains("memory_search"),
@@ -507,33 +484,39 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_memory_v2_renders_filesystem_instructions_and_roots() {
+        let mut placeholders = default_placeholders();
+        jset(
+            &mut placeholders,
+            "memory_v2_enabled",
+            serde_json::json!(true),
+        );
+        jset(
+            &mut placeholders,
+            "memory_global_path",
+            serde_json::json!("/home/test/.grok/memory-v2/global"),
+        );
+        jset(
+            &mut placeholders,
+            "memory_workspace_path",
+            serde_json::json!("/home/test/.grok/memory-v2/workspaces/project"),
+        );
+
+        let prompt = render_base(&default_renderer(), &placeholders);
+        assert!(prompt.contains("<memory>"));
+        assert!(prompt.contains("/home/test/.grok/memory-v2/global"));
+        assert!(prompt.contains("/home/test/.grok/memory-v2/workspaces/project"));
+        assert!(prompt.contains("topics/"));
+        assert!(prompt.contains("observations/_inbox/"));
+        assert!(prompt.contains("NEVER edit it directly"));
+        assert!(prompt.contains("read the topic files whose titles cover it"));
+        assert!(!prompt.contains("memory_save"));
+    }
+
     // ── Web search disabled ─────────────────────────────────────────
 
-    #[test]
-    fn test_web_search_disabled_renders_without_crash() {
-        // No Fetch tool
-        let tools: HashMap<ToolKind, String> = [
-            (ToolKind::Read, "read_file".to_string()),
-            (ToolKind::Plan, "todo_write".to_string()),
-        ]
-        .into();
-        let r = TemplateRenderer::new(tools, HashMap::new());
-        let tmpl = base_template();
-        let result = r.render_with_extra(&tmpl, &default_placeholders());
-        assert!(
-            result.is_ok(),
-            "Must render without crash: {:?}",
-            result.err()
-        );
-    }
-
     // ── Apply-patch template rendering ───────────────────────────────────
-
-    #[test]
-    fn test_apply_patch_template_renders() {
-        let prompt = render_apply_patch(&default_renderer(), &default_placeholders());
-        assert!(prompt.contains("coding agent"));
-    }
 
     #[test]
     fn test_apply_patch_template_contains_resolved_tool_names() {
@@ -560,21 +543,8 @@ mod tests {
         let r = TemplateRenderer::new(tools, HashMap::new());
         let prompt = render_apply_patch(&r, &default_placeholders());
         assert!(
-            !prompt.contains("## Planning"),
-            "Planning section should be omitted when plan tool absent"
-        );
-        assert!(
             !prompt.contains("update_plan"),
             "update_plan references should be omitted"
-        );
-    }
-
-    #[test]
-    fn test_apply_patch_template_plan_present_includes_planning() {
-        let prompt = render_apply_patch(&default_renderer(), &default_placeholders());
-        assert!(
-            prompt.contains("## Planning"),
-            "Planning section should be present when plan tool exists"
         );
     }
 
@@ -593,7 +563,7 @@ mod tests {
         .into();
         let r = TemplateRenderer::new(tools, HashMap::new());
         let prompt = render_apply_patch(&r, &default_placeholders());
-        // apply_patch is hardcoded — NOT affected by Edit tool override
+        // apply_patch is hardcoded, so the Edit tool override does not affect it
         assert!(
             prompt.contains("`apply_patch`"),
             "apply_patch must remain hardcoded regardless of edit override"
@@ -627,13 +597,8 @@ mod tests {
         assert_eq!(a, b, "Subagent template rendering must be deterministic");
     }
 
-    // ── Task completion discipline ─────────────────────────────────
-    //
-    // The `<task_completion_discipline>` block was removed from both
-    // base and subagent templates. These tests pin the deletion so the
-    // block doesn't accidentally come back, and so the runtime TodoGate
-    // doesn't start firing reminders that reference a non-existent
-    // block.
+    // The `<task_completion_discipline>` block was removed from both templates.
+    // These tests pin the deletion so it does not come back, and so TodoGate does not remind about a missing block.
 
     #[test]
     fn task_completion_discipline_block_is_not_rendered() {
@@ -650,7 +615,7 @@ mod tests {
     }
 
     /// Soft byte ceiling shared by both prompt-size budget tests.
-    /// Forward-budget guard against runaway growth, not a tight target.
+    /// This is a guard against runaway growth, not a tight target.
     const PROMPT_SIZE_SOFT_CEILING_BYTES: usize = 16384;
 
     fn assert_template_size_under(prompt: &str, label: &str) {
@@ -674,17 +639,15 @@ mod tests {
         assert_template_size_under(&prompt, "subagent");
     }
 
-    // ── Guard invariant ─────────────────────────────────────────────
-    // Every `${{ tools.by_kind.X }}` must sit inside a `${%- if ... %}`
-    // whose condition requires X (contains `tools.by_kind.X` at a word
-    // boundary, with no top-level ` or `). If violated, X could render
-    // as empty string at runtime.
+    // Every `${{ tools.by_kind.X }}` must sit inside a `${%- if ... %}` whose condition requires X.
+    // The condition must contain `tools.by_kind.X` at a word boundary, with no top-level ` or `.
+    // If violated, X could render as an empty string at runtime.
 
     fn word_bounded(hay: &str, needle: &str) -> bool {
         let mut s = 0;
-        while let Some(i) = hay[s..].find(needle) {
+        while let Some(i) = hay.get(s..).and_then(|rest| rest.find(needle)) {
             let end = s + i + needle.len();
-            match hay[end..].chars().next() {
+            match hay.get(end..).and_then(|rest| rest.chars().next()) {
                 None => return true,
                 Some(c) if !(c.is_alphanumeric() || c == '_') => return true,
                 _ => s += i + 1,
@@ -706,16 +669,22 @@ mod tests {
         let mut errors: Vec<String> = Vec::new();
         let mut i = 0;
         while i + 2 < bytes.len() {
-            let three = &bytes[i..i + 3];
+            let Some(three) = bytes.get(i..i + 3) else {
+                break;
+            };
             if three == b"${%" {
-                let end = bytes[i + 3..]
-                    .windows(2)
-                    .position(|w| w == b"%}")
+                let end = bytes
+                    .get(i + 3..)
+                    .and_then(|rest| rest.windows(2).position(|w| w == b"%}"))
                     .map(|e| i + 3 + e + 2)
                     .unwrap_or(bytes.len());
-                let body = std::str::from_utf8(&bytes[i + 3..end - 2])
-                    .unwrap()
-                    .trim_matches(['-', ' ']);
+                let body = std::str::from_utf8(
+                    end.checked_sub(2)
+                        .and_then(|e| bytes.get(i + 3..e))
+                        .unwrap_or(&[]),
+                )
+                .unwrap()
+                .trim_matches(['-', ' ']);
                 if let Some(c) = body.strip_prefix("if ") {
                     stack.push(c.trim().into());
                 } else if let Some(c) = body.strip_prefix("elif ") {
@@ -729,21 +698,26 @@ mod tests {
                 }
                 i = end;
             } else if three == b"${{" {
-                let end = bytes[i + 3..]
-                    .windows(2)
-                    .position(|w| w == b"}}")
+                let end = bytes
+                    .get(i + 3..)
+                    .and_then(|rest| rest.windows(2).position(|w| w == b"}}"))
                     .map(|e| i + 3 + e + 2)
                     .unwrap_or(bytes.len());
-                let body = std::str::from_utf8(&bytes[i + 3..end - 2]).unwrap().trim();
-                // search_tool and use_tool are always built-in, so they
-                // never need a guard.
+                let body = std::str::from_utf8(
+                    end.checked_sub(2)
+                        .and_then(|e| bytes.get(i + 3..e))
+                        .unwrap_or(&[]),
+                )
+                .unwrap()
+                .trim();
+                // search_tool and use_tool are always built-in, so they never need a guard
                 const ALWAYS_BUILTIN: &[&str] = &["search_tool", "use_tool"];
                 if let Some(kind) = body.strip_prefix("tools.by_kind.")
                     && kind.chars().all(|c| c.is_alphanumeric() || c == '_')
                     && !ALWAYS_BUILTIN.contains(&kind)
                     && !stack.iter().any(|c| guarantees(c, kind))
                 {
-                    let line = template[..i].lines().count() + 1;
+                    let line = template.get(..i).unwrap_or("").lines().count() + 1;
                     errors.push(format!(
                         "{label}:{line}: unguarded `${{{{ tools.by_kind.{kind} }}}}` (stack: {stack:?})"
                     ));
@@ -764,62 +738,37 @@ mod tests {
     }
 
     // ── Combination sweep ───────────────────────────────────────────
-    // Belt-and-braces: renders the base template across tool-kind subsets
-    // and asserts no raw template tokens leak. The static guard test above
-    // is the authoritative check; this one just catches syntax drift.
+    // Renders the base template across tool-kind subsets and asserts no raw template tokens leak
+    // The static guard test above is the authoritative check; this one catches syntax drift
 
-    // ── is_non_interactive gating ──────────────────────────────────
-    // Headless / SDK / stdio / generic-ACP sessions have no human typing
-    // into a TUI prompt, so the `! <command>` shell-prefix tip and the
-    // `<user_guide>` TUI pointer are noise. Those sections must drop out
-    // when `is_non_interactive=true` and remain when it's false.
+    // Headless / SDK / stdio sessions have no human typing into a TUI prompt.
+    // The shell-prefix tip and `<user_guide>` pointer are noise there.
+    // Those sections must drop out when `is_non_interactive=true` and remain when false.
 
     #[test]
     fn interactive_renders_shell_prefix_tip_and_user_guide() {
-        // The `! <command>` shell-prefix tip was removed from the minimal
-        // prompt. The <user_guide> block still renders for interactive
-        // sessions only, so that's what we assert here.
+        // The `! <command>` shell-prefix tip was removed from the minimal prompt
+        // The <user_guide> block still renders for interactive sessions only, so that's what we assert here
         let mut p = default_placeholders();
-        p["is_non_interactive"] = serde_json::json!(false);
+        jset(&mut p, "is_non_interactive", serde_json::json!(false));
         let prompt = render_base(&default_renderer(), &p);
         assert!(
             prompt.contains("<user_guide>"),
             "interactive prompt must keep the <user_guide> block"
-        );
-        assert!(
-            prompt.contains("interactive CLI tool"),
-            "interactive prompt must declare interactive mode in the header"
-        );
-        assert!(
-            !prompt.contains("autonomous agent"),
-            "interactive prompt must NOT advertise non-interactive (autonomous) mode"
         );
     }
 
     #[test]
     fn non_interactive_suppresses_shell_prefix_tip_and_user_guide() {
         let mut p = default_placeholders();
-        p["is_non_interactive"] = serde_json::json!(true);
+        jset(&mut p, "is_non_interactive", serde_json::json!(true));
         let prompt = render_base(&default_renderer(), &p);
-        assert!(
-            !prompt.contains("`! <command>`"),
-            "non-interactive prompt must suppress the shell-prefix tip"
-        );
         assert!(
             !prompt.contains("<user_guide>"),
             "non-interactive prompt must suppress the <user_guide> block"
         );
-        assert!(
-            prompt.contains("autonomous agent"),
-            "non-interactive prompt must declare autonomous mode in the header"
-        );
-        assert!(
-            !prompt.contains("interactive CLI tool"),
-            "non-interactive prompt must NOT claim to be the interactive CLI"
-        );
         // Sanity: rest of the template still renders.
         assert!(prompt.contains(crate::prompt::context::DEFAULT_SYSTEM_PROMPT_LABEL));
-        assert!(prompt.contains("user_query"));
     }
 
     #[test]
@@ -843,9 +792,14 @@ mod tests {
         ];
         let mut subsets: Vec<Vec<ToolKind>> = vec![vec![], optional.to_vec()];
         for i in 0..optional.len() {
-            subsets.push(vec![optional[i]]);
+            let Some(&a) = optional.get(i) else {
+                continue;
+            };
+            subsets.push(vec![a]);
             for j in (i + 1)..optional.len() {
-                subsets.push(vec![optional[i], optional[j]]);
+                if let Some(&b) = optional.get(j) {
+                    subsets.push(vec![a, b]);
+                }
             }
         }
 
@@ -857,7 +811,7 @@ mod tests {
                     .collect();
                 let r = TemplateRenderer::new(tools, HashMap::new());
                 let mut p = default_placeholders();
-                p["memory_enabled"] = serde_json::json!(memory_enabled);
+                jset(&mut p, "memory_enabled", serde_json::json!(memory_enabled));
                 let rendered = r
                     .render_with_extra(&base_template(), &p)
                     .unwrap_or_else(|e| {

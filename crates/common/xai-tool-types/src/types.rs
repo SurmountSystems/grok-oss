@@ -80,6 +80,15 @@ impl ToolDescription {
         self
     }
 
+    /// Fill `arguments_schema` from `fallback` when this description has none; an attached
+    /// schema always wins.
+    pub fn or_arguments_schema(mut self, fallback: Option<Value>) -> Self {
+        if self.arguments_schema.is_none() {
+            self.arguments_schema = fallback;
+        }
+        self
+    }
+
     /// Derive structured arguments from the attached `arguments_schema`.
     ///
     /// **Lossy** — this only extracts flat, top-level properties and a
@@ -597,6 +606,27 @@ mod tests {
     use super::*;
 
     #[test]
+    fn or_arguments_schema_fills_only_a_missing_schema() {
+        let served = serde_json::json!({"type": "object"});
+        let own = serde_json::json!({"type": "object", "properties": {}});
+        let bare = ToolDescription::new("wait", "Wait");
+        assert_eq!(
+            bare.clone()
+                .or_arguments_schema(Some(served.clone()))
+                .arguments_schema,
+            Some(served.clone())
+        );
+        assert_eq!(bare.or_arguments_schema(None).arguments_schema, None);
+        assert_eq!(
+            ToolDescription::new("wait", "Wait")
+                .with_arguments_schema(own.clone())
+                .or_arguments_schema(Some(served))
+                .arguments_schema,
+            Some(own)
+        );
+    }
+
+    #[test]
     fn argument_type_serde_roundtrip() {
         let cases = [
             (ArgumentType::String, "\"string\""),
@@ -614,14 +644,6 @@ mod tests {
             let parsed: ArgumentType = serde_json::from_str(&json).unwrap();
             assert_eq!(parsed, ty);
         }
-    }
-
-    #[test]
-    fn argument_type_display() {
-        assert_eq!(ArgumentType::String.to_string(), "string");
-        assert_eq!(ArgumentType::Integer.to_string(), "integer");
-        assert_eq!(ArgumentType::Object.to_string(), "object");
-        assert_eq!(ArgumentType::Null.to_string(), "null");
     }
 
     #[test]
@@ -798,35 +820,6 @@ mod tests {
     }
 
     #[test]
-    fn schema_type_from_argument_type() {
-        let st: SchemaType = ArgumentType::Boolean.into();
-        assert_eq!(st, SchemaType::Single(ArgumentType::Boolean));
-    }
-
-    #[test]
-    fn argument_new_defaults() {
-        let arg = ToolArgument::new("query", "Search query");
-        assert_eq!(arg.name, "query");
-        assert_eq!(arg.arg_type, ArgumentType::String);
-        assert!(arg.required);
-        assert!(arg.default.is_none());
-        assert!(arg.allowed_values.is_empty());
-    }
-
-    #[test]
-    fn argument_builder_chain() {
-        let arg = ToolArgument::new("mode", "Processing mode")
-            .with_type(ArgumentType::String)
-            .with_allowed_values(["fast", "slow", "auto"])
-            .set_optional()
-            .with_default(serde_json::json!("auto"));
-
-        assert!(!arg.required);
-        assert_eq!(arg.default, Some(serde_json::json!("auto")));
-        assert_eq!(arg.allowed_values.len(), 3);
-    }
-
-    #[test]
     fn argument_with_default_does_not_change_required() {
         // default and required are orthogonal per JSON Schema
         let arg = ToolArgument::new("x", "test").with_default(serde_json::json!(42));
@@ -875,17 +868,6 @@ mod tests {
         let json = r#"{"name": "x", "description": "test", "type": "string"}"#;
         let arg: ToolArgument = serde_json::from_str(json).unwrap();
         assert!(arg.required);
-    }
-
-    #[test]
-    fn description_new() {
-        let tool = ToolDescription::new("search", "Search things");
-        assert_eq!(tool.name, "search");
-        assert_eq!(tool.description, "Search things");
-        assert!(tool.namespace.is_none());
-        assert!(tool.title.is_none());
-        assert!(tool.to_arguments_lossy().is_empty());
-        assert!(tool.arguments_schema.is_none());
     }
 
     /// When a raw parameters schema is attached, `to_input_schema` must

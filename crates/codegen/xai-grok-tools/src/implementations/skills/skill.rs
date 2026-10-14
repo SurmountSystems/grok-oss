@@ -3,7 +3,11 @@
 //! Skills are user-defined prompts stored as Markdown files that can be invoked
 //! by the user via slash commands (e.g., /commit) or by the model via this tool.
 
+use crate::implementations::grok_build::read_file::{
+    READ_FILE_MAX_BYTES, READ_FILE_MAX_TOKENS, exceeds_read_cap,
+};
 use crate::implementations::skills::types::SkillInfo;
+use crate::util::truncate::floor_char_boundary;
 
 /// Input for the Skill tool
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
@@ -33,14 +37,11 @@ pub struct SkillOutput {
     pub error: Option<String>,
 }
 
-// Old `SkillToolImpl` + `impl Tool` deleted.
-// New implementation is in `grok_build/skill/`.
-
 /// Mint an 8-char lowercase hex run id from host OS entropy (`uuid` crate).
 ///
 /// Injected into every skill envelope so orchestrator skills can use a
 /// collision-resistant id without shelling out to Python/Bash or inventing
-/// tokens in the model. Not cryptographic key material — only for artifact
+/// tokens in the model. Not cryptographic key material, only for artifact
 /// path uniqueness within a skill invocation.
 pub fn mint_skill_run_id() -> String {
     let u = uuid::Uuid::new_v4();
@@ -59,27 +60,9 @@ fn skill_run_id_preamble(run_id: &str) -> String {
     )
 }
 
-/// Build the formatted skill message shown to the model.
-///
-/// Canonical formatter for skill content injection. Used by the skill tool
-/// (invocation path), TUI slash commands, the pager, and agent definition
-/// preloading — every path that surfaces a skill to the model routes
-/// through this function so the presentation stays consistent.
-///
-/// Format: `<skill>` envelope with name, description, path, and a host-minted
-/// `run_id` attribute wraps the raw markdown body. The open/close tags give
-/// the model a clear identity and boundary — everything inside is additional
-/// instructions to follow, not a program being invoked.
-///
-/// ```text
-/// <skill name="{name}" description="{description}" path="{path}" run_id="{id}">
-/// Host-minted run_id ...
-/// {body}
-/// </skill>
-/// ```
-///
-/// Used on both the invocation path (skill tool, slash expansion) and
-/// preloading paths (agent definitions) — no separate instruct prefix.
+/// Build the formatted skill message shown to the model. Canonical formatter for skill content injection. Used by the
+/// skill tool (invocation path), TUI slash commands, the pager, and agent definition preloading — every path that
+/// surfaces a skill to the model routes through this function so the presentation stays consistent.
 pub fn build_skill_message(skill: &SkillInfo, content: &str) -> String {
     let run_id = mint_skill_run_id();
     let mut body = content.to_string();
@@ -97,22 +80,9 @@ pub fn build_skill_message(skill: &SkillInfo, content: &str) -> String {
     )
 }
 
-/// Build a `<skill>` block for user-invoked skill expansion.
-///
-/// Used in the `<skill_information>` envelope when skills are expanded
-/// at prompt-assembly time (the new zero-round-trip path). Includes the
-/// `args` attribute so the model knows what arguments were provided, plus a
-/// host-minted `run_id`.
-///
-/// Prefer [`build_skill_block_with_run_id`] when the same id was already used
-/// for `${RUN_ID}` substitution so envelope and body stay consistent.
-///
-/// ```text
-/// <skill name="commit" args="fix typo" run_id="a1b2c3d4">
-/// Host-minted run_id ...
-/// {body}
-/// </skill>
-/// ```
+/// Build a `<skill>` block for user-invoked skill expansion. Used in the `<skill_information>`
+/// envelope when skills are expanded at prompt-assembly time (the new zero-round-trip path).
+/// Includes the `args` attribute so the model knows what arguments were provided.
 pub fn build_skill_block(name: &str, args: &str, content: &str) -> String {
     let run_id = mint_skill_run_id();
     build_skill_block_with_run_id(name, args, content, &run_id)
@@ -140,6 +110,31 @@ pub fn build_skill_block_with_run_id(
     }
 }
 
+/// Cap a skill body at `READ_FILE_MAX_TOKENS`: cut at the last line boundary that fits (char
+/// boundary when the body is a single oversized line, which can split a `$…` token) and append a
+/// note pointing at offset/limit for the rest; head plus note stays under the cap. Call before
+/// `apply_substitutions` so the `**ARGUMENTS:**` suffix lands after the cut.
+pub fn cap_skill_body(body: &mut String) -> bool {
+    if !exceeds_read_cap(body) {
+        return false;
+    }
+    let note = format!(
+        "[Skill body truncated at the {READ_FILE_MAX_TOKENS}-token cap. Read the rest of the \
+         skill file with the file read tool using a line offset and limit.]"
+    );
+    let budget = READ_FILE_MAX_BYTES.saturating_sub(note.len() + 2);
+    let end = floor_char_boundary(body, budget);
+    let cut = body
+        .get(..end)
+        .and_then(|head| head.rfind('\n'))
+        .filter(|&i| i > 0)
+        .unwrap_or(end);
+    body.truncate(cut);
+    body.push_str("\n\n");
+    body.push_str(&note);
+    true
+}
+
 /// A skill reference for the `<skills_referenced>` index inside
 /// `<skill_information>`.
 pub struct SkillRef<'a> {
@@ -147,15 +142,9 @@ pub struct SkillRef<'a> {
     pub path: &'a str,
 }
 
-/// Wrap one or more `<skill>` blocks in a `<skill_information>` envelope.
-///
-/// Includes a `<skills_referenced>` index listing each skill's name and
-/// full path so the model can quickly see what skills are loaded and where
-/// they live on disk.
-///
-/// Returns an empty string if no blocks are provided. The caller should
-/// append the returned string directly after the `<user_query>` block
-/// when assembling the user message.
+/// Wrap one or more `<skill>` blocks in a `<skill_information>` envelope. Includes a `<skills_referenced>` index listing each skill's name and
+/// full path so the model can quickly see what skills are loaded and where they live on disk. Returns an empty string if no blocks are
+/// provided. The caller should append the returned string directly after the `<user_query>` block when assembling the user message.
 pub fn build_skill_information(skill_blocks: &[String], refs: &[SkillRef<'_>]) -> String {
     if skill_blocks.is_empty() {
         return String::new();
@@ -205,18 +194,9 @@ pub fn format_skill_name(skill: &SkillInfo) -> String {
     format!("{}:{}", skill.scope.as_ref(), skill.name)
 }
 
-/// Extract a clean display string from skill XML markup.
-///
-/// Skill invocations are encoded on the wire as XML tags:
-/// ```text
-/// <command-name>NAME</command-name>
-/// <command-message>/NAME</command-message>
-/// <command-args>ARGS</command-args>           (optional)
-/// ```
-///
-/// Returns `Some("/NAME ARGS")` if the text contains skill markup, `None` otherwise.
-/// Falls back to `<command-name>` when `<command-message>` is absent (e.g. stored
-/// session titles that were truncated to just the first XML tag).
+/// Extract a clean display string from skill XML markup. Returns `Some("/NAME ARGS")` if the text
+/// contains skill markup, `None` otherwise. Falls back to `<command-name>` when `<command-message>`
+/// is absent (e.g. stored session titles that were truncated to just the first XML tag).
 pub fn extract_skill_display_text(text: &str) -> Option<String> {
     let name_open = "<command-name>";
     let name_close = "</command-name>";
@@ -232,9 +212,9 @@ pub fn extract_skill_display_text(text: &str) -> Option<String> {
             Some(s) => s + cmd_open.len(),
             None => break 'cmd None,
         };
-        text[start..]
-            .find(cmd_close)
-            .map(|rel| &text[start..start + rel])
+        text.get(start..)
+            .and_then(|rest| rest.find(cmd_close))
+            .and_then(|rel| text.get(start..start + rel))
     };
 
     if let Some(cmd) = command.filter(|c| !c.is_empty()) {
@@ -247,8 +227,8 @@ pub fn extract_skill_display_text(text: &str) -> Option<String> {
 
     // Fallback: derive "/NAME" from <command-name>NAME</command-name>.
     let inner = text.find(name_open)? + name_open.len();
-    let end = inner + text[inner..].find(name_close)?;
-    let name = &text[inner..end];
+    let end = inner + text.get(inner..)?.find(name_close)?;
+    let name = text.get(inner..end)?;
     if name.is_empty() {
         return None;
     }
@@ -266,10 +246,11 @@ fn extract_command_args(text: &str) -> Option<&str> {
     let open = "<command-args>";
     let close = "</command-args>";
     let start = text.find(open)? + open.len();
-    let end = text[start..]
-        .find(close)
+    let end = text
+        .get(start..)
+        .and_then(|rest| rest.find(close))
         .map_or(text.len(), |rel| start + rel);
-    let args = text[start..end].trim();
+    let args = text.get(start..end)?.trim();
     if args.is_empty() { None } else { Some(args) }
 }
 
@@ -282,10 +263,9 @@ fn escape_xml(s: &str) -> String {
         .replace('"', "&quot;")
 }
 
-/// Non-argument substitution inputs for `apply_substitutions`.
-///
-/// Bundles the four same-typed `Option<&str>` context values so callers name
-/// each field by hand and cannot transpose them positionally.
+/// Non-argument substitution inputs for `apply_substitutions`. Bundles the four same-typed
+/// `Option<&str>` context values so callers name each field by hand and cannot transpose them
+/// positionally.
 #[derive(Default)]
 pub struct SubstitutionContext<'a> {
     pub skill_dir: Option<&'a str>,
@@ -297,32 +277,9 @@ pub struct SubstitutionContext<'a> {
     pub plugin_data: Option<&'a str>,
 }
 
-/// Apply variable substitutions to skill content.
-///
-/// Supported variables (Grok-native names + compat aliases):
-///
-/// | Variable | Alias | Description |
-/// |----------|-------|-------------|
-/// | `$ARGUMENTS` | | Full arguments string (empty if none) |
-/// | `$ARGUMENTS[N]` | | Nth argument (0-indexed, whitespace-split) |
-/// | `$N` | | Shorthand for `$ARGUMENTS[N]` (no upper bound) |
-/// | `${SKILL_DIR}` | `${CLAUDE_SKILL_DIR}` | Directory containing the SKILL.md |
-/// | `${SESSION_ID}` | `${CLAUDE_SESSION_ID}` | Current session ID |
-/// | `${RUN_ID}` | | Host-minted 8-char hex for this skill invocation (artifact paths) |
-/// | `${GROK_PLUGIN_ROOT}` | `${CLAUDE_PLUGIN_ROOT}` | Plugin root dir (plugin-backed skills) |
-/// | `${GROK_PLUGIN_DATA}` | `${CLAUDE_PLUGIN_DATA}` | Plugin data dir (plugin-backed skills) |
-///
-/// The body is treated as argument-aware only when it contains an *argument*
-/// token (`$ARGUMENTS`, `$ARGUMENTS[N]`, or `$N`); in that case the args are
-/// expanded inline and the `**ARGUMENTS:** ...` suffix is **not** appended.
-/// Path/metadata tokens (`${SKILL_DIR}`, `${SESSION_ID}`,
-/// `${CLAUDE_PLUGIN_ROOT}`, `${CLAUDE_PLUGIN_DATA}`, and their aliases) are
-/// expanded but do NOT suppress the suffix, so a body that references only a
-/// path token still receives its arguments. If no argument token is present,
-/// arguments are appended as a suffix in the traditional format for backward
-/// compatibility.
-///
-/// Unknown `$` tokens are left unchanged.
+/// Apply variable substitutions to skill content. The body is treated as argument-aware only when it contains an *argument* token
+/// (`$ARGUMENTS`, `$ARGUMENTS[N]`, or `$N`); in that case the args are expanded inline and the `**ARGUMENTS:** ...` suffix is **not** appended.
+/// If no argument token is present, arguments are appended as a suffix in the traditional format for backward compatibility.
 pub fn apply_substitutions(content: &mut String, args: Option<&str>, ctx: &SubstitutionContext) {
     let args_str = args.unwrap_or("");
     let argv: Vec<&str> = if args_str.is_empty() {
@@ -331,10 +288,9 @@ pub fn apply_substitutions(content: &mut String, args: Option<&str>, ctx: &Subst
         args_str.split_whitespace().collect()
     };
 
-    // Track whether an *argument* token consumed the args. Only that suppresses
-    // the **ARGUMENTS:** fallback; path/metadata tokens (SKILL_DIR, SESSION_ID,
-    // plugin root/data) expand without suppressing it, so a body that uses only
-    // a path token still receives its arguments.
+    // Track whether an *argument* token consumed the args. Only that suppresses the **ARGUMENTS:**
+    // fallback; path/metadata tokens (SKILL_DIR, SESSION_ID, plugin root/data) expand without
+    // suppressing it, so a body that uses only a path token still receives its arguments.
     let mut args_substituted = false;
 
     // $ARGUMENTS[N] first (before $ARGUMENTS to avoid partial match).
@@ -360,8 +316,8 @@ pub fn apply_substitutions(content: &mut String, args: Option<&str>, ctx: &Subst
         let mut result = String::with_capacity(content.len());
         let mut rest = content.as_str();
         while let Some(pos) = rest.find(&pattern) {
-            result.push_str(&rest[..pos]);
-            let after = &rest[pos + pat_len..];
+            result.push_str(rest.get(..pos).unwrap_or(""));
+            let after = rest.get(pos + pat_len..).unwrap_or("");
             // Only substitute if the next character is NOT a digit
             // (to avoid turning "$100" into replacement + "00").
             if after.starts_with(|c: char| c.is_ascii_digit()) {
@@ -488,7 +444,9 @@ pub fn resolve_skill_internal_links(body: &str, skill_dir: &std::path::Path) -> 
 
         match link_type {
             LinkType::Inline => {
-                let event_src = &body[event_range.clone()];
+                let Some(event_src) = body.get(event_range.clone()) else {
+                    continue;
+                };
                 if let Some(rel) = event_src.rfind(url_str) {
                     let start = event_range.start + rel;
                     edits.push((start..start + url_str.len(), resolved_str));
@@ -496,7 +454,9 @@ pub fn resolve_skill_internal_links(body: &str, skill_dir: &std::path::Path) -> 
             }
             LinkType::Reference | LinkType::Collapsed | LinkType::Shortcut => {
                 if let Some(def_span) = ref_def_spans.get(id) {
-                    let def_src = &body[def_span.clone()];
+                    let Some(def_src) = body.get(def_span.clone()) else {
+                        continue;
+                    };
                     if let Some(rel) = def_src.rfind(url_str) {
                         let start = def_span.start + rel;
                         if !edits.iter().any(|(r, _)| r.start == start) {
@@ -535,7 +495,9 @@ pub fn extract_skill_body(content: &str) -> String {
         && let Some(closing_idx) = rest.find("\n---")
     {
         // Return everything after the closing ---
-        let after_frontmatter = &rest[closing_idx + 4..];
+        let Some(after_frontmatter) = rest.get(closing_idx + 4..) else {
+            return content.to_string();
+        };
         return after_frontmatter.trim_start().to_string();
     }
 
@@ -543,12 +505,9 @@ pub fn extract_skill_body(content: &str) -> String {
     content.to_string()
 }
 
-/// Load skill content from its file, stripping YAML frontmatter.
-///
-/// Public entrypoint for the shell crate to load skill content at
-/// prompt-assembly time (the new zero-round-trip path). The private
-/// `load_skill_content` in `grok_build/skill/mod.rs` is a duplicate
-/// of this.
+/// Load skill content from its file, stripping YAML frontmatter. Public entrypoint for the shell
+/// crate to load skill content at prompt-assembly time (the new zero-round-trip path). The private
+/// `load_skill_content` in `opencode/skill/mod.rs` is a duplicate of this.
 pub async fn load_skill_content(skill: &SkillInfo) -> Result<String, String> {
     // Producers strip frontmatter before setting `body`. Re-strip would drop a
     // leading Markdown HR (`---`) and skip link resolution for disk skills.
@@ -563,7 +522,19 @@ pub async fn load_skill_content(skill: &SkillInfo) -> Result<String, String> {
         ));
     }
     let path = std::path::Path::new(&skill.path);
-    match tokio::fs::read_to_string(path).await {
+    match crate::util::file_reader::read_file(
+        path,
+        crate::util::file_reader::FileReadOptions::default(),
+    )
+    .await
+    .and_then(|bytes| {
+        String::from_utf8(bytes).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "stream did not contain valid UTF-8",
+            )
+        })
+    }) {
         Ok(content) => {
             let body = extract_skill_body(&content);
             Ok(match path.parent() {
@@ -578,9 +549,20 @@ pub async fn load_skill_content(skill: &SkillInfo) -> Result<String, String> {
 /// Load skill body into SkillInfo.
 pub async fn load_skill_with_body(skill: &SkillInfo) -> Result<SkillInfo, String> {
     let path = std::path::Path::new(&skill.path);
-    let content = tokio::fs::read_to_string(path)
-        .await
-        .map_err(|e| format!("Failed to read {}: {}", skill.path, e))?;
+    let content = crate::util::file_reader::read_file(
+        path,
+        crate::util::file_reader::FileReadOptions::default(),
+    )
+    .await
+    .and_then(|bytes| {
+        String::from_utf8(bytes).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "stream did not contain valid UTF-8",
+            )
+        })
+    })
+    .map_err(|e| format!("Failed to read {}: {}", skill.path, e))?;
     let body = extract_skill_body(&content);
     let body = match path.parent() {
         Some(skill_dir) => resolve_skill_internal_links(&body, skill_dir),
@@ -625,6 +607,38 @@ It has multiple lines."#;
         assert_eq!(body, content);
     }
 
+    #[test]
+    fn cap_skill_body_leaves_body_under_cap_untouched() {
+        let mut body = "# Small skill\n\nDo the thing.".to_owned();
+        assert!(!cap_skill_body(&mut body));
+        assert_eq!("# Small skill\n\nDo the thing.", body);
+    }
+
+    #[test]
+    fn cap_skill_body_cuts_on_line_boundary_under_cap() {
+        let mut body = (1..=1100)
+            .map(|n| format!("{n:05} {}", "x".repeat(194)))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(cap_skill_body(&mut body));
+        assert!(!exceeds_read_cap(&body));
+        assert!(!body.contains("01100 "));
+        assert!(body.contains("offset"));
+        let (head, _) = body.rsplit_once("\n\n").expect("note separator");
+        let last_line = head.rsplit('\n').next().expect("head has a line");
+        assert_eq!(200, last_line.len());
+    }
+
+    #[test]
+    fn cap_skill_body_single_long_line_falls_back_to_char_cut() {
+        let mut body = "é".repeat(60_000);
+
+        assert!(cap_skill_body(&mut body));
+        assert!(!exceeds_read_cap(&body));
+        assert!(body.starts_with("éé"));
+    }
+
     #[tokio::test]
     async fn load_skill_content_trusts_preloaded_body_with_leading_hr() {
         let skill = SkillInfo {
@@ -652,6 +666,7 @@ It has multiple lines."#;
             when_to_use: None,
             has_user_specified_description: true,
             paths: None,
+            origin: None,
             enabled: true,
             body: Some("---\n\nParagraph after a markdown HR.".to_string()),
         };
@@ -686,6 +701,7 @@ It has multiple lines."#;
             when_to_use: None,
             has_user_specified_description: true,
             paths: None,
+            origin: None,
             enabled: true,
             body: None,
         };
@@ -721,6 +737,7 @@ It has multiple lines."#;
             when_to_use: None,
             has_user_specified_description: false,
             paths: None,
+            origin: None,
             enabled: true,
             body: None,
         };
@@ -751,6 +768,7 @@ It has multiple lines."#;
             when_to_use: None,
             has_user_specified_description: false,
             paths: None,
+            origin: None,
             enabled: true,
             body: None,
         };
@@ -784,6 +802,7 @@ It has multiple lines."#;
             when_to_use: None,
             has_user_specified_description: false,
             paths: None,
+            origin: None,
             enabled: true,
             body: None,
         };
@@ -823,6 +842,7 @@ It has multiple lines."#;
             when_to_use: None,
             has_user_specified_description: false,
             paths: None,
+            origin: None,
             enabled: true,
             body: None,
         };

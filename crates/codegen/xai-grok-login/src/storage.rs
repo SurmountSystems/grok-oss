@@ -1,0 +1,1020 @@
+use std::ffi::OsString;
+use std::fs::File;
+use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
+
+use xai_grok_config::{Capability, Distribution};
+
+use super::model::{API_KEY_SCOPE, AuthMode, AuthStore, GrokAuth};
+
+#[must_use]
+pub struct AuthFileLock {
+    pub(super) heartbeat: Option<super::manager::lock::LockHeartbeat>,
+    pub(super) file: File,
+}
+
+impl Drop for AuthFileLock {
+    fn drop(&mut self) {
+        // Join the heartbeat while the flock is held; a late rewrite would stamp a sibling's lock.
+        self.heartbeat.take();
+    }
+}
+
+impl AuthFileLock {
+    // TODO: delete once the token endpoint tolerates racing refreshes; this guards the rule that a refresh token can be used only once
+    /// False if the lock file was replaced out from under us.
+    #[cfg(unix)]
+    pub fn still_live(&self, auth_json_path: &Path) -> bool {
+        use std::os::unix::fs::MetadataExt;
+        let lock_path = auth_json_path.with_file_name(super::manager::lock::LOCK_FILE_NAME);
+        let (Ok(fd_meta), Ok(path_meta)) = (self.file.metadata(), std::fs::metadata(&lock_path))
+        else {
+            return false;
+        };
+        fd_meta.ino() == path_meta.ino() && fd_meta.dev() == path_meta.dev()
+    }
+
+    /// Non-Unix has no inode identity, so revalidation is deliberately a no-op.
+    #[cfg(not(unix))]
+    pub fn still_live(&self, _auth_json_path: &Path) -> bool {
+        true
+    }
+}
+
+/// Shared by the auth manager and the managed-config identity reads: a reader that bypasses it
+/// splits "who is signed in" between the two.
+// Empty override (e.g. an unexpanded `$VAR`) is treated as unset; non-UTF-8 preserved.
+fn resolve_auth_json_path(grok_auth_path: Option<OsString>, grok_home: &Path) -> PathBuf {
+    match grok_auth_path {
+        Some(p) if !p.is_empty() => PathBuf::from(p),
+        _ => grok_home.join("auth.json"),
+    }
+}
+
+pub fn auth_json_path(grok_home: &Path) -> PathBuf {
+    resolve_auth_json_path(std::env::var_os("GROK_AUTH_PATH"), grok_home)
+}
+
+pub fn read_auth_json(auth_file: &Path) -> std::io::Result<AuthStore> {
+    read_auth_json_as(Distribution::current(), auth_file)
+}
+
+/// A distribution without account logins has no login store, whatever `GROK_HOME` or
+/// `GROK_AUTH_PATH` point at: reads find nothing and writes are refused. Every reader and writer in
+/// this crate comes through here, and each already treats a missing store as no login.
+/// `xai-grok-workspace`'s hub auth keeps its own and needs `local-workspace`.
+fn read_auth_json_as(distribution: Distribution, auth_file: &Path) -> std::io::Result<AuthStore> {
+    if !distribution.allows(Capability::AccountLogin) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "this build has no login store",
+        ));
+    }
+    let mut file = File::open(auth_file)?;
+    let mut contents = String::new();
+    file.read_to_string(&mut contents)?;
+
+    // Tighten world-readable copies (hand-restored, umask edge cases, etc.).
+    // Best-effort: a chmod failure must not block login/read paths.
+    if let Err(e) = xai_grok_shell_base::util::secure_file::ensure_owner_only_permissions(auth_file)
+    {
+        tracing::warn!(
+            path = %auth_file.display(),
+            error = %e,
+            "auth: failed to enforce owner-only permissions on auth.json"
+        );
+    }
+
+    // Empty files are valid (recover from prior crash/partial write).
+    let trimmed = contents.trim();
+    if trimmed.is_empty() {
+        return Ok(AuthStore::new());
+    }
+
+    let mut map = serde_json::from_str(trimmed)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    restore_session_secrets(auth_file, &mut map);
+    Ok(map)
+}
+
+/// Read auth.json, returning an empty map if the file does not exist. Non-empty corrupt JSON, permission errors, etc. are returned as errors.
+/// The caller can then decide whether to skip the write (to avoid clobbering sibling scopes). Kept for the test-only `persist_and_swap` and as a strict reader.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "used from tests only; remove expect when wired in production"
+    )
+)]
+pub(crate) fn read_auth_json_or_empty(auth_file: &Path) -> std::io::Result<AuthStore> {
+    match read_auth_json(auth_file) {
+        Ok(map) => Ok(map),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(AuthStore::new()),
+        Err(e) => Err(e),
+    }
+}
+
+/// Best-effort backup of a corrupt (unparseable) auth.json.
+/// If the file exists and `read_auth_json` fails with `InvalidData`, it is renamed to `auth.json.corrupt.<millis>` in the same directory.
+/// Returns the backup path. This runs before recovery writes so the original bytes are never silently lost.
+pub fn backup_corrupt_auth_file(path: &Path) -> Option<PathBuf> {
+    if !path.exists() {
+        return None;
+    }
+    match read_auth_json(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::InvalidData => {}
+        _ => return None,
+    }
+
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+
+    let file_name = path
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "auth.json".to_string());
+
+    let backup_name = format!("{}.corrupt.{}", file_name, ts);
+    let backup = path.with_file_name(backup_name);
+
+    match std::fs::rename(path, &backup) {
+        Ok(()) => {
+            // Corrupt backups still hold token material, so keep them owner-only
+            let _ = xai_grok_shell_base::util::secure_file::ensure_owner_only_permissions(&backup);
+            tracing::warn!(
+                original = %path.display(),
+                backup = %backup.display(),
+                "auth: backed up corrupt auth.json before recovery write"
+            );
+            // Must reach unified.jsonl: the tracing line above is invisible in production captures
+            // This is the only record of both the corruption and where the original bytes went
+            xai_grok_telemetry::unified_log::error(
+                "auth: corrupt auth.json backed up",
+                None,
+                Some(serde_json::json!({
+                    "original": path.display().to_string(),
+                    "backup": backup.display().to_string(),
+                })),
+            );
+            Some(backup)
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "auth: failed to rename corrupt auth.json for backup");
+            xai_grok_telemetry::unified_log::error(
+                "auth: corrupt auth.json backup failed",
+                None,
+                Some(serde_json::json!({
+                    "original": path.display().to_string(),
+                    "error": e.to_string(),
+                })),
+            );
+            None
+        }
+    }
+}
+
+/// Read auth.json for an upcoming write, with recovery for corrupt files. Missing or empty: returns an empty map (safe to write fresh) Valid JSON: returns the parsed map
+/// Non-empty corrupt JSON: backs up to `auth.json.corrupt.<millis>`, then returns an empty map so the caller can write the new credential. Other I/O errors (PermissionDenied, etc.) are still returned as errors.
+pub fn read_auth_json_or_empty_recovering_corrupt(auth_file: &Path) -> std::io::Result<AuthStore> {
+    match read_auth_json(auth_file) {
+        Ok(map) => Ok(map),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(AuthStore::new()),
+        Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
+            let _ = backup_corrupt_auth_file(auth_file);
+            Ok(AuthStore::new())
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// Persist `auth.json`, preferring a crash-safe atomic write but falling back to a non-atomic in-place write when the disk is full. The atomic path (a temp file, then a rename) needs free space of at least the file size.
+/// The old file and the full temp copy coexist until the rename. When that happens we retry with an in-place truncate-and-rewrite, which only needs the blocks the old file freed.
+/// The in-place path is non-atomic, with two accepted trade-offs: A failed in-place write restores the prior bytes best-effort, so on-disk state ends up no worse than before the attempt.
+pub fn write_auth_json(auth_file: &Path, auth_store: &AuthStore) -> std::io::Result<()> {
+    write_auth_json_as(Distribution::current(), auth_file, auth_store)
+}
+
+fn write_auth_json_as(
+    distribution: Distribution,
+    auth_file: &Path,
+    auth_store: &AuthStore,
+) -> std::io::Result<()> {
+    if !distribution.allows(Capability::AccountLogin) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "this build keeps no stored login",
+        ));
+    }
+    let disk = prepare_auth_store_for_disk(auth_file, auth_store)?;
+    write_auth_json_with(auth_file, &disk, write_auth_json_atomic)
+}
+
+fn session_secret_store_error() -> std::io::Error {
+    std::io::Error::other("session secret store write failed")
+}
+
+fn is_supergrok_session(auth: &GrokAuth) -> bool {
+    matches!(auth.auth_mode, AuthMode::Oidc | AuthMode::WebLogin)
+}
+
+fn session_key_url(account: &str) -> String {
+    format!("supergrok-session:{account}")
+}
+
+fn session_refresh_url(account: &str) -> String {
+    format!("supergrok-session:{account}#refresh_token")
+}
+
+fn session_credential_store(auth_file: &Path) -> crate::credentials_store::CredentialsStore {
+    #[cfg(test)]
+    {
+        crate::credentials_store::CredentialsStore::at_path(
+            auth_file.with_file_name("provider_credentials.json"),
+        )
+    }
+    #[cfg(not(test))]
+    {
+        let home = auth_file.parent().unwrap_or_else(|| Path::new("."));
+        crate::credentials_store::CredentialsStore::at_grok_home(home)
+    }
+}
+
+fn session_store_fault(auth_file: &Path) -> bool {
+    #[cfg(test)]
+    {
+        SESSION_SECRET_STORE_FAULT_PATH
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .as_deref()
+            == Some(auth_file)
+    }
+    #[cfg(not(test))]
+    {
+        let _ = auth_file;
+        false
+    }
+}
+
+/// Store SuperGrok session secrets, then return the `AuthStore` copy to write.
+/// The copy omits those secrets only after the store write succeeds.
+/// A store failure returns before `auth.json` is rewritten.
+fn prepare_auth_store_for_disk(
+    auth_file: &Path,
+    auth_store: &AuthStore,
+) -> std::io::Result<AuthStore> {
+    let has_session = auth_store.values().any(is_supergrok_session);
+    if !has_session {
+        return Ok(auth_store.clone());
+    }
+    let needs_store = auth_store.values().any(|auth| {
+        is_supergrok_session(auth) && (!auth.key.is_empty() || auth.refresh_token.is_some())
+    });
+    if needs_store && session_store_fault(auth_file) {
+        return Err(session_secret_store_error());
+    }
+    let store = session_credential_store(auth_file);
+    let mut disk = auth_store.clone();
+    for (account, auth) in disk.iter_mut() {
+        if !is_supergrok_session(auth) {
+            continue;
+        }
+        let key_url = session_key_url(account);
+        let refresh_url = session_refresh_url(account);
+        if auth.key.is_empty() {
+            store
+                .delete(&key_url)
+                .map_err(|_| session_secret_store_error())?;
+        } else {
+            store
+                .write(&key_url, "key", &auth.key)
+                .map_err(|_| session_secret_store_error())?;
+            auth.key.clear();
+        }
+        if let Some(refresh) = auth.refresh_token.clone() {
+            store
+                .write(&refresh_url, "refresh_token", &refresh)
+                .map_err(|_| session_secret_store_error())?;
+            auth.refresh_token = None;
+        } else {
+            store
+                .delete(&refresh_url)
+                .map_err(|_| session_secret_store_error())?;
+        }
+    }
+    Ok(disk)
+}
+
+fn restore_session_secrets(auth_file: &Path, map: &mut AuthStore) {
+    let needs_restore = map.values().any(|auth| {
+        is_supergrok_session(auth) && (auth.key.is_empty() || auth.refresh_token.is_none())
+    });
+    if !needs_restore {
+        return;
+    }
+    let store = session_credential_store(auth_file);
+    for (account, auth) in map.iter_mut() {
+        if !is_supergrok_session(auth) {
+            continue;
+        }
+        if auth.key.is_empty() {
+            if let Ok(Some((username, secret))) = store.read(&session_key_url(account)) {
+                if username == "key" {
+                    auth.key = secret;
+                }
+            }
+        }
+        if auth.refresh_token.is_none() {
+            if let Ok(Some((username, secret))) = store.read(&session_refresh_url(account)) {
+                if username == "refresh_token" {
+                    auth.refresh_token = Some(secret);
+                }
+            }
+        }
+    }
+}
+
+/// Dispatch helper: run `atomic`, and on `StorageFull` fall back to an in-place write.
+/// Split out (with `atomic` injectable) so the disk-full fallback is unit-testable without an actually-full filesystem.
+fn write_auth_json_with(
+    auth_file: &Path,
+    auth_store: &AuthStore,
+    atomic: fn(&Path, &AuthStore) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    match atomic(auth_file, auth_store) {
+        Err(e) if e.kind() == std::io::ErrorKind::StorageFull => {
+            tracing::warn!(
+                path = %auth_file.display(),
+                "auth: disk full during atomic write, falling back to in-place write"
+            );
+            // Must reach unified.jsonl: a silent in-memory-only credential (the prior behavior) leaves sibling processes with a stale refresh token
+            // Without the log there is no record of why
+            xai_grok_telemetry::unified_log::warn(
+                "auth: disk full, falling back to non-atomic in-place write",
+                None,
+                Some(serde_json::json!({
+                    "path": auth_file.display().to_string(),
+                })),
+            );
+            write_auth_json_in_place(auth_file, auth_store)
+        }
+        other => other,
+    }
+}
+
+/// Serialize `auth_store` to `path` (truncate and rewrite), owner-only (0o600) and `fsync`'d.
+/// Shared core of the atomic path (which targets the temp file) and the in-place fallback (which targets `auth.json` directly).
+/// Streams `to_writer_pretty` through a `BufWriter` so the entire JSON string is never held in memory, avoiding OOM under severe memory pressure.
+fn write_store_to(path: &Path, auth_store: &AuthStore) -> std::io::Result<()> {
+    use xai_grok_shell_base::util::secure_file::open_secure_file;
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let file = open_secure_file(path)?;
+    let mut writer = std::io::BufWriter::new(file);
+    serde_json::to_writer_pretty(&mut writer, auth_store)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    writer.flush()?;
+    writer
+        .into_inner()
+        .map_err(|e| e.into_error())?
+        .sync_all()?;
+    // `open_secure_file` mode bits apply only on create; tighten existing paths. Best-effort after durable content: a chmod-only failure must not look like a failed write
+    // The in-place fallback restores the prior snapshot on any `write_store_to` Err, which would discard freshly written tokens The load path re-tightens on the next read
+    if let Err(e) = xai_grok_shell_base::util::secure_file::ensure_owner_only_permissions(path) {
+        tracing::warn!(
+            error = %e,
+            path = %path.display(),
+            "auth: failed to ensure owner-only permissions after write"
+        );
+    }
+    Ok(())
+}
+
+/// Test-only, path-scoped write fault: `write_auth_json_atomic` fails with `Unsupported` for exactly this `auth.json` path.
+/// Path-scoped so parallel tests in the same process do not sabotage each other.
+#[cfg(test)]
+pub(super) static WRITE_FAULT_PATH: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
+
+/// Test-only fault: the session-secret store write fails for this `auth.json` path before the file is rewritten.
+/// Path-scoped so parallel tests in the same process do not sabotage each other.
+#[cfg(test)]
+pub(super) static SESSION_SECRET_STORE_FAULT_PATH: std::sync::Mutex<Option<PathBuf>> =
+    std::sync::Mutex::new(None);
+
+/// Atomic write: a temp file, then a rename, through a symlinked `auth.json` (dotfiles, `GROK_HOME` overlays).
+fn write_auth_json_atomic(auth_file: &Path, auth_store: &AuthStore) -> std::io::Result<()> {
+    #[cfg(test)]
+    if WRITE_FAULT_PATH
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_deref()
+        == Some(auth_file)
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "injected write fault (WRITE_FAULT_PATH)",
+        ));
+    }
+    if let Some(parent) = auth_file.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let json = serde_json::to_string_pretty(auth_store)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    xai_grok_config::fs_atomic::write_user_file_atomically(auth_file, &json, Some(0o600))?;
+    // Re-assert on the final path (covers rename edge cases and FS quirks)
+    // Best-effort: rename already published the new tokens.
+    if let Err(e) = xai_grok_shell_base::util::secure_file::ensure_owner_only_permissions(auth_file)
+    {
+        tracing::warn!(
+            error = %e,
+            path = %auth_file.display(),
+            "auth: failed to ensure owner-only permissions after rename"
+        );
+    }
+    Ok(())
+}
+
+/// This runs only when [`write_auth_json_atomic`] fails with `StorageFull`. Opening with truncation first frees the old content's blocks before the new bytes are written.
+/// The write therefore needs only the file size in free space, not the extra full copy the temp-file approach keeps alive.
+/// Truncation is destructive, so the prior bytes are snapshotted first and restored best-effort if the rewrite fails partway. A failed fallback must not leave an empty or torn file where a parseable (if stale) credential used to be. A partial file that survives (because even the restore failed) is healed on the next read via [`read_auth_json_or_empty_recovering_corrupt`].
+fn write_auth_json_in_place(auth_file: &Path, auth_store: &AuthStore) -> std::io::Result<()> {
+    write_auth_json_in_place_with(auth_file, auth_store, write_store_to)
+}
+
+/// Inner of [`write_auth_json_in_place`] with `write` injectable so the rollback-on-failure path is unit-testable without an actually-full disk.
+fn write_auth_json_in_place_with(
+    auth_file: &Path,
+    auth_store: &AuthStore,
+    write: fn(&Path, &AuthStore) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    // Snapshot the prior bytes so a torn/empty write can be rolled back to the previous on-disk credential
+    // `prior` is `None` when the file is absent
+    let prior = std::fs::read(auth_file).ok();
+    match write(auth_file, auth_store) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            if let Some(prior) = prior
+                && let Err(restore_err) = restore_prior_bytes(auth_file, &prior)
+            {
+                tracing::warn!(
+                    error = %restore_err,
+                    "auth: failed to restore prior auth.json after in-place write failure"
+                );
+            }
+            Err(e)
+        }
+    }
+}
+
+/// Best-effort rollback: rewrite `bytes` (owner-only, `fsync`'d) after a failed in-place write.
+/// A torn or empty file must not replace the prior credential.
+fn restore_prior_bytes(auth_file: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use xai_grok_shell_base::util::secure_file::open_secure_file;
+
+    let mut file = open_secure_file(auth_file)?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    xai_grok_shell_base::util::secure_file::ensure_owner_only_permissions(auth_file)?;
+    Ok(())
+}
+
+/// Read the API key from the `xai::api_key` scope in auth.json.
+pub fn read_api_key(grok_home: &Path) -> Option<String> {
+    let path = auth_json_path(grok_home);
+    let map = read_auth_json(&path).ok()?;
+    map.get(API_KEY_SCOPE).map(|a| a.key.clone())
+}
+
+/// Store a plain API key in auth.json under the `xai::api_key` scope.
+///
+/// Uses the corrupt-recovery reader so a malformed auth.json (e.g. from a previous crash) can be healed when the user sets an API key.
+pub fn store_api_key(grok_home: &Path, api_key: &str) -> std::io::Result<()> {
+    let path = auth_json_path(grok_home);
+    let mut map = read_auth_json_or_empty_recovering_corrupt(&path)?;
+    map.insert(
+        API_KEY_SCOPE.to_owned(),
+        GrokAuth {
+            key: api_key.to_owned(),
+            auth_mode: AuthMode::ApiKey,
+            ..Default::default()
+        },
+    );
+    write_auth_json(&path, &map)
+}
+
+/// Remove the `xai::api_key` scope from auth.json.
+pub fn clear_api_key(grok_home: &Path) -> std::io::Result<()> {
+    let path = auth_json_path(grok_home);
+    if let Ok(mut map) = read_auth_json(&path) {
+        map.remove(API_KEY_SCOPE);
+        if map.is_empty() {
+            let _ = std::fs::remove_file(&path);
+        } else {
+            write_auth_json(&path, &map)?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+#[path = "storage_distribution_tests.rs"]
+mod distribution_tests;
+
+#[cfg(test)]
+mod write_fallback_tests {
+    use super::*;
+
+    #[test]
+    fn auth_json_path_uses_override_when_set() {
+        assert_eq!(
+            resolve_auth_json_path(
+                Some("/custom/creds.json".into()),
+                Path::new("/home/u/.grok")
+            ),
+            PathBuf::from("/custom/creds.json"),
+        );
+    }
+
+    #[test]
+    fn auth_json_path_falls_back_to_home() {
+        assert_eq!(
+            resolve_auth_json_path(None, Path::new("/home/u/.grok")),
+            PathBuf::from("/home/u/.grok/auth.json"),
+        );
+    }
+
+    #[test]
+    fn auth_json_path_treats_empty_override_as_unset() {
+        assert_eq!(
+            resolve_auth_json_path(Some(OsString::new()), Path::new("/home/u/.grok")),
+            PathBuf::from("/home/u/.grok/auth.json"),
+        );
+    }
+
+    fn sample_store() -> AuthStore {
+        let mut map = AuthStore::new();
+        map.insert(
+            API_KEY_SCOPE.to_owned(),
+            GrokAuth {
+                key: "secret-key".to_owned(),
+                auth_mode: AuthMode::ApiKey,
+                ..Default::default()
+            },
+        );
+        map
+    }
+
+    fn read_key(path: &Path) -> Option<String> {
+        read_auth_json(path)
+            .ok()
+            .and_then(|m| m.get(API_KEY_SCOPE).map(|a| a.key.clone()))
+    }
+
+    fn fake_storage_full(_: &Path, _: &AuthStore) -> std::io::Result<()> {
+        Err(std::io::Error::from(std::io::ErrorKind::StorageFull))
+    }
+
+    fn fake_permission_denied(_: &Path, _: &AuthStore) -> std::io::Result<()> {
+        Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+    }
+
+    /// Simulates an in-place write that truncates the file (destroying the old content, as `open_secure_file` does) and then fails partway.
+    /// This is the torn-write case the rollback must recover from.
+    fn fake_truncate_then_fail(path: &Path, _: &AuthStore) -> std::io::Result<()> {
+        xai_grok_shell_base::util::secure_file::open_secure_file(path)?; // truncates to 0 bytes
+        Err(std::io::Error::from(std::io::ErrorKind::StorageFull))
+    }
+
+    #[test]
+    fn in_place_write_roundtrips() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+        write_auth_json_in_place(&path, &sample_store()).unwrap();
+        assert_eq!(read_key(&path).as_deref(), Some("secret-key"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn in_place_write_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+        write_auth_json_in_place(&path, &sample_store()).unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "in-place write must stay 0o600");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_tightens_preexisting_world_readable_auth_json() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+        std::fs::write(&path, b"{}").unwrap();
+        let mut loose = std::fs::metadata(&path).unwrap().permissions();
+        loose.set_mode(0o644);
+        std::fs::set_permissions(&path, loose).unwrap();
+
+        write_auth_json(&path, &sample_store()).unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(
+            mode & 0o777,
+            0o600,
+            "rewrite must tighten preexisting open perms"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_tightens_world_readable_auth_json() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+        write_auth_json(&path, &sample_store()).unwrap();
+        let mut loose = std::fs::metadata(&path).unwrap().permissions();
+        loose.set_mode(0o644);
+        std::fs::set_permissions(&path, loose).unwrap();
+
+        let _ = read_auth_json(&path).unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(
+            mode & 0o777,
+            0o600,
+            "load must tighten open auth.json perms"
+        );
+    }
+
+    /// A `StorageFull` (ENOSPC) failure on the atomic path must fall back to the in-place write so the credential still lands on disk.
+    #[test]
+    fn falls_back_to_in_place_on_storage_full() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+        write_auth_json_with(&path, &sample_store(), fake_storage_full).unwrap();
+        assert_eq!(
+            read_key(&path).as_deref(),
+            Some("secret-key"),
+            "disk-full atomic write must fall back to a successful in-place write"
+        );
+    }
+
+    /// Non-ENOSPC errors must propagate unchanged and must NOT trigger the in-place fallback (e.g. a permission error should not write the file).
+    #[test]
+    fn propagates_non_storage_full_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+        let err = write_auth_json_with(&path, &sample_store(), fake_permission_denied).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+        assert!(!path.exists(), "non-ENOSPC failure must not write the file");
+    }
+
+    /// The normal (real atomic) path still works end to end.
+    #[test]
+    fn atomic_write_roundtrips() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+        write_auth_json(&path, &sample_store()).unwrap();
+        assert_eq!(read_key(&path).as_deref(), Some("secret-key"));
+    }
+
+    /// Under the user's home an `auth.json` link survives and its target gets the tokens at 0o600.
+    #[cfg(unix)]
+    #[test]
+    #[serial_test::serial]
+    fn atomic_write_writes_through_symlink_and_keeps_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let _home = xai_grok_test_support::EnvGuard::set("GROK_HOME", dir.path());
+        let target = dir.path().join("shared").join("auth.json");
+        write_auth_json(&target, &AuthStore::new()).unwrap();
+        let link = dir.path().join("auth.json");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        write_auth_json(&link, &sample_store()).unwrap();
+
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "auth.json must stay a symlink"
+        );
+        assert_eq!(
+            read_key(&target).as_deref(),
+            Some("secret-key"),
+            "the link target must receive the refreshed credential"
+        );
+        let mode = std::fs::metadata(&target).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "link target must stay 0o600");
+    }
+
+    /// On a failed atomic write, the temp file must be removed so no orphan accumulates.
+    /// Here `auth.json` is a directory, so the `rename` fails after the temp file is written.
+    #[test]
+    fn atomic_write_reclaims_tmp_on_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+        std::fs::create_dir(&path).unwrap();
+
+        assert!(
+            write_auth_json_atomic(&path, &sample_store()).is_err(),
+            "rename onto a directory must fail"
+        );
+
+        let orphans: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|e| e.file_name().to_string_lossy().contains(".tmp"))
+            .collect();
+        assert!(
+            orphans.is_empty(),
+            "TmpReclaim must remove the temp file on failure: {orphans:?}"
+        );
+    }
+
+    /// A fallback write that truncates then fails must roll back to the prior bytes instead of leaving an empty/torn file.
+    /// Otherwise a second disk-full failure would destroy a previously-valid credential.
+    #[test]
+    fn in_place_restores_prior_bytes_on_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+        // Seed a valid prior credential.
+        write_auth_json_in_place(&path, &sample_store()).unwrap();
+        assert_eq!(read_key(&path).as_deref(), Some("secret-key"));
+
+        let mut replacement = AuthStore::new();
+        replacement.insert(
+            API_KEY_SCOPE.to_owned(),
+            GrokAuth {
+                key: "replacement-key".to_owned(),
+                auth_mode: AuthMode::ApiKey,
+                ..Default::default()
+            },
+        );
+        let err = write_auth_json_in_place_with(&path, &replacement, fake_truncate_then_fail)
+            .unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::StorageFull);
+        assert_eq!(
+            read_key(&path).as_deref(),
+            Some("secret-key"),
+            "a failed in-place write must restore the prior credential, not leave an empty file"
+        );
+    }
+
+    /// Rollback after a failed write must keep the file owner-only (0o600).
+    #[cfg(unix)]
+    #[test]
+    fn in_place_restore_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+        write_auth_json_in_place(&path, &sample_store()).unwrap();
+        let _ = write_auth_json_in_place_with(&path, &sample_store(), fake_truncate_then_fail);
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "restored file must stay 0o600");
+    }
+
+    const PLACEHOLDER_ACCOUNT: &str = "placeholder-account";
+    const PLACEHOLDER_SESSION_KEY: &str = "placeholder-session-key";
+    const PLACEHOLDER_REFRESH: &str = "placeholder-refresh-token";
+
+    fn session_store(key: &str, refresh: Option<&str>) -> AuthStore {
+        let mut map = AuthStore::new();
+        map.insert(
+            PLACEHOLDER_ACCOUNT.to_owned(),
+            GrokAuth {
+                key: key.to_owned(),
+                refresh_token: refresh.map(str::to_owned),
+                auth_mode: AuthMode::Oidc,
+                user_id: "placeholder-user".to_owned(),
+                ..Default::default()
+            },
+        );
+        map
+    }
+
+    fn credentials_beside(auth_file: &Path) -> crate::credentials_store::CredentialsStore {
+        crate::credentials_store::CredentialsStore::at_path(
+            auth_file.with_file_name("provider_credentials.json"),
+        )
+    }
+
+    fn file_hides_session_secret(path: &Path, secret: &str) {
+        let bytes = std::fs::read(path).unwrap_or_default();
+        assert!(
+            secret.is_empty()
+                || !bytes
+                    .windows(secret.len())
+                    .any(|window| window == secret.as_bytes()),
+            "auth.json contains a session secret"
+        );
+    }
+
+    fn dir_hides_session_secret(dir: &Path, secret: &str) {
+        let entries = std::fs::read_dir(dir).expect("temp dir readable");
+        for entry in entries {
+            let path = entry.expect("temp entry").path();
+            if !path.is_file() {
+                continue;
+            }
+            let name = path.file_name().and_then(|name| name.to_str());
+            if name == Some("provider_credentials.json") || name == Some("auth.json") {
+                continue;
+            }
+            file_hides_session_secret(&path, secret);
+        }
+    }
+
+    fn store_has_username_secret(
+        store: &crate::credentials_store::CredentialsStore,
+        url: &str,
+        username: &str,
+        secret: &str,
+    ) {
+        let read = store.read(url).expect("credentials store readable");
+        let Some((stored_user, stored_secret)) = read else {
+            panic!("session secret missing from credentials store");
+        };
+        assert_eq!(stored_user, username, "credentials username");
+        assert!(
+            stored_secret == secret,
+            "credentials store missing the session secret"
+        );
+    }
+
+    fn read_restores_session(path: &Path, key: &str, refresh: Option<&str>) {
+        let loaded = read_auth_json(path).expect("read finds the session");
+        let session = loaded
+            .get(PLACEHOLDER_ACCOUNT)
+            .expect("account entry remains");
+        assert!(session.key == key, "read path restores the session secret");
+        assert!(
+            session.refresh_token.as_deref() == refresh,
+            "read path restores the refresh token"
+        );
+    }
+
+    fn fresh_auth_file() -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+        (dir, path)
+    }
+
+    fn grok_build_session_json() -> String {
+        format!(
+            r#"{{"{PLACEHOLDER_ACCOUNT}":{{"key":"{PLACEHOLDER_SESSION_KEY}","auth_mode":"oidc","create_time":"2026-01-01T00:00:00Z","user_id":"placeholder-user","refresh_token":"{PLACEHOLDER_REFRESH}"}}}}"#
+        )
+    }
+
+    fn bytes_contain(bytes: &[u8], secret: &str) -> bool {
+        !secret.is_empty()
+            && bytes
+                .windows(secret.len())
+                .any(|window| window == secret.as_bytes())
+    }
+
+    struct ClearSessionStoreFault;
+    impl Drop for ClearSessionStoreFault {
+        fn drop(&mut self) {
+            *super::SESSION_SECRET_STORE_FAULT_PATH
+                .lock()
+                .unwrap_or_else(|err| err.into_inner()) = None;
+        }
+    }
+
+    /// A SuperGrok session secret is stored in CredentialsStore. `write_auth_json` returns Ok. `auth.json` keeps the account and omits the secret strings. A Grok Build file that still has the secrets still loads. A failed store write leaves that file unchanged.
+    #[test]
+    fn supergrok_session_secret_is_not_written_to_auth_json() {
+        let key_url = format!("supergrok-session:{PLACEHOLDER_ACCOUNT}");
+        let refresh_url = format!("supergrok-session:{PLACEHOLDER_ACCOUNT}#refresh_token");
+
+        let (dir, path) = fresh_auth_file();
+        let key_only = session_store(PLACEHOLDER_SESSION_KEY, None);
+        write_auth_json(&path, &key_only).expect("session secret store write returns Ok");
+        file_hides_session_secret(&path, PLACEHOLDER_SESSION_KEY);
+        dir_hides_session_secret(dir.path(), PLACEHOLDER_SESSION_KEY);
+        let store = credentials_beside(&path);
+        store_has_username_secret(&store, &key_url, "key", PLACEHOLDER_SESSION_KEY);
+        read_restores_session(&path, PLACEHOLDER_SESSION_KEY, None);
+        assert!(
+            path.exists()
+                && std::fs::read_to_string(&path)
+                    .unwrap()
+                    .contains(PLACEHOLDER_ACCOUNT),
+            "account entry remains on disk"
+        );
+
+        let (dir, path) = fresh_auth_file();
+        let refresh_only = session_store("", Some(PLACEHOLDER_REFRESH));
+        write_auth_json(&path, &refresh_only).expect("session secret store write returns Ok");
+        file_hides_session_secret(&path, PLACEHOLDER_REFRESH);
+        dir_hides_session_secret(dir.path(), PLACEHOLDER_REFRESH);
+        let store = credentials_beside(&path);
+        store_has_username_secret(&store, &refresh_url, "refresh_token", PLACEHOLDER_REFRESH);
+        read_restores_session(&path, "", Some(PLACEHOLDER_REFRESH));
+
+        let (dir, path) = fresh_auth_file();
+        let both = session_store(PLACEHOLDER_SESSION_KEY, Some(PLACEHOLDER_REFRESH));
+        write_auth_json(&path, &both).expect("session secret store write returns Ok");
+        file_hides_session_secret(&path, PLACEHOLDER_SESSION_KEY);
+        file_hides_session_secret(&path, PLACEHOLDER_REFRESH);
+        dir_hides_session_secret(dir.path(), PLACEHOLDER_SESSION_KEY);
+        dir_hides_session_secret(dir.path(), PLACEHOLDER_REFRESH);
+        assert!(
+            std::fs::read_to_string(&path)
+                .unwrap()
+                .contains(PLACEHOLDER_ACCOUNT),
+            "account id remains in auth.json"
+        );
+        let store = credentials_beside(&path);
+        store_has_username_secret(&store, &key_url, "key", PLACEHOLDER_SESSION_KEY);
+        store_has_username_secret(&store, &refresh_url, "refresh_token", PLACEHOLDER_REFRESH);
+        read_restores_session(&path, PLACEHOLDER_SESSION_KEY, Some(PLACEHOLDER_REFRESH));
+
+        let (_dir, path) = fresh_auth_file();
+        let empty_refresh = session_store("", Some(""));
+        write_auth_json(&path, &empty_refresh).expect("empty refresh token may be written");
+        let store = credentials_beside(&path);
+        store_has_username_secret(&store, &refresh_url, "refresh_token", "");
+        read_restores_session(&path, "", Some(""));
+
+        let (_dir, path) = fresh_auth_file();
+        let seeded = grok_build_session_json();
+        std::fs::write(&path, &seeded).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let loaded = read_auth_json(&path).expect("Grok Build auth.json still loads");
+        let session = loaded
+            .get(PLACEHOLDER_ACCOUNT)
+            .expect("account entry remains");
+        assert_eq!(session.auth_mode, AuthMode::Oidc, "auth mode still loads");
+        assert_eq!(session.user_id, "placeholder-user", "user id still loads");
+        assert_eq!(
+            session.key, PLACEHOLDER_SESSION_KEY,
+            "Grok Build file still loads the session key"
+        );
+        assert_eq!(
+            session.refresh_token.as_deref(),
+            Some(PLACEHOLDER_REFRESH),
+            "Grok Build file still loads the refresh token"
+        );
+        let after_read = std::fs::read(&path).unwrap();
+        assert_eq!(
+            before, after_read,
+            "reading a Grok Build auth.json must not rewrite it"
+        );
+        assert!(
+            bytes_contain(&after_read, PLACEHOLDER_SESSION_KEY)
+                && bytes_contain(&after_read, PLACEHOLDER_REFRESH),
+            "Grok Build auth.json still contains the session secret"
+        );
+
+        let (_dir, path) = fresh_auth_file();
+        let seeded = grok_build_session_json();
+        std::fs::write(&path, &seeded).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let _clear_fault = ClearSessionStoreFault;
+        *super::SESSION_SECRET_STORE_FAULT_PATH
+            .lock()
+            .unwrap_or_else(|err| err.into_inner()) = Some(path.clone());
+        let write_result = write_auth_json(&path, &both_from_seed());
+        let after = std::fs::read(&path).unwrap();
+        assert_eq!(
+            before, after,
+            "failed store write leaves auth.json bytes unchanged"
+        );
+        assert!(
+            bytes_contain(&after, PLACEHOLDER_SESSION_KEY)
+                && bytes_contain(&after, PLACEHOLDER_REFRESH),
+            "failed store write keeps the session secret in auth.json"
+        );
+        let omitted = write_result.is_ok()
+            && !bytes_contain(&after, PLACEHOLDER_SESSION_KEY)
+            && !bytes_contain(&after, PLACEHOLDER_REFRESH);
+        assert!(
+            !omitted,
+            "a failed store write must not succeed at a migration that omitted the secret"
+        );
+        drop(_clear_fault);
+
+        let (_dir, path) = fresh_auth_file();
+        let clear = session_store("", None);
+        write_auth_json(&path, &clear).expect("empty key and no refresh token may be written");
+        file_hides_session_secret(&path, PLACEHOLDER_SESSION_KEY);
+        file_hides_session_secret(&path, PLACEHOLDER_REFRESH);
+        let loaded = read_auth_json(&path).expect("read finds the session");
+        let session = loaded
+            .get(PLACEHOLDER_ACCOUNT)
+            .expect("account entry remains");
+        assert!(session.key.is_empty(), "cleared session key stays empty");
+        assert!(
+            session.refresh_token.is_none(),
+            "cleared refresh token stays absent"
+        );
+    }
+
+    fn both_from_seed() -> AuthStore {
+        session_store(PLACEHOLDER_SESSION_KEY, Some(PLACEHOLDER_REFRESH))
+    }
+}

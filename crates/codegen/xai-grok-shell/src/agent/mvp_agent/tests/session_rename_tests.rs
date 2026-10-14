@@ -1,5 +1,4 @@
-//! `x.ai/session/rename` ext-handler coverage: resident `ManualTitleRenamed`
-//! enqueue, non-resident skip, and control-char stripping at the boundary.
+//! `x.ai/session/rename` ext-handler coverage: resident `ManualTitleRenamed` enqueue, non-resident skip, and control-char stripping at the boundary.
 
 use agent_client_protocol as acp;
 use xai_grok_test_support::EnvGuard;
@@ -75,7 +74,11 @@ async fn rename_enqueues_manual_title_on_resident_persistence_tx() {
         .await
         .expect("rename must succeed");
     let wrapper: serde_json::Value = serde_json::from_str(resp.0.get()).unwrap();
-    assert_eq!(wrapper["success"], true, "{wrapper}");
+    assert_eq!(
+        wrapper.get("success").and_then(|v| v.as_bool()),
+        Some(true),
+        "{wrapper}"
+    );
 
     let msg = persistence_rx
         .try_recv()
@@ -114,7 +117,11 @@ async fn rename_non_resident_updates_summary_without_panic() {
         .await
         .expect("non-resident rename must succeed");
     let wrapper: serde_json::Value = serde_json::from_str(resp.0.get()).unwrap();
-    assert_eq!(wrapper["success"], true, "{wrapper}");
+    assert_eq!(
+        wrapper.get("success").and_then(|v| v.as_bool()),
+        Some(true),
+        "{wrapper}"
+    );
 
     let summary = JsonlStorageAdapter::new()
         .load_summary(&info)
@@ -143,14 +150,17 @@ async fn rename_strips_ascii_controls_before_persist_and_enqueue() {
     handle.info = info.clone();
     agent.insert_resident(&sid, handle);
 
-    // OSC (`ESC ] … BEL`) + CSI (`ESC [ …`) + BEL: C0/C1 strip; leftover
-    // `]0;` / `[31m` payload is expected (payload is not CSI).
+    // OSC (`ESC ] … BEL`) + CSI (`ESC [ …`) + BEL: C0/C1 strip; leftover `]0;` / `[31m` payload is expected (payload is not CSI)
     let raw = "Hello\u{1b}[31m\u{1b}]0;evil\u{07}World\u{07}";
     let resp = drive_rename(&agent, sid.0.as_ref(), raw, cwd)
         .await
         .expect("sanitized rename must succeed");
     let wrapper: serde_json::Value = serde_json::from_str(resp.0.get()).unwrap();
-    assert_eq!(wrapper["success"], true, "{wrapper}");
+    assert_eq!(
+        wrapper.get("success").and_then(|v| v.as_bool()),
+        Some(true),
+        "{wrapper}"
+    );
 
     let msg = persistence_rx
         .try_recv()
@@ -215,7 +225,11 @@ async fn rename_rejects_title_over_max_scalars() {
         .await
         .expect("exactly 100 scalars must be accepted");
     let wrapper: serde_json::Value = serde_json::from_str(resp.0.get()).unwrap();
-    assert_eq!(wrapper["success"], true, "{wrapper}");
+    assert_eq!(
+        wrapper.get("success").and_then(|v| v.as_bool()),
+        Some(true),
+        "{wrapper}"
+    );
 
     let summary = JsonlStorageAdapter::new()
         .load_summary(&info)
@@ -246,7 +260,11 @@ async fn rename_counts_scalars_after_control_strip() {
         .await
         .expect("control-stripped 100 scalars must pass");
     let wrapper: serde_json::Value = serde_json::from_str(resp.0.get()).unwrap();
-    assert_eq!(wrapper["success"], true, "{wrapper}");
+    assert_eq!(
+        wrapper.get("success").and_then(|v| v.as_bool()),
+        Some(true),
+        "{wrapper}"
+    );
 
     let summary = JsonlStorageAdapter::new()
         .load_summary(&info)
@@ -316,9 +334,8 @@ async fn rename_rejects_title_over_max_bytes_before_strip() {
     let before = seeded.display_title().to_owned();
 
     let agent = build_minimal_agent_for_tests();
-    // 65 C0 + 100 4-byte scalars = MAX_TITLE_BYTES + 1, but only 100
-    // scalars after strip — the scalar cap would accept this. Isolates
-    // the byte gate: 64 C0 + 100 thumbs is the slack accept below.
+    // 65 C0 + 100 4-byte scalars = MAX_TITLE_BYTES + 1, but only 100 scalars after strip; the scalar cap would accept this
+    // Isolates the byte gate: 64 C0 + 100 thumbs is the slack accept below
     let too_long = format!("{}{}", "\u{1b}".repeat(65), "👍".repeat(MAX_TITLE_SCALARS));
     assert_eq!(too_long.len(), MAX_TITLE_BYTES + 1);
     assert_eq!(
@@ -347,7 +364,11 @@ async fn rename_rejects_title_over_max_bytes_before_strip() {
         .await
         .expect("byte slack must still accept a 100-scalar title");
     let wrapper: serde_json::Value = serde_json::from_str(resp.0.get()).unwrap();
-    assert_eq!(wrapper["success"], true, "{wrapper}");
+    assert_eq!(
+        wrapper.get("success").and_then(|v| v.as_bool()),
+        Some(true),
+        "{wrapper}"
+    );
     let summary = JsonlStorageAdapter::new()
         .load_summary(&info)
         .await
@@ -359,9 +380,9 @@ async fn rename_rejects_title_over_max_bytes_before_strip() {
 #[serial_test::serial]
 async fn rename_fanout_stamps_title_is_manual_meta() {
     use crate::agent::config::Config as AgentConfig;
-    use crate::auth::{AuthManager, GrokComConfig};
     use crate::extensions::notification::TITLE_IS_MANUAL_META_KEY;
     use xai_acp_lib::{AcpAgentGatewaySender as GatewaySender, AcpClientMessage};
+    use xai_grok_login::{AuthManager, GrokComConfig};
 
     let _home = isolate_grok_home();
     let cwd = "/tmp/rename-fanout-meta";
@@ -382,6 +403,7 @@ async fn rename_fanout_stamps_title_is_manual_meta() {
         &AgentConfig::default(),
         auth_manager,
         None,
+        None,
     )
     .expect("valid test config");
     let mut handle = make_test_handle("test-model", false, None);
@@ -401,9 +423,18 @@ async fn rename_fanout_stamps_title_is_manual_meta() {
             continue;
         }
         let v: serde_json::Value = serde_json::from_str(args.request.params.get()).unwrap();
-        if v["_meta"][TITLE_IS_MANUAL_META_KEY] == true {
+        if v.get("_meta")
+            .and_then(|m| m.get(TITLE_IS_MANUAL_META_KEY))
+            .and_then(|x| x.as_bool())
+            == Some(true)
+        {
             saw_manual_meta = true;
-            assert_eq!(v["update"]["session_summary"], "Fanout Title");
+            assert_eq!(
+                v.get("update")
+                    .and_then(|u| u.get("session_summary"))
+                    .and_then(|s| s.as_str()),
+                Some("Fanout Title")
+            );
         }
     }
     assert!(
@@ -464,7 +495,11 @@ async fn reset_enqueues_reset_title_to_auto_on_resident_persistence_tx() {
         .await
         .expect("reset must succeed");
     let wrapper: serde_json::Value = serde_json::from_str(resp.0.get()).unwrap();
-    assert_eq!(wrapper["success"], true, "{wrapper}");
+    assert_eq!(
+        wrapper.get("success").and_then(|v| v.as_bool()),
+        Some(true),
+        "{wrapper}"
+    );
 
     let msg = persistence_rx
         .try_recv()
@@ -507,7 +542,11 @@ async fn reset_non_resident_updates_summary_without_panic() {
         .await
         .expect("non-resident reset must succeed");
     let wrapper: serde_json::Value = serde_json::from_str(resp.0.get()).unwrap();
-    assert_eq!(wrapper["success"], true, "{wrapper}");
+    assert_eq!(
+        wrapper.get("success").and_then(|v| v.as_bool()),
+        Some(true),
+        "{wrapper}"
+    );
 
     let summary = JsonlStorageAdapter::new()
         .load_summary(&info)
@@ -563,7 +602,11 @@ async fn reset_rejects_nonempty_title() {
     .await
     .expect("whitespace-only title is empty after sanitize");
     let wrapper: serde_json::Value = serde_json::from_str(resp.0.get()).unwrap();
-    assert_eq!(wrapper["success"], true, "{wrapper}");
+    assert_eq!(
+        wrapper.get("success").and_then(|v| v.as_bool()),
+        Some(true),
+        "{wrapper}"
+    );
 }
 
 #[tokio::test]
@@ -615,9 +658,9 @@ async fn reset_rejects_chat_kind() {
 #[serial_test::serial]
 async fn reset_fanout_stamps_title_is_manual_false() {
     use crate::agent::config::Config as AgentConfig;
-    use crate::auth::{AuthManager, GrokComConfig};
     use crate::extensions::notification::TITLE_IS_MANUAL_META_KEY;
     use xai_acp_lib::{AcpAgentGatewaySender as GatewaySender, AcpClientMessage};
+    use xai_grok_login::{AuthManager, GrokComConfig};
 
     let _home = isolate_grok_home();
     let cwd = "/tmp/reset-fanout";
@@ -642,6 +685,7 @@ async fn reset_fanout_stamps_title_is_manual_false() {
         &AgentConfig::default(),
         auth_manager,
         None,
+        None,
     )
     .expect("valid test config");
     let mut handle = make_test_handle("test-model", false, None);
@@ -662,17 +706,34 @@ async fn reset_fanout_stamps_title_is_manual_false() {
                     continue;
                 }
                 let v: serde_json::Value = serde_json::from_str(args.request.params.get()).unwrap();
-                if v["_meta"][TITLE_IS_MANUAL_META_KEY] == false {
+                if v.get("_meta")
+                    .and_then(|m| m.get(TITLE_IS_MANUAL_META_KEY))
+                    .and_then(|x| x.as_bool())
+                    == Some(false)
+                {
                     saw_unpin_ext = true;
-                    assert_eq!(v["update"]["session_summary"], "");
+                    assert_eq!(
+                        v.get("update")
+                            .and_then(|u| u.get("session_summary"))
+                            .and_then(|s| s.as_str()),
+                        Some("")
+                    );
                 }
-                if v["_meta"][TITLE_IS_MANUAL_META_KEY] == true {
+                if v.get("_meta")
+                    .and_then(|m| m.get(TITLE_IS_MANUAL_META_KEY))
+                    .and_then(|x| x.as_bool())
+                    == Some(true)
+                {
                     saw_manual_true = true;
                 }
             }
             AcpClientMessage::SessionNotification(args) => {
                 let v = serde_json::to_value(&args.request).unwrap();
-                if v["_meta"][TITLE_IS_MANUAL_META_KEY] == false {
+                if v.get("_meta")
+                    .and_then(|m| m.get(TITLE_IS_MANUAL_META_KEY))
+                    .and_then(|x| x.as_bool())
+                    == Some(false)
+                {
                     saw_unpin_siu = true;
                     let title = v
                         .pointer("/update/title")
@@ -682,7 +743,11 @@ async fn reset_fanout_stamps_title_is_manual_false() {
                         "unpinned SessionInfoUpdate must omit title: {v}"
                     );
                 }
-                if v["_meta"][TITLE_IS_MANUAL_META_KEY] == true {
+                if v.get("_meta")
+                    .and_then(|m| m.get(TITLE_IS_MANUAL_META_KEY))
+                    .and_then(|x| x.as_bool())
+                    == Some(true)
+                {
                     saw_manual_true = true;
                 }
             }
@@ -704,9 +769,9 @@ async fn reset_fanout_stamps_title_is_manual_false() {
 #[serial_test::serial]
 async fn reset_already_auto_is_idempotent_and_skips_persistence_msg() {
     use crate::agent::config::Config as AgentConfig;
-    use crate::auth::{AuthManager, GrokComConfig};
     use crate::extensions::notification::TITLE_IS_MANUAL_META_KEY;
     use xai_acp_lib::{AcpAgentGatewaySender as GatewaySender, AcpClientMessage};
+    use xai_grok_login::{AuthManager, GrokComConfig};
 
     let _home = isolate_grok_home();
     let cwd = "/tmp/reset-idempotent";
@@ -731,6 +796,7 @@ async fn reset_already_auto_is_idempotent_and_skips_persistence_msg() {
         &AgentConfig::default(),
         auth_manager,
         None,
+        None,
     )
     .expect("valid test config");
     let (persistence_tx, mut persistence_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -743,7 +809,11 @@ async fn reset_already_auto_is_idempotent_and_skips_persistence_msg() {
         .await
         .expect("no-op reset must succeed");
     let wrapper: serde_json::Value = serde_json::from_str(resp.0.get()).unwrap();
-    assert_eq!(wrapper["success"], true, "{wrapper}");
+    assert_eq!(
+        wrapper.get("success").and_then(|v| v.as_bool()),
+        Some(true),
+        "{wrapper}"
+    );
     assert!(
         persistence_rx.try_recv().is_err(),
         "no-op reset must not enqueue ResetTitleToAuto"
@@ -756,13 +826,21 @@ async fn reset_already_auto_is_idempotent_and_skips_persistence_msg() {
                     continue;
                 }
                 let v: serde_json::Value = serde_json::from_str(args.request.params.get()).unwrap();
-                if v["_meta"][TITLE_IS_MANUAL_META_KEY] == false {
+                if v.get("_meta")
+                    .and_then(|m| m.get(TITLE_IS_MANUAL_META_KEY))
+                    .and_then(|x| x.as_bool())
+                    == Some(false)
+                {
                     saw_unpin = true;
                 }
             }
             AcpClientMessage::SessionNotification(args) => {
                 let v = serde_json::to_value(&args.request).unwrap();
-                if v["_meta"][TITLE_IS_MANUAL_META_KEY] == false {
+                if v.get("_meta")
+                    .and_then(|m| m.get(TITLE_IS_MANUAL_META_KEY))
+                    .and_then(|x| x.as_bool())
+                    == Some(false)
+                {
                     saw_unpin = true;
                 }
             }

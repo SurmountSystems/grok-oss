@@ -38,9 +38,18 @@ pub enum SshRequest<'a> {
 }
 
 /// Copy owner-only files onto the guest. Implementations must not print
-/// file contents (the env file holds the key).
+/// file contents (the env file holds the key; an enqueue file holds the prompt).
 pub trait HostFileInstall {
     fn install_owner_only_file(&self, local: &Path, dest: &str) -> Result<(), String>;
+
+    /// Create `remote_dir` on the guest before a copy. The default does
+    /// nothing so a test installer can record the `scp` destination only.
+    /// Production [`SshDeployInstall`] runs `mkdir` over the same SSH target
+    /// shape `grok-oss gui --ssh` already uses. Do not print file contents.
+    fn prepare_remote_dir(&self, user_at_host: &str, remote_dir: &str) -> Result<(), String> {
+        let _ = (user_at_host, remote_dir);
+        Ok(())
+    }
 }
 
 /// Why the machine-key action could not finish.
@@ -217,6 +226,38 @@ pub fn scp_copy_argv(local: &Path, dest: &str) -> Vec<String> {
         local.display().to_string(),
         dest.to_string(),
     ]
+}
+
+/// `ssh` argv that creates the guest enqueue directory. Does not print the prompt.
+///
+/// The remote command is one argument so the path is not a second local flag.
+/// Rejects a target or path that would need a shell quote.
+pub fn ssh_mkdir_argv(user_at_host: &str, remote_dir: &str) -> Result<Vec<String>, String> {
+    let user_at_host = user_at_host.trim();
+    if user_at_host.is_empty()
+        || !user_at_host.contains('@')
+        || user_at_host.contains(' ')
+        || user_at_host.contains('\0')
+    {
+        return Err("SSH target must look like user@host".to_string());
+    }
+    if !guest_path_is_safe(remote_dir) {
+        return Err("remote directory is not a safe absolute path".to_string());
+    }
+    Ok(vec![
+        "ssh".to_string(),
+        user_at_host.to_string(),
+        format!("mkdir -p -- {remote_dir}"),
+    ])
+}
+
+/// Absolute guest path with no shell metacharacters.
+pub(crate) fn guest_path_is_safe(path: &str) -> bool {
+    if path.is_empty() || !path.starts_with('/') || path.contains('\0') || path.contains("..") {
+        return false;
+    }
+    path.chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '-' | '_' | '.'))
 }
 
 /// `ssh` argv that sets owner-only mode on a remote path. Does not cat the file.
@@ -409,6 +450,18 @@ impl HostFileInstall for SshDeployInstall {
             .map_err(|err| format!("scp failed to start: {err}"))?;
         if !status.success() {
             return Err(format!("scp exited {status}"));
+        }
+        Ok(())
+    }
+
+    fn prepare_remote_dir(&self, user_at_host: &str, remote_dir: &str) -> Result<(), String> {
+        let argv = ssh_mkdir_argv(user_at_host, remote_dir)?;
+        let status = std::process::Command::new(&argv[0])
+            .args(&argv[1..])
+            .status()
+            .map_err(|err| format!("ssh mkdir failed to start: {err}"))?;
+        if !status.success() {
+            return Err(format!("ssh mkdir exited {status}"));
         }
         Ok(())
     }

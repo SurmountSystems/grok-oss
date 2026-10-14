@@ -1,44 +1,35 @@
 //! Thread-local caches for the pager's UI settings.
 //!
-//! Read on every render frame — must be cheaper than re-loading from
-//! `config.toml`. Call [`prime`] at startup so the first frame never
-//! hits disk; the lazy fallback seeds from `load_effective_config()`
-//! on first read as a safety net.
+//! Every render frame reads these, so they must be cheaper than re-loading `config.toml`.
+//! Call [`prime`] at startup so the first frame never hits disk; as a safety net, the first read lazily seeds from `load_effective_config()`.
 //!
-//! Disk writes live in `xai_grok_shell::util::config::set_<field>()`.
-//! This module is a pager-side in-memory cache only.
+//! Disk writes live in `xai_grok_shell::util::config::set_<field>()`; this module only caches in memory.
 //!
-//! Default consts are hardcoded for `Cell::new` (`const` required) and
-//! asserted in tests to match `UiConfig::default()`.
+//! The default consts are hardcoded because `Cell::new` needs a `const` value; tests assert they match `UiConfig::default()`.
 //!
-//! Thread-local `Cell<bool>` is safe because TUI render + dispatch run
-//! on a single thread. Multi-thread use would require `AtomicBool`.
+//! Thread-local `Cell<bool>` is safe because the TUI renders and dispatches on a single thread; multi-thread use would need `AtomicBool`.
 
 use std::cell::Cell;
 
 use xai_grok_shared::ui_config::UiConfig;
 
+use super::follow_up_behavior::FollowUpBehavior;
 use super::render_mermaid::RenderMermaid;
 use super::scroll_mode::ScrollMode;
 use super::text_selection::TextSelection;
 
-// -- Defaults (asserted in tests to match UiConfig::default()) --------------
-
 const COMPACT_DEFAULT: bool = false;
 const TIMESTAMPS_DEFAULT: bool = true;
-/// Timeline sidebar (per-turn tick rail): single source of truth is
-/// [`UiConfig::SHOW_TIMELINE_DEFAULT`]; aliased here for the `Cell::new`
-/// const context and the effective-config fallback read.
+/// Aliased rather than hardcoded so [`UiConfig::SHOW_TIMELINE_DEFAULT`] stays the single source of truth.
 const TIMELINE_DEFAULT: bool = UiConfig::SHOW_TIMELINE_DEFAULT;
 const PAGE_FLIP_ON_SEND_DEFAULT: bool = UiConfig::PAGE_FLIP_ON_SEND_DEFAULT;
-/// Assistant ASCII scrub default ON when unset (matches UiConfig).
+/// Assistant ASCII scrub default on when unset (matches `UiConfig`).
 const SCRUB_ASCII_PUNCT_DEFAULT: bool = UiConfig::SCRUB_ASCII_PUNCT_DEFAULT;
-/// ULID-primary session ids default ON when unset (matches UiConfig).
-const ULID_SESSION_IDS_DEFAULT: bool = UiConfig::ULID_SESSION_IDS_DEFAULT;
-/// Combine-queued-prompts rollout flag defaults OFF (opt-in).
+/// Rollout flag.
 const COMBINE_QUEUED_PROMPTS_DEFAULT: bool = false;
+const FOLLOW_UP_BEHAVIOR_DEFAULT: FollowUpBehavior = FollowUpBehavior::Queue;
 const SIMPLE_MODE_DEFAULT: bool = true;
-/// Vim-mode scrollback default — matches the previous on-disk default.
+/// This matches the previous on-disk default.
 const VIM_MODE_DEFAULT: bool = false;
 const SHOW_THINKING_BLOCKS_DEFAULT: bool = true;
 /// Keep thinking fully expanded by default — off (collapsed on finish).
@@ -48,9 +39,9 @@ const HIDE_HEADER_DEFAULT: bool = false;
 /// Force fullscreen plan approval. Default off (`soft` park).
 const PLAN_APPROVAL_FORCE_MODAL_DEFAULT: bool = false;
 const GROUP_TOOL_VERBS_DEFAULT: bool = true;
-/// Collapsed-Edit-blocks rollout flag defaults OFF (legacy expanded diffs).
+/// Rollout flag; while it is off, edit blocks render as the legacy expanded diffs.
 const COLLAPSED_EDIT_BLOCKS_DEFAULT: bool = false;
-/// Next-prompt suggestions (tab autocomplete ghost text) default ON.
+/// "Prompt suggestions" is the ghost text Tab autocompletes.
 const PROMPT_SUGGESTIONS_DEFAULT: bool = true;
 /// Human-box newlines from Enter / Shift+Enter. Default ON when unset.
 const COMPOSER_MULTILINE_DEFAULT: bool = UiConfig::COMPOSER_MULTILINE_DEFAULT;
@@ -60,22 +51,32 @@ const ALLOW_SESSION_MULTILINE_DEFAULT: bool = UiConfig::ALLOW_SESSION_MULTILINE_
 const AUTO_RUN_IMPLEMENT_DEFAULT: bool = true;
 /// Soft-cap context at the 200K pricing tier; default ON when unset.
 const ECONOMIC_MODE_DEFAULT: bool = true;
+/// Session ids are ULID when unset. Matches [`UiConfig::ULID_SESSION_IDS_DEFAULT`].
+const ULID_SESSION_IDS_DEFAULT: bool = UiConfig::ULID_SESSION_IDS_DEFAULT;
 /// Live exclusive / Isolated Preview plan turns use xhigh. Default ON.
-const TURBO_PLANNING_DEFAULT: bool = UiConfig::TURBO_PLANNING_DEFAULT;
+/// `UiConfig` stores `turbo_planning: Option<bool>` (`None` means on) and does not expose this const.
+const TURBO_PLANNING_DEFAULT: bool = true;
+
+trait TurboPlanningUi {
+    fn turbo_planning_enabled(&self) -> bool;
+}
+
+impl TurboPlanningUi for UiConfig {
+    fn turbo_planning_enabled(&self) -> bool {
+        self.turbo_planning.unwrap_or(TURBO_PLANNING_DEFAULT)
+    }
+}
 const KEEP_TEXT_SELECTION_DEFAULT: TextSelection = TextSelection::Flash;
-/// Scroll speed default (1-100 scale, matches the legacy `[ui].scroll_speed`).
+/// This matches the legacy `[ui].scroll_speed` default.
 const SCROLL_SPEED_DEFAULT: u8 = 50;
 const SCROLL_SPEED_MIN: u8 = 1;
 const SCROLL_SPEED_MAX: u8 = 100;
 const SCROLL_MODE_DEFAULT: ScrollMode = ScrollMode::Auto;
 const INVERT_SCROLL_DEFAULT: bool = false;
-/// `scroll_lines` sentinel for "never configured": keep the per-terminal
-/// profile's lines-per-tick instead of forcing a user value.
+/// Sentinel for "never configured": the per-terminal profile keeps its own lines-per-tick.
 const SCROLL_LINES_UNSET: u8 = 0;
 const SCROLL_LINES_MIN: u8 = 1;
 const SCROLL_LINES_MAX: u8 = 10;
-
-// -- Compact mode ------------------------------------------------------------
 
 thread_local! {
     static COMPACT_CURRENT: Cell<bool> = const { Cell::new(COMPACT_DEFAULT) };
@@ -104,8 +105,6 @@ pub fn set(enabled: bool) {
     COMPACT_LOADED.with(|l| l.set(true));
 }
 
-// -- Timestamps --------------------------------------------------------------
-
 thread_local! {
     static TIMESTAMPS_CURRENT: Cell<bool> = const { Cell::new(TIMESTAMPS_DEFAULT) };
     static TIMESTAMPS_LOADED: Cell<bool> = const { Cell::new(false) };
@@ -131,8 +130,6 @@ pub fn set_timestamps(enabled: bool) {
     TIMESTAMPS_LOADED.with(|l| l.set(true));
 }
 
-// -- Timeline sidebar ----------------------------------------------------------
-
 thread_local! {
     static TIMELINE_CURRENT: Cell<bool> = const { Cell::new(TIMELINE_DEFAULT) };
     static TIMELINE_LOADED: Cell<bool> = const { Cell::new(false) };
@@ -157,8 +154,6 @@ pub fn set_show_timeline(enabled: bool) {
     TIMELINE_CURRENT.with(|c| c.set(enabled));
     TIMELINE_LOADED.with(|l| l.set(true));
 }
-
-// -- Page-flip on send ---------------------------------------------------------
 
 thread_local! {
     static PAGE_FLIP_ON_SEND_CURRENT: Cell<bool> = const { Cell::new(PAGE_FLIP_ON_SEND_DEFAULT) };
@@ -186,8 +181,6 @@ pub fn set_page_flip_on_send(enabled: bool) {
     PAGE_FLIP_ON_SEND_LOADED.with(|l| l.set(true));
 }
 
-// -- Scrub ASCII punctuation (assistant text) ---------------------------------
-
 thread_local! {
     static SCRUB_ASCII_PUNCT_CURRENT: Cell<bool> = const { Cell::new(SCRUB_ASCII_PUNCT_DEFAULT) };
     static SCRUB_ASCII_PUNCT_LOADED: Cell<bool> = const { Cell::new(false) };
@@ -214,14 +207,12 @@ pub fn set_scrub_ascii_punct(enabled: bool) {
     SCRUB_ASCII_PUNCT_LOADED.with(|l| l.set(true));
 }
 
-// -- ULID session ids (primary display) --------------------------------------
-
 thread_local! {
     static ULID_SESSION_IDS_CURRENT: Cell<bool> = const { Cell::new(ULID_SESSION_IDS_DEFAULT) };
     static ULID_SESSION_IDS_LOADED: Cell<bool> = const { Cell::new(false) };
 }
 
-/// Cached `ulid_session_ids`, seeding from `[ui]` on first call.
+/// Cached `[ui].ulid_session_ids`. Default on when unset.
 pub fn load_ulid_session_ids() -> bool {
     ULID_SESSION_IDS_LOADED.with(|loaded| {
         if !loaded.get() {
@@ -237,12 +228,11 @@ pub fn load_ulid_session_ids() -> bool {
     ULID_SESSION_IDS_CURRENT.with(|c| c.get())
 }
 
+/// Replace cached `ulid_session_ids`.
 pub fn set_ulid_session_ids(enabled: bool) {
     ULID_SESSION_IDS_CURRENT.with(|c| c.set(enabled));
     ULID_SESSION_IDS_LOADED.with(|l| l.set(true));
 }
-
-// -- Combine queued prompts ---------------------------------------------------
 
 thread_local! {
     static COMBINE_QUEUED_PROMPTS_CURRENT: Cell<bool> =
@@ -271,7 +261,37 @@ pub fn set_combine_queued_prompts(enabled: bool) {
     COMBINE_QUEUED_PROMPTS_LOADED.with(|l| l.set(true));
 }
 
-// -- Simple mode --------------------------------------------------------------
+thread_local! {
+    static FOLLOW_UP_BEHAVIOR_CURRENT: Cell<FollowUpBehavior> =
+        const { Cell::new(FOLLOW_UP_BEHAVIOR_DEFAULT) };
+    static FOLLOW_UP_BEHAVIOR_LOADED: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Read cached `follow_up_behavior`, seeding from disk on first call.
+pub fn load_follow_up_behavior() -> FollowUpBehavior {
+    FOLLOW_UP_BEHAVIOR_LOADED.with(|loaded| {
+        if !loaded.get() {
+            let value = load_str_from_effective_config("follow_up_behavior")
+                .as_deref()
+                .and_then(FollowUpBehavior::from_canonical)
+                .unwrap_or(FOLLOW_UP_BEHAVIOR_DEFAULT);
+            FOLLOW_UP_BEHAVIOR_CURRENT.with(|c| c.set(value));
+            loaded.set(true);
+        }
+    });
+    FOLLOW_UP_BEHAVIOR_CURRENT.with(|c| c.get())
+}
+
+/// True when follow-ups interject into the running turn (`Steer`) instead of queueing.
+pub fn load_follow_up_steer() -> bool {
+    load_follow_up_behavior().is_steer()
+}
+
+/// Replace cached `follow_up_behavior`.
+pub fn set_follow_up_behavior(value: FollowUpBehavior) {
+    FOLLOW_UP_BEHAVIOR_CURRENT.with(|c| c.set(value));
+    FOLLOW_UP_BEHAVIOR_LOADED.with(|l| l.set(true));
+}
 
 thread_local! {
     static SIMPLE_MODE_CURRENT: Cell<bool> = const { Cell::new(SIMPLE_MODE_DEFAULT) };
@@ -298,20 +318,12 @@ pub fn set_simple_mode(enabled: bool) {
     SIMPLE_MODE_LOADED.with(|l| l.set(true));
 }
 
-// -- Vim mode (scrollback) ---------------------------------------------------
-
 thread_local! {
     static VIM_MODE_CURRENT: Cell<bool> = const { Cell::new(VIM_MODE_DEFAULT) };
     static VIM_MODE_LOADED: Cell<bool> = const { Cell::new(false) };
 }
 
-/// Read cached `vim_mode`, seeding from disk on first call.
-///
-/// `vim_mode` is pager-owned ephemeral state in the new settings
-/// registry: the cache acts as the process-wide source of truth so
-/// newly-spawned agents read a consistent value, but no `Effect`
-/// writes to disk. Restored from `[ui].vim_mode` on first read so
-/// historical configs continue to work.
+/// Ephemeral process-wide source of truth; no Effect writes it back. First read seeds from `[ui].vim_mode`.
 pub fn load_vim_mode() -> bool {
     VIM_MODE_LOADED.with(|loaded| {
         if !loaded.get() {
@@ -333,8 +345,6 @@ pub fn set_vim_mode(enabled: bool) {
     VIM_MODE_LOADED.with(|l| l.set(true));
 }
 
-// -- Show thinking blocks ----------------------------------------------------
-
 thread_local! {
     static SHOW_THINKING_BLOCKS_CURRENT: Cell<bool> =
         const { Cell::new(SHOW_THINKING_BLOCKS_DEFAULT) };
@@ -342,7 +352,7 @@ thread_local! {
 }
 
 /// Read cached `show_thinking_blocks`, seeding from `[ui]` on first call.
-/// Default ON when unset. Startup may override via resolve.
+/// Settings resolution at startup may override the seeded value.
 pub fn load_show_thinking_blocks() -> bool {
     SHOW_THINKING_BLOCKS_LOADED.with(|loaded| {
         if !loaded.get() {
@@ -511,7 +521,7 @@ thread_local! {
 }
 
 /// Read cached `group_tool_verbs`, seeding from `[ui]` on first call.
-/// Default ON when unset. Startup may override via resolve.
+/// Settings resolution at startup may override the seeded value.
 pub fn load_group_tool_verbs() -> bool {
     GROUP_TOOL_VERBS_LOADED.with(|loaded| {
         if !loaded.get() {
@@ -533,8 +543,6 @@ pub fn set_group_tool_verbs(enabled: bool) {
     GROUP_TOOL_VERBS_LOADED.with(|l| l.set(true));
 }
 
-// -- Collapsed edit blocks -----------------------------------------------------
-
 thread_local! {
     static COLLAPSED_EDIT_BLOCKS_CURRENT: Cell<bool> =
         const { Cell::new(COLLAPSED_EDIT_BLOCKS_DEFAULT) };
@@ -542,9 +550,7 @@ thread_local! {
 }
 
 /// Read cached `collapsed_edit_blocks`, seeding from `[ui]` on first call.
-/// Default OFF when unset. Startup may override via resolve. Consulted only
-/// when the pager.toml `[scrollback.blocks.edit]` shape keys are unset (see
-/// `EditBlockConfig::effective_expanded` / `effective_line_summary`).
+/// Settings resolution at startup may override the seeded value.
 pub fn load_collapsed_edit_blocks() -> bool {
     COLLAPSED_EDIT_BLOCKS_LOADED.with(|loaded| {
         if !loaded.get() {
@@ -566,48 +572,40 @@ pub fn set_collapsed_edit_blocks(enabled: bool) {
     COLLAPSED_EDIT_BLOCKS_LOADED.with(|l| l.set(true));
 }
 
-// -- Prompt suggestions (tab autocomplete) -----------------------------------
-
 thread_local! {
-    static PROMPT_SUGGESTIONS_CURRENT: Cell<bool> =
-        const { Cell::new(PROMPT_SUGGESTIONS_DEFAULT) };
+    static PROMPT_SUGGESTIONS_CURRENT: Cell<Option<bool>> = const { Cell::new(None) };
     static PROMPT_SUGGESTIONS_LOADED: Cell<bool> = const { Cell::new(false) };
 }
 
-/// Read cached `prompt_suggestions`, seeding from `[ui]` on first call.
-/// Default ON when unset. The `GROK_PROMPT_SUGGESTIONS` env var overrides
-/// this at the feature gate (see the pager's `prompt_suggestion` module).
-pub fn load_prompt_suggestions() -> bool {
+/// Reads the cached raw `[ui].prompt_suggestions` value.
+pub fn load_prompt_suggestions_config() -> Option<bool> {
     PROMPT_SUGGESTIONS_LOADED.with(|loaded| {
         if !loaded.get() {
-            PROMPT_SUGGESTIONS_CURRENT.with(|c| {
-                c.set(load_bool_from_effective_config(
-                    "prompt_suggestions",
-                    PROMPT_SUGGESTIONS_DEFAULT,
-                ))
-            });
+            PROMPT_SUGGESTIONS_CURRENT
+                .with(|c| c.set(load_bool_option_from_effective_config("prompt_suggestions")));
             loaded.set(true);
         }
     });
     PROMPT_SUGGESTIONS_CURRENT.with(|c| c.get())
 }
 
-/// Replace cached `prompt_suggestions`.
+/// Reads `prompt_suggestions`, defaulting to enabled.
+pub fn load_prompt_suggestions() -> bool {
+    load_prompt_suggestions_config().unwrap_or(PROMPT_SUGGESTIONS_DEFAULT)
+}
+
+/// Replaces the cached `prompt_suggestions` setting.
 pub fn set_prompt_suggestions(enabled: bool) {
-    PROMPT_SUGGESTIONS_CURRENT.with(|c| c.set(enabled));
+    PROMPT_SUGGESTIONS_CURRENT.with(|c| c.set(Some(enabled)));
     PROMPT_SUGGESTIONS_LOADED.with(|l| l.set(true));
 }
 
-// -- Composer multiline (Shift+Enter newline) --------------------------------
-
 thread_local! {
-    static COMPOSER_MULTILINE_CURRENT: Cell<bool> =
-        const { Cell::new(COMPOSER_MULTILINE_DEFAULT) };
+    static COMPOSER_MULTILINE_CURRENT: Cell<bool> = const { Cell::new(COMPOSER_MULTILINE_DEFAULT) };
     static COMPOSER_MULTILINE_LOADED: Cell<bool> = const { Cell::new(false) };
 }
 
-/// Cached `[ui].composer_multiline`. Default on. When false, Enter and
-/// Shift+Enter never insert a newline in the Human box.
+/// Cached `[ui].composer_multiline`. Default on when unset.
 pub fn load_composer_multiline() -> bool {
     COMPOSER_MULTILINE_LOADED.with(|loaded| {
         if !loaded.get() {
@@ -629,16 +627,13 @@ pub fn set_composer_multiline(enabled: bool) {
     COMPOSER_MULTILINE_LOADED.with(|l| l.set(true));
 }
 
-// -- Allow session Multiline -------------------------------------------------
-
 thread_local! {
     static ALLOW_SESSION_MULTILINE_CURRENT: Cell<bool> =
         const { Cell::new(ALLOW_SESSION_MULTILINE_DEFAULT) };
     static ALLOW_SESSION_MULTILINE_LOADED: Cell<bool> = const { Cell::new(false) };
 }
 
-/// Cached `[ui].allow_session_multiline`. Default on. When false, slash,
-/// Ctrl+M, and the Multiline settings row cannot turn session Multiline on.
+/// Cached `[ui].allow_session_multiline`. Default on when unset.
 pub fn load_allow_session_multiline() -> bool {
     ALLOW_SESSION_MULTILINE_LOADED.with(|loaded| {
         if !loaded.get() {
@@ -776,16 +771,29 @@ pub fn set_keep_text_selection(value: TextSelection) {
     KEEP_TEXT_SELECTION_LOADED.with(|l| l.set(true));
 }
 
-// -- Scroll speed ------------------------------------------------------------
+/// Apply the server's soft default for `keep_text_selection`, called once at startup after [`prime`].
+///
+/// A recognized remote value becomes the default only when the user never picked a text-selection setting; any explicit local choice wins.
+pub fn apply_remote_keep_text_selection_default(remote_default: Option<&str>, ui: &UiConfig) {
+    let Some(value) = remote_default.and_then(TextSelection::from_canonical) else {
+        return;
+    };
+    let user_expressed_preference = ui.keep_text_selection.is_some()
+        || ui.selection_highlight_duration_ms.is_some()
+        || ui.double_click_action.as_deref() == Some("word_select");
+    if user_expressed_preference {
+        return;
+    }
+    set_keep_text_selection(value);
+}
 
 thread_local! {
     static SCROLL_SPEED_CURRENT: Cell<u8> = const { Cell::new(SCROLL_SPEED_DEFAULT) };
     static SCROLL_SPEED_LOADED: Cell<bool> = const { Cell::new(false) };
 }
 
-/// Read cached scroll speed (1..=100), seeding from disk + env var on
-/// first call. `GROK_SCROLL_SPEED` overrides config.toml — matches the
-/// legacy `appearance::persist::load_scroll_speed` behaviour.
+/// Read cached scroll speed (1..=100), seeding from disk and the env var on first call.
+/// `GROK_SCROLL_SPEED` overrides config.toml.
 pub fn load_scroll_speed() -> u8 {
     SCROLL_SPEED_LOADED.with(|loaded| {
         if !loaded.get() {
@@ -802,23 +810,19 @@ pub fn load_scroll_speed() -> u8 {
     SCROLL_SPEED_CURRENT.with(|c| c.get())
 }
 
-/// Replace cached scroll speed. Input clamped to `[1, 100]` to match
-/// the registry's `Int { min: 1, max: 100 }` bounds.
+/// Replace cached scroll speed, clamped to `[1, 100]` to match the registry's `Int { min: 1, max: 100 }` bounds.
 pub fn set_scroll_speed(speed: u8) {
     SCROLL_SPEED_CURRENT.with(|c| c.set(speed.clamp(SCROLL_SPEED_MIN, SCROLL_SPEED_MAX)));
     SCROLL_SPEED_LOADED.with(|l| l.set(true));
 }
-
-// -- Scroll mode (auto | wheel | trackpad) -----------------------------------
 
 thread_local! {
     static SCROLL_MODE_CURRENT: Cell<ScrollMode> = const { Cell::new(SCROLL_MODE_DEFAULT) };
     static SCROLL_MODE_LOADED: Cell<bool> = const { Cell::new(false) };
 }
 
-/// Read cached `scroll_mode`, seeding from disk + env var on first call.
-/// `GROK_SCROLL_MODE` overrides `[ui].scroll_mode` (the `GROK_SCROLL_SPEED`
-/// contract); unrecognized values from either source fall back to `auto`.
+/// Read cached `scroll_mode`, seeding from disk and the env var on first call.
+/// `GROK_SCROLL_MODE` overrides `[ui].scroll_mode`, like `GROK_SCROLL_SPEED` does for speed; unrecognized values fall back to `auto`.
 pub fn load_scroll_mode() -> ScrollMode {
     SCROLL_MODE_LOADED.with(|loaded| {
         if !loaded.get() {
@@ -844,14 +848,12 @@ pub fn set_scroll_mode(value: ScrollMode) {
     SCROLL_MODE_LOADED.with(|l| l.set(true));
 }
 
-// -- Invert scroll ------------------------------------------------------------
-
 thread_local! {
     static INVERT_SCROLL_CURRENT: Cell<bool> = const { Cell::new(INVERT_SCROLL_DEFAULT) };
     static INVERT_SCROLL_LOADED: Cell<bool> = const { Cell::new(false) };
 }
 
-/// Read cached `invert_scroll`, seeding from disk + env var on first call.
+/// Read cached `invert_scroll`, seeding from disk and the env var on first call.
 /// `GROK_INVERT_SCROLL` (`1`/`true`/`0`/`false`) overrides `[ui].invert_scroll`.
 pub fn load_invert_scroll() -> bool {
     INVERT_SCROLL_LOADED.with(|loaded| {
@@ -879,16 +881,14 @@ pub fn set_invert_scroll(enabled: bool) {
     INVERT_SCROLL_LOADED.with(|l| l.set(true));
 }
 
-// -- Scroll lines ------------------------------------------------------------
-
 thread_local! {
     static SCROLL_LINES_CURRENT: Cell<u8> = const { Cell::new(SCROLL_LINES_UNSET) };
     static SCROLL_LINES_LOADED: Cell<bool> = const { Cell::new(false) };
 }
 
-/// Read cached `scroll_lines` (1..=10), seeding from disk + env var on first
-/// call. `None` = never configured, so the per-terminal scroll profile keeps
-/// its own lines-per-tick. `GROK_SCROLL_LINES` overrides `[ui].scroll_lines`.
+/// Read cached `scroll_lines` (1..=10), seeding from disk and the env var on first call.
+/// `None` means the user never configured it, so the per-terminal scroll profile keeps its own lines-per-tick.
+/// `GROK_SCROLL_LINES` overrides `[ui].scroll_lines`.
 pub fn load_scroll_lines() -> Option<u8> {
     SCROLL_LINES_LOADED.with(|loaded| {
         if !loaded.get() {
@@ -913,29 +913,19 @@ pub fn load_scroll_lines() -> Option<u8> {
     })
 }
 
-/// Replace cached `scroll_lines`. Input clamped to `[1, 10]` to match the
-/// registry's `Int { min: 1, max: 10 }` bounds.
+/// Replace cached `scroll_lines`, clamped to `[1, 10]` to match the registry's `Int { min: 1, max: 10 }` bounds.
 pub fn set_scroll_lines(lines: u8) {
     SCROLL_LINES_CURRENT.with(|c| c.set(lines.clamp(SCROLL_LINES_MIN, SCROLL_LINES_MAX)));
     SCROLL_LINES_LOADED.with(|l| l.set(true));
 }
-
-// -- Render mermaid (auto | on | off) ---------------------------------------
 
 thread_local! {
     static RENDER_MERMAID_CURRENT: Cell<RenderMermaid> = const { Cell::new(RenderMermaid::Auto) };
     static RENDER_MERMAID_LOADED: Cell<bool> = const { Cell::new(false) };
 }
 
-/// Read the cached `render_mermaid` preference, seeding from
-/// `[ui].render_mermaid` on first call.
-///
-/// Mirrors `vim_mode`: the cache is the process-wide render-path source of
-/// truth, modal commits update it optimistically, and the value is persisted to
-/// disk (via `PersistSetting`) so it survives restarts. The thread-local is
-/// coherent because scrollback render + dispatch run on the one main thread
-/// (see the module docs); a render on any other thread would lazy-seed from
-/// disk and would not observe an in-session modal override.
+/// Render-path source of truth: the modal updates it optimistically, `PersistSetting` writes disk.
+/// Must stay on the main thread; another thread would seed from disk and miss modal overrides.
 pub fn load_render_mermaid() -> RenderMermaid {
     RENDER_MERMAID_LOADED.with(|loaded| {
         if !loaded.get() {
@@ -949,8 +939,7 @@ pub fn load_render_mermaid() -> RenderMermaid {
     RENDER_MERMAID_CURRENT.with(|c| c.get())
 }
 
-/// Parse a `[ui].render_mermaid` config value into the preference, defaulting to
-/// `Auto` for an absent or unrecognized value (the seed-path fallback).
+/// An absent or unrecognized config value falls back to `Auto`.
 fn render_mermaid_from_config_str(value: Option<&str>) -> RenderMermaid {
     value
         .and_then(RenderMermaid::from_canonical)
@@ -963,10 +952,7 @@ pub fn set_render_mermaid(value: RenderMermaid) {
     RENDER_MERMAID_LOADED.with(|l| l.set(true));
 }
 
-// -- Prime + read path ------------------------------------------------------
-
-/// Seed all caches from the live `UiConfig` at startup so subsequent
-/// `load*()` calls never hit disk on the render hot path.
+/// Seed all caches from the live `UiConfig` at startup so subsequent `load*()` calls never hit disk on the render hot path.
 pub fn prime(ui: &UiConfig) {
     set(ui.compact_mode);
     set_timestamps(ui.show_timestamps.unwrap_or(TIMESTAMPS_DEFAULT));
@@ -976,14 +962,16 @@ pub fn prime(ui: &UiConfig) {
         ui.combine_queued_prompts
             .unwrap_or(COMBINE_QUEUED_PROMPTS_DEFAULT),
     );
+    set_follow_up_behavior(
+        ui.follow_up_behavior
+            .as_deref()
+            .and_then(FollowUpBehavior::from_canonical)
+            .unwrap_or(FOLLOW_UP_BEHAVIOR_DEFAULT),
+    );
     set_simple_mode(ui.simple_mode.unwrap_or(SIMPLE_MODE_DEFAULT));
     set_keep_text_selection(text_selection_from_ui(ui));
-    set_scrub_ascii_punct(ui.scrub_ascii_punct_enabled());
-    set_ulid_session_ids(ui.ulid_session_ids_enabled());
-    set_hide_header(ui.hide_header);
-    set_plan_approval_force_modal(ui.plan_approval_force_modal());
-    // Layered-config keys (not the `UiConfig` arg) — seed so the first frame
-    // skips disk. `load_*` is a no-op when already set (e.g. resolve at startup).
+    // These keys live in the layered config, not the `UiConfig` arg; seed them so the first frame skips disk
+    // `load_*` is a no-op when already set (e.g. by the startup resolve).
     let _ = load_vim_mode();
     let _ = load_scroll_speed();
     let _ = load_scroll_mode();
@@ -995,9 +983,12 @@ pub fn prime(ui: &UiConfig) {
         ui.always_expand_thinking
             .unwrap_or(ALWAYS_EXPAND_THINKING_DEFAULT),
     );
+    // Unset stays on (`scrub_ascii_punct_enabled`). A configured false must win over the thread-local default.
+    set_scrub_ascii_punct(ui.scrub_ascii_punct_enabled());
     let _ = load_group_tool_verbs();
     let _ = load_collapsed_edit_blocks();
     let _ = load_prompt_suggestions();
+    set_ulid_session_ids(ui.ulid_session_ids_enabled());
     set_composer_multiline(ui.composer_multiline_enabled());
     set_allow_session_multiline(ui.allow_session_multiline_enabled());
     let _ = load_auto_run_implement();
@@ -1007,11 +998,15 @@ pub fn prime(ui: &UiConfig) {
     crate::appearance::permission_cursor::prime();
 }
 
-/// Read a `[subagents].<key>` boolean from the shell's layered effective config.
+/// Read a `[ui].<key>` boolean from the shell's layered effective config (managed, then user, then defaults).
+fn load_bool_from_effective_config(key: &str, default: bool) -> bool {
+    load_bool_option_from_effective_config(key).unwrap_or(default)
+}
+
+/// Read a `[subagents].<key>` boolean from the layered effective config.
 fn load_subagents_bool_from_effective_config(key: &str, default: bool) -> bool {
-    let root = match xai_grok_config::load_effective_config_disk_only() {
-        Ok(r) => r,
-        Err(_) => return default,
+    let Ok(root) = xai_grok_config::load_effective_config_disk_only() else {
+        return default;
     };
     root.get("subagents")
         .and_then(|sa| sa.get(key))
@@ -1019,30 +1014,15 @@ fn load_subagents_bool_from_effective_config(key: &str, default: bool) -> bool {
         .unwrap_or(default)
 }
 
-/// Read a `[ui].<key>` boolean from the shell's layered effective config
-/// (managed → user → defaults). Falls back to `default` on any error.
-fn load_bool_from_effective_config(key: &str, default: bool) -> bool {
-    let root = match xai_grok_config::load_effective_config_disk_only() {
-        Ok(r) => r,
-        Err(_) => return default,
-    };
+fn load_bool_option_from_effective_config(key: &str) -> Option<bool> {
+    let root = xai_grok_config::load_effective_config_disk_only().ok()?;
     root.get("ui")
         .and_then(|ui| ui.get(key))
         .and_then(|v| v.as_bool())
-        .unwrap_or(default)
 }
 
-/// Resolve the unified text-selection mode from a parsed `UiConfig`.
-///
-/// Precedence:
-/// 1. Explicit canonical `[ui].keep_text_selection` (`flash` | `hold` |
-///    `word_select`) always wins — Settings and hand-edits must stick even if a
-///    retired `double_click_action` key is still on disk.
-/// 2. Else retired `double_click_action = "word_select"` migrates to
-///    `word_select` (pre-unification / hand-edited configs only; Settings
-///    clears it on any write via `set_keep_text_selection`).
-/// 3. Else legacy bool / `selection_highlight_duration_ms` fallback (`hold` vs
-///    `flash`).
+/// Explicit `keep_text_selection` wins over a retired on-disk `double_click_action`.
+/// The remote soft default is applied at startup and does not change this resolution.
 fn text_selection_from_ui(ui: &UiConfig) -> TextSelection {
     if let Some(kind) = ui
         .keep_text_selection
@@ -1051,14 +1031,14 @@ fn text_selection_from_ui(ui: &UiConfig) -> TextSelection {
     {
         return kind;
     }
-    // Legacy only when keep_text_selection is unset/non-canonical.
+    // The legacy keys apply only when keep_text_selection is unset or non-canonical
     if ui.double_click_action.as_deref() == Some("word_select") {
         return TextSelection::WordSelect;
     }
-    if ui.keep_text_selection_enabled() {
-        TextSelection::Hold
-    } else {
-        TextSelection::Flash
+    match ui.selection_highlight_duration_ms {
+        Some(0) => TextSelection::Hold,
+        Some(_) => TextSelection::Flash,
+        None => KEEP_TEXT_SELECTION_DEFAULT,
     }
 }
 
@@ -1090,7 +1070,6 @@ fn load_u8_from_effective_config(key: &str, default: u8) -> u8 {
 }
 
 /// Read a `[ui].<key>` string from the shell's layered effective config.
-/// `None` on any error or when the key is absent.
 fn load_str_from_effective_config(key: &str) -> Option<String> {
     let root = xai_grok_config::load_effective_config_disk_only().ok()?;
     root.get("ui")
@@ -1098,8 +1077,6 @@ fn load_str_from_effective_config(key: &str) -> Option<String> {
         .and_then(|v| v.as_str())
         .map(str::to_string)
 }
-
-// -- Tests -------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
@@ -1119,6 +1096,10 @@ mod tests {
             COMBINE_QUEUED_PROMPTS_DEFAULT,
             ui.combine_queued_prompts
                 .unwrap_or(COMBINE_QUEUED_PROMPTS_DEFAULT)
+        );
+        assert_eq!(
+            FOLLOW_UP_BEHAVIOR_DEFAULT.as_canonical(),
+            ui.follow_up_behavior()
         );
         assert_eq!(SIMPLE_MODE_DEFAULT, ui.simple_mode.unwrap_or(true));
         assert_eq!(VIM_MODE_DEFAULT, ui.vim_mode.unwrap_or(false));
@@ -1141,7 +1122,7 @@ mod tests {
             ui.collapsed_edit_blocks
                 .unwrap_or(COLLAPSED_EDIT_BLOCKS_DEFAULT)
         );
-        // Deliberate constant pin: the rollout contract is default-OFF.
+        // Deliberately asserting on a constant: the rollout contract pins the default off
         #[allow(clippy::assertions_on_constants)]
         {
             assert!(
@@ -1170,15 +1151,14 @@ mod tests {
                 .unwrap_or_default()
         );
         assert_eq!(INVERT_SCROLL_DEFAULT, ui.invert_scroll.unwrap_or(false));
-        // None on disk = the SCROLL_LINES_UNSET sentinel (profile default).
+        // None on disk means the SCROLL_LINES_UNSET sentinel (profile default)
         assert_eq!(
             SCROLL_LINES_UNSET,
             ui.scroll_lines.unwrap_or(SCROLL_LINES_UNSET)
         );
     }
 
-    /// `set` then `load` round-trips. Runs in a fresh thread because
-    /// `Cell<bool>` thread-locals are sticky across `#[test]`s.
+    /// Runs in a fresh thread because `Cell<bool>` thread-locals are sticky across `#[test]`s.
     #[test]
     fn set_then_load_round_trips_compact() {
         std::thread::spawn(|| {
@@ -1476,9 +1456,7 @@ mod tests {
         .unwrap();
     }
 
-    /// `set_scroll_lines` clamps to `[1, 10]` (the registry bounds); a set
-    /// value always reads back as `Some` — only the never-configured seed
-    /// path can yield `None` (profile default).
+    /// A set value always reads back as `Some`; only the never-configured seed path yields `None`.
     #[test]
     fn set_scroll_lines_round_trips_and_clamps_to_bounds() {
         std::thread::spawn(|| {
@@ -1507,11 +1485,7 @@ mod tests {
         .unwrap();
     }
 
-    /// The first-read seed parse: a valid `[ui].render_mermaid` value maps to
-    /// the preference; an absent or unrecognized value falls back to `Auto`.
-    /// (Exercises the parse path `load_render_mermaid` runs on its disk seed;
-    /// the disk read itself goes through the shell's layered config and is
-    /// covered by integration use.)
+    /// Exercises the parse path `load_render_mermaid` runs on its disk seed; the disk read itself is covered by integration use.
     #[test]
     fn render_mermaid_config_seed_parse() {
         assert_eq!(
@@ -1526,7 +1500,7 @@ mod tests {
             render_mermaid_from_config_str(Some("auto")),
             RenderMermaid::Auto
         );
-        // Invalid / absent → default Auto (the #5-class fallback).
+        // Invalid or absent input falls back to Auto
         assert_eq!(
             render_mermaid_from_config_str(Some("garbage")),
             RenderMermaid::Auto
@@ -1555,7 +1529,6 @@ mod tests {
     #[test]
     fn caches_are_independent() {
         std::thread::spawn(|| {
-            // ── compact independent (the other two stay true) ──
             set(false);
             set_timestamps(true);
             set_simple_mode(true);
@@ -1569,7 +1542,6 @@ mod tests {
                 "simple_mode must NOT toggle when compact changed"
             );
 
-            // ── timestamps independent ──
             set(true);
             set_timestamps(false);
             set_simple_mode(true);
@@ -1580,7 +1552,6 @@ mod tests {
                 "simple_mode must NOT toggle when timestamps changed"
             );
 
-            // ── simple_mode independent ──
             set(true);
             set_timestamps(true);
             set_simple_mode(false);
@@ -1595,12 +1566,12 @@ mod tests {
         .unwrap();
     }
 
-    /// First `load()` seeds from disk, subsequent calls return the
-    /// same value (cache stabilises). Fresh thread = un-seeded locals.
+    /// The first `load()` seeds from disk and subsequent calls return the same value.
+    /// A fresh thread starts with un-seeded thread-locals.
     #[test]
     fn first_load_seeds_then_subsequent_loads_are_stable() {
         std::thread::spawn(|| {
-            // First reads — exercise the lazy-seed branch.
+            // First reads exercise the lazy-seed branch
             let c1 = load();
             let t1 = load_timestamps();
             let s1 = load_simple_mode();
@@ -1688,9 +1659,8 @@ mod tests {
         .unwrap();
     }
 
-    /// Backward-compat: the retired hidden `double_click_action = "word_select"`
-    /// flag migrates onto the unified `word_select` mode when
-    /// `keep_text_selection` is unset.
+    /// The retired hidden `double_click_action = "word_select"` flag migrates onto the unified `word_select` mode.
+    /// It applies only when `keep_text_selection` is unset.
     #[test]
     fn prime_migrates_legacy_double_click_action_flag() {
         std::thread::spawn(|| {
@@ -1705,9 +1675,8 @@ mod tests {
         .unwrap();
     }
 
-    /// Explicit `keep_text_selection` must beat a leftover
-    /// `double_click_action = "word_select"` so Settings/hand-edits stick and
-    /// the legacy key cannot re-override on every prime/load.
+    /// An explicit `keep_text_selection` must beat a leftover `double_click_action = "word_select"`.
+    /// Otherwise the legacy key would re-override Settings and hand-edits on every prime or load.
     #[test]
     fn explicit_keep_text_selection_wins_over_legacy_double_click() {
         std::thread::spawn(|| {
@@ -1728,6 +1697,39 @@ mod tests {
                     "explicit keep_text_selection={paired} must win over double_click_action"
                 );
             }
+        })
+        .join()
+        .unwrap();
+    }
+
+    /// The remote `keep_text_selection_default` sets only the untouched default.
+    /// It never overrides an explicit local choice and ignores unknown values.
+    #[test]
+    fn remote_keep_text_selection_default_sets_only_untouched_default() {
+        std::thread::spawn(|| {
+            // Absent or unrecognized: the compile-time default (flash) stands.
+            set_keep_text_selection(TextSelection::Flash);
+            apply_remote_keep_text_selection_default(None, &UiConfig::default());
+            assert_eq!(load_keep_text_selection(), TextSelection::Flash);
+            apply_remote_keep_text_selection_default(Some("nonsense"), &UiConfig::default());
+            assert_eq!(load_keep_text_selection(), TextSelection::Flash);
+
+            // With no user preference, a recognized value is adopted (word_select and hold)
+            set_keep_text_selection(TextSelection::Flash);
+            apply_remote_keep_text_selection_default(Some("word_select"), &UiConfig::default());
+            assert_eq!(load_keep_text_selection(), TextSelection::WordSelect);
+            set_keep_text_selection(TextSelection::Flash);
+            apply_remote_keep_text_selection_default(Some("hold"), &UiConfig::default());
+            assert_eq!(load_keep_text_selection(), TextSelection::Hold);
+
+            // The user explicitly chose flash: the user wins over a remote value.
+            set_keep_text_selection(TextSelection::Flash);
+            let ui = UiConfig {
+                keep_text_selection: Some("flash".into()),
+                ..UiConfig::default()
+            };
+            apply_remote_keep_text_selection_default(Some("word_select"), &ui);
+            assert_eq!(load_keep_text_selection(), TextSelection::Flash);
         })
         .join()
         .unwrap();

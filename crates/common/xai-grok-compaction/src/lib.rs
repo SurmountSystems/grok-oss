@@ -61,16 +61,15 @@ pub use intra_compaction::DEFAULT_COMPACTION_MODEL_NAME;
 // re-exported at the crate root so consumers keep a stable public API.
 pub use code_compaction::{
     AutoCompactThreshold, CompactedHistoryParts, DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT,
-    FailureKind, FullReplaceAttemptOutcome, FullReplaceConfig, FullReplaceContext,
-    FullReplaceError, FullReplaceObserver, FullReplaceOutput, FullReplaceSummary,
-    GROK_45_CONTEXT_WINDOW_TOKENS, GROK_45_DEFAULT_AUTO_COMPACT_TOKENS,
-    GROK_45_LONG_CONTEXT_PRICE_THRESHOLD_TOKENS, MIN_SUMMARY_SEED_CHARS,
-    NESTED_SESSION_CONTEXT_CAP, SELF_SUMMARIZATION_PROMPT, SESSION_ATTENTION_TARGET_PERCENT,
-    SummaryPromptKind, apply_full_replace_compaction, assemble_compacted_history,
-    build_summary_prompt, build_summary_prompt_kind, classify_http_status,
-    classify_stream_event_error, format_compact_summary, format_compact_summary_content,
-    is_context_length_error, is_degenerate_summary, sample_full_replace_summary,
-    session_attention_target_tokens, session_sampling_window, wrap_user_query,
+    FullReplaceAttemptOutcome, FullReplaceConfig, FullReplaceContext, FullReplaceError,
+    FullReplaceObserver, FullReplaceOutput, FullReplaceSummary, GROK_45_CONTEXT_WINDOW_TOKENS,
+    GROK_45_DEFAULT_AUTO_COMPACT_TOKENS, GROK_45_LONG_CONTEXT_PRICE_THRESHOLD_TOKENS,
+    MIN_SUMMARY_SEED_CHARS, NESTED_SESSION_CONTEXT_CAP, SELF_SUMMARIZATION_PROMPT,
+    SESSION_ATTENTION_TARGET_PERCENT, SummaryPromptKind, apply_full_replace_compaction,
+    assemble_compacted_history, build_summary_prompt, build_summary_prompt_kind,
+    format_compact_summary, format_compact_summary_content, is_context_length_error,
+    is_degenerate_summary, sample_full_replace_summary, session_attention_target_tokens,
+    session_sampling_window, wrap_user_query,
 };
 pub use item::{
     CompactionFileRef, CompactionItem, CompactionItemBuilder, CompactionItemFactory, CompactionRole,

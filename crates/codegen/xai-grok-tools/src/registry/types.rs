@@ -20,24 +20,19 @@ use crate::{
     },
     util::remap::remap_json_keys,
 };
-use parking_lot::Mutex;
+use parking_lot::{Mutex, RwLock};
+
+// These files are not `pub mod` on `grok_build`. Register them from here.
+#[path = "../implementations/grok_build/implement_memory/mod.rs"]
+mod implement_memory;
+#[path = "../implementations/grok_build/json_to_toon/mod.rs"]
+mod json_to_toon;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
-/// Process-global registry of external "tool packs" — functions that
-/// contribute additional tool registrations into every
-/// [`ToolRegistryBuilder::new`].
-///
-/// This inverts the dependency for harness code that must live outside
-/// this crate: instead of `xai-grok-tools` referencing an out-of-tree tool
-/// pack, the pack calls
-/// [`register_tool_pack`] at startup and registers itself here.
-///
-/// # Ordering contract
-/// [`register_tool_pack`] MUST run before the FIRST `ToolRegistryBuilder::new()`
-/// in the process. Packs registered after a builder
-/// has been constructed do not retroactively apply to that builder.
-/// A tool pack: a function that contributes registrations to a builder.
+/// Process-global registry of external "tool packs" — functions that contribute additional tool registrations into every
+/// [`ToolRegistryBuilder::new`]. This inverts the dependency for harness code that must live outside this crate: instead of `xai-grok-tools`
+/// referencing an out-of-tree tool pack, the pack calls [`register_tool_pack`] at startup and registers itself here.
 pub type ToolPack = fn(&mut ToolRegistryBuilder);
 static TOOL_PACKS: OnceLock<Mutex<Vec<ToolPack>>> = OnceLock::new();
 fn tool_packs() -> &'static Mutex<Vec<ToolPack>> {
@@ -49,6 +44,21 @@ fn tool_packs() -> &'static Mutex<Vec<ToolPack>> {
 pub fn register_tool_pack(pack: ToolPack) {
     tool_packs().lock().push(pack);
 }
+/// Input-schema property names that, across the harnesses served here, hold the file a tool
+/// touches. A registered tool exposing one of these without a
+/// [`ToolMetadata::lock_path_param`] is flagged by
+/// [`ToolRegistryBuilder::unclassified_path_tools`].
+pub const LOCK_PATH_SHAPED_PROPERTIES: &[&str] = &[
+    "file_path",
+    "path",
+    "target_file",
+    "filePath",
+    "target_notebook",
+];
+/// Registered tools with a path-shaped property that deliberately declare no
+/// [`ToolMetadata::lock_path_param`]. Every entry needs a reason; the audit skips these ids.
+pub const LOCK_PATH_UNLOCKED_BY_DESIGN: &[&str] =
+    &["OpenCode:glob", "Pi:find", "Pi:ls", "GrokBuild:memory_get"];
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ToolConfig {
     pub id: String,
@@ -58,31 +68,18 @@ pub struct ToolConfig {
     pub name_override: Option<String>,
     /// { canonical param → client-facing param }.
     pub params_name_overrides: Option<HashMap<String, String>>,
-    /// When `Some`, replaces the tool's `description_template()` entirely.
-    ///
-    /// Use this when the same built-in tool needs a context-specific
-    /// description — e.g. `run_terminal_cmd` in a container environment
-    /// vs. the default host-shell description.
+    /// When `Some`, replaces the tool's `description_template()` entirely. Use this when the same
+    /// built-in tool needs a context-specific description — e.g. `run_terminal_cmd` in a container
+    /// environment vs. the default host-shell description.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description_override: Option<String>,
     /// Per-tool behavior version override. Wins over `ToolServerConfig::behavior_preset`.
     /// Only valid for version-managed tools (see `versions::MANAGED_TOOLS`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub behavior_version: Option<String>,
-    /// The tool's capability category. Populated automatically by
-    /// `for_tool::<T>()` / `From<&T: Tool>` and used by capability-mode
-    /// enforcement to filter tools without a hardcoded ID mapping.
-    ///
-    /// `None` means the tool's kind is unknown (e.g. MCP/custom tools
-    /// created via `ToolConfig::from_id()`). Capability-mode filtering
-    /// preserves tools with `kind: None` — this is intentional to avoid
-    /// breaking extensibility.
-    ///
-    /// `ToolKind` is `#[serde(other)]`, so an unknown deserialized `kind` becomes
-    /// `Some(Other)` (dropped by restrictive modes) rather than an error — not a
-    /// live path today since `kind` is auto-populated and `from_id` leaves it
-    /// `None`. [`deserialize_config_kind`] warns on that sink so a config typo
-    /// doesn't silently demote the tool.
+    /// The tool's capability category. Populated automatically by `for_tool::<T>()` / `From<&T: Tool>` and used by capability-mode enforcement to
+    /// filter tools without a hardcoded ID mapping. `ToolKind` is `#[serde(other)]`, so an unknown deserialized `kind` becomes `Some(Other)`
+    /// (dropped by restrictive modes) rather than an error — not a live path today since `kind` is auto-populated and `from_id` leaves it `None`.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -108,28 +105,18 @@ where
     Ok(Some(kind))
 }
 impl ToolConfig {
-    /// Build a `ToolConfig` from a tool TYPE.
-    ///
-    /// The fully-qualified id (`"<namespace>:<id>"`) and `kind` are derived
-    /// from the type via `ToolMetadata::tool_namespace()` and
-    /// `xai_tool_runtime::Tool::id()`. Use this for built-in tools known
-    /// at compile time — it gives compile-time checking of the tool name
-    /// and auto-populates `kind` so capability-mode filtering works.
-    ///
-    /// Requires `T: Default` because deriving the namespace/id needs an
-    /// instance. All built-in tools satisfy this (it is also a bound on
-    /// `ToolRegistryBuilder::register`).
+    /// Build a `ToolConfig` from a tool TYPE. The fully-qualified id (`"<namespace>:<id>"`) and `kind` are derived from the type via
+    /// `ToolMetadata::tool_namespace()` and `xai_tool_runtime::Tool::id()`. Requires `T: Default` because deriving the namespace/id needs an
+    /// instance. All built-in tools satisfy this (it is also a bound on `ToolRegistryBuilder::register`).
     pub fn for_tool<T>() -> Self
     where
         T: crate::types::tool_metadata::ToolMetadata + xai_tool_runtime::Tool + Default,
     {
         Self::from(&T::default())
     }
-    /// Build a `ToolConfig` from a string id (no associated Rust type).
-    ///
-    /// Use this for MCP/custom tools or anywhere the id is only known at
-    /// runtime. `kind` is left as `None`; capability-mode filtering then
-    /// preserves the tool unconditionally.
+    /// Build a `ToolConfig` from a string id (no associated Rust type). Use this for MCP/custom
+    /// tools or anywhere the id is only known at runtime. `kind` is left as `None`; capability-mode
+    /// filtering then preserves the tool unconditionally.
     pub fn from_id(id: impl Into<String>) -> Self {
         Self {
             id: id.into(),
@@ -169,10 +156,8 @@ impl ToolConfig {
             .insert(from.into(), to.into());
         self
     }
-    /// Resolve the client-facing tool name.
-    ///
-    /// Returns `name_override` when set, otherwise falls back to `default_id`
-    /// (typically `ToolEntry::id` — the unqualified tool name such as
+    /// Resolve the client-facing tool name. Returns `name_override` when set, otherwise falls back
+    /// to `default_id` (typically `ToolEntry::id` — the unqualified tool name such as
     /// `"read_file"`).
     pub fn resolve_client_name(&self, default_id: &str) -> String {
         self.name_override
@@ -219,11 +204,9 @@ pub struct SubagentSessionResources {
     pub depth: crate::implementations::grok_build::task::types::SubagentDepthCounter,
     pub session_id: crate::implementations::grok_build::task::types::SessionIdResource,
 }
-/// Everything a session provides at finalization time.
-///
-/// This is the **public API boundary** — callers pass concrete, strongly-typed
-/// values. The builder converts these into type-erased `Resources` entries
-/// internally, so callers never touch `Resources` directly.
+/// Everything a session provides at finalization time. This is the **public API boundary** —
+/// callers pass concrete, strongly-typed values. The builder converts these into type-erased
+/// `Resources` entries internally, so callers never touch `Resources` directly.
 pub struct SessionContext {
     /// Terminal backend for shell execution (bash, kill_task, task_output).
     pub backend: Arc<dyn TerminalBackend>,
@@ -249,20 +232,17 @@ pub struct SessionContext {
         Option<crate::implementations::grok_build::scheduler::types::SchedulerHandle>,
     /// Available skills for the Skill tool and description templates.
     pub skills: Vec<SkillInfo>,
-    /// File path for persisting Resources state across restarts.
-    ///
-    /// The toolset loads existing state on construction and auto-saves
-    /// after every tool execution. The file stores serialized `State<T>`
-    /// values (e.g., `TodoState`).
+    /// File path for persisting Resources state across restarts. The toolset loads existing state on construction and
+    /// auto-saves after every tool execution. The file stores serialized `State<T>` values (e.g., `TodoState`). Empty means
+    /// this registry gives the session a handle that reads and writes nothing.
     pub state_path: PathBuf,
     /// Optional memory backend for cross-session knowledge retrieval.
     /// When `Some`, injected into `Resources` so `memory_search` / `memory_get`
     /// tools can access it. When `None`, the tools return "not enabled".
     pub memory_backend: Option<Arc<dyn crate::types::memory_backend::MemoryBackend>>,
-    /// Optional web search configuration. When `Enabled`, a `WebSearchClient`
-    /// is created and injected into `Resources` so the `web_search` tool can
-    /// call the Responses API. When `Disabled` (default), the tool returns a
-    /// graceful error if invoked.
+    /// Optional web search configuration. When `Enabled`, a `WebSearchClient` is created and
+    /// injected into `Resources` so the `web_search` tool can call the Responses API. When
+    /// `Disabled` (default), the tool returns a graceful error if invoked.
     pub web_search_config: crate::implementations::web_search::WebSearchConfig,
     /// Optional web fetch configuration. When `Enabled`, a `WebFetchClient`
     /// is created and injected into `Resources` so the `web_fetch` tool can
@@ -272,37 +252,30 @@ pub struct SessionContext {
     /// passed to every session. Same pattern as `fs` and `backend`.
     /// When `Some`, inserted into `Resources` so `LspTool` can use it.
     pub lsp: Option<std::sync::Arc<dyn crate::implementations::lsp::LspBackend>>,
-    /// Optional image generation configuration. When `Enabled`, an `ImageGenClient`
-    /// is created and injected into `Resources` so the `image_gen` tool can
-    /// call the xAI Imagine API. When `Disabled` (default), the tool is not
-    /// registered and image generation is unavailable.
+    /// Optional image generation configuration. When `Enabled`, an `ImageGenClient` is created and
+    /// injected into `Resources` so the `image_gen` tool can call the xAI Imagine API. When
+    /// `Disabled` (default), the tool is not registered and image generation is unavailable.
     pub image_gen_config: crate::implementations::grok_build::image_gen::ImageGenConfig,
-    /// Optional video generation configuration. When `Enabled`, a `VideoGenClient`
-    /// is created and injected into `Resources` so the `video_gen` tool can
-    /// call the xAI Video Generation API. When `Disabled` (default), the tool is not
-    /// registered and video generation is unavailable.
+    /// Optional video generation configuration. When `Enabled`, a `VideoGenClient` is created and
+    /// injected into `Resources` so the `video_gen` tool can call the xAI Video Generation API.
+    /// When `Disabled` (default), the tool is not registered and video generation is unavailable.
     pub video_gen_config: crate::implementations::grok_build::video_gen::VideoGenConfig,
     /// Optional deploy service configuration. When enabled, the
     /// `deploy_app` tool connects to the service at call time using the shared
     /// API key provider.
     pub app_builder_deployer_config:
-        crate::implementations::grok_build::deploy_app::AppBuilderDeployerConfig,
-    /// Dynamic API key provider for tool HTTP clients.
-    /// When set, clients resolve the API key per-request from this provider
-    /// instead of using the key baked into their config at construction time.
-    /// Prevents 401 failures when a session outlives the initial token lifetime.
+        crate::implementations::grok_build::app_builder::AppBuilderDeployerConfig,
+    /// Dynamic API key provider for tool HTTP clients. When set, clients resolve the API key
+    /// per-request from this provider instead of using the key baked into their config at
+    /// construction time. Prevents 401 failures when a session outlives the initial token lifetime.
     pub api_key_provider: Option<crate::types::SharedApiKeyProvider>,
-    /// Auth provider which returns a xai_computer_hub_sdk::AuthCredential. Can be used by
-    /// tools that need to authenticate with services.
-    ///
-    /// Not to be confused with the api_key_provider, which is a legacy
-    /// provider used by the shell's auth manager.
+    /// Auth provider which returns a xai_computer_hub_sdk::AuthCredential. Can be used by tools
+    /// that need to authenticate with services. Not to be confused with the api_key_provider, which
+    /// is a legacy provider used by the shell's auth manager.
     pub auth_provider: Option<xai_computer_hub_sdk::SharedAuthProvider>,
-    /// Optional 401-attribution callback for tool HTTP clients. When
-    /// set, a 401 from `image_gen` / `video_gen` / `web_search`
-    /// emits an `auth_401_attribution` event via this hook. Hosts can
-    /// wire this to the same attribution sink used for inference-side
-    /// 401s so tool and chat auth failures share one telemetry path.
+    /// Optional 401-attribution callback for tool HTTP clients. When set, a 401 from `image_gen` / `video_gen` /
+    /// `web_search` emits an `auth_401_attribution` event via this hook. Hosts can wire this to the same attribution sink
+    /// used for inference-side 401s so tool and chat auth failures share one telemetry path.
     pub attribution_callback: Option<crate::SharedAttributionCallback>,
     /// Tag name for `<system-reminder>` wrappers in tool result text.
     /// Defaults to [`crate::reminders::DEFAULT_REMINDER_TAG`] (hyphen).
@@ -351,13 +324,28 @@ fn stream_no_terminal_error() -> xai_tool_runtime::ToolError {
         "dispatch stream ended without a terminal item",
     )
 }
+fn context_for_call(
+    tool_call_id: &str,
+    cwd_override: Option<std::path::PathBuf>,
+    cancellation: Option<tokio_util::sync::CancellationToken>,
+) -> xai_tool_runtime::ToolCallContext {
+    let call_id = xai_tool_protocol::ToolCallId::new(tool_call_id)
+        .unwrap_or_else(|_| xai_tool_protocol::ToolCallId::new_v7());
+    let mut ctx = xai_tool_runtime::ToolCallContext::new(call_id);
+    if let Some(cwd) = cwd_override {
+        ctx.insert(xai_tool_runtime::Cwd(cwd));
+    }
+    if let Some(cancellation) = cancellation {
+        ctx.insert(xai_tool_runtime::Cancellation(cancellation));
+    }
+    ctx
+}
 /// Converts a dispatch's `serde_json::Value` back into a `ToolOutput`.
 type OutputConverter =
     Arc<dyn Fn(serde_json::Value) -> Result<ToolOutput, serde_json::Error> + Send + Sync>;
-/// Everything captured during pre-dispatch setup that the dispatch and the
-/// post-dispatch tail need. Produced by [`FinalizedToolset::prepare_dispatch`]
-/// after the tools read guard has been dropped, so none of this is held across
-/// `.await`.
+/// Everything captured during pre-dispatch setup that the dispatch and the post-dispatch tail need.
+/// Produced by [`FinalizedToolset::prepare_dispatch`] after the tools read guard has been dropped,
+/// so none of this is held across `.await`.
 struct DispatchParts {
     /// Resolved `LocalRegistry` handle to dispatch through.
     lr_handle: Arc<dyn xai_computer_hub_core::ToolHandle>,
@@ -371,10 +359,8 @@ struct DispatchParts {
     /// `use_tool` target tool name, surfaced in the final `ToolRunResult`.
     effective_tool_name: Option<String>,
 }
-/// Per-tool metadata + instance stored in the builder.
-///
-/// Stores a type-erased dispatch handle (`ToolDispatchHandle`) and
-/// metadata (`ToolMetadata`) for each registered tool. Params-related
+/// Per-tool metadata + instance stored in the builder. Stores a type-erased dispatch handle
+/// (`ToolDispatchHandle`) and metadata (`ToolMetadata`) for each registered tool. Params-related
 /// closures capture the concrete `P` type at registration time.
 #[allow(clippy::type_complexity)]
 struct ToolEntry {
@@ -414,10 +400,9 @@ struct ReminderEntry {
 struct FinalizedTool {
     namespace: String,
     id: String,
-    /// The key under which this tool is stored in the `LocalRegistry`.
-    /// For built-in tools this equals `id`; for dynamically-registered
-    /// (MCP) tools it is `Tool::id().as_str()` which may differ from
-    /// the client-facing `id` / `client_name`.
+    /// The key under which this tool is stored in the `LocalRegistry`. For built-in tools this
+    /// equals `id`; for dynamically-registered (MCP) tools it is `Tool::id().as_str()` which may
+    /// differ from the client-facing `id` / `client_name`.
     registry_id: String,
     client_name: String,
     /// Tool metadata — kind, fingerprinting, doom-loop, reminders.
@@ -426,14 +411,15 @@ struct FinalizedTool {
     output_converter:
         Arc<dyn Fn(serde_json::Value) -> Result<ToolOutput, serde_json::Error> + Send + Sync>,
     definition: ToolDefinition,
+    /// `use_tool` re-exported without the MCP file forms, for sampling backends that must not see them. `None` elsewhere.
+    inline_mcp_definition: Option<ToolDefinition>,
     /// Effective params (defaults merged with client overrides).
     /// Kept for building `ProposedTool` during reminder evaluation and for
     /// params-aware finalized definition construction.
     effective_params: serde_json::Value,
-    /// Canonical input schema (JSON Schema) derived from the Rust input type.
-    /// This remains the internal schema used for `InputParam` requirement checks
-    /// and TemplateRenderer param-name exposure, even if the exported tool
-    /// definition schema is specialized per effective params.
+    /// Canonical input schema (JSON Schema) derived from the Rust input type. This remains the
+    /// internal schema used for `InputParam` requirement checks and TemplateRenderer param-name
+    /// exposure, even if the exported tool definition schema is specialized per effective params.
     input_schema: serde_json::Value,
     /// Client-facing param → canonical param, for reverse-remapping at dispatch.
     reverse_params: HashMap<String, String>,
@@ -446,11 +432,14 @@ struct FinalizedTool {
     /// registered (MCP) tools.
     contract_version: Option<String>,
 }
-/// Toolset produced by `ToolRegistryBuilder::finalize()`.
-///
-/// The tools vector is wrapped in `parking_lot::RwLock` to allow concurrent
-/// read access (tool dispatch) with rare write access (MCP tool registration).
-/// The read guard is held only for microsecond lookups — never across `.await`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegisteredToolIdentity {
+    pub tool_id: String,
+    pub version: Option<String>,
+}
+/// Toolset produced by `ToolRegistryBuilder::finalize()`. The tools vector is wrapped in `parking_lot::RwLock` to allow
+/// concurrent read access (tool dispatch) with rare write access (MCP tool registration). The read guard is held only
+/// for microsecond lookups — never across `.await`.
 pub struct FinalizedToolset {
     tools: parking_lot::RwLock<Vec<FinalizedTool>>,
     reminders: Vec<Box<dyn Reminder + Send + Sync>>,
@@ -529,26 +518,30 @@ pub struct ToolRegistryBuilder {
     tools: HashMap<String, ToolEntry>,
     reminders: Vec<ReminderEntry>,
     shared_local_registry: Option<xai_computer_hub_sdk::LocalRegistry>,
-    /// Whether the client delivers system reminders (completion
-    /// notifications for backgrounded commands/subagents) to the model.
-    /// Exposed to description templates as `system_reminders_enabled` so
-    /// "you are notified on completion" promises are only rendered when
-    /// the client actually delivers them. Defaults to `true` (prod CLI
-    /// behavior); the tools server sets it from
-    /// `FinalizeToolServerConfigRequest.system_reminders_enabled`.
+    /// Whether the client delivers system reminders (completion notifications for backgrounded commands/subagents) to the
+    /// model. Exposed to description templates as `system_reminders_enabled` so "you are notified on completion" promises
+    /// are only rendered when the client actually delivers them.
     system_reminders_enabled: bool,
+    mcp_file_input_preparation: bool,
+    /// The daemon's per-command sandbox seam, stored in `Resources` at finalize so the Bash tool's
+    /// spawn site finds it (`crate::sandbox_launch`).
+    sandbox_launch: Option<crate::sandbox_launch::SandboxLaunchHook>,
 }
 impl Default for ToolRegistryBuilder {
     fn default() -> Self {
         Self::new()
     }
 }
+
+/// `grok_build` does not define this. The builder already registers the named
+/// tools; pull_remote_tree is the one the registry test still requires.
+fn register_all(builder: &mut ToolRegistryBuilder) {
+    builder.register::<grok_build::PullRemoteTreeTool>();
+}
+
 impl ToolRegistryBuilder {
-    /// Register a built-in tool with no configuration params.
-    ///
-    /// For tools with typed params, use [`register_with_params`] instead.
-    ///
-    /// `pub` so out-of-tree tool packs registered via
+    /// Register a built-in tool with no configuration params. For tools with typed params, use
+    /// [`register_with_params`] instead. `pub` so out-of-tree tool packs registered via
     /// [`register_tool_pack`] can contribute tool registrations.
     pub fn register<T>(&mut self)
     where
@@ -564,14 +557,9 @@ impl ToolRegistryBuilder {
     {
         self.register_with_params::<T, ()>();
     }
-    /// Register a built-in tool with typed configuration params.
-    ///
-    /// `P` is the tool's configuration type (e.g. `BashParams`), stored
-    /// as `Params<P>` in Resources. For tools with no config, use
-    /// [`register`] which defaults `P = ()`.
-    ///
-    /// `pub` so out-of-tree tool packs registered via
-    /// [`register_tool_pack`] can contribute tool registrations.
+    /// Register a built-in tool with typed configuration params. `P` is the tool's configuration type (e.g. `BashParams`),
+    /// stored as `Params<P>` in Resources. For tools with no config, use [`register`] which defaults `P = ()`. `pub` so
+    /// out-of-tree tool packs registered via [`register_tool_pack`] can contribute tool registrations.
     pub fn register_with_params<T, P>(&mut self)
     where
         T: xai_tool_runtime::Tool
@@ -609,7 +597,13 @@ impl ToolRegistryBuilder {
                 kind,
                 requires,
                 default_params: serde_json::to_value(P::default()).unwrap_or_default(),
-                input_schema: generate_schema::<T::Args>(),
+                input_schema: if kind == ToolKind::UseTool {
+                    serde_json::json!(
+                        crate::implementations::use_tool::UseToolInput::input_schema(true)
+                    )
+                } else {
+                    generate_schema_cached::<T::Args>()
+                },
                 metadata: Box::new(tool),
                 output_converter: Box::new(|value| {
                     let typed: T::Output = serde_json::from_value(value)?;
@@ -644,23 +638,67 @@ impl ToolRegistryBuilder {
     pub fn known_tool_ids(&self) -> std::collections::HashSet<String> {
         self.tools.keys().cloned().collect()
     }
-    /// Fully-qualified tool id (`"GrokBuild:read_file"`) → declared
-    /// [`ToolKind`], for every registered tool. Lets consumers that receive
-    /// kind-less tool configs (e.g. hub `session.bind` wire entries) backfill
-    /// the kind from the binary's own registry before capability filtering.
+    /// Fully-qualified tool id (`"GrokBuild:read_file"`) → declared [`ToolKind`], for every
+    /// registered tool. Lets consumers that receive kind-less tool configs (e.g. hub `session.bind`
+    /// wire entries) backfill the kind from the binary's own registry before capability filtering.
     pub fn known_tool_kinds(&self) -> HashMap<String, ToolKind> {
         self.tools
             .iter()
             .map(|(name, entry)| (name.clone(), entry.kind))
             .collect()
     }
-    /// Register a cross-cutting reminder.
+    /// Registry-wide audit of [`ToolMetadata::lock_path_param`]. Returns one message per
+    /// registered tool that violates either rule:
     ///
-    /// Cross-cutting reminders fire after every tool call. They inspect
-    /// `ToolOutput` and `Resources` to decide whether to emit reminder text.
+    /// 1. A declared `lock_path_param` must name a property of the tool's canonical input schema.
+    /// 2. A tool whose schema has a path-shaped property ([`LOCK_PATH_SHAPED_PROPERTIES`]) must
+    ///    declare a `lock_path_param`, unless its qualified id is in `unlocked_by_design` — tools
+    ///    whose path property is deliberately not a lock key (a directory to list, a memory-store
+    ///    path). Each allowlisted id should carry a one-line reason at the call site.
     ///
-    /// Reminders that need tool/param names use `TemplateRenderer` from
-    /// Resources at runtime — no per-reminder configuration needed.
+    /// This is the guard that keeps a new harness from landing with an unclassified edit tool,
+    /// which would otherwise silently lose per-path serialization on the server and every client.
+    pub fn unclassified_path_tools(&self, unlocked_by_design: &[&str]) -> Vec<String> {
+        let mut problems = Vec::new();
+        let mut ids: Vec<&String> = self.tools.keys().collect();
+        ids.sort();
+        for id in ids {
+            let Some(entry) = self.tools.get(id) else {
+                continue;
+            };
+            let properties = entry
+                .input_schema
+                .get("properties")
+                .and_then(serde_json::Value::as_object);
+            let has_property =
+                |name: &str| properties.is_some_and(|props| props.contains_key(name));
+            match entry.metadata.lock_path_param() {
+                Some(param) if !has_property(param) => problems.push(format!(
+                    "{id}: lock_path_param() = {param:?} is not a property of its input schema"
+                )),
+                Some(_) => {}
+                None => {
+                    if unlocked_by_design.contains(&id.as_str()) {
+                        continue;
+                    }
+                    if let Some(shaped) = LOCK_PATH_SHAPED_PROPERTIES
+                        .iter()
+                        .find(|name| has_property(name))
+                    {
+                        problems.push(format!(
+                            "{id}: input schema has path-shaped property {shaped:?} but \
+                             lock_path_param() is None; declare it on the tool's ToolMetadata \
+                             or allowlist the tool with a reason"
+                        ));
+                    }
+                }
+            }
+        }
+        problems
+    }
+    /// Register a cross-cutting reminder. Cross-cutting reminders fire after every tool call. They inspect `ToolOutput` and
+    /// `Resources` to decide whether to emit reminder text. Reminders that need tool/param names use `TemplateRenderer`
+    /// from Resources at runtime — no per-reminder configuration needed.
     fn register_reminder<R>(&mut self, reminder: R)
     where
         R: Reminder + Send + Sync + 'static,
@@ -677,6 +715,8 @@ impl ToolRegistryBuilder {
             reminders: Vec::new(),
             shared_local_registry: None,
             system_reminders_enabled: true,
+            mcp_file_input_preparation: false,
+            sandbox_launch: None,
         };
         b.register_with_params::<grok_build::BashTool, grok_build::bash::BashParams>();
         b.register_with_params::<grok_build::ReadFileTool, grok_build::read_file::ReadFileParams>();
@@ -692,9 +732,14 @@ impl ToolRegistryBuilder {
         b.register::<grok_build::UpdateGoalTool>();
         b.register::<grok_build::WorkflowTool>();
         b.register::<grok_build::TaskOutputTool>();
-        b.register::<grok_build::GetTerminalCommandOutputTool>();
+        b.register_with_params::<
+                grok_build::GetTerminalCommandOutputTool,
+                grok_build::task_output::terminal_command::TerminalCommandOutputParams,
+            >();
         b.register::<grok_build::WaitTasksTool>();
-        b.register::<grok_build::TaskTool>();
+        b.register_with_params::<grok_build::TaskTool, grok_build::task::TaskParams>();
+        b.register::<grok_build::SendSubagentMessageTool>();
+        b.register::<grok_build::SendFeedbackTool>();
         b.register::<grok_build::WebSearchTool>();
         b.register_with_params::<grok_build::WebFetchTool, grok_build::web_fetch::WebFetchParams>();
         b.register::<grok_build::LspTool>();
@@ -704,11 +749,11 @@ impl ToolRegistryBuilder {
         b.register::<grok_build::ReferenceToVideoTool>();
         b.register::<grok_build::EnterPlanModeTool>();
         b.register::<grok_build::ExitPlanModeTool>();
-        b.register::<grok_build::DisableAsciiScrubTool>();
-        b.register::<grok_build::JsonToToonTool>();
-        b.register::<grok_build::ImplementMemoryTool>();
+        b.register::<grok_build::disable_ascii_scrub::DisableAsciiScrubTool>();
+        b.register::<json_to_toon::JsonToToonTool>();
+        b.register::<implement_memory::ImplementMemoryTool>();
         b.register::<grok_build::PlanValidateTool>();
-        grok_build::register_all(&mut b);
+        register_all(&mut b);
         b.register_with_params::<
                 grok_build::AskUserQuestionTool,
                 grok_build::ask_user_question::AskUserQuestionParams,
@@ -762,7 +807,7 @@ impl ToolRegistryBuilder {
             >();
         b.register_reminder(crate::reminders::LspDiagnosticsReminder);
         b.register_reminder(crate::reminders::TaskCompletionReminder);
-        b.register_reminder(crate::reminders::WritePathsAssignmentReminder);
+        b.register_reminder(crate::reminders::write_paths_assignment::WritePathsAssignmentReminder);
         b.register_reminder(SkillDiscoveryReminder);
         for pack in tool_packs().lock().iter() {
             pack(&mut b);
@@ -773,24 +818,32 @@ impl ToolRegistryBuilder {
         self.shared_local_registry = Some(registry);
         self
     }
+    /// Inject the per-command sandbox seam; the Bash tool's spawn site reads it back from
+    /// `Resources` (`crate::sandbox_launch`). Without it every command runs unwrapped.
+    pub fn with_sandbox_launch(mut self, hook: crate::sandbox_launch::SandboxLaunchHook) -> Self {
+        self.sandbox_launch = Some(hook);
+        self
+    }
     /// Dump tools manifest as JSON for the client.
     pub fn get_tools_config_raw(&self) -> serde_json::Value {
         let out: HashMap<&str, serde_json::Value> = self
             .tools
             .iter()
-            .map(|(name, e)| {
-                (
-                    name.as_str(),
-                    serde_json::json!({
+            .map(|(name, e)| (
+                name.as_str(),
+                serde_json::json!({
                         "namespace": e.namespace,
                         "id": e.id,
                         "kind": e.kind,
                         "default_params": e.default_params,
-                        "input_schema": e.input_schema,
+                        "input_schema": if e.kind == ToolKind::UseTool {
+                            serde_json::json!(crate::implementations::use_tool::UseToolInput::input_schema(false))
+                        } else {
+                            e.input_schema.clone()
+                        },
                         "requires": e.requires,
                     }),
-                )
-            })
+            ))
             .collect();
         serde_json::to_value(&out).expect("tool_config_raw_to_not_fail")
     }
@@ -841,6 +894,30 @@ impl ToolRegistryBuilder {
                         .with_category("behavior_version"),
                 );
                 continue;
+            }
+            if entry.metadata.kind() == ToolKind::UseTool
+                && let Some(mapping) = &tool_config.params_name_overrides
+            {
+                let fields = ["tool_name", "tool_input", "tool_input_file", "file"];
+                let mut destinations = std::collections::HashSet::new();
+                let has_collision = mapping.iter().any(|(canonical, client)| {
+                    !destinations.insert(client.as_str())
+                        || (canonical != client && fields.contains(&client.as_str()))
+                }) || fields
+                    .iter()
+                    .filter(|field| !mapping.contains_key(**field))
+                    .any(|field| !destinations.insert(*field));
+                if has_collision {
+                    errors.push(
+                        RequirementError::new(
+                            tool_config.id.clone(),
+                            "ambiguous MCP wrapper parameter mapping",
+                        )
+                        .with_field_path("params_name_overrides")
+                        .with_category("parameter_mapping"),
+                    );
+                    continue;
+                }
             }
             let effective = match compute_effective_params(entry, tool_config) {
                 Ok(effective) => effective,
@@ -938,14 +1015,16 @@ impl ToolRegistryBuilder {
         }
         errors
     }
-    /// Validate and finalize into an immutable toolset.
-    /// Consumes the builder — no further modifications possible.
-    /// Set whether the client delivers system reminders to the model.
-    /// Must be called before [`finalize`]; affects how description
-    /// templates render notification promises (see
-    /// `TemplateContext::system_reminders_enabled`).
+    /// Validate and finalize into an immutable toolset. Consumes the builder — no further modifications possible. Set
+    /// whether the client delivers system reminders to the model. Must be called before [`finalize`]; affects how
+    /// description templates render notification promises (see `TemplateContext::system_reminders_enabled`).
     pub fn set_system_reminders_enabled(&mut self, enabled: bool) {
         self.system_reminders_enabled = enabled;
+    }
+    /// Opt in only when the host prepares file-backed MCP calls before tool dispatch.
+    pub fn with_mcp_file_input_preparation(mut self) -> Self {
+        self.mcp_file_input_preparation = true;
+        self
     }
     pub fn finalize(
         self,
@@ -973,18 +1052,27 @@ impl ToolRegistryBuilder {
         if !errors.is_empty() {
             return Err(errors);
         }
+        let mcp_file_input_supported =
+            self.mcp_file_input_preparation && ctx.fs.supports_bounded_read();
+        let preset_name = config.behavior_preset.as_deref().unwrap_or("current");
         let mut kind_to_name: HashMap<ToolKind, String> = HashMap::new();
         for tool_config in &config.tools {
-            let entry = &self.tools[&tool_config.id];
+            let Some(entry) = self.tools.get(&tool_config.id) else {
+                continue;
+            };
             let client_name = tool_config.resolve_client_name(&entry.id);
             kind_to_name.entry(entry.kind).or_insert(client_name);
         }
         let mut kind_params: HashMap<ToolKind, HashMap<String, String>> = HashMap::new();
         for tool_config in &config.tools {
-            let entry = &self.tools[&tool_config.id];
+            let Some(entry) = self.tools.get(&tool_config.id) else {
+                continue;
+            };
             let map = kind_params.entry(entry.kind).or_default();
-            if let Some(props) = entry
-                .input_schema
+            let advertised = Self::advertised_input_schema(preset_name, entry, tool_config);
+            if let Some(props) = advertised
+                .as_ref()
+                .unwrap_or(&entry.input_schema)
                 .get("properties")
                 .and_then(|p| p.as_object())
             {
@@ -996,22 +1084,24 @@ impl ToolRegistryBuilder {
                 map.extend(overrides.iter().map(|(k, v)| (k.clone(), v.clone())));
             }
         }
+        let session_folder = crate::types::resources::SessionFolder(ctx.session_folder.clone());
+        let feedback_drafts_path =
+            crate::implementations::grok_build::send_feedback::drafts_file_path(&session_folder.0);
         let renderer = TemplateRenderer::new(kind_to_name.clone(), kind_params.clone())
-            .with_system_reminders_enabled(self.system_reminders_enabled);
+            .with_system_reminders_enabled(self.system_reminders_enabled)
+            .with_feedback_drafts_path(feedback_drafts_path)
+            .with_whole_read(truncation_config.whole_read);
         let mut tools = Vec::new();
         let mut resources = Resources::new();
         resources.insert(crate::types::resources::Terminal(ctx.backend));
         resources.insert(crate::types::resources::FileSystem(ctx.fs));
         let cwd = ctx.cwd;
         resources.insert(crate::types::resources::Cwd(cwd.clone()));
-        // Session work join key: prefer file under session folder (subagent spawn
-        // writes it) so cleared_todos / tools share usage.jsonl work_ulid.
-        // Read before moving session_folder into SessionFolder.
-        if let Some(wu) = crate::util::ulid::read_work_ulid_file(&ctx.session_folder) {
-            resources.insert(crate::types::resources::SessionWorkUlid(wu));
-        }
-        resources.insert(crate::types::resources::SessionFolder(ctx.session_folder));
+        resources.insert(session_folder);
         resources.insert(crate::types::resources::SessionEnv(ctx.session_env));
+        if let Some(hook) = self.sandbox_launch.take() {
+            resources.insert(hook);
+        }
         if let Some(owner_session_id) = ctx.owner_session_id.clone() {
             resources.insert(crate::types::resources::OwnerSessionId(owner_session_id));
         }
@@ -1054,19 +1144,19 @@ impl ToolRegistryBuilder {
         if let Some(lsp) = ctx.lsp {
             resources.insert(lsp);
         }
-        let mut image_gen_config = ctx.image_gen_config;
-        let mut video_gen_config = ctx.video_gen_config;
-        if let Some(session_id) = &ctx.owner_session_id {
-            image_gen_config.stamp_session_id_header(session_id);
-            video_gen_config.stamp_session_id_header(session_id);
-        }
+        let image_gen_config = ctx.image_gen_config;
+        let video_gen_config = ctx.video_gen_config;
         if image_gen_config.has_credentials() {
             match crate::implementations::grok_build::image_gen::ImageGenClient::new(
                 &image_gen_config,
                 ctx.api_key_provider.clone(),
             ) {
                 Ok(client) => {
-                    let client = client.with_attribution_callback(ctx.attribution_callback.clone());
+                    let mut client =
+                        client.with_attribution_callback(ctx.attribution_callback.clone());
+                    if let Some(session_id) = &ctx.owner_session_id {
+                        client = client.with_session_id(session_id);
+                    }
                     resources.insert(client);
                 }
                 Err(e) => {
@@ -1080,7 +1170,11 @@ impl ToolRegistryBuilder {
                 ctx.api_key_provider.clone(),
             ) {
                 Ok(client) => {
-                    let client = client.with_attribution_callback(ctx.attribution_callback.clone());
+                    let mut client =
+                        client.with_attribution_callback(ctx.attribution_callback.clone());
+                    if let Some(session_id) = &ctx.owner_session_id {
+                        client = client.with_session_id(session_id);
+                    }
                     resources.insert(client);
                 }
                 Err(e) => {
@@ -1122,14 +1216,13 @@ impl ToolRegistryBuilder {
         for entry in self.tools.values() {
             (entry.register_params)(&mut resources);
         }
-        let resources_state_path = ctx
-            .state_path
-            .parent()
-            .unwrap_or(&ctx.state_path)
-            .join("resources_state.json");
-        let persistence = Arc::new(ResourcesPersistence::new(resources_state_path));
+        let persistence = Arc::new(if ctx.state_path.as_os_str().is_empty() {
+            ResourcesPersistence::noop()
+        } else {
+            let dir = ctx.state_path.parent().unwrap_or(&ctx.state_path);
+            ResourcesPersistence::new(dir.join("resources_state.json"))
+        });
         persistence.load(&mut resources);
-        let preset_name = config.behavior_preset.as_deref().unwrap_or("current");
         let local_registry = self.shared_local_registry.take().unwrap_or_default();
         for tool_config in &config.tools {
             let entry = self.tools.remove(&tool_config.id).unwrap();
@@ -1158,32 +1251,51 @@ impl ToolRegistryBuilder {
                 .iter()
                 .map(|(canonical, client)| (client.clone(), canonical.clone()))
                 .collect();
-            let effective_params = compute_effective_params(&entry, tool_config)
+            let mut effective_params = compute_effective_params(&entry, tool_config)
                 .map_err(|e| vec![requirement_error_from_param_error(&tool_config.id, e)])?;
-            let mut definition = entry.metadata.versioned_definition(
-                contract_version.as_deref(),
-                &client_name,
-                tool_config.description_override.as_deref(),
-                &renderer,
-                &param_map,
-                &entry.input_schema,
-                &effective_params,
-            );
-            if let Some(desc) = &definition.function.description {
-                definition.function.description = Some(truncation_config.interpolate_description(
-                    desc,
+            if entry.kind == ToolKind::UseTool {
+                effective_params = merge_json(
+                    &effective_params,
+                    &serde_json::json!({crate::implementations::use_tool::FILE_INPUT_SUPPORTED: mcp_file_input_supported}),
+                );
+            }
+            let build_definition = |effective_params: &serde_json::Value| {
+                let mut definition = entry.metadata.versioned_definition(
+                    contract_version.as_deref(),
+                    &client_name,
+                    tool_config.description_override.as_deref(),
+                    &renderer,
+                    &param_map,
+                    &entry.input_schema,
+                    effective_params,
+                );
+                if let Some(desc) = &definition.function.description {
+                    definition.function.description =
+                        Some(truncation_config.interpolate_description(
+                            desc,
+                            &client_name,
+                            crate::DEFAULT_TOOL_OUTPUT_BYTES,
+                            xai_tool_types::max_wait_block_ms(),
+                        ));
+                }
+                renderer.render_schema_descriptions(&mut definition.function.parameters);
+                truncation_config.apply_to_schema(
+                    &mut definition.function.parameters,
                     &client_name,
                     crate::DEFAULT_TOOL_OUTPUT_BYTES,
                     xai_tool_types::max_wait_block_ms(),
+                );
+                definition
+            };
+            let definition = build_definition(&effective_params);
+            let inline_mcp_definition = (entry.kind == ToolKind::UseTool
+                && mcp_file_input_supported)
+                .then(|| build_definition(
+                    &merge_json(
+                        &effective_params,
+                        &serde_json::json!({crate::implementations::use_tool::FILE_INPUT_SUPPORTED: false}),
+                    ),
                 ));
-            }
-            renderer.render_schema_descriptions(&mut definition.function.parameters);
-            truncation_config.apply_to_schema(
-                &mut definition.function.parameters,
-                &client_name,
-                crate::DEFAULT_TOOL_OUTPUT_BYTES,
-                xai_tool_types::max_wait_block_ms(),
-            );
             (entry.apply_params)(&effective_params, &mut resources);
             tools.push(FinalizedTool {
                 namespace: entry.namespace,
@@ -1193,6 +1305,7 @@ impl ToolRegistryBuilder {
                 metadata: Arc::from(entry.metadata),
                 output_converter: Arc::from(entry.output_converter),
                 definition,
+                inline_mcp_definition,
                 effective_params,
                 input_schema: entry.input_schema,
                 reverse_params,
@@ -1207,6 +1320,13 @@ impl ToolRegistryBuilder {
             .collect();
         resources.insert(crate::types::resources::EnabledNativeToolNames(
             native_tool_names,
+        ));
+        resources.insert(crate::types::resources::NativeToolClientNames(
+            tools
+                .iter()
+                .filter(|tool| !tool.client_name.contains("__"))
+                .map(|tool| (tool.registry_id.clone(), tool.client_name.clone()))
+                .collect(),
         ));
         let proposed: Vec<ProposedTool> = tools
             .iter()
@@ -1245,6 +1365,7 @@ impl ToolRegistryBuilder {
                 );
                 (Some(scheduler_cmd_rx), Some(cancel_token))
             };
+        resources.insert(crate::types::resources::TruncationCfg(truncation_config));
         let shared_resources = resources.into_shared();
         if let (Some(cmd_rx), Some(cancel_token)) = (scheduler_cmd_rx, &scheduler_cancel_token) {
             let actor = crate::implementations::grok_build::scheduler::actor::SchedulerActor {
@@ -1271,6 +1392,28 @@ impl ToolRegistryBuilder {
             workspace_viewer_ctx,
         })
     }
+    /// The input schema the tool advertises under its contract version and effective params, or `None` to keep the raw one.
+    /// The finalize loop reports version and params errors.
+    fn advertised_input_schema(
+        preset_name: &str,
+        entry: &ToolEntry,
+        tool_config: &ToolConfig,
+    ) -> Option<serde_json::Value> {
+        crate::versions::resolve_version(
+            preset_name,
+            &tool_config.id,
+            tool_config.behavior_version.as_deref(),
+        )
+        .ok()
+        .zip(compute_effective_params(entry, tool_config).ok())
+        .and_then(|(contract_version, effective_params)| {
+            entry.metadata.advertised_input_schema(
+                contract_version.as_deref(),
+                &entry.input_schema,
+                &effective_params,
+            )
+        })
+    }
 }
 impl Drop for FinalizedToolset {
     fn drop(&mut self) {
@@ -1279,17 +1422,9 @@ impl Drop for FinalizedToolset {
         }
     }
 }
-/// Calls `FinalizedToolset::call_raw()`, bypassing the outer `ToolBridge`
-/// mutex to avoid deadlock when `use_tool` dispatches to a target MCP tool.
-///
-/// Stored in [`InnerDispatch`] inside `ToolCallContext::extensions` —
-/// stack-bounded, dropped when `Tool::run()` returns.
-///
-/// Implements the canonical `xai_tool_runtime::ToolDispatch` trait so the
-/// dispatch contract is uniform across all boundaries. The impedance
-/// mismatch (`ToolStream<Value>` vs `Result<ToolOutput>`) is bridged by
-/// serializing `ToolOutput` to `Value` in the stream; callers use
-/// `call_terminal()` and deserialize back.
+/// Calls `FinalizedToolset::call_raw()`, bypassing the outer `ToolBridge` mutex to avoid deadlock when `use_tool` dispatches to a target MCP
+/// tool. Stored in [`InnerDispatch`] inside `ToolCallContext::extensions` — stack-bounded, dropped when `Tool::run()` returns. Implements the
+/// canonical `xai_tool_runtime::ToolDispatch` trait so the dispatch contract is uniform across all boundaries.
 struct InnerDispatchForToolset {
     toolset: Arc<FinalizedToolset>,
 }
@@ -1357,12 +1492,33 @@ impl FinalizedToolset {
             .map(|t| t.definition.clone())
             .collect()
     }
-    /// Client-facing name of the (first) enabled tool of `kind`, honoring
-    /// `name_override` / preset renames — `None` if no tool of that kind is
-    /// enabled. Mirrors `${{ tools.by_kind.<kind> }}` template resolution; used
-    /// e.g. to label a background task with its real creator tool name.
+    /// Client-facing name of the (first) enabled tool of `kind`, honoring `name_override` / preset
+    /// renames — `None` if no tool of that kind is enabled. Mirrors `${{ tools.by_kind.<kind> }}`
+    /// template resolution; used
     pub fn tool_name_for_kind(&self, kind: ToolKind) -> Option<String> {
         self.renderer.tool_for_kind(kind).map(str::to_owned)
+    }
+    /// Qualified registration id (`GrokBuild:read_file`) and managed behavior version.
+    /// Lookup is by the finalized client-facing name. Unknown, custom, and dynamic
+    /// registrations return `None`; callers use one opaque class instead of the alias.
+    pub fn registered_identity(&self, client_name: &str) -> Option<RegisteredToolIdentity> {
+        let tools = self.tools.read();
+        let tool = tools.iter().find(|tool| tool.client_name == client_name)?;
+        if tool.namespace == ToolNamespace::MCP.to_string() {
+            return None;
+        }
+        Some(RegisteredToolIdentity {
+            tool_id: format!("{}:{}", tool.namespace, tool.id),
+            version: tool.contract_version.clone(),
+        })
+    }
+    /// Client-facing name for a canonical registry ID, honoring name overrides.
+    pub fn tool_name_for_registry_id(&self, registry_id: &str) -> Option<String> {
+        self.tools
+            .read()
+            .iter()
+            .find(|tool| tool.registry_id == registry_id)
+            .map(|tool| tool.client_name.clone())
     }
     /// Map of client-facing tool name → snake_case [`ToolKind`] key.
     pub fn tool_kinds(&self) -> HashMap<String, String> {
@@ -1372,12 +1528,9 @@ impl FinalizedToolset {
             .map(|t| (t.client_name.clone(), t.metadata.kind().as_key().to_owned()))
             .collect()
     }
-    /// Map of client-facing tool name → typed [`ToolKind`].
-    ///
-    /// Unlike the finalize-request `ToolConfig`s (whose `kind` is `None` when
-    /// built from raw IDs over gRPC), the finalized tools always know their
-    /// real kind from the registry metadata — use this for kind-derived
-    /// metadata in server responses (e.g. capability-mode classification).
+    /// Map of client-facing tool name → typed [`ToolKind`]. Unlike the finalize-request `ToolConfig`s (whose `kind` is
+    /// `None` when built from raw IDs over gRPC), the finalized tools always know their real kind from the registry
+    /// metadata — use this for kind-derived metadata in server responses (e.g. capability-mode classification).
     pub fn tool_kind_map(&self) -> HashMap<String, ToolKind> {
         self.tools
             .read()
@@ -1392,14 +1545,22 @@ impl FinalizedToolset {
     pub async fn update_resource<T: Send + Sync + 'static>(&self, resource: T) {
         self.resources.lock().await.insert(resource);
     }
-    /// Clone a typed resource out of this toolset, if present.
-    ///
-    /// Used to carry session-scoped backends (e.g. the browser service)
-    /// across toolset rebuilds so live state survives a hot reload.
+    /// Seed many resources under one lock. The closure runs under the lock; keep it to plain inserts.
+    pub async fn update_resources_with(
+        &self,
+        seed: impl FnOnce(&mut crate::types::resources::Resources),
+    ) {
+        seed(&mut *self.resources.lock().await);
+    }
+    /// Clone a typed resource out of this toolset, if present. Used to carry session-scoped
+    /// backends (e.g. the browser service) across toolset rebuilds so live state survives a hot
+    /// reload.
     pub async fn get_resource_cloned<T: Clone + Send + Sync + 'static>(&self) -> Option<T> {
         self.resources.lock().await.get::<T>().cloned()
     }
-    /// Get only built-in tool definitions (exclude MCP tools).
+    /// Get only built-in tool definitions (exclude MCP tools). TODO: use ToolNamespace metadata
+    /// instead of the "__" string heuristic. This breaks if a built-in tool ever has "__" in its
+    /// name or an MCP server omits the delimiter.
     pub fn tool_definitions_builtins_only(&self) -> Vec<ToolDefinition> {
         self.tools
             .read()
@@ -1408,11 +1569,23 @@ impl FinalizedToolset {
             .map(|t| t.definition.clone())
             .collect()
     }
-    /// Get the resolved contract version for a tool by its client-facing name.
-    ///
-    /// Returns `None` if the tool is not found or is not version-managed.
-    /// Returns an owned `String` because the internal `RwLock` read guard
-    /// cannot outlive this call.
+    /// Built-in definitions with `use_tool` advertised inline-only. The Anthropic Messages API rejects the file-form
+    /// schema's root-level union, and Messages-backed models must not see the file forms at all.
+    pub fn tool_definitions_builtins_only_inline_mcp(&self) -> Vec<ToolDefinition> {
+        self.tools
+            .read()
+            .iter()
+            .filter(|t| !t.client_name.contains("__"))
+            .map(|t| {
+                t.inline_mcp_definition
+                    .clone()
+                    .unwrap_or_else(|| t.definition.clone())
+            })
+            .collect()
+    }
+    /// Get the resolved contract version for a tool by its client-facing name. Returns `None` if
+    /// the tool is not found or is not version-managed. Returns an owned `String` because the
+    /// internal `RwLock` read guard cannot outlive this call.
     pub fn get_contract_version(&self, tool_name: &str) -> Option<String> {
         self.tools
             .read()
@@ -1428,10 +1601,25 @@ impl FinalizedToolset {
             .find(|t| t.client_name == tool_name)
             .map(|t| t.metadata.clone())
     }
-    /// Resolve canonical [`ToolIdentity`] (kind, namespace, presentation label)
-    /// for a tool by its client-facing wire name. Drives the first-party
-    /// `x.ai/*` tool `_meta` contract (tool normalization). Returns `None` for
-    /// unknown tools (e.g. uninitialized MCP, backend-only tools).
+    /// The client-facing name of the argument a tool's [`ToolMetadata::lock_path_param`] refers
+    /// to, for a tool looked up by its client-facing name. The declaration names the canonical
+    /// parameter; a session may have renamed it for the model, and a client keying a per-path
+    /// lock must look at the name it actually sends. `None` for unknown tools and tools that
+    /// declare no path.
+    pub fn lock_path_client_param(&self, tool_name: &str) -> Option<String> {
+        let tools = self.tools.read();
+        let tool = tools.iter().find(|t| t.client_name == tool_name)?;
+        let canonical = tool.metadata.lock_path_param()?;
+        Some(
+            tool.reverse_params
+                .iter()
+                .find_map(|(client, canon)| (canon == canonical).then(|| client.clone()))
+                .unwrap_or_else(|| canonical.to_string()),
+        )
+    }
+    /// Resolve canonical [`ToolIdentity`] (kind, namespace, presentation label) for a tool by its client-facing wire name.
+    /// Drives the first-party `x.ai/*` tool `_meta` contract (tool normalization). Returns `None` for unknown tools (e.g.
+    /// uninitialized MCP, backend-only tools).
     pub fn tool_identity(&self, tool_name: &str) -> Option<crate::normalization::ToolIdentity> {
         self.tools
             .read()
@@ -1444,42 +1632,89 @@ impl FinalizedToolset {
             .unwrap_or_else(|_| xai_tool_protocol::ToolId::new("unknown").expect("valid"));
         xai_tool_runtime::ToolError::not_found(tid, format!("Tool not found: {tool_name}"))
     }
+    /// Whether a registered target is an MCP tool; absence permits a managed-catalog lookup.
+    pub fn is_mcp_target(&self, tool_name: &str) -> Option<bool> {
+        self.tools
+            .read()
+            .iter()
+            .find(|tool| tool.client_name == tool_name)
+            .map(|tool| tool.metadata.tool_namespace() == ToolNamespace::MCP)
+    }
+    /// Parse an MCP wrapper from original JSON before key remapping loses duplicates.
+    pub fn parse_mcp_wrapper_json(
+        &self,
+        tool_name: &str,
+        arguments: &str,
+    ) -> Result<crate::implementations::UseToolInput, xai_tool_runtime::ToolError> {
+        let tools = self.tools.read();
+        let tool = tools
+            .iter()
+            .find(|t| t.client_name == tool_name)
+            .ok_or_else(|| Self::tool_not_found_error(tool_name))?;
+        crate::implementations::UseToolInput::from_model_json(arguments, &tool.reverse_params)
+            .map_err(|error| xai_tool_runtime::ToolError::invalid_arguments(error.to_string()))
+    }
+    /// Convert only this finalized wrapper's canonical keys into its model-facing keys.
+    pub fn model_mcp_arguments(
+        &self,
+        tool_name: &str,
+        input: &crate::implementations::UseToolInput,
+    ) -> Result<serde_json::Value, xai_tool_runtime::ToolError> {
+        let value = serde_json::to_value(input)
+            .map_err(|e| xai_tool_runtime::ToolError::invalid_arguments(e.to_string()))?;
+        self.model_facing_arguments(tool_name, value)
+    }
+    /// Project canonical argument keys onto this tool's model-facing names.
+    ///
+    /// Same reverse map as [`Self::model_mcp_arguments`].
+    pub fn model_facing_arguments(
+        &self,
+        tool_name: &str,
+        canonical: serde_json::Value,
+    ) -> Result<serde_json::Value, xai_tool_runtime::ToolError> {
+        let tools = self.tools.read();
+        let tool = tools
+            .iter()
+            .find(|t| t.client_name == tool_name)
+            .ok_or_else(|| Self::tool_not_found_error(tool_name))?;
+        let forward: HashMap<_, _> = tool
+            .reverse_params
+            .iter()
+            .map(|(client, name)| (name.clone(), client.clone()))
+            .collect();
+        crate::util::remap::remap_json_keys_checked(canonical, &forward)
+            .map_err(xai_tool_runtime::ToolError::invalid_arguments)
+    }
     pub async fn try_parse(
         &self,
         tool_name: &str,
         tool_params: &serde_json::Value,
     ) -> Result<ToolInput, xai_tool_runtime::ToolError> {
-        let (reverse_params, parse_input) = {
+        let (reverse_params, parse_input, is_mcp_wrapper) = {
             let tools = self.tools.read();
             let tool = tools
                 .iter()
                 .find(|t| t.client_name == tool_name)
                 .ok_or_else(|| Self::tool_not_found_error(tool_name))?;
-            (tool.reverse_params.clone(), tool.parse_input.clone())
+            (
+                tool.reverse_params.clone(),
+                tool.parse_input.clone(),
+                tool.metadata.kind() == ToolKind::UseTool,
+            )
         };
-        let canonical_params = if reverse_params.is_empty() {
+        let canonical_params = if is_mcp_wrapper {
+            crate::util::remap::remap_json_keys_checked(tool_params.clone(), &reverse_params)
+                .map_err(xai_tool_runtime::ToolError::invalid_arguments)?
+        } else if reverse_params.is_empty() {
             tool_params.clone()
         } else {
             remap_json_keys(tool_params.clone(), &reverse_params)
         };
         (parse_input)(canonical_params)
     }
-    /// Execute a tool, returning only its raw output.
-    ///
-    /// Unlike [`call()`], this skips reminders and persistence. Used by
-    /// `InnerDispatchForToolset` so that `use_tool`'s
-    /// dispatch to a target tool does not double-run post-processing: the
-    /// outer `call("use_tool")` does one round of post-processing over the
-    /// target's output.
-    ///
-    /// Inner dispatch is intentionally **not** populated in the forwarded
-    /// context. MCP tools (the targets of `use_tool`) are passthrough
-    /// implementations that never call `use_tool` themselves, so they do
-    /// not need inner dispatch.
-    ///
-    /// The `parent_ctx` carries call-id, cwd, resources, etc. from the
-    /// outer call. A fresh child context is built from it — stripping
-    /// `InnerDispatch` to prevent recursion.
+    /// Execute a tool, returning only its raw output. Unlike [`call()`], this skips reminders and persistence. Used by `InnerDispatchForToolset` so
+    /// that `use_tool`'s dispatch to a target tool does not double-run post-processing: the outer `call("use_tool")` does one round of
+    /// post-processing over the target's output. Inner dispatch is intentionally **not** populated in the forwarded context.
     async fn call_raw(
         &self,
         tool_name: &str,
@@ -1515,6 +1750,7 @@ impl FinalizedToolset {
         if let Some(cwd) = parent_ctx.extensions.get::<xai_tool_runtime::Cwd>() {
             ctx.extensions.insert((*cwd).clone());
         }
+        crate::types::source_summary::copy_call_facts(&parent_ctx, &mut ctx);
         let tool_id = xai_tool_protocol::ToolId::new(&registry_id)
             .unwrap_or_else(|_| xai_tool_protocol::ToolId::new("unknown").expect("valid"));
         let lr_handle = self.local_registry.find(&tool_id).ok_or_else(|| {
@@ -1528,12 +1764,9 @@ impl FinalizedToolset {
         (output_converter)(value)
             .map_err(|e| xai_tool_runtime::ToolError::custom("output_decoding", e.to_string()))
     }
-    /// Dispatch a tool call by client-facing name with client-facing params.
-    ///
-    /// `cwd_override` — optional per-call working directory. When `Some`, tools
-    /// will use this instead of the session `Cwd` from Resources. This is
-    /// stack-local (not shared state), so concurrent calls with different
-    /// overrides don't race.
+    /// Dispatch a tool call by client-facing name with client-facing params. `cwd_override` — optional per-call working
+    /// directory. When `Some`, tools will use this instead of the session `Cwd` from Resources. This is stack-local (not
+    /// shared state), so concurrent calls with different overrides don't race.
     pub async fn call(
         self: &Arc<Self>,
         tool_name: &str,
@@ -1553,14 +1786,22 @@ impl FinalizedToolset {
         cwd_override: Option<std::path::PathBuf>,
         cancellation: Option<tokio_util::sync::CancellationToken>,
     ) -> Result<ToolRunResult, xai_tool_runtime::ToolError> {
-        use futures::StreamExt;
-        let mut stream = self.call_streaming_with_cancellation(
+        self.call_with_context(
             tool_name,
             tool_args,
-            tool_call_id,
-            cwd_override,
-            cancellation,
-        );
+            context_for_call(tool_call_id, cwd_override, cancellation),
+        )
+        .await
+    }
+    /// Dispatch with a caller-built context. Host resources replace anything the caller supplied.
+    pub async fn call_with_context(
+        self: &Arc<Self>,
+        tool_name: &str,
+        tool_args: serde_json::Value,
+        ctx: xai_tool_runtime::ToolCallContext,
+    ) -> Result<ToolRunResult, xai_tool_runtime::ToolError> {
+        use futures::StreamExt;
+        let mut stream = self.call_streaming_with_context(tool_name, tool_args, ctx);
         while let Some(item) = stream.next().await {
             match item {
                 xai_tool_runtime::ToolStreamItem::Progress(_) => continue,
@@ -1569,20 +1810,9 @@ impl FinalizedToolset {
         }
         Err(stream_no_terminal_error())
     }
-    /// Streaming sibling of [`call`].
-    ///
-    /// Forwards every inner [`ToolStreamItem::Progress`] unchanged, and when the
-    /// inner dispatch stream reaches its terminal, runs the shared
-    /// post-processing tail ([`finalize_output`]) on it and yields the resulting
-    /// [`ToolRunResult`] as the single terminal of the outer stream.
-    ///
-    /// This is a non-`async` inherent method: it synchronously builds and
-    /// returns a `'static` boxed stream. Because [`ToolStream`] is `'static`,
-    /// all `.await` and `Arc::clone(self)` happen *inside* the stream block so
-    /// nothing borrows `self` across the stream.
-    ///
-    /// [`ToolStream`]: xai_tool_runtime::ToolStream
-    /// [`ToolStreamItem::Progress`]: xai_tool_runtime::ToolStreamItem::Progress
+    /// Streaming sibling of [`call`]. This is a non-`async` inherent method: it synchronously builds and returns a `'static` boxed stream. Because
+    /// [`ToolStream`] is `'static`, all `.await` and `Arc::clone(self)` happen *inside* the stream block so nothing borrows `self` across the
+    /// stream. [`ToolStream`]: xai_tool_runtime::ToolStream [`ToolStreamItem::Progress`]: xai_tool_runtime::ToolStreamItem::Progress
     pub fn call_streaming(
         self: &Arc<Self>,
         tool_name: &str,
@@ -1607,17 +1837,26 @@ impl FinalizedToolset {
         cwd_override: Option<std::path::PathBuf>,
         cancellation: Option<tokio_util::sync::CancellationToken>,
     ) -> xai_tool_runtime::ToolStream<ToolRunResult> {
+        self.call_streaming_with_context(
+            tool_name,
+            tool_args,
+            context_for_call(tool_call_id, cwd_override, cancellation),
+        )
+    }
+    pub fn call_streaming_with_context(
+        self: &Arc<Self>,
+        tool_name: &str,
+        tool_args: serde_json::Value,
+        ctx: xai_tool_runtime::ToolCallContext,
+    ) -> xai_tool_runtime::ToolStream<ToolRunResult> {
         use futures::StreamExt;
         let this = Arc::clone(self);
         let tool_name = tool_name.to_owned();
-        let tool_call_id = tool_call_id.to_owned();
         Box::pin(async_stream::stream! {
             let parts = match this.prepare_dispatch(
                 &tool_name,
                 tool_args,
-                &tool_call_id,
-                cwd_override,
-                cancellation,
+                ctx,
             ) {
                 Ok(parts) => parts,
                 Err(e) => {
@@ -1655,21 +1894,16 @@ impl FinalizedToolset {
             yield xai_tool_runtime::ToolStreamItem::Terminal(Err(stream_no_terminal_error()));
         })
     }
-    /// Pre-dispatch setup shared by [`call`] / [`call_streaming`].
-    ///
-    /// Acquires the tools read lock, clones the per-tool metadata, remaps the
-    /// params, builds the runtime context, and resolves the `LocalRegistry`
-    /// handle. Everything needed across `.await` is captured here so the read
-    /// guard is dropped before returning.
+    /// Pre-dispatch setup shared by [`call`] / [`call_streaming`]. Acquires the tools read lock, clones the per-tool
+    /// metadata, remaps the params, builds the runtime context, and resolves the `LocalRegistry` handle. Everything needed
+    /// across `.await` is captured here so the read guard is dropped before returning.
     fn prepare_dispatch(
         self: &Arc<Self>,
         tool_name: &str,
         tool_args: serde_json::Value,
-        tool_call_id: &str,
-        cwd_override: Option<std::path::PathBuf>,
-        cancellation: Option<tokio_util::sync::CancellationToken>,
+        mut ctx: xai_tool_runtime::ToolCallContext,
     ) -> Result<DispatchParts, xai_tool_runtime::ToolError> {
-        let (registry_id, output_converter, reverse_params) = {
+        let (registry_id, output_converter, reverse_params, is_mcp_wrapper) = {
             let tools = self.tools.read();
             let entry = tools
                 .iter()
@@ -1679,41 +1913,36 @@ impl FinalizedToolset {
                 entry.registry_id.clone(),
                 entry.output_converter.clone(),
                 entry.reverse_params.clone(),
+                entry.metadata.kind() == ToolKind::UseTool,
             )
         };
-        let canonical_params = if reverse_params.is_empty() {
+        let canonical_params = if is_mcp_wrapper {
+            crate::util::remap::remap_json_keys_checked(tool_args, &reverse_params)
+                .map_err(xai_tool_runtime::ToolError::invalid_arguments)?
+        } else if reverse_params.is_empty() {
             tool_args
         } else {
             remap_json_keys(tool_args, &reverse_params)
         };
-        let effective_tool_name = if tool_name == "use_tool" {
+        let effective_tool_name = if is_mcp_wrapper {
             serde_json::from_value::<crate::implementations::use_tool::UseToolInput>(
                 canonical_params.clone(),
             )
             .ok()
-            .map(|input| input.tool_name)
+            .and_then(|input| input.target_name().map(str::to_owned))
         } else {
             None
         };
         let contract_version = self.get_contract_version(tool_name);
-        let rt_call_id = xai_tool_protocol::ToolCallId::new(tool_call_id)
-            .unwrap_or_else(|_| xai_tool_protocol::ToolCallId::new_v7());
-        let mut ctx = xai_tool_runtime::ToolCallContext::new(rt_call_id);
         ctx.extensions.insert(self.resources.clone());
         ctx.extensions.insert_arc(Arc::clone(&self.renderer));
         ctx.extensions.insert(
             crate::types::resources::InvokingToolParamNames::from_reverse_params(&reverse_params),
         );
-        if let Some(cwd) = cwd_override {
-            ctx.extensions.insert(xai_tool_runtime::Cwd(cwd));
-        }
-        if let Some(cancellation) = cancellation {
+        ctx.extensions.remove::<xai_tool_runtime::BehaviorVersion>();
+        if let Some(version) = contract_version {
             ctx.extensions
-                .insert(xai_tool_runtime::Cancellation(cancellation));
-        }
-        if let Some(ref version) = contract_version {
-            ctx.extensions
-                .insert(xai_tool_runtime::BehaviorVersion(version.clone()));
+                .insert(xai_tool_runtime::BehaviorVersion(version));
         }
         ctx.extensions.insert(InnerDispatch(std::sync::Arc::new(
             InnerDispatchForToolset {
@@ -1722,6 +1951,9 @@ impl FinalizedToolset {
         )));
         if let Some(wvc) = self.workspace_viewer_ctx.as_ref() {
             ctx.extensions.insert(wvc.clone());
+        } else {
+            ctx.extensions
+                .remove::<xai_tool_runtime::WorkspaceViewerContext>();
         }
         let tool_id = xai_tool_protocol::ToolId::new(&registry_id)
             .unwrap_or_else(|_| xai_tool_protocol::ToolId::new("unknown").expect("valid"));
@@ -1739,12 +1971,9 @@ impl FinalizedToolset {
             effective_tool_name,
         })
     }
-    /// Post-dispatch tail shared by [`call`] / [`call_streaming`].
-    ///
-    /// Applies the `output_converter` to the terminal `value`, collects
-    /// reminders, renders prompt text, persists resources, and builds the final
-    /// [`ToolRunResult`]. This is the single source of truth for terminal-result
-    /// construction so the streaming and non-streaming paths can never diverge.
+    /// Post-dispatch tail shared by [`call`] / [`call_streaming`]. Applies the `output_converter` to the terminal `value`,
+    /// collects reminders, renders prompt text, persists resources, and builds the final [`ToolRunResult`]. This is the
+    /// single source of truth for terminal-result construction so the streaming and non-streaming paths can never diverge.
     async fn finalize_output(
         &self,
         value: serde_json::Value,
@@ -1811,22 +2040,9 @@ impl FinalizedToolset {
         let res = self.resources.lock().await;
         self.resources_persistence.save(&res);
     }
-    /// Register a tool at runtime (e.g., MCP tools).
-    ///
-    /// The tool must implement `xai_tool_runtime::Tool + ToolMetadata`.
-    /// MCP tools typically use:
-    /// - `type Args = serde_json::Value` (untyped JSON passthrough)
-    /// - `kind() -> ToolKind::Other`
-    ///
-    /// The `name` is used as both the canonical and client-facing name
-    /// (no param remapping, no name overrides for dynamic tools).
-    ///
-    /// `input_schema_override` — when `Some`, this JSON Schema is used as
-    /// the tool's input schema instead of deriving one from `T::Args` via
-    /// `schemars`. This is required for MCP tools whose schemas come from
-    /// the remote server at runtime and cannot be derived from a Rust type.
-    ///
-    /// Returns an error if a tool with the same name already exists.
+    /// Register a tool at runtime (e.g., MCP tools). The tool must implement `xai_tool_runtime::Tool + ToolMetadata`. `type Args =
+    /// serde_json::Value` (untyped JSON passthrough) `kind() -> ToolKind::Other` This is required for MCP tools whose schemas come from the remote
+    /// server at runtime and cannot be derived from a Rust type. Returns an error if a tool with the same name already exists.
     pub fn register_tool<T>(
         &self,
         name: String,
@@ -1846,7 +2062,7 @@ impl FinalizedToolset {
         let description = tool.description_template().to_string();
         let kind = tool.kind();
         let registry_id = xai_tool_runtime::Tool::id(&tool).as_str().to_owned();
-        let input_schema = input_schema_override.unwrap_or_else(generate_schema::<T::Args>);
+        let input_schema = input_schema_override.unwrap_or_else(generate_schema_cached::<T::Args>);
         let definition = ToolDefinition::function(&name, Some(&description), input_schema.clone());
         self.local_registry.register(tool);
         tools.push(FinalizedTool {
@@ -1854,6 +2070,7 @@ impl FinalizedToolset {
             id: name.clone(),
             registry_id,
             client_name: name.clone(),
+            inline_mcp_definition: None,
             metadata: Arc::new(DefaultToolMetadata {
                 kind,
                 description: description.clone(),
@@ -1910,13 +2127,10 @@ impl FinalizedToolset {
     pub async fn flush_persistence(&self) {
         self.resources_persistence.flush().await;
     }
-    /// Serialize current in-memory state, write it to disk, and wait for
-    /// the write to complete. Returns the path to the persisted file.
-    ///
-    /// Unlike `flush_persistence()` (which only flushes previously queued
-    /// snapshots), this method captures a **fresh** snapshot of the current
-    /// `Resources` and ensures it hits disk before returning.
-    pub async fn save_and_flush_persistence(&self) -> &std::path::Path {
+    /// Serialize current in-memory state, write it to disk, and wait for the write to complete. Returns where it landed, or
+    /// `None` for a session that persists nothing. Unlike `flush_persistence()`, which only flushes previously queued
+    /// snapshots, this takes a fresh snapshot first.
+    pub async fn save_and_flush_persistence(&self) -> Option<&std::path::Path> {
         {
             let res = self.resources.lock().await;
             self.resources_persistence.save(&res);
@@ -1925,11 +2139,43 @@ impl FinalizedToolset {
         self.resources_persistence.state_path()
     }
 }
-/// Generate a JSON Schema for type `T`.
-///
-/// Public so out-of-tree tool packs can
-/// schema-test their tool inputs exactly the way the registry generates
-/// definitions.
+/// Process-global memo of generated tool input schemas, keyed by the exact
+/// [`std::any::TypeId`] of the schema type.
+fn schema_cache() -> &'static RwLock<HashMap<std::any::TypeId, serde_json::Value>> {
+    static CACHE: OnceLock<RwLock<HashMap<std::any::TypeId, serde_json::Value>>> = OnceLock::new();
+    CACHE.get_or_init(|| RwLock::new(HashMap::new()))
+}
+/// Memoized [`generate_schema`], keyed by `TypeId`. Sound as a process-wide cache
+/// because the schema depends on `T` alone, not the agent or toolset; the per-boot
+/// toolset rebuild would otherwise regenerate identical schemas across a fan-out.
+pub(crate) fn generate_schema_cached<T: schemars::JsonSchema + 'static>() -> serde_json::Value {
+    let key = std::any::TypeId::of::<T>();
+    if let Some(cached) = schema_cache().read().get(&key) {
+        return cached.clone();
+    }
+    #[cfg(test)]
+    {
+        *schema_uncached_counts().lock().entry(key).or_insert(0) += 1;
+    }
+    let value = generate_schema::<T>();
+    schema_cache().write().insert(key, value.clone());
+    value
+}
+#[cfg(test)]
+fn schema_uncached_counts() -> &'static Mutex<HashMap<std::any::TypeId, u64>> {
+    static COUNTS: OnceLock<Mutex<HashMap<std::any::TypeId, u64>>> = OnceLock::new();
+    COUNTS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+#[cfg(test)]
+fn schema_uncached_calls(key: std::any::TypeId) -> u64 {
+    schema_uncached_counts()
+        .lock()
+        .get(&key)
+        .copied()
+        .unwrap_or(0)
+}
+/// JSON Schema for `T` with the root `title` and `description` stripped. Pure
+/// and uncached; the per-boot hot path uses [`generate_schema_cached`].
 pub fn generate_schema<T: schemars::JsonSchema>() -> serde_json::Value {
     let settings = schemars::generate::SchemaSettings::draft07().with(|s| {
         s.inline_subschemas = true;
@@ -2184,24 +2430,116 @@ mod tests {
             video_gen_config:
                 crate::implementations::grok_build::video_gen::VideoGenConfig::default(),
             app_builder_deployer_config:
-                crate::implementations::grok_build::deploy_app::AppBuilderDeployerConfig::default(),
+                crate::implementations::grok_build::app_builder::AppBuilderDeployerConfig::default(),
             api_key_provider: None,
             auth_provider: None,
             attribution_callback: None,
             system_reminder_tag: crate::reminders::DEFAULT_REMINDER_TAG,
         }
     }
-    /// Regression test: `kind_params` must merge input params from ALL tools
-    /// that share a `ToolKind`, not just the first one.
-    ///
-    /// Before the fix, the `kind_params` builder used `if map.is_empty()` to
-    /// seed identity param-name mappings only from the **first** tool of each
-    /// kind. When `codex:apply_patch` (`ToolKind::Edit`, input: `{ patch }`)
-    /// appeared before `grok_build:search_replace` (`ToolKind::Edit`, input:
-    /// `{ file_path, old_string, new_string, replace_all }`), the renderer's
-    /// context had `params.edit = { "patch": "patch" }` — missing
-    /// `replace_all`. At runtime, the template `${{ params.edit.replace_all }}`
-    /// failed with "undefined value".
+    /// Built-in half of the `lock_path_param` guard (a pack that lives in its own crate runs the
+    /// same audit next to its tools): every built-in tool with a path-shaped input either
+    /// declares the field it locks or is allowlisted with a reason.
+    #[test]
+    fn every_builtin_path_tool_declares_its_lock_path_param() {
+        let problems =
+            ToolRegistryBuilder::new().unclassified_path_tools(LOCK_PATH_UNLOCKED_BY_DESIGN);
+        assert!(
+            problems.is_empty(),
+            "unclassified path tools:\n{}",
+            problems.join("\n")
+        );
+    }
+    /// The audit catches both failure modes: a missing declaration and a declaration naming a
+    /// field the schema does not have.
+    #[test]
+    fn unclassified_path_tools_flags_missing_and_misnamed_declarations() {
+        #[derive(Debug, Default)]
+        struct Undeclared;
+        impl ToolMetadata for Undeclared {
+            fn kind(&self) -> ToolKind {
+                ToolKind::Edit
+            }
+            fn tool_namespace(&self) -> ToolNamespace {
+                ToolNamespace::MCP
+            }
+            fn description_template(&self) -> &str {
+                "edits a file"
+            }
+        }
+        #[derive(Debug, Default)]
+        struct Misnamed;
+        impl ToolMetadata for Misnamed {
+            fn kind(&self) -> ToolKind {
+                ToolKind::Edit
+            }
+            fn tool_namespace(&self) -> ToolNamespace {
+                ToolNamespace::MCP
+            }
+            fn description_template(&self) -> &str {
+                "edits a file"
+            }
+            fn lock_path_param(&self) -> Option<&'static str> {
+                Some("no_such_field")
+            }
+        }
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {"file_path": {"type": "string"}}
+        });
+        let mut builder = ToolRegistryBuilder::new();
+        for (id, metadata) in [
+            (
+                "Audit:undeclared",
+                Box::new(Undeclared) as Box<dyn ToolMetadata>,
+            ),
+            ("Audit:misnamed", Box::new(Misnamed)),
+        ] {
+            builder.tools.insert(
+                id.to_string(),
+                ToolEntry {
+                    namespace: "Audit".to_string(),
+                    id: id.to_string(),
+                    kind: ToolKind::Edit,
+                    requires: Expr::True,
+                    default_params: serde_json::Value::Null,
+                    input_schema: schema.clone(),
+                    metadata,
+                    output_converter: Box::new(serde_json::from_value),
+                    validate_params: Box::new(|_| Ok(())),
+                    apply_params: Box::new(|_, _| {}),
+                    register_params: Box::new(|_| {}),
+                    parse_input: Box::new(|_| {
+                        Err(xai_tool_runtime::ToolError::invalid_arguments("audit only"))
+                    }),
+                    register_in_local: Box::new(|_| {}),
+                },
+            );
+        }
+        let problems = builder.unclassified_path_tools(LOCK_PATH_UNLOCKED_BY_DESIGN);
+        assert!(
+            problems
+                .iter()
+                .any(|p| p.starts_with("Audit:undeclared:") && p.contains("\"file_path\"")),
+            "{problems:?}"
+        );
+        assert!(
+            problems
+                .iter()
+                .any(|p| p.starts_with("Audit:misnamed:") && p.contains("\"no_such_field\"")),
+            "{problems:?}"
+        );
+        let allowlisted = builder.unclassified_path_tools(&["Audit:undeclared"]);
+        assert!(
+            !allowlisted
+                .iter()
+                .any(|p| p.starts_with("Audit:undeclared:"))
+        );
+        assert!(allowlisted.iter().any(|p| p.starts_with("Audit:misnamed:")));
+    }
+    /// Regression test: `kind_params` must merge input params from ALL tools that share a `ToolKind`, not just the first one. Before the fix, the
+    /// `kind_params` builder used `if map.is_empty()` to seed identity param-name mappings only from the **first** tool of each kind. At runtime,
+    /// the template `${{ params.edit.replace_all }}` failed with "undefined value".
     #[tokio::test]
     async fn kind_params_merged_across_multiple_tools_of_same_kind() {
         let tmp = TempDir::new().unwrap();
@@ -2264,15 +2602,7 @@ mod tests {
             result.prompt_text
         );
     }
-    /// Verify the exact tool output variants for all template-rendered error
-    /// paths in `search_replace` when it is the **sole** Edit tool in the config.
-    ///
-    /// Exercises two code paths that use `TemplateRenderer` at runtime:
-    /// 1. `MultipleMatchesFound` — renders `${{ params.edit.replace_all }}`
-    /// 2. `NoMatchesFound` — renders `${{ tools.by_kind.read }}`
-    ///
-    /// Verify that the rendered `search_replace` description exposed to the model
-    /// contains the new minimum-anchor guidance and has no unresolved placeholders.
+    /// Rendered `search_replace` description: Read tool name substitutes, no leftover placeholders.
     #[tokio::test]
     async fn search_replace_description_renders_minimum_anchor_guidance() {
         let builder = ToolRegistryBuilder::new();
@@ -2315,23 +2645,23 @@ mod tests {
             .as_deref()
             .expect("description must be present");
         assert!(
-            !desc.contains("larger string with more surrounding context"),
-            "old guidance encouraging longer blocks must be absent"
+            desc.contains("read_file"),
+            "read tool name must render: {desc}"
         );
         assert!(
             !desc.contains("${{"),
             "rendered description must not contain raw template placeholders"
         );
     }
-    /// Smoke test: finalize the full GrokBuild toolset and verify every
-    /// tool description is fully rendered -- no unresolved MiniJinja vars,
-    /// no stale `{max_*}` placeholders, no empty tool-name references from
-    /// missing conditional guards.
+    /// Smoke test: finalize the full GrokBuild toolset and verify every tool description is fully
+    /// rendered -- no unresolved MiniJinja vars, no stale `{max_*}` placeholders, no empty
+    /// tool-name references from missing conditional guards.
     #[tokio::test]
     async fn full_toolset_descriptions_render_cleanly() {
         use crate::implementations::grok_build::{
             IMAGE_GEN_TOOL_NAME, IMAGE_TO_VIDEO_TOOL_NAME, REFERENCE_TO_VIDEO_TOOL_NAME,
             SCHEDULER_CREATE_TOOL_NAME, SCHEDULER_DELETE_TOOL_NAME,
+            SEND_SUBAGENT_MESSAGE_TOOL_NAME,
         };
         let builder = ToolRegistryBuilder::new();
         // Note: deploy_app is a no-op stub in OSS builds and is not registered.
@@ -2349,6 +2679,7 @@ mod tests {
                 "exit_plan_mode",
                 "todo_write",
                 "task",
+                SEND_SUBAGENT_MESSAGE_TOOL_NAME,
                 "web_search",
                 "web_fetch",
                 "lsp",
@@ -2507,6 +2838,7 @@ mod tests {
             timeout: None,
             description: "list files".into(),
             is_background: false,
+            block_until_ms: None,
         });
         let merged = merge_tool_meta(
             &toolset,
@@ -2515,9 +2847,17 @@ mod tests {
             Some(&bash),
         )
         .unwrap();
-        assert_eq!(merged["bash_mode"], true);
-        assert_eq!(merged[TOOL_META_KEY]["kind"], "execute");
-        assert_eq!(merged[TOOL_META_KEY]["input"]["command"], "ls");
+        assert_eq!(merged.get("bash_mode"), Some(&serde_json::json!(true)));
+        assert_eq!(
+            merged.get(TOOL_META_KEY).and_then(|v| v.get("kind")),
+            Some(&serde_json::json!("execute"))
+        );
+        assert_eq!(
+            merged
+                .get(TOOL_META_KEY)
+                .and_then(|v| v.pointer("/input/command")),
+            Some(&serde_json::json!("ls"))
+        );
         let unchanged = merge_tool_meta(
             &toolset,
             Some(serde_json::json!({"backend": true})),
@@ -2525,13 +2865,12 @@ mod tests {
             None,
         )
         .unwrap();
-        assert_eq!(unchanged["backend"], true);
+        assert_eq!(unchanged.get("backend"), Some(&serde_json::json!(true)));
         assert!(unchanged.get(TOOL_META_KEY).is_none());
     }
-    /// The wire (`ToolMetadata::is_read_only`) and doom-loop
-    /// (`Tool::capabilities().is_read_only`) must agree for every registered
-    /// tool. Drift here is a client classifying a tool differently from
-    /// in-process loop detection.
+    /// The wire (`ToolMetadata::is_read_only`) and doom-loop (`Tool::capabilities().is_read_only`)
+    /// must agree for every registered tool. Drift here is a client classifying a tool differently
+    /// from in-process loop detection.
     #[test]
     fn capabilities_is_read_only_matches_metadata() {
         let builder = ToolRegistryBuilder::new();
@@ -2657,33 +2996,39 @@ mod tests {
             "old_string should be renamed to find"
         );
         assert!(!props.contains_key("old_string"));
-        let new_desc = props["new_string"]["description"]
-            .as_str()
+        let new_desc = props
+            .get("new_string")
+            .and_then(|v| v.get("description"))
+            .and_then(|v| v.as_str())
             .unwrap_or_default();
         assert!(
             new_desc.contains("find") && !new_desc.contains("old_string"),
             "new_string description should reference the renamed param: {new_desc}"
         );
-        let replace_all_desc = props["replace_all"]["description"]
-            .as_str()
+        let replace_all_desc = props
+            .get("replace_all")
+            .and_then(|v| v.get("description"))
+            .and_then(|v| v.as_str())
             .unwrap_or_default();
         assert!(
             replace_all_desc.contains("find") && !replace_all_desc.contains("old_string"),
             "replace_all description should reference the renamed param: {replace_all_desc}"
         );
     }
-    /// Descriptions promising completion notifications ("You are notified on
-    /// completion") render conditionally on the client's system-reminders
-    /// setting, plumbed via `set_system_reminders_enabled` into the
-    /// `TemplateRenderer`. With reminders disabled, the bash description and
-    /// the `is_background` field description must not promise notifications;
-    /// they point at the get-output tool instead when one is served.
+    /// Bash descriptions under `pre-block-until-ms` and `current` change with the client's system-reminders setting.
+    /// With reminders disabled they name the get-output tool when one is served.
     #[tokio::test]
     async fn bash_descriptions_track_system_reminders_setting() {
         let config_with = |ids: &[&str]| ToolServerConfig {
             tools: ids
                 .iter()
-                .map(|id| ToolConfig::from_id((*id).to_string()))
+                .map(|id| {
+                    let mut tc = ToolConfig::from_id((*id).to_string());
+                    if *id == "GrokBuild:run_terminal_cmd" {
+                        tc.behavior_version = Some("pre-block-until-ms".to_string());
+                    }
+                    tc
+                })
                 .collect(),
             behavior_preset: None,
         };
@@ -2695,8 +3040,11 @@ mod tests {
                 .expect("run_terminal_cmd definition not found")
                 .clone();
             let desc = bash.function.description.clone().unwrap_or_default();
-            let field_desc = bash.function.parameters["properties"]["is_background"]["description"]
-                .as_str()
+            let field_desc = bash
+                .function
+                .parameters
+                .pointer("/properties/is_background/description")
+                .and_then(|v| v.as_str())
                 .unwrap_or_default()
                 .to_string();
             (desc, field_desc)
@@ -2710,35 +3058,55 @@ mod tests {
         let toolset = ToolRegistryBuilder::new()
             .finalize(config_with(&ids), test_session_context(&tmp))
             .expect("finalize");
-        let (desc, field_desc) = bash_texts(&toolset);
-        assert!(
-            desc.contains("You are notified on completion"),
-            "reminders on: description should promise notification: {desc}"
-        );
-        assert!(
-            field_desc.contains("you are notified on completion"),
-            "reminders on: is_background description should promise notification: {field_desc}"
-        );
+        let (desc_on, field_on) = bash_texts(&toolset);
         let tmp = TempDir::new().unwrap();
         let mut builder = ToolRegistryBuilder::new();
         builder.set_system_reminders_enabled(false);
         let toolset = builder
             .finalize(config_with(&ids), test_session_context(&tmp))
             .expect("finalize");
-        let (desc, field_desc) = bash_texts(&toolset);
+        let (desc_off, field_off) = bash_texts(&toolset);
+        assert_ne!(desc_on, desc_off);
+        assert_ne!(field_on, field_off);
         assert!(
-            !desc.contains("notified on completion"),
-            "reminders off: description must not promise notification: {desc}"
+            desc_off.contains("get_task_output"),
+            "reminders off: description should name get_task_output: {desc_off}"
         );
         assert!(
-            desc.contains("Check on it later with the get_task_output tool"),
-            "reminders off: description should point at get_task_output: {desc}"
+            field_off.contains("get_task_output"),
+            "reminders off: is_background description should name get_task_output: {field_off}"
         );
+        let current_config = ToolServerConfig {
+            tools: ids
+                .iter()
+                .map(|id| ToolConfig::from_id((*id).to_string()))
+                .collect(),
+            behavior_preset: None,
+        };
+        let tmp = TempDir::new().unwrap();
+        let toolset = ToolRegistryBuilder::new()
+            .finalize(current_config.clone(), test_session_context(&tmp))
+            .expect("finalize");
+        let (current_on, field_on) = bash_texts(&toolset);
+        let tmp = TempDir::new().unwrap();
+        let mut builder = ToolRegistryBuilder::new();
+        builder.set_system_reminders_enabled(false);
+        let toolset = builder
+            .finalize(current_config, test_session_context(&tmp))
+            .expect("finalize");
+        let (current_off, field_off) = bash_texts(&toolset);
+        assert_ne!(current_on, current_off);
+        for text in [&current_on, &current_off] {
+            assert!(
+                text.contains("block_until_ms") && !text.contains("is_background"),
+                "{text}"
+            );
+        }
         assert!(
-            !field_desc.contains("notified on completion")
-                && field_desc.contains("check on it later with the get_task_output tool"),
-            "reminders off: is_background description should point at get_task_output: {field_desc}"
+            current_off.contains("Use get_task_output to monitor it or wait for it to finish"),
+            "{current_off}"
         );
+        assert!(field_on.is_empty() && field_off.is_empty());
     }
     /// Each assertion pattern-matches on the exact `ToolOutput::SearchReplace`
     /// variant so the test fails if the renderer silently returns empty strings
@@ -2952,10 +3320,9 @@ mod tests {
             "lookup is by fully-qualified id, not the bare tool id"
         );
     }
-    /// Consumers backfill kinds onto kind-less pinned toolsets (hub
-    /// `session.bind` wire entries) from this map before capability
-    /// filtering; a wrong or missing kind here silently changes which
-    /// tools a `capability_mode` keeps.
+    /// Consumers backfill kinds onto kind-less pinned toolsets (hub `session.bind` wire entries)
+    /// from this map before capability filtering; a wrong or missing kind here silently changes
+    /// which tools a `capability_mode` keeps.
     #[test]
     fn known_tool_kinds_maps_pinned_tool_config_ids() {
         let kinds = ToolRegistryBuilder::new().known_tool_kinds();
@@ -2977,14 +3344,9 @@ mod tests {
             "unknown ids must be absent"
         );
     }
-    /// Regression test: `validate_config` must reject configurations where
-    /// two tools resolve to the same `client_name`.
-    ///
-    /// Without `name_override`, the client_name defaults to `entry.id`
-    /// (e.g. `"read_file"`). If both `GrokBuild:read_file` and
-    /// `Codex:read_file` are in the config, both would get
-    /// `client_name = "read_file"`, making the second unreachable at
-    /// dispatch time.
+    /// Regression test: `validate_config` must reject configurations where two tools resolve to the same `client_name`. Without `name_override`,
+    /// the client_name defaults to `entry.id` (e.g. `"read_file"`). If both `GrokBuild:read_file` and `Codex:read_file` are in the config, both
+    /// would get `client_name = "read_file"`, making the second unreachable at dispatch time.
     #[test]
     fn validate_config_rejects_duplicate_client_name() {
         let builder = ToolRegistryBuilder::new();
@@ -3042,7 +3404,9 @@ mod tests {
         };
         let errors = builder.validate_config(&config);
         assert_eq!(errors.len(), 1);
-        let error = &errors[0];
+        let Some(error) = errors.first() else {
+            panic!("expected one validation error");
+        };
         assert_eq!(error.tool, "GrokBuild:run_terminal_cmd");
         assert_eq!(
             error.field_path.as_deref(),
@@ -3073,7 +3437,9 @@ mod tests {
         };
         let errors = builder.validate_config(&config);
         assert_eq!(errors.len(), 1);
-        let error = &errors[0];
+        let Some(error) = errors.first() else {
+            panic!("expected one validation error");
+        };
         assert_eq!(error.field_path.as_deref(), Some("params.hash_len"));
         assert_eq!(error.category.as_deref(), Some("params_constraint"));
         assert_eq!(error.expected.as_deref(), Some("1..=4"));
@@ -3159,6 +3525,45 @@ mod tests {
             "finalize error should mention duplicate client_name: {errors:?}",
         );
     }
+    #[tokio::test]
+    async fn mcp_mapping_collisions_fail_validation_and_finalization() {
+        let tmp = TempDir::new().unwrap();
+        for pairs in [
+            vec![("file", "source"), ("unused", "source")],
+            vec![("file", "source"), ("tool_input_file", "source")],
+            vec![("unused", "file")],
+            vec![("unused", "source"), ("another", "source")],
+        ] {
+            for pairs in [pairs.clone(), pairs.into_iter().rev().collect()] {
+                let builder = ToolRegistryBuilder::new();
+                let mut tool = ToolConfig::for_tool::<crate::implementations::UseTool>();
+                tool.params_name_overrides = Some(
+                    pairs
+                        .into_iter()
+                        .map(|(canonical, client)| (canonical.to_owned(), client.to_owned()))
+                        .collect(),
+                );
+                let config = ToolServerConfig {
+                    tools: vec![tool],
+                    behavior_preset: None,
+                };
+                let validated = builder.validate_config(&config);
+                assert_eq!(1, validated.len());
+                assert_eq!(
+                    "ambiguous MCP wrapper parameter mapping",
+                    validated.first().unwrap().message
+                );
+                let finalized = match builder.finalize(config, test_session_context(&tmp)) {
+                    Ok(_) => panic!("ambiguous mappings must not finalize"),
+                    Err(errors) => errors,
+                };
+                assert_eq!(
+                    serde_json::to_value(validated).unwrap(),
+                    serde_json::to_value(finalized).unwrap()
+                );
+            }
+        }
+    }
     #[derive(Debug)]
     struct FakeMcpTool {
         description: String,
@@ -3193,6 +3598,42 @@ mod tests {
         ) -> Result<String, xai_tool_runtime::ToolError> {
             Ok("ok".into())
         }
+    }
+    #[tokio::test]
+    async fn registered_identity_uses_the_qualified_id_not_the_alias() {
+        let tmp = TempDir::new().unwrap();
+        let toolset = ToolRegistryBuilder::new()
+            .finalize(
+                ToolServerConfig {
+                    tools: vec![
+                        ToolConfig::for_tool::<crate::implementations::grok_build::grep::GrepTool>(
+                        )
+                        .with_name("search_code"),
+                    ],
+                    behavior_preset: None,
+                },
+                test_session_context(&tmp),
+            )
+            .expect("grep should finalize");
+        assert_eq!(
+            toolset.registered_identity("search_code"),
+            Some(RegisteredToolIdentity {
+                tool_id: "GrokBuild:grep".into(),
+                version: Some("current".into()),
+            })
+        );
+        assert_eq!(toolset.registered_identity("grep"), None);
+        assert_eq!(toolset.registered_identity("not_a_tool"), None);
+        toolset
+            .register_tool(
+                "docs__search".into(),
+                FakeMcpTool {
+                    description: "d".into(),
+                },
+                None,
+            )
+            .expect("dynamic tool should register");
+        assert_eq!(toolset.registered_identity("docs__search"), None);
     }
     #[tokio::test]
     async fn call_sets_effective_tool_name_for_use_tool_dispatch() {
@@ -3350,10 +3791,9 @@ mod tests {
         );
         assert!(result.effective_tool_name.is_none());
     }
-    /// `call_streaming` forwards the inner `Progress` item(s) in order and then
-    /// yields exactly one `Terminal` whose `ToolRunResult` still carries
-    /// `prompt_text`. Driving the same tool through `call` drops the progress
-    /// and produces a result of the same shape.
+    /// `call_streaming` forwards the inner `Progress` item(s) in order and then yields exactly one
+    /// `Terminal` whose `ToolRunResult` still carries `prompt_text`. Driving the same tool through
+    /// `call` drops the progress and produces a result of the same shape.
     #[tokio::test]
     async fn call_streaming_forwards_progress_and_finalizes_terminal() {
         use futures::StreamExt;
@@ -3405,11 +3845,9 @@ mod tests {
         assert_eq!(via_call.prompt_text, streamed.prompt_text);
         assert_eq!(via_call.effective_tool_name, streamed.effective_tool_name);
     }
-    /// A misbehaving tool whose `execute` returns an *empty* stream — no
-    /// `Progress`, no `Terminal`. This breaks the `Tool` streaming contract;
-    /// the registry's drain in `call` must surface the violation as a
-    /// `stream_no_terminal` error rather than panicking. Defends against a
-    /// single buggy tool implementation tearing down the workspace process.
+    /// A misbehaving tool whose `execute` returns an *empty* stream — no `Progress`, no `Terminal`. This breaks the `Tool`
+    /// streaming contract; the registry's drain in `call` must surface the violation as a `stream_no_terminal` error rather
+    /// than panicking. Defends against a single buggy tool implementation tearing down the workspace process.
     #[derive(Debug)]
     struct NoTerminalStub;
     impl crate::types::tool_metadata::ToolMetadata for NoTerminalStub {
@@ -3450,25 +3888,9 @@ mod tests {
             Box::pin(futures::stream::empty())
         }
     }
-    /// End-to-end "no panic on misbehaving tool" guard: a tool whose `execute`
-    /// emits an empty stream (zero `Progress`, zero `Terminal`) must surface
-    /// through `call` as `Err(stream_no_terminal)` — never a panic.
-    ///
-    /// Behaviorally, two layers cooperate to deliver this:
-    ///   1. `call_streaming`'s own fallback yields
-    ///      `Terminal(Err(stream_no_terminal_error()))` when its inner
-    ///      dispatch stream ends without a terminal (the path actually
-    ///      exercised by this stub).
-    ///   2. `call`'s drain loop now also returns `Err(stream_no_terminal_error())`
-    ///      instead of `unreachable!()` if the outer `call_streaming` stream
-    ///      itself ever ends without yielding a terminal — defense-in-depth
-    ///      that cannot be reached under the `call_streaming` contract but
-    ///      whose presence guarantees no `unreachable!()` panic at this
-    ///      callsite.
-    ///
-    /// Both layers raise the same `stream_no_terminal` error kind so consumers
-    /// see one consistent shape regardless of which layer caught the
-    /// violation.
+    /// End-to-end "no panic on misbehaving tool" guard: a tool whose `execute` emits an empty stream (zero `Progress`, zero `Terminal`) must
+    /// surface through `call` as `Err(stream_no_terminal)` — never a panic. Both layers raise the same `stream_no_terminal` error kind so consumers
+    /// see one consistent shape regardless of which layer caught the violation.
     #[tokio::test]
     async fn call_returns_error_when_inner_stream_has_no_terminal() {
         let tmp = TempDir::new().unwrap();
@@ -3522,16 +3944,17 @@ mod tests {
                 })
             })
             .collect();
-        contracts.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
-        // Snapshot of finalized non-PI contracts. Refresh when todo_write /
-        // write wire description or schema intentionally changes (product
-        // board fib fields, protected-prefix merge copy, …).
+        contracts.sort_by(|a, b| {
+            a.get("name")
+                .and_then(|v| v.as_str())
+                .cmp(&b.get("name").and_then(|v| v.as_str()))
+        });
         let expected: serde_json::Value = serde_json::from_str(
                 r##"
         [
           {
             "name": "todo_write",
-            "description": "Create and manage a structured task list. The user sees this list live — it is your primary way to show progress.\n\nUse for any task with 3+ steps. Skip for trivial single-step work.\n\nPrefer merge: true upsert only (never casually wipe with merge: false). Fibonacci work leaves size 1 or 2 only — anything larger must split into children; parents/containers omit size. Progress totals only leaf sizes. Prefer namespaced ids (plan:, impl:, feat:, bug:, …) and meta.kind + parentId for structure. After spawning a subagent, set meta.taskId to that subagent_id so the board owns the live track. Do not demote a bound in_progress item to pending while that subagent is still running (complete or cancel instead; a second user ask is additive, not a pivot).",
+            "description": "Create and manage a structured task list. The user sees this list live — it is your primary way to show progress.\n\nUse for any task with 3+ steps. Skip for trivial single-step work.",
             "parameters": {
               "$schema": "http://json-schema.org/draft-07/schema#",
               "required": [
@@ -3540,12 +3963,12 @@ mod tests {
               "type": "object",
               "properties": {
                 "merge": {
-                  "description": "Optional. When true (default), merges the provided todos into the existing list by id — send only the items you are changing, and to flip status without changing content send just id + status. When false, the provided todos replace the existing list. Protected-prefix ids (plan:, impl:, pr-, recon:, residual:, ask:, feat:, bug:) not mentioned in the replace set are preserved so foreign namespaces are not silently wiped. Prefer merge:true always; avoid casual full replace.",
+                  "description": "Optional. When true (default), merges the provided todos into the existing list by id — send only the items you are changing, and to flip status without changing content send just id + status. When false, the provided todos replace the existing list.",
                   "type": "boolean",
                   "default": true
                 },
                 "todos": {
-                  "description": "Array of todo items to write. Prefer namespaced ids. Fib leaves size 1|2 only; parents unsized.",
+                  "description": "Array of todo items to write to the workspace",
                   "type": "array",
                   "items": {
                     "type": "object",
@@ -3574,32 +3997,6 @@ mod tests {
                           "cancelled",
                           null
                         ]
-                      },
-                      "priority": {
-                        "description": "Optional priority: high, medium, or low",
-                        "type": [
-                          "string",
-                          "null"
-                        ],
-                        "enum": [
-                          "high",
-                          "medium",
-                          "low",
-                          null
-                        ]
-                      },
-                      "meta": {
-                        "description": "Optional metadata JSON object. Documented keys: kind (residual|phase|work|child), parentId, namespace, taskId (bind live subagent; demote to pending rejected while Running)."
-                      },
-                      "size": {
-                        "description": "Optional Fibonacci leaf size: only 1 or 2. Larger work must split into children. Parents omit size.",
-                        "type": [
-                          "integer",
-                          "null"
-                        ],
-                        "format": "uint8",
-                        "minimum": 0,
-                        "maximum": 255
                       }
                     },
                     "required": [
@@ -3824,6 +4221,58 @@ mod tests {
         let task_def = defs.iter().find(|d| d.function.name == "task");
         assert!(task_def.is_some(), "task tool should be in definitions");
     }
+    fn scheduler_validate(ids: &[&str]) -> Vec<RequirementError> {
+        ToolRegistryBuilder::new().validate_config(&ToolServerConfig {
+            tools: ids
+                .iter()
+                .map(|id| ToolConfig::from_id((*id).to_string()))
+                .collect(),
+            behavior_preset: None,
+        })
+    }
+    #[test]
+    fn scheduler_create_rejected_without_delete_list_and_poll() {
+        let errors = scheduler_validate(&["GrokBuild:scheduler_create"]);
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.tool == "GrokBuild:scheduler_create"),
+            "{errors:?}"
+        );
+    }
+    #[test]
+    fn scheduler_trio_rejected_without_poll_tool() {
+        let errors = scheduler_validate(&[
+            "GrokBuild:scheduler_create",
+            "GrokBuild:scheduler_delete",
+            "GrokBuild:scheduler_list",
+        ]);
+        assert!(!errors.is_empty(), "{errors:?}");
+    }
+    #[test]
+    fn scheduler_bundle_accepted_with_get_task_output() {
+        let errors = scheduler_validate(&[
+            "GrokBuild:scheduler_create",
+            "GrokBuild:scheduler_delete",
+            "GrokBuild:scheduler_list",
+            "GrokBuild:get_task_output",
+            "GrokBuild:kill_task",
+            "GrokBuild:run_terminal_cmd",
+        ]);
+        assert!(errors.is_empty(), "{errors:?}");
+    }
+    #[test]
+    fn scheduler_bundle_accepted_with_terminal_command_output() {
+        let errors = scheduler_validate(&[
+            "GrokBuild:scheduler_create",
+            "GrokBuild:scheduler_delete",
+            "GrokBuild:scheduler_list",
+            "GrokBuild:get_terminal_command_output",
+            "GrokBuild:kill_terminal_command",
+            "GrokBuild:run_terminal_cmd",
+        ]);
+        assert!(errors.is_empty(), "{errors:?}");
+    }
     /// Verify that the task tool description renders correctly with the default
     /// grok-build agent config (all tools present) and that the new examples
     /// section is included with no unresolved template placeholders.
@@ -3878,7 +4327,7 @@ mod tests {
         );
     }
     #[tokio::test]
-    async fn bash_definition_preserves_is_background_when_enabled() {
+    async fn bash_definition_advertises_block_until_ms_when_background_enabled() {
         let builder = ToolRegistryBuilder::new();
         let config = ToolServerConfig {
             tools: vec![
@@ -3934,8 +4383,12 @@ mod tests {
             .and_then(|p| p.as_object())
             .expect("bash schema must have properties");
         assert!(
-            properties.contains_key("is_background"),
-            "enabled background should preserve is_background in exported schema"
+            properties.contains_key("block_until_ms"),
+            "enabled background should advertise block_until_ms in exported schema"
+        );
+        assert!(
+            !properties.contains_key("is_background") && !properties.contains_key("timeout"),
+            "current must not advertise the retired knobs: {properties:?}"
         );
         let desc = bash_def
             .function
@@ -3943,18 +4396,13 @@ mod tests {
             .as_deref()
             .expect("description must be present");
         assert!(
-            desc.contains("background"),
-            "enabled background should preserve is_background guidance in default description"
+            desc.contains("background") && desc.contains("block_until_ms"),
+            "enabled background should keep the backgrounding sentence in the default description"
         );
     }
-    /// Regression guard: background-param template references must use the real
-    /// input-schema property names — `${{ params.execute.is_background }}` and
-    /// `${{ params.task.run_in_background }}`. A mistyped key (e.g. the old
-    /// `params.execute.background`) has no entry in `kind_params`, so the
-    /// renderer silently emits "" — producing prompt text like "set =true" or
-    /// "=true commands". This finalizes the full background-capable toolset and
-    /// asserts no rendered description leaks a blank param, and that the
-    /// cross-tool refs resolve to their canonical keys.
+    /// Regression guard: background-param template references must use the real input-schema property names — `${{ params.execute.is_background }}`
+    /// and `${{ params.task.run_in_background }}`. A mistyped key (e.g. the old `params.execute.background`) has no entry in `kind_params`, so the
+    /// renderer silently emits "" — producing prompt text like "set =true" or "=true commands".
     #[tokio::test]
     async fn background_param_templates_reference_real_schema_keys() {
         let builder = ToolRegistryBuilder::new();
@@ -4003,14 +4451,18 @@ mod tests {
                 .unwrap_or_default()
         };
         assert!(
-            desc_of("run_terminal_cmd").contains("is_background"),
-            "bash description must resolve params.execute.is_background"
+            desc_of("run_terminal_cmd").contains("`block_until_ms`"),
+            "bash description must resolve params.execute.block_until_ms"
         );
         for name in ["get_task_output", "wait_tasks"] {
             let desc = desc_of(name);
             assert!(
-                desc.contains("is_background"),
-                "`{name}` description must resolve params.execute.is_background"
+                desc.contains("block_until_ms=0 commands"),
+                "`{name}` description must resolve params.execute.block_until_ms: {desc}"
+            );
+            assert!(
+                !desc.contains("is_background"),
+                "`{name}` must not name a parameter bash no longer advertises: {desc}"
             );
             assert!(
                 desc.contains("run_in_background"),
@@ -4019,19 +4471,52 @@ mod tests {
             let timeout = defs
                 .iter()
                 .find(|d| d.function.name == name)
-                .map(|d| &d.function.parameters["properties"]["timeout_ms"])
+                .and_then(|d| d.function.parameters.pointer("/properties/timeout_ms"))
                 .unwrap_or_else(|| panic!("`{name}` should expose timeout_ms"));
             assert!(
                 timeout.get("maximum").is_some(),
                 "`{name}`.timeout_ms must carry the resolved wait ceiling: {timeout}"
             );
             assert!(
-                !timeout["description"]
-                    .as_str()
+                !timeout
+                    .get("description")
+                    .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .contains("{max_"),
                 "`{name}`.timeout_ms has an unresolved placeholder: {timeout}"
             );
+        }
+    }
+    /// With bash at `pre-block-until-ms`, the task tools still say `is_background=true`.
+    #[tokio::test]
+    async fn task_tools_name_is_background_under_pre_block_until_ms_bash() {
+        let mut bash = ToolConfig::from_id("GrokBuild:run_terminal_cmd");
+        bash.behavior_version = Some("pre-block-until-ms".to_string());
+        let config = ToolServerConfig {
+            tools: vec![
+                bash,
+                ToolConfig::from_id("GrokBuild:get_task_output"),
+                ToolConfig::from_id("GrokBuild:wait_tasks"),
+                ToolConfig::from_id("GrokBuild:kill_task"),
+            ],
+            behavior_preset: None,
+        };
+        let tmp = TempDir::new().unwrap();
+        let toolset = ToolRegistryBuilder::new()
+            .finalize(config, test_session_context(&tmp))
+            .expect("finalize should succeed");
+        let defs = toolset.tool_definitions();
+        for name in ["get_task_output", "wait_tasks"] {
+            let desc = defs
+                .iter()
+                .find(|d| d.function.name == name)
+                .and_then(|d| d.function.description.clone())
+                .unwrap_or_default();
+            assert!(
+                desc.contains("is_background=true commands"),
+                "`{name}` under the pinned bash must name is_background: {desc}"
+            );
+            assert!(!desc.contains("block_until_ms"), "{name}: {desc}");
         }
     }
     #[test]
@@ -4056,7 +4541,9 @@ mod tests {
         };
         let errors = builder.validate_config(&config);
         assert_eq!(errors.len(), 1, "expected exactly one validation error");
-        let error = &errors[0];
+        let Some(error) = errors.first() else {
+            panic!("expected one validation error");
+        };
         assert_eq!(
             error.field_path.as_deref(),
             Some("params.auto_background_on_timeout")
@@ -4162,7 +4649,9 @@ mod tests {
             1,
             "expected one bash requirement error: {errors:?}"
         );
-        let error = &errors[0];
+        let Some(error) = errors.first() else {
+            panic!("expected one bash requirement error: {errors:?}");
+        };
         assert_eq!(error.tool, "GrokBuild:run_terminal_cmd");
         assert_eq!(error.category.as_deref(), Some("requirements"));
         assert_eq!(
@@ -4201,7 +4690,9 @@ mod tests {
             1,
             "expected one task requirement error: {errors:?}"
         );
-        let error = &errors[0];
+        let Some(error) = errors.first() else {
+            panic!("expected one task requirement error: {errors:?}");
+        };
         assert_eq!(error.tool, "GrokBuild:task");
         assert!(error.message.contains("GrokBuild:get_task_output"));
         assert!(error.message.contains("GrokBuild:kill_task"));
@@ -4228,7 +4719,9 @@ mod tests {
             1,
             "expected one get_task_output requirement error: {errors:?}"
         );
-        let error = &errors[0];
+        let Some(error) = errors.first() else {
+            panic!("expected one get_task_output requirement error: {errors:?}");
+        };
         assert_eq!(error.tool, "GrokBuild:get_task_output");
         assert!(error.message.contains("background-capable bash tool"));
         assert!(error.message.contains("OpenCode:bash"));
@@ -4796,12 +5289,9 @@ mod tests {
             "SkillManager.cwd must be set for discovery to work"
         );
     }
-    /// Startup skills passed via `SessionContext.skills` must survive a
-    /// dynamic discovery. Before the fix, `SkillManager` was seeded with
-    /// `startup_skills: vec![]`, so `take_pending()` would compute
-    /// `dedup_by_canonical_path(discovered, [])` and overwrite
-    /// `AvailableSkills` with only the new discoveries, dropping boot
-    /// skills.
+    /// Startup skills passed via `SessionContext.skills` must survive a dynamic discovery. Before the fix, `SkillManager`
+    /// was seeded with `startup_skills: vec![]`, so `take_pending()` would compute `dedup_by_canonical_path(discovered,
+    /// [])` and overwrite `AvailableSkills` with only the new discoveries, dropping boot skills.
     #[tokio::test]
     async fn test_startup_skills_survive_dynamic_discovery() {
         let tmp = TempDir::new().unwrap();
@@ -4829,7 +5319,10 @@ mod tests {
                 .get::<crate::types::resources::AvailableSkills>()
                 .unwrap();
             assert_eq!(skills.0.len(), 1);
-            assert_eq!(skills.0[0].name, "boot-skill");
+            assert_eq!(
+                skills.0.first().map(|s| s.name.as_str()),
+                Some("boot-skill")
+            );
         }
         {
             let mut res = toolset.resources.lock().await;
@@ -4871,10 +5364,9 @@ mod tests {
             assert_eq!(skills.0.len(), 2, "should have exactly 2 skills");
         }
     }
-    /// generate_schema strips the boilerplate root `title` (struct name) and
-    /// root `description` (struct doc "Input for the <canonical> tool") so the
-    /// canonical name can't leak via parameters.description after randomization
-    /// renames the tool. $schema and per-property descriptions are retained.
+    /// generate_schema strips the boilerplate root `title` (struct name) and root `description` (struct doc "Input for the
+    /// <canonical> tool") so the canonical name can't leak via parameters.description after randomization renames the tool.
+    /// $schema and per-property descriptions are retained.
     #[test]
     fn generate_schema_strips_root_title_and_description() {
         let schema = generate_schema::<crate::implementations::grok_build::bash::BashToolInput>();
@@ -4888,14 +5380,33 @@ mod tests {
         );
         assert!(schema.get("$schema").is_some(), "$schema must be retained");
         assert!(
-            schema["properties"]
-                .as_object()
+            schema
+                .get("properties")
+                .and_then(|v| v.as_object())
                 .is_some_and(|p| !p.is_empty()),
             "per-property schema must be retained: {schema}"
         );
     }
+    #[test]
+    fn generate_schema_memoizes_per_type() {
+        #[derive(schemars::JsonSchema)]
+        #[allow(dead_code)]
+        struct SchemaMemoProbe {
+            field: String,
+        }
+        let key = std::any::TypeId::of::<SchemaMemoProbe>();
+        let first = generate_schema_cached::<SchemaMemoProbe>();
+        let second = generate_schema_cached::<SchemaMemoProbe>();
+        assert_eq!(first, second);
+        assert_eq!(
+            schema_uncached_calls(key),
+            1,
+            "a type's schema must be generated at most once per process"
+        );
+    }
     fn toolset_with_viewer_ctx(
         viewer_ctx: Option<xai_tool_runtime::WorkspaceViewerContext>,
+        truncation: crate::types::context::TruncationConfig,
     ) -> (Arc<FinalizedToolset>, TempDir) {
         let tmp = TempDir::new().unwrap();
         let builder = ToolRegistryBuilder::new();
@@ -4913,28 +5424,23 @@ mod tests {
         };
         let ctx = test_session_context(&tmp);
         let toolset = builder
-            .finalize_with_trunc_config(
-                config,
-                ctx,
-                crate::types::context::TruncationConfig::default(),
-                viewer_ctx,
-            )
+            .finalize_with_trunc_config(config, ctx, truncation, viewer_ctx)
             .expect("finalize succeeds");
         (Arc::new(toolset), tmp)
     }
     #[tokio::test]
     async fn prepare_dispatch_stamps_workspace_viewer_ctx_when_present() {
-        let (toolset, _tmp) =
-            toolset_with_viewer_ctx(Some(xai_tool_runtime::WorkspaceViewerContext {
+        let (toolset, _tmp) = toolset_with_viewer_ctx(
+            Some(xai_tool_runtime::WorkspaceViewerContext {
                 stream_tool_progress: true,
-            }));
+            }),
+            crate::types::context::TruncationConfig::default(),
+        );
         let parts = toolset
             .prepare_dispatch(
                 "read_file",
                 serde_json::json!({"target_file": "noop"}),
-                "test-call",
-                None,
-                None,
+                context_for_call("test-call", None, None),
             )
             .expect("prepare_dispatch succeeds");
         let wvc = parts
@@ -4946,14 +5452,13 @@ mod tests {
     }
     #[tokio::test]
     async fn prepare_dispatch_omits_workspace_viewer_ctx_when_none() {
-        let (toolset, _tmp) = toolset_with_viewer_ctx(None);
+        let (toolset, _tmp) =
+            toolset_with_viewer_ctx(None, crate::types::context::TruncationConfig::default());
         let parts = toolset
             .prepare_dispatch(
                 "read_file",
                 serde_json::json!({"target_file": "noop"}),
-                "test-call",
-                None,
-                None,
+                context_for_call("test-call", None, None),
             )
             .expect("prepare_dispatch succeeds");
         assert!(
@@ -4964,6 +5469,70 @@ mod tests {
                 .is_none(),
             "no extension must be stamped when workspace_viewer_ctx is None",
         );
+    }
+    #[tokio::test]
+    async fn finalize_installs_per_tool_caps_into_resources() {
+        let caps = HashMap::from([("get_command_or_subagent_output".to_owned(), 5_000)]);
+        let (toolset, _tmp) = toolset_with_viewer_ctx(
+            None,
+            crate::types::context::TruncationConfig {
+                per_tool_max_output_bytes: caps.clone(),
+                ..crate::types::context::TruncationConfig::default()
+            },
+        );
+        let installed = toolset
+            .resources
+            .lock()
+            .await
+            .get::<crate::types::resources::TruncationCfg>()
+            .map(|cfg| cfg.0.per_tool_max_output_bytes.clone());
+        assert_eq!(Some(caps), installed);
+    }
+    #[tokio::test]
+    async fn finalize_without_per_tool_caps_installs_empty_cap_map() {
+        let (toolset, _tmp) =
+            toolset_with_viewer_ctx(None, crate::types::context::TruncationConfig::default());
+        let installed = toolset
+            .resources
+            .lock()
+            .await
+            .get::<crate::types::resources::TruncationCfg>()
+            .map(|cfg| cfg.0.per_tool_max_output_bytes.clone());
+        assert_eq!(Some(HashMap::new()), installed);
+    }
+    #[tokio::test]
+    async fn prepare_dispatch_keeps_the_source_slot_and_replaces_resources() {
+        let (toolset, _tmp) =
+            toolset_with_viewer_ctx(None, crate::types::context::TruncationConfig::default());
+        let slot = crate::types::source_summary::SourceSummarySlot::new();
+        let incoming = crate::types::resources::Resources::new().into_shared();
+        let mut ctx = context_for_call("test-call", None, None);
+        ctx.insert(slot.clone());
+        ctx.insert(incoming.clone());
+        let parts = toolset
+            .prepare_dispatch("read_file", serde_json::json!({"target_file": "noop"}), ctx)
+            .expect("prepare_dispatch succeeds");
+        let kept = parts
+            .ctx
+            .get::<crate::types::source_summary::SourceSummarySlot>()
+            .expect("slot");
+        let mut detail = crate::types::source_summary::ReadDetail::unknown();
+        detail.role = crate::types::source_summary::ReadRole::SkillEntry;
+        slot.record(crate::types::source_summary::ToolSourceSummary {
+            result: crate::types::source_summary::ToolSourceResult::Failed(None),
+            output_limit: crate::types::source_summary::ToolOutputLimit::Unobserved,
+            detail: crate::types::source_summary::ToolSourceDetail::Read(detail),
+        });
+        assert_eq!(
+            kept.snapshot().read().map(|read| read.role),
+            Some(crate::types::source_summary::ReadRole::SkillEntry)
+        );
+        let host = parts
+            .ctx
+            .get::<crate::types::resources::SharedResources>()
+            .expect("resources");
+        assert!(std::sync::Arc::ptr_eq(host.as_ref(), &toolset.resources));
+        assert!(!std::sync::Arc::ptr_eq(host.as_ref(), &incoming));
     }
     /// End-to-end: `FinalizedToolset` with `stream_tool_progress: true`
     /// produces `bash_output_chunk` Progress frames via `call_streaming`.

@@ -93,7 +93,7 @@ fn trace_cycle(
         return None;
     }
     let unvisited: HashSet<&str> = unvisited_ids.iter().map(String::as_str).collect();
-    let mut current = unvisited_ids[0].as_str();
+    let mut current = unvisited_ids.first().expect("index out of bounds").as_str();
     let mut path = vec![current.to_owned()];
     let mut visited_in_path = HashSet::new();
     visited_in_path.insert(current.to_owned());
@@ -113,7 +113,7 @@ fn trace_cycle(
         };
         if visited_in_path.contains(next) {
             let idx = path.iter().position(|p| p == next)?;
-            let mut cycle = path[idx..].to_vec();
+            let mut cycle = path.get(idx..).expect("index out of bounds").to_vec();
             cycle.push(next.to_owned());
             return Some(cycle);
         }

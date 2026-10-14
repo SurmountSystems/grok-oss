@@ -2803,6 +2803,10 @@ install:
     strip --strip-unneeded target/release/grok-oss
     echo "==> install -> ${CARGO_HOME:-$HOME/.cargo}/bin/grok-oss"
     install -Dm755 target/release/grok-oss "${CARGO_HOME:-$HOME/.cargo}/bin/grok-oss"
+    # Desktop Fish starts with ~/.local/bin and does not read ~/.profile.
+    # Already-open terminals keep that PATH. A symlink makes `grok-oss` resolve there.
+    mkdir -p "${HOME}/.local/bin"
+    ln -sfn "${CARGO_HOME:-$HOME/.cargo}/bin/grok-oss" "${HOME}/.local/bin/grok-oss"
     echo "==> verify"
     "${CARGO_HOME:-$HOME/.cargo}/bin/grok-oss" --version
     file "${CARGO_HOME:-$HOME/.cargo}/bin/grok-oss" | grep -q 'stripped' \

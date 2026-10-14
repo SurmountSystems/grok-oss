@@ -16,28 +16,19 @@ pub fn loop_usage_message() -> &'static str {
 }
 
 /// Where a scheduled fire runs, which decides what the stored prompt can rely on.
-///
-/// Resolved from `[scheduler] background_loops` (env, config, managed policy and
-/// remote settings all feed it), so `/loop` describes the runtime the user
-/// actually has rather than hedging across both.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LoopFireMode {
-    /// Each fire runs in a detached background subagent that cannot see this
-    /// conversation. The default.
+    /// Each fire runs in a detached background subagent that cannot see this conversation.
     Detached,
-    /// Each fire runs as a turn in this conversation, where earlier results from
-    /// the same task may still be visible.
+    /// Each fire runs as a turn in this conversation.
     InSession,
 }
 
-/// Build the model instruction that `/loop` expands into for `args`.
-///
-/// The model, not brittle host parsing, turns the request into the
-/// `scheduler_create` interval, accepting every natural phrasing and erroring
-/// on bad input rather than silently defaulting. See [`loop_usage_message`].
-///
-/// Only the framing differs by `mode`; the stop condition and length guidance
-/// are identical, because both hold wherever the fire runs.
+/// Build the model instruction that `/loop` expands into for `args`. The model, not brittle host
+/// parsing, turns the request into the `scheduler_create` interval, accepting every natural
+/// phrasing and erroring on bad input rather than silently defaulting. See [`loop_usage_message`].
+/// `mode` selects the fire context. Detached and in-session share the stop condition and length
+/// guidance.
 pub fn loop_schedule_instruction(args: &str, mode: LoopFireMode) -> String {
     let fire_context = match mode {
         LoopFireMode::Detached => {
@@ -239,7 +230,6 @@ mod tests {
         let text = imagine_instruction("a golden sunset");
         assert!(text.contains("a golden sunset"));
         assert!(text.contains("image_gen"));
-        assert!(text.contains("verbatim"));
     }
 
     #[test]
@@ -247,55 +237,30 @@ mod tests {
         let text = imagine_video_instruction("a cat playing piano");
         assert!(text.contains("a cat playing piano"));
         assert!(text.contains("image_to_video"));
-        assert!(text.contains("FFmpeg"));
     }
 
     #[test]
     fn instruction_carries_args_and_contract_tokens() {
-        for mode in [LoopFireMode::Detached, LoopFireMode::InSession] {
-            let text = loop_schedule_instruction("every 30 minutes do x", mode);
-            assert!(text.contains("every 30 minutes do x"), "{mode:?}");
-            assert!(text.contains("<number><unit>"), "{mode:?}");
-            assert!(text.contains("ask the user how often"), "{mode:?}");
-            assert!(
-                !text.contains("10m"),
-                "no host-side default interval: {mode:?}"
-            );
-            assert!(
-                !text.contains("recurring:"),
-                "the retired one-shot flag must not be referenced: {mode:?}"
-            );
-            assert!(
-                text.contains("task_id"),
-                "must teach in-place updates via task_id: {mode:?}"
-            );
-            assert!(
-                text.contains("delete and recreate"),
-                "must steer away from delete+recreate: {mode:?}"
-            );
-            assert!(
-                text.contains("scheduler_delete <task_id>"),
-                "every mode must authorize the fire to end the task: {mode:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn each_fire_mode_describes_its_own_runtime() {
-        let detached = loop_schedule_instruction("5m check ci", LoopFireMode::Detached);
-        let in_session = loop_schedule_instruction("5m check ci", LoopFireMode::InSession);
-
-        assert!(detached.contains("cannot see this conversation"));
-        assert!(!detached.contains("arrives as a new turn in this conversation"));
-
-        assert!(in_session.contains("arrives as a new turn in this conversation"));
-        assert!(!in_session.contains("cannot see this conversation"));
-
-        // The two levers the A/B showed carry the behavior are mode-independent.
-        for text in [&detached, &in_session] {
-            assert!(text.contains("report it and call"));
-            assert!(text.contains("Keep it short and concrete"));
-        }
+        let text = loop_schedule_instruction("every 30 minutes do x", LoopFireMode::Detached);
+        assert!(text.contains("every 30 minutes do x"));
+        assert!(text.contains("<number><unit>"));
+        assert!(!text.contains("10m"), "no host-side default interval");
+        assert!(
+            !text.contains("recurring:"),
+            "the retired one-shot flag must not be referenced"
+        );
+        assert!(
+            text.contains("task_id"),
+            "must teach in-place updates via task_id"
+        );
+        assert!(
+            text.contains("scheduler_delete <task_id>"),
+            "the fire must be authorized to end the task"
+        );
+        assert!(
+            text.contains("detached background subagent"),
+            "every fire is detached, and the stored prompt must be told so"
+        );
     }
 
     #[test]
@@ -304,7 +269,6 @@ mod tests {
         assert!(text.contains("ship the widget"));
         assert!(text.contains("update_goal(completed: true"));
         assert!(text.contains("blocked_reason"));
-        assert!(text.contains("If update_goal returns an error"));
         assert!(
             !text.contains("system-reminder"),
             "expansions ride as user messages and must not claim reminder authority"

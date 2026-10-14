@@ -1,9 +1,7 @@
 //! Shared helpers for integration tests.
 //!
-//! Each `tests/*.rs` integration test is its own binary, so each binary has
-//! its own `OnceLock<GROK_HOME>`. The helpers below ensure the per-binary
-//! initialization is identical: same env-var set, same isolation guarantees,
-//! same reset between tests.
+//! Each `tests/*.rs` integration test is its own binary, so each binary has its own `OnceLock<GROK_HOME>`.
+//! The helpers below ensure the per-binary initialization is identical: same env-var set, same isolation guarantees, same reset between tests.
 //!
 //! Mirrors the GROK_HOME isolation pattern used in other integration tests.
 //!
@@ -35,13 +33,9 @@ use std::sync::OnceLock;
 // GROK_HOME isolation
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Returns a process-wide test `GROK_HOME`, initialized exactly once per test
-/// binary. Once initialized, `xai_grok_config::grok_home()` will resolve to
-/// this directory for the lifetime of the process.
-///
-/// Also clears env vars that the auto-update code consults so a parent shell's
-/// values can't pollute the baseline (e.g. running tests from `npm run` would
-/// otherwise inherit `npm_config_user_agent` and `NPM_TOKEN`).
+/// Returns a process-wide test `GROK_HOME`, initialized exactly once per test binary. Once initialized,
+/// `xai_grok_config::grok_home()` will resolve to this directory for the lifetime of the process. Also clears env vars
+/// that the auto-update code consults so a parent shell's values can't pollute the baseline.
 pub fn test_home() -> &'static PathBuf {
     static HOME: OnceLock<PathBuf> = OnceLock::new();
     HOME.get_or_init(|| {
@@ -62,8 +56,7 @@ pub fn test_home() -> &'static PathBuf {
 }
 
 /// Wipe state in `GROK_HOME` between tests so each test sees a clean home.
-/// Removes the well-known files and subdirectories the update path writes,
-/// and clears env vars that individual tests may set.
+/// Removes the well-known files and subdirectories the update path writes, and clears env vars that individual tests may set.
 pub fn reset_home() {
     let home = test_home();
     let _ = std::fs::remove_file(home.join("config.toml"));
@@ -90,8 +83,7 @@ pub fn set_test_version(v: &str) {
 // Install-test fixtures (shared by the blitz + convergence suites)
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Host `{os}-{arch}` string matching the versioned binary naming scheme
-/// (`grok-{version}-{platform}`).
+/// Host `{os}-{arch}` string matching the versioned binary naming scheme (`grok-{version}-{platform}`).
 pub fn host_platform() -> String {
     let os = if cfg!(target_os = "macos") {
         "macos"
@@ -122,8 +114,8 @@ pub fn make_update_config(channel: &str) -> xai_grok_update::UpdateConfig {
     }
 }
 
-/// True if shell-script artifacts can execute in this environment. False in
-/// restricted sandboxes (e.g. hermetic remote execution) that lack /bin/sh.
+/// True if shell-script artifacts can execute in this environment.
+/// False in restricted sandboxes (e.g. hermetic remote execution) that lack /bin/sh.
 #[cfg(unix)]
 pub fn can_exec_shell_scripts() -> bool {
     use std::os::unix::fs::PermissionsExt;
@@ -145,28 +137,25 @@ pub fn small_good_artifact() -> Vec<u8> {
     b"#!/bin/sh\nexit 0\n".to_vec()
 }
 
-/// Distinct from [`small_good_artifact`] so refused installs cannot
-/// false-green by overwriting previous-good with identical bytes.
+/// Previous-good bytes, distinct from [`small_good_artifact`].
+/// Still exits 0. A refused install must not look like the download.
 pub fn previous_good_artifact() -> Vec<u8> {
     b"#!/bin/sh\nexit 0\n# prev\n".to_vec()
 }
 
-/// SHA-256 (lowercase hex) of [`small_good_artifact`]. Not SHA-1.
+/// SHA-256 of [`small_good_artifact`], lowercase hex. Not SHA-1.
 pub fn small_good_artifact_sha256() -> String {
     xai_grok_update::artifact_sha256::sha256_hex(&small_good_artifact())
 }
 
-/// GNU `hash  name` line for [`small_good_artifact`].
+/// GNU `sha256sum` line for [`small_good_artifact`]. Not SHA-1.
 pub fn small_good_artifact_sha256_line() -> String {
     format!("{}  grok\n", small_good_artifact_sha256())
 }
 
-/// Backdate every file in `GROK_HOME/downloads` by ~2 hours.
-///
-/// `cleanup_old_downloads` deliberately never deletes a freshly-written
-/// binary or temp file (it may belong to a concurrent in-flight install), so
-/// tests asserting the retention policy must age their fixtures to look like
-/// real leftovers from previous releases.
+/// Backdate every file in `GROK_HOME/downloads` by ~2 hours. `cleanup_old_downloads` deliberately never deletes a
+/// freshly-written binary or temp file (it may belong to a concurrent in-flight install). Tests asserting the retention
+/// policy must therefore age their fixtures to look like real leftovers from previous releases.
 pub fn backdate_downloads() {
     let downloads = test_home().join("downloads");
     let Ok(entries) = std::fs::read_dir(&downloads) else {
@@ -187,10 +176,8 @@ pub fn backdate_downloads() {
 // PATH-override fake binary
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// RAII guard that places a sh-script with name `name` at the head of `PATH`.
-/// Restores `PATH` on drop.
-///
-/// All tests using this MUST be `#[serial]` because `PATH` is process-global.
+/// RAII guard that places a sh-script with name `name` at the head of `PATH`. Restores `PATH` on drop. All tests using
+/// this MUST be `#[serial]` because `PATH` is process-global.
 pub struct FakeBinGuard {
     pub tmp: tempfile::TempDir,
     pub name: String,
@@ -198,8 +185,7 @@ pub struct FakeBinGuard {
 }
 
 impl FakeBinGuard {
-    /// Install a fake binary at `<tmp>/<name>` whose body is produced by
-    /// `script_body(<tmp>)`, and prepend `<tmp>` to `PATH`.
+    /// Install a fake binary at `<tmp>/<name>` whose body is produced by `script_body(<tmp>)`, and prepend `<tmp>` to `PATH`.
     pub fn install<F>(name: &str, script_body: F) -> Self
     where
         F: FnOnce(&Path) -> String,
@@ -241,36 +227,18 @@ impl FakeBinGuard {
         Self::install("gh", fake_gh_script)
     }
 
-    /// Install a fake `gh` that can `release download` a binary and the
-    /// published `${artifact}.sha256` asset. See [`fake_gh_serving_releases`].
+    /// Install a fake `gh` that lists releases and serves a binary plus
+    /// the published `${artifact}.sha256` asset. Not SHA-1.
     pub fn install_gh_serving_releases() -> Self {
         Self::install("gh", fake_gh_serving_releases)
     }
 
-    /// Bytes written for a non-checksum `release download`. Default is
-    /// [`small_good_artifact`].
-    pub fn set_gh_artifact(&self, bytes: &[u8]) {
-        std::fs::write(self.dir().join("gh-artifact"), bytes).unwrap();
-    }
-
-    /// Published checksum-file body for a `.sha256` `release download`.
-    /// Default is the GNU line for [`small_good_artifact`].
-    pub fn set_gh_sha256_body(&self, body: &str) {
-        std::fs::write(self.dir().join("gh-sha256"), body.as_bytes()).unwrap();
-    }
-
-    /// Make `.sha256` `release download` fail (no published checksum asset).
-    pub fn set_gh_sha256_missing(&self) {
-        std::fs::write(self.dir().join("gh-sha256-missing"), []).unwrap();
-    }
-
-    /// The tempdir backing this guard (where canned stdout/stderr/exit files
-    /// can be written by tests, and where `<name>-args.log` is appended).
+    /// The tempdir backing this guard (where canned stdout/stderr/exit files can be written by tests, and where `<name>-args.log` is appended).
     pub fn dir(&self) -> PathBuf {
         self.tmp.path().to_path_buf()
     }
 
-    /// Argv lines logged by the fake script — one line per invocation.
+    /// Argv lines logged by the fake script, one line per invocation.
     pub fn args_log(&self) -> Vec<String> {
         std::fs::read_to_string(self.dir().join(format!("{}-args.log", self.name)))
             .unwrap_or_default()
@@ -318,6 +286,21 @@ impl FakeBinGuard {
         )
         .unwrap();
     }
+
+    /// Bytes written for a non-checksum `release download`.
+    pub fn set_gh_artifact(&self, bytes: &[u8]) {
+        std::fs::write(self.dir().join("gh-artifact"), bytes).unwrap();
+    }
+
+    /// Body of the published `${artifact}.sha256` asset. Not SHA-1.
+    pub fn set_gh_sha256_body(&self, body: &str) {
+        std::fs::write(self.dir().join("gh-sha256"), body).unwrap();
+    }
+
+    /// Make checksum downloads exit 1 (published SHA-256 asset missing).
+    pub fn set_gh_sha256_missing(&self) {
+        std::fs::write(self.dir().join("gh-sha256-missing"), b"").unwrap();
+    }
 }
 
 impl Drop for FakeBinGuard {
@@ -330,20 +313,14 @@ impl Drop for FakeBinGuard {
 /// Single-quote a path for safe substitution into a sh script.
 fn single_quote_for_sh(p: &Path) -> String {
     let s = p.to_string_lossy();
-    // Escape any embedded single quotes (paranoid — tempdir paths shouldn't
-    // contain them, but defensively quote).
+    // Escape any embedded single quotes (paranoid: tempdir paths shouldn't contain them, but defensively quote)
     let escaped = s.replace('\'', "'\\''");
     format!("'{escaped}'")
 }
 
-/// sh script body for a fake `npm`. Logs argv to `<dir>/npm-args.log` and
-/// dispatches stdout based on the first matching argv pattern:
-///
-/// - argv contains `@alpha`     → cat `<dir>/npm-alpha-stdout`
-/// - else                       → cat `<dir>/npm-stdout`
-///
-/// Always cats `<dir>/npm-stderr` to stderr (if exists). Exits with the integer
-/// in `<dir>/npm-exit` (default 0).
+/// sh script body for a fake `npm`. Logs argv to `<dir>/npm-args.log` and dispatches stdout based on the first matching
+/// argv pattern: argv contains `@alpha` → cat `<dir>/npm-alpha-stdout`; else → cat `<dir>/npm-stdout`. Always cats
+/// `<dir>/npm-stderr` to stderr (if exists). Exits with the integer in `<dir>/npm-exit` (default 0).
 pub fn fake_npm_script(dir: &Path) -> String {
     let dq = single_quote_for_sh(dir);
     format!(
@@ -362,14 +339,9 @@ exit "$exit_code"
     )
 }
 
-/// sh script body for a fake `gh`. Logs argv to `<dir>/gh-args.log` and
-/// dispatches stdout based on `release list` argv:
-///
-/// - argv contains `release list --exclude-pre-releases` → `<dir>/gh-stable-only-stdout`
-/// - argv contains `release list` (no exclude flag)      → `<dir>/gh-with-pre-stdout`
-/// - else                                                 → `<dir>/gh-stdout`
-///
-/// Exits with `<dir>/gh-exit` (default 0).
+/// sh script body for a fake `gh`. Logs argv to `<dir>/gh-args.log` and dispatches stdout based on `release list` argv:
+/// argv contains `release list --exclude-pre-releases` → `<dir>/gh-stable-only-stdout`; argv contains `release list` (no
+/// exclude flag) → `<dir>/gh-with-pre-stdout`; else → `<dir>/gh-stdout`. Exits with `<dir>/gh-exit` (default 0).
 pub fn fake_gh_script(dir: &Path) -> String {
     let dq = single_quote_for_sh(dir);
     format!(

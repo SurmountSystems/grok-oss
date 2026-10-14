@@ -3,8 +3,6 @@
 use super::*;
 use xai_grok_shell::sampling::error::is_free_usage_exhausted_error;
 
-// ── Credit-limit upsell / max-tier tests ───────────────────────────
-
 /// Open the non-max-tier Q&A upsell modal. Panics if the modal was not created.
 fn open_upsell_qa(app: &mut AppView, mode: CreditLimitUpsellMode) {
     let agent = app.agents.get_mut(&AgentId(0)).unwrap();
@@ -17,6 +15,21 @@ fn open_upsell_max_card(app: &mut AppView, mode: CreditLimitUpsellMode) {
     open_credit_limit_upsell(agent, mode, true);
 }
 
+/// The `CreditLimitBlock` pushed at scrollback index `idx`.
+fn credit_limit_block_at(
+    app: &AppView,
+    idx: usize,
+) -> &crate::scrollback::blocks::CreditLimitBlock {
+    let agent = app.agents.get(&AgentId(0)).unwrap();
+    match agent.scrollback.entry(idx) {
+        Some(entry) => match &entry.block {
+            crate::scrollback::block::RenderBlock::CreditLimit(blk) => blk,
+            _ => panic!("expected CreditLimit block at index {idx}"),
+        },
+        None => panic!("expected scrollback entry at index {idx}"),
+    }
+}
+
 /// Return the `QuestionViewState` from agent 0. Panics if absent.
 fn agent_qv(app: &AppView) -> &crate::views::question_view::QuestionViewState {
     app.agents
@@ -27,24 +40,48 @@ fn agent_qv(app: &AppView) -> &crate::views::question_view::QuestionViewState {
         .unwrap()
 }
 
-/// Extract the last-pushed `CreditLimitBlock` from agent 0 scrollback.
-fn last_credit_limit_block(
-    app: &AppView,
-    idx: usize,
-) -> &crate::scrollback::blocks::CreditLimitBlock {
-    let agent = app.agents.get(&AgentId(0)).unwrap();
-    if let crate::scrollback::block::RenderBlock::CreditLimit(ref blk) =
-        agent.scrollback.entry(idx).unwrap().block
-    {
-        blk
-    } else {
-        panic!("expected CreditLimit block at index {idx}");
+fn first_question(
+    qv: &crate::views::question_view::QuestionViewState,
+) -> &crate::views::question_view::Question {
+    match qv.questions.first() {
+        Some(q) => q,
+        None => panic!("expected a question"),
+    }
+}
+
+fn option_at(
+    q: &crate::views::question_view::Question,
+    i: usize,
+) -> &crate::views::question_view::QuestionOption {
+    match q.options.get(i) {
+        Some(o) => o,
+        None => panic!("expected option {i}"),
+    }
+}
+
+fn set_first_selection(
+    qv: &mut crate::views::question_view::QuestionViewState,
+    sel: crate::views::question_view::QuestionSelection,
+) {
+    match qv.selections.first_mut() {
+        Some(slot) => *slot = sel,
+        None => panic!("expected a selection slot"),
+    }
+}
+
+fn test_stashed_prompt(text: &str) -> crate::app::agent::InFlightPrompt {
+    crate::app::agent::InFlightPrompt {
+        text: text.into(),
+        images: Vec::new(),
+        scrollback_entry: crate::scrollback::EntryId::new(0),
+        combined_scrollback_entries: Vec::new(),
+        chip_elements: Vec::new(),
     }
 }
 
 /// Dispatch a `BillingFetched` task result with sensible defaults.
 fn open_usage_modal_nonce(app: &AppView) -> u64 {
-    match app.agents[&AgentId(0)].active_modal.as_ref() {
+    match test_agent(app, AgentId(0)).active_modal.as_ref() {
         Some(crate::views::modal::ActiveModal::UsageInfo { state }) => state.fetch_nonce,
         _ => 0,
     }
@@ -106,13 +143,207 @@ fn credit_limit_retry_preserves_image_submission_state() {
             .iter()
             .any(|effect| matches!(effect, Effect::SendPromptBlocks { .. }))
     );
-    let in_flight = app.agents[&AgentId(0)]
+    let in_flight = test_agent(&app, AgentId(0))
         .session
         .in_flight_prompt
         .as_ref()
         .unwrap();
     assert_eq!(in_flight.images.len(), 1);
     assert_eq!(in_flight.chip_elements.len(), 1);
+}
+
+#[test]
+fn credit_limit_recheck_keeps_stash_when_showing_upsell() {
+    let mut app = test_app_with_agent();
+    app.agents
+        .get_mut(&AgentId(0))
+        .unwrap()
+        .credit_limit_stashed_prompt = Some(test_stashed_prompt("retry me"));
+
+    let _ = dispatch(
+        Action::TaskComplete(TaskResult::CreditLimitRecheckComplete {
+            agent_id: AgentId(0),
+            meta: None,
+        }),
+        &mut app,
+    );
+    let agent = app.agents.get(&AgentId(0)).unwrap();
+    assert!(agent.question_view.is_some());
+    assert_eq!(
+        agent
+            .credit_limit_stashed_prompt
+            .as_ref()
+            .map(|p| p.text.as_str()),
+        Some("retry me")
+    );
+}
+
+#[test]
+fn credit_limit_recheck_drops_stash_when_user_moved_on() {
+    let mut app = test_app_with_agent();
+    {
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        agent.credit_limit_stashed_prompt = Some(test_stashed_prompt("retry me"));
+        agent.session.enqueue_prompt("new prompt".into());
+    }
+
+    let _ = dispatch(
+        Action::TaskComplete(TaskResult::CreditLimitRecheckComplete {
+            agent_id: AgentId(0),
+            meta: None,
+        }),
+        &mut app,
+    );
+    let agent = app.agents.get(&AgentId(0)).unwrap();
+    assert!(agent.credit_limit_stashed_prompt.is_none());
+    assert!(
+        agent.question_view.is_none(),
+        "moved-on must not open the upsell"
+    );
+}
+
+#[test]
+fn sending_a_new_prompt_clears_credit_limit_stash() {
+    let mut app = test_app_with_agent();
+    app.agents
+        .get_mut(&AgentId(0))
+        .unwrap()
+        .credit_limit_stashed_prompt = Some(test_stashed_prompt("retry me"));
+
+    let _ = dispatch_send_prompt(&mut app, "something new".into());
+    assert!(
+        app.agents
+            .get(&AgentId(0))
+            .unwrap()
+            .credit_limit_stashed_prompt
+            .is_none()
+    );
+}
+
+#[test]
+fn send_prompt_now_clears_credit_limit_stash() {
+    let mut app = test_app_with_agent();
+    app.agents
+        .get_mut(&AgentId(0))
+        .unwrap()
+        .credit_limit_stashed_prompt = Some(test_stashed_prompt("retry me"));
+
+    let _ = dispatch(
+        Action::SendPromptNow {
+            text: "steer it".into(),
+            images: Vec::new(),
+            image_notice: None,
+        },
+        &mut app,
+    );
+    assert!(
+        app.agents
+            .get(&AgentId(0))
+            .unwrap()
+            .credit_limit_stashed_prompt
+            .is_none()
+    );
+}
+
+#[test]
+fn retry_credit_limit_prompt_resubmits_stash() {
+    let mut app = test_app_with_agent();
+    app.agents
+        .get_mut(&AgentId(0))
+        .unwrap()
+        .credit_limit_stashed_prompt = Some(test_stashed_prompt("retry me"));
+
+    let effects = dispatch(Action::RetryCreditLimitPrompt, &mut app);
+    assert!(
+        effects.iter().any(|effect| matches!(
+            effect,
+            Effect::SendPrompt { text, .. } if text == "retry me"
+        )),
+        "expected SendPrompt, got {effects:?}"
+    );
+    let agent = app.agents.get(&AgentId(0)).unwrap();
+    assert!(agent.credit_limit_stashed_prompt.is_none());
+    assert_eq!(
+        agent
+            .session
+            .in_flight_prompt
+            .as_ref()
+            .map(|p| p.text.as_str()),
+        Some("retry me")
+    );
+    let has_retry_line = (0..agent.scrollback.len()).any(|i| {
+        matches!(
+            &agent.scrollback.entry(i).unwrap().block,
+            crate::scrollback::block::RenderBlock::System(sys)
+                if sys.text.contains("Trying again")
+        )
+    });
+    assert!(has_retry_line, "expected retry system line");
+}
+
+#[test]
+fn retry_credit_limit_prompt_toasts_when_stash_empty() {
+    let mut app = test_app_with_agent();
+    let effects = dispatch(Action::RetryCreditLimitPrompt, &mut app);
+    assert!(effects.is_empty(), "expected no send, got {effects:?}");
+    let toast = test_agent(&app, AgentId(0))
+        .toast
+        .as_ref()
+        .map(|(m, _)| m.as_str());
+    assert_eq!(toast, Some("No prompt to retry."));
+    let has_system = (0..test_agent(&app, AgentId(0)).scrollback.len()).any(|i| {
+        matches!(
+            &test_agent(&app, AgentId(0)).scrollback.entry(i).unwrap().block,
+            crate::scrollback::block::RenderBlock::System(sys)
+                if sys.text.contains("No prompt to retry")
+        )
+    });
+    assert!(has_system, "minimal mode has no toast; need a system line");
+}
+
+#[test]
+fn credit_limit_translate_retry_option_dispatches_retry() {
+    use crate::app::agent_view::translate_local_submit_for_test;
+    use crate::app::app_view::InputOutcome;
+    use crate::views::question_view::QuestionSelection;
+
+    let mut app = test_app_with_agent();
+    open_upsell_qa(&mut app, CreditLimitUpsellMode::UnifiedCredits);
+    let mut qv = app
+        .agents
+        .get_mut(&AgentId(0))
+        .unwrap()
+        .question_view
+        .take()
+        .expect("expected credit-limit upsell modal");
+    set_first_selection(&mut qv, QuestionSelection::Single(Some(2)));
+    let kind = qv
+        .local_kind
+        .take()
+        .expect("open_credit_limit_upsell sets local_kind");
+    match translate_local_submit_for_test(&qv, kind, false) {
+        InputOutcome::Action(Action::RetryCreditLimitPrompt) => {}
+        other => panic!("expected RetryCreditLimitPrompt, got {other:?}"),
+    }
+}
+
+#[test]
+fn credit_limit_max_tier_unified_pushes_inline_card() {
+    let mut app = test_app_with_agent();
+    let before = agent_scrollback_len(&app);
+    open_upsell_max_card(&mut app, CreditLimitUpsellMode::UnifiedCredits);
+    assert!(
+        app.agents.get(&AgentId(0)).unwrap().question_view.is_none(),
+        "max-tier must not open the question modal"
+    );
+    assert_eq!(agent_scrollback_len(&app), before + 1);
+    let blk = credit_limit_block_at(&app, before);
+    assert!(blk.heading.contains("weekly limit"));
+    assert_eq!(
+        blk.action,
+        crate::scrollback::blocks::CreditLimitCardAction::PurchaseCredits
+    );
+    assert_eq!(blk.url, UPSELL_URL_PAYG);
 }
 
 #[test]
@@ -127,7 +358,7 @@ fn is_max_tier_non_max_and_unknown() {
     assert!(!is_max_tier(Some("supergrok")));
     assert!(!is_max_tier(Some("premium")));
     assert!(!is_max_tier(Some("free")));
-    // Unknown defaults to non-max → Q&A shown.
+    // Unknown defaults to non-max, so the Q&A is shown
     assert!(!is_max_tier(None));
 }
 
@@ -146,18 +377,23 @@ fn is_max_tier_rejects_partial_matches() {
 }
 
 #[test]
-fn upsell_non_max_shows_qa_with_two_options() {
+fn upsell_non_max_shows_qa_with_retry_option() {
     let mut app = test_app_with_agent();
     open_upsell_qa(
         &mut app,
         CreditLimitUpsellMode::LegacyPayg { enabled: false },
     );
-    let q = &agent_qv(&app).questions[0];
-    assert_eq!(q.options.len(), 2);
-    assert_eq!(q.options[0].label, "Upgrade tier");
-    assert_eq!(q.options[0].id.as_deref(), Some(UPSELL_URL_UPGRADE));
-    assert_eq!(q.options[1].label, "Pay as you go");
-    assert_eq!(q.options[1].id.as_deref(), Some(UPSELL_URL_PAYG));
+    let q = first_question(agent_qv(&app));
+    assert_eq!(q.options.len(), 3);
+    assert_eq!(option_at(q, 0).label, "Upgrade tier");
+    assert_eq!(option_at(q, 0).id.as_deref(), Some(UPSELL_URL_UPGRADE));
+    assert_eq!(option_at(q, 1).label, "Pay as you go");
+    assert_eq!(option_at(q, 1).id.as_deref(), Some(UPSELL_URL_PAYG));
+    assert_eq!(option_at(q, 2).label, "Try Again");
+    assert_eq!(
+        option_at(q, 2).id.as_deref(),
+        Some(crate::app::dispatch::CREDIT_LIMIT_RETRY_OPTION_ID)
+    );
 }
 
 #[test]
@@ -167,9 +403,10 @@ fn upsell_non_max_payg_on_shows_increase_label() {
         &mut app,
         CreditLimitUpsellMode::LegacyPayg { enabled: true },
     );
-    let q = &agent_qv(&app).questions[0];
-    assert_eq!(q.options.len(), 2);
-    assert_eq!(q.options[1].label, "Increase limit");
+    let q = first_question(agent_qv(&app));
+    assert_eq!(q.options.len(), 3);
+    assert_eq!(option_at(q, 1).label, "Increase limit");
+    assert_eq!(option_at(q, 2).label, "Try Again");
 }
 
 #[test]
@@ -179,7 +416,7 @@ fn upsell_non_max_qa_heading_is_credit_limit_when_payg_off() {
         &mut app,
         CreditLimitUpsellMode::LegacyPayg { enabled: false },
     );
-    let heading = &agent_qv(&app).questions[0].question;
+    let heading = &first_question(agent_qv(&app)).question;
     assert!(
         heading.contains("credit limit"),
         "expected 'credit limit' in heading, got: {heading}"
@@ -193,7 +430,7 @@ fn upsell_non_max_qa_heading_is_spending_cap_when_payg_on() {
         &mut app,
         CreditLimitUpsellMode::LegacyPayg { enabled: true },
     );
-    let heading = &agent_qv(&app).questions[0].question;
+    let heading = &first_question(agent_qv(&app)).question;
     assert!(
         heading.contains("spending cap"),
         "expected 'spending cap' in heading, got: {heading}"
@@ -207,7 +444,7 @@ fn upsell_non_max_upgrade_url_is_supergrok() {
         &mut app,
         CreditLimitUpsellMode::LegacyPayg { enabled: false },
     );
-    let url = agent_qv(&app).questions[0].options[0]
+    let url = option_at(first_question(agent_qv(&app)), 0)
         .id
         .as_deref()
         .unwrap();
@@ -222,7 +459,7 @@ fn upsell_non_max_payg_url_is_usage() {
         &mut app,
         CreditLimitUpsellMode::LegacyPayg { enabled: false },
     );
-    let url = agent_qv(&app).questions[0].options[1]
+    let url = option_at(first_question(agent_qv(&app)), 1)
         .id
         .as_deref()
         .unwrap();
@@ -237,7 +474,7 @@ fn upsell_non_max_payg_on_description_mentions_spending_cap() {
         CreditLimitUpsellMode::LegacyPayg { enabled: true },
     );
     assert_eq!(
-        agent_qv(&app).questions[0].options[1].description,
+        option_at(first_question(agent_qv(&app)), 1).description,
         "Raise your pay-as-you-go spending cap"
     );
 }
@@ -250,7 +487,7 @@ fn upsell_non_max_payg_off_description_mentions_on_demand() {
         CreditLimitUpsellMode::LegacyPayg { enabled: false },
     );
     assert_eq!(
-        agent_qv(&app).questions[0].options[1].description,
+        option_at(first_question(agent_qv(&app)), 1).description,
         "Enable pay-as-you-go credits for on-demand usage"
     );
 }
@@ -259,17 +496,18 @@ fn upsell_non_max_payg_off_description_mentions_on_demand() {
 fn upsell_non_max_unified_shows_buy_credits() {
     let mut app = test_app_with_agent();
     open_upsell_qa(&mut app, CreditLimitUpsellMode::UnifiedCredits);
-    let q = &agent_qv(&app).questions[0];
+    let q = first_question(agent_qv(&app));
     assert!(q.question.contains("weekly limit"));
     assert_eq!(
-        q.options[0].description,
+        option_at(q, 0).description,
         "Upgrade to a higher tier for more usage"
     );
-    assert_eq!(q.options[1].label, "Buy more credits");
+    assert_eq!(option_at(q, 1).label, "Buy more credits");
     assert_eq!(
-        q.options[1].description,
+        option_at(q, 1).description,
         "Purchase credits to keep using Grok Build"
     );
+    assert_eq!(option_at(q, 2).label, "Try Again");
 }
 
 #[test]
@@ -277,19 +515,25 @@ fn upsell_max_unified_card_mentions_purchasing() {
     let mut app = test_app_with_agent();
     let before = agent_scrollback_len(&app);
     open_upsell_max_card(&mut app, CreditLimitUpsellMode::UnifiedCredits);
-    let blk = last_credit_limit_block(&app, before);
+    assert!(
+        app.agents.get(&AgentId(0)).unwrap().question_view.is_none(),
+        "max-tier upsell must not open the question modal"
+    );
+    assert_eq!(agent_scrollback_len(&app), before + 1);
+    let blk = credit_limit_block_at(&app, before);
+    assert!(blk.heading.contains("weekly limit"));
     assert_eq!(
         blk.action,
         crate::scrollback::blocks::CreditLimitCardAction::PurchaseCredits
     );
-    assert!(blk.heading.contains("weekly limit"));
+    assert_eq!(blk.url, UPSELL_URL_PAYG);
 }
 
 #[test]
 fn credit_limit_upsell_mode_prefers_unified_flag() {
     let mut bal = test_bal(100.0);
     bal.is_unified_billing_user = Some(true);
-    bal.pay_as_you_go = true; // must not override explicit unified
+    bal.pay_as_you_go = true; // must not override the explicit unified flag
     assert_eq!(
         credit_limit_upsell_mode(Some(&bal)),
         CreditLimitUpsellMode::UnifiedCredits
@@ -323,7 +567,7 @@ fn is_credit_limit_error_matches_legacy_403_and_pool_402() {
         Some(403),
         "status 403: run out of credits"
     ));
-    // 402 Payment Required is always credit/spend on this surface.
+    // A 402 Payment Required always counts as a credit/spend limit, whatever the message says
     assert!(is_credit_limit_error(Some(402), "anything"));
     assert!(is_credit_limit_error(
         None,
@@ -363,7 +607,7 @@ fn upsell_non_max_qa_has_single_select() {
         CreditLimitUpsellMode::LegacyPayg { enabled: false },
     );
     assert_eq!(
-        agent_qv(&app).questions[0].multi_select,
+        first_question(agent_qv(&app)).multi_select,
         Some(false),
         "upsell should be single-select"
     );
@@ -393,7 +637,7 @@ fn upsell_non_max_idempotent_when_question_view_already_open() {
     );
     assert!(app.agents.get(&AgentId(0)).unwrap().question_view.is_some());
 
-    // Second call should be a no-op (guard at line 2070).
+    // Second call should be a no-op (open_credit_limit_upsell returns if a modal is already open).
     let before = agent_scrollback_len(&app);
     open_upsell_qa(
         &mut app,
@@ -419,7 +663,7 @@ fn upsell_max_tier_pushes_scrollback_card_payg_off() {
         "max-tier should NOT open the question modal"
     );
     assert_eq!(agent_scrollback_len(&app), before + 1);
-    let blk = last_credit_limit_block(&app, before);
+    let blk = credit_limit_block_at(&app, before);
     assert!(blk.heading.contains("credit limit"));
     assert_eq!(
         blk.action,
@@ -438,7 +682,7 @@ fn upsell_max_tier_pushes_scrollback_card_payg_on() {
     );
     assert!(app.agents.get(&AgentId(0)).unwrap().question_view.is_none());
     assert_eq!(agent_scrollback_len(&app), before + 1);
-    let blk = last_credit_limit_block(&app, before);
+    let blk = credit_limit_block_at(&app, before);
     assert!(blk.heading.contains("spending cap"));
     assert_eq!(
         blk.action,
@@ -450,33 +694,40 @@ fn upsell_max_tier_pushes_scrollback_card_payg_on() {
 #[test]
 fn upsell_max_tier_does_not_open_question_view() {
     let mut app = test_app_with_agent();
+    let before = agent_scrollback_len(&app);
     open_upsell_max_card(
         &mut app,
         CreditLimitUpsellMode::LegacyPayg { enabled: false },
     );
     assert!(
         app.agents.get(&AgentId(0)).unwrap().question_view.is_none(),
-        "max-tier should use inline card, not question modal"
+        "max-tier should use the inline card, not the question modal"
+    );
+    assert_eq!(agent_scrollback_len(&app), before + 1);
+    let blk = credit_limit_block_at(&app, before);
+    assert!(
+        blk.heading.contains("credit limit"),
+        "max-tier must push a credit-limit card, got heading: {}",
+        blk.heading
     );
 }
 
 #[test]
-fn upsell_max_tier_scrollback_card_url_is_payg() {
+fn upsell_max_tier_buy_url_is_payg() {
     let mut app = test_app_with_agent();
     let before = agent_scrollback_len(&app);
     open_upsell_max_card(
         &mut app,
         CreditLimitUpsellMode::LegacyPayg { enabled: false },
     );
-    assert_eq!(last_credit_limit_block(&app, before).url, UPSELL_URL_PAYG);
+    assert!(app.agents.get(&AgentId(0)).unwrap().question_view.is_none());
+    assert_eq!(credit_limit_block_at(&app, before).url, UPSELL_URL_PAYG);
 }
 
 #[test]
 fn upsell_max_tier_not_idempotent_pushes_multiple_cards() {
     let mut app = test_app_with_agent();
     let before = agent_scrollback_len(&app);
-    // Max-tier path doesn't guard against duplicates — each call
-    // pushes a new inline card.
     open_upsell_max_card(
         &mut app,
         CreditLimitUpsellMode::LegacyPayg { enabled: false },
@@ -484,15 +735,25 @@ fn upsell_max_tier_not_idempotent_pushes_multiple_cards() {
     open_upsell_max_card(
         &mut app,
         CreditLimitUpsellMode::LegacyPayg { enabled: false },
+    );
+    assert!(
+        app.agents.get(&AgentId(0)).unwrap().question_view.is_none(),
+        "max-tier must not open the question modal"
     );
     assert_eq!(
         agent_scrollback_len(&app),
         before + 2,
         "max-tier path pushes a card on every call"
     );
+    assert_eq!(
+        credit_limit_block_at(&app, before).action,
+        crate::scrollback::blocks::CreditLimitCardAction::EnablePayg
+    );
+    assert_eq!(
+        credit_limit_block_at(&app, before + 1).action,
+        crate::scrollback::blocks::CreditLimitCardAction::EnablePayg
+    );
 }
-
-// ── ShowUsage / session usage ───────────────────────────────────────
 
 fn is_session_usage_fetch(effects: &[Effect]) -> bool {
     matches!(
@@ -518,7 +779,7 @@ fn complete_session_usage(
             agent_id: AgentId(0),
             session_id: session_id.to_string().into(),
             usage: Box::new(usage),
-            nonce: 0,
+            nonce: Default::default(),
         }),
         app,
     )
@@ -530,7 +791,7 @@ fn fail_session_usage(app: &mut AppView, session_id: &str, error: &str) -> Vec<E
             agent_id: AgentId(0),
             session_id: session_id.to_string().into(),
             error: error.into(),
-            nonce: 0,
+            nonce: Default::default(),
         }),
         app,
     )
@@ -539,7 +800,7 @@ fn fail_session_usage(app: &mut AppView, session_id: &str, error: &str) -> Vec<E
 #[test]
 fn show_usage_schedules_session_fetch_only() {
     let mut app = test_app_with_agent();
-    // Scrollback flow is minimal-only.
+    // The scrollback usage flow only runs in Minimal screen mode
     app.screen_mode = crate::app::ScreenMode::Minimal;
     assert!(is_session_usage_fetch(&dispatch(
         Action::ShowUsage,
@@ -572,7 +833,7 @@ fn team_auth_disables_agent_billing_surface() {
         .get_mut(&AgentId(0))
         .unwrap()
         .billing_surface_visible = true;
-    app.apply_auth_meta(&xai_grok_shell::auth::AuthMeta {
+    app.apply_auth_meta(&xai_grok_login::AuthMeta {
         team_id: Some("team-uuid".into()),
         team_name: Some("Acme Corp".into()),
         ..Default::default()
@@ -698,8 +959,6 @@ fn session_usage_failed_drops_stale_session() {
     assert_eq!(agent_scrollback_len(&app), before);
 }
 
-// ── BillingFetched dispatch tests ───────────────────────────────────
-
 #[test]
 fn billing_fetched_updates_app_credit_balance() {
     let mut app = test_app_with_agent();
@@ -772,12 +1031,11 @@ fn billing_fetched_none_balance_shows_no_data_message() {
 #[test]
 fn billing_fetched_none_balance_clears_cached() {
     let mut app = test_app_with_agent();
-    // Seed a known balance + polling, as a prior successful fetch would.
+    // Seed a known balance and polling, as a prior successful fetch would
     dispatch_billing(&mut app, Some(test_bal(80.0)), true, None);
     app.billing_poll_wanted = true;
-    // A response carrying no billing config clears the cached balance and
-    // polling so the status bar agrees with the "No billing data" message
-    // (parse/transport failures route to BillingError, not here).
+    // A response carrying no billing config clears the cached balance and polling so the status bar agrees with the "No billing data" message
+    // Parse/transport failures route to BillingError, not here
     dispatch_billing(&mut app, None, false, None);
     assert!(
         app.credit_balance.is_none(),
@@ -803,21 +1061,17 @@ fn billing_fetched_high_usage_enables_poll() {
 #[test]
 fn background_billing_poll_wanted_is_honor_ttl_not_force_refresh() {
     assert_eq!(
-        background_billing_poll_snapshot_mode(),
+        crate::app::dispatch::billing::background_billing_poll_snapshot_mode(),
         xai_grok_shell::auth::LimitsSnapshotMode::HonorTtl,
         "near-full included SuperGrok period poll FetchBilling is HonorTtl"
     );
-    let Effect::FetchBilling {
-        force_refresh,
-        silent,
-        nonce,
-        ..
-    } = background_billing_poll_fetch_billing(AgentId(0))
+    let Effect::FetchBilling { silent, nonce, .. } =
+        crate::app::dispatch::billing::background_billing_poll_fetch_billing(AgentId(0))
     else {
         panic!("background billing poll must queue FetchBilling");
     };
     assert!(
-        !force_refresh,
+        !crate::app::dispatch::billing::background_billing_poll_force_refresh(),
         "near-full included SuperGrok period poll FetchBilling is HonorTtl, not ForceRefresh"
     );
     assert!(silent, "background billing poll is silent chrome refresh");
@@ -892,7 +1146,7 @@ fn billing_fetched_stores_autotopup_on_app_and_agent() {
             silent: true,
             subscription_tier: None,
             autotopup: crate::views::credit_bar::AutoTopupFetch::Resolved(autotopup),
-            nonce: 0,
+            nonce: Default::default(),
         }),
         &mut app,
     );
@@ -922,7 +1176,7 @@ fn billing_fetched_unchanged_autotopup_keeps_cached_rule() {
             silent: true,
             subscription_tier: None,
             autotopup: resolved,
-            nonce: 0,
+            nonce: Default::default(),
         }),
         &mut app,
     );
@@ -934,7 +1188,7 @@ fn billing_fetched_unchanged_autotopup_keeps_cached_rule() {
             silent: true,
             subscription_tier: None,
             autotopup: crate::views::credit_bar::AutoTopupFetch::Unchanged,
-            nonce: 0,
+            nonce: Default::default(),
         }),
         &mut app,
     );
@@ -963,12 +1217,11 @@ fn billing_fetched_cleared_autotopup_resets_cache() {
                     max_amount_cents: None,
                 },
             ),
-            nonce: 0,
+            nonce: Default::default(),
         }),
         &mut app,
     );
-    // Credits gone → `Cleared` resets the cached rule to "unknown" so a later
-    // credits period can't read a stale rule.
+    // Credits gone: `Cleared` resets the cached rule to "unknown" so a later credits period can't read a stale rule
     dispatch(
         Action::TaskComplete(TaskResult::BillingFetched {
             agent_id: AgentId(0),
@@ -976,7 +1229,7 @@ fn billing_fetched_cleared_autotopup_resets_cache() {
             silent: true,
             subscription_tier: None,
             autotopup: crate::views::credit_bar::AutoTopupFetch::Cleared,
-            nonce: 0,
+            nonce: Default::default(),
         }),
         &mut app,
     );
@@ -997,6 +1250,7 @@ fn app_billing_fetched_stores_autotopup() {
             autotopup: crate::views::credit_bar::AutoTopupFetch::Resolved(
                 crate::views::credit_bar::AutoTopupInfo::disabled(),
             ),
+            nonce: 0,
         }),
         &mut app,
     );
@@ -1007,7 +1261,21 @@ fn app_billing_fetched_stores_autotopup() {
     assert!(app.auto_topup.is_some_and(|at| !at.enabled));
 }
 
-// ── BillingError dispatch tests ─────────────────────────────────────
+/// A failed app-level fetch is not a "no billing data" answer: the cached balance behind the welcome warning stays put.
+#[test]
+fn app_billing_error_keeps_cached_balance() {
+    let mut app = test_app_with_agent();
+    app.credit_balance = Some(test_bal(77.0));
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::AppBillingError {
+            error: "timeout".to_string(),
+            nonce: 0,
+        }),
+        &mut app,
+    );
+    assert!(effects.is_empty());
+    assert_eq!(app.credit_balance.as_ref().map(|b| b.usage_pct), Some(77.0));
+}
 
 #[test]
 fn billing_error_silent_does_not_push_scrollback() {
@@ -1018,7 +1286,7 @@ fn billing_error_silent_does_not_push_scrollback() {
             agent_id: AgentId(0),
             error: "network timeout".into(),
             silent: true,
-            nonce: 0,
+            nonce: Default::default(),
         }),
         &mut app,
     );
@@ -1038,7 +1306,7 @@ fn billing_error_non_silent_pushes_error_message() {
             agent_id: AgentId(0),
             error: "service unavailable".into(),
             silent: false,
-            nonce: 0,
+            nonce: Default::default(),
         }),
         &mut app,
     );
@@ -1048,8 +1316,6 @@ fn billing_error_non_silent_pushes_error_message() {
         "non-silent billing error should push an error message"
     );
 }
-
-// ── Free-usage paywall tests ────────────────────────────────────────
 
 #[test]
 fn free_usage_error_detected_by_embedded_code() {
@@ -1068,7 +1334,24 @@ fn free_usage_error_detected_by_embedded_code() {
 }
 
 #[test]
-fn free_usage_upsell_shows_two_options_with_exact_labels() {
+fn free_usage_upsell_displaces_feedback_before_opening_question() {
+    let mut app = test_app_with_agent();
+    let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+    agent.feedback_modal = Some(crate::views::feedback_modal::FeedbackModalState::new(
+        crate::views::feedback_modal::OpenFeedbackModal {
+            text: Some("unsent report".to_owned()),
+            ..Default::default()
+        },
+    ));
+
+    open_free_usage_upsell(agent, None);
+
+    assert!(agent.feedback_modal.is_none());
+    assert!(agent.question_view.is_some());
+}
+
+#[test]
+fn free_usage_upsell_shows_three_options_with_exact_labels() {
     let mut app = test_app_with_agent();
     let agent = app.agents.get_mut(&AgentId(0)).unwrap();
     open_free_usage_upsell(agent, None);
@@ -1082,12 +1365,17 @@ fn free_usage_upsell_shows_two_options_with_exact_labels() {
             }
         )
     ));
-    let q = &qv.questions[0];
+    let q = first_question(qv);
     assert_eq!(q.question, "You hit your free usage limit.");
     let expected = [
         (
             "Upgrade to SuperGrok",
             "For everyday coding and productivity tasks",
+            Some(UPSELL_URL_UPGRADE),
+        ),
+        (
+            "Upgrade to SuperGrok Plus",
+            "Significantly higher usage and rate limits",
             Some(UPSELL_URL_UPGRADE),
         ),
         (
@@ -1104,9 +1392,8 @@ fn free_usage_upsell_shows_two_options_with_exact_labels() {
     }
 }
 
-/// Replay the REAL free-usage sequence — send → `RetryState::Retrying` →
-/// `Exhausted` → PromptResponse error — through the production handlers:
-/// the paywall modal must open on the turn-end error.
+/// Replay the REAL free-usage sequence (send, `RetryState::Retrying`, `Exhausted`, PromptResponse error) through the production handlers.
+/// The paywall modal must open on the turn-end error.
 #[test]
 fn free_usage_failure_opens_paywall_modal() {
     use crate::app::acp_handler::apply_session_event_for_test;
@@ -1118,13 +1405,13 @@ fn free_usage_failure_opens_paywall_modal() {
     // 1. Real send.
     let effects = dispatch(Action::SendPrompt("draw me a cat".into()), &mut app);
     assert!(
-        matches!(&effects[0], Effect::SendPrompt { text, .. } if text == "draw me a cat"),
+        matches!(effects.first(), Some(Effect::SendPrompt { text, .. }) if text == "draw me a cat"),
         "send must dispatch: {effects:?}"
     );
-    let prompt_id = app.agents[&id].session.current_prompt_id.clone();
+    let prompt_id = test_agent(&app, id).session.current_prompt_id.clone();
     assert!(prompt_id.is_some(), "send must mint a prompt id");
 
-    // 2+3. Real notification sequence through the production handler.
+    // 2 and 3. Real notification sequence through the production handler.
     {
         let agent = app.agents.get_mut(&id).unwrap();
         apply_session_event_for_test(
@@ -1132,6 +1419,7 @@ fn free_usage_failure_opens_paywall_modal() {
                 attempt: 1,
                 max_retries: 2,
                 reason: "429 Too Many Requests".into(),
+                error_type: None,
             }),
             &mut agent.session,
             &mut agent.scrollback,
@@ -1161,12 +1449,12 @@ fn free_usage_failure_opens_paywall_modal() {
         &mut app,
     );
     assert!(
-        app.agents[&id].question_view.is_some(),
+        test_agent(&app, id).question_view.is_some(),
         "paywall modal must open"
     );
 }
 
-/// Answer translation: both upgrade options open their URL.
+/// Answer translation: every upgrade option opens the upgrade URL.
 #[test]
 fn free_usage_translate_local_submit_maps_options() {
     use crate::app::agent_view::translate_local_submit_for_test;
@@ -1181,8 +1469,8 @@ fn free_usage_translate_local_submit_maps_options() {
         source: xai_grok_telemetry::events::SuperGrokUpsell::FreeUsagePaywall,
     };
 
-    for idx in [0, 1] {
-        qv.selections[0] = QuestionSelection::Single(Some(idx));
+    for idx in [0, 1, 2] {
+        set_first_selection(&mut qv, QuestionSelection::Single(Some(idx)));
         match translate_local_submit_for_test(&qv, kind(), false) {
             InputOutcome::Action(Action::OpenUrl(url)) => assert_eq!(url, UPSELL_URL_UPGRADE),
             other => panic!("expected OpenUrl for option {idx}, got {other:?}"),
@@ -1190,12 +1478,9 @@ fn free_usage_translate_local_submit_maps_options() {
     }
 }
 
-// ── Restricted-command upsell tests ─────────────────────────────────
-
-/// Submitting a tier-restricted command opens the two-option SuperGrok
-/// upsell and neither runs the command nor leaks the text to the model.
+/// Submitting a tier-restricted command opens the three-option SuperGrok upsell and neither runs the command nor leaks the text to the model.
 #[test]
-fn restricted_command_submit_opens_two_option_upsell() {
+fn restricted_command_submit_opens_three_option_upsell() {
     let mut app = test_app_with_agent();
     let id = AgentId(0);
     app.agents
@@ -1209,7 +1494,7 @@ fn restricted_command_submit_opens_two_option_upsell() {
         effects.is_empty(),
         "restricted command must not produce a SendPrompt: {effects:?}"
     );
-    let agent = &app.agents[&id];
+    let agent = test_agent(&app, id);
     assert!(
         agent.session.pending_prompts.is_empty(),
         "restricted command must not be enqueued"
@@ -1225,17 +1510,18 @@ fn restricted_command_submit_opens_two_option_upsell() {
             }
         )
     ));
-    let q = &qv.questions[0];
+    let q = first_question(qv);
     assert_eq!(q.question, "Unlock all features with SuperGrok.");
-    assert_eq!(q.options.len(), 2);
-    assert_eq!(q.options[0].label, "Upgrade to SuperGrok");
-    assert_eq!(q.options[0].id.as_deref(), Some(UPSELL_URL_UPGRADE));
-    assert_eq!(q.options[1].label, "Upgrade to SuperGrok Heavy");
-    assert_eq!(q.options[1].id.as_deref(), Some(UPSELL_URL_UPGRADE));
+    assert_eq!(q.options.len(), 3);
+    assert_eq!(option_at(q, 0).label, "Upgrade to SuperGrok");
+    assert_eq!(option_at(q, 0).id.as_deref(), Some(UPSELL_URL_UPGRADE));
+    assert_eq!(option_at(q, 1).label, "Upgrade to SuperGrok Plus");
+    assert_eq!(option_at(q, 1).id.as_deref(), Some(UPSELL_URL_UPGRADE));
+    assert_eq!(option_at(q, 2).label, "Upgrade to SuperGrok Heavy");
+    assert_eq!(option_at(q, 2).id.as_deref(), Some(UPSELL_URL_UPGRADE));
 }
 
-/// Aliases of a restricted command hit the same upsell (deny-list
-/// matching covers aliases via the registry).
+/// Aliases of a restricted command hit the same upsell (deny-list matching covers aliases via the registry).
 #[test]
 fn restricted_command_alias_also_upsells() {
     let mut app = test_app_with_agent();
@@ -1248,14 +1534,15 @@ fn restricted_command_alias_also_upsells() {
     let effects = dispatch(Action::SendPrompt("/cost".into()), &mut app);
 
     assert!(effects.is_empty());
-    assert!(app.agents[&id].question_view.is_some(), "upsell must open");
+    assert!(
+        test_agent(&app, id).question_view.is_some(),
+        "upsell must open"
+    );
 }
 
-/// A restricted submit while ANOTHER question modal is already open
-/// must not silently drop the typed text — the upsell can't open (the guard
-/// never displaces a modal), so the composer keeps the text for a resubmit
-/// after the modal closes. No passthrough, nothing enqueued, and the
-/// existing modal survives untouched.
+/// A restricted submit while ANOTHER question modal is already open must not silently drop the typed text.
+/// The upsell can't open (the guard never displaces a modal), so the composer keeps the text for a resubmit after the modal closes.
+/// No passthrough, nothing enqueued, and the existing modal survives untouched.
 #[test]
 fn restricted_command_with_open_modal_keeps_composer_text() {
     let mut app = test_app_with_agent();
@@ -1273,7 +1560,7 @@ fn restricted_command_with_open_modal_keeps_composer_text() {
     let effects = dispatch(Action::SendPrompt("/imagine a sunset".into()), &mut app);
 
     assert!(effects.is_empty(), "no passthrough / send: {effects:?}");
-    let agent = &app.agents[&id];
+    let agent = test_agent(&app, id);
     assert_eq!(
         agent.prompt.text(),
         "/imagine a sunset",
@@ -1295,8 +1582,7 @@ fn restricted_command_with_open_modal_keeps_composer_text() {
     );
 }
 
-/// Regression: genuinely unknown (non-restricted) commands keep the
-/// PassThrough behavior shell/ACP commands rely on.
+/// Regression: genuinely unknown (non-restricted) commands keep the PassThrough behavior shell/ACP commands rely on.
 #[test]
 fn unknown_non_restricted_command_still_passes_through() {
     let mut app = test_app_with_agent();
@@ -1310,26 +1596,22 @@ fn unknown_non_restricted_command_still_passes_through() {
 
     assert_eq!(effects.len(), 1);
     assert!(
-        matches!(&effects[0], Effect::SendPrompt { text, .. } if text == "/frobnicate arg"),
+        matches!(effects.first(), Some(Effect::SendPrompt { text, .. }) if text == "/frobnicate arg"),
         "unknown command must still pass through: {effects:?}"
     );
     assert!(
-        app.agents[&id].question_view.is_none(),
+        test_agent(&app, id).question_view.is_none(),
         "no upsell for genuinely unknown commands"
     );
 }
 
-// ── Browser-unavailable URL fallback ────────────────────────────────
-
-/// When the OS browser opener cannot run (simulated via a broken
-/// `GROK_TEST_OPEN_URL_FILE` seam), `Action::OpenUrl` for a billing CTA
-/// must push a scrollback system message that includes the full URL —
-/// the headless-VM fix for silent Upgrade / Buy-more-credits no-ops.
+/// `Action::OpenUrl` for a billing CTA must push a scrollback system message that includes the full URL when the OS browser opener cannot run.
+/// The opener failure is simulated via a broken `GROK_TEST_OPEN_URL_FILE` path.
+/// On a headless VM the opener always fails, so without this message the Upgrade and Buy-more-credits buttons do nothing visible.
 #[serial_test::serial(GROK_TEST_OPEN_URL_FILE)]
 #[test]
 fn open_url_shows_manual_url_when_browser_unavailable() {
-    // Point the test seam at a path whose parent dir does not exist so the
-    // write fails and `open_url` returns false (BrowserUnavailable).
+    // Point `GROK_TEST_OPEN_URL_FILE` at a path whose parent dir does not exist so the write fails and `open_url` returns false (BrowserUnavailable)
     let bad = std::env::temp_dir().join(format!(
         "grok-open-url-missing-{}/out.txt",
         std::process::id()
@@ -1353,7 +1635,7 @@ fn open_url_shows_manual_url_when_browser_unavailable() {
         text,
         crate::app::link_opener::browser_unavailable_message(url)
     );
-    let toast = app.agents[&AgentId(0)]
+    let toast = test_agent(&app, AgentId(0))
         .toast
         .as_ref()
         .map(|(m, _)| m.as_str());
@@ -1363,7 +1645,7 @@ fn open_url_shows_manual_url_when_browser_unavailable() {
     unsafe { std::env::remove_var("GROK_TEST_OPEN_URL_FILE") };
 }
 
-/// Successful open (test seam write OK) must not spam a fallback system message.
+/// A successful open (the `GROK_TEST_OPEN_URL_FILE` write succeeds) must not spam a fallback system message.
 #[serial_test::serial(GROK_TEST_OPEN_URL_FILE)]
 #[test]
 fn open_url_does_not_show_fallback_when_opener_succeeds() {
@@ -1394,9 +1676,8 @@ fn open_url_does_not_show_fallback_when_opener_succeeds() {
     let _ = std::fs::remove_file(&url_file);
 }
 
-/// Welcome has no scrollback: browser-unavailable OpenUrl must put a
-/// single-line toast that includes the full URL (no `\n` — the welcome
-/// painter is one row). Privacy-banner Terms/Policy clicks hit this path.
+/// Welcome has no scrollback: browser-unavailable OpenUrl must put up a single-line toast that includes the full URL.
+/// No `\n`; the welcome painter is one row. Privacy-banner Terms/Policy clicks hit this path.
 #[serial_test::serial(GROK_TEST_OPEN_URL_FILE)]
 #[test]
 fn open_url_welcome_toasts_single_line_url_when_browser_unavailable() {
@@ -1413,7 +1694,7 @@ fn open_url_welcome_toasts_single_line_url_when_browser_unavailable() {
         "fixture must start on welcome"
     );
 
-    use crate::app::link_opener::browser_unavailable_message;
+    use crate::app::link_opener::browser_unavailable_line;
 
     let terms = crate::views::privacy_banner::PRIVACY_BANNER_TERMS_URL;
     let effects = dispatch(Action::OpenUrl(terms.to_string()), &mut app);
@@ -1423,17 +1704,16 @@ fn open_url_welcome_toasts_single_line_url_when_browser_unavailable() {
         .as_ref()
         .map(|(m, _)| m.as_str())
         .unwrap_or("");
-    // Structure only: clipboard delivery varies by host, so do not lock the
-    // exact "copied" phrase here (constructor unit tests cover both arms).
+    // Structure only: clipboard delivery varies by host, so do not lock the exact "copied" phrase here (constructor unit tests cover both arms)
     assert!(toast.starts_with(terms), "{toast}");
     assert!(!toast.contains('\n'), "{toast}");
     assert!(
-        toast == browser_unavailable_message(terms),
-        "welcome toast must match the 1.0.3 browser-unavailable line: {toast}"
+        toast == browser_unavailable_line(terms, true)
+            || toast == browser_unavailable_line(terms, false),
+        "welcome toast must match a delivery-honest line form: {toast}"
     );
 
-    // Policy URL is shorter than terms (compile-time constants); second toast
-    // replaces the first in welcome toast state.
+    // Policy URL is shorter than terms (compile-time constants); second toast replaces the first in welcome toast state
     let policy = crate::views::privacy_banner::PRIVACY_BANNER_POLICY_URL;
     let _ = dispatch(Action::OpenUrl(policy.to_string()), &mut app);
     let toast = app
@@ -1443,7 +1723,8 @@ fn open_url_welcome_toasts_single_line_url_when_browser_unavailable() {
         .unwrap_or("");
     assert!(toast.starts_with(policy), "{toast}");
     assert!(
-        toast == browser_unavailable_message(policy),
+        toast == browser_unavailable_line(policy, true)
+            || toast == browser_unavailable_line(policy, false),
         "second welcome toast must match a delivery-honest line form: {toast}"
     );
 
@@ -1451,8 +1732,7 @@ fn open_url_welcome_toasts_single_line_url_when_browser_unavailable() {
     unsafe { std::env::remove_var("GROK_TEST_OPEN_URL_FILE") };
 }
 
-/// Credit-limit upsell Q&A submit routes through OpenUrl; when the browser
-/// is unavailable the full option URL must land in scrollback.
+/// Credit-limit upsell Q&A submit routes through OpenUrl; when the browser is unavailable the full option URL must land in scrollback.
 #[serial_test::serial(GROK_TEST_OPEN_URL_FILE)]
 #[test]
 fn credit_limit_upsell_submit_shows_url_when_browser_unavailable() {
@@ -1476,12 +1756,13 @@ fn credit_limit_upsell_submit_shows_url_when_browser_unavailable() {
         .question_view
         .take()
         .expect("expected credit-limit upsell modal");
-    // Select option 1 = "Buy more credits" (credits / usage URL).
-    qv.selections[0] = QuestionSelection::Single(Some(1));
+    // Select option 1, "Buy more credits" (credits / usage URL)
+    set_first_selection(&mut qv, QuestionSelection::Single(Some(1)));
     let kind = LocalQuestionKind::CreditLimitUpsell {
         choices: vec![
             xai_grok_telemetry::events::CreditLimitChoice::UpgradeTier,
             xai_grok_telemetry::events::CreditLimitChoice::PurchaseCredits,
+            xai_grok_telemetry::events::CreditLimitChoice::RetryLastPrompt,
         ],
     };
     let InputOutcome::Action(Action::OpenUrl(url)) =
@@ -1514,7 +1795,7 @@ fn billing_fetched_clears_usage_modal_loading() {
         true,
         Some("SuperGrok".into()),
     );
-    let agent = &app.agents[&AgentId(0)];
+    let agent = test_agent(&app, AgentId(0));
     let Some(crate::views::modal::ActiveModal::UsageInfo { state }) = agent.active_modal.as_ref()
     else {
         panic!("expected the usage modal to be open");
@@ -1530,19 +1811,18 @@ fn billing_fetched_clears_usage_modal_loading() {
 fn background_billing_reply_does_not_settle_modal_loading() {
     let mut app = test_app_with_agent();
     dispatch(Action::ShowUsage, &mut app);
-    // A turn-end refresh (nonce 0) lands while the modal's own fetch is in
-    // flight: mirrors update, but the modal's loading/error flags don't.
+    // A turn-end refresh (nonce 0) lands while the modal's own fetch is in flight: mirrors update, but the modal's loading/error flags don't
     dispatch(
         Action::TaskComplete(TaskResult::BillingError {
             agent_id: AgentId(0),
             error: "background boom".to_string(),
             silent: true,
-            nonce: 0,
+            nonce: Default::default(),
         }),
         &mut app,
     );
     let Some(crate::views::modal::ActiveModal::UsageInfo { state }) =
-        app.agents[&AgentId(0)].active_modal.as_ref()
+        test_agent(&app, AgentId(0)).active_modal.as_ref()
     else {
         panic!("expected the usage modal to be open");
     };
@@ -1566,7 +1846,7 @@ fn billing_error_surfaces_in_usage_modal_without_scrollback() {
         &mut app,
     );
     let Some(crate::views::modal::ActiveModal::UsageInfo { state }) =
-        app.agents[&AgentId(0)].active_modal.as_ref()
+        test_agent(&app, AgentId(0)).active_modal.as_ref()
     else {
         panic!("expected the usage modal to be open");
     };

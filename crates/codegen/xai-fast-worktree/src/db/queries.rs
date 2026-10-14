@@ -5,6 +5,7 @@ use rusqlite::{Connection, params};
 
 use super::{DbStats, ListFilter, WorktreeKind, WorktreeRecord, WorktreeStatus, now_epoch_secs};
 
+// xai-grok-permission-rules/src/worktree.rs copies row_to_record and the get_by_* lookups read-only; keep them in sync
 fn row_to_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorktreeRecord> {
     let kind_str: String = row.get("kind")?;
     let status_str: String = row.get("status")?;
@@ -49,7 +50,7 @@ pub fn register(conn: &Connection, record: &WorktreeRecord) -> Result<()> {
             path_str.as_ref(),
             source_str.as_ref(),
             record.repo_name,
-            record.kind.as_str(),
+            record.kind.as_ref(),
             record.creation_mode,
             record.git_ref,
             record.head_commit,
@@ -57,7 +58,7 @@ pub fn register(conn: &Connection, record: &WorktreeRecord) -> Result<()> {
             record.creator_pid.map(|p| p as i64),
             record.created_at,
             record.last_accessed_at,
-            record.status.as_str(),
+            record.status.as_ref(),
             metadata_str,
         ],
     )
@@ -138,8 +139,8 @@ pub fn list(conn: &Connection, filter: &ListFilter) -> Result<Vec<WorktreeRecord
     let mut sql = String::from("SELECT * FROM worktrees WHERE 1=1");
     let mut idx = 0usize;
 
-    let status_str = filter.status.map(|s| s.as_str());
-    let kind_str = filter.kind.map(|k| k.as_str());
+    let status_str = filter.status.map(Into::<&'static str>::into);
+    let kind_str = filter.kind.map(Into::<&'static str>::into);
     let source_repo_str = filter
         .source_repo
         .as_ref()
@@ -209,17 +210,46 @@ pub fn stats(conn: &Connection) -> Result<DbStats> {
 }
 
 pub fn sweep_dead(conn: &Connection) -> Result<u64> {
-    let alive_paths: Vec<(String, String)> = {
-        let mut stmt = conn.prepare("SELECT id, path FROM worktrees WHERE status = 'alive'")?;
+    let alive_paths: Vec<(String, String, String)> = {
+        let mut stmt =
+            conn.prepare("SELECT id, path, creation_mode FROM worktrees WHERE status = 'alive'")?;
         let rows = stmt.query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
         })?;
         rows.filter_map(|r| r.ok()).collect()
     };
 
     let mut marked = 0u64;
-    for (id, path_str) in alive_paths {
-        if !Path::new(&path_str).exists() {
+    for (id, path_str, mode) in alive_paths {
+        // Grove dests can be a leftover mountpoint dir or a wedged mount.
+        // `exists()` follows the mount and can hang; nfs_row_is_dead is
+        // the only liveness probe for those rows.
+        if crate::worktree::is_grove_strategy(&mode) {
+            if crate::nfs::nfs_record_is_dead(Path::new(&path_str), None) {
+                conn.execute(
+                    "UPDATE worktrees SET status = 'dead' WHERE id = ?1",
+                    params![id],
+                )?;
+                marked += 1;
+            }
+            continue;
+        }
+        // Linked/copy rows on a live grove dest: exists() hangs.
+        let dest = Path::new(&path_str);
+        if crate::nfs::dest_is_nfs_mount(dest)
+            || crate::nfs::dest_is_mountpoint(dest)
+            || !crate::nfs::dest_is_known_unmounted(dest)
+        {
+            continue;
+        }
+        // `exists()` follows the dest. A dangling worktree symlink still
+        // occupies the path and must be unlinked by the age pass, not marked
+        // dead and forgotten.
+        if std::fs::symlink_metadata(dest).is_err() {
             conn.execute(
                 "UPDATE worktrees SET status = 'dead' WHERE id = ?1",
                 params![id],

@@ -1,27 +1,19 @@
-//! Grok OSS update, rebuild, and optional SpaceXAI auto-update.
-//!
-//! Hash roles, in complete thoughts:
-//! - Git object ids (40-hex SHA-1 on today's repos, or a future git SHA-256
-//!   object id) identify commits. They are not a security hash for downloads
-//!   or Nix FODs.
-//! - `/rebuild` checks the installed binary with `--version`, then compares
-//!   package version plus that git identity.
-//! - The SpaceXAI internal auto-updater and the GitHub Releases installer
-//!   pin SHA-256 of the published `${artifact}.sha256` file (fail-closed on
-//!   miss or mismatch). Internal then still smoke-tests `--version`. They
-//!   do not hash the bytes with SHA-1. GitHub publishes that pin as a
-//!   release asset named `${artifact}.sha256`.
-//! - New artifact / FOD verify is SHA-256 or minisign. POSIX `install.sh`
-//!   / `install-enterprise.sh` and PowerShell `install.ps1` /
-//!   `install-enterprise.ps1` pin SHA-256 of the published checksum file.
-
+#![allow(
+    unused_imports,
+    unused_variables,
+    unused_mut,
+    unreachable_code,
+    dead_code
+)]
+#![deny(clippy::indexing_slicing)]
 pub mod artifact_sha256;
 pub mod auto_update;
+mod cleanup_downloads;
 pub mod oss_update;
 pub mod rebuild;
 pub mod version;
 mod version_policy;
-
+mod winget;
 pub use auto_update::UpdateStatus;
 pub use oss_update::{
     OSS_GITHUB_REPO, OssUpdateStatus, check_against_main, format_build_id, how_to_update_message,
@@ -32,8 +24,8 @@ pub use rebuild::{
     REBUILD_PROGRESS_LINE_MAX_CHARS, RebuildFleetPlan, RebuildFleetSignalStep,
     RebuildProgressEngine, RebuildProgressEvent, RebuildRelaunchRequest, RebuildReport,
     backup_previous_grok_oss_binary, cargo_sub_fraction, clamp_rebuild_fraction,
-    collect_rebuild_signal_pids, export_git_index_to, format_rebuild_cli_progress,
-    git_work_tree_is_present, identity_git_sha, install_stdio_policy,
+    collect_rebuild_signal_pids, exec_installed_binary_for_peer_rebuild, export_git_index_to,
+    format_rebuild_cli_progress, git_work_tree_is_present, identity_git_sha, install_stdio_policy,
     installed_identity_matches_workspace_git_sha, is_cargo_json_build_finished,
     is_rebuild_progress_stage_line, is_stable_height_progress_line, make_rebuild_relaunch_request,
     overall_fraction_in_cargo, parse_cargo_json_artifact_package, parse_compiling_crate,

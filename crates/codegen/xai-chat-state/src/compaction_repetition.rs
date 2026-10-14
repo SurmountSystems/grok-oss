@@ -1,9 +1,12 @@
 //! Detect high-repetition assistant / reasoning blocks for compact recovery.
 //!
 //! Same thresholds as the live-stream breaker in `xai-grok-sampler` (copied,
-//! not imported): a short sentence four times, or a two-sentence cycle three
-//! times. Compact must drop that wall so summarizer input and reseed are not
-//! `Context compacted: 75.2k → 75.2k tokens`.
+//! not imported): a short sentence four times, a two-sentence cycle three
+//! times, or a 64-character block three times when a smear keeps that block.
+//! Compact must drop that wall so summarizer input and reseed are not
+//! `Context compacted: 75.2k → 75.2k tokens`. Not a second stream stop.
+
+use std::collections::HashMap;
 
 use xai_grok_sampling_types::{ConversationItem, synthesized_reasoning_item};
 
@@ -21,14 +24,34 @@ const MIN_SHORT_REPEATS: usize = 4;
 const MIN_LONG_REPEATS: usize = 3;
 /// Phrases this long use [`MIN_LONG_REPEATS`].
 const LONG_PHRASE_CHARS: usize = 48;
+/// Block that still counts when a smear drops words or pastes the list
+/// onto itself. Distinct numbered steps share a shorter tail and must
+/// not be stripped. Matches the live-stream breaker.
+const SMEAR_BLOCK_CHARS: usize = 64;
 
-/// True when `text` is an obvious looping sentence or two-sentence cycle.
+/// Same failure as `bytes[index]` when `index` is past `bytes`.
+fn byte_at(bytes: &[u8], index: usize) -> u8 {
+    bytes.get(index).copied().expect("index out of bounds")
+}
+
+/// Same failure as `units[index]` when `index` is past `units`.
+fn unit_at<'a>(units: &[&'a str], index: usize) -> &'a str {
+    units.get(index).copied().expect("index out of bounds")
+}
+
+/// True when `text` is an obvious looping sentence, a two-sentence cycle,
+/// or a long block that still repeats after a smear.
 pub fn is_repetitive_generation(text: &str) -> bool {
+    if identical_character_run_hit_256(text) {
+        return true;
+    }
     let tail = tail_window(text);
     if tail.len() < MIN_PHRASE_CHARS * MIN_LONG_REPEATS {
         return false;
     }
-    trailing_units_loop(split_sentences(tail)) || trailing_units_loop(split_nonempty_lines(tail))
+    trailing_units_loop(split_sentences(tail))
+        || trailing_units_loop(split_nonempty_lines(tail))
+        || repeated_block_survives_smear(tail)
 }
 
 /// Replace looping assistant and reasoning content with
@@ -78,11 +101,11 @@ fn split_sentences(s: &str) -> Vec<&str> {
     let bytes = s.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
-        if matches!(bytes[i], b'.' | b'?' | b'!') {
+        if matches!(byte_at(bytes, i), b'.' | b'?' | b'!') {
             let next = i + 1;
-            if next == bytes.len() || bytes[next].is_ascii_whitespace() {
+            if next == bytes.len() || byte_at(bytes, next).is_ascii_whitespace() {
                 let mut end = next;
-                while end < bytes.len() && bytes[end].is_ascii_whitespace() {
+                while end < bytes.len() && byte_at(bytes, end).is_ascii_whitespace() {
                     end += 1;
                 }
                 let piece = s[start..end].trim();
@@ -117,7 +140,7 @@ fn trailing_units_loop(units: Vec<&str>) -> bool {
     if units.is_empty() {
         return false;
     }
-    let last = units[units.len() - 1];
+    let last = unit_at(&units, units.len() - 1);
     if is_loop_phrase(last) {
         let mut k = 1usize;
         for unit in units.iter().rev().skip(1) {
@@ -139,8 +162,8 @@ fn trailing_units_loop(units: Vec<&str>) -> bool {
     if units.len() < MIN_LONG_REPEATS * 2 {
         return false;
     }
-    let a = units[units.len() - 2];
-    let b = units[units.len() - 1];
+    let a = unit_at(&units, units.len() - 2);
+    let b = unit_at(&units, units.len() - 1);
     if a == b {
         return false;
     }
@@ -153,18 +176,244 @@ fn trailing_units_loop(units: Vec<&str>) -> bool {
     let mut cycles = 1usize;
     let mut i = units.len() - 2;
     while i >= 2 {
-        if units[i - 2] == a && units[i - 1] == b {
+        if unit_at(&units, i - 2) == a && unit_at(&units, i - 1) == b {
             cycles += 1;
             i -= 2;
         } else {
             break;
         }
     }
-    cycles >= MIN_LONG_REPEATS
+    if cycles >= MIN_LONG_REPEATS {
+        return true;
+    }
+    // A 3- or 4-line cycle smears inside one line. Compare trimmed text
+    // with collapsed whitespace, drop a leading "L3." or "N." marker, and
+    // split on " N. ". The same step matches on its first 24 characters.
+    // A shorter smear matches when it is still a prefix of that step.
+    // The same words with a different index are unique steps, not a smear.
+    let step_pieces = |unit: &str| -> Vec<String> {
+        let mut collapsed = String::new();
+        let mut prev_space = false;
+        for ch in unit.trim().chars() {
+            if ch.is_whitespace() {
+                if !prev_space {
+                    collapsed.push(' ');
+                    prev_space = true;
+                }
+            } else {
+                collapsed.push(ch);
+                prev_space = false;
+            }
+        }
+        let mut body = collapsed.as_str();
+        if let Some(after) = body.strip_prefix("L3.") {
+            body = after.trim_start();
+        } else {
+            let raw = body.as_bytes();
+            let mut k = 0;
+            while k < raw.len() && byte_at(raw, k).is_ascii_digit() {
+                k += 1;
+            }
+            if k > 0 && k < raw.len() && byte_at(raw, k) == b'.' {
+                body = body[k + 1..].trim_start();
+            }
+        }
+        let normalized = body.to_string();
+        let bytes = normalized.as_bytes();
+        let mut pieces = Vec::new();
+        let mut start = 0usize;
+        let mut at = 0usize;
+        while at < bytes.len() {
+            if byte_at(bytes, at) == b' ' {
+                let mut end_num = at + 1;
+                while end_num < bytes.len() && byte_at(bytes, end_num).is_ascii_digit() {
+                    end_num += 1;
+                }
+                if end_num > at + 1
+                    && end_num + 1 < bytes.len()
+                    && byte_at(bytes, end_num) == b'.'
+                    && byte_at(bytes, end_num + 1) == b' '
+                {
+                    let piece = normalized[start..at].trim();
+                    if !piece.is_empty() {
+                        pieces.push(piece.to_string());
+                    }
+                    start = end_num + 2;
+                    at = start;
+                    continue;
+                }
+            }
+            at += 1;
+        }
+        let tail = normalized[start..].trim();
+        if !tail.is_empty() {
+            pieces.push(tail.to_string());
+        }
+        pieces
+    };
+    let same_step = |left: &str, right: &str| -> bool {
+        let left_n = left.chars().count();
+        let right_n = right.chars().count();
+        if left_n >= 24 && right_n >= 24 {
+            let left_head: String = left.chars().take(24).collect();
+            let right_head: String = right.chars().take(24).collect();
+            if left_head != right_head {
+                return false;
+            }
+            return !distinct_numbered_template(left, right);
+        }
+        if left_n < 24 && right_n < 24 {
+            return left == right;
+        }
+        let (short, long) = if left_n < right_n {
+            (left, right)
+        } else {
+            (right, left)
+        };
+        short.chars().count() >= 20 && long.starts_with(short)
+    };
+    let same_unit = |left: &str, right: &str| -> bool {
+        let left_pieces = step_pieces(left);
+        let right_pieces = step_pieces(right);
+        !left_pieces.is_empty()
+            && left_pieces.len() == right_pieces.len()
+            && left_pieces
+                .iter()
+                .zip(right_pieces.iter())
+                .all(|(left_piece, right_piece)| same_step(left_piece, right_piece))
+    };
+    for period in [3usize, 4] {
+        let need = period * MIN_LONG_REPEATS;
+        if units.len() < need {
+            continue;
+        }
+        let start = units.len() - need;
+        let mut matched = true;
+        for offset in 0..period {
+            let base = unit_at(&units, start + offset);
+            for rep in 1..MIN_LONG_REPEATS {
+                if !same_unit(base, unit_at(&units, start + rep * period + offset)) {
+                    matched = false;
+                    break;
+                }
+            }
+            if !matched {
+                break;
+            }
+        }
+        if matched {
+            return true;
+        }
+    }
+    false
 }
 
 fn is_loop_phrase(unit: &str) -> bool {
     unit.len() >= MIN_PHRASE_CHARS && unit.contains(char::is_whitespace)
+}
+
+/// Exact copies stay a loop. A shared sentence whose ASCII digit runs differ does not.
+fn distinct_numbered_template(left: &str, right: &str) -> bool {
+    if left == right {
+        return false;
+    }
+    let template = |text: &str| -> String {
+        let mut out = String::with_capacity(text.len());
+        let mut in_digits = false;
+        for ch in text.chars() {
+            if ch.is_ascii_digit() {
+                if !in_digits {
+                    out.push('#');
+                    in_digits = true;
+                }
+            } else {
+                in_digits = false;
+                out.push(ch);
+            }
+        }
+        out
+    };
+    template(left) == template(right)
+}
+
+fn identical_character_run_hit_256(text: &str) -> bool {
+    // The counter is a u8. The 256th identical character stops, and it never wraps.
+    let mut run: u8 = 0;
+    let mut prev: Option<char> = None;
+    for ch in text.chars() {
+        if prev == Some(ch) {
+            if run == 255 {
+                return true;
+            }
+            run += 1;
+        } else {
+            prev = Some(ch);
+            run = 1;
+        }
+    }
+    false
+}
+
+fn smear_block_is_mostly_spaces(block: &str) -> bool {
+    // A short run of padding spaces is a fixed-width table, not a smear.
+    // A block that is more than half spaces is not a smear either.
+    let mut spaces = 0usize;
+    let mut total = 0usize;
+    let mut run: u8 = 0;
+    let mut longest: u8 = 0;
+    for ch in block.chars() {
+        total += 1;
+        if ch == ' ' {
+            spaces += 1;
+            run = run.saturating_add(1);
+            if run > longest {
+                longest = run;
+            }
+        } else {
+            run = 0;
+        }
+    }
+    total > 0 && (spaces * 2 > total || longest >= 3)
+}
+
+fn repeated_block_survives_smear(tail: &str) -> bool {
+    if tail.len() < SMEAR_BLOCK_CHARS * MIN_LONG_REPEATS {
+        return false;
+    }
+    let mut starts: HashMap<&str, Vec<usize>> = HashMap::new();
+    let n = tail.len();
+    let mut i = 0;
+    while i + SMEAR_BLOCK_CHARS <= n {
+        if tail.is_char_boundary(i) && tail.is_char_boundary(i + SMEAR_BLOCK_CHARS) {
+            let window = &tail[i..i + SMEAR_BLOCK_CHARS];
+            // A `|` is a markdown table row. Shared cells are not a smeared sentence.
+            if window.contains(char::is_whitespace)
+                && !window.contains('|')
+                && !smear_block_is_mostly_spaces(window)
+            {
+                starts.entry(window).or_default().push(i);
+            }
+        }
+        i += 1;
+    }
+    starts.values().any(|at| {
+        let mut count = 0usize;
+        let mut last: Option<usize> = None;
+        for &pos in at {
+            let far = match last {
+                Some(prev) => pos >= prev + SMEAR_BLOCK_CHARS,
+                None => true,
+            };
+            if far {
+                count += 1;
+                last = Some(pos);
+                if count >= MIN_LONG_REPEATS {
+                    return true;
+                }
+            }
+        }
+        false
+    })
 }
 
 #[cfg(test)]
@@ -229,5 +478,34 @@ mod tests {
         assert_eq!(out[0].text_content(), "Keep Isolated Preview open");
         assert!(out[1].text_content().contains("dest.md"));
         assert_eq!(out[2].text_content(), REPETITIVE_ASSISTANT_OMITTED);
+    }
+
+    /// Same screenshot table as the live-stream breaker. A repeated short
+    /// cell is not a loop. Four copies of one prose sentence still are.
+    #[test]
+    fn status_table_repeating_no_sample_was_printed_is_not_a_repeating_sentence() {
+        let cell = "no sample was printed";
+        assert!(cell.len() < MIN_PHRASE_CHARS);
+        let shared = " minutes | 80.0k | not started | no sample was printed | still open |";
+        assert!(shared.len() >= SMEAR_BLOCK_CHARS);
+        let table = "\
+| Job | Estimate wall | Estimate nested tokens | Actual wall | Actual nested tokens | Under / over |
+| --- | --- | --- | --- | --- | --- |
+| How a credits click can switch to limits | 15 minutes | 80.0k | 4 minutes 3 seconds | no sample was printed | under on wall; tokens were not printed |
+| View-plan outline test | 15 minutes | 80.0k | not started | no sample was printed | still open |
+| Header click test | 20 minutes | 100.0k | not started | no sample was printed | still open |
+| Contract sentences | 10 minutes | 40.0k | not started | no sample was printed | still open |
+| Red compile | 32 minutes | 80.0k | not started | no sample was printed | still open |
+| White frame paint | 15 minutes | 80.0k | not started | no sample was printed | still open |
+";
+        assert!(table.matches(shared).count() >= MIN_LONG_REPEATS);
+        assert!(!is_repetitive_generation(table));
+        let sentence = "I am repeating this exact prose sentence. ";
+        assert!(!is_repetitive_generation(
+            &sentence.repeat(MIN_SHORT_REPEATS - 1)
+        ));
+        assert!(is_repetitive_generation(
+            &sentence.repeat(MIN_SHORT_REPEATS)
+        ));
     }
 }

@@ -2,8 +2,8 @@
 //!
 //! Chat history is JSON-parsed user text. Do not substring-search the raw
 //! JSONL file for decoded WAL bodies (escaped quotes miss; assistant lines
-//! false-hit). `/goal <rest>` matches `A goal has been set: <rest>` after
-//! unwrapping `<user_query>`.
+//! false-hit). `/goal <rest>` matches `A goal has been set: <rest>` in the
+//! user turn, including a system-reminder that sits before `<user_query>`.
 
 const USER_QUERY_OPEN: &str = "<user_query>";
 const USER_QUERY_CLOSE: &str = "</user_query>";
@@ -69,7 +69,8 @@ pub fn user_texts_from_chat_history_jsonl(blob: &str) -> Vec<String> {
         if !json_line_is_user(&value) {
             continue;
         }
-        let Some(text) = json_content_text(&value["content"]) else {
+        let Some(text) = json_content_text(value.get("content").expect("index out of bounds"))
+        else {
             continue;
         };
         if !text.trim().is_empty() {
@@ -93,13 +94,24 @@ fn slash_goal_objective(text: &str) -> Option<&str> {
     Some(rest)
 }
 
-/// Objective from `A goal has been set: <rest>` after unwrapping
-/// `<user_query>`.
+/// Objective from `A goal has been set: <rest>`.
+///
+/// Prefer the `<user_query>` body when that body holds the sentence. A
+/// system-reminder before the tag must not hide it, and a same-line
+/// `</user_query>` must not stick to the objective. When the sentence is
+/// only in the reminder, search the whole turn.
 fn recorded_goal_objective(text: &str) -> Option<&str> {
+    let text = text.trim();
     let unwrapped = unwrap_user_query(text);
-    let idx = unwrapped.find(GOAL_SET_PREFIX)?;
-    let after = &unwrapped[idx + GOAL_SET_PREFIX.len()..];
+    let search = if unwrapped.contains(GOAL_SET_PREFIX) {
+        unwrapped
+    } else {
+        text
+    };
+    let idx = search.find(GOAL_SET_PREFIX)?;
+    let after = &search[idx + GOAL_SET_PREFIX.len()..];
     let line = after.lines().next().unwrap_or(after).trim();
+    let line = line.split(USER_QUERY_CLOSE).next().unwrap_or(line).trim();
     if line.is_empty() {
         return None;
     }
@@ -128,6 +140,16 @@ pub fn operator_text_matches_recorded(needle: &str, recorded: &str) -> bool {
 /// WAL sends (and interject/queue) missing from chat/prompt/queue.
 /// Restore those as pending Human turns. Plan notes and rebuild flush
 /// have their own draft/queue restore paths.
+///
+/// A parsed chat-history match closes the prefix. Send, interject, and
+/// queue lines before that match already became Human turns. Compact can
+/// drop those bodies from the current user text. They must not come back
+/// as new prompts on session start or `/rebuild`. Lines after the last
+/// chat match that are still absent still restore. Prompt history and the
+/// live queue do not close the prefix, so an earlier send that never
+/// reached history still restores when a later line is only in prompt
+/// history. Empty text does not close the prefix. Plan notes and rebuild
+/// flush do not close it and are not restored here.
 pub fn wal_sends_missing_from_history(
     records: &[crate::session::prompt_wal::PromptWalRecord],
     prompt_history: &[String],
@@ -135,12 +157,30 @@ pub fn wal_sends_missing_from_history(
     chat_history_blob: Option<&str>,
 ) -> Vec<crate::session::prompt_wal::PromptWalRecord> {
     use crate::session::prompt_wal::PromptWalKind;
+    let mut last_chat_recorded: Option<usize> = None;
+    for (idx, rec) in records.iter().enumerate() {
+        if !matches!(
+            rec.kind,
+            PromptWalKind::Send | PromptWalKind::Interject | PromptWalKind::Queue
+        ) {
+            continue;
+        }
+        if rec.text.trim().is_empty() {
+            continue;
+        }
+        if operator_text_recorded_in_chat(&rec.text, chat_history_blob) {
+            last_chat_recorded = Some(idx);
+        }
+    }
+    let start = last_chat_recorded.map(|idx| idx + 1).unwrap_or(0);
     let mut out = Vec::new();
     let mut seen = std::collections::HashSet::new();
-    for rec in records {
-        match rec.kind {
-            PromptWalKind::Send | PromptWalKind::Interject | PromptWalKind::Queue => {}
-            PromptWalKind::PlanNotes | PromptWalKind::RebuildFlush => continue,
+    for rec in records.iter().skip(start) {
+        if !matches!(
+            rec.kind,
+            PromptWalKind::Send | PromptWalKind::Interject | PromptWalKind::Queue
+        ) {
+            continue;
         }
         let key = rec.text.trim().to_string();
         if key.is_empty() || !seen.insert(key) {
@@ -153,6 +193,24 @@ pub fn wal_sends_missing_from_history(
         out.push(rec.clone());
     }
     out
+}
+
+/// Whether parsed user turns in `chat_history.jsonl` already contain `text`.
+///
+/// Empty text does not count. Assistant lines do not count. This is the
+/// same matcher as [`operator_text_matches_recorded`], not a raw file
+/// substring.
+fn operator_text_recorded_in_chat(text: &str, chat_history_blob: Option<&str>) -> bool {
+    let needle = text.trim();
+    if needle.is_empty() {
+        return false;
+    }
+    let Some(blob) = chat_history_blob else {
+        return false;
+    };
+    user_texts_from_chat_history_jsonl(blob)
+        .iter()
+        .any(|user_text| operator_text_matches_recorded(needle, user_text))
 }
 
 /// Whether `text` already exists as a Human turn in history or the pager queue.
@@ -284,6 +342,41 @@ mod tests {
             "only the truly absent WAL send restores, got {:?}",
             missing.iter().map(|r| r.text.as_str()).collect::<Vec<_>>()
         );
+        assert_eq!(missing[0].text, absent.text);
+    }
+
+    /// Operator: "Stale prompts at start are still a problem sadly... And yes, what is running is the latest binary."
+    ///
+    /// WAL send `/goal do the thing`. History is a system-reminder, then
+    /// `<user_query>A goal has been set: do the thing</user_query>` on one
+    /// line. This matcher does not read `canceled_turn_resume.json`. The
+    /// slash must not be missing. A send that is truly absent still is.
+    #[test]
+    fn wal_goal_send_is_not_missing_when_reminder_precedes_user_query() {
+        let history = "<system-reminder>\nThe session is continuing.\n</system-reminder>\n<user_query>A goal has been set: do the thing</user_query>";
+        let goal = rec(
+            crate::session::prompt_wal::PromptWalKind::Send,
+            "/goal do the thing",
+        );
+        let absent = rec(
+            crate::session::prompt_wal::PromptWalKind::Send,
+            "operator send that never reached chat history",
+        );
+        let blob = concat!(
+            r#"{"type":"user","content":[{"type":"text","text":"<system-reminder>\nThe session is continuing.\n</system-reminder>\n<user_query>A goal has been set: do the thing</user_query>"}]}"#,
+            "\n",
+        );
+        assert!(
+            operator_text_matches_recorded("/goal do the thing", history),
+            "Operator: \"Stale prompts at start are still a problem sadly... And yes, what is running is the latest binary.\" A system-reminder before <user_query> must not hide A goal has been set: do the thing"
+        );
+        let missing = wal_sends_missing_from_history(&[goal, absent.clone()], &[], &[], Some(blob));
+        assert!(
+            missing.iter().all(|r| r.text != "/goal do the thing"),
+            "Operator: \"Stale prompts at start are still a problem sadly... And yes, what is running is the latest binary.\" WAL /goal do the thing must not be missing; missing={:?}",
+            missing.iter().map(|r| r.text.as_str()).collect::<Vec<_>>()
+        );
+        assert_eq!(missing.len(), 1, "the absent send still restores");
         assert_eq!(missing[0].text, absent.text);
     }
 }

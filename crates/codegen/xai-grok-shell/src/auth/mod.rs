@@ -19,7 +19,8 @@ mod jwt;
 pub mod limits_pins;
 pub mod limits_snapshot_hub;
 pub(crate) mod manager;
-mod model;
+// The login crate owns this model. Do not add a second copy under shell.
+use xai_grok_login::model;
 pub mod oidc;
 pub mod openrouter;
 pub(crate) mod recovery;
@@ -111,7 +112,8 @@ pub use limits_snapshot_hub::{
     LimitsSnapshotRole, POLL_OUTCOME_AUTH, POLL_OUTCOME_NETWORK, POLL_OUTCOME_NEVER,
     POLL_OUTCOME_OK, POLL_OUTCOME_OTHER, SNAPSHOT_FILE_NAME, SNAPSHOT_LOCK_FILE_NAME, SNAPSHOT_TTL,
     SNAPSHOT_TTL_SECS, apply_limits_snapshot, coordinate_limits_snapshot,
-    fetch_management_into_snapshot, read_limits_snapshot_file, shared_limits_snapshot_disabled,
+    fetch_management_into_snapshot, read_limits_snapshot_file, select_team_prepaid_meter,
+    shared_limits_snapshot_disabled, should_also_call_management_prepaid_balance,
     snapshot_is_stale, snapshot_json_contains_secrets, write_limits_snapshot_file,
 };
 pub use manager::{AuthManager, shared_api_key_provider};
@@ -176,21 +178,21 @@ pub use xai_management::{
     XAI_MANAGEMENT_TEAM_ID_ENV, billing_credits_card_from_prepaid_total,
     billing_credits_card_from_remaining_cents, billing_credits_remaining_cents_from_preview,
     cached_console_team_postpaid, cached_console_team_postpaid_default,
-    cached_console_team_prepaid, cached_console_team_prepaid_cents_default,
-    cached_console_team_usage_series, cached_console_team_usage_series_default,
-    cached_discovered_team_id, classify_postpaid_line, clear_console_team_billing_meter_caches,
-    clear_console_team_postpaid_cache, clear_console_team_prepaid_cache,
-    clear_console_team_usage_series_cache, clear_discovered_team_id_cache,
-    clear_management_api_key, clear_management_billing_process_caches,
-    console_team_postpaid_from_response, console_team_postpaid_setup_note,
-    console_team_prepaid_from_response, console_team_prepaid_setup_note,
-    console_team_usage_series_from_response, console_team_usage_series_setup_note,
-    fetch_console_team_postpaid_preview, fetch_console_team_postpaid_preview_at,
-    fetch_console_team_postpaid_preview_default, fetch_console_team_prepaid_balance,
-    fetch_console_team_prepaid_balance_at, fetch_console_team_prepaid_balance_default,
-    fetch_console_team_usage_series, fetch_console_team_usage_series_at,
-    fetch_console_team_usage_series_default, fingerprint_management_key,
-    format_management_key_validate_failure, has_management_api_key_env,
+    cached_console_team_prepaid, cached_console_team_prepaid_cents_any,
+    cached_console_team_prepaid_cents_default, cached_console_team_usage_series,
+    cached_console_team_usage_series_default, cached_discovered_team_id, classify_postpaid_line,
+    clear_console_team_billing_meter_caches, clear_console_team_postpaid_cache,
+    clear_console_team_prepaid_cache, clear_console_team_usage_series_cache,
+    clear_discovered_team_id_cache, clear_management_api_key,
+    clear_management_billing_process_caches, console_team_postpaid_from_response,
+    console_team_postpaid_setup_note, console_team_prepaid_from_response,
+    console_team_prepaid_setup_note, console_team_usage_series_from_response,
+    console_team_usage_series_setup_note, fetch_console_team_postpaid_preview,
+    fetch_console_team_postpaid_preview_at, fetch_console_team_postpaid_preview_default,
+    fetch_console_team_prepaid_balance, fetch_console_team_prepaid_balance_at,
+    fetch_console_team_prepaid_balance_default, fetch_console_team_usage_series,
+    fetch_console_team_usage_series_at, fetch_console_team_usage_series_default,
+    fingerprint_management_key, format_management_key_validate_failure, has_management_api_key_env,
     load_stored_management_api_key, management_api_base, management_api_key_from_env,
     management_credential_url, management_team_id_from_env, postpaid_invoice_preview_path,
     prepaid_balance_path, prepaid_remaining_cents_from_total_val, resolve_management_api_key,

@@ -153,9 +153,12 @@ fn try_parse_direct(cmd: &str) -> Option<MemoryIntercept> {
 
     // Optional leading env assignments: FOO=bar python3 …
     let mut i = 0;
-    while i < tokens.len() && tokens[i].contains('=') && !tokens[i].starts_with('-') {
+    while i < tokens.len()
+        && tokens.get(i).expect("index out of bounds").contains('=')
+        && !tokens.get(i).expect("index out of bounds").starts_with('-')
+    {
         // Only treat as env if it looks like NAME=value and not a path
-        let t = &tokens[i];
+        let t = tokens.get(i).expect("index out of bounds");
         if let Some((name, _)) = t.split_once('=') {
             if name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') && !name.is_empty() {
                 i += 1;
@@ -169,12 +172,20 @@ fn try_parse_direct(cmd: &str) -> Option<MemoryIntercept> {
         return None;
     }
 
-    let script = if is_python_bin(&tokens[i]) {
+    let script = if is_python_bin(tokens.get(i).expect("index out of bounds")) {
         i += 1;
         // Optional -u / -B flags commonly used with python
-        while i < tokens.len() && tokens[i].starts_with('-') && tokens[i] != "-" {
+        while i < tokens.len()
+            && tokens.get(i).expect("index out of bounds").starts_with('-')
+            && tokens.get(i).expect("index out of bounds") != "-"
+        {
             // Do not accept -c (that is inline code — never intercept)
-            if tokens[i] == "-c" || tokens[i].starts_with("-c") {
+            if tokens.get(i).expect("index out of bounds") == "-c"
+                || tokens
+                    .get(i)
+                    .expect("index out of bounds")
+                    .starts_with("-c")
+            {
                 return None;
             }
             i += 1;
@@ -182,14 +193,14 @@ fn try_parse_direct(cmd: &str) -> Option<MemoryIntercept> {
         if i >= tokens.len() {
             return None;
         }
-        let script = tokens[i].clone();
+        let script = tokens.get(i).expect("index out of bounds").clone();
         if !is_allowlisted_memory_py(&script) {
             return None;
         }
         i += 1;
         script
-    } else if is_memory_stub_or_cli_bin(&tokens[i]) {
-        let script = tokens[i].clone();
+    } else if is_memory_stub_or_cli_bin(tokens.get(i).expect("index out of bounds")) {
+        let script = tokens.get(i).expect("index out of bounds").clone();
         i += 1;
         script
     } else {
@@ -199,20 +210,22 @@ fn try_parse_direct(cmd: &str) -> Option<MemoryIntercept> {
     if i >= tokens.len() {
         return None;
     }
-    let sub = tokens[i].clone();
+    let sub = tokens.get(i).expect("index out of bounds").clone();
     let make = parse_subcmd(&sub)?;
     i += 1;
 
     let mut stdin = UpdateStdinSource::Empty;
     // Trailing: < file   or  2>/dev/null etc. (ignore redirects we do not need)
     while i < tokens.len() {
-        let t = &tokens[i];
+        let t = tokens.get(i).expect("index out of bounds");
         if t == "<" {
             i += 1;
             if i >= tokens.len() {
                 return None;
             }
-            stdin = UpdateStdinSource::FromFile(PathBuf::from(&tokens[i]));
+            stdin = UpdateStdinSource::FromFile(PathBuf::from(
+                tokens.get(i).expect("index out of bounds"),
+            ));
             i += 1;
             continue;
         }
@@ -273,7 +286,7 @@ fn find_top_level_pipe(s: &str) -> Option<usize> {
     let bytes = s.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
-        let c = bytes[i] as char;
+        let c = bytes.get(i).copied().expect("index out of bounds") as char;
         if in_single {
             if c == '\'' {
                 in_single = false;
@@ -305,14 +318,21 @@ fn find_top_level_pipe(s: &str) -> Option<usize> {
 
 fn parse_echo_payload(left: &str) -> Option<String> {
     let tokens = simple_tokens(left);
-    if tokens.is_empty() || tokens[0] != "echo" {
+    if tokens.is_empty() || tokens.first().expect("index out of bounds") != "echo" {
         return None;
     }
     // echo -n payload…  or echo payload
     let mut i = 1;
-    while i < tokens.len() && tokens[i].starts_with('-') && tokens[i] != "-" {
+    while i < tokens.len()
+        && tokens.get(i).expect("index out of bounds").starts_with('-')
+        && tokens.get(i).expect("index out of bounds") != "-"
+    {
         // only allow -n / -e
-        if tokens[i] != "-n" && tokens[i] != "-e" && tokens[i] != "-ne" && tokens[i] != "-en" {
+        if tokens.get(i).expect("index out of bounds") != "-n"
+            && tokens.get(i).expect("index out of bounds") != "-e"
+            && tokens.get(i).expect("index out of bounds") != "-ne"
+            && tokens.get(i).expect("index out of bounds") != "-en"
+        {
             return None;
         }
         i += 1;
@@ -321,7 +341,7 @@ fn parse_echo_payload(left: &str) -> Option<String> {
         return Some(String::new());
     }
     // Join remaining tokens with spaces (echo default)
-    Some(tokens[i..].join(" "))
+    Some(tokens.get(i..).expect("index out of bounds").join(" "))
 }
 
 #[cfg(test)]

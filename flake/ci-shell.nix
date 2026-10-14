@@ -23,11 +23,22 @@ let
     PROTOC = "${pkgs.protobuf}/bin/protoc";
     OPENSSL_NO_VENDOR = "1";
     PKG_CONFIG_PATH = lib.makeSearchPathOutput "dev" "lib/pkgconfig" (
-      [ pkgs.openssl ] ++ lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.dbus ]
+      [ pkgs.openssl ]
+      ++ lib.optionals pkgs.stdenv.hostPlatform.isLinux [
+        pkgs.dbus
+        pkgs.duckdb
+      ]
     );
     LD_LIBRARY_PATH = lib.makeLibraryPath (
-      [ pkgs.openssl ] ++ lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.dbus ]
+      [ pkgs.openssl ]
+      ++ lib.optionals pkgs.stdenv.hostPlatform.isLinux [
+        pkgs.dbus
+        pkgs.duckdb.lib
+      ]
     );
+    # Same libduckdb-sys names as flake/grok-oss.nix. Empty off Linux.
+    DUCKDB_LIB_DIR = lib.optionalString pkgs.stdenv.hostPlatform.isLinux "${pkgs.duckdb.lib}/lib";
+    DUCKDB_INCLUDE_DIR = lib.optionalString pkgs.stdenv.hostPlatform.isLinux "${pkgs.duckdb.dev}/include";
     # mkShell injects NIX_HARDENING_ENABLE with fortify. jemalloc's
     # configure runs C probes under -O0 -Werror; fortify then emits
     # "_FORTIFY_SOURCE requires -O" and the probe fails as
@@ -76,6 +87,8 @@ let
       ++ lib.optionals pkgs.stdenv.hostPlatform.isLinux [
         pkgs.mold
         pkgs.dbus
+        pkgs.duckdb.lib
+        pkgs.duckdb.dev
       ];
     pathsToLink = [
       "/bin"
@@ -108,6 +121,8 @@ let
     ++ lib.optionals pkgs.stdenv.hostPlatform.isLinux [
       pkgs.dbus
       pkgs.mold
+      pkgs.duckdb.lib
+      pkgs.duckdb.dev
     ];
 
     # Share host-cargo env with .#ci so jemalloc configure works here too
@@ -116,6 +131,8 @@ let
       PROTOC
       OPENSSL_NO_VENDOR
       NIX_HARDENING_ENABLE
+      DUCKDB_LIB_DIR
+      DUCKDB_INCLUDE_DIR
       ;
 
     shellHook = ''

@@ -3,7 +3,7 @@
 //! Exact user-facing phrases live here so unit tests can assert them without
 //! scattering string literals. Meters stay distinct: SuperGrok included weekly
 //! % ≠ SuperGrok dollar credits ≠ console team prepaid ≠ team postpaid OAuth/API ≠
-//! team default credits (dashboard allotment).
+//! team default credits (postpaid preview defaultCredits).
 //!
 //! **Named contracts:**
 //! - grok-oss limits / TUI `/limits` is a client printout, not grok.com Usage.
@@ -168,14 +168,26 @@ Billing Credits card. The Billing Credits remaining is GetAmountToPay prepaidCre
 prepaidCreditsUsed when those fields are fetched. The Billing page \
 may say it includes free credits granted; that is their copy.";
 
-/// Team default credits are a separate dashboard allotment meter.
+/// Team default credits are postpaid preview `defaultCredits`.
 ///
-/// Shown when postpaid preview carried `defaultCredits`. Not the console team
-/// prepaid wallet, not included SuperGrok period limits, not SuperGrok top-up
-/// dollars.
-pub const NOTE_TEAM_DEFAULT_CREDITS_ARE_DASHBOARD_ALLOTMENT: &str = "Note: team default credits \
-are the console dashboard allotment (postpaid preview defaultCredits), not the team prepaid \
-wallet, not included SuperGrok period limits, and not SuperGrok prepaid top-up dollars.";
+/// Shown when the postpaid preview carried `defaultCredits`. That meter is
+/// not Credits remaining and not the prepaid wallet. It is not included
+/// SuperGrok period limits and not SuperGrok top-up dollars.
+pub const NOTE_TEAM_DEFAULT_CREDITS_ARE_POSTPAID_PREVIEW_DEFAULT_CREDITS: &str = "Note: team default credits are postpaid preview defaultCredits, not Credits remaining, \
+and not the prepaid wallet. They are not included SuperGrok period limits and not SuperGrok \
+prepaid top-up dollars.";
+
+/// Default credits issued were absent on the invoice preview.
+///
+/// Shown when a postpaid preview was parsed and `coreInvoice.defaultCreditsIssued`
+/// was not in that body. Not the granted share of dashboard Credits remaining.
+pub const NOTE_DEFAULT_CREDITS_ISSUED_NOT_IN_PREVIEW: &str =
+    "Note: the issued amount was not in the preview.";
+
+/// The console.x.ai 30-day Credits remaining and Credits usage dollars are
+/// not fields this printout parsed. Do not invent them by summing other meters.
+pub const NOTE_DASHBOARD_THIRTY_DAY_CREDITS_NOT_PARSED: &str = "Note: the 30-day dashboard \
+Credits remaining and Credits usage were not in the management bodies this printout parsed.";
 
 /// Platforms → Grok Business → licenses Usage (messages / conversations) is
 /// not dogfood proof for this CLI.
@@ -309,13 +321,14 @@ pub struct LimitsHonestyInput {
     /// True when console team prepaid dollars are shown (Management meter).
     /// Independent of SuperGrok vs console live identity.
     pub has_console_team_prepaid_reading: bool,
-    /// True when team default credits (dashboard allotment) are shown.
+    /// True when postpaid preview `defaultCredits` are shown.
+    /// Not Credits remaining. Not the prepaid wallet.
     pub has_team_default_credits_reading: bool,
     /// True when the product will block sampler turns under unproven free
     /// SuperGrok period debit (operator has not opted into allow-spend).
     pub turns_blocked_free_period_debit_unproven: bool,
     /// Billing Credits card status (GetAmountToPay remaining).
-    pub billing_credits_card: xai_grok_sampling_types::BillingCreditsCard,
+    pub billing_credits_card: super::limits_snapshot::BillingCreditsCard,
 }
 
 /// True when `text` carries the fail-open printout-vs-Usage contract.
@@ -366,13 +379,13 @@ pub fn honesty_notes_for_limits(input: LimitsHonestyInput) -> Vec<String> {
     // Always: license seat page is not a product meter (plain dogfood honesty).
     notes.push(NOTE_LICENSE_PAGE_IS_NOT_PRODUCT_METER.to_string());
     notes.push(match input.billing_credits_card {
-        xai_grok_sampling_types::BillingCreditsCard::Fetched => {
+        super::limits_snapshot::BillingCreditsCard::Fetched => {
             NOTE_BILLING_CREDITS_CARD_FETCHED.to_string()
         }
-        xai_grok_sampling_types::BillingCreditsCard::Error => {
+        super::limits_snapshot::BillingCreditsCard::Error => {
             NOTE_BILLING_CREDITS_CARD_FETCH_FAILED.to_string()
         }
-        xai_grok_sampling_types::BillingCreditsCard::NotFetched => {
+        super::limits_snapshot::BillingCreditsCard::NotFetched => {
             NOTE_BILLING_CREDITS_CARD_NOT_FETCHED.to_string()
         }
     });
@@ -381,7 +394,7 @@ pub fn honesty_notes_for_limits(input: LimitsHonestyInput) -> Vec<String> {
         notes.push(NOTE_PREPAID_LEDGER_IS_NOT_BILLING_CREDITS_PAGE.to_string());
     }
     if input.has_team_default_credits_reading {
-        notes.push(NOTE_TEAM_DEFAULT_CREDITS_ARE_DASHBOARD_ALLOTMENT.to_string());
+        notes.push(NOTE_TEAM_DEFAULT_CREDITS_ARE_POSTPAID_PREVIEW_DEFAULT_CREDITS.to_string());
     }
     if input.live.is_console() {
         return notes;
@@ -501,7 +514,9 @@ mod tests {
         }
     }
 
-    /// Named contract (Item 5b): default credits note names what the meter is not.
+    /// Named contract: `teamDefaultCreditsUsd` is postpaid preview
+    /// `defaultCredits`, not Credits remaining, and not the prepaid wallet.
+    /// The old "dashboard allotment" wording is the defect.
     #[test]
     fn default_credits_note_when_reading_present() {
         let notes = honesty_notes_for_limits(LimitsHonestyInput {
@@ -512,16 +527,28 @@ mod tests {
         assert!(
             notes
                 .iter()
-                .any(|n| n == NOTE_TEAM_DEFAULT_CREDITS_ARE_DASHBOARD_ALLOTMENT),
+                .any(|n| n == NOTE_TEAM_DEFAULT_CREDITS_ARE_POSTPAID_PREVIEW_DEFAULT_CREDITS),
             "must emit default-credits honesty: {notes:?}"
         );
         let n = notes
             .iter()
-            .find(|n| n.as_str() == NOTE_TEAM_DEFAULT_CREDITS_ARE_DASHBOARD_ALLOTMENT)
+            .find(|n| n.as_str() == NOTE_TEAM_DEFAULT_CREDITS_ARE_POSTPAID_PREVIEW_DEFAULT_CREDITS)
             .expect("note");
         assert!(
-            n.contains("not the team prepaid wallet"),
-            "must exclude prepaid wallet: {n}"
+            n.contains("postpaid preview defaultCredits"),
+            "must name postpaid preview defaultCredits: {n}"
+        );
+        assert!(
+            n.contains("not Credits remaining"),
+            "must say this meter is not Credits remaining: {n}"
+        );
+        assert!(
+            n.contains("not the prepaid wallet"),
+            "must exclude the prepaid wallet: {n}"
+        );
+        assert!(
+            !n.contains("dashboard allotment"),
+            "dashboard allotment wording is the defect: {n}"
         );
         assert!(
             n.contains("not included SuperGrok period limits"),
@@ -530,6 +557,10 @@ mod tests {
         assert!(
             n.contains("not SuperGrok prepaid top-up"),
             "must exclude SuperGrok top-up: {n}"
+        );
+        assert!(
+            !n.to_ascii_lowercase().contains("free supergrok"),
+            "must not call SuperGrok free: {n}"
         );
     }
 
@@ -817,12 +848,17 @@ mod tests {
     /// team prepaid or is not SuperGrok dollar credits.
     #[test]
     fn billing_credits_card_is_not_classified_without_named_json_field() {
-        use xai_grok_sampling_types::{BillingCreditsCard, current_billing_credits_usd};
+        use crate::views::limits_snapshot::BillingCreditsCard;
 
-        assert_eq!(
-            current_billing_credits_usd(Some(89.94), Some(47.03), None),
-            None
-        );
+        #[cfg(feature = "xai-grok-sampling-types")]
+        {
+            use xai_grok_sampling_types::current_billing_credits_usd;
+
+            assert_eq!(
+                current_billing_credits_usd(Some(89.94), Some(47.03), None),
+                None
+            );
+        }
         assert_eq!(BillingCreditsCard::NotFetched.as_wire(), "not_fetched");
 
         let notes = honesty_notes_for_limits(LimitsHonestyInput::default());
@@ -873,7 +909,7 @@ mod tests {
     /// must name prepaidCredits minus prepaidCreditsUsed and must not hop.
     #[test]
     fn billing_credits_card_fetched_note_names_remaining_and_does_not_hop() {
-        use xai_grok_sampling_types::BillingCreditsCard;
+        use crate::views::limits_snapshot::BillingCreditsCard;
 
         let notes = honesty_notes_for_limits(LimitsHonestyInput {
             billing_credits_card: BillingCreditsCard::Fetched,

@@ -53,7 +53,7 @@ fn split_sentences(text: &str) -> Vec<String> {
     let bytes = text.as_bytes();
     let mut i = 0usize;
     while i < bytes.len() {
-        let b = bytes[i];
+        let b = bytes.get(i).copied().expect("index out of bounds");
         if b == b'\n' {
             push_unit(&mut out, &text[start..i]);
             start = i + 1;
@@ -62,12 +62,22 @@ fn split_sentences(text: &str) -> Vec<String> {
         }
         if matches!(b, b'.' | b'!' | b'?') {
             let next = i + 1;
-            if next >= bytes.len() || bytes[next].is_ascii_whitespace() {
+            if next >= bytes.len()
+                || bytes
+                    .get(next)
+                    .copied()
+                    .expect("index out of bounds")
+                    .is_ascii_whitespace()
+            {
                 push_unit(&mut out, &text[start..next]);
                 start = next;
                 while start < bytes.len()
-                    && bytes[start].is_ascii_whitespace()
-                    && bytes[start] != b'\n'
+                    && bytes
+                        .get(start)
+                        .copied()
+                        .expect("index out of bounds")
+                        .is_ascii_whitespace()
+                    && bytes.get(start).copied().expect("index out of bounds") != b'\n'
                 {
                     start += 1;
                 }

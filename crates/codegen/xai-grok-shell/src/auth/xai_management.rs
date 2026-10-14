@@ -15,7 +15,9 @@
 //! Management keys come from Console → Settings → Management Keys and authorize
 //! `https://management-api.x.ai` (billing prepaid balance, postpaid preview, …).
 //! The browser console dashboard (`console.x.ai`) uses a **session cookie**, not
-//! this key; product cannot read ~team prepaid remaining from an inference key.
+//! this management key. Console API credits are read with the console inference
+//! key on `api.x.ai`. This management key is not required for that balance, and
+//! this path does not call `management-api.x.ai` for it.
 //!
 //! Storage: OS keyring / file mirror via [`CredentialsStore`], keyed by
 //! [`MANAGEMENT_API_BASE_URL`] (not the inference console URL). Resolve order:
@@ -259,9 +261,30 @@ pub fn resolve_management_api_key(
     load_stored_management_api_key(store)
 }
 
+fn endpoint_toml_string(key: &str) -> Option<String> {
+    let path = crate::util::grok_home::grok_home().join("config.toml");
+    let text = std::fs::read_to_string(path).ok()?;
+    let value: toml::Value = toml::from_str(&text).ok()?;
+    value
+        .get("endpoints")
+        .and_then(|table| table.get(key))
+        .and_then(|item| item.as_str())
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(str::to_owned)
+}
+
+fn load_management_api_key_from_config() -> Option<String> {
+    endpoint_toml_string("management_api_key")
+}
+
+fn load_management_team_id_from_config() -> Option<String> {
+    endpoint_toml_string("management_team_id")
+}
+
 /// Resolve using the process default config loader + grok-home store.
 pub fn resolve_management_api_key_default() -> Option<String> {
-    let config_key = crate::util::config::load_management_api_key_sync();
+    let config_key = load_management_api_key_from_config();
     let store = CredentialsStore::default_store();
     resolve_management_api_key(config_key.as_deref(), &store)
         .ok()
@@ -288,9 +311,7 @@ pub fn resolve_management_team_id(config_team_id: Option<&str>) -> Option<String
 /// Sync only: never hits the network. After a successful validation fetch, the
 /// discovered id is available here until TTL expiry.
 pub fn resolve_management_team_id_default() -> Option<String> {
-    if let Some(t) =
-        resolve_management_team_id(crate::util::config::load_management_team_id_sync().as_deref())
-    {
+    if let Some(t) = resolve_management_team_id(load_management_team_id_from_config().as_deref()) {
         return Some(t);
     }
     cached_discovered_team_id()
@@ -792,6 +813,19 @@ pub fn cached_console_team_prepaid_cents_default() -> Option<i64> {
     cached_console_team_prepaid(&team).map(|m| m.balance_cents)
 }
 
+/// Last fresh prepaid cents in this process, with no management team id.
+///
+/// A console inference key read stores the team balance here. Management team
+/// id may still be unset. Returns `None` when the cache is cold or stale.
+pub fn cached_console_team_prepaid_cents_any() -> Option<i64> {
+    let g = PREPAID_CACHE.lock().ok()?;
+    let entry = g.as_ref()?;
+    if entry.fetched_at.elapsed() > PREPAID_CACHE_TTL {
+        return None;
+    }
+    Some(entry.balance_cents)
+}
+
 fn remember_prepaid(meter: &ConsoleTeamPrepaidMeter) {
     if let Ok(mut g) = PREPAID_CACHE.lock() {
         *g = Some(PrepaidCacheEntry {
@@ -812,6 +846,88 @@ pub fn seed_console_team_prepaid_cache(team_id: &str, balance_cents: i64) {
         team_id: team.to_owned(),
         balance_cents,
     });
+}
+
+/// Console API credits balance, read with the console inference key.
+///
+/// The key is `XAI_API_KEY`, the legacy env name, or the `api.x.ai` secret.
+/// No management key. The host is `GROK_XAI_API_BASE_URL` or
+/// `https://api.x.ai/v1`. `GET {base}/api-key` supplies `team_id` or `teamId`.
+/// Then `GET {base}/billing/teams/{team}/prepaid/balance`. The base already
+/// includes `/v1`, so the balance path does not add another `/v1`. This does
+/// not call `management-api.x.ai`. A missing key or a failed read returns
+/// `None` and does not invent a balance.
+pub(crate) async fn fetch_console_api_credits_with_inference_key() -> Option<ConsoleTeamPrepaidMeter>
+{
+    let key = first_console_inference_key()?;
+    let base = console_inference_api_base();
+    let client = crate::http::shared_client();
+    let info_url = format!("{base}/api-key");
+    let info = client
+        .get(&info_url)
+        .header("Authorization", format!("Bearer {key}"))
+        .timeout(Duration::from_secs(15))
+        .send()
+        .await
+        .ok()?;
+    if !info.status().is_success() {
+        return None;
+    }
+    let body: serde_json::Value = info.json().await.ok()?;
+    let team = body
+        .get("team_id")
+        .or_else(|| body.get("teamId"))
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|id| !id.is_empty())?;
+    if let Some(cached) = cached_console_team_prepaid(team) {
+        return Some(cached);
+    }
+    let balance_url = format!(
+        "{base}/billing/teams/{}/prepaid/balance",
+        urlencoding_path_segment(team)
+    );
+    let response = client
+        .get(&balance_url)
+        .header("Authorization", format!("Bearer {key}"))
+        .timeout(Duration::from_secs(15))
+        .send()
+        .await
+        .ok()?;
+    if !response.status().is_success() {
+        return None;
+    }
+    let parsed: PrepaidBalanceResponse = response.json().await.ok()?;
+    let meter = console_team_prepaid_from_response(team, &parsed)?;
+    remember_prepaid(&meter);
+    Some(meter)
+}
+
+fn first_console_inference_key() -> Option<String> {
+    if let Ok(raw) = crate::agent::auth_method::read_xai_api_key_env() {
+        if let Some(key) = crate::agent::config::split_api_key_list(&raw)
+            .into_iter()
+            .find(|part| !part.is_empty())
+        {
+            return Some(key);
+        }
+    }
+    let store = super::credentials_store::CredentialsStore::default_store();
+    super::xai_console::load_stored_console_api_keys(&store)
+        .ok()
+        .and_then(|keys| keys.into_iter().find(|part| !part.is_empty()))
+}
+
+fn console_inference_api_base() -> String {
+    std::env::var("GROK_XAI_API_BASE_URL")
+        .ok()
+        .map(|raw| raw.trim().trim_end_matches('/').to_owned())
+        .filter(|raw| !raw.is_empty())
+        .unwrap_or_else(|| {
+            super::xai_console::XAI_CONSOLE_API_URL
+                .trim_end_matches('/')
+                .to_owned()
+        })
 }
 
 /// Fetch console team prepaid balance when management key + team_id are present.
@@ -901,7 +1017,7 @@ pub async fn fetch_console_team_prepaid_balance_at(
 /// id is unset.
 pub async fn fetch_console_team_prepaid_balance_default() -> Option<ConsoleTeamPrepaidMeter> {
     let key = resolve_management_api_key_default();
-    let config_team = crate::util::config::load_management_team_id_sync();
+    let config_team = load_management_team_id_from_config();
     let team = resolve_management_team_id_with_discovery(
         MANAGEMENT_API_BASE_URL,
         key.as_deref(),
@@ -1366,7 +1482,7 @@ pub async fn fetch_console_team_postpaid_preview_at(
 /// Resolve credentials from config/store/env defaults and fetch postpaid preview.
 pub async fn fetch_console_team_postpaid_preview_default() -> Option<ConsoleTeamPostpaidPreview> {
     let key = resolve_management_api_key_default();
-    let config_team = crate::util::config::load_management_team_id_sync();
+    let config_team = load_management_team_id_from_config();
     let team = resolve_management_team_id_with_discovery(
         MANAGEMENT_API_BASE_URL,
         key.as_deref(),
@@ -1789,7 +1905,7 @@ pub async fn fetch_console_team_usage_series_default(
     day_window: i64,
 ) -> Option<ConsoleTeamUsageSeries> {
     let key = resolve_management_api_key_default();
-    let config_team = crate::util::config::load_management_team_id_sync();
+    let config_team = load_management_team_id_from_config();
     let team = resolve_management_team_id_with_discovery(
         MANAGEMENT_API_BASE_URL,
         key.as_deref(),

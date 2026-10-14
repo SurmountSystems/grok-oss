@@ -10,7 +10,7 @@ mod tests {
     use crate::app::agent::{AgentId, AgentState, QueueEntryKind, QueuedPrompt};
     use crate::app::dispatch::queue::maybe_drain_queue;
     use crate::scrollback::block::RenderBlock;
-    use xai_grok_shell::session::pending_prompts::PersistedQueuedPrompt;
+    use xai_grok_shell::session::unsent_prompt_draft::pending_prompts::PersistedQueuedPrompt;
 
     const LAKE_BUILD: &str = "Lake-build time-preference note";
     const LIGHTWAVE: &str =
@@ -113,7 +113,8 @@ mod tests {
         agent.session.enqueue_prompt(LIGHTWAVE.into());
         agent.session.enqueue_prompt(LIGHTWAVE.into());
         agent.session.enqueue_prompt(STILL_UNSENT.into());
-        let drain = maybe_drain_queue(agent);
+        let mut notices = Vec::new();
+        let drain = maybe_drain_queue(agent, &mut notices);
         assert!(
             !drain.effects.is_empty(),
             "idle drain must start the first LightWave copy as a Human turn"
@@ -142,7 +143,7 @@ mod tests {
         let cwd = proj.path().to_path_buf();
         let cwd_str = cwd.to_string_lossy().into_owned();
         let sid = "stale-queue-live-scrollback";
-        xai_grok_shell::session::pending_prompts::write_pending_prompts(
+        xai_grok_shell::session::unsent_prompt_draft::pending_prompts::write_pending_prompts(
             &cwd_str,
             sid,
             &[
@@ -210,7 +211,7 @@ mod tests {
         let cwd = proj.path().to_path_buf();
         let cwd_str = cwd.to_string_lossy().into_owned();
         let sid = "stale-queue-nonempty-memory";
-        xai_grok_shell::session::pending_prompts::write_pending_prompts(
+        xai_grok_shell::session::unsent_prompt_draft::pending_prompts::write_pending_prompts(
             &cwd_str,
             sid,
             &[
@@ -476,6 +477,80 @@ mod tests {
         assert!(live_subagent_list(agent.subagent_sessions.values()).is_empty());
     }
 
+    /// Vacant occupancy restore must not keep a host that already exited
+    /// painted live Responding. Occupancy json always has finished: false.
+    /// meta.json status completed is the host exit.
+    #[test]
+    #[serial_test::serial(GROK_HOME)]
+    fn vacant_occupancy_restore_drops_responding_when_meta_says_host_exited() {
+        use crate::app::subagent::live_subagent_list;
+
+        let grok_home = tempfile::tempdir().unwrap();
+        let _home = xai_grok_test_support::EnvGuard::set("GROK_HOME", grok_home.path());
+        crate::app::subagent::set_replay_grok_home_for_tests(Some(grok_home.path().to_path_buf()));
+        let proj = tempfile::tempdir().unwrap();
+        let cwd = proj.path().to_path_buf();
+        let sid = "occupancy-restore-vacant-exited";
+
+        let mut app = crate::app::app_view::tests::test_app_with_agent();
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        agent.session.session_id = Some(sid.into());
+        agent.session.cwd = cwd.clone();
+        agent.session.state = AgentState::TurnRunning;
+        agent.subagent_sessions.insert(
+            "cs-vacant-exited".into(),
+            crate::app::agent_view::AgentView::live_nested_occupancy_row_for_tests(
+                "cs-vacant-exited",
+                "sa-vacant-exited",
+                "stalled nested implementor",
+                Some("implementer"),
+            ),
+        );
+        {
+            let info = agent.subagent_sessions.get_mut("cs-vacant-exited").unwrap();
+            info.attempt.activity_label = Some("Responding".into());
+        }
+        agent.persist_session_work_to_disk_for_rebuild();
+        let meta_dir = grok_home
+            .path()
+            .join("sessions")
+            .join(urlencoding::encode(&cwd.to_string_lossy()).as_ref())
+            .join(sid)
+            .join("subagents")
+            .join("sa-vacant-exited");
+        std::fs::create_dir_all(&meta_dir).unwrap();
+        std::fs::write(
+            meta_dir.join("meta.json"),
+            r#"{"prompt":"x","status":"completed","duration_ms":1500}"#,
+        )
+        .unwrap();
+        agent.subagent_sessions.clear();
+        agent.restore_nested_occupancy_from_disk();
+        let restored = agent
+            .subagent_sessions
+            .get("cs-vacant-exited")
+            .expect("vacant restore still inserts the occupancy row");
+        assert!(
+            restored.finished || restored.is_finished(),
+            "meta.json completed must mark the vacant restore row finished"
+        );
+        assert!(!restored.is_running());
+        assert_ne!(
+            restored.attempt.activity_label.as_deref(),
+            Some("Responding"),
+            "vacant restore of an exited host must not stay painted Responding"
+        );
+        assert_eq!(
+            restored.display_elapsed(),
+            std::time::Duration::from_millis(1500)
+        );
+        assert!(
+            live_subagent_list(agent.subagent_sessions.values()).is_empty(),
+            "exited host must not return to the live Subagents list"
+        );
+        crate::app::subagent::set_replay_grok_home_for_tests(None);
+    }
+
     /// Named contract: Compact-fail unstick after occupancy drop must not
     /// leave the last Human turn as a Prompt row. Command `/compact` only.
     #[test]
@@ -492,7 +567,6 @@ mod tests {
             agent.session.in_flight_prompt = None;
             agent.session.compact_held_prompt = None;
             agent.session.pending_prompts.clear();
-            agent.session_sampling_window = Some(500_000);
             agent.context_state = Some(xai_grok_shell::session::ContextInfo::from_notification(
                 507_000, 500_000,
             ));
@@ -605,6 +679,7 @@ mod tests {
                 restore_degree: None,
                 running_prompt_id: None,
                 scheduler_background_loops: None,
+                modes: None,
             }),
             &mut app,
         );
@@ -630,5 +705,145 @@ mod tests {
             &cwd_str, sid,
         );
         xai_grok_shell::session::canceled_turn_resume::clear_process_shutdown_cancel_resume();
+    }
+
+    /// Operator: "Stale prompts at start are still a problem sadly... And yes, what is running is the latest binary."
+    ///
+    /// Last-session open. No `canceled_turn_resume.json`. Chat history already
+    /// has the Operator prompt, including `/goal do the thing` recorded as
+    /// `A goal has been set: do the thing`. Disk pending has those bodies
+    /// plus a truly unsent follow-up. Occupancy already marked the goal
+    /// `continue_prior_work`, which the ordinary drop spares. Restore through
+    /// session bind must not re-queue the recorded prompts.
+    #[test]
+    #[serial_test::serial(GROK_HOME)]
+    fn last_session_restore_without_canceled_turn_file_does_not_requeue_recorded_operator_prompt() {
+        use crate::app::actions::{Action, Effect, TaskResult};
+        use crate::app::dispatch::dispatch;
+        use agent_client_protocol as acp;
+
+        let grok_home = tempfile::tempdir().unwrap();
+        let _home = xai_grok_test_support::EnvGuard::set("GROK_HOME", grok_home.path());
+        let proj = tempfile::tempdir().unwrap();
+        let cwd = proj.path().to_path_buf();
+        let cwd_str = cwd.to_string_lossy().into_owned();
+        let sid = "last-session-no-canceled-marker";
+        let goal = "/goal do the thing";
+        let recorded = "already recorded operator prompt";
+        let _ = xai_grok_shell::session::canceled_turn_resume::clear_canceled_turn_resume(
+            &cwd_str, sid,
+        );
+        xai_grok_shell::session::canceled_turn_resume::clear_process_shutdown_cancel_resume();
+        let marker =
+            xai_grok_shell::session::canceled_turn_resume::load_canceled_turn_resume(&cwd_str, sid)
+                .expect("load canceled-turn marker");
+        assert!(
+            marker.is_none(),
+            "fixture is last-session open with no canceled_turn_resume.json"
+        );
+        xai_grok_shell::session::unsent_prompt_draft::pending_prompts::write_pending_prompts(
+            &cwd_str,
+            sid,
+            &[
+                PersistedQueuedPrompt {
+                    id: 1,
+                    text: goal.to_string(),
+                    kind: "prompt".into(),
+                },
+                PersistedQueuedPrompt {
+                    id: 2,
+                    text: recorded.to_string(),
+                    kind: "prompt".into(),
+                },
+                PersistedQueuedPrompt {
+                    id: 3,
+                    text: STILL_UNSENT.to_string(),
+                    kind: "prompt".into(),
+                },
+            ],
+        )
+        .expect("write pending_prompts.json");
+        write_session_chat_history(
+            &cwd_str,
+            sid,
+            &format!(
+                "{}\n{}\n",
+                serde_json::json!({
+                    "type": "user",
+                    "content": [{"type": "text", "text": recorded}],
+                }),
+                serde_json::json!({
+                    "type": "user",
+                    "content": [{
+                        "type": "text",
+                        "text": "<user_query>\nA goal has been set: do the thing\n</user_query>",
+                    }],
+                }),
+            ),
+        );
+
+        let mut app = crate::app::app_view::tests::test_app_with_agent();
+        let agent_id = AgentId(0);
+        {
+            let agent = app.agents.get_mut(&agent_id).unwrap();
+            agent.session.session_id = Some(sid.into());
+            agent.session.cwd = cwd;
+            agent.session.state = AgentState::Idle;
+            agent.session.loading_replay = true;
+            agent.session.pending_prompts.clear();
+            agent.session.prompt_history.clear();
+            agent
+                .session
+                .enqueue_continue_prior_work_front(goal.to_string());
+            assert_eq!(
+                agent.scrollback.len(),
+                0,
+                "last-session open starts with empty scrollback"
+            );
+        }
+        let load_effects = dispatch(
+            Action::TaskComplete(TaskResult::SessionLoaded {
+                agent_id,
+                session_id: acp::SessionId::new(sid),
+                models: None,
+                code_restored: false,
+                restore_summary: None,
+                restore_degree: None,
+                running_prompt_id: None,
+                scheduler_background_loops: None,
+                modes: None,
+            }),
+            &mut app,
+        );
+        let agent = app.agents.get(&agent_id).unwrap();
+        let queued = queued_texts(agent);
+        let stale = |text: &str| {
+            text.contains(goal) || text.contains("do the thing") || text.trim() == recorded
+        };
+        assert!(
+            !queued.iter().any(|t| stale(t)),
+            "Operator: \"Stale prompts at start are still a problem sadly... And yes, what is running is the latest binary.\" last-session restore must not re-queue an Operator prompt already in history, including /goal mapped to A goal has been set; queue={queued:?}"
+        );
+        assert!(
+            !load_effects
+                .iter()
+                .any(|e| { matches!(e, Effect::SendPrompt { text, .. } if stale(text)) }),
+            "Operator: \"Stale prompts at start are still a problem sadly... And yes, what is running is the latest binary.\" last-session restore must not send that recorded prompt; effects={load_effects:?}"
+        );
+        let kept_unsent = queued.iter().any(|t| t == STILL_UNSENT)
+            || load_effects
+                .iter()
+                .any(|e| matches!(e, Effect::SendPrompt { text, .. } if text == STILL_UNSENT));
+        assert!(
+            kept_unsent,
+            "a pending row that is not yet a Human turn must still restore; queue={queued:?} effects={load_effects:?}"
+        );
+        let still_absent =
+            xai_grok_shell::session::canceled_turn_resume::load_canceled_turn_resume(&cwd_str, sid)
+                .expect("load marker after restore");
+        assert!(
+            still_absent.is_none(),
+            "this restore must not invent canceled_turn_resume.json"
+        );
     }
 }

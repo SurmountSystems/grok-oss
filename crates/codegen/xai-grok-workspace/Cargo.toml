@@ -14,14 +14,15 @@ async-stream = { workspace = true }
 async-trait = { workspace = true }
 futures = { workspace = true }
 fs2 = { workspace = true }
-dirs = "6"
 parking_lot = { workspace = true }
 git2 = { version = "0.21", default-features = false, features = ["vendored-libgit2"] }
 ignore = { workspace = true }
 regex = { workspace = true }
+rand = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+strum = { workspace = true }
 tokio = { workspace = true, features = [
     "fs",
     "io-std",
@@ -39,20 +40,25 @@ xai-grok-tools = { path = "../xai-grok-tools" }
 xai-grok-tools-api = { path = "../xai-grok-tools-api" }
 # `DiagHandle`, held by the hub config and threaded through `connect_hub`.
 xai-grok-diag-server = { workspace = true }
+# Pre-stop lifecycle broker served on the diagnostics socket by `bin/workspace_server.rs`.
+xai-grok-lifecycle = { workspace = true }
 xai-grok-workspace-client = { path = "../xai-grok-workspace-client" }
 # Daemon/process-lifecycle machinery for `bin/workspace_server.rs` only; the
 # library never references it.
 xai-grok-workspace-daemon = { path = "../xai-grok-workspace-daemon" }
 xai-grok-workspace-types = { path = "../xai-grok-workspace-types" }
 xai-grok-config = { workspace = true }
+xai-dirs = { workspace = true }
 # Leaf config value types (RemoteSettings, BoolFlag) for the folder-trust decision.
 xai-grok-config-types = { workspace = true }
 toml = { workspace = true, features = ["preserve_order"] }
+toml_edit = { workspace = true }
 dashmap = { workspace = true }
 agent-client-protocol = { workspace = true }
 xai-acp-lib = { workspace = true }
 xai-codebase-graph = { path = "../xai-codebase-graph" }
 xai-grok-paths = { path = "../xai-grok-paths" }
+xai-grok-permission-rules = { workspace = true }
 base64 = { workspace = true }
 infer = { workspace = true }
 sha2 = { workspace = true, features = ["force-soft"] }
@@ -65,13 +71,12 @@ xai-fuzzy-file-search = { workspace = true }
 indexmap = { workspace = true, features = ["serde"] }
 smallvec = { workspace = true }
 chrono = { workspace = true }
-tree-sitter = "0.25.10"
-tree-sitter-bash = "0.25"
+tree-sitter = { workspace = true }
 url = { workspace = true }
 xai-grok-env = { workspace = true }
 humantime-serde = { workspace = true }
 prometheus = { workspace = true }
-glob = "0.3"
+xai-grok-egress-proxy = { path = "../xai-grok-egress-proxy" }
 xai-grok-sandbox = { path = "../xai-grok-sandbox", default-features = false }
 xai-grok-hooks = { path = "../xai-grok-hooks" }
 xai-hunk-tracker = { path = "../xai-hunk-tracker" }
@@ -103,7 +108,7 @@ tracing-subscriber = { workspace = true }
 # "enable" required for the SDK's spans to record at all.
 fastrace = { workspace = true, features = ["enable"] }
 xai-tracing = { workspace = true }
-rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
+xai-grok-extra-ca = { workspace = true }
 tokio-tungstenite = { workspace = true, features = ["rustls-tls-webpki-roots"] }
 tempfile = { workspace = true }
 zstd = { workspace = true }
@@ -128,10 +133,10 @@ path = "src/bin/workspace_server_probe.rs"
 [features]
 default = ["sandbox-enforce"]
 compression = []
+test-support = []
 test-util = []
 sandbox-enforce = ["xai-grok-sandbox/enforce"]
 # WorkspaceOps::for_test / WorkspaceHandle::for_test for dependents' cargo tests.
-test-support = []
 default-bazel = [
     "sandbox-enforce",
     "test-support",
@@ -139,6 +144,7 @@ default-bazel = [
 
 [dev-dependencies]
 tempfile = { workspace = true }
+axum = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
 xai-test-utils = { path = "../../common/xai-test-utils" }
 # Decode tar.gz archives produced by workspace upload helpers in tests.

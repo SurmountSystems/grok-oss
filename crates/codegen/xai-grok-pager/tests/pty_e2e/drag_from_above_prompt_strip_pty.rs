@@ -70,7 +70,7 @@ async fn drag_from_above_prompt_strip_pty() {
     let border_row = placeholder_row - 1;
     let border_line = screen.lines().nth(border_row as usize).unwrap_or("");
     assert!(
-        border_line.contains('\u{256d}'),
+        border_line.contains('\u{250c}'),
         "setup: prompt top border above the placeholder; line: {border_line:?}"
     );
     let strip_row = border_row - 1;

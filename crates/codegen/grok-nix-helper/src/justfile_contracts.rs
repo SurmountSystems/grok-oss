@@ -672,10 +672,10 @@ fn workspace_quality_source_matches_just_test() {
         quality.contains("--build-jobs \"$CARGO_LINK_JOBS\""),
         "quality nextest compile/link must pass --build-jobs \"$CARGO_LINK_JOBS\" (not 32 parallel mold links)"
     );
+    // link jobs are 32 because the nix-daemon MemoryMax on surmount-1 is 192G.
     assert!(
-        quality.contains("CARGO_LINK_JOBS")
-            && (quality.contains("\"$linkJobs\" -gt 4") || quality.contains("linkJobs\" -gt 4")),
-        "quality must cap CARGO_LINK_JOBS at 4 (nix-daemon 32GiB memory cgroup):\n{quality}"
+        quality.contains("CARGO_LINK_JOBS") && quality.contains("\"$linkJobs\" -gt 32"),
+        "quality must cap CARGO_LINK_JOBS at 32 (nix-daemon MemoryMax on surmount-1 is 192G):\n{quality}"
     );
     assert!(
         !quality.contains("--no-run"),

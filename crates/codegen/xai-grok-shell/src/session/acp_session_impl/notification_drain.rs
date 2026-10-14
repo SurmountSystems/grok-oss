@@ -1,16 +1,43 @@
-//! Idle-gated pending-notification buffering and drain for `SessionActor`,
-//! plus auto-start of queued prompts (`maybe_start_running_task`).
+//! Idle-gated pending-notification buffering and drain for `SessionActor`, plus auto-start of queued prompts (`maybe_start_running_task`).
 
 use super::*;
 
 /// Maximum number of pending notifications before oldest are dropped.
 pub(super) const MAX_PENDING_NOTIFICATIONS: usize = 50;
 
-/// Mid-turn live-orphan scan interval. InjectNotification can fire often;
-/// one disk pass per window is enough because persist-first makes a repeat
-/// finalize a no-op.
+/// Mid-turn live-orphan scan interval.
+/// InjectNotification can fire often; one disk pass per window is enough since records persist first, so finalizing the same orphan again is a no-op.
 pub(crate) const LIVE_ORPHAN_RECONCILE_INTERVAL: std::time::Duration =
     std::time::Duration::from_secs(30);
+
+/// Pager Approve sends this sentence with a uuid prompt id. Resume also
+/// queues it under a `plan-resume-` id. Either one is the implement turn.
+const IMPLEMENT_SENTENCE: &str = "The user approved the plan. Implement the plan in plan.md.";
+
+fn input_item_is_implement_sentence(item: &InputItem) -> bool {
+    if item.prompt_id.starts_with("plan-resume-") {
+        return true;
+    }
+    item.prompt_blocks.iter().any(|block| {
+        matches!(
+            block,
+            acp::ContentBlock::Text(text) if text.text.contains(IMPLEMENT_SENTENCE)
+        )
+    })
+}
+
+fn promote_implement_sentence_to_front(pending: &mut std::collections::VecDeque<InputItem>) {
+    let Some(index) = pending.iter().position(input_item_is_implement_sentence) else {
+        return;
+    };
+    if index == 0 {
+        return;
+    }
+    let Some(item) = pending.remove(index) else {
+        return;
+    };
+    pending.push_front(item);
+}
 
 /// A notification buffered for idle-gated drain (see `maybe_drain_notifications`).
 pub(crate) struct PendingNotification {
@@ -120,13 +147,49 @@ impl SessionActor {
 
     pub(super) async fn maybe_start_running_task(
         self: Arc<Self>,
-        completion_tx: mpsc::UnboundedSender<(String, PromptTurnResult)>,
+        completion_tx: mpsc::UnboundedSender<super::turn_task::TurnCompletionMsg>,
     ) {
         // Fast path under the lock: nothing to promote.
         let may_combine;
+        let queued_wake_ids: Vec<String>;
         {
-            let state = self.state.lock().await;
-            if state.running_task.is_some() {
+            let mut state = self.state.lock().await;
+            // An implement sentence is queued after Approve. Its id is
+            // `plan-resume-*`, or a uuid whose text is the approved-plan
+            // sentence. The resume re-park is detached, so a holder in
+            // `running_task` is the restored parked turn unless its prompt
+            // id is this sentence (that task is the sampler call).
+            promote_implement_sentence_to_front(&mut state.pending_inputs);
+            let resume_sentence_queued = state
+                .pending_inputs
+                .front()
+                .is_some_and(input_item_is_implement_sentence);
+            if resume_sentence_queued && state.running_task.is_some() {
+                let front_id = state
+                    .pending_inputs
+                    .front()
+                    .map(|item| item.prompt_id.clone());
+                let holder_is_this_sentence = state
+                    .running_task
+                    .as_ref()
+                    .is_some_and(|task| front_id.as_deref() == Some(task.prompt_id.as_str()));
+                if !holder_is_this_sentence {
+                    if let Some(task) = state.running_task.take() {
+                        task.handle.abort();
+                    }
+                }
+            }
+            let slot_blocked = state.running_task.is_some() || state.finalization_gate.is_active();
+            // An active finalization gate with an empty slot is the restored
+            // park, not a live sampler. Returning here ate the implement
+            // sentence (`running_task` stayed empty, no inference request).
+            let stale_gate_ate_resume = resume_sentence_queued
+                && state.running_task.is_none()
+                && state.finalization_gate.is_active();
+            if stale_gate_ate_resume {
+                state.finalization_gate.release_for_resume_implement();
+            }
+            if slot_blocked && !resume_sentence_queued {
                 let queue_depth = state.pending_inputs.len();
                 if queue_depth > 0 {
                     xai_grok_telemetry::unified_log::debug(
@@ -157,12 +220,13 @@ impl SessionActor {
             // re-park is detached). Promoting a queued prompt would start a
             // new turn while exit_plan_mode is still waiting on the user —
             // that hijacks the in-flight plan decision. Hold until approve /
-            // revise / abandon clears the gate.
+            // revise / abandon clears the gate. An implement sentence
+            // is already the decision, so that hold must not eat it.
             let plan_approval_open = self.plan_mode.lock().is_awaiting_plan_approval()
                 || crate::session::pending_interaction::has_parked_plan_approval(
                     &self.pending_interactions,
                 );
-            if plan_approval_open {
+            if plan_approval_open && !resume_sentence_queued {
                 let queue_depth = state.pending_inputs.len();
                 if queue_depth > 0 {
                     xai_grok_telemetry::unified_log::debug(
@@ -188,39 +252,135 @@ impl SessionActor {
             if state.pending_inputs.is_empty() {
                 return;
             }
-            // A merge needs 2+ queued prompts; sample here so the common
-            // single-prompt promote skips the config disk read below.
+            // A merge needs at least two queued prompts; sample here so the common single-prompt promote skips the config disk read below
             may_combine = state.pending_inputs.len() >= 2;
+            queued_wake_ids = state
+                .pending_inputs
+                .iter()
+                .filter_map(|item| match item.input_origin.as_prompt_origin() {
+                    super::PromptOrigin::SubagentCompleted { subagent_id } => {
+                        Some(subagent_id.clone())
+                    }
+                    _ => None,
+                })
+                .collect();
         }
 
-        // Config I/O outside the state lock, and only when a merge is even
-        // possible — keeps the single-prompt promote (the common case) off disk.
+        // Config I/O outside the state lock, and only when a merge is even possible; keeps the single-prompt promote (the common case) off disk
         let combine_queued = may_combine
             && crate::util::config::load_config()
                 .await
                 .ui
                 .combine_queued_prompts
                 .unwrap_or(false);
+        // The resources mutex is never taken under `state`; a wake queued after this snapshot is still caught at turn start
+        let mut reported_wake_ids = queued_wake_ids;
+        if !reported_wake_ids.is_empty() {
+            self.with_reported_completions(|reported| {
+                reported_wake_ids.retain(|id| reported.is_reported(id))
+            })
+            .await;
+        }
+
+        // A `/memory` toggle during the previous turn could not swap the prompt; do it before this
+        // turn samples. Takes `state` briefly on its own, so it stays outside the lock below.
+        if self
+            .memory
+            .prompt_sync_pending
+            .load(std::sync::atomic::Ordering::Relaxed)
+            && self.sync_v2_memory_prompt().await
+                == super::memory_control::MemoryPromptSync::RenderFailed
+        {
+            tracing::warn!(
+                target: xai_grok_telemetry::memory_log::TARGET,
+                session_id = %self.session_info.id.0,
+                "memory prompt sync failed again at turn promotion; this turn samples with the \
+                 previous memory section"
+            );
+        }
 
         let mut state = self.state.lock().await;
-        // Re-check after the await gap.
+        // Re-check after the await gap. A pager SendPrompt uses a uuid, and
+        // the implement sentence may sit behind another queued row.
+        promote_implement_sentence_to_front(&mut state.pending_inputs);
+        let resume_sentence_queued = state
+            .pending_inputs
+            .front()
+            .is_some_and(input_item_is_implement_sentence);
+        if resume_sentence_queued {
+            let front_id = state
+                .pending_inputs
+                .front()
+                .map(|item| item.prompt_id.clone());
+            let holder_is_this_sentence = state
+                .running_task
+                .as_ref()
+                .is_some_and(|task| front_id.as_deref() == Some(task.prompt_id.as_str()));
+            if !holder_is_this_sentence {
+                if let Some(task) = state.running_task.take() {
+                    task.handle.abort();
+                }
+            }
+            if state.running_task.is_none() && state.finalization_gate.is_active() {
+                state.finalization_gate.release_for_resume_implement();
+            }
+        }
         if state.running_task.is_some() || state.pending_inputs.is_empty() {
             return;
         }
-        if self.plan_mode.lock().is_awaiting_plan_approval()
-            || crate::session::pending_interaction::has_parked_plan_approval(
-                &self.pending_interactions,
-            )
+        if state.finalization_gate.is_active() && !resume_sentence_queued {
+            return;
+        }
+        if !resume_sentence_queued
+            && (self.plan_mode.lock().is_awaiting_plan_approval()
+                || crate::session::pending_interaction::has_parked_plan_approval(
+                    &self.pending_interactions,
+                ))
         {
             return;
         }
 
-        // Note: Auto-compact is now handled inline during process_conversation_turn,
-        // so we no longer need to check for queued auto-compact here.
+        if state.hook_block_held() {
+            xai_grok_telemetry::unified_log::debug(
+                "shell.prompt.start_blocked",
+                Some(self.session_info.id.0.as_ref()),
+                Some(serde_json::json!({
+                    "reason": "hook_block_hold",
+                    "queue_depth": state.pending_inputs.len(),
+                })),
+            );
+            tracing::debug!(
+                target: "qtrace",
+                pid = std::process::id(),
+                event = "server_start_blocked",
+                queue_depth = state.pending_inputs.len(),
+                session = self.session_info.id.0.as_ref(),
+                "maybe_start_running_task blocked: queue held after a hook block",
+            );
+            return;
+        }
 
-        // Drop stale workflow-completion synthetic fronts (already reported).
+        // Auto-compact is handled inline by process_conversation_turn, so there is no queued auto-compact to check here
+
+        // Drop stale synthetic fronts before promoting
+        // Stale means already-reported workflow or subagent completions, and goal continuations whose goal is no longer Active
+        // An Active goal queues a fresh continuation at turn end, so a leftover one here would jump ahead of the user's queue
         loop {
-            let stale = match state.pending_inputs.front().map(|item| &item.origin) {
+            let stale = match state
+                .pending_inputs
+                .front()
+                .map(|item| item.input_origin.as_prompt_origin())
+            {
+                Some(super::PromptOrigin::SubagentCompleted { subagent_id }) => {
+                    let reported = reported_wake_ids.contains(subagent_id);
+                    if reported {
+                        tracing::info!(
+                            subagent_id,
+                            "dropping queued wake: completion already reported"
+                        );
+                    }
+                    reported
+                }
                 Some(super::PromptOrigin::WorkflowCompleted { completion_id }) => {
                     match completion_id
                         .rsplit_once('-')
@@ -237,6 +397,9 @@ impl SessionActor {
                         None => true,
                     }
                 }
+                Some(
+                    super::PromptOrigin::GoalSummary | super::PromptOrigin::GoalClassifierNudge,
+                ) => !self.goal_loop_active(),
                 _ => false,
             };
             if !stale {
@@ -247,8 +410,7 @@ impl SessionActor {
             }
         }
 
-        // Drop holds for rows no longer queued, then expire leaked holds so a
-        // client crash or dropped release cannot park the queue forever.
+        // Drop holds for rows no longer queued, then expire leaked holds so a client crash or dropped release cannot park the queue forever
         if !state.edit_holds.is_empty() {
             let live: std::collections::HashSet<String> = state
                 .pending_inputs
@@ -259,8 +421,7 @@ impl SessionActor {
             super::expire_older_than(&mut state.edit_holds, super::EDIT_HOLD_TTL);
         }
 
-        // Held front must not start until edit/release; check before combine so
-        // we never absorb followers into a front that will not run yet.
+        // A held front must not start until edit/release; check before combine so we never absorb followers into a front that will not run yet
         if let Some(front) = state.pending_inputs.front()
             && state.edit_holds.contains_key(&front.prompt_id)
         {
@@ -293,12 +454,13 @@ impl SessionActor {
             SessionActor::combine_front_pending_inputs(&mut state.pending_inputs, &skip);
         }
 
-        // Start the next pending user prompt. Pull all needed fields from the
-        // queue head in one `front_mut` scope so we can mutate `state` again
-        // (e.g. `rewindable`) without overlapping borrows.
+        // Start the next pending user prompt
+        // Pull all needed fields from the queue head in one `front_mut` scope
+        // `state` can then be mutated again (e.g. `rewindable`) without overlapping borrows.
         let (
             persist_ack,
             parsed_prompt_tx,
+            initial_child_prompt_ready,
             prompt_id,
             prompt_blocks,
             prompt_mode,
@@ -309,9 +471,10 @@ impl SessionActor {
             verbatim,
             send_now,
             json_schema,
-            origin,
+            input_origin,
             running_display,
             tool_overrides_update,
+            traceparent,
             unstick_retry,
         ) = {
             let Some(front) = state.pending_inputs.front_mut() else {
@@ -321,6 +484,7 @@ impl SessionActor {
             (
                 front.persist_ack.take(),
                 front.parsed_prompt_tx.take(),
+                front.initial_child_prompt_ready.take(),
                 front.prompt_id.clone(),
                 front.prompt_blocks.clone(),
                 front.prompt_mode,
@@ -331,14 +495,15 @@ impl SessionActor {
                 front.verbatim,
                 front.send_now,
                 front.json_schema.clone(),
-                front.origin.clone(),
+                front.input_origin.clone(),
                 running_display,
                 front.tool_overrides_update.take(),
+                front.traceparent.clone(),
                 front.unstick_retry,
             )
         };
         self.apply_tool_overrides_update(tool_overrides_update);
-        if matches!(origin, super::PromptOrigin::User) {
+        if input_origin.policy().authority.is_human_intent() {
             if let Some(gate) = &self.tool_context.task_wake_suppressed {
                 gate.set(false);
             }
@@ -394,31 +559,49 @@ impl SessionActor {
             session = self.session_info.id.0.as_ref(),
             "promoting front of pending_inputs to the running turn",
         );
-        // Promote broadcast before spawn so clients paint (and arm echo-skip)
-        // before the user-message chunk can race in.
+        // Promote broadcast before spawn so clients paint (and enable echo-skip) before the user-message chunk can race in
         self.broadcast_queue_changed_promoting(&state, running_display);
 
+        // Bump the epoch here rather than in `handle_prompt`: a cancel reads the slot as soon as
+        // `running_task` is set on the next line.
+        let epoch = self.turn_report.start_next_turn();
+        let (publication_release, start_gate) = if initial_child_prompt_ready.is_some() {
+            let (release, released) = oneshot::channel();
+            (Some(release), Some(released))
+        } else {
+            (None, None)
+        };
         state.running_task = Some(AgentTask::new_prompt(
             self.clone(),
-            prompt_id,
-            prompt_blocks,
-            prompt_mode,
-            trace_gcs_config,
-            artifact_tracker,
-            client_identifier,
-            screen_mode,
-            verbatim,
-            send_now,
-            json_schema,
+            TurnInputRequest {
+                prompt_id,
+                input_origin,
+                prompt_blocks,
+                prompt_mode,
+                trace_gcs_config,
+                artifact_tracker,
+                client_identifier,
+                screen_mode,
+                verbatim,
+                send_now,
+                json_schema,
+                persist_ack,
+                parsed_prompt_tx,
+                traceparent,
+                unstick_retry,
+                start_gate,
+            },
+            epoch,
             completion_tx,
-            persist_ack,
-            parsed_prompt_tx,
-            unstick_retry,
         ));
+        if let (Some(initial_child_prompt_ready), Some(publication_release)) =
+            (initial_child_prompt_ready, publication_release)
+        {
+            let _ = initial_child_prompt_ready.send(publication_release);
+        }
     }
 
-    /// Flip on-disk `running` metas that the coordinator no longer holds so
-    /// the pager stops showing Responding without a quit+resume.
+    /// Flip on-disk `running` metas that the coordinator no longer holds so the pager stops showing Responding without a quit and resume.
     pub(super) async fn reconcile_live_orphaned_subagents(&self) {
         self.last_live_orphan_reconcile
             .set(Some(std::time::Instant::now()));
@@ -448,8 +631,7 @@ impl SessionActor {
         }
     }
 
-    /// Tray / reconnect can miss the idle hook; heal before listing so the
-    /// pager does not keep a dead child as Responding.
+    /// Tray / reconnect can miss the idle hook; heal before listing so the pager does not keep a dead child as Responding.
     #[cfg(test)]
     pub(super) async fn list_running_subagents(
         &self,
@@ -463,23 +645,15 @@ impl SessionActor {
             .await
     }
 
-    /// Drain pending notifications into a single batched turn, if idle and not suppressed.
-    ///
-    /// Guards:
-    /// - No turn is running (`running_task` is `None`)
-    /// - No user prompts are pending (user prompts always take priority)
-    /// - Notifications are NOT suppressed (cleared on next user prompt)
-    ///
-    /// All notifications are taken and merged into a single `InputItem` with
-    /// `---` separators between content blocks. The take+push happens in a
-    /// single lock acquisition to avoid interleaving.
+    /// No turn is running (`running_task` is `None`).
+    /// No user prompts are pending (user prompts always take priority).
+    /// The take and push happen in a single lock acquisition to avoid interleaving.
     pub(super) async fn maybe_drain_notifications(
         self: Arc<Self>,
-        completion_tx: mpsc::UnboundedSender<(String, PromptTurnResult)>,
+        completion_tx: mpsc::UnboundedSender<super::turn_task::TurnCompletionMsg>,
     ) {
-        // Mid-turn tick: parent may still be Responding so the idle
-        // hook never runs. Throttled so InjectNotification does not scan disk
-        // on every event.
+        // Mid-turn tick: the parent may still be Responding so the idle hook never runs
+        // Throttled so InjectNotification does not scan disk on every event
         if self
             .last_live_orphan_reconcile
             .get()
@@ -488,15 +662,9 @@ impl SessionActor {
             self.reconcile_live_orphaned_subagents().await;
         }
 
-        // Auto-wake notification turns are DROPPED both while the goal loop is
-        // active (a bg-task / monitor "completed" turn would pull a weak model
-        // off the goal continuation, e.g. relaunching a killed server) AND
-        // after the goal completes (the autonomous run is over — late dev-
-        // server completions should leave the session idle, not spawn fresh
-        // post-goal turns). Independently, completions whose source task
-        // originated during the goal turn are dropped regardless of status (see
-        // `split_goal_suppressed`). Dropped notifications are still marked
-        // reported below so nothing resurfaces later.
+        // Auto-wake notification turns are DROPPED both while the goal loop is active AND after the goal completes.
+        // While active, a task or monitor completion turn would pull a weak model off the goal continuation.
+        // After the goal completes the autonomous run is over; late dev-server completions should leave the session idle, not spawn post-goal turns.
         let suppress_all = self.goal_harness_enabled()
             && matches!(
                 self.goal_tracker.lock().status(),
@@ -511,19 +679,16 @@ impl SessionActor {
         let drained = {
             let mut state = self.state.lock().await;
 
-            // Shared idle predicate — same conditions Layer 3 uses via
-            // `is_session_idle_for_injection`. Inlined here so the
-            // `mut state` borrow can survive into the take/push below.
+            // Shared idle predicate: the same conditions Layer 3 uses via `is_session_idle_for_injection`
+            // Inlined here so the `mut state` borrow can survive into the take/push below
             if !is_session_idle_for_injection(&state) {
                 return;
             }
 
-            // Backstop sweep for events that hit the buffer after the
-            // turn-end drain (the is_turn_active flag can lag the actual
-            // turn teardown). Normally a no-op.
+            // Backstop sweep for events that hit the buffer after the turn-end drain (the is_turn_active flag can lag the actual turn teardown)
+            // Normally a no-op
             self.sweep_monitor_buffer_into_pending(&mut state, "monitor-idle-drain");
 
-            // Nothing to drain
             if state.pending_notifications.is_empty() {
                 return;
             }
@@ -558,8 +723,7 @@ impl SessionActor {
                 )
             }
         };
-        // Mark reported whether dropped or surfaced, so the per-tool-call
-        // `TaskCompletionReminder` won't resurface the same completions.
+        // Mark reported whether dropped or surfaced, so the per-tool-call `TaskCompletionReminder` won't resurface the same completions
         let ids: Vec<&str> = drained_task_ids.iter().map(String::as_str).collect();
         self.mark_completions_reported(&ids).await;
 
@@ -570,14 +734,27 @@ impl SessionActor {
 
     /// Notifies extensions when the session settles idle (nothing running, nothing queued).
     /// The idle check stays host-side; extensions only get the event.
+    /// Ignores `notifications_suppressed`, unlike [`is_session_idle_for_injection`].
     pub(super) async fn emit_session_idle_if_idle(&self) {
-        {
+        let suppressed = {
             let state = self.state.lock().await;
-            if !is_session_idle_for_injection(&state) {
+            if state_is_busy(&state) {
                 return;
             }
+            state.notifications_suppressed
+        };
+        // Reconciliation writes subagent records, so it stays behind the suppression check
+        // It also runs in a child session, which the notification below does not
+        // Reconciliation writes subagent records. A suppressed session must
+        // not cancel a live orphan just because the host went idle.
+        if !suppressed {
+            self.reconcile_live_orphaned_subagents().await;
         }
-        self.reconcile_live_orphaned_subagents().await;
+        // Like the session-end `Stop`: a subagent settling is not the session settling.
+        // `SessionEnd` itself still fires for a child, carrying `subagentType`.
+        if self.startup_hints.is_subagent {
+            return;
+        }
         for contributor in self.extension_registry.session_lifecycle_contributors() {
             contributor
                 .on_session_idle(&xai_agent_lifecycle::SessionIdleInput)
@@ -585,11 +762,9 @@ impl SessionActor {
         }
     }
 
-    /// Sweep this session's buffered monitor events (`drain_owned`) into
-    /// `pending_notifications`. Used where the turn loop can no longer
-    /// drain the buffer: turn end (`drain_monitor_buffer_to_pending`),
-    /// turn cancel, and the idle drain (all three race the
-    /// `is_turn_active`-gated buffer push in `InjectNotification`).
+    /// Sweep this session's buffered monitor events (`drain_owned`) into `pending_notifications`.
+    /// Used where the turn loop can no longer drain the buffer: turn end (`drain_monitor_buffer_to_pending`), turn cancel, and the idle drain.
+    /// All three race the `is_turn_active`-gated buffer push in `InjectNotification`.
     pub(super) fn sweep_monitor_buffer_into_pending(
         &self,
         state: &mut State,
@@ -619,10 +794,8 @@ impl SessionActor {
     }
 
     /// Partition drained notifications into `(to_surface, dropped_count)`.
-    ///
-    /// `suppress_all` mirrors the goal Active/Complete blanket gate (drop
-    /// everything); independently, notifications whose source task is in
-    /// `goal_turn_task_ids` are always dropped (see that field).
+    /// `suppress_all` mirrors the goal Active/Complete blanket gate (drop everything).
+    /// Independently, notifications whose source task is in `goal_turn_task_ids` are always dropped.
     pub(super) fn split_goal_suppressed(
         suppress_all: bool,
         goal_turn_task_ids: &std::collections::HashSet<String>,
@@ -700,8 +873,9 @@ impl SessionActor {
                 &monitor_events,
                 Some(task_output_tool_name),
             ),
-        ) {
-            sections[index] = vec![acp::ContentBlock::Text(acp::TextContent::new(batch))];
+        ) && let Some(slot) = sections.get_mut(index)
+        {
+            *slot = vec![acp::ContentBlock::Text(acp::TextContent::new(batch))];
         }
 
         let mut blocks = Vec::new();
@@ -724,9 +898,8 @@ impl SessionActor {
 
         let merged_prompt_id = format!("notifications-{}", uuid::Uuid::now_v7());
 
-        // Receiver intentionally dropped — notification turns have no caller
-        // awaiting the result. The send() in handle_completion returns Err,
-        // which is harmless.
+        // Receiver intentionally dropped: notification turns have no caller awaiting the result
+        // The send() in handle_completion returns Err, which is harmless
         let (respond_to, _) = tokio::sync::oneshot::channel();
 
         state.pending_inputs.push_back(InputItem {
@@ -739,15 +912,18 @@ impl SessionActor {
             screen_mode: None,
             verbatim: true,
             json_schema: None,
-            origin: super::PromptOrigin::NotificationDrain,
+            input_origin: InputOrigin::new(super::PromptOrigin::NotificationDrain),
             task_wake_fallback: None,
             tool_overrides_update: None,
             respond_to,
             persist_ack: None,
             parsed_prompt_tx: None,
+            initial_child_prompt_ready: None,
             queue_meta: None,
+            queue_mutation_policy: QueueMutationPolicy::hidden(),
             send_now: false,
             unstick_retry: false,
+            traceparent: None,
         });
 
         tracing::info!(
@@ -765,11 +941,9 @@ impl SessionActor {
         true
     }
 
-    /// Turn-end straggler sweep: monitor events buffered during the turn's
-    /// final sampling step (after the loop's last `inject_pending_monitor_events`
-    /// pass) move to `pending_notifications`. Runs in the completion handler
-    /// before `maybe_drain_notifications`, so it — not the idle sweep — is
-    /// what normally catches them.
+    /// Turn-end straggler sweep: monitor events buffered during the turn's final sampling step move to `pending_notifications`.
+    /// That step follows the loop's last `inject_pending_monitor_events` pass.
+    /// Runs in the completion handler before `maybe_drain_notifications`, so this sweep (not the idle one) is what normally catches them.
     pub(super) async fn drain_monitor_buffer_to_pending(&self) {
         let mut state = self.state.lock().await;
         self.sweep_monitor_buffer_into_pending(&mut state, "monitor-turn-end-drain");
@@ -789,6 +963,7 @@ mod live_orphan_hook_tests {
     fn running_meta(id: &str, parent: &str) -> SubagentMeta {
         SubagentMeta {
             subagent_id: id.into(),
+            attempt_id: None,
             parent_session_id: parent.into(),
             child_session_id: format!("child-{id}"),
             subagent_type: "explore".into(),
@@ -982,7 +1157,7 @@ mod live_orphan_hook_tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn emit_session_idle_skips_reconcile_when_not_idle() {
+    async fn emit_session_idle_skips_reconcile_while_suppressed() {
         let local = tokio::task::LocalSet::new();
         local
             .run_until(async {
@@ -1045,8 +1220,10 @@ mod live_orphan_hook_tests {
                 let (actor, sub_dir, mut persistence_rx) =
                     actor_with_orphan(id, Some(running_inspection(id))).await;
                 let listed = actor.list_running_subagents().await;
-                assert_eq!(listed.len(), 1);
-                assert_eq!(listed[0].snapshot.subagent_id, id);
+                let [listed_one] = listed.as_slice() else {
+                    panic!("expected one listed subagent: {listed:?}");
+                };
+                assert_eq!(listed_one.snapshot.subagent_id, id);
 
                 let reread: SubagentMeta = serde_json::from_str(
                     &std::fs::read_to_string(sub_dir.join("meta.json")).unwrap(),

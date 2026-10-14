@@ -1,6 +1,6 @@
 # Skills
 
-Skills are reusable prompt packages that extend Grok with task-specific instructions. They let you capture a repeatable procedure once, instead of re-explaining it each session.
+Skills are reusable prompt packages that extend Grok with task-specific instructions. They let you capture a repeatable procedure once, instead of re-explaining it each session. Startup discovery skips project skills and commands in untrusted folders.
 
 ---
 
@@ -46,6 +46,8 @@ disabled = ["wip-skill"]              # Skill names to keep listed but inactive
 ```
 
 Each entry in `paths` is a `SKILL.md` file or a directory that Grok walks recursively. `ignore` hides a skill completely; `disabled` keeps it in the list but excludes it from the system prompt and from invocation. `paths` and `ignore` take filesystem paths and support `~` expansion; `disabled` takes skill names.
+
+`[paths] extra_skill_dirs` is written by `/import-claude`. It does not inject skills. Put extra directories in `[skills] paths`.
 
 ---
 
@@ -242,10 +244,12 @@ Grok Build compatibility is those CLI bins of the Rust functions, not a second P
 
 2. **Include concrete steps.** Skills work best when they give Grok a clear, ordered procedure to follow.
 
-3. **Reference tools by name.** When a skill relies on specific tools (such as `run_terminal_command` or `search_replace`), name them so the model knows what to use.
+3. **Reference tools by name.** When a skill relies on specific tools (such as `run_terminal_cmd` or `search_replace`), name them so the model knows what to use.
 
 4. **Keep skills focused.** Write one skill per workflow. A "deploy" skill and a "rollback" skill work better than a single "deploy-and-rollback" skill.
 
 5. **Version-control project skills.** Commit `.agents/skills/` or `.grok/skills/` to your repository so the whole team benefits. Do not commit `.py` helpers there. User skills in `~/.agents/skills/` or `~/.grok/skills/` stay personal and unshared. `/polish`, `/subagent`, `/what`, and `/pull-remote-tree` are default Grok OSS skills (product tree `crates/codegen/xai-grok-bundle/skills/`, installed into `~/.grok/bundled/skills/`). Do not ship them as project `.agents/skills/polish`, `.agents/skills/subagent`, `.agents/skills/what`, or `.agents/skills/pull-remote-tree` unless you want a project override. When you ask to revise a skill in grok-oss, edit that product tree. The live cache is not the source.
 
 6. **Test by running it.** Invoke `/name` and confirm the skill works before you rely on automatic invocation.
+
+7. **Keep the body under the file-read cap.** Grok inlines at most the first 25,000 tokens of a skill body (the same cap as `read_file`). Put long reference material in sibling files and tell Grok to read them with a line offset and limit.

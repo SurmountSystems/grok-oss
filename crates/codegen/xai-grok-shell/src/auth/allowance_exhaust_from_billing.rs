@@ -509,8 +509,11 @@ impl std::fmt::Debug for SupergrokBillingPollTarget {
 
 /// All SuperGrok principals that can be billed (deduped by identity_id).
 ///
-/// Prefer multi-slot scopes over a duplicate base for the same identity.
-/// Empty when no SuperGrok session tokens are stored.
+/// When one identity has more than one store entry, keep the entry
+/// [`prefer_supergrok_store_entry`] already prefers: not memoized out of
+/// allowance, then later `expires_at`, then later `create_time`. Multi-slot
+/// wins only when those are tied. A stale multi-slot does not hide a later
+/// token for that identity. Empty when no SuperGrok session tokens are stored.
 pub fn load_supergrok_billing_poll_targets(grok_home: &Path) -> Vec<SupergrokBillingPollTarget> {
     use super::model::{is_supergrok_session_mode, supergrok_identity_id_from_auth};
 
@@ -518,8 +521,9 @@ pub fn load_supergrok_billing_poll_targets(grok_home: &Path) -> Vec<SupergrokBil
     let Ok(map) = read_auth_json(&path) else {
         return Vec::new();
     };
-    // identity_id → (is_multi, target)
-    let mut by_id: BTreeMap<String, (bool, SupergrokBillingPollTarget)> = BTreeMap::new();
+    // identity_id → (is_multi, auth, target). Same preference as session candidates.
+    let mut by_id: BTreeMap<String, (bool, super::model::GrokAuth, SupergrokBillingPollTarget)> =
+        BTreeMap::new();
     for (scope, auth) in &map {
         if scope == API_KEY_SCOPE {
             continue;
@@ -538,18 +542,17 @@ pub fn load_supergrok_billing_poll_targets(grok_home: &Path) -> Vec<SupergrokBil
             access_token: token.to_owned(),
             user_id: auth.user_id.clone(),
         };
-        match by_id.get(&identity_id) {
-            None => {
-                by_id.insert(identity_id, (is_multi, target));
+        let replace = match by_id.get(&identity_id) {
+            None => true,
+            Some((prev_multi, prev_auth, _)) => {
+                prefer_supergrok_store_entry(prev_auth, *prev_multi, auth, is_multi)
             }
-            Some((prev_multi, _)) => {
-                if is_multi && !*prev_multi {
-                    by_id.insert(identity_id, (is_multi, target));
-                }
-            }
+        };
+        if replace {
+            by_id.insert(identity_id, (is_multi, auth.clone(), target));
         }
     }
-    by_id.into_values().map(|(_, t)| t).collect()
+    by_id.into_values().map(|(_, _, target)| target).collect()
 }
 
 /// SuperGrok principals other than the active base identity.
@@ -606,11 +609,11 @@ pub fn session_needs_oidc_refresh_before_billing_poll(auth: &super::model::GrokA
     has_rt && has_issuer && has_client && is_expired(auth)
 }
 
-/// Prefer multi-slot store entry for `identity_id` (same policy as poll targets).
+/// Store entry for `identity_id`, using [`prefer_supergrok_store_entry`].
 ///
-/// Returns `(auth.json scope key, GrokAuth)`. Used so sibling OIDC refresh can
-/// write back the multi-slot without clobbering the active base of another
-/// principal.
+/// Same order as poll targets and session candidates. A later token replaces
+/// a stale multi-slot for this identity. Returns `(auth.json scope key, GrokAuth)`.
+/// Refresh writes that scope only. It does not replace another principal's base.
 pub fn find_supergrok_auth_entry_for_billing(
     grok_home: &Path,
     identity_id: &str,
@@ -639,13 +642,14 @@ pub fn find_supergrok_auth_entry_for_billing(
             continue;
         }
         let is_multi = scope.contains("::personal") || scope.contains("::team::");
-        match &best {
-            None => best = Some((is_multi, scope.clone(), auth.clone())),
-            Some((prev_multi, _, _)) => {
-                if is_multi && !*prev_multi {
-                    best = Some((is_multi, scope.clone(), auth.clone()));
-                }
+        let replace = match &best {
+            None => true,
+            Some((prev_multi, _, prev_auth)) => {
+                prefer_supergrok_store_entry(prev_auth, *prev_multi, auth, is_multi)
             }
+        };
+        if replace {
+            best = Some((is_multi, scope.clone(), auth.clone()));
         }
     }
     best.map(|(_, scope, auth)| (scope, auth))
@@ -669,13 +673,50 @@ pub fn persist_refreshed_supergrok_billing_auth(
     write_auth_json(&path, &map)
 }
 
+/// Record one identity's refresh poll outcome. No access tokens or refresh tokens.
+fn write_refresh_poll_outcome(grok_home: &Path, identity_id: &str, poll_outcome: &str) {
+    use super::limits_snapshot_hub::{
+        LimitsSnapshotDocument, LimitsSnapshotIdentity, now_unix_ms, read_limits_snapshot_file,
+        write_limits_snapshot_file,
+    };
+
+    let now = now_unix_ms();
+    let mut doc =
+        read_limits_snapshot_file(grok_home).unwrap_or_else(|| LimitsSnapshotDocument::empty(now));
+    if let Some(row) = doc
+        .identities
+        .iter_mut()
+        .find(|row| row.identity_id == identity_id)
+    {
+        row.poll_outcome = poll_outcome.to_owned();
+        row.usage_pct = None;
+    } else {
+        doc.identities.push(LimitsSnapshotIdentity {
+            identity_id: identity_id.to_owned(),
+            usage_pct: None,
+            period_end: None,
+            period_type: None,
+            dollar_credits_cents: None,
+            grok_build_usage_pct: None,
+            is_unified_billing_user: None,
+            poll_outcome: poll_outcome.to_owned(),
+        });
+    }
+    let _ = write_limits_snapshot_file(grok_home, &doc);
+}
+
 /// Ensure the SuperGrok principal has a usable access token for a billing poll.
 ///
 /// When the multi-slot (or base) JWT is past the early-invalidation buffer and
 /// still has OIDC refresh credentials, exchange the refresh token and write the
 /// new access token back to that `auth.json` scope **before** the credits HTTP
-/// call. On refresh failure, returns the existing token so the poll can record
-/// auth-fail honesty (and eventually N-fail demote). Never deletes secrets.
+/// call. A successful refresh returns the new token. A transport failure
+/// returns the stored token for a later retry. When that failure never reached
+/// the identity provider, the snapshot poll outcome is `network`, not `reauth`.
+/// A rejected grant (`TerminalError`, including `invalid_grant`) returns no
+/// token and records `reauth` with no usage percent. It does not return the
+/// stored access token. Other non-network failures still return the stored
+/// token and do not record `reauth`. Never deletes secrets.
 ///
 /// Returns `(access_token, user_id)`.
 pub async fn ensure_fresh_access_token_for_supergrok_billing_poll(
@@ -709,11 +750,34 @@ pub async fn ensure_fresh_access_token_for_supergrok_billing_poll(
             tracing::debug!(
                 identity_id = %identity_id,
                 ?reason,
-                "sibling SuperGrok billing: OIDC refresh terminal; polling with stored token"
+                "sibling SuperGrok billing: OIDC refresh rejected; not polling with the stored token"
+            );
+            write_refresh_poll_outcome(
+                grok_home,
+                identity_id,
+                super::limits_snapshot_hub::POLL_OUTCOME_REAUTH,
+            );
+            None
+        }
+        super::oidc::OidcRefreshResult::Failed {
+            network_unreachable: true,
+            ..
+        } => {
+            tracing::debug!(
+                identity_id = %identity_id,
+                "sibling SuperGrok billing: OIDC refresh did not reach the identity provider"
+            );
+            write_refresh_poll_outcome(
+                grok_home,
+                identity_id,
+                super::limits_snapshot_hub::POLL_OUTCOME_NETWORK,
             );
             Some((auth.key.clone(), auth.user_id.clone()))
         }
-        super::oidc::OidcRefreshResult::Failed { .. } => {
+        super::oidc::OidcRefreshResult::Failed {
+            network_unreachable: false,
+            ..
+        } => {
             tracing::debug!(
                 identity_id = %identity_id,
                 "sibling SuperGrok billing: OIDC refresh failed; polling with stored token"
@@ -868,7 +932,11 @@ pub fn load_supergrok_session_candidates(
         if scope == LEGACY_SCOPE {
             continue;
         }
-        if !is_supergrok_session_mode(auth.auth_mode) {
+        // OIDC and WebLogin are SuperGrok session mode. External on the OAuth
+        // base is the same ranking peer. The legacy sign-in scope is already skipped.
+        let session_candidate = is_supergrok_session_mode(auth.auth_mode)
+            || matches!(auth.auth_mode, AuthMode::External);
+        if !session_candidate {
             continue;
         }
         let token = auth.key.trim();
@@ -1451,6 +1519,74 @@ mod tests {
             find_supergrok_auth_entry_for_billing(dir.path(), &sibling_id).expect("stored");
         assert_eq!(stored.key, "mock-billing-access-token");
         assert!(!session_needs_oidc_refresh_before_billing_poll(&stored));
+        clear_included_billing_cache();
+    }
+
+    /// A refresh that never reaches the identity provider keeps the stored
+    /// access token for a later retry. The poll outcome is `network`, not
+    /// `reauth`.
+    #[tokio::test]
+    async fn network_refresh_failure_keeps_the_stored_token_and_is_not_a_rejected_grant() {
+        use crate::auth::model::upsert_supergrok_session;
+        use chrono::{Duration, Utc};
+
+        const STORED: &str = "stored-personal-access-for-later-retry";
+        const USER: &str = "personal-network-refresh-user";
+
+        clear_included_billing_cache();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("closed-port bind");
+        let port = listener.local_addr().expect("closed port").port();
+        drop(listener);
+        let issuer = format!("http://127.0.0.1:{port}");
+
+        let dir = TempDir::new().unwrap();
+        let base = "https://auth.x.ai::network-refresh";
+        let mut map = AuthStore::default();
+        upsert_supergrok_session(
+            &mut map,
+            base,
+            GrokAuth {
+                key: STORED.into(),
+                auth_mode: AuthMode::Oidc,
+                user_id: USER.into(),
+                refresh_token: Some("rt-network".into()),
+                oidc_issuer: Some(issuer),
+                oidc_client_id: Some("personal-limits-client".into()),
+                expires_at: Some(Utc::now() - Duration::minutes(30)),
+                create_time: Utc::now() - Duration::hours(2),
+                ..Default::default()
+            },
+        );
+        write_auth_json(&dir.path().join("auth.json"), &map).unwrap();
+
+        let (token, user_id) =
+            ensure_fresh_access_token_for_supergrok_billing_poll(dir.path(), USER)
+                .await
+                .expect("network failure keeps the stored token");
+        assert_eq!(token, STORED);
+        assert_eq!(user_id, USER);
+        let (_, still_stored) =
+            find_supergrok_auth_entry_for_billing(dir.path(), USER).expect("stored entry");
+        assert_eq!(still_stored.key, STORED);
+
+        let doc = crate::auth::limits_snapshot_hub::read_limits_snapshot_file(dir.path())
+            .expect("network refresh writes a poll outcome");
+        let row = doc
+            .identities
+            .iter()
+            .find(|row| row.identity_id == USER)
+            .expect("personal identity row");
+        assert_eq!(
+            row.poll_outcome,
+            crate::auth::limits_snapshot_hub::POLL_OUTCOME_NETWORK
+        );
+        assert_ne!(
+            row.poll_outcome,
+            crate::auth::limits_snapshot_hub::POLL_OUTCOME_REAUTH,
+            "a network miss is not a rejected grant"
+        );
         clear_included_billing_cache();
     }
 

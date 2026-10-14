@@ -5,21 +5,25 @@ pub mod bulk_edit_policy;
 pub mod command_display;
 pub mod compiler_probe_junk;
 pub mod env;
+pub mod file_reader;
 pub mod fs;
 pub mod git_detect;
 pub mod grok_home;
 pub mod hash;
 pub mod image_compress;
-pub mod image_validate;
 pub mod implement_memory;
+pub use xai_grok_image as image_validate;
+pub mod lock_path;
 pub mod mcp_truncate;
 pub mod path_suggestions;
 pub mod plan_validate;
 pub(crate) mod query_tools;
+pub mod read_policy;
 pub mod remap;
 pub mod rust_edit_verify;
 pub mod serde_base64;
 pub mod session_reader;
+pub(crate) mod shared_http;
 pub mod shell_env_policy;
 pub mod spawn;
 pub mod toon;
@@ -27,6 +31,8 @@ pub mod trailing_ws;
 pub mod truncate;
 pub mod ulid;
 pub mod unicode_confusables;
+#[cfg(any(bundle_rg, bundle_fd, bundle_bfs, bundle_ugrep, test))]
+pub(crate) mod vendor;
 
 pub use command_display::strip_redundant_session_cd;
 #[cfg(unix)]

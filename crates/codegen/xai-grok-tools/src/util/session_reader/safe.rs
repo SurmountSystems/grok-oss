@@ -231,8 +231,8 @@ fn hex_decode(s: &str) -> Result<Vec<u8>, ()> {
     let bytes = s.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
-        let hi = hex_nibble(bytes[i])?;
-        let lo = hex_nibble(bytes[i + 1])?;
+        let hi = hex_nibble(bytes.get(i).copied().expect("index out of bounds"))?;
+        let lo = hex_nibble(bytes.get(i + 1).copied().expect("index out of bounds"))?;
         out.push((hi << 4) | lo);
         i += 2;
     }

@@ -1,37 +1,25 @@
-//! Defers `SessionLoaded` / `SessionLoadFailed` until ACP replay already in
-//! the pager queue has been applied — without blocking unrelated JoinSet tasks.
+//! Defers `SessionLoaded` / `SessionLoadFailed` until ACP replay already in the pager queue is applied, without blocking unrelated JoinSet tasks.
 //!
-//! This-session [`AcpLoadBacklog::LiveHead`] releases immediately: it means
-//! unicast replay has finished. Leader mode buffers live notifications for the
-//! loading client until after the `session/load` RESPONSE (`load_live_buffer` in
-//! `xai-grok-shell` leader), so another client's live event cannot land on this
-//! pager's socket mid-replay even though agent-side replay now awaits between
-//! lines. The client wire order is `[unicast replay] → [load response] →
-//! [buffered live]`. Overflow of that buffer forwards live mid-replay and is
-//! already warned at the leader; it is not the common path. Direct-spawn has no
-//! second client on the same socket.
+//! This-session [`AcpLoadBacklog::LiveHead`] releases immediately: it means unicast replay has finished.
+//! Leader mode buffers live notifications for the loading client until after the `session/load` RESPONSE (`load_live_buffer` in the shell leader).
+//! Another client's live event therefore cannot land on this pager's socket mid-replay even though agent-side replay now awaits between lines.
+//! The client wire order is `[unicast replay] → [load response] → [buffered live]`.
+//! Overflow of that buffer forwards live mid-replay and is already warned at the leader; it is not the common path.
+//! Direct-spawn has no second client on the same socket.
 //!
-//! [`AcpLoadBacklog::Unrelated`] still times out after
-//! [`SESSION_LOADED_ACP_BARRIER`] of draining: a shared `acp_rx` can show
-//! another session's traffic forever, and waiting for `Empty` would stall
-//! resume. Remaining this-session `isReplay` behind that head is still applied
-//! after dispatch via the post-load late-replay grace on
-//! `drop_unexpected_replay`.
-
-use std::time::{Duration, Instant};
-
-use agent_client_protocol as acp;
-use serde::Deserialize;
-use xai_acp_lib::AcpClientMessage;
-
+//! [`AcpLoadBacklog::Unrelated`] still times out after [`SESSION_LOADED_ACP_BARRIER`] of draining.
+//! A shared `acp_rx` can show another session's traffic forever, and waiting for `Empty` would stall resume.
+//! Remaining this-session `isReplay` behind that head is applied after dispatch via the post-load late-replay grace on `drop_unexpected_replay`.
 use super::actions::TaskResult;
 use super::agent::AgentId;
 use crate::acp::meta::NotificationMeta;
-
-/// Firehose escape when the ACP head is unrelated to this load.
-/// Does not accrue on this-session `ReplayHead` or while input-starved.
+use agent_client_protocol as acp;
+use serde::Deserialize;
+use std::time::{Duration, Instant};
+use xai_acp_lib::AcpClientMessage;
+/// How long an unrelated ACP head may keep deferring the load before it dispatches anyway.
+/// The clock does not accrue on this-session `ReplayHead` or while input-starved.
 pub(super) const SESSION_LOADED_ACP_BARRIER: Duration = Duration::from_secs(2);
-
 /// Head of the pager ACP queue, classified against one deferred load's session.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum AcpLoadBacklog {
@@ -40,14 +28,12 @@ pub(super) enum AcpLoadBacklog {
     LiveHead,
     Unrelated,
 }
-
 /// Whether the event loop's ACP recv arm can run this iteration.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum AcpDrainArm {
     InputStarved,
     CanDrain,
 }
-
 impl AcpDrainArm {
     pub(super) fn from_input_rx_empty(input_rx_empty: bool) -> Self {
         if input_rx_empty {
@@ -57,31 +43,29 @@ impl AcpDrainArm {
         }
     }
 }
-
-/// One barrier observation: ACP peek + whether the ACP arm can drain.
+/// One barrier observation: the ACP peek and whether the ACP arm can drain.
 #[derive(Clone, Copy, Debug)]
 pub(super) struct SessionLoadAcpTick<'a> {
     pub head: Option<&'a AcpClientMessage>,
     pub drain_arm: AcpDrainArm,
     pub now: Instant,
 }
-
 pub(super) fn session_load_agent_id(result: &TaskResult) -> Option<AgentId> {
     match result {
         TaskResult::SessionLoaded { agent_id, .. }
         | TaskResult::SessionLoadFailed { agent_id, .. } => Some(*agent_id),
+        TaskResult::WithPinnedMemoryMode { result, .. } => session_load_agent_id(result),
         _ => None,
     }
 }
-
 fn session_load_session_id(result: &TaskResult) -> Option<&acp::SessionId> {
     match result {
         TaskResult::SessionLoaded { session_id, .. }
         | TaskResult::SessionLoadFailed { session_id, .. } => Some(session_id),
+        TaskResult::WithPinnedMemoryMode { result, .. } => session_load_session_id(result),
         _ => None,
     }
 }
-
 /// Classify the ACP lookahead slot (filled by the event loop via `try_recv`).
 pub(super) fn acp_load_backlog(
     head: Option<&AcpClientMessage>,
@@ -98,7 +82,6 @@ pub(super) fn acp_load_backlog(
         _ => AcpLoadBacklog::Unrelated,
     }
 }
-
 fn classify_session_meta(
     msg_session_id: &acp::SessionId,
     meta: Option<&serde_json::Map<String, serde_json::Value>>,
@@ -113,7 +96,6 @@ fn classify_session_meta(
         AcpLoadBacklog::LiveHead
     }
 }
-
 fn classify_ext_notification(
     notif: &acp::ExtNotification,
     load_session_id: &acp::SessionId,
@@ -148,23 +130,19 @@ fn classify_ext_notification(
         AcpLoadBacklog::LiveHead
     }
 }
-
 fn backlog_for_result(result: &TaskResult, acp_head: Option<&AcpClientMessage>) -> AcpLoadBacklog {
     match session_load_session_id(result) {
         Some(sid) => acp_load_backlog(acp_head, sid),
         None => AcpLoadBacklog::Empty,
     }
 }
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct SessionLoadDeferState {
     pub backlog: AcpLoadBacklog,
     pub drain_arm: AcpDrainArm,
     pub unrelated_drain_elapsed: Duration,
 }
-
-/// Whether this JoinSet result should wait for ACP already queued for this
-/// agent's in-flight `session/load` replay.
+/// Whether this JoinSet result should wait for ACP already queued for this agent's in-flight `session/load` replay.
 pub(super) fn should_defer_session_load(
     result: &TaskResult,
     agent_loading_replay: bool,
@@ -185,13 +163,11 @@ pub(super) fn should_defer_session_load(
         },
     }
 }
-
 struct DeferredLoad {
     result: TaskResult,
     unrelated_drain_elapsed: Duration,
     last_unrelated_drain_sample: Option<Instant>,
 }
-
 impl DeferredLoad {
     fn observe(&mut self, backlog: AcpLoadBacklog, drain_arm: AcpDrainArm, now: Instant) {
         match backlog {
@@ -215,7 +191,6 @@ impl DeferredLoad {
             }
         }
     }
-
     fn defer_state(
         &self,
         backlog: AcpLoadBacklog,
@@ -228,23 +203,19 @@ impl DeferredLoad {
         }
     }
 }
-
 #[derive(Default)]
 pub(super) struct SessionLoadBarrier {
     deferred: Vec<DeferredLoad>,
 }
-
 impl SessionLoadBarrier {
     pub(super) fn new() -> Self {
         Self {
             deferred: Vec::new(),
         }
     }
-
     pub(super) fn is_empty(&self) -> bool {
         self.deferred.is_empty()
     }
-
     pub(super) fn push_or_dispatch(
         &mut self,
         result: TaskResult,
@@ -269,7 +240,6 @@ impl SessionLoadBarrier {
             Some(entry.result)
         }
     }
-
     pub(super) fn next_wakeup(&self) -> Option<Instant> {
         self.deferred
             .iter()
@@ -279,7 +249,6 @@ impl SessionLoadBarrier {
             })
             .min()
     }
-
     pub(super) fn take_ready(
         &mut self,
         mut agent_loading_replay: impl FnMut(AgentId) -> bool,
@@ -305,35 +274,37 @@ impl SessionLoadBarrier {
         ready
     }
 }
-
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-    use std::time::{Duration, Instant};
-
-    use agent_client_protocol as acp;
-    use serde_json::json;
-
     use super::*;
     use crate::app::agent::AgentId;
-
+    use agent_client_protocol as acp;
+    use serde_json::json;
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
     fn sid(s: &str) -> acp::SessionId {
         acp::SessionId::new(s)
     }
-
     fn loaded(id: usize, session: &str) -> TaskResult {
         TaskResult::SessionLoaded {
             agent_id: AgentId(id),
             session_id: sid(session),
             models: None,
+            modes: None,
+            scheduler_background_loops: None,
             code_restored: false,
             restore_summary: None,
             restore_degree: None,
             running_prompt_id: None,
-            scheduler_background_loops: None,
         }
     }
-
+    fn loaded_with_memory_mode(id: usize, session: &str) -> TaskResult {
+        TaskResult::WithPinnedMemoryMode {
+            agent_id: AgentId(id),
+            memory_mode: Some(xai_grok_shell::config::MemoryMode::V2),
+            result: Box::new(loaded(id, session)),
+        }
+    }
     fn load_failed(id: usize, session: &str) -> TaskResult {
         TaskResult::SessionLoadFailed {
             agent_id: AgentId(id),
@@ -341,14 +312,14 @@ mod tests {
             error: "x".into(),
         }
     }
-
     fn other_task() -> TaskResult {
         TaskResult::WorktreeSessionFailed {
             agent_id: AgentId(9),
             error: "nope".into(),
+            orphaned_worktree_root: None,
+            timed_out: false,
         }
     }
-
     fn session_notif(session: &str, is_replay: bool) -> AcpClientMessage {
         let mut meta = serde_json::Map::new();
         meta.insert("isReplay".into(), json!(is_replay));
@@ -365,7 +336,6 @@ mod tests {
             response_tx: tx,
         })
     }
-
     fn ext_session_update(session: &str, is_replay: bool) -> AcpClientMessage {
         ext_session_update_raw(json!({
             "sessionId": session,
@@ -373,11 +343,9 @@ mod tests {
             "_meta": { "isReplay": is_replay },
         }))
     }
-
     fn ext_session_update_raw(params: serde_json::Value) -> AcpClientMessage {
         ext_notification("x.ai/session/update", params)
     }
-
     fn ext_notification(method: &str, params: serde_json::Value) -> AcpClientMessage {
         let (tx, _rx) = tokio::sync::oneshot::channel();
         let raw = serde_json::value::to_raw_value(&params).expect("raw params");
@@ -386,7 +354,6 @@ mod tests {
             response_tx: tx,
         })
     }
-
     fn request_permission(session: &str) -> AcpClientMessage {
         let (tx, _rx) = tokio::sync::oneshot::channel();
         let request = acp::RequestPermissionRequest::new(
@@ -406,7 +373,6 @@ mod tests {
             response_tx: tx,
         })
     }
-
     fn tick<'a>(
         head: Option<&'a AcpClientMessage>,
         drain_arm: AcpDrainArm,
@@ -418,11 +384,9 @@ mod tests {
             now,
         }
     }
-
     fn draining<'a>(head: Option<&'a AcpClientMessage>, now: Instant) -> SessionLoadAcpTick<'a> {
         tick(head, AcpDrainArm::CanDrain, now)
     }
-
     fn defer_state(
         backlog: AcpLoadBacklog,
         drain_arm: AcpDrainArm,
@@ -434,7 +398,6 @@ mod tests {
             unrelated_drain_elapsed,
         }
     }
-
     #[test]
     fn predicate_table() {
         let r = loaded(0, "s");
@@ -537,7 +500,6 @@ mod tests {
             )
         ));
     }
-
     #[test]
     fn session_loaded_waits_behind_queued_replay() {
         let now = Instant::now();
@@ -557,11 +519,22 @@ mod tests {
         let ready = barrier.take_ready(|_| true, draining(None, now));
         assert_eq!(ready.len(), 1);
     }
-
+    #[test]
+    fn pinned_memory_metadata_preserves_the_session_load_barrier() {
+        let result = loaded_with_memory_mode(1, "s");
+        let replay = session_notif("s", true);
+        assert_eq!(session_load_agent_id(&result), Some(AgentId(1)));
+        assert!(result.ends_startup());
+        let backlog = backlog_for_result(&result, Some(&replay));
+        assert_eq!(backlog, AcpLoadBacklog::ReplayHead);
+        assert!(should_defer_session_load(
+            &result,
+            true,
+            defer_state(backlog, AcpDrainArm::CanDrain, Duration::ZERO),
+        ));
+    }
     #[test]
     fn this_session_live_head_releases_session_loaded() {
-        // LiveHead means unicast replay is done (leader held live until after
-        // the load response); remaining this-session live must not block.
         let now = Instant::now();
         let mut barrier = SessionLoadBarrier::new();
         let replay = session_notif("s", true);
@@ -574,7 +547,6 @@ mod tests {
         let ready = barrier.take_ready(|_| true, draining(Some(&live), now));
         assert_eq!(ready.len(), 1);
     }
-
     #[test]
     fn other_session_live_head_does_not_release_before_this_replay() {
         let now = Instant::now();
@@ -599,7 +571,6 @@ mod tests {
             "A replay behind a foreign live head still defers once it reaches the peek"
         );
     }
-
     #[test]
     fn foreign_live_after_this_session_replay_still_defers() {
         let now = Instant::now();
@@ -623,7 +594,6 @@ mod tests {
             "A-replay then B-live must still defer; remaining A replay may sit behind B"
         );
     }
-
     #[test]
     fn replay_head_resets_unrelated_drain_clock() {
         let start = Instant::now();
@@ -677,7 +647,6 @@ mod tests {
         );
         assert_eq!(ready.len(), 1);
     }
-
     #[test]
     fn request_permission_head_does_not_release_immediately() {
         let now = Instant::now();
@@ -694,7 +663,6 @@ mod tests {
                 .is_empty()
         );
     }
-
     #[test]
     fn other_agent_loading_does_not_block_this_session_loaded() {
         let now = Instant::now();
@@ -704,7 +672,6 @@ mod tests {
             barrier.push_or_dispatch(loaded(2, "s"), false, draining(Some(&replay), now));
         assert!(dispatched.is_some());
     }
-
     #[test]
     fn replay_head_stays_deferred_past_two_second_drain() {
         let start = Instant::now();
@@ -727,7 +694,6 @@ mod tests {
             "no timer while head is still this-session replay"
         );
     }
-
     #[test]
     fn unrelated_firehose_timeout_after_drain() {
         let start = Instant::now();
@@ -747,7 +713,6 @@ mod tests {
         let ready = barrier.take_ready(|_| true, draining(Some(&foreign), later));
         assert_eq!(ready.len(), 1);
     }
-
     #[test]
     fn unrelated_timeout_freezes_while_input_starved() {
         let start = Instant::now();
@@ -799,7 +764,6 @@ mod tests {
         );
         assert_eq!(ready.len(), 1);
     }
-
     #[test]
     fn unparseable_ext_meta_fails_closed() {
         let now = Instant::now();
@@ -824,7 +788,6 @@ mod tests {
                 .is_empty()
         );
     }
-
     #[test]
     fn acp_load_backlog_classifies_replay_and_live_heads() {
         let load = sid("s");

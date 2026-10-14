@@ -8,7 +8,7 @@ pub const PAGER_CLIENT_VERSION: &str = xai_grok_version::VERSION;
 /// Shown in terminal/tab titles, resume hints, and CLI branding. Upstream xAI
 /// uses bare `grok`; this fork's install artifact is `grok-oss`. Config keys
 /// that refer to the brand slot (e.g. title item `"grok"`) may keep the short
-/// name for compatibility. The display string is always this constant.
+/// name for compatibility ,  the **display** string is always this constant.
 pub const PRODUCT_CLI_NAME: &str = "grok-oss";
 
 /// Operator-facing `--version` line. First token is always [`PRODUCT_CLI_NAME`].
@@ -35,8 +35,7 @@ pub fn resume_session_command(session_id: &str, minimal: bool) -> String {
 
 /// `User-Agent` for pager-owned direct-to-`api.x.ai` clients (voice STT).
 ///
-/// Matches the sampler's `grok-shell/<version> (os; arch)` shape so server-side
-/// dashboards bucket voice traffic alongside chat / imagine requests.
+/// Matches the sampler's `grok-shell/<version> (os; arch)` shape so server-side dashboards bucket voice traffic alongside chat / imagine requests.
 pub fn client_user_agent() -> String {
     format!(
         "{}/{} ({}; {})",
@@ -53,8 +52,8 @@ mod tests {
 
     #[test]
     fn client_user_agent_has_expected_shape() {
-        // e.g. "grok-shell/1.2.3 (macos; aarch64)". The pieces are wire
-        // contract for server-side UA parsing, so pin the exact shape.
+        // e.g. "grok-shell/1.2.3 (macos; aarch64)".
+        // Servers parse this UA string, so pin the exact shape
         let ua = client_user_agent();
         assert_eq!(
             ua,

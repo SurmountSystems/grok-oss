@@ -1,9 +1,8 @@
 //! Agent builder, definition parsing, and system prompt assembly.
 //!
-//! This crate extracts a first-class `Agent` type from `xai-grok-shell`.
-//! An `Agent` bundles tools, system prompt, system-reminder policy,
-//! compaction policy, and model configuration into a single, portable
-//! object that any host can consume.
+//! An `Agent` bundles tools, system prompt, system-reminder policy, compaction policy, and model configuration into one object any host can consume.
+
+#![deny(clippy::indexing_slicing)]
 
 pub mod agent;
 pub mod builder;
@@ -16,14 +15,16 @@ pub mod prompt;
 pub mod repo;
 pub mod system_reminder;
 pub mod timing;
+pub mod tool_list;
 
 pub use agent::Agent;
 pub use builder::AgentBuilder;
 pub use compaction::CompactionPolicy;
 pub use config::AgentDefinition;
+pub use config::api_backed_tool_ids;
 pub use config::preset_names;
 pub use config::toolset_for_preset;
 pub use config::workspace_grok_build_toolset;
 pub use error::AgentBuildError;
-pub use prompt::context::{DEFAULT_SYSTEM_PROMPT_LABEL, PromptContext};
+pub use prompt::context::{DEFAULT_SYSTEM_PROMPT_LABEL, PromptContext, RenderedPrompt};
 pub use system_reminder::ReminderPolicy;

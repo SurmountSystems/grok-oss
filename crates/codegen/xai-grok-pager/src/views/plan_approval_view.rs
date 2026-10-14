@@ -7,71 +7,18 @@ pub use xai_grok_tools::implementations::grok_build::exit_plan_mode::{
 
 use crate::views::prompt_widget::StashedPrompt;
 
-/// Placeholder body for the plan-approval preview when `exit_plan_mode` parks
-/// with no plan content (missing/empty `plan.md`, or a whitespace-only body).
-///
-/// Must be non-empty after trim so `LineViewerState::open_markdown_content`
-/// accepts it — empty bodies are rejected there.
+/// Placeholder body for the plan-approval preview when `exit_plan_mode` parks with no plan content.
+/// No content means a missing/empty `plan.md`, or a whitespace-only body. Must be non-empty after
+/// trim so `LineViewerState::open_markdown_content` accepts it; empty bodies are rejected there.
 pub const EMPTY_PLAN_PLACEHOLDER: &str = "\
 # No plan written yet
 
 The agent exited plan mode without writing a plan.
 
-- **Approve** - leave plan mode and start implementing
-- **Comment** - type a note, then Approve, Clarify, or Revise
-- **Clarify** - after Comment, ask a question; do not rewrite the plan
-- **Revise** - focus the box and wait for notes, then send the agent back to rewrite the plan
-- **Exit** - abandon and turn plan mode off
+- **Approve**: leave plan mode and start implementing
+- **Request changes**: send the agent back to planning
+- **Quit**: abandon and turn plan mode off
 ";
-
-/// Isolated Preview body for `/plan --soft` before `exit_plan_mode` writes
-/// the secondary plan. Must be non-empty after trim so the markdown viewer
-/// accepts it. Must not copy leftover primary `plan.md`.
-pub const SECONDARY_PLAN_PLACEHOLDER: &str = "\
-# Secondary plan
-
-Soft planning. This Isolated Preview is a secondary plan. It does not reset the primary session plan.md.
-
-- Empty Enter never Approves
-- Comment then Approve works after exit_plan_mode writes this secondary plan
-";
-
-/// Status-line label while plan mode is active without a live reverse-request
-/// (idle / freeform dead end). Never return this while Revise/Clarify rewrite
-/// is in flight (see [`PLAN_REVISING_STATUS`] / [`PLAN_WAITING_UPDATED_STATUS`]),
-/// or while a plan-update turn is rewriting-wait
-/// ([`PLAN_REWRITE_WAIT_STATUS`]).
-/// Never return this while the side panel is shut (see [`PLAN_READY_STATUS`]).
-pub const PLAN_IDLE_REVIEW_STATUS: &str = "Plan written. Click or /view-plan";
-
-/// Short status that used to paint while a plan was parked and the side
-/// panel was shut. Do not return this while the composer is Enter:send.
-/// Open-pane review uses [`plan_approval_status_label`]. Leftover / rebuild
-/// `plan.md` is view-only until `/view-plan` or a live present docks.
-pub const PLAN_READY_STATUS: &str = "Plan ready";
-
-/// Toast when freeform Enter cannot attach to a live plan-feedback channel
-/// (Revise/Clarify already unparked) and the message will queue as a normal
-/// follow-up instead. Never pretend the second note was live Revise/Clarify.
-pub const PLAN_FEEDBACK_QUEUE_TOAST: &str =
-    "No live plan feedback channel. Message will queue as a normal follow-up.";
-
-/// Human scrollback line when decisive Revise unparks with no freeform notes.
-/// Keeps the transcript from looking barren while the agent rewrites.
-pub const PLAN_REVISE_HUMAN_LINE: &str = "Revise the plan";
-
-/// Synthetic tool_call_id for local idle decision park (no shell reverse-request).
-pub const IDLE_PLAN_DECISION_TOOL_CALL_ID: &str = "local-idle-plan-decision";
-
-/// Model-facing text after a real plan-panel Approve with no live waiter.
-/// Mid-turn Approve uses the same sentence in the shell tool result.
-pub const PLAN_APPROVED_IMPLEMENT_MESSAGE: &str =
-    "The user approved the plan. Implement the plan in plan.md.";
-
-/// Lead-in when Approve sends typed review comments with the implement turn.
-/// A `/implement` block after this line is that turn, not a later auto-run.
-pub const PLAN_APPROVED_REVIEW_COMMENTS_LEAD: &str =
-    "The user approved the plan with the following review comments:";
 
 /// Status while Revise unparked and the agent is rewriting `plan.md`
 /// (waiting for a new `exit_plan_mode` present). Not idle click ceremony.
@@ -89,9 +36,49 @@ pub const PLAN_REWRITE_WAIT_STATUS: &str = "Rewriting plan...";
 /// Isolated Preview heading while a plan-update turn is in flight.
 pub const PLAN_REWRITE_WAIT_HEADING: &str = "Rewriting the plan";
 
+/// Status-line label while plan mode is active without a live reverse-request.
+pub const PLAN_IDLE_REVIEW_STATUS: &str = "Plan written. Click or /view-plan";
+
+/// Toast when a parked plan offers Approve, Revise, and Shift+Tab.
+pub const PLAN_IDLE_REVIEW_TOAST: &str =
+    "Side panel open. Approve, Revise, or Shift+Tab to leave plan mode.";
+
+/// Toast when freeform Enter cannot attach to a live plan-feedback channel.
+pub const PLAN_FEEDBACK_QUEUE_TOAST: &str =
+    "No live plan feedback channel. Message will queue as a normal follow-up.";
+
+/// Human scrollback line when decisive Revise unparks with no freeform notes.
+pub const PLAN_REVISE_HUMAN_LINE: &str = "Revise the plan";
+
+/// Short status that used to paint while a plan was parked and the side
+/// panel was shut. Do not return this while the composer is Enter:send.
+pub const PLAN_READY_STATUS: &str = "Plan ready";
+
+/// Synthetic tool_call_id for local idle decision park (no shell reverse-request).
+pub const IDLE_PLAN_DECISION_TOOL_CALL_ID: &str = "local-idle-plan-decision";
+
+/// Model-facing text after a real plan-panel Approve with no live waiter.
+/// Mid-turn Approve uses the same sentence in the shell tool result.
+pub const PLAN_APPROVED_IMPLEMENT_MESSAGE: &str =
+    "The user approved the plan. Implement the plan in plan.md.";
+
+/// Lead-in when Approve sends typed review comments with the implement turn.
+pub const PLAN_APPROVED_REVIEW_COMMENTS_LEAD: &str =
+    "The user approved the plan with the following review comments:";
+
+/// Isolated Preview body for `/plan --soft` before `exit_plan_mode` writes
+/// the secondary plan. Must be non-empty after trim. Must not copy leftover
+/// primary `plan.md`.
+pub const SECONDARY_PLAN_PLACEHOLDER: &str = "\
+# Secondary plan
+
+Soft planning. This Isolated Preview is a secondary plan. It does not reset the primary session plan.md.
+
+- Empty Enter never Approves
+- Comment then Approve works after exit_plan_mode writes this secondary plan
+";
+
 /// Isolated Preview body while a plan-update turn is rewriting `plan.md`.
-/// Quotes the Operator's second prompt. Does not paint leftover `plan.md`
-/// as a live present. Does not persist this chrome as session `plan.md`.
 pub fn isolated_preview_rewrite_wait_markdown(operator_prompt: &str) -> String {
     let quoted = operator_prompt
         .trim()
@@ -135,15 +122,40 @@ impl PlanFeedbackInFlight {
     }
 }
 
-/// Status-line label while plan approval is parked.
+/// Empty Updating wait yields when a real session plan file is already
+/// written. A non-empty Operator prompt stays quoted on rewrite-wait.
+/// Revise stays on rewrite-wait. A secondary plan stays on rewrite-wait.
+/// Leftover bodies that still say why the agent stopped, or that name
+/// TECH.md, are not that saved plan.
+pub fn rewrite_wait_should_yield_to_plan_file(
+    kind: PlanFeedbackInFlight,
+    operator_prompt: &str,
+    plan_file_body: Option<&str>,
+    shows_secondary_plan: bool,
+) -> bool {
+    if shows_secondary_plan || !matches!(kind, PlanFeedbackInFlight::Updating) {
+        return false;
+    }
+    if !operator_prompt.trim().is_empty() {
+        return false;
+    }
+    plan_file_body.is_some_and(|body| {
+        let trimmed = body.trim();
+        !trimmed.is_empty()
+            && !trimmed.contains("why the agent stopped")
+            && !trimmed.contains("TECH.md")
+    })
+}
+
+/// Toast shown when `exit_plan_mode` parks approval and auto-opens the
+/// non-capturing side panel (default soft park).
 ///
-/// A new `exit_plan_mode` present is review park, not operator Approve.
-/// Empty plans still name a review path so the status line never looks stuck.
+/// Empty plans use an active decision prompt instead of "Waiting…", so the UI doesn't look stuck when there is no preview body to open.
 pub fn plan_approval_status_label(has_plan: bool) -> &'static str {
     if has_plan {
         "Plan ready. Side panel open"
     } else {
-        "No plan written. Side panel open"
+        "No plan written: approve or request changes"
     }
 }
 
@@ -176,6 +188,20 @@ pub enum PlanReviewSource {
     FileBacked,
 }
 
+/// A revision request is not an outcome: the review reopens and plan mode stays on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlanReviewOutcome {
+    Approved,
+    Abandoned,
+}
+
+/// In-turn reviews hold an ext-method channel. After-turn reviews never do.
+/// Answering an in-turn review leaves this as `InTurn(None)`.
+pub enum ReviewOrigin {
+    InTurn(Option<tokio::sync::oneshot::Sender<AcpResult<acp::ExtResponse>>>),
+    AfterTurn,
+}
+
 #[derive(Debug, Clone)]
 pub struct PlanComment {
     pub id: u64,
@@ -189,7 +215,7 @@ pub struct PlanApprovalViewState {
     pub plan_content: Option<String>,
     pub source: PlanReviewSource,
     pub stashed_prompt: StashedPrompt,
-    pub response_tx: Option<tokio::sync::oneshot::Sender<AcpResult<acp::ExtResponse>>>,
+    pub origin: ReviewOrigin,
 
     pub focus: PlanApprovalFocus,
     /// Semantic for Prompt Enter with non-empty text (or comments).
@@ -245,7 +271,36 @@ impl PlanApprovalViewState {
             plan_content,
             source,
             stashed_prompt,
-            response_tx: Some(response_tx),
+            origin: ReviewOrigin::InTurn(Some(response_tx)),
+            focus: PlanApprovalFocus::Preview,
+            prompt_intent: PlanPromptIntent::Revise,
+            comments: Vec::new(),
+            next_comment_id: 0,
+            editing_comment_id: None,
+            commenting_range: None,
+            stashed_feedback_prompt: None,
+            feedback_draft: None,
+            comment_held_from_enter: false,
+            keep_draft_is_next_operator_turn: false,
+            is_local_idle_decision: false,
+        }
+    }
+
+    /// CreatePlan already ended; no ext method to answer.
+    pub fn after_turn(
+        tool_call_id: String,
+        plan_content: String,
+        stashed_prompt: StashedPrompt,
+    ) -> Self {
+        let plan_content = (!plan_content.trim().is_empty()).then_some(plan_content);
+        let has_plan = plan_content.is_some();
+        PlanApprovalViewState {
+            tool_call_id,
+            has_plan,
+            plan_content,
+            source: PlanReviewSource::Inline,
+            stashed_prompt,
+            origin: ReviewOrigin::AfterTurn,
             focus: PlanApprovalFocus::Preview,
             prompt_intent: PlanPromptIntent::Revise,
             comments: Vec::new(),
@@ -273,7 +328,7 @@ impl PlanApprovalViewState {
             plan_content,
             source: PlanReviewSource::FileBacked,
             stashed_prompt: StashedPrompt::default(),
-            response_tx: None,
+            origin: ReviewOrigin::AfterTurn,
             focus: PlanApprovalFocus::Preview,
             prompt_intent: PlanPromptIntent::Revise,
             comments: Vec::new(),
@@ -341,11 +396,11 @@ pub fn send_exit_plan_response(
 }
 
 fn send_ext_response(
-    tx: &mut Option<tokio::sync::oneshot::Sender<AcpResult<acp::ExtResponse>>>,
+    tx: Option<tokio::sync::oneshot::Sender<AcpResult<acp::ExtResponse>>>,
     outcome: &str,
     feedback: Option<String>,
 ) -> bool {
-    let Some(tx) = tx.take() else {
+    let Some(tx) = tx else {
         return false;
     };
     send_exit_plan_response(tx, outcome, feedback);
@@ -353,21 +408,45 @@ fn send_ext_response(
 }
 
 impl PlanApprovalViewState {
-    pub fn send_approved(&mut self) -> bool {
-        send_ext_response(&mut self.response_tx, "approved", None)
+    pub fn is_after_turn(&self) -> bool {
+        matches!(self.origin, ReviewOrigin::AfterTurn)
+    }
+
+    pub fn is_in_turn(&self) -> bool {
+        matches!(self.origin, ReviewOrigin::InTurn(_))
+    }
+
+    /// Live `exit_plan_mode` waiter. Taken responses and after-turn reviews are not live.
+    pub fn has_live_ext_waiter(&self) -> bool {
+        matches!(self.origin, ReviewOrigin::InTurn(Some(_)))
+    }
+
+    fn take_response_tx(
+        &mut self,
+    ) -> Option<tokio::sync::oneshot::Sender<AcpResult<acp::ExtResponse>>> {
+        match &mut self.origin {
+            ReviewOrigin::InTurn(tx) => tx.take(),
+            ReviewOrigin::AfterTurn => None,
+        }
+    }
+
+    /// `feedback` is the review comment attached to this approval.
+    /// Approve with a typed comment passes that text. Empty Approve passes None.
+    pub fn send_approved(&mut self, feedback: Option<String>) -> bool {
+        send_ext_response(self.take_response_tx(), "approved", feedback)
     }
 
     pub fn send_abandoned(&mut self) -> bool {
-        send_ext_response(&mut self.response_tx, "abandoned", None)
+        send_ext_response(self.take_response_tx(), "abandoned", None)
     }
 
     pub fn send_cancelled(&mut self, feedback: Option<String>) -> bool {
-        send_ext_response(&mut self.response_tx, "cancelled", feedback)
+        send_ext_response(self.take_response_tx(), "cancelled", feedback)
     }
 
     /// Clarifying questions — plan mode stays Active; shell injects answer-only turn.
     pub fn send_questions(&mut self, feedback: Option<String>) -> bool {
-        send_ext_response(&mut self.response_tx, "questions", feedback)
+        send_ext_response(self.take_response_tx(), "questions", feedback)
     }
 
     pub fn send_stale_cancel(&mut self) -> bool {
@@ -400,12 +479,18 @@ pub(crate) fn inline_plan_snippets(
         return "> [selected lines unavailable]".to_owned();
     }
 
+    let Some(start) = range.start.checked_sub(1) else {
+        return "> [selected lines unavailable]".to_owned();
+    };
     let end = range.end.saturating_sub(1).min(lines.len());
     if end < range.start {
         return "> [selected lines unavailable]".to_owned();
     }
 
-    lines[range.start - 1..end]
+    let Some(snippet) = lines.get(start..end) else {
+        return "> [selected lines unavailable]".to_owned();
+    };
+    snippet
         .iter()
         .map(|line| format!("> {line}"))
         .collect::<Vec<_>>()
@@ -464,12 +549,15 @@ mod tests {
     #[test]
     fn test_send_approved() {
         let (mut state, mut rx) = make_test_state();
-        assert!(state.send_approved());
+        assert!(state.send_approved(None));
         let resp = rx.try_recv().expect("should receive response");
         let raw = resp.expect("should be Ok");
         let parsed: serde_json::Value =
             serde_json::from_str(raw.0.get()).expect("should be valid JSON");
-        assert_eq!(parsed["outcome"], "approved");
+        assert_eq!(
+            parsed.get("outcome").and_then(|v| v.as_str()),
+            Some("approved")
+        );
         assert!(parsed.get("feedback").is_none());
     }
 
@@ -481,8 +569,14 @@ mod tests {
         let raw = resp.expect("should be Ok");
         let parsed: serde_json::Value =
             serde_json::from_str(raw.0.get()).expect("should be valid JSON");
-        assert_eq!(parsed["outcome"], "cancelled");
-        assert_eq!(parsed["feedback"], "fix auth flow");
+        assert_eq!(
+            parsed.get("outcome").and_then(|v| v.as_str()),
+            Some("cancelled")
+        );
+        assert_eq!(
+            parsed.get("feedback").and_then(|v| v.as_str()),
+            Some("fix auth flow")
+        );
     }
 
     #[test]
@@ -493,7 +587,10 @@ mod tests {
         let raw = resp.expect("should be Ok");
         let parsed: serde_json::Value =
             serde_json::from_str(raw.0.get()).expect("should be valid JSON");
-        assert_eq!(parsed["outcome"], "cancelled");
+        assert_eq!(
+            parsed.get("outcome").and_then(|v| v.as_str()),
+            Some("cancelled")
+        );
         assert!(parsed.get("feedback").is_none());
     }
 
@@ -505,8 +602,15 @@ mod tests {
         let raw = resp.expect("should be Ok");
         let parsed: serde_json::Value =
             serde_json::from_str(raw.0.get()).expect("should be valid JSON");
-        assert_eq!(parsed["outcome"], "questions");
-        assert_eq!(parsed["feedback"], "Why Redis?");
+        assert_eq!(
+            parsed.get("outcome").and_then(|v| v.as_str()),
+            Some("questions"),
+            "clarifying questions send the questions outcome"
+        );
+        assert_eq!(
+            parsed.get("feedback").and_then(|v| v.as_str()),
+            Some("Why Redis?")
+        );
     }
 
     #[test]
@@ -529,16 +633,39 @@ mod tests {
         let raw = resp.expect("should be Ok");
         let parsed: serde_json::Value =
             serde_json::from_str(raw.0.get()).expect("should be valid JSON");
-        assert_eq!(parsed["outcome"], "cancelled");
+        assert_eq!(
+            parsed.get("outcome").and_then(|v| v.as_str()),
+            Some("cancelled")
+        );
         assert!(parsed.get("feedback").is_none());
     }
 
     #[test]
     fn test_double_send_returns_false() {
         let (mut state, _rx) = make_test_state();
-        assert!(state.send_approved());
-        assert!(!state.send_approved());
+        assert!(state.send_approved(None));
+        assert!(!state.send_approved(None));
         assert!(!state.send_cancelled(None));
+    }
+
+    #[test]
+    fn after_turn_review_has_no_ext_method() {
+        let mut state = PlanApprovalViewState::after_turn(
+            "CreatePlan".into(),
+            "# Plan".into(),
+            StashedPrompt {
+                text: String::new(),
+                cursor: 0,
+                images: Vec::new(),
+                chip_elements: Vec::new(),
+                image_counter: 0,
+                image_undo_stash: Vec::new(),
+            },
+        );
+        assert!(state.is_after_turn());
+        assert!(state.has_plan);
+        assert!(!state.send_approved(None));
+        assert!(!state.send_abandoned());
     }
 
     #[test]
@@ -552,7 +679,7 @@ mod tests {
         );
         assert_eq!(state.source, PlanReviewSource::Inline);
         assert_eq!(state.stashed_prompt.text, "stashed text");
-        assert!(state.response_tx.is_some());
+        assert!(state.is_in_turn());
         assert_eq!(state.focus, PlanApprovalFocus::Preview);
         assert!(state.comments.is_empty());
         assert_eq!(state.next_comment_id, 0);
@@ -602,7 +729,42 @@ mod tests {
         );
         assert_eq!(
             plan_approval_status_label(false),
-            "No plan written. Side panel open"
+            "No plan written: approve or request changes"
+        );
+        assert!(
+            PLAN_IDLE_REVIEW_TOAST.contains("Side panel open")
+                && PLAN_IDLE_REVIEW_TOAST.contains("Approve")
+                && PLAN_IDLE_REVIEW_TOAST.contains("Revise")
+                && PLAN_IDLE_REVIEW_TOAST.contains("Shift+Tab"),
+            "idle-review toast must name panel + decision CTAs + exit; got {PLAN_IDLE_REVIEW_TOAST:?}"
+        );
+        assert!(
+            PLAN_IDLE_REVIEW_STATUS.contains("Click")
+                && PLAN_IDLE_REVIEW_STATUS.contains("/view-plan"),
+            "idle-review status must be click-discoverable; got {PLAN_IDLE_REVIEW_STATUS:?}"
+        );
+        assert_eq!(
+            PlanFeedbackInFlight::Revising.status_label(),
+            PLAN_REVISING_STATUS
+        );
+        assert_eq!(
+            PlanFeedbackInFlight::Clarifying.status_label(),
+            PLAN_WAITING_UPDATED_STATUS
+        );
+        assert!(
+            PLAN_REVISING_STATUS.contains("Revising")
+                && !PLAN_REVISING_STATUS.contains("Click")
+                && !PLAN_REVISING_STATUS.contains("/view-plan"),
+            "revising status must not be idle click ceremony; got {PLAN_REVISING_STATUS:?}"
+        );
+        assert!(
+            PLAN_WAITING_UPDATED_STATUS.contains("Waiting")
+                && !PLAN_WAITING_UPDATED_STATUS.contains("Click"),
+            "waiting status must not be idle click ceremony; got {PLAN_WAITING_UPDATED_STATUS:?}"
+        );
+        assert!(
+            PLAN_FEEDBACK_QUEUE_TOAST.to_lowercase().contains("queue"),
+            "queue toast must mention queue; got {PLAN_FEEDBACK_QUEUE_TOAST:?}"
         );
         // Placeholder must be non-empty so the line viewer accepts it.
         assert!(!EMPTY_PLAN_PLACEHOLDER.trim().is_empty());

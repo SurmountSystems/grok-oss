@@ -1,119 +1,50 @@
 #![cfg_attr(rustfmt, rustfmt::skip)]
 use super::*;
+fn nth<T>(xs: &[T], i: usize) -> &T {
+    let Some(x) = xs.get(i) else {
+        panic!("expected index {i}, len {}", xs.len());
+    };
+    x
+}
+/// Test-only key lookup over either a JSON object or a bare `Map`.
+trait JsonKeyed {
+    fn key(&self, key: &str) -> Option<&serde_json::Value>;
+    fn describe(&self) -> String;
+}
+impl JsonKeyed for serde_json::Value {
+    fn key(&self, key: &str) -> Option<&serde_json::Value> {
+        self.get(key)
+    }
+    fn describe(&self) -> String {
+        self.to_string()
+    }
+}
+impl JsonKeyed for serde_json::Map<String, serde_json::Value> {
+    fn key(&self, key: &str) -> Option<&serde_json::Value> {
+        self.get(key)
+    }
+    fn describe(&self) -> String {
+        serde_json::Value::Object(self.clone()).to_string()
+    }
+}
+impl<T: JsonKeyed + ?Sized> JsonKeyed for &T {
+    fn key(&self, key: &str) -> Option<&serde_json::Value> {
+        (**self).key(key)
+    }
+    fn describe(&self) -> String {
+        (**self).describe()
+    }
+}
+fn j<'a, V: JsonKeyed + ?Sized>(v: &'a V, key: &str) -> &'a serde_json::Value {
+    let Some(got) = v.key(key) else {
+        panic!("missing json key {key}: {}", v.describe());
+    };
+    got
+}
+use std::path::PathBuf;
+use actions::ProbedAttachment;
 use xai_grok_shell::extensions::billing::{BillingConfig, Cent, UsagePeriod};
-#[test]
-fn format_restore_elapsed_hour_uses_hours_not_padded_minutes() {
-    let hour = format_restore_elapsed(std::time::Duration::from_secs(3725));
-    assert_eq!(hour, "1h2m");
-    assert!(!hour.contains("62m"), "must not print 62m05s: {hour}");
-    let mins = format_restore_elapsed(std::time::Duration::from_secs(943));
-    assert_eq!(mins, "15m43s");
-}
-
-#[test]
-fn format_restore_complete_hour_uses_hours_not_padded_minutes() {
-    let hour = format_restore_finalize_status(false, std::time::Duration::from_secs(3725));
-    assert_eq!(hour, "Restore complete (1h2m).");
-    assert!(!hour.contains("62m"), "must not print 62m05s: {hour}");
-    let incomplete = format_restore_finalize_status(true, std::time::Duration::from_secs(943));
-    assert_eq!(incomplete, "Restore incomplete (15m43s).");
-}
-
-#[test]
-fn session_rpc_timeout_copy_uses_minutes_not_raw_seconds() {
-    let msg = format_session_rpc_timeout("session/new", std::time::Duration::from_secs(180));
-    assert!(
-        msg.contains("timed out after 3m0s"),
-        "180s session RPC floor must print as minutes, got: {msg}"
-    );
-    assert!(
-        !msg.contains("180s") && !msg.contains("180 seconds"),
-        "raw second budget must not leak: {msg}"
-    );
-}
-
-#[tokio::test]
-async fn session_rpc_timeout_wait_or_warn_then_keep_returns_the_value() {
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    tokio::spawn(async move {
-        tokio::time::sleep(std::time::Duration::from_millis(40)).await;
-        let _ = tx.send("loaded");
-    });
-    let warned = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let warned_flag = warned.clone();
-    let out = wait_or_warn_then_keep(
-        async { rx.await.expect("oneshot") },
-        std::time::Duration::from_millis(5),
-        std::time::Duration::from_millis(200),
-        || {
-            warned_flag.store(true, std::sync::atomic::Ordering::SeqCst);
-        },
-    )
-    .await;
-    assert_eq!(out, Some("loaded"));
-    assert!(
-        warned.load(std::sync::atomic::Ordering::SeqCst),
-        "the timeout warning must fire without dropping the in-flight wait"
-    );
-}
-
-#[tokio::test]
-async fn session_rpc_hard_cap_gives_up_if_the_rpc_never_returns() {
-    let (tx, rx) = tokio::sync::oneshot::channel::<()>();
-    let warned = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let warned_flag = warned.clone();
-    let started = std::time::Instant::now();
-    let out = wait_or_warn_then_keep(
-        async {
-            rx.await.ok();
-            "never"
-        },
-        std::time::Duration::from_millis(15),
-        std::time::Duration::from_millis(40),
-        || {
-            warned_flag.store(true, std::sync::atomic::Ordering::SeqCst);
-        },
-    )
-    .await;
-    drop(tx);
-    assert!(
-        out.is_none(),
-        "a stuck session/load must give up, not hang the spinner"
-    );
-    assert!(
-        warned.load(std::sync::atomic::Ordering::SeqCst),
-        "the 3m-style warning must still fire before give-up"
-    );
-    assert!(
-        started.elapsed() < std::time::Duration::from_millis(200),
-        "give-up must be the hard cap, not an unbounded wait: {:?}",
-        started.elapsed()
-    );
-}
-
-#[test]
-fn session_rpc_gave_up_copy_is_not_the_keep_waiting_timeout() {
-    let msg = format_session_rpc_gave_up("Session loading", std::time::Duration::from_secs(360));
-    assert!(
-        msg.contains("gave up after 6m0s"),
-        "hard cap must print as minutes, got: {msg}"
-    );
-    assert!(
-        !is_session_rpc_timeout_error(&msg),
-        "give-up must clear the loading placeholder (not keep-waiting copy)"
-    );
-}
-
-#[test]
-fn session_rpc_timeout_error_is_detected() {
-    let msg = format_session_rpc_timeout("Session loading", std::time::Duration::from_secs(180));
-    assert!(is_session_rpc_timeout_error(&msg));
-    assert!(!is_session_rpc_timeout_error("transient"));
-    assert!(!is_session_rpc_timeout_error("Couldn't load session: boom"));
-}
-
-/// The invalid-params server detail survives `attach_prompt_usage`
-/// wrapping `error.data` as `{message, promptUsage}`.
+/// The invalid-params server detail survives `attach_prompt_usage` wrapping `error.data` as `{message, promptUsage}`.
 #[test]
 fn format_acp_error_reads_detail_from_wrapped_data() {
     let bare = acp::Error::invalid_params().data("model does not support tools");
@@ -138,7 +69,34 @@ fn format_acp_error_formats_http_500_dump() {
         );
     assert_eq!(
             format_acp_error(&err, false),
-            "Server error (500) \u{2014} Something went wrong on our side. Wait a minute and send again."
+            "Server error (500): Something went wrong on our side. Wait a minute and send again."
+        );
+}
+/// The typed kind in `error.data` (the shell's `terminal_error_data` shape) picks the truncation copy.
+/// The placeholder message proves the typed extraction, not the text fallback, chose it.
+#[test]
+fn format_acp_error_typed_truncation_kind_renders_truncation_copy() {
+    let err = acp::Error::internal_error()
+        .data(
+            serde_json::json!({
+            "message": "turn ended early",
+            "error_kind": "max_tokens_truncation"
+        }),
+        );
+    assert_eq!(
+            format_acp_error(&err, false),
+            "Response truncated: turn ended early"
+        );
+    let unknown = acp::Error::internal_error()
+        .data(
+            serde_json::json!({
+            "message": "a future failure quoting: response truncated by max_tokens",
+            "error_kind": "a_future_kind"
+        }),
+        );
+    assert_eq!(
+            format_acp_error(&unknown, false),
+            "Request failed: a future failure quoting: response truncated by max_tokens. Try sending again."
         );
 }
 #[test]
@@ -207,8 +165,7 @@ fn format_acp_error_rate_limit_surfaces_detail_or_fallback() {
             FREE_USAGE_USER_MESSAGE
         );
 }
-/// Non-empty token ranges ride the wire block meta as `skillTokenRanges`
-/// byte pairs; the text itself is untouched.
+/// Non-empty token ranges ride the wire block meta as `skillTokenRanges` byte pairs; the text itself is untouched.
 #[test]
 fn plain_prompt_block_stamps_skill_token_ranges_meta() {
     let block = plain_prompt_content_block("great /pr-workflow go".into(), &[6..18]);
@@ -217,9 +174,9 @@ fn plain_prompt_block_stamps_skill_token_ranges_meta() {
     };
     assert_eq!(tb.text, "great /pr-workflow go");
     let meta = tb.meta.expect("meta stamped when ranges non-empty");
-    assert_eq!(meta["skillTokenRanges"], serde_json::json!([[6, 18]]));
+    assert_eq!(j(&meta, "skillTokenRanges"), &serde_json::json!([[6, 18]]));
 }
-/// Empty ranges keep `meta: None` — the legacy wire shape is unchanged.
+/// Empty ranges keep `meta: None`; the legacy wire shape is unchanged.
 #[test]
 fn plain_prompt_block_no_meta_when_ranges_empty() {
     let block = plain_prompt_content_block("hello".into(), &[]);
@@ -229,8 +186,7 @@ fn plain_prompt_block_no_meta_when_ranges_empty() {
     assert_eq!(tb.text, "hello");
     assert!(tb.meta.is_none());
 }
-/// With a screen mode, `_meta` carries both `promptId` and `screenMode`
-/// (the shell threads the latter into `prompt_submitted.screen_mode`).
+/// With a screen mode, `_meta` carries both `promptId` and `screenMode` (the shell threads the latter into `prompt_submitted.screen_mode`).
 #[test]
 fn prompt_request_meta_stamps_screen_mode() {
     let meta = prompt_request_meta("p-1", Some("minimal"));
@@ -239,147 +195,26 @@ fn prompt_request_meta_stamps_screen_mode() {
             serde_json::json!({ "promptId": "p-1", "screenMode": "minimal" })
         );
 }
-/// Without a screen mode (`SessionFlags::default()` in tests), the key is
-/// omitted — the legacy `{"promptId": …}` wire shape stays byte-identical.
+/// Without a screen mode (`SessionFlags::default()` in tests), the key is omitted; the legacy `{"promptId": …}` wire shape stays byte-identical.
 #[test]
 fn prompt_request_meta_omits_screen_mode_when_unset() {
     let meta = prompt_request_meta("p-2", None);
     assert_eq!(meta, serde_json::json!({ "promptId": "p-2" }));
 }
-/// Text-only interjections must omit the `content` key entirely — the
-/// legacy `x.ai/interject` wire shape stays byte-identical.
+/// Text-only interjections must omit the `content` key entirely; the legacy `x.ai/interject` wire shape stays byte-identical.
 #[test]
 fn interject_params_omit_content_when_no_blocks() {
     let sid = acp::SessionId::new("s1");
     let params = build_interject_params(&sid, "steer", "i1", None);
     let obj = params.as_object().unwrap();
     assert!(!obj.contains_key("content"), "content key must be absent");
-    assert_eq!(obj["sessionId"], "s1");
-    assert_eq!(obj["text"], "steer");
-    assert_eq!(obj["interjectionId"], "i1");
+    assert_eq!(j(&obj, "sessionId"), "s1");
+    assert_eq!(j(&obj, "text"), "steer");
+    assert_eq!(j(&obj, "interjectionId"), "i1");
     assert_eq!(obj.len(), 3, "no extra keys on the legacy shape");
 }
-#[test]
-fn picker_keeps_conversation_with_empty_cwd_and_missing_updated_at() {
-    let payload = serde_json::json!({
-            "sessions": [{
-                "sessionId": "conv_abc",
-                "cwd": "",
-                "summary": "Compare GPU vendors",
-                "source": "conversation",
-                "_meta": { "x.ai/session": { "kind": "chat" } }
-            }]
-        });
-    let entries = parse_session_picker_entries(&payload);
-    assert_eq!(entries.len(), 1, "conversation must not vanish");
-    assert_eq!(entries[0].id, "conv_abc");
-    assert_eq!(entries[0].cwd, "");
-    assert_eq!(entries[0].source, "conversation");
-}
-#[test]
-fn picker_keeps_old_conversation_past_cutoff() {
-    let payload = serde_json::json!({
-            "sessions": [{
-                "sessionId": "conv_old",
-                "cwd": "",
-                "summary": "Ancient chat",
-                "source": "conversation",
-                "updatedAt": "2020-01-01T00:00:00Z",
-                "_meta": { "x.ai/session": { "kind": "chat" } }
-            }]
-        });
-    let entries = parse_session_picker_entries(&payload);
-    assert_eq!(entries.len(), 1, "old conversation must still render");
-    assert_eq!(entries[0].source, "conversation");
-}
-#[test]
-fn picker_drops_local_with_missing_updated_at() {
-    let payload = serde_json::json!({
-            "sessions": [{
-                "sessionId": "local_no_ts",
-                "cwd": "/Users/me/xai",
-                "summary": "no timestamp",
-                "source": "local"
-            }]
-        });
-    let entries = parse_session_picker_entries(&payload);
-    assert!(
-            entries.is_empty(),
-            "local rows still require a parseable updatedAt"
-        );
-}
-/// Untitled grok.com chats must stay listed, rendered as "Untitled".
-#[test]
-fn picker_keeps_untitled_conversation_as_untitled() {
-    let payload = serde_json::json!({
-            "sessions": [{
-                "sessionId": "conv_untitled",
-                "cwd": "",
-                "summary": "",
-                "source": "conversation",
-                "updatedAt": "2026-07-01T00:00:00Z",
-                "_meta": { "x.ai/session": { "kind": "chat" } }
-            }]
-        });
-    let entries = parse_session_picker_entries(&payload);
-    assert_eq!(entries.len(), 1, "untitled conversation must not vanish");
-    assert_eq!(entries[0].summary, "Untitled");
-    assert_eq!(entries[0].source, "conversation");
-}
-/// Canary: the empty-summary drop still applies to Build rows.
-#[test]
-fn picker_still_drops_build_row_with_empty_summary() {
-    let payload = serde_json::json!({
-            "sessions": [{
-                "sessionId": "local_empty",
-                "cwd": "/nonexistent/effects-test",
-                "summary": "",
-                "source": "local",
-                "updatedAt": "2026-07-01T00:00:00Z"
-            }]
-        });
-    let entries = parse_session_picker_entries(&payload);
-    assert!(entries.is_empty(), "empty-summary Build rows stay dropped");
-}
-#[test]
-fn session_list_partial_parses_reasons() {
-    let payload = |reason: &str| {
-        serde_json::json!({
-                "sessions": [],
-                "_meta": { "x.ai/partial": { "conversations": true, "reason": reason } }
-            })
-    };
-    assert_eq!(
-            parse_session_list_partial(&payload("no_oauth")),
-            Some(ConversationsPartial::NoOauth)
-        );
-    assert_eq!(
-            parse_session_list_partial(&payload("timeout")),
-            Some(ConversationsPartial::Timeout)
-        );
-    assert_eq!(
-            parse_session_list_partial(&payload("error")),
-            Some(ConversationsPartial::Error)
-        );
-    assert_eq!(
-            parse_session_list_partial(&payload("something_new")),
-            Some(ConversationsPartial::Error)
-        );
-}
-#[test]
-fn session_list_partial_absent_for_healthy_or_meta_less_responses() {
-    let healthy = serde_json::json!({
-            "sessions": [],
-            "_meta": { "x.ai/partial": { "conversations": false } }
-        });
-    assert_eq!(parse_session_list_partial(&healthy), None);
-    let legacy = serde_json::json!({ "sessions": [] });
-    assert_eq!(parse_session_list_partial(&legacy), None);
-}
-/// The agent serializes `ExtMethodResult<KillTaskResponse>`: the outcome
-/// lives at `result.outcome`. Probing the top level (the pre-fix code)
-/// was why the tasks-pane ✗ never removed stale (`not_found`) rows after
-/// a session resume.
+/// The agent serializes `ExtMethodResult<KillTaskResponse>`: the outcome lives at `result.outcome`.
+/// Probing the top level instead was why the tasks-pane ✗ never removed stale (`not_found`) rows after a session resume.
 #[test]
 fn parse_kill_outcome_reads_result_envelope() {
     use xai_grok_tools::types::KillOutcome;
@@ -390,9 +225,8 @@ fn parse_kill_outcome_reads_result_envelope() {
     let resp = r#"{"result":{"taskId":"t-1","outcome":"already_exited"}}"#;
     assert_eq!(parse_kill_outcome(resp), Some(KillOutcome::AlreadyExited));
 }
-/// Round-trip through the agent's own serializer: what
-/// `extensions::task::respond()` produces must parse back to the same
-/// typed outcome (guards against the two sides drifting apart).
+/// Round-trip through the agent's own serializer: what `extensions::task::respond()` produces must parse back to the same typed outcome.
+/// This guards against the two sides drifting apart.
 #[test]
 fn parse_kill_outcome_round_trips_agent_serialization() {
     use xai_grok_shell::extensions::task::KillTaskResponse;
@@ -407,8 +241,7 @@ fn parse_kill_outcome_round_trips_agent_serialization() {
         .unwrap();
     assert_eq!(parse_kill_outcome(&wire), Some(KillOutcome::NotFound));
 }
-/// Error envelopes and malformed payloads yield `None` (clear pending
-/// state, keep the row).
+/// Error envelopes and malformed payloads yield `None` (clear pending state, keep the row).
 #[test]
 fn parse_kill_outcome_none_for_error_or_malformed() {
     assert_eq!(
@@ -422,8 +255,7 @@ fn parse_kill_outcome_none_for_error_or_malformed() {
             None
         );
 }
-/// Typed `outcome`: `Cancelled` → `StoppedLive`; `AlreadyFinished` /
-/// `NotFound` → `NothingLive` (carrying the real status when known).
+/// Typed `outcome`: `Cancelled` maps to `StoppedLive`; `AlreadyFinished` and `NotFound` map to `NothingLive` (carrying the real status when known).
 #[test]
 fn parse_subagent_kill_outcome_reads_typed_outcome() {
     assert!(matches!(
@@ -445,8 +277,7 @@ fn parse_subagent_kill_outcome_reads_typed_outcome() {
             SubagentKillOutcome::NothingLive { status: None }
         ));
 }
-/// An older shell sends no `outcome`; the parser falls back to the legacy
-/// `cancelled` bool (true → `StoppedLive`, false → `NothingLive`).
+/// An older shell sends no `outcome`; the parser falls back to the legacy `cancelled` bool: true means `StoppedLive`, false means `NothingLive`.
 #[test]
 fn parse_subagent_kill_outcome_falls_back_to_legacy_bool() {
     assert!(matches!(
@@ -458,9 +289,8 @@ fn parse_subagent_kill_outcome_falls_back_to_legacy_bool() {
             SubagentKillOutcome::NothingLive { status: None }
         ));
 }
-/// An unknown future `kind` deserializes to `Unknown` (via `#[serde(other)]`)
-/// and falls back to the always-present `cancelled` bool — not `RpcFailed`,
-/// which would leave the row stuck.
+/// An unknown future `kind` deserializes to `Unknown` (via `#[serde(other)]`) and falls back to the always-present `cancelled` bool.
+/// It must not become `RpcFailed`, which would leave the row stuck.
 #[test]
 fn parse_subagent_kill_outcome_unknown_kind_falls_back_to_legacy_bool() {
     assert!(matches!(
@@ -476,8 +306,7 @@ fn parse_subagent_kill_outcome_unknown_kind_falls_back_to_legacy_bool() {
             SubagentKillOutcome::NothingLive { status: None }
         ));
 }
-/// Round-trip through the agent's own serializer guards the two sides
-/// against drifting apart.
+/// Round-trip through the agent's own serializer guards the two sides against drifting apart.
 #[test]
 fn parse_subagent_kill_outcome_round_trips_agent_serialization() {
     use xai_grok_shell::extensions::task::{
@@ -498,9 +327,8 @@ fn parse_subagent_kill_outcome_round_trips_agent_serialization() {
             SubagentKillOutcome::NothingLive { status: Some(s) } if s == "failed"
         ));
 }
-/// A top-level payload (no `result` envelope), error envelopes, and
-/// malformed payloads are a failed RPC (`RpcFailed`) — the caller must NOT
-/// finalize a possibly-live row.
+/// A top-level payload (no `result` envelope), error envelopes, and malformed payloads are a failed RPC (`RpcFailed`).
+/// The caller must not finalize a possibly-live row.
 #[test]
 fn parse_subagent_kill_outcome_rpc_failed_for_error_or_malformed() {
     assert!(matches!(
@@ -533,12 +361,11 @@ fn interject_params_carry_content_when_blocks_present() {
         "i1",
         Some(blocks.as_slice()),
     );
-    let content = params["content"].as_array().expect("content array");
+    let content = j(&params, "content").as_array().expect("content array");
     assert_eq!(content.len(), 1);
-    assert_eq!(content[0]["text"], "look at [Image #1]");
+    assert_eq!(j(nth(content, 0), "text"), "look at [Image #1]");
 }
-/// A billing config with every field unset, for use as a base in
-/// `credit_balance_from_config` tests via struct-update syntax.
+/// A billing config with every field unset, for use as a base in `credit_balance_from_config` tests via struct-update syntax.
 fn empty_billing_config() -> BillingConfig {
     BillingConfig {
         credit_usage_percent: None,
@@ -589,7 +416,7 @@ fn credit_balance_falls_back_to_limit_used_when_percent_absent() {
     };
     assert_eq!(credit_balance_from_config(c).usage_pct, 25.0);
 }
-/// Match production: RFC 3339 → user's local wall-clock (no zone label).
+/// Match production: RFC 3339 renders as the user's local wall-clock (no zone label).
 fn expected_period_end_display(rfc3339: &str) -> String {
     chrono::DateTime::parse_from_rfc3339(rfc3339)
         .expect("test fixture is valid RFC 3339")
@@ -875,8 +702,7 @@ fn parse_worktree_restore_payload_missing_fields() {
     assert!(summary.is_none());
     assert!(degree.is_none());
 }
-/// A typo / unknown variant must parse as `None` rather than
-/// silently round-tripping a bogus value.
+/// A typo or unknown variant must parse as `None` rather than silently round-tripping a bogus value.
 #[test]
 fn parse_worktree_restore_payload_rejects_unknown_degree() {
     let value = serde_json::json!({
@@ -886,6 +712,26 @@ fn parse_worktree_restore_payload_rejects_unknown_degree() {
         });
     let (_, _, degree) = parse_worktree_restore_payload(&value);
     assert!(degree.is_none(), "typo must produce None");
+}
+#[test]
+fn parse_worktree_strategy_summary_grove_success_and_empty() {
+    let value = serde_json::json!({
+            "strategy": {
+                "requestedStrategy": "grove",
+                "resolvedStrategy": "grove-fuse",
+                "transport": "fuse",
+                "sourceMode": "local",
+                "daemonCapabilityClass": "current"
+            }
+        });
+    assert_eq!(
+            parse_worktree_strategy_summary(&value).as_deref(),
+            Some("Requested Grove; using `grove-fuse` (local objects).")
+        );
+    assert!(parse_worktree_strategy_summary(&serde_json::json!({})).is_none());
+    assert!(
+            parse_worktree_strategy_summary(&serde_json::json!({ "strategy": {} })).is_none()
+        );
 }
 #[test]
 fn parse_session_load_restore_meta_full_shape() {
@@ -926,57 +772,257 @@ fn parse_session_load_restore_meta_rejects_unknown_degree() {
     let (_, _, degree) = parse_session_load_restore_meta(meta.as_object());
     assert!(degree.is_none());
 }
-/// Changing the Settings "Default reasoning effort" row must write
-/// `[models].default_reasoning_effort` and a live read must see the override.
+/// A deadline is `Timeout` and a decode/persist panic is `Panicked`, never `ReadFailed`; the deadline arm returns without waiting on the stalled thread.
 #[tokio::test]
-async fn default_reasoning_effort_settings_row_persists_toml_override() {
-    use crate::settings::{current_value_for, PagerLocalSnapshot, SettingValue};
-    use xai_grok_shell::agent::config::UiConfig;
-    use xai_grok_shell::sampling::types::ReasoningEffort;
-    use xai_grok_shell::util::config::{load_config_from_toml, user_config_path};
-
-    let _home = setup_grok_home_in_tempdir();
-    persist_setting("default_reasoning_effort", SettingValue::Enum("high"))
-        .await
-        .expect("Settings row persist must write [models].default_reasoning_effort");
-
-    let path = user_config_path();
-    let body = std::fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("read {} after persist: {e}", path.display()));
-    let root: toml::Value = toml::from_str(&body).expect("config.toml parse");
-    let models = root.get("models").and_then(|v| v.as_table()).unwrap_or_else(|| {
-        panic!("expected [models] table after persist, got:\n{body}")
-    });
-    assert_eq!(
-        models.get("default_reasoning_effort").and_then(|v| v.as_str()),
-        Some("high"),
-        "persist key must be [models].default_reasoning_effort, got:\n{body}"
-    );
-
-    let cfg = load_config_from_toml(&root);
-    assert_eq!(
-        cfg.models.default_reasoning_effort,
-        Some(ReasoningEffort::High),
-        "live config read must see the persisted High override"
-    );
-
-    // Settings modal live-read: seed the snapshot from the loaded config,
-    // same as AppView after startup / setter refresh.
-    let live = cfg
-        .models
-        .default_reasoning_effort
-        .expect("live config read must keep the persist");
-    let snap = PagerLocalSnapshot {
-        default_reasoning_effort: Some(live.to_string().to_ascii_lowercase()),
-        ..Default::default()
-    };
-    assert_eq!(
-        current_value_for("default_reasoning_effort", &UiConfig::default(), &snap),
-        Some(SettingValue::Enum("high")),
-        "live Settings read must show the persisted override, not the baked medium default"
-    );
+async fn clipboard_probe_stage_names_a_deadline_and_a_panic_apart_from_a_read_failure() {
+    use xai_grok_telemetry::events::ClipboardProbeDropReason as Reason;
+    let started = std::time::Instant::now();
+    let late = clipboard_probe_stage(
+            std::time::Duration::from_millis(20),
+            || {
+                std::thread::sleep(std::time::Duration::from_millis(300));
+                Ok((ProbedAttachment::NoRaster, None))
+            },
+        )
+        .await;
+    assert!(started.elapsed() < std::time::Duration::from_millis(250), "the deadline must not wait on the stall");
+    assert_eq!(late.expect_err("the stage outlives the deadline").reason, Reason::Timeout);
+    let panicked = clipboard_probe_stage(
+            std::time::Duration::from_secs(5),
+            || panic!("decoder bug"),
+        )
+        .await;
+    assert_eq!(panicked.expect_err("a panicking stage drops").reason, Reason::Panicked);
 }
-
+fn probe_raster() -> crate::clipboard::ImageData {
+    crate::clipboard::ImageData {
+        data: vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3],
+        mime_type: "image/png".to_owned(),
+    }
+}
+/// Each drop reason maps to exactly one completion; a failed persist keeps its error text for the toast.
+#[tokio::test]
+async fn bounded_clipboard_probe_maps_each_drop_reason_to_its_completion() {
+    use xai_grok_telemetry::events::ClipboardProbeDropReason as Reason;
+    for (reason, image, expected) in [
+        (Reason::PasteboardChangedBeforeRead, None, "ProbeDropped"),
+        (Reason::PasteboardChangedAfterRead, Some(probe_raster()), "ProbeDropped"),
+        (Reason::BracketedPayloadMismatch, None, "ProbeDropped"),
+        (Reason::BracketedOriginReadFailed, None, "ProbeDropped"),
+        (Reason::PersistFailed, Some(probe_raster()), "PersistFailed(disk full)"),
+        (Reason::ReadFailed, None, "ProbeFailed"),
+        (Reason::Timeout, None, "ProbeFailed"),
+        (Reason::Panicked, None, "ProbeFailed"),
+    ] {
+        let message = (reason == Reason::PersistFailed).then(|| "disk full".to_owned());
+        let (attachment, file_urls) = bounded_clipboard_probe(
+                std::time::Duration::from_secs(5),
+                move || Err(crate::clipboard::ProbeDrop {
+                    reason,
+                    image,
+                    message,
+                }),
+            )
+            .await;
+        let got = match attachment {
+            ProbedAttachment::ProbeDropped => "ProbeDropped".to_owned(),
+            ProbedAttachment::PersistFailed(message) => {
+                format!("PersistFailed({message})")
+            }
+            ProbedAttachment::ProbeFailed => "ProbeFailed".to_owned(),
+            other => panic!("{reason:?} completed as {other:?}"),
+        };
+        assert_eq!(got, expected, "{reason:?}");
+        assert!(file_urls.is_none(), "{reason:?} must attach nothing");
+    }
+    let (attachment, file_urls) = bounded_clipboard_probe(
+            std::time::Duration::from_secs(5),
+            || Ok((ProbedAttachment::NoRaster, Some("/tmp/a".to_owned()))),
+        )
+        .await;
+    assert!(matches!(attachment, ProbedAttachment::NoRaster));
+    assert_eq!(file_urls.as_deref(), Some("/tmp/a"));
+}
+/// Runs the blocking stage against a canned pasteboard (baseline changeCount 1) with no session images dir.
+fn probe_stage(
+    hook: crate::clipboard::ClipboardProbeHook,
+) -> (ClipboardProbeStage, u32) {
+    crate::clipboard::set_clipboard_probe_hook(hook);
+    let outcome = probe_clipboard_attachment_blocking(
+        Some(1),
+        Some("caption".to_owned()),
+        false,
+        None,
+    );
+    let probe_calls = crate::clipboard::clipboard_probe_call_count();
+    crate::clipboard::clear_clipboard_probe_hook();
+    (outcome, probe_calls)
+}
+/// A board that moved since enqueue drops before any pasteboard read.
+#[test]
+fn probe_stage_drops_before_reading_when_the_board_moved_since_the_keypress() {
+    use xai_grok_telemetry::events::ClipboardProbeDropReason as Reason;
+    let (outcome, probe_calls) = probe_stage(crate::clipboard::ClipboardProbeHook {
+        snapshot: Some((Some(2), true)),
+        ..crate::clipboard::ClipboardProbeHook::with_raster(Some(probe_raster()))
+    });
+    let drop = outcome.expect_err("the board moved since the keypress");
+    assert_eq!(drop.reason, Reason::PasteboardChangedBeforeRead);
+    assert!(drop.image.is_none());
+    assert_eq!(probe_calls, 0, "a stale board must not be read at all");
+}
+/// A copy landing during the read (GB-5461) discards the raster that read returned and names the move.
+#[test]
+fn probe_stage_drops_the_raster_when_the_board_moved_during_the_read() {
+    use xai_grok_telemetry::events::ClipboardProbeDropReason as Reason;
+    let (outcome, probe_calls) = probe_stage(crate::clipboard::ClipboardProbeHook {
+        snapshot_after_read: Some((Some(2), true)),
+        ..crate::clipboard::ClipboardProbeHook::with_raster(Some(probe_raster()))
+    });
+    let drop = outcome.expect_err("the board moved under the read");
+    assert_eq!(drop.reason, Reason::PasteboardChangedAfterRead);
+    assert_eq!(drop.image.map(|img| img.data), Some(probe_raster().data));
+    assert_eq!(probe_calls, 1);
+}
+/// A read error keeps its own reason: the deadline kill stays `Timeout`, anything else `ReadFailed`.
+#[test]
+fn probe_stage_keeps_the_read_error_reason() {
+    use xai_grok_telemetry::events::ClipboardProbeDropReason as Reason;
+    for reason in [Reason::Timeout, Reason::ReadFailed] {
+        let (outcome, _) = probe_stage(crate::clipboard::ClipboardProbeHook {
+            attachment_probe_error: Some(reason),
+            ..crate::clipboard::ClipboardProbeHook::with_raster(None)
+        });
+        let drop = outcome.expect_err("the read failed");
+        assert_eq!(drop.reason, reason);
+        assert!(drop.image.is_none(), "{reason:?}");
+    }
+}
+/// An unchanged board passes its raster through decoded, or reports that none was there.
+#[test]
+fn probe_stage_attaches_the_raster_or_reports_none() {
+    let (outcome, _) = probe_stage(
+        crate::clipboard::ClipboardProbeHook::with_raster(Some(probe_raster())),
+    );
+    let (attachment, file_urls) = outcome.expect("the read stands");
+    assert!(matches!(attachment, ProbedAttachment::Image(_)), "got {attachment:?}");
+    assert!(file_urls.is_none());
+    let (outcome, _) = probe_stage(
+        crate::clipboard::ClipboardProbeHook::with_raster(None),
+    );
+    let (attachment, _) = outcome.expect("the read stands");
+    assert!(matches!(attachment, ProbedAttachment::NoRaster), "got {attachment:?}");
+}
+#[test]
+fn non_bracketed_probe_attaches_even_when_text_does_not_match() {
+    crate::clipboard::set_clipboard_probe_hook(crate::clipboard::ClipboardProbeHook {
+        text: Some("screenshot".to_owned()),
+        ..crate::clipboard::ClipboardProbeHook::with_raster(Some(probe_raster()))
+    });
+    let outcome = probe_clipboard_attachment_blocking(
+        Some(1),
+        Some("中".to_owned()),
+        false,
+        None,
+    );
+    crate::clipboard::clear_clipboard_probe_hook();
+    let (attachment, _) = outcome.expect("an explicit paste key still attaches");
+    assert!(matches!(attachment, ProbedAttachment::Image(_)), "got {attachment:?}");
+}
+#[test]
+fn bracketed_probe_drops_a_mismatched_payload_before_reading_the_raster() {
+    use xai_grok_telemetry::events::ClipboardProbeDropReason as Reason;
+    crate::clipboard::set_clipboard_probe_hook(crate::clipboard::ClipboardProbeHook {
+        text: Some("screenshot".to_owned()),
+        ..crate::clipboard::ClipboardProbeHook::with_raster(Some(probe_raster()))
+    });
+    let outcome = probe_clipboard_attachment_blocking(
+        Some(1),
+        Some("中".to_owned()),
+        true,
+        None,
+    );
+    let probe_calls = crate::clipboard::clipboard_probe_call_count();
+    crate::clipboard::clear_clipboard_probe_hook();
+    let drop = outcome.expect_err("mismatched bracketed payload");
+    assert_eq!(Reason::BracketedPayloadMismatch, drop.reason);
+    assert!(drop.image.is_none());
+    assert_eq!(0, probe_calls);
+}
+#[test]
+fn bracketed_probe_attaches_when_the_payload_matches_clipboard_text() {
+    crate::clipboard::set_clipboard_probe_hook(crate::clipboard::ClipboardProbeHook {
+        text: Some("caption".to_owned()),
+        ..crate::clipboard::ClipboardProbeHook::with_raster(Some(probe_raster()))
+    });
+    let outcome = probe_clipboard_attachment_blocking(
+        Some(1),
+        Some("caption".to_owned()),
+        true,
+        None,
+    );
+    crate::clipboard::clear_clipboard_probe_hook();
+    let (attachment, file_urls) = outcome.expect("a matching caption still probes");
+    assert!(matches!(attachment, ProbedAttachment::Image(_)), "got {attachment:?}");
+    assert!(file_urls.is_none());
+}
+#[test]
+fn bracketed_probe_attaches_an_image_only_paste() {
+    crate::clipboard::set_clipboard_probe_hook(
+        crate::clipboard::ClipboardProbeHook::with_raster(Some(probe_raster())),
+    );
+    let outcome = probe_clipboard_attachment_blocking(
+        Some(1),
+        Some(String::new()),
+        true,
+        None,
+    );
+    crate::clipboard::clear_clipboard_probe_hook();
+    let (attachment, _) = outcome
+        .expect("empty payload with no clipboard text still matches");
+    assert!(matches!(attachment, ProbedAttachment::Image(_)), "got {attachment:?}");
+}
+/// Origin-text read failure on a bracketed probe is its own silent drop, not the toasting `ReadFailed`.
+#[test]
+fn bracketed_probe_names_a_clipboard_text_read_failure() {
+    use xai_grok_telemetry::events::ClipboardProbeDropReason as Reason;
+    crate::clipboard::set_clipboard_probe_hook(crate::clipboard::ClipboardProbeHook {
+        text_read_failed: true,
+        ..crate::clipboard::ClipboardProbeHook::with_raster(Some(probe_raster()))
+    });
+    let outcome = probe_clipboard_attachment_blocking(
+        Some(1),
+        Some("中".to_owned()),
+        true,
+        None,
+    );
+    let probe_calls = crate::clipboard::clipboard_probe_call_count();
+    crate::clipboard::clear_clipboard_probe_hook();
+    let drop = outcome.expect_err("clipboard text read failed");
+    assert_eq!(Reason::BracketedOriginReadFailed, drop.reason);
+    assert!(drop.image.is_none());
+    assert_eq!(0, probe_calls);
+}
+/// A failed session persist keeps the raster (for the drop's hash) and the error text (for the toast).
+#[test]
+fn probe_stage_reports_a_failed_persist_with_its_error() {
+    use xai_grok_telemetry::events::ClipboardProbeDropReason as Reason;
+    let not_a_dir = tempfile::NamedTempFile::new().expect("temp file");
+    crate::clipboard::set_clipboard_probe_hook(
+        crate::clipboard::ClipboardProbeHook::with_raster(Some(probe_raster())),
+    );
+    let outcome = probe_clipboard_attachment_blocking(
+        Some(1),
+        None,
+        false,
+        Some(not_a_dir.path().to_path_buf()),
+    );
+    crate::clipboard::clear_clipboard_probe_hook();
+    let drop = outcome.expect_err("persisting under a plain file must fail");
+    assert_eq!(drop.reason, Reason::PersistFailed);
+    assert_eq!(drop.image.map(|img| img.data), Some(probe_raster().data));
+    assert!(drop.message.is_some_and(|message| !message.is_empty()));
+}
 /// Unknown keys return a descriptive error.
 #[tokio::test]
 async fn persist_setting_unknown_key_returns_err() {
@@ -992,7 +1038,7 @@ async fn persist_setting_unknown_key_returns_err() {
         Ok(()) => panic!("expected Err for unknown key"),
     }
 }
-/// Type-mismatch returns Err (not panic) for spawned-task safety.
+/// Type-mismatch returns Err, not panic: the parser runs inside spawned tasks.
 #[tokio::test]
 async fn persist_setting_type_mismatch_errors_compact_mode() {
     use crate::settings::SettingValue;
@@ -1025,6 +1071,17 @@ async fn persist_setting_type_mismatch_errors_show_timeline() {
             err.contains("persist_setting(show_timeline) expected Bool"),
             "error message must mention key + expected kind, got: {err}",
         );
+}
+#[tokio::test]
+async fn persist_setting_type_mismatch_errors_dashboard_preview() {
+    use crate::settings::SettingValue;
+    let error = persist_setting(
+            "dashboard_preview",
+            SettingValue::String("nope".to_owned()),
+        )
+        .await
+        .expect_err("dashboard preview rejects a non-boolean value");
+    assert!(error.contains("persist_setting(dashboard_preview) expected Bool"), "{error}");
 }
 #[tokio::test]
 async fn persist_setting_type_mismatch_errors_page_flip_on_send() {
@@ -1075,17 +1132,34 @@ async fn persist_setting_type_mismatch_errors_simple_mode() {
 }
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-/// Spawn a fake ACP agent that counts `x.ai/yolo_mode_changed`
-/// notifications. Exits when the channel closes.
+/// Spawn a fake ACP agent that counts `x.ai/yolo_mode_changed` notifications.
+/// Exits when the channel closes.
 fn spawn_fake_acp_agent(
+    rx: tokio::sync::mpsc::UnboundedReceiver<xai_acp_lib::AcpAgentMessage>,
+) -> Arc<AtomicUsize> {
+    spawn_fake_acp_agent_counting(rx, "x.ai/yolo_mode_changed")
+}
+fn spawn_fake_acp_agent_counting(
     mut rx: tokio::sync::mpsc::UnboundedReceiver<xai_acp_lib::AcpAgentMessage>,
+    method: &'static str,
 ) -> Arc<AtomicUsize> {
     let counter = Arc::new(AtomicUsize::new(0));
     let counter_clone = counter.clone();
     tokio::spawn(async move {
         while let Some(msg) = rx.recv().await {
             if let xai_acp_lib::AcpAgentMessage::ExtNotification(args) = msg {
-                if args.request.method.as_ref() == "x.ai/yolo_mode_changed" {
+                if args.request.method.as_ref() == method {
+                    if method == "x.ai/yolo_mode_changed" {
+                        let params: serde_json::Value = serde_json::from_str(
+                                args.request.params.get(),
+                            )
+                            .expect("permission notification payload");
+                        assert_eq!(
+                                Some("test-session"),
+                                params.get("sessionId").and_then(serde_json::Value::as_str),
+                                "permission notifications must name their session"
+                            );
+                    }
                     counter_clone.fetch_add(1, Ordering::SeqCst);
                 }
                 let _ = args.response_tx.send(Ok(()));
@@ -1101,6 +1175,39 @@ fn setup_grok_home_in_tempdir() -> tempfile::TempDir {
         std::env::set_var("GROK_HOME", tmp.path());
     }
     tmp
+}
+
+/// Helper notify: fires exactly one `x.ai/auto_compact_threshold_changed`.
+#[tokio::test]
+async fn notify_auto_compact_threshold_changed_fires_acp_once() {
+    use crate::settings::SettingValue;
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let counter = spawn_fake_acp_agent_counting(rx, "x.ai/auto_compact_threshold_changed");
+    notify_auto_compact_threshold_changed(&tx, &SettingValue::Enum("98")).await;
+    tokio::task::yield_now().await;
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    assert_eq!(
+        counter.load(Ordering::SeqCst),
+        1,
+        "notify helper must fire ACP auto_compact_threshold_changed once"
+    );
+}
+
+/// Unparseable / wrong kind must not spam ACP.
+#[tokio::test]
+async fn notify_auto_compact_threshold_changed_skips_invalid_value() {
+    use crate::settings::SettingValue;
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let counter = spawn_fake_acp_agent_counting(rx, "x.ai/auto_compact_threshold_changed");
+    notify_auto_compact_threshold_changed(&tx, &SettingValue::Bool(true)).await;
+    notify_auto_compact_threshold_changed(&tx, &SettingValue::Enum("not-a-choice")).await;
+    tokio::task::yield_now().await;
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    assert_eq!(
+        counter.load(Ordering::SeqCst),
+        0,
+        "invalid live-apply values must not fire ACP"
+    );
 }
 fn register_session_in(root: &std::path::Path, id: &str) -> acp::SessionId {
     use xai_grok_active_sessions::{ActiveSession, register_in};
@@ -1131,8 +1238,7 @@ fn unregister_best_effort_removes_entry_when_lock_free() {
         );
 }
 /// Contended: the quit path must skip the shared flock rather than block.
-/// The unregister runs on a worker joined against a deadline so a blocking
-/// regression fails fast here instead of deadlocking the test binary.
+/// The unregister runs on a worker joined against a deadline so a blocking regression fails fast instead of deadlocking the test binary.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn unregister_best_effort_is_nonblocking_under_lock_contention() {
@@ -1167,30 +1273,17 @@ fn unregister_best_effort_is_nonblocking_under_lock_contention() {
                 .expect("list")
                 .len(),
             1,
-            "contended unregister must leave the entry for collect_crashed",
+            "contended unregister must leave the entry for the next register to prune",
         );
 }
-/// A real I/O error (uncreatable registry root) is swallowed: the
-/// best-effort helper logs and returns instead of panicking.
+/// A real I/O error (uncreatable registry root) is swallowed: the best-effort helper logs and returns instead of panicking.
 #[test]
 fn unregister_best_effort_swallows_io_error() {
     let file = tempfile::NamedTempFile::new().expect("tempfile");
     let bad_root = file.path().join("not-a-dir");
     unregister_active_session_best_effort_in(&bad_root, &acp::SessionId::new("s1"));
 }
-#[test]
-fn permission_mode_changed_params_context_only_payload() {
-    let params = permission_mode_changed_params("context-only");
-    assert_eq!(params["context_only"], true);
-    assert_eq!(params["yolo_mode"], false);
-    assert_eq!(params["auto_mode"], false);
-    assert_eq!(params["permission_mode"], "context-only");
-    let ask = permission_mode_changed_params("ask");
-    assert_eq!(ask["context_only"], false);
-}
-
-/// BestEffort path fires exactly one ACP notification regardless
-/// of disk outcome.
+/// BestEffort path fires exactly one ACP notification regardless of disk outcome.
 #[tokio::test]
 async fn persist_permission_mode_acp_notification_fires_once_on_best_effort() {
     use agent_client_protocol as acp;
@@ -1223,8 +1316,7 @@ async fn persist_permission_mode_acp_notification_fires_once_on_best_effort() {
              SettingPersistFailedBestEffort (Err), got {result:?}",
         );
 }
-/// WithRollback: notification count matches disk outcome
-/// (1 on Ok, 0 on Err).
+/// WithRollback: notification count matches disk outcome (1 on Ok, 0 on Err).
 #[tokio::test]
 async fn persist_permission_mode_acp_notification_gated_on_disk_for_with_rollback() {
     use agent_client_protocol as acp;
@@ -1283,7 +1375,7 @@ async fn persist_permission_mode_no_session_id_suppresses_acp() {
              agents have no ACP channel to notify",
         );
 }
-/// BestEffort + disk failure must NOT return `SettingPersisted`.
+/// BestEffort with a disk failure must not return `SettingPersisted`.
 #[tokio::test]
 async fn persist_permission_mode_best_effort_failure_returns_dedicated_variant() {
     let _guard = setup_grok_home_in_tempdir();
@@ -1317,7 +1409,7 @@ async fn persist_permission_mode_best_effort_failure_returns_dedicated_variant()
         }
     }
 }
-/// (Err, WithRollback) → SUPPRESS for all canonicals.
+/// (Err, WithRollback) suppresses for all canonicals.
 #[test]
 fn should_send_yolo_acp_with_rollback_suppresses_on_err() {
     let result: Result<(), String> = Err("simulated disk failure".to_string());
@@ -1340,7 +1432,7 @@ fn should_send_yolo_acp_with_rollback_suppresses_on_err() {
             "WithRollback + Err MUST suppress for the 'default' prior canonical too",
         );
 }
-/// (Ok, WithRollback) → FIRE for all canonicals.
+/// (Ok, WithRollback) fires for all canonicals.
 #[test]
 fn should_send_yolo_acp_with_rollback_fires_on_ok() {
     let ok: Result<(), String> = Ok(());
@@ -1475,7 +1567,7 @@ fn route_permission_mode_result_ok_preserves_default_canonical() {
         other => panic!("Ok must return SettingPersisted, got {other:?}"),
     }
 }
-/// `(Err, BestEffort)` must NOT return `SettingPersisted`.
+/// `(Err, BestEffort)` must not return `SettingPersisted`.
 #[test]
 fn route_permission_mode_result_err_best_effort_routes_to_dedicated_variant() {
     let result = route_permission_mode_result(
@@ -1652,6 +1744,48 @@ async fn check_marketplace_updates_dispatches_update_and_skips_failed_notificati
     assert!(!saw_wrong_action.load(Ordering::SeqCst));
     assert!(!saw_success_notification.load(Ordering::SeqCst));
 }
+/// A refused interjection shows the refusal's own sentence, as a refused prompt does
+#[tokio::test]
+async fn refused_interjection_shows_the_refusal_sentence() {
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        while let Some(msg) = rx.recv().await {
+            if let xai_acp_lib::AcpAgentMessage::ExtMethod(args) = msg {
+                let refusal = acp::Error::invalid_params()
+                    .data("Update Grok on \"desk\" to send images.");
+                let _ = args.response_tx.send(Err(refusal));
+            }
+        }
+    });
+    let mut tasks = JoinSet::new();
+    let (progress_tx, _progress_rx) = tokio::sync::mpsc::unbounded_channel();
+    execute(
+        Effect::SendInterject {
+            agent_id: AgentId(4),
+            session_id: acp::SessionId::new("test-session"),
+            text: "look".to_owned(),
+            interjection_id: "i-1".to_owned(),
+            blocks: None,
+        },
+        &mut tasks,
+        &tx,
+        Path::new("."),
+        &SessionFlags::default(),
+        &progress_tx,
+    );
+    let result = tasks
+        .join_next()
+        .await
+        .expect("task should complete")
+        .expect("task should not panic");
+    let TaskResult::InterjectFailed { error, .. } = result else {
+        panic!("expected InterjectFailed, got {result:?}");
+    };
+    assert_eq!(
+            "couldn't send interjection: Update Grok on \"desk\" to send images.",
+            error
+        );
+}
 #[tokio::test]
 async fn foreign_scan_task_echoes_sequence_without_enabled_sources() {
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
@@ -1739,9 +1873,8 @@ async fn foreign_resume_detection_runs_as_task_result() {
         other => panic!("expected ForeignResumeHintDetected, got {other:?}"),
     }
 }
-/// `FetchSessionList` wire shape: search sends `query` (no `allowRelax`);
-/// browse opts into `allowRelax` and parses `x.ai/listScope`; all
-/// outcomes echo `seq`/`query`.
+/// `FetchSessionList` wire shape: search sends `query` (no `allowRelax`); browse opts into `allowRelax` and parses `x.ai/listScope`.
+/// All outcomes echo `seq` and `query`.
 #[tokio::test]
 async fn fetch_session_list_pushes_query_and_echoes_seq() {
     use std::sync::{Arc, Mutex};
@@ -1792,14 +1925,29 @@ async fn fetch_session_list_pushes_query_and_echoes_seq() {
         );
         tasks
     };
+    use crate::views::session_picker_surface::SessionPickerHost;
     let mut tasks = run(Effect::FetchSessionList {
+        host: SessionPickerHost::AgentModal,
+        cwd_override: None,
+        generation: 41,
         query: Some("hit".into()),
         seq: 7,
         kind_filter: None,
+        headless_policy: Default::default(),
     });
     match tasks.join_next().await.expect("task").expect("no panic") {
-        TaskResult::SessionListLoaded { sessions, scope, seq, query, .. } => {
+        TaskResult::SessionListLoaded {
+            host,
+            generation,
+            sessions,
+            scope,
+            seq,
+            query,
+            ..
+        } => {
             assert!(sessions.is_empty());
+            assert_eq!(host, SessionPickerHost::AgentModal, "host must be echoed");
+            assert_eq!(generation, 41, "generation must be echoed");
             assert_eq!(seq, 7, "seq must be echoed, not reconstructed");
             assert_eq!(query.as_deref(), Some("hit"), "query must be echoed");
             assert!(
@@ -1810,9 +1958,13 @@ async fn fetch_session_list_pushes_query_and_echoes_seq() {
         other => panic!("expected SessionListLoaded, got {other:?}"),
     }
     let mut tasks = run(Effect::FetchSessionList {
+        host: SessionPickerHost::Welcome,
+        cwd_override: None,
+        generation: 42,
         query: None,
         seq: 8,
         kind_filter: None,
+        headless_policy: Default::default(),
     });
     match tasks.join_next().await.expect("task").expect("no panic") {
         TaskResult::SessionListLoaded { scope, seq, query, .. } => {
@@ -1826,13 +1978,35 @@ async fn fetch_session_list_pushes_query_and_echoes_seq() {
         other => panic!("expected SessionListLoaded, got {other:?}"),
     }
     let mut tasks = run(Effect::FetchSessionList {
+        host: SessionPickerHost::Dashboard,
+        cwd_override: Some("/dashboard-cwd".into()),
+        generation: 44,
+        query: None,
+        seq: 10,
+        kind_filter: Some(vec!["build".into()]),
+        headless_policy: Default::default(),
+    });
+    assert!(matches!(
+            tasks.join_next().await.expect("task").expect("no panic"),
+            TaskResult::SessionListLoaded {
+                host: SessionPickerHost::Dashboard,
+                ..
+            }
+        ));
+    let mut tasks = run(Effect::FetchSessionList {
+        host: SessionPickerHost::Welcome,
+        cwd_override: None,
+        generation: 43,
         query: Some("fail-me".into()),
         seq: 9,
         kind_filter: None,
+        headless_policy: Default::default(),
     });
     match tasks.join_next().await.expect("task").expect("no panic") {
-        TaskResult::SessionListFailed { error, seq, query } => {
+        TaskResult::SessionListFailed { host, generation, error, seq, query } => {
             assert_eq!(error, "boom");
+            assert_eq!(host, SessionPickerHost::Welcome, "failure must echo the host");
+            assert_eq!(generation, 43, "failure must echo the generation");
             assert_eq!(seq, 9);
             assert_eq!(
                     query.as_deref(),
@@ -1843,25 +2017,73 @@ async fn fetch_session_list_pushes_query_and_echoes_seq() {
         other => panic!("expected SessionListFailed, got {other:?}"),
     }
     let captured = captured.lock().unwrap();
-    assert_eq!(captured.len(), 3);
-    assert_eq!(captured[0]["query"], "hit");
-    assert_eq!(captured[0]["limit"], 30);
-    assert!(captured[0]["cwd"].is_string());
+    assert_eq!(captured.len(), 4);
+    assert_eq!(j(nth(&captured, 0), "query"), "hit");
+    assert_eq!(j(nth(&captured, 0), "limit"), 30);
+    assert_eq!(j(nth(&captured, 0), "headless"), "exclude");
+    assert_eq!(j(nth(&captured, 1), "headless"), "exclude");
+    assert_eq!(j(nth(&captured, 2), "headless"), "exclude");
+    assert_eq!(j(nth(&captured, 2), "limit"), 100);
+    assert_eq!(j(nth(&captured, 2), "cwd"), "/dashboard-cwd");
+    assert_eq!(j(nth(&captured, 3), "headless"), "exclude");
+    assert_eq!(j(nth(&captured, 0), "cwd"), ".");
     assert!(
-            captured[0].get("allowRelax").is_none(),
+            nth(&captured, 0).get("allowRelax").is_none(),
             "search fetches must not opt into relaxing: {:?}",
-            captured[0]
+            nth(&captured, 0)
         );
     assert!(
-            captured[1].get("query").is_none(),
+            nth(&captured, 1).get("query").is_none(),
             "plain fetch must not send a query key: {:?}",
-            captured[1]
+            nth(&captured, 1)
         );
     assert_eq!(
-            captured[1]["allowRelax"], true,
+            j(nth(&captured, 1), "allowRelax"), true,
             "browse fetches opt into relaxing"
         );
-    assert_eq!(captured[2]["query"], "fail-me");
+    assert_eq!(j(nth(&captured, 3), "query"), "fail-me");
+}
+#[tokio::test]
+async fn fetch_dashboard_sessions_explicitly_excludes_headless() {
+    use std::sync::{Arc, Mutex};
+    use xai_acp_lib::AcpAgentMessage;
+    let captured: Arc<Mutex<Option<serde_json::Value>>> = Arc::default();
+    let captured_for_task = captured.clone();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        while let Some(msg) = rx.recv().await {
+            if let AcpAgentMessage::ExtMethod(args) = msg {
+                assert_eq!(args.request.method.as_ref(), "x.ai/session/list");
+                let params = serde_json::from_str(args.request.params.get())
+                    .expect("params JSON");
+                *captured_for_task.lock().unwrap() = Some(params);
+                let body = serde_json::json!({ "result": { "sessions": [] } });
+                let raw = serde_json::value::RawValue::from_string(body.to_string())
+                    .expect("serialize list response");
+                let _ = args.response_tx.send(Ok(acp::ExtResponse::new(Arc::from(raw))));
+                break;
+            }
+        }
+    });
+    let (progress_tx, _progress_rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut tasks = JoinSet::new();
+    execute(
+        Effect::FetchDashboardSessions,
+        &mut tasks,
+        &tx,
+        Path::new("."),
+        &SessionFlags::default(),
+        &progress_tx,
+    );
+    match tasks.join_next().await.expect("task").expect("no panic") {
+        TaskResult::DashboardSessionsLoaded { sessions } => assert!(sessions.is_empty()),
+        other => panic!("expected DashboardSessionsLoaded, got {other:?}"),
+    }
+    let captured = captured.lock().unwrap();
+    let Some(params) = captured.as_ref() else {
+        panic!("captured params");
+    };
+    assert_eq!(j(params, "headless"), "exclude");
 }
 #[tokio::test]
 async fn fetch_session_list_sends_kind_facet_filter() {
@@ -1889,9 +2111,13 @@ async fn fetch_session_list_sends_kind_facet_filter() {
     let mut tasks = JoinSet::new();
     execute(
         Effect::FetchSessionList {
+            host: crate::views::session_picker_surface::SessionPickerHost::Welcome,
+            cwd_override: None,
+            generation: 1,
             query: None,
             seq: 1,
             kind_filter: Some(vec!["build".into()]),
+            headless_policy: Default::default(),
         },
         &mut tasks,
         &tx,
@@ -1903,8 +2129,8 @@ async fn fetch_session_list_sends_kind_facet_filter() {
     let captured = captured.lock().unwrap();
     assert_eq!(captured.len(), 1);
     assert_eq!(
-            captured[0]["_meta"]["x.ai/facetFilters"]["kind"],
-            serde_json::json!(["build"])
+            j(j(j(nth(&captured, 0), "_meta"), "x.ai/facetFilters"), "kind"),
+            &serde_json::json!(["build"])
         );
 }
 #[tokio::test]
@@ -1958,21 +2184,24 @@ async fn fetch_workflows_list_sends_session_id() {
     }
     let captured = captured.lock().unwrap();
     assert_eq!(captured.len(), 1);
-    assert_eq!(captured[0]["sessionId"], "test-session");
-    assert!(captured[0].get("cwd").is_none());
+    assert_eq!(j(nth(&captured, 0), "sessionId"), "test-session");
+    assert!(nth(&captured, 0).get("cwd").is_none());
 }
-/// The debounce arm must echo `query` and `seq` exactly. Awaits the real
-/// 250 ms debounce (tokio's paused clock needs `test-util`, not enabled
-/// in this crate).
+/// The debounce arm must echo `query` and `seq` exactly.
+/// Awaits the real 250 ms debounce (tokio's paused clock needs `test-util`, not enabled in this crate).
 #[tokio::test]
 async fn debounce_session_search_echoes_query_and_seq() {
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let (progress_tx, _progress_rx) = tokio::sync::mpsc::unbounded_channel();
     let mut tasks = JoinSet::new();
+    use crate::views::session_picker_surface::SessionPickerHost;
     execute(
         Effect::DebounceSessionSearch {
+            host: SessionPickerHost::Welcome,
+            generation: 5,
             query: "abc".into(),
             seq: 9,
+            kind_filter: None,
         },
         &mut tasks,
         &tx,
@@ -1981,15 +2210,116 @@ async fn debounce_session_search_echoes_query_and_seq() {
         &progress_tx,
     );
     match tasks.join_next().await.expect("task").expect("no panic") {
-        TaskResult::SessionSearchDebounceExpired { query, seq } => {
+        TaskResult::SessionSearchDebounceExpired { host, generation, query, seq } => {
+            assert_eq!(host, SessionPickerHost::Welcome, "host must be echoed");
+            assert_eq!(generation, 5, "generation must be echoed");
             assert_eq!(query, "abc");
             assert_eq!(seq, 9);
         }
         other => panic!("expected SessionSearchDebounceExpired, got {other:?}"),
     }
 }
-/// Verify that every profile name produced by `SessionFlags::agent_profile()`
-/// is a valid `BuiltinAgentName` that the shell can resolve.
+/// The deep-search executor must echo host, generation, and seq verbatim and carry the selected Headless policy on the wire.
+#[tokio::test]
+async fn deep_search_sessions_echoes_routing_and_policy() {
+    use std::sync::{Arc, Mutex};
+    use crate::views::session_picker_surface::SessionPickerHost;
+    use xai_acp_lib::AcpAgentMessage;
+    let captured: Arc<Mutex<Vec<(String, serde_json::Value)>>> = Arc::default();
+    let captured_for_task = captured.clone();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        while let Some(msg) = rx.recv().await {
+            if let AcpAgentMessage::ExtMethod(args) = msg {
+                let params = serde_json::from_str(args.request.params.get())
+                    .expect("deep-search params JSON");
+                captured_for_task
+                    .lock()
+                    .unwrap()
+                    .push((args.request.method.as_ref().to_string(), params));
+                let body = serde_json::json!({
+                        "result": { "results": [], "bootstrapping": false }
+                    });
+                let raw = serde_json::value::RawValue::from_string(body.to_string())
+                    .expect("serialize search response");
+                let _ = args.response_tx.send(Ok(acp::ExtResponse::new(Arc::from(raw))));
+            }
+        }
+    });
+    let (progress_tx, _progress_rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut tasks = JoinSet::new();
+    execute(
+        Effect::DeepSearchSessions {
+            host: SessionPickerHost::AgentModal,
+            generation: 11,
+            query: "abc".into(),
+            seq: 4,
+            headless_policy: xai_grok_shell::session::unified_list::HeadlessPolicy::Only,
+        },
+        &mut tasks,
+        &tx,
+        Path::new("."),
+        &SessionFlags::default(),
+        &progress_tx,
+    );
+    match tasks.join_next().await.expect("task").expect("no panic") {
+        TaskResult::DeepSearchResults { host, generation, results, seq } => {
+            assert_eq!(host, SessionPickerHost::AgentModal, "host must be echoed");
+            assert_eq!(generation, 11, "generation must be echoed");
+            assert_eq!(seq, 4, "seq must be echoed");
+            assert!(results.is_empty());
+        }
+        other => panic!("expected DeepSearchResults, got {other:?}"),
+    }
+    let captured = captured.lock().unwrap();
+    assert_eq!(captured.len(), 1);
+    assert_eq!(nth(&captured, 0).0, "x.ai/session/search");
+    assert_eq!(j(&nth(&captured, 0).1, "headless"), "only");
+}
+/// The card-detail executor must echo host, generation, seq, and the row identity verbatim; a session missing on disk zeroes the stats.
+#[tokio::test]
+async fn load_card_detail_echoes_identity_and_zeroes_missing_session() {
+    use crate::views::session_picker_surface::SessionPickerHost;
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let (progress_tx, _progress_rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut tasks = JoinSet::new();
+    execute(
+        Effect::LoadCardDetail {
+            host: SessionPickerHost::Welcome,
+            generation: 6,
+            source: "local".into(),
+            session_id: "wire-echo-missing-session-e5b1".into(),
+            cwd: "/nonexistent/effects-test".into(),
+            seq: 3,
+        },
+        &mut tasks,
+        &tx,
+        Path::new("."),
+        &SessionFlags::default(),
+        &progress_tx,
+    );
+    match tasks.join_next().await.expect("task").expect("no panic") {
+        TaskResult::CardDetailLoaded {
+            host,
+            generation,
+            source,
+            session_id,
+            seq,
+            detail,
+        } => {
+            assert_eq!(host, SessionPickerHost::Welcome, "host must be echoed");
+            assert_eq!(generation, 6, "generation must be echoed");
+            assert_eq!(seq, 3, "seq must be echoed");
+            assert_eq!(source, "local");
+            assert_eq!(session_id, "wire-echo-missing-session-e5b1");
+            assert_eq!(detail.turn_count, 0);
+            assert_eq!(detail.tool_call_count, 0);
+            assert!(detail.first_prompt_preview.is_empty());
+        }
+        other => panic!("expected CardDetailLoaded, got {other:?}"),
+    }
+}
+/// Verify that every profile name produced by `SessionFlags::agent_profile()` is a valid `BuiltinAgentName` that the shell can resolve.
 #[test]
 fn agent_profile_names_are_valid_builtins() {
     use std::str::FromStr;
@@ -2082,17 +2412,14 @@ fn subagents_without_plan_produces_no_profile() {
     };
     assert_eq!(flags.agent_profile(), None);
 }
-/// Neutralize `GROK_AGENT` for the profile-matrix tests below: agent-driven
-/// dev shells export it, which flips `to_meta` into the defer-to-shell
-/// escape hatch and drops `agentProfile` — the tests would then assert the
-/// wrong branch. Empty string counts as unset (`!s.trim().is_empty()`).
+/// Neutralize `GROK_AGENT` for the profile-matrix tests below.
+/// The tests would then assert the wrong branch.
 /// Callers must be `#[serial_test::serial(GROK_AGENT)]` (process-global env).
 fn without_grok_agent() -> crate::test_util::EnvVarGuard {
     crate::test_util::EnvVarGuard::set("GROK_AGENT", "")
 }
-/// At the runtime defaults (every `--no-*` flag false → every
-/// `SessionFlags` bool true via `!args.no_*`), `to_meta()` reflects the
-/// full plan profile and no separate `askUserQuestion` toggle.
+/// At the runtime defaults every `--no-*` flag is false, so every `SessionFlags` bool is true via `!args.no_*`.
+/// `to_meta()` then reflects the full plan profile and no separate `askUserQuestion` toggle.
 #[serial_test::serial(GROK_AGENT)]
 #[test]
 fn runtime_default_flags_produce_plan_meta() {
@@ -2104,12 +2431,11 @@ fn runtime_default_flags_produce_plan_meta() {
         ..Default::default()
     };
     let meta = flags.to_meta().unwrap();
-    assert_eq!(meta["agentProfile"], "grok-build-plan");
+    assert_eq!(j(&meta, "agentProfile"), "grok-build-plan");
     assert!(meta.get("askUserQuestion").is_none());
-    assert_eq!(meta["yoloMode"], false);
+    assert_eq!(j(&meta, "yoloMode"), false);
 }
-/// --plan alone produces meta with `agentProfile` only and a
-/// `askUserQuestion: false` since `ask_user` is off here.
+/// --plan alone produces meta with `agentProfile` only and a `askUserQuestion: false` since `ask_user` is off here.
 #[serial_test::serial(GROK_AGENT)]
 #[test]
 fn plan_only_meta() {
@@ -2121,9 +2447,9 @@ fn plan_only_meta() {
         ..Default::default()
     };
     let meta = flags.to_meta().unwrap();
-    assert_eq!(meta["agentProfile"], "grok-build-plan-no-subagents");
-    assert_eq!(meta["askUserQuestion"], false);
-    assert_eq!(meta["yoloMode"], false);
+    assert_eq!(j(&meta, "agentProfile"), "grok-build-plan-no-subagents");
+    assert_eq!(j(&meta, "askUserQuestion"), false);
+    assert_eq!(j(&meta, "yoloMode"), false);
 }
 /// --plan --subagents selects the full plan profile.
 #[serial_test::serial(GROK_AGENT)]
@@ -2137,9 +2463,9 @@ fn plan_with_subagents_meta() {
         ..Default::default()
     };
     let meta = flags.to_meta().unwrap();
-    assert_eq!(meta["agentProfile"], "grok-build-plan");
-    assert_eq!(meta["askUserQuestion"], false);
-    assert_eq!(meta["yoloMode"], false);
+    assert_eq!(j(&meta, "agentProfile"), "grok-build-plan");
+    assert_eq!(j(&meta, "askUserQuestion"), false);
+    assert_eq!(j(&meta, "yoloMode"), false);
 }
 /// --ask-user alone selects the grok-build-ask-user profile.
 #[serial_test::serial(GROK_AGENT)]
@@ -2153,9 +2479,9 @@ fn ask_user_alone_meta() {
         ..Default::default()
     };
     let meta = flags.to_meta().unwrap();
-    assert_eq!(meta["agentProfile"], "grok-build-ask-user");
+    assert_eq!(j(&meta, "agentProfile"), "grok-build-ask-user");
     assert!(meta.get("askUserQuestion").is_none());
-    assert_eq!(meta["yoloMode"], false);
+    assert_eq!(j(&meta, "yoloMode"), false);
 }
 /// --plan --ask-user: plan already includes ask-user; profile is plan.
 #[serial_test::serial(GROK_AGENT)]
@@ -2169,14 +2495,13 @@ fn plan_with_ask_user_uses_plan_profile() {
         ..Default::default()
     };
     let meta = flags.to_meta().unwrap();
-    assert_eq!(meta["agentProfile"], "grok-build-plan-no-subagents");
+    assert_eq!(j(&meta, "agentProfile"), "grok-build-plan-no-subagents");
     assert!(meta.get("askUserQuestion").is_none());
-    assert_eq!(meta["yoloMode"], false);
+    assert_eq!(j(&meta, "yoloMode"), false);
 }
-/// --no-plan --no-subagents --no-ask-user picks the default profile but
-/// must still emit `askUserQuestion: false` so the shell can strip the
-/// tool at the builder. Mirrors the runtime: `subagents` toggle alone
-/// does not need an `agentProfile` (default `grok-build` already has it).
+/// --no-plan --no-subagents --no-ask-user picks the default profile.
+/// It must still emit `askUserQuestion: false` so the shell can strip the tool at the builder.
+/// Mirrors the runtime: the `subagents` toggle alone does not need an `agentProfile` (default `grok-build` already has it).
 #[test]
 fn subagents_alone_emits_only_ask_user_question_disable() {
     let flags = SessionFlags {
@@ -2187,10 +2512,9 @@ fn subagents_alone_emits_only_ask_user_question_disable() {
     };
     let meta = flags.to_meta().expect("askUserQuestion=false must produce meta");
     assert!(meta.get("agentProfile").is_none());
-    assert_eq!(meta["askUserQuestion"], false);
+    assert_eq!(j(&meta, "askUserQuestion"), false);
 }
-/// All three flags on at the runtime default produce grok-build-plan
-/// and no `askUserQuestion` field.
+/// All three flags on at the runtime default produce grok-build-plan and no `askUserQuestion` field.
 #[serial_test::serial(GROK_AGENT)]
 #[test]
 fn all_flags_meta() {
@@ -2202,13 +2526,11 @@ fn all_flags_meta() {
         ..Default::default()
     };
     let meta = flags.to_meta().unwrap();
-    assert_eq!(meta["agentProfile"], "grok-build-plan");
+    assert_eq!(j(&meta, "agentProfile"), "grok-build-plan");
     assert!(meta.get("askUserQuestion").is_none());
-    assert_eq!(meta["yoloMode"], false);
+    assert_eq!(j(&meta, "yoloMode"), false);
 }
-/// `--no-ask-user` is the user-discovered bug — the flag must surface
-/// as `_meta.askUserQuestion = false` regardless of which profile (if
-/// any) the other flags select.
+/// `--no-ask-user` must land as `_meta.askUserQuestion = false` regardless of which profile (if any) the other flags select.
 #[test]
 fn to_meta_emits_ask_user_question_false_when_disabled() {
     for plan in [false, true] {
@@ -2227,15 +2549,14 @@ fn to_meta_emits_ask_user_question_false_when_disabled() {
                     )
                 });
             assert_eq!(
-                    meta["askUserQuestion"], false,
+                    j(&meta, "askUserQuestion"), false,
                     "askUserQuestion must be false (plan={plan}, subagents={subagents}); meta={meta:?}"
                 );
         }
     }
 }
-/// Symmetric positive control: when `ask_user` is enabled the field is
-/// omitted entirely (the shell defaults to enabled when the key is
-/// absent — see `parse_ask_user_question_from_meta`).
+/// Symmetric positive control: when `ask_user` is enabled the field is omitted entirely.
+/// The shell defaults to enabled when the key is absent (see `parse_ask_user_question_from_meta`).
 #[test]
 fn to_meta_omits_ask_user_question_when_enabled() {
     for plan in [false, true] {
@@ -2263,16 +2584,28 @@ fn to_meta_emits_auto_mode_when_enabled() {
         ..Default::default()
     };
     let meta = flags.to_meta().expect("auto_mode must emit meta");
-    assert_eq!(meta["autoMode"], true);
+    assert_eq!(j(&meta, "autoMode"), true);
     assert_eq!(
-            meta["yoloMode"], false,
+            j(&meta, "yoloMode"), false,
             "yoloMode must be explicitly false, not omitted (absent key falls \
              back to the shell's connect-time default / leader injection)"
         );
 }
-/// yoloMode must ride the meta explicitly for BOTH polarities — absent
-/// key ≠ off (see the emit-site comment in `to_meta`). Pins the
-/// pre-session Always-Approve → Normal cycle not creating a yolo session.
+#[test]
+fn create_permission_override_replaces_global_permission_seeds() {
+    let flags = SessionFlags {
+        yolo_mode: true,
+        auto_mode: false,
+        ..Default::default()
+    };
+    let mut meta = flags.to_meta();
+    apply_permission_mode_override(&mut meta, Some(PermissionModeKind::Auto));
+    let meta = meta.expect("permission metadata");
+    assert_eq!(j(&meta, "yoloMode"), false);
+    assert_eq!(j(&meta, "autoMode"), true);
+}
+/// yoloMode must ride the meta explicitly for both polarities; an absent key does not mean off (see the emit-site comment in `to_meta`).
+/// Cycling Always-Approve back to Normal before the session starts must not create a yolo session.
 #[test]
 fn to_meta_always_emits_yolo_mode_explicitly() {
     for yolo in [false, true] {
@@ -2282,8 +2615,8 @@ fn to_meta_always_emits_yolo_mode_explicitly() {
         };
         let meta = flags.to_meta().expect("permission seeds must always emit meta");
         assert_eq!(
-                meta["yoloMode"],
-                serde_json::json!(yolo),
+                j(&meta, "yoloMode"),
+                &serde_json::json!(yolo),
                 "yoloMode must be explicit (yolo={yolo}); meta={meta:?}"
             );
     }
@@ -2298,7 +2631,7 @@ fn to_meta_chat_mode_stamps_kind_and_omits_agent_profile() {
         ..Default::default()
     };
     let meta = flags.to_meta().expect("chat_mode must emit meta");
-    assert_eq!(meta["x.ai/session"]["kind"], "chat");
+    assert_eq!(j(j(&meta, "x.ai/session"), "kind"), "chat");
     assert!(
             meta.get("agentProfile").is_none(),
             "K12: chat mode must omit Build agentProfile"
@@ -2307,8 +2640,7 @@ fn to_meta_chat_mode_stamps_kind_and_omits_agent_profile() {
         &serde_json::Value::Object(meta.clone()),
     );
 }
-/// Load meta merge: explicit `chat_kind` alone (no process-wide chat_mode)
-/// stamps kind and strips agentProfile — conversation resume acceptance.
+/// Load meta merge: explicit `chat_kind` alone (no process-wide chat_mode) stamps kind and strips agentProfile, the conversation-resume case.
 #[test]
 fn load_meta_chat_kind_alone_stamps_kind_and_strips_profile() {
     let flags = SessionFlags {
@@ -2325,7 +2657,7 @@ fn load_meta_chat_kind_alone_stamps_kind_and_strips_profile() {
         scrub_chat_workspace_bind_meta(&mut meta);
     }
     let meta = meta.expect("chat_kind must produce meta");
-    assert_eq!(meta["x.ai/session"]["kind"], "chat");
+    assert_eq!(j(j(&meta, "x.ai/session"), "kind"), "chat");
     assert!(
             meta.get("agentProfile").is_none(),
             "entry chat_kind must strip Build agentProfile"
@@ -2334,9 +2666,8 @@ fn load_meta_chat_kind_alone_stamps_kind_and_strips_profile() {
         &serde_json::Value::Object(meta.clone()),
     );
 }
-/// Chat create/load meta must never include client workspace-bind keys
-/// (`envId`, Direct hub id, gateway attach), even if cloud fields are
-/// present on the effect — backend owns workspace for `kind=chat`.
+/// Chat create and load meta must never include client workspace-bind keys (`envId`, Direct hub id, gateway attach).
+/// That holds even when cloud fields are present on the effect; the backend owns the workspace for `kind=chat`.
 fn assert_chat_meta_has_no_workspace_bind_keys(meta: &serde_json::Value) {
     for key in CHAT_FORBIDDEN_WORKSPACE_BIND_KEYS {
         assert!(
@@ -2359,7 +2690,7 @@ fn chat_create_meta_never_includes_workspace_bind_keys_when_cloud_fields_set() {
     apply_chat_kind_meta(&mut meta);
     scrub_chat_workspace_bind_meta(&mut meta);
     let meta = meta.expect("chat create must emit meta");
-    assert_eq!(meta["x.ai/session"]["kind"], "chat");
+    assert_eq!(j(j(&meta, "x.ai/session"), "kind"), "chat");
     assert_chat_meta_has_no_workspace_bind_keys(
         &serde_json::Value::Object(meta.clone()),
     );
@@ -2383,12 +2714,12 @@ fn chat_load_meta_never_includes_workspace_bind_keys() {
     }
     scrub_chat_workspace_bind_meta(&mut meta);
     let meta = meta.expect("chat load must emit meta");
-    assert_eq!(meta["x.ai/session"]["kind"], "chat");
+    assert_eq!(j(j(&meta, "x.ai/session"), "kind"), "chat");
     assert_chat_meta_has_no_workspace_bind_keys(
         &serde_json::Value::Object(meta.clone()),
     );
 }
-/// Attach stamp keeps existing workspace + local intent; envId / Direct hub stay stripped.
+/// The attach stamp keeps the existing workspace and local intent; envId and Direct hub stay stripped.
 #[cfg(feature = "local-workspace")]
 #[test]
 fn scrub_chat_workspace_matrix_attach_exception() {
@@ -2430,12 +2761,12 @@ fn scrub_chat_workspace_matrix_attach_exception() {
             "Direct hub must stay scrubbed"
         );
     assert_eq!(
-            scrubbed["x.ai/cloud_existing_workspace"]["server_id"],
+            j(j(&scrubbed, "x.ai/cloud_existing_workspace"), "server_id"),
             "srv-dogfood"
         );
-    assert_eq!(scrubbed["x.ai/local_workspace"]["mode"], "attach");
-    assert_eq!(scrubbed["x.ai/local_workspace"]["server_id"], "srv-dogfood");
-    assert_eq!(scrubbed["x.ai/local_workspace"]["cwd"], "/tmp/repo");
+    assert_eq!(j(j(&scrubbed, "x.ai/local_workspace"), "mode"), "attach");
+    assert_eq!(j(j(&scrubbed, "x.ai/local_workspace"), "server_id"), "srv-dogfood");
+    assert_eq!(j(j(&scrubbed, "x.ai/local_workspace"), "cwd"), "/tmp/repo");
 }
 #[cfg(feature = "local-workspace")]
 #[test]
@@ -2451,9 +2782,9 @@ fn to_meta_chat_attach_stamps_local_and_existing() {
         ..Default::default()
     };
     let meta = flags.to_meta().expect("meta");
-    assert_eq!(meta["x.ai/session"]["kind"], "chat");
-    assert_eq!(meta["x.ai/local_workspace"]["mode"], "attach");
-    assert_eq!(meta["x.ai/cloud_existing_workspace"]["server_id"], "srv-1");
+    assert_eq!(j(j(&meta, "x.ai/session"), "kind"), "chat");
+    assert_eq!(j(j(&meta, "x.ai/local_workspace"), "mode"), "attach");
+    assert_eq!(j(j(&meta, "x.ai/cloud_existing_workspace"), "server_id"), "srv-1");
     assert!(meta.get("envId").is_none());
     assert!(meta.get("x.ai/cloud_server_id").is_none());
 }
@@ -2471,9 +2802,9 @@ fn to_meta_chat_own_stamps_intent_without_existing() {
         ..Default::default()
     };
     let meta = flags.to_meta().expect("meta");
-    assert_eq!(meta["x.ai/local_workspace"]["mode"], "own");
-    assert_eq!(meta["x.ai/local_workspace"]["cwd"], "/tmp/repo-own");
-    assert!(meta["x.ai/local_workspace"].get("server_id").is_none());
+    assert_eq!(j(j(&meta, "x.ai/local_workspace"), "mode"), "own");
+    assert_eq!(j(j(&meta, "x.ai/local_workspace"), "cwd"), "/tmp/repo-own");
+    assert!(j(&meta, "x.ai/local_workspace").get("server_id").is_none());
     assert!(
             meta.get("x.ai/cloud_existing_workspace").is_none(),
             "own must not stamp existing; shell mints server_id"
@@ -2482,41 +2813,22 @@ fn to_meta_chat_own_stamps_intent_without_existing() {
 }
 #[cfg(feature = "local-workspace")]
 #[test]
-fn mid_session_add_params_scrub_envid() {
-    use crate::app::session_startup::{LocalWorkspaceConfig, LocalWorkspaceMode};
-    let params = mid_session_add_local_workspace_params(
-        "sess-1",
-        &LocalWorkspaceConfig {
-            mode: LocalWorkspaceMode::Attach,
-            cwd: Some(std::path::PathBuf::from("/tmp/repo")),
-            server_id: Some("srv-add".into()),
-        },
-    );
-    assert_eq!(params["sessionId"], "sess-1");
-    assert_eq!(params["meta"]["x.ai/local_workspace"]["mode"], "attach");
-    assert_eq!(
-            params["meta"]["x.ai/cloud_existing_workspace"]["server_id"],
-            "srv-add"
-        );
-    assert!(params["meta"].get("envId").is_none());
-}
-#[cfg(feature = "local-workspace")]
-#[test]
 fn reject_non_fs_only_advertised_tools_matrix() {
     let fs_only = ["workspace.fs_list", "workspace.fs_read_file", "workspace.put_files"];
-    assert!(reject_non_fs_only_advertised_tools(Some(&fs_only[..])).is_ok());
+    assert!(reject_non_fs_only_advertised_tools(Some(fs_only.as_slice())).is_ok());
     assert!(
             reject_non_fs_only_advertised_tools(None)
                 .unwrap_err()
                 .contains("uncheckable")
         );
     assert!(
-            reject_non_fs_only_advertised_tools(Some(&[][..]))
+            reject_non_fs_only_advertised_tools(Some(&[] as &[_]))
                 .unwrap_err()
                 .contains("empty")
         );
     let with_exec = ["workspace.fs_list", "workspace.bash", "terminal.exec"];
-    let err = reject_non_fs_only_advertised_tools(Some(&with_exec[..])).unwrap_err();
+    let err = reject_non_fs_only_advertised_tools(Some(with_exec.as_slice()))
+        .unwrap_err();
     assert!(err.contains("FS-only"), "{err}");
     assert!(err.contains("workspace.bash"), "{err}");
     assert!(err.contains("terminal.exec"), "{err}");
@@ -2537,9 +2849,9 @@ fn finalize_chat_session_meta_stamps_attach_on_worktree_path() {
     let mut meta = flags.to_meta();
     finalize_chat_session_meta(&mut meta, true, &flags);
     let meta = meta.expect("meta");
-    assert_eq!(meta["x.ai/session"]["kind"], "chat");
-    assert_eq!(meta["x.ai/local_workspace"]["mode"], "attach");
-    assert_eq!(meta["x.ai/cloud_existing_workspace"]["server_id"], "srv-wt");
+    assert_eq!(j(j(&meta, "x.ai/session"), "kind"), "chat");
+    assert_eq!(j(j(&meta, "x.ai/local_workspace"), "mode"), "attach");
+    assert_eq!(j(j(&meta, "x.ai/cloud_existing_workspace"), "server_id"), "srv-wt");
     assert!(meta.get("envId").is_none());
 }
 #[test]
@@ -2550,14 +2862,13 @@ fn to_meta_yolo_suppresses_auto_mode() {
         ..Default::default()
     };
     let meta = flags.to_meta().expect("yolo must emit meta");
-    assert_eq!(meta["yoloMode"], true);
+    assert_eq!(j(&meta, "yoloMode"), true);
     assert_eq!(
-            meta["autoMode"], false,
+            j(&meta, "autoMode"), false,
             "yolo wins; autoMode must be explicitly false (not omitted)"
         );
 }
-/// Verify that each resolved profile name produces a valid
-/// `AgentDefinition` whose name matches the expected kebab-case string.
+/// Verify that each resolved profile name produces a valid `AgentDefinition` whose name matches the expected kebab-case string.
 #[test]
 fn agent_profile_definitions_have_correct_names() {
     use std::str::FromStr;
@@ -2673,6 +2984,35 @@ fn format_session_info_hides_resolved_when_disabled() {
     assert!(text.contains("Model: grok-4.5"));
     assert!(!text.contains("grok-4.3"));
 }
+/// The (cwd, id)-derived summary path resolves and `generated_title` wins.
+#[tokio::test]
+async fn lookup_session_title_loads_single_summary_by_cwd() {
+    let root = tempfile::tempdir().unwrap();
+    let cwd = "/workspace";
+    let dir = root
+        .path()
+        .join("sessions")
+        .join(xai_grok_shell::util::grok_home::encode_cwd_dirname(cwd))
+        .join("sess-1");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+            dir.join("summary.json"),
+            serde_json::json!({
+                "info": { "id": "sess-1", "cwd": cwd },
+                "session_summary": "raw summary",
+                "created_at": "2026-01-01T00:00:00Z",
+                "updated_at": "2026-01-01T00:00:00Z",
+                "num_messages": 1,
+                "current_model_id": "m",
+                "generated_title": "Renamed title"
+            })
+                .to_string(),
+        )
+        .unwrap();
+    let id = acp::SessionId::new("sess-1");
+    let title = lookup_session_title_in(root.path().to_path_buf(), &id, cwd).await;
+    assert_eq!(title.as_deref(), Some("Renamed title"));
+}
 #[test]
 fn format_session_info_no_parens_when_resolved_matches_requested() {
     let info = make_session_info("grok-4.5", Some("grok-4.5"), 1000, 10000);
@@ -2697,12 +3037,12 @@ fn format_session_info_hides_model_hash_for_noncoding_without_flag() {
     assert!(!text.contains("Model Hash"));
 }
 #[test]
-fn format_session_info_shows_model_hash_for_coding_slug_without_flag() {
-    let mut info = make_session_info("grok-build", None, 1000, 10000);
+fn format_session_info_hides_model_hash_for_coding_slug_without_flag() {
+    let mut info = make_session_info("grok-4.6", None, 1000, 10000);
     info.data.model_fingerprint = Some("abc123".into());
     info.data.show_model_fingerprint = false;
     let text = format_session_info(&info, None, false, false, false);
-    assert!(text.contains("Model Hash: abc123"));
+    assert!(!text.contains("Model Hash"));
 }
 #[test]
 fn session_picker_summary_strips_skill_xml() {
@@ -2720,6 +3060,30 @@ fn session_picker_summary_preserves_normal_text() {
     let summary = "Fix authentication bug in login flow".to_string();
     let display = extract_skill_display_text(&summary).unwrap_or(summary);
     assert_eq!(display, "Fix authentication bug in login flow");
+}
+#[test]
+fn sanitize_user_error_rewrites_shared_service_names() {
+    for (pattern, replacement) in xai_grok_shell::sampling::error::SERVICE_NAME_REWRITES {
+        for variant in [pattern.to_string(), pattern.to_ascii_uppercase()] {
+            assert_eq!(
+                    sanitize_user_error(&format!("ACP error: {variant} unreachable")),
+                    format!("error: {replacement} unreachable")
+                );
+        }
+    }
+}
+#[test]
+fn compact_error_message_empty_data_renders_terse_and_no_data_uses_display() {
+    let empty = compact_error_message(&acp::Error::internal_error().data(""));
+    assert_eq!(empty, "");
+    assert_eq!(
+            crate::scrollback::blocks::SessionEvent::CompactionFailed { error: empty }.message(),
+            "Compaction failed."
+        );
+    assert_eq!(
+            compact_error_message(&acp::Error::internal_error()),
+            "Internal error"
+        );
 }
 #[test]
 fn sanitize_user_error_strips_auth_prefixes() {
@@ -2761,12 +3125,11 @@ fn sanitize_user_error_collapses_disk_full() {
             "couldn't create worktree: failed to get HEAD commit from source"
         );
 }
-/// Production ordering of the deferred worktree resume failure: the
-/// detail is sanitized FIRST, then composed — sanitizing the composed
-/// message would collapse a disk-full chain whole and erase the title
-/// hint for a deferred local-miss target.
+/// Production ordering of the deferred worktree resume failure: the detail is sanitized first, then composed.
+/// Sanitizing the composed message would collapse a disk-full chain whole and erase the title hint for a deferred local-miss target.
 #[test]
 fn worktree_resume_failure_sanitizes_detail_before_hint() {
+    use crate::app::session_title_resolve::worktree_resume_failure_message;
     let raw = "failed to copy index: No space left on device (os error 28)";
     let msg = worktree_resume_failure_message(
         Some("typo title"),
@@ -2782,53 +3145,158 @@ fn worktree_resume_failure_sanitizes_detail_before_hint() {
     let id_msg = worktree_resume_failure_message(None, &sanitize_user_error(raw));
     assert_eq!(id_msg, "couldn't resume worktree session: No space left on device");
 }
-/// A resume-picker entry converts to a **dormant** dashboard roster row
-/// (the non-leader idle source) preserving title, cwd, model, worktree
-/// flag, origin, and last-change time.
-#[test]
-fn session_picker_entry_maps_to_dormant_roster_row() {
-    use crate::app::app_view::SessionPickerEntry;
-    use crate::app::roster::RosterActivity;
-    let updated = chrono::Utc::now();
-    let entry = SessionPickerEntry {
-        id: "sess-1".to_string(),
-        summary: "Wire up dashboard".to_string(),
-        updated_at: updated,
-        created_at: updated,
-        cwd: "/repo/app".to_string(),
-        hostname: Some("box".to_string()),
-        source: "local".to_string(),
-        model_id: Some("grok-4".to_string()),
-        num_messages: 3,
-        last_active_at: Some(updated),
-        branch: None,
-        repo_name: "repo-app".to_string(),
-        worktree_label: Some("wt".to_string()),
-        last_turn_summary: Some("Fixed the parser".to_string()),
-        card_detail: None,
-    };
-    let roster = session_picker_entry_to_roster(&entry);
-    assert_eq!(roster.session_id, "sess-1");
-    assert_eq!(roster.title.as_deref(), Some("Wire up dashboard"));
-    assert_eq!(roster.cwd, "/repo/app");
-    assert!(roster.is_worktree, "worktree_label present → is_worktree");
-    assert_eq!(roster.model_id.as_deref(), Some("grok-4"));
-    assert_eq!(roster.activity, RosterActivity::Dormant);
-    assert_eq!(
-            roster.last_turn_summary.as_deref(),
-            Some("Fixed the parser")
-        );
-    assert!(!roster.resident);
-    assert_eq!(roster.last_change_unix_ms, updated.timestamp_millis());
-    assert_eq!(roster.origin.kind, "local");
-    assert_eq!(roster.origin.host.as_deref(), Some("box"));
-}
 #[test]
 fn rewind_execute_params_sends_conversation_only_with_force() {
     let params = rewind_execute_params("sess-1", 3);
-    assert_eq!(params["sessionId"], "sess-1");
-    assert_eq!(params["targetPromptIndex"], 3);
-    assert_eq!(params["force"], true);
-    assert_eq!(params["mode"], REWIND_MODE_WIRE);
-    assert_eq!(params["mode"], "conversation_only");
+    assert_eq!(j(&params, "sessionId"), "sess-1");
+    assert_eq!(j(&params, "targetPromptIndex"), 3);
+    assert_eq!(j(&params, "force"), true);
+    assert_eq!(j(&params, "mode"), REWIND_MODE_WIRE);
+    assert_eq!(j(&params, "mode"), "conversation_only");
 }
+#[tokio::test]
+async fn rewind_points_are_asked_only_after_the_cancel_is_answered() {
+    use std::sync::Arc;
+    use xai_acp_lib::AcpAgentMessage;
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let listing = tokio::spawn(async move {
+        cancel_then_fetch_rewind_points(&tx, AgentId(0), acp::SessionId::new("sess-1"))
+            .await
+    });
+    let Some(AcpAgentMessage::Cancel(cancel)) = rx.recv().await else {
+        panic!("the cancel goes out first")
+    };
+    tokio::task::yield_now().await;
+    assert!(rx.try_recv().is_err(), "points waits for the cancel's answer");
+    cancel.response_tx.send(Ok(())).expect("the listing waits on the cancel");
+    let Some(AcpAgentMessage::ExtMethod(points)) = rx.recv().await else {
+        panic!("points follows the answered cancel")
+    };
+    let body = serde_json::value::RawValue::from_string(
+            r#"{"rewind_points":[]}"#.to_owned(),
+        )
+        .expect("valid JSON");
+    points
+        .response_tx
+        .send(Ok(acp::ExtResponse::new(Arc::from(body))))
+        .expect("the listing waits on points");
+    assert_eq!("sess-1", cancel.request.session_id.0.as_ref());
+    assert_eq!("x.ai/rewind/points", points.request.method.as_ref());
+    match listing.await.expect("the listing task finishes") {
+        TaskResult::RewindPointsLoaded { agent_id, points } => {
+            assert_eq!((AgentId(0), 0), (agent_id, points.len()));
+        }
+        other => panic!("{other:?}"),
+    }
+}
+#[rstest::rstest]
+#[case::error_envelope(
+    r#"{"error":"the session is answering"}"#,
+    "the session is answering"
+)]
+#[case::not_json("not json", "invalid response: expected ident at line 1 column 2")]
+fn a_failed_rewind_points_reply_names_the_failure(
+    #[case]
+    body: &str,
+    #[case]
+    expected: &str,
+) {
+    match parse_rewind_points_response(AgentId(0), body) {
+        TaskResult::RewindPointsFailed { error, .. } => assert_eq!(expected, error),
+        other => panic!("{other:?}"),
+    }
+}
+/// Exact wire bytes of the one-shot request: the shell's `upload_trace_offer_gate_allows`
+/// relaxation keys off this exact snake_case value, so the shape is a cross-crate contract.
+#[test]
+fn upload_trace_request_with_intent_exact_wire_shape() {
+    let request = UploadTraceRequest {
+        session_id: "sess-1".to_string(),
+        intent: Some(
+            crate::views::feedback_modal::FeedbackTraceUploadIntent::SendThisSession,
+        ),
+        trace_upload_token: Some("grant-1".to_string()),
+    };
+    assert_eq!(
+            serde_json::to_string(&request).unwrap(),
+            r#"{"sessionId":"sess-1","intent":"send_this_session","traceUploadToken":"grant-1"}"#
+        );
+}
+/// A legacy trace-card upload must stay byte-identical to the pre-intent request
+/// (no `"intent":null`), so an older shell's strict parsing cannot regress.
+#[test]
+fn upload_trace_request_without_intent_keeps_legacy_wire_shape() {
+    let request = UploadTraceRequest {
+        session_id: "sess-1".to_string(),
+        intent: None,
+        trace_upload_token: None,
+    };
+    assert_eq!(
+            serde_json::to_string(&request).unwrap(),
+            r#"{"sessionId":"sess-1"}"#
+        );
+}
+/// Every answer the shell can give, plus a dead channel and a broken peer, comes back as `TeamCapabilityHydrated` for the identity that asked.
+/// The serialization arm is not in the table: `HydrateTeamCapabilityRequest` is two `Option<String>`s, whose `Serialize` cannot fail, so no input reaches it.
+#[tokio::test]
+async fn hydrate_team_capability_adapter_maps_every_reply_to_the_asking_identity() {
+    use std::sync::Arc;
+    use xai_acp_lib::AcpAgentMessage;
+    use xai_grok_shell::extensions::auth::HydrateTeamCapabilityResponse;
+    let identity = crate::app::app_view::AuthIdentity {
+        email: Some("a@acme.test".into()),
+        team_id: Some("team-a".into()),
+        team_principal: true,
+    };
+    type ScriptedReply = (Option<Result<&'static str, acp::Error>>, Option<bool>);
+    let replies: [ScriptedReply; 8] = [
+        (Some(Ok(r#"{"canAdministerTeam":true}"#)), Some(true)),
+        (Some(Ok(r#"{"canAdministerTeam":false}"#)), Some(false)),
+        (Some(Ok(r#"{"canAdministerTeam":null,"extra":1}"#)), None),
+        (Some(Err(acp::Error::method_not_found())), None),
+        (Some(Ok(r#"{"canAdministerTeam":"yes"}"#)), None),
+        (Some(Ok(r#"{}"#)), None),
+        (Some(Ok(r#"{"canadministerteam":true}"#)), None),
+        (None, None),
+    ];
+    for (reply, expected) in replies {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let asked = identity.clone();
+        tokio::spawn(async move {
+            let Some(AcpAgentMessage::ExtMethod(args)) = rx.recv().await else {
+                panic!("one ext request")
+            };
+            assert_eq!(args.request.method.as_ref(), "x.ai/auth/hydrate_team_capability");
+            assert_eq!(
+                    args.request.params.get(),
+                    r#"{"email":"a@acme.test","teamId":"team-a"}"#
+                );
+            if let Some(reply) = reply {
+                let response = reply
+                    .map(|body| {
+                        let raw = serde_json::value::RawValue::from_string(
+                                body.to_owned(),
+                            )
+                            .unwrap();
+                        acp::ExtResponse::new(Arc::from(raw))
+                    });
+                let _ = args.response_tx.send(response);
+            }
+        });
+        match send_hydrate_team_capability(&tx, asked).await {
+            TaskResult::TeamCapabilityHydrated {
+                identity: answered,
+                can_administer_team,
+            } => {
+                assert_eq!((answered, can_administer_team), (identity.clone(), expected))
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+    assert!(serde_json::from_str::<HydrateTeamCapabilityResponse>("{}").is_err());
+    assert!(
+            serde_json::from_str::<HydrateTeamCapabilityResponse>(r#"{"canadministerteam":true}"#)
+                .is_err()
+        );
+}
+

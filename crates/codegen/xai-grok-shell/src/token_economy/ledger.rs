@@ -122,11 +122,146 @@ impl LocalBookSummary {
     }
 }
 
+/// True when this ULID would record nested L2/L3 spend that is already stored.
+///
+/// One grok-oss ULID row per nested work. An L3 whose tokens are already inside
+/// the L2 total for that work is not a second row. A later ulid that sums those
+/// tokens again is not stored. Same `event_ulid` stays `INSERT OR IGNORE`.
+/// L3 stored first is replaced by the covering L2 rollup, not skipped here.
+fn nested_spend_already_recorded(
+    store: &GrokOssStore,
+    event: &LocalUsageEvent,
+) -> Result<bool, rusqlite::Error> {
+    let (Some(total), Some(work)) = (event.total_tokens, event.work_ulid.as_deref()) else {
+        return Ok(false);
+    };
+    let existing: Option<i64> = store.connection().query_row(
+        "SELECT MAX(total_tokens) FROM local_usage_event
+         WHERE session_id = ?1 AND work_ulid = ?2
+           AND lower(agent_kind) IN ('l2', 'nested_l2')",
+        rusqlite::params![event.session_id, work],
+        |row| row.get(0),
+    )?;
+    let kind = event.agent_kind.to_ascii_lowercase();
+    match kind.as_str() {
+        "l3" | "nested_l3" => Ok(existing.is_some_and(|parent| parent >= total)),
+        "l2" | "nested_l2" => Ok(existing.is_some()),
+        _ => Ok(false),
+    }
+}
+
+/// L3-then-L2: drop L3 rows when this L2 total already includes their tokens.
+fn drop_l3_rows_covered_by_arriving_l2(
+    store: &GrokOssStore,
+    event: &LocalUsageEvent,
+) -> Result<(), rusqlite::Error> {
+    let kind = event.agent_kind.to_ascii_lowercase();
+    if kind != "l2" && kind != "nested_l2" {
+        return Ok(());
+    }
+    let (Some(total), Some(work)) = (event.total_tokens, event.work_ulid.as_deref()) else {
+        return Ok(());
+    };
+    let l3_sum: Option<i64> = store.connection().query_row(
+        "SELECT SUM(total_tokens) FROM local_usage_event
+         WHERE session_id = ?1 AND work_ulid = ?2
+           AND lower(agent_kind) IN ('l3', 'nested_l3')",
+        rusqlite::params![event.session_id, work],
+        |row| row.get(0),
+    )?;
+    let Some(covered) = l3_sum else {
+        return Ok(());
+    };
+    if total < covered {
+        return Ok(());
+    }
+    store.connection().execute(
+        "DELETE FROM local_usage_event
+         WHERE session_id = ?1 AND work_ulid = ?2
+           AND lower(agent_kind) IN ('l3', 'nested_l3')",
+        rusqlite::params![event.session_id, work],
+    )?;
+    Ok(())
+}
+
+/// True when this `event_ulid` is already a `local_usage_event` primary key.
+fn event_ulid_exists(store: &GrokOssStore, event_ulid: &str) -> Result<bool, rusqlite::Error> {
+    let n: i64 = store.connection().query_row(
+        "SELECT COUNT(*) FROM local_usage_event WHERE event_ulid = ?1",
+        [event_ulid],
+        |row| row.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// Same nested L2 ulid: raise `total_tokens` in place. Not a second row.
+///
+/// A lower sample (compact) does not shrink the stored total. A different
+/// ulid is not updated here, so a third summed row stays rejected.
+fn raise_nested_l2_total_if_higher(
+    store: &GrokOssStore,
+    event: &LocalUsageEvent,
+) -> Result<(), rusqlite::Error> {
+    let kind = event.agent_kind.to_ascii_lowercase();
+    if kind != "l2" && kind != "nested_l2" {
+        return Ok(());
+    }
+    let Some(total) = event.total_tokens else {
+        return Ok(());
+    };
+    if total <= 0 {
+        return Ok(());
+    }
+    store.connection().execute(
+        "UPDATE local_usage_event
+         SET total_tokens = ?1
+         WHERE event_ulid = ?2
+           AND lower(agent_kind) IN ('l2', 'nested_l2')
+           AND COALESCE(total_tokens, -1) < ?1",
+        rusqlite::params![total, event.event_ulid],
+    )?;
+    Ok(())
+}
+
+/// Finish write for one nested row. Sets output and reasoning only.
+/// Does not insert a row and does not change `total_tokens`.
+pub fn set_nested_l2_finish_output(
+    store: &GrokOssStore,
+    event_ulid: &str,
+    output_tokens: i64,
+    reasoning_tokens: i64,
+) -> Result<usize, rusqlite::Error> {
+    store.connection().execute(
+        "UPDATE local_usage_event
+         SET output_tokens = ?1, reasoning_tokens = ?2
+         WHERE event_ulid = ?3
+           AND lower(agent_kind) IN ('l2', 'nested_l2')",
+        rusqlite::params![output_tokens, reasoning_tokens, event_ulid],
+    )
+}
+
 /// Insert one local event. Idempotent on `event_ulid`. Fail-open: errors returned.
+///
+/// One nested row. The same L2 `event_ulid` refreshes its total upward and
+/// does not insert again. A zero L2 total is not stored. A different L2 ulid
+/// for the same work is not stored. An L3 already covered by the L2 total
+/// is not stored.
 pub fn insert_local_usage_event(
     store: &GrokOssStore,
     event: &LocalUsageEvent,
 ) -> Result<bool, rusqlite::Error> {
+    let kind = event.agent_kind.to_ascii_lowercase();
+    if (kind == "l2" || kind == "nested_l2") && event.total_tokens.unwrap_or(0) <= 0 {
+        return Ok(false);
+    }
+    if event_ulid_exists(store, &event.event_ulid)? {
+        raise_nested_l2_total_if_higher(store, event)?;
+        return Ok(false);
+    }
+    if nested_spend_already_recorded(store, event)? {
+        return Ok(false);
+    }
+    drop_l3_rows_covered_by_arriving_l2(store, event)?;
     let ingested_at = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
     let changed = store.connection().execute(
         r#"
@@ -161,6 +296,98 @@ INSERT OR IGNORE INTO local_usage_event (
         ],
     )?;
     Ok(changed > 0)
+}
+
+#[cfg(test)]
+mod nested_ulid_spend_tests {
+    use super::*;
+    use crate::grok_oss::open_at;
+    use tempfile::TempDir;
+
+    fn nested_event(ulid: &str, kind: &str, total: i64) -> LocalUsageEvent {
+        LocalUsageEvent {
+            event_ulid: ulid.to_string(),
+            session_id: "sess-nested-once".into(),
+            work_ulid: Some("01ARZ3NDEKTSV4RRFFQ69G5FAY".into()),
+            timestamp_utc: "2026-09-21T00:00:00.000Z".into(),
+            turn_type: "nested".into(),
+            agent_kind: kind.into(),
+            model_id: None,
+            input_tokens: None,
+            output_tokens: None,
+            cached_tokens: None,
+            reasoning_tokens: None,
+            total_tokens: Some(total),
+            cost_usd_ticks: None,
+            cost_missing: true,
+            incomplete: false,
+            sampling_identity: None,
+        }
+    }
+
+    /// Operator: ULID session rows. Nested spend is recorded once.
+    #[test]
+    fn grok_oss_sqlite_ulid_rows_record_nested_l2_and_l3_spend_once() {
+        let l2_ulid = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+        let l3_ulid = "01ARZ3NDEKTSV4RRFFQ69G5FAW";
+        let sum_ulid = "01ARZ3NDEKTSV4RRFFQ69G5FAX";
+        let late_l3_ulid = "01ARZ3NDEKTSV4RRFFQ69G5FAT";
+        let l3_tokens = 85_600;
+        let l2_total = 442_200 + l3_tokens;
+        assert_eq!(l2_ulid.len(), 26, "ULID session rows");
+        assert!(
+            !l2_ulid.contains('-')
+                && !l3_ulid.contains('-')
+                && !sum_ulid.contains('-')
+                && !late_l3_ulid.contains('-'),
+            "ULID session rows are grok-oss ULIDs, not Grok Build UUIDs"
+        );
+
+        let tmp = TempDir::new().expect("temp dir");
+        let store = open_at(&tmp.path().join("grok_oss.db")).expect("grok_oss.db");
+        assert!(
+            insert_local_usage_event(&store, &nested_event(l3_ulid, "l3", l3_tokens)).expect("l3"),
+            "ULID session rows"
+        );
+        assert!(
+            insert_local_usage_event(&store, &nested_event(l2_ulid, "l2", l2_total)).expect("l2"),
+            "Nested spend is recorded once"
+        );
+        assert!(
+            !insert_local_usage_event(&store, &nested_event(late_l3_ulid, "l3", l3_tokens))
+                .expect("l3 after l2"),
+            "Nested spend is recorded once"
+        );
+        assert!(
+            !insert_local_usage_event(&store, &nested_event(sum_ulid, "l2", l2_total + l3_tokens))
+                .expect("third"),
+            "Nested spend is recorded once. must not store a third summed row"
+        );
+        assert!(
+            !insert_local_usage_event(&store, &nested_event(l2_ulid, "l2", l2_total))
+                .expect("again"),
+            "ULID session rows stay INSERT OR IGNORE on event_ulid"
+        );
+
+        let count: i64 = store
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM local_usage_event",
+                rusqlite::params![],
+                |row| row.get(0),
+            )
+            .expect("count");
+        let sum: i64 = store
+            .connection()
+            .query_row(
+                "SELECT COALESCE(SUM(total_tokens), 0) FROM local_usage_event",
+                rusqlite::params![],
+                |row| row.get(0),
+            )
+            .expect("sum");
+        assert_eq!(count, 1, "ULID session rows");
+        assert_eq!(sum, l2_total, "Nested spend is recorded once");
+    }
 }
 
 /// Fail-open insert (logs debug on error). Returns whether a new row was written.
@@ -410,6 +637,144 @@ INSERT INTO reconciliation_run (
     Ok(store.connection().last_insert_rowid())
 }
 
+/// Sum of `input_tokens` and `output_tokens` on complete model-call rows.
+///
+/// `None` when no complete model-call row exists. Never a stand-in 0.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelCallCost {
+    /// Sum of input_tokens + output_tokens on complete model-call rows.
+    /// None when no complete model-call row exists. Never a stand-in 0.
+    pub input_plus_output: Option<i64>,
+    /// event_ulid values skipped because input_tokens or output_tokens is null.
+    pub missing_event_ulids: Vec<String>,
+}
+
+/// Job cost for these sessions. Session ids are deduped. Each `event_ulid` counts once.
+///
+/// Includes `turn_type` `main` and `agent_turn` only. A completion-notice row
+/// (`turn_type` `nested`) is left out.
+pub fn model_call_cost_for_sessions(
+    store: &GrokOssStore,
+    session_ids: &[&str],
+) -> Result<ModelCallCost, rusqlite::Error> {
+    let mut seen_sessions = std::collections::HashSet::new();
+    let mut seen_ulids = std::collections::HashSet::new();
+    let mut sum: i64 = 0;
+    let mut complete: u64 = 0;
+    let mut missing_event_ulids = Vec::new();
+    for session_id in session_ids {
+        if !seen_sessions.insert((*session_id).to_string()) {
+            continue;
+        }
+        for event in local_usage_events_for_session(store, session_id)? {
+            if !seen_ulids.insert(event.event_ulid.clone()) {
+                continue;
+            }
+            if event.turn_type != "main" && event.turn_type != "agent_turn" {
+                continue;
+            }
+            match (event.input_tokens, event.output_tokens) {
+                (Some(input), Some(output)) => {
+                    // Each row is one billed call; this call's input does not contain this call's output.
+                    sum = sum.saturating_add(input).saturating_add(output);
+                    complete += 1;
+                }
+                _ => missing_event_ulids.push(event.event_ulid),
+            }
+        }
+    }
+    Ok(ModelCallCost {
+        input_plus_output: if complete == 0 { None } else { Some(sum) },
+        missing_event_ulids,
+    })
+}
+
+/// Host chrome `0K/0K` after tool work is a broken context reading.
+///
+/// The cell says the context figure was not stored. It is not `0`, and it
+/// does not invent a token count from that chrome. A real input plus output
+/// cost is a separate figure. Subagents overlay paint uses
+/// [`last_input_tokens_from_usage_jsonl`] instead of this sentence.
+pub fn broken_host_context_cell(host_context: &str, did_tool_work: bool) -> Option<&'static str> {
+    if !did_tool_work {
+        return None;
+    }
+    if host_chrome_is_zero_context(host_context) {
+        Some("the context figure was not stored")
+    } else {
+        None
+    }
+}
+
+/// True when host chrome is a zero context window (`0K/0K` or `0/0`).
+///
+/// Trailing `context+`, `context`, `tokens`, and a percent clause are ignored
+/// so `0K/0K tokens (0% context)` and `0K/0K context+` count as zero.
+pub fn host_chrome_is_zero_context(host_context: &str) -> bool {
+    let mut compact: String = host_context.split_whitespace().collect();
+    if let Some(idx) = compact.find('(') {
+        compact.truncate(idx);
+    }
+    let compact = compact
+        .trim_end_matches('+')
+        .trim_end_matches("context")
+        .trim_end_matches("tokens")
+        .trim_end_matches('+')
+        .trim_end_matches('%');
+    compact.eq_ignore_ascii_case("0K/0K") || compact.eq_ignore_ascii_case("0/0")
+}
+
+/// Last `usage.jsonl` row `input_tokens` that is greater than zero.
+///
+/// That integer is the context window (input). Cached tokens are already
+/// inside input. Reasoning tokens are already inside output. Do not add
+/// either again. `total_tokens` is provider context length, not this figure.
+pub fn last_input_tokens_from_usage_jsonl(path: &Path) -> Option<u64> {
+    let (events, _) = parse_usage_jsonl(path);
+    events.into_iter().rev().find_map(|event| {
+        event
+            .input_tokens
+            .and_then(|n| u64::try_from(n).ok())
+            .filter(|n| *n > 0)
+    })
+}
+
+/// Rows in `local_usage_event` for one `session_id`, ordered by `event_ulid`.
+pub fn local_usage_events_for_session(
+    store: &GrokOssStore,
+    session_id: &str,
+) -> Result<Vec<LocalUsageEvent>, rusqlite::Error> {
+    let mut stmt = store.connection().prepare(
+        "SELECT event_ulid, session_id, work_ulid, timestamp_utc, turn_type, agent_kind,
+                model_id, input_tokens, output_tokens, cached_tokens, reasoning_tokens,
+                total_tokens, cost_usd_ticks, cost_missing, incomplete, sampling_identity
+         FROM local_usage_event
+         WHERE session_id = ?1
+         ORDER BY event_ulid",
+    )?;
+    let rows = stmt.query_map([session_id], |row| {
+        Ok(LocalUsageEvent {
+            event_ulid: row.get(0)?,
+            session_id: row.get(1)?,
+            work_ulid: row.get(2)?,
+            timestamp_utc: row.get(3)?,
+            turn_type: row.get(4)?,
+            agent_kind: row.get(5)?,
+            model_id: row.get(6)?,
+            input_tokens: row.get(7)?,
+            output_tokens: row.get(8)?,
+            cached_tokens: row.get(9)?,
+            reasoning_tokens: row.get(10)?,
+            total_tokens: row.get(11)?,
+            cost_usd_ticks: row.get(12)?,
+            cost_missing: row.get::<_, i64>(13)? != 0,
+            incomplete: row.get::<_, i64>(14)? != 0,
+            sampling_identity: row.get(15)?,
+        })
+    })?;
+    rows.collect()
+}
+
 /// Whether `local_usage_event` contains this ulid (spend ingest checks).
 pub fn local_usage_event_exists(
     store: &GrokOssStore,
@@ -520,5 +885,226 @@ mod tests {
             .unwrap()
             .expect("sample");
         assert_eq!(got.payload["api_class_usd"], 1.25);
+    }
+
+    fn model_call_row(
+        event_ulid: &str,
+        session_id: &str,
+        turn_type: &str,
+        agent_kind: &str,
+        input_tokens: Option<i64>,
+        output_tokens: Option<i64>,
+        cached_tokens: Option<i64>,
+        reasoning_tokens: Option<i64>,
+        total_tokens: Option<i64>,
+        incomplete: bool,
+    ) -> LocalUsageEvent {
+        LocalUsageEvent {
+            event_ulid: event_ulid.to_string(),
+            session_id: session_id.to_string(),
+            work_ulid: None,
+            timestamp_utc: "2026-10-12T00:00:00.000Z".into(),
+            turn_type: turn_type.to_string(),
+            agent_kind: agent_kind.to_string(),
+            model_id: None,
+            input_tokens,
+            output_tokens,
+            cached_tokens,
+            reasoning_tokens,
+            total_tokens,
+            cost_usd_ticks: None,
+            cost_missing: input_tokens.is_none() || output_tokens.is_none(),
+            incomplete,
+            sampling_identity: None,
+        }
+    }
+
+    #[test]
+    fn job_cost_is_input_plus_output_not_the_small_output_alone() {
+        let parent = model_call_row(
+            "01PARENTCALL00000000000001",
+            "parent-sess",
+            "agent_turn",
+            "general-purpose",
+            Some(183_190),
+            Some(292),
+            Some(179_968),
+            Some(289),
+            Some(183_486),
+            false,
+        );
+        let child = model_call_row(
+            "01CHILDCALL000000000000001",
+            "child-sess",
+            "agent_turn",
+            "general-purpose",
+            Some(1_000),
+            Some(40),
+            Some(10),
+            Some(30),
+            Some(50_000),
+            false,
+        );
+        let nested = model_call_row(
+            "01NESTEDL2ROW0000000000001",
+            "parent-sess",
+            "nested",
+            "l2",
+            None,
+            Some(10_498),
+            None,
+            Some(4_000),
+            Some(181_000),
+            false,
+        );
+        let missing = model_call_row(
+            "01MISSINGCALL0000000000001",
+            "child-sess",
+            "agent_turn",
+            "general-purpose",
+            None,
+            None,
+            None,
+            None,
+            None,
+            true,
+        );
+
+        let tmp = TempDir::new().unwrap();
+        let store = open_at(&tmp.path().join("grok_oss.db")).unwrap();
+        assert!(insert_local_usage_event(&store, &parent).unwrap());
+        assert!(insert_local_usage_event(&store, &child).unwrap());
+        assert!(insert_local_usage_event(&store, &nested).unwrap());
+        assert!(insert_local_usage_event(&store, &missing).unwrap());
+
+        let cost =
+            model_call_cost_for_sessions(&store, &["parent-sess", "child-sess", "parent-sess"])
+                .unwrap();
+        let got = cost.input_plus_output;
+        assert!(
+            got == Some(184_522),
+            "only-output is not the cost: got {got:?}, expected Some(184522); 332 or 292 is not 184522"
+        );
+        for forbidden in [
+            Some(292_i64),
+            Some(332),
+            Some(10_498),
+            Some(10_498 + 40),
+            Some(184_522 + 289 + 30),
+            Some(184_522 + 179_968 + 10),
+            Some(183_486),
+            Some(181_000),
+            Some(50_000),
+            Some(0),
+        ] {
+            assert_ne!(got, forbidden, "cost must not be {forbidden:?}");
+        }
+        assert_eq!(
+            cost.missing_event_ulids,
+            vec!["01MISSINGCALL0000000000001".to_string()]
+        );
+
+        let nested_only = TempDir::new().unwrap();
+        let nested_store = open_at(&nested_only.path().join("grok_oss.db")).unwrap();
+        assert!(insert_local_usage_event(&nested_store, &nested).unwrap());
+        let excluded = model_call_cost_for_sessions(&nested_store, &["parent-sess"]).unwrap();
+        assert_eq!(excluded.input_plus_output, None);
+        assert_ne!(excluded.input_plus_output, Some(10_498));
+        assert_ne!(excluded.input_plus_output, Some(0));
+    }
+
+    /// Input and output are disjoint. Reasoning is absent on this row, so it
+    /// is not a third addend. Cache reads stay inside input. Provider
+    /// `total_tokens` is context length, not the cost. Output alone is not
+    /// the cost. Broken host chrome `0K/0K` after tool work is not cost 0.
+    #[test]
+    fn large_input_180000_and_output_4000_cost_is_184000_not_4000() {
+        let row = model_call_row(
+            "01LARGEINPUTSMALL000000001",
+            "job-sess",
+            "agent_turn",
+            "general-purpose",
+            Some(180_000),
+            Some(4_000),
+            Some(12_000),
+            None,
+            Some(180_000),
+            false,
+        );
+        let tmp = TempDir::new().unwrap();
+        let store = open_at(&tmp.path().join("grok_oss.db")).unwrap();
+        assert!(insert_local_usage_event(&store, &row).unwrap());
+        let cost = model_call_cost_for_sessions(&store, &["job-sess"]).unwrap();
+        let got = cost.input_plus_output;
+        assert_ne!(
+            got,
+            Some(4_000),
+            "output alone is not the cost of input 180000 and output 4000, got {got:?}"
+        );
+        assert_eq!(
+            got,
+            Some(184_000),
+            "input 180000 + output 4000 = 184000 when those fields are disjoint, got {got:?}"
+        );
+        assert_ne!(got, Some(180_000), "context length is not the cost");
+        assert_ne!(
+            got,
+            Some(184_000 + 12_000),
+            "cached_tokens is already inside input_tokens"
+        );
+        assert_ne!(got, Some(0));
+
+        let bare = TempDir::new().unwrap();
+        let bare_store = open_at(&bare.path().join("grok_oss.db")).unwrap();
+        let unread = model_call_cost_for_sessions(&bare_store, &["did-tool-work"]).unwrap();
+        assert_ne!(unread.input_plus_output, Some(0));
+        assert!(unread.input_plus_output.is_none());
+
+        let cell = broken_host_context_cell("0K/0K", true).expect("sentence");
+        assert_eq!(cell, "the context figure was not stored");
+        assert_ne!(cell, "0");
+        assert!(!cell.contains("not stored yet"), "{cell}");
+        assert!(!cell.contains("not accepted"), "{cell}");
+        assert!(!cell.contains("not_fetched"), "{cell}");
+        assert!(broken_host_context_cell("168K/200K", true).is_none());
+        assert!(broken_host_context_cell("0K/0K", false).is_none());
+    }
+
+    /// Last usage.jsonl input_tokens is the context integer. A later zero
+    /// row does not hide an earlier real input. Cached tokens stay inside
+    /// input. total_tokens is not this figure.
+    #[test]
+    fn last_input_tokens_from_usage_jsonl_skips_zero_and_uses_input() {
+        let tmp = TempDir::new().unwrap();
+        let usage = tmp.path().join("usage.jsonl");
+        std::fs::write(
+            &usage,
+            concat!(
+                r#"{"schema_version":1,"event_ulid":"01FIRSTINPUT0000000000001","timestamp":"2026-10-13T00:00:00.000Z","turn_type":"agent_turn","agent_kind":"general-purpose","session_id":"child-sess","input_tokens":80000,"output_tokens":10,"cached_tokens":12000,"reasoning_tokens":5,"total_tokens":80000,"cost_missing":false,"incomplete":false}"#,
+                "\n",
+                r#"{"schema_version":1,"event_ulid":"01SECONDINPUT000000000001","timestamp":"2026-10-13T00:01:00.000Z","turn_type":"agent_turn","agent_kind":"general-purpose","session_id":"child-sess","input_tokens":152000,"output_tokens":400,"cached_tokens":20000,"reasoning_tokens":80,"total_tokens":152000,"cost_missing":false,"incomplete":false}"#,
+                "\n",
+                r#"{"schema_version":1,"event_ulid":"01ZEROINPUT00000000000001","timestamp":"2026-10-13T00:02:00.000Z","turn_type":"agent_turn","agent_kind":"general-purpose","session_id":"child-sess","input_tokens":0,"output_tokens":0,"total_tokens":0,"cost_missing":false,"incomplete":false}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+        let got = last_input_tokens_from_usage_jsonl(&usage);
+        assert_eq!(got, Some(152_000));
+        assert_ne!(got, Some(0));
+        assert_ne!(
+            got,
+            Some(152_000 + 20_000),
+            "cached_tokens is already inside input"
+        );
+        assert_ne!(
+            got,
+            Some(80_000),
+            "an earlier row is not the last real input"
+        );
+        assert!(host_chrome_is_zero_context("0K/0K"));
+        assert!(host_chrome_is_zero_context("0K/0K context+"));
+        assert!(host_chrome_is_zero_context("0K/0K tokens (0% context)"));
+        assert!(!host_chrome_is_zero_context("152K/200K context+"));
     }
 }

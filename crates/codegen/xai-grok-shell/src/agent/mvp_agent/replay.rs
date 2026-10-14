@@ -1,24 +1,23 @@
-//! Forwards recorded session updates back to a loading client, fitting
-//! completion records written before the size limit existed.
+//! Forwards recorded session updates back to a loading client, fitting completion records written before the size limit existed.
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
 
 use agent_client_protocol as acp;
+use tracing::Instrument as _;
 use xai_grok_paths::AbsPathBuf;
 
 use super::{MvpAgent, mark_as_replay, stamp_meta_value};
-use crate::session::storage::ReplayToolCollapser;
+use crate::session::storage::{ReplayToolCollapser, UnfinishedSubagent};
 
 /// Max in-flight `forward_with_completion` receivers during cold resume.
-/// Unbounded enqueue + sync pager apply peaks the pager at multi-GB on huge
-/// sessions; this keeps ACP apply roughly windowed.
+/// Unbounded enqueue with sync pager apply peaks the pager at multi-GB on huge sessions; this keeps ACP apply roughly windowed.
 pub(super) const REPLAY_COMPLETION_WINDOW: usize = 64;
 
 type ReplayCompletionRx = tokio::sync::oneshot::Receiver<xai_acp_lib::AcpResult<()>>;
 
-/// Sliding window of replay completion receivers. Awaits the oldest when full
-/// so at most [`REPLAY_COMPLETION_WINDOW`] notifications sit un-acked.
+/// Sliding window of replay completion receivers.
+/// Awaits the oldest when full so at most [`REPLAY_COMPLETION_WINDOW`] notifications sit un-acked.
 pub(super) struct ReplayCompletionDrain {
     pending: VecDeque<ReplayCompletionRx>,
     forwarded: usize,
@@ -54,43 +53,8 @@ impl ReplayCompletionDrain {
 }
 
 impl MvpAgent {
-    /// When `updates.jsonl` has no Operator/Agent UI chunks, paint
-    /// `chat_history.jsonl` so last-session resume is not chrome-only.
-    pub(super) async fn forward_chat_history_replay(
-        &self,
-        session_id: &acp::SessionId,
-        items: &[crate::sampling::ConversationItem],
-        persist_data: Option<&serde_json::Value>,
-        target_client_id: Option<&serde_json::Value>,
-    ) {
-        let lines = crate::session::storage::chat_history_replay_lines(session_id.0.as_ref(), items);
-        if lines.is_empty() {
-            return;
-        }
-        tracing::info!(
-            session_id = %session_id.0,
-            lines = lines.len(),
-            "replay: updates.jsonl had no user/agent chunks; painting chat_history.jsonl"
-        );
-        let mut drain = ReplayCompletionDrain::new();
-        let mut collapser = ReplayToolCollapser::new();
-        for line in &lines {
-            if let Some(rx) = self.forward_raw_replay_line(
-                line,
-                persist_data,
-                target_client_id,
-                true,
-                &mut collapser,
-            ) {
-                drain.push(rx).await;
-            }
-        }
-        drain.drain_all().await;
-    }
-
-    /// Records written before completions were bounded can still be too long
-    /// for a client to read. `None` drops one that cannot be shrunk, which
-    /// costs a completion event but keeps the connection.
+    /// Records written before completions were bounded can still be too long for a client to read.
+    /// `None` drops one that cannot be shrunk, which costs a completion event but keeps the connection.
     fn fitted_replay_params(
         params: Box<serde_json::value::RawValue>,
     ) -> Option<Box<serde_json::value::RawValue>> {
@@ -109,18 +73,9 @@ impl MvpAgent {
         }
     }
 
-    /// Forward one raw JSONL replay line. Returns the completion receiver when
-    /// a notification was actually sent.
-    ///
-    /// Dispatches by on-disk method name:
-    /// - ACP updates (`"session/update"`) → typed `SessionNotification` for correct
-    ///   TUI dispatch (direct dispatch preserves Rust types, not method strings).
-    /// - xAI updates (`"_x.ai/session/update"`) → `ExtNotification`.
-    ///
-    /// When `mark_replay` is true, the notification is tagged with
-    /// `_meta.isReplay: true` so the client knows it's historical data.
-    /// Cursor-based reconnects set this to false for events after the cursor
-    /// so the client processes them as live updates.
+    /// Forward one raw JSONL replay line. Dispatches by on-disk method name: ACP updates (`"session/update"`) become a typed `SessionNotification` for correct TUI dispatch.
+    /// Direct dispatch preserves Rust types, not method strings. xAI updates (`"_x.ai/session/update"`) become an `ExtNotification`.
+    /// When `mark_replay` is true, the notification is tagged with `_meta.isReplay: true` so the client knows it's historical data. Cursor-based reconnects set this to false for events after the cursor so the client processes them as live updates.
     pub(super) fn forward_raw_replay_line(
         &self,
         line: &str,
@@ -148,10 +103,9 @@ impl MvpAgent {
         let is_xai = method == "_x.ai/session/update";
 
         if is_xai {
-            // The fast-path forwards raw params with no `_meta` round-trip, so it
-            // can stamp nothing. When a `target_client_id` is present we MUST take
-            // the injection path instead, otherwise the replay would lose the
-            // target and the leader would broadcast it to every subscriber.
+            // The fast-path forwards raw params with no `_meta` round-trip, so it can stamp nothing
+            // When a `target_client_id` is present we MUST take the injection path instead
+            // Otherwise the replay would lose the target and the leader would broadcast it to every subscriber
             if target_client_id.is_none() && !mark_replay {
                 if let Ok(owned) =
                     serde_json::value::RawValue::from_string(raw_params.get().to_owned())
@@ -174,8 +128,7 @@ impl MvpAgent {
             if let Some(obj) = params.as_object_mut() {
                 let meta = obj.entry("_meta").or_insert_with(|| serde_json::json!({}));
                 if let Some(m) = meta.as_object_mut() {
-                    // `isReplay` only applies to historical replay events, not the
-                    // post-cursor live deltas that reach this path when a target is set.
+                    // `isReplay` only applies to historical replay events, not the post-cursor live deltas that reach this path when a target is set
                     if mark_replay {
                         m.insert("isReplay".to_string(), serde_json::json!(true));
                     }
@@ -218,9 +171,8 @@ impl MvpAgent {
         if mark_replay {
             mark_as_replay(&mut notification.meta, persist_data);
         }
-        // Stamp the leader unicast target regardless of mark_replay so the
-        // leader routes both historical and post-cursor live deltas only to
-        // the loading client.
+        // Stamp the leader unicast target regardless of mark_replay
+        // The leader then routes both historical and post-cursor live deltas only to the loading client
         if let Some(tid) = target_client_id {
             stamp_meta_value(&mut notification.meta, "x.ai/leaderClientId", tid);
         }
@@ -228,7 +180,7 @@ impl MvpAgent {
     }
 
     /// Replay updates from disk and drain completions.
-    /// Returns `(initial_total_tokens, end_offset, unfinished_subagents, has_user_or_agent_chunk)`.
+    /// Returns `(initial_total_tokens, end_offset, unfinished_subagents)`.
     pub(super) async fn replay_session_updates(
         &self,
         session_id: &acp::SessionId,
@@ -237,45 +189,80 @@ impl MvpAgent {
         persist_data: Option<&serde_json::Value>,
         target_client_id: Option<&serde_json::Value>,
         cursor: Option<&str>,
-    ) -> Result<(u64, u64, Vec<(String, String)>, bool), acp::Error> {
+        skip_local_background_tasks: bool,
+    ) -> Result<(u64, u64, Vec<UnfinishedSubagent>), acp::Error> {
         let mut replay_timer = crate::instrumentation_timer!("session.load_session_replay");
         replay_timer.with_field("session_id", session_id.0.as_ref());
         replay_timer.with_field("cwd", cwd.as_str());
+        replay_timer.with_subphase(xai_grok_telemetry::startup::Subphase::SessionReplay);
+        let subphase = replay_timer.subphase_span();
+        let active = subphase.is_some();
+        let replay_parent = subphase.unwrap_or_else(tracing::Span::current);
+        macro_rules! replay_step_timer {
+            ($startup:literal, $neutral:literal) => {
+                if active {
+                    crate::instrumentation_timer!($startup)
+                } else {
+                    crate::instrumentation_timer!($neutral)
+                }
+            };
+        }
+        macro_rules! replay_step_span {
+            ($startup:literal, $neutral:literal $(, $field:ident = $value:expr)?) => {
+                if active {
+                    tracing::info_span!(parent: &replay_parent, $startup $(, $field = $value)?)
+                } else {
+                    tracing::info_span!(parent: &replay_parent, $neutral $(, $field = $value)?)
+                }
+            };
+        }
 
         let Some(updates_path) = updates_file_path.as_ref() else {
             tracing::warn!(session_id = %session_id.0, "replay: no updates file path");
-            return Ok((0, 0, Vec::new(), false));
+            return Ok((0, 0, Vec::new()));
         };
 
         let file_size = std::fs::metadata(updates_path)
             .map(|m| m.len())
             .unwrap_or(0);
 
-        // Offset plan, then one line at a time. Do not `read_to_string` the
-        // whole file: last-session resume of a gigabyte `updates.jsonl`
-        // painted chrome for minutes with an empty transcript.
-        let plan = {
-            let _timer = crate::instrumentation_timer!("session.replay.read_and_filter");
-            match crate::session::storage::plan_replay_file(updates_path, cursor) {
-                Ok(p) => p,
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                    return Ok((0, 0, Vec::new(), false));
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        session_id = %session_id.0,
-                        error = %e,
-                        "replay: failed to plan updates.jsonl; continuing without UI replay"
-                    );
-                    return Ok((0, 0, Vec::new(), false));
-                }
+        // Inline blocking I/O: spawn_blocking has multi-second latency on LocalSet.
+        let file_contents = {
+            let _timer = replay_step_timer!(
+                "startup.session_replay.read_file",
+                "session.replay.read_file"
+            );
+            let _span = replay_step_span!(
+                "startup.session_replay.read_file",
+                "session.replay.read_file",
+                bytes = file_size
+            )
+            .entered();
+            match std::fs::read_to_string(updates_path) {
+                Ok(s) if !s.is_empty() => s,
+                _ => return Ok((0, 0, Vec::new())),
             }
         };
-        let unfinished_subagents = plan.unfinished_subagents.clone();
+        let end_offset = file_contents.len() as u64;
+
+        let mut prepared = {
+            let _timer = replay_step_timer!(
+                "startup.session_replay.read_and_filter",
+                "session.replay.read_and_filter"
+            );
+            let _span = replay_step_span!(
+                "startup.session_replay.read_and_filter",
+                "session.replay.read_and_filter",
+                bytes = end_offset
+            )
+            .entered();
+            crate::session::storage::prepare_replay_lines(&file_contents, cursor)
+        };
+        let unfinished_subagents = std::mem::take(&mut prepared.unfinished_subagents);
 
         if cursor.is_some() {
-            let sending = plan.lines.len();
-            if plan.mark_replay {
+            let sending = prepared.lines.len();
+            if prepared.mark_replay {
                 tracing::warn!(
                     session_id = %session_id.0,
                     "replay: cursor not found, falling back to full replay"
@@ -283,67 +270,53 @@ impl MvpAgent {
             } else {
                 tracing::info!(
                     session_id = %session_id.0,
-                    skipped = plan.total_live.saturating_sub(sending),
+                    skipped = prepared.total_live - sending,
                     remaining = sending,
                     "replay: cursor found, skipping events"
                 );
             }
         }
 
-        let last_tokens = plan.last_tokens;
-        let mark_replay = plan.mark_replay;
-        let end_offset = plan.end_offset;
+        let last_tokens = prepared.last_tokens;
+        let mark_replay = prepared.mark_replay;
 
-        if let Some(max_seq) = plan.max_event_seq {
+        if let Some(max_seq) = prepared.max_event_seq {
             crate::util::event_id::ensure_event_counter_at_least(max_seq + 1);
         }
 
-        let updates_count = plan.lines.len() as u64;
+        let lines_to_send = prepared.lines;
+        let updates_count = lines_to_send.len() as u64;
         let mut drain = ReplayCompletionDrain::new();
-        let mut painted_ua = false;
 
         {
-            let _timer = crate::instrumentation_timer!("session.replay.forward_updates");
-            let mut collapser = ReplayToolCollapser::new();
-            match std::fs::File::open(updates_path) {
-                Ok(mut file) => {
-                    let mut buf = String::new();
-                    for loc in &plan.lines {
-                        if crate::session::storage::read_replay_line_at(&mut file, *loc, &mut buf)
-                            .is_err()
-                        {
-                            break;
-                        }
-                        let line = buf.trim();
-                        if line.is_empty() {
-                            continue;
-                        }
-                        if line.contains("user_message_chunk") || line.contains("agent_message_chunk")
-                        {
-                            painted_ua = true;
-                        }
-                        if let Some(rx) = self.forward_raw_replay_line(
-                            line,
-                            persist_data,
-                            target_client_id,
-                            mark_replay,
-                            &mut collapser,
-                        ) {
-                            drain.push(rx).await;
-                        }
+            let _timer = replay_step_timer!(
+                "startup.session_replay.forward_updates",
+                "session.replay.forward_updates"
+            );
+            let forward_span = replay_step_span!(
+                "startup.session_replay.forward_updates",
+                "session.replay.forward_updates",
+                updates = updates_count
+            );
+            async {
+                let mut collapser = ReplayToolCollapser::new();
+                for line in &lines_to_send {
+                    if skip_local_background_tasks && line_is_background_tasks_update(line) {
+                        continue;
+                    }
+                    if let Some(rx) = self.forward_raw_replay_line(
+                        line,
+                        persist_data,
+                        target_client_id,
+                        mark_replay,
+                        &mut collapser,
+                    ) {
+                        drain.push(rx).await;
                     }
                 }
-                Err(e) => {
-                    tracing::warn!(
-                        session_id = %session_id.0,
-                        error = %e,
-                        "replay: failed to open updates.jsonl for pass 2"
-                    );
-                }
             }
-            // Do not flush collapser leftovers: synthesizing a ToolCall here
-            // would drop the persisted `_meta.eventId` and duplicate on
-            // incremental reconnect. Child stream EOF flush is separate.
+            .instrument(forward_span)
+            .await;
         }
 
         if updates_count > 0 && drain.forwarded() == 0 {
@@ -355,8 +328,15 @@ impl MvpAgent {
             );
         }
         {
-            let _timer = crate::instrumentation_timer!("session.replay.drain_completions");
-            drain.drain_all().await;
+            let _timer = replay_step_timer!(
+                "startup.session_replay.drain_completions",
+                "session.replay.drain_completions"
+            );
+            let drain_span = replay_step_span!(
+                "startup.session_replay.drain_completions",
+                "session.replay.drain_completions"
+            );
+            drain.drain_all().instrument(drain_span).await;
         }
 
         tracing::info!(
@@ -369,20 +349,12 @@ impl MvpAgent {
 
         replay_timer.with_field("updates_count", updates_count);
 
-        Ok((last_tokens, end_offset, unfinished_subagents, painted_ua))
+        Ok((last_tokens, end_offset, unfinished_subagents))
     }
 
-    /// Enqueue replay notifications for updates appended after `from_offset`.
-    /// Returns completion receivers; callers open the gate then drain.
-    /// Intentionally sync (not async) so no prompt-task progress before gate flip.
-    ///
-    /// The delta tail is typically small (appends during the just-finished
-    /// replay). Windowing would require `.await` here and would delay the gate
-    /// flip; the caller drains the returned receivers before `LoadSessionResponse`.
-    ///
-    /// When `mark_replay` is false (cursor-based reconnect), delta events are
-    /// forwarded without `_meta.isReplay` since they are truly new events the
-    /// client has not seen.
+    /// Enqueue replay notifications for updates appended after `from_offset`. Intentionally sync (not async) so no prompt task can make progress before the gate flips.
+    /// The delta tail is typically small (appends during the just-finished replay). Windowing would require `.await` here and would delay the gate flip; the caller drains the returned receivers before `LoadSessionResponse`.
+    /// When `mark_replay` is false (cursor-based reconnect), delta events are forwarded without `_meta.isReplay`. They are truly new events the client has not seen.
     pub(super) fn replay_session_updates_from_offset_enqueue(
         &self,
         session_id: &acp::SessionId,
@@ -391,6 +363,7 @@ impl MvpAgent {
         persist_data: Option<&serde_json::Value>,
         target_client_id: Option<&serde_json::Value>,
         mark_replay: bool,
+        skip_local_background_tasks: bool,
     ) -> Vec<ReplayCompletionRx> {
         use std::io::{Read, Seek, SeekFrom};
 
@@ -416,6 +389,9 @@ impl MvpAgent {
         let mut completions = Vec::with_capacity(live_lines.len());
         let mut collapser = ReplayToolCollapser::new();
         for line in &live_lines {
+            if skip_local_background_tasks && line_is_background_tasks_update(line) {
+                continue;
+            }
             if let Some(rx) = self.forward_raw_replay_line(
                 line,
                 persist_data,
@@ -447,6 +423,12 @@ impl MvpAgent {
 
         completions
     }
+}
+
+/// True when a persisted updates.jsonl line is a local `background_tasks` snapshot.
+/// Gateway-backed attaches skip these so a stale empty list cannot last-wins-clear remote Running.
+fn line_is_background_tasks_update(line: &str) -> bool {
+    line.contains("\"sessionUpdate\":\"background_tasks\"")
 }
 
 #[cfg(test)]

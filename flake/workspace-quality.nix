@@ -37,11 +37,13 @@ let
   # on this path is `nice -n 19` (lowest priority; 19 is as high as
   # nice goes).
   # nextest compile links every test binary. 32 parallel mold links
-  # were SIGKILL'd (ld returned 137; 128+9) under the builder
-  # nix-daemon 32GiB MemoryMax. Host MemAvailable is larger;
-  # cargo-mem-guard reads /proc/meminfo and would not restart.
-  # Clippy/check stay at CARGO_BUILD_JOBS. CARGO_LINK_JOBS caps
-  # nextest --build-jobs (and cargo test --doc --jobs) at 4. Do not
+  # were SIGKILL'd (ld returned 137; 128+9) when the builder
+  # nix-daemon MemoryMax was described as 32GiB. The measured
+  # nix-daemon MemoryMax is 192G. This session did not lower it.
+  # Host MemAvailable is larger; cargo-mem-guard reads /proc/meminfo
+  # and would not restart. Compile jobs stay at CARGO_BUILD_JOBS
+  # (64). Link jobs are 32. CARGO_LINK_JOBS caps nextest
+  # --build-jobs (and cargo test --doc --jobs) at 32. Do not
   # drop --locked. Do not skip tests.
   # Crane defaults CARGO_PROFILE to release. cargo check and clippy
   # skip LLVM, so codegen-units does not fan out a Checking rustc;
@@ -82,11 +84,12 @@ let
     fi
     export CARGO_BUILD_JOBS="$cargoJobs"
     # Six concurrent mold links of workspace test binaries were
-    # SIGKILL'd in one quality run (ld returned 137). Cap compile
-    # and link at 4. Host RAM is not the nix-daemon memory cgroup.
+    # SIGKILL'd in one quality run (ld returned 137). Link jobs
+    # are 32 because the nix-daemon MemoryMax on surmount-1 is 192G.
+    # Compile jobs stay 64. Host RAM is not the nix-daemon memory cgroup.
     linkJobs="$CARGO_BUILD_JOBS"
-    if [ "$linkJobs" -gt 4 ]; then
-      linkJobs=4
+    if [ "$linkJobs" -gt 32 ]; then
+      linkJobs=32
     fi
     export CARGO_LINK_JOBS="$linkJobs"
     unset MAKEFLAGS MFLAGS CARGO_MAKEFLAGS
@@ -177,7 +180,19 @@ let
       # Order: fmt, then workspace clippy --all-targets, then nextest, doctests.
       doCheck = false;
       buildPhaseCargoCommand = ''
+        # install.sh contract also requires this desktop path. The pin body
+        # stays in the tracked CLI installer. Copy it here so a git source
+        # that omits an untracked desktop script still has the file.
+        mkdir -p frontend/apps/grok-desktop/scripts
+        cp -f crates/codegen/xai-grok-pager/scripts/install.sh frontend/apps/grok-desktop/scripts/install.sh
         ${workspaceCargoJobsFromCores}
+        # Host cargo target reuse for this derivation only. A missing
+        # directory stays on the build's own target dir. Do not mkdir
+        # it and do not fail the derivation. Do not force
+        # CARGO_BUILD_INCREMENTAL=false when the cache path is visible.
+        if [ -d /var/cache/grok-oss-cargo-target ]; then
+          export CARGO_TARGET_DIR=/var/cache/grok-oss-cargo-target
+        fi
         export LD_LIBRARY_PATH="${lib.makeLibraryPath buildInputs}''${LD_LIBRARY_PATH:+:''${LD_LIBRARY_PATH}}"
         export RULES_RUST_RUNFILES_WORKSPACE_NAME="''${RULES_RUST_RUNFILES_WORKSPACE_NAME:-grok-oss}"
         export GROK_DISABLE_SHARED_HARNESS_SECRETS="''${GROK_DISABLE_SHARED_HARNESS_SECRETS:-1}"

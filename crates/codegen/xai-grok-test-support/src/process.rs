@@ -1,8 +1,5 @@
-//! Shared subprocess lifecycle ownership for grok-build test harnesses.
-//!
-//! [`TestProcess`] is the Tokio-child owner used by ACP, leader, and headless
-//! harnesses. [`TestProcessTree`] is the narrower process-tree guard used when
-//! a dependency (notably `portable-pty`) owns the concrete child handle.
+//! [`TestProcess`] is the Tokio-child owner used by ACP, leader, and headless harnesses.
+//! [`TestProcessTree`] is the narrower process-tree guard used when a dependency (notably `portable-pty`) owns the concrete child handle.
 
 use std::ffi::{OsStr, OsString};
 use std::fmt::Write as _;
@@ -51,6 +48,7 @@ pub struct TestProcessConfig {
     stdin: TestStdin,
     stdout: TestOutput,
     stderr: TestOutput,
+    keep_stdout: bool,
     tail_bytes: usize,
     grace_period: Duration,
     kill_wait: Duration,
@@ -75,6 +73,11 @@ impl TestProcessConfig {
 
     pub fn stdout(mut self, policy: TestOutput) -> Self {
         self.stdout = policy;
+        self
+    }
+
+    pub fn keep_stdout(mut self) -> Self {
+        self.keep_stdout = true;
         self
     }
 
@@ -130,6 +133,7 @@ impl Default for TestProcessConfig {
             grace_period: DEFAULT_GRACE_PERIOD,
             kill_wait: DEFAULT_KILL_WAIT,
             env: Vec::new(),
+            keep_stdout: false,
         }
     }
 }
@@ -184,8 +188,13 @@ impl TailState {
         self.bytes_seen = self.bytes_seen.saturating_add(bytes.len() as u64);
         if bytes.len() >= self.capacity {
             self.bytes.clear();
-            self.bytes
-                .extend_from_slice(&bytes[bytes.len() - self.capacity..]);
+            self.bytes.extend_from_slice(
+                bytes
+                    .len()
+                    .checked_sub(self.capacity)
+                    .and_then(|start| bytes.get(start..))
+                    .unwrap_or(bytes),
+            );
             self.truncated = true;
             return;
         }
@@ -239,8 +248,7 @@ impl OutputTail {
 
 macro_rules! captured_reader {
     ($name:ident, $inner:ty) => {
-        /// A child-output reader that updates its owning [`TestProcess`]'s
-        /// bounded diagnostic tail as the caller consumes bytes.
+        /// A child-output reader that updates its owning [`TestProcess`]'s bounded diagnostic tail as the caller consumes bytes.
         pub struct $name {
             inner: $inner,
             tail: OutputTail,
@@ -256,7 +264,7 @@ macro_rules! captured_reader {
                 let before = buf.filled().len();
                 match Pin::new(&mut this.inner).poll_read(cx, buf) {
                     Poll::Ready(Ok(())) => {
-                        this.tail.append(&buf.filled()[before..]);
+                        this.tail.append(buf.filled().get(before..).unwrap_or(&[]));
                         Poll::Ready(Ok(()))
                     }
                     Poll::Ready(Err(error)) => {
@@ -358,8 +366,7 @@ impl TestProcessTree {
         }
     }
 
-    /// Stop owning the process-group/job handle after the concrete child owner
-    /// has reaped the child and torn down any remaining descendants.
+    /// Stop owning the process-group/job handle after the concrete child owner has reaped the child and torn down any remaining descendants.
     pub fn release(&mut self) {
         self.group = None;
     }
@@ -426,13 +433,9 @@ pub struct TestProcess {
 }
 
 impl TestProcess {
-    /// Spawn from the [`TestSandbox`] baseline with detached, piped stdio and
-    /// test-owned process-tree cleanup.
-    ///
-    /// Unix detachment establishes the child's session/process group before
-    /// exec. Windows preserves `CREATE_NO_WINDOW`; Job attachment uses the
-    /// pre-existing post-spawn API, so very short-lived descendants can escape
-    /// before enrollment and cleanup remains best effort.
+    /// Spawn from the [`TestSandbox`] baseline with detached, piped stdio and test-owned process-tree cleanup. Unix
+    /// detachment establishes the child's session/process group before exec. Job attachment uses the post-spawn API, so very
+    /// short-lived descendants can escape before enrollment and cleanup remains best effort.
     pub fn spawn(
         mut cmd: tokio::process::Command,
         sandbox: &TestSandbox,
@@ -454,9 +457,11 @@ impl TestProcess {
                 TestStdin::Null => Stdio::null(),
                 TestStdin::Piped => Stdio::piped(),
             })
-            .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
+        if !config.keep_stdout {
+            cmd.stdout(Stdio::piped());
+        }
         xai_tty_utils::detach_command(&mut cmd);
 
         let mut group = xai_tty_utils::ProcessGroup::new()?;
@@ -494,18 +499,23 @@ impl TestProcess {
         let stdin = child.stdin.take();
         let stdout_tail = OutputTail::new(config.tail_bytes);
         let stderr_tail = OutputTail::new(config.tail_bytes);
-        let child_stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| io::Error::other("test child stdout pipe missing"))?;
+        let child_stdout = child.stdout.take();
+        if !config.keep_stdout && child_stdout.is_none() {
+            return Err(io::Error::other("test child stdout pipe missing"));
+        }
         let child_stderr = child
             .stderr
             .take()
             .ok_or_else(|| io::Error::other("test child stderr pipe missing"))?;
 
-        let (stdout, stdout_capture) = match config.stdout {
-            TestOutput::Capture => (None, Some(spawn_capture(child_stdout, stdout_tail.clone()))),
-            TestOutput::Piped => (Some(child_stdout), None),
+        let (stdout, stdout_capture) = match child_stdout {
+            None => (None, None),
+            Some(child_stdout) => match config.stdout {
+                TestOutput::Capture => {
+                    (None, Some(spawn_capture(child_stdout, stdout_tail.clone())))
+                }
+                TestOutput::Piped => (Some(child_stdout), None),
+            },
         };
         let (stderr, stderr_capture) = match config.stderr {
             TestOutput::Capture => (None, Some(spawn_capture(child_stderr, stderr_tail.clone()))),
@@ -599,9 +609,9 @@ impl TestProcess {
         }
     }
 
-    /// Poll once and cache the exit status. Unix observes exit without reaping,
-    /// kills any remaining descendants while the PGID is still reserved by the
-    /// zombie leader, and only then consumes the direct child's wait status.
+    /// Poll once and cache the exit status.
+    /// Unix observes exit without reaping and kills any remaining descendants while the PGID is still reserved by the zombie leader.
+    /// Only then does it consume the direct child's wait status.
     pub fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
         if let Some(status) = self.status {
             return Ok(Some(status));
@@ -621,8 +631,7 @@ impl TestProcess {
             let Some(status) = self.child.try_wait()? else {
                 return Ok(None);
             };
-            // Windows process and Job handles stay stable after direct-child
-            // reap, unlike Unix PGIDs, so descendant cleanup can follow here.
+            // Windows process and Job handles stay stable after direct-child reap, unlike Unix PGIDs, so descendant cleanup can follow here
             self.cleanup_descendants_before_reap();
             status
         };
@@ -634,8 +643,8 @@ impl TestProcess {
         self.try_wait().map(|status| status.is_none())
     }
 
-    /// Wait for direct-child exit up to `deadline`. `Ok(None)` means the child
-    /// is still owned and running; no implicit kill occurs.
+    /// Wait for direct-child exit up to `deadline`.
+    /// `Ok(None)` means the child is still owned and running; no implicit kill occurs.
     pub async fn wait_with_deadline(
         &mut self,
         deadline: Duration,
@@ -659,8 +668,7 @@ impl TestProcess {
         }
     }
 
-    /// Request whole-tree graceful termination, then escalate to a hard tree
-    /// kill if the child has not exited within the configured grace period.
+    /// Request whole-tree graceful termination, then escalate to a hard tree kill if the child has not exited within the configured grace period.
     pub async fn close(&mut self) -> io::Result<ExitStatus> {
         if let Some(status) = self.try_wait()? {
             self.finish_capture_tasks().await;
@@ -684,8 +692,7 @@ impl TestProcess {
         self.wait_after_kill().await
     }
 
-    /// Hard-kill the whole tree immediately and wait a bounded time for the
-    /// direct child to be reaped.
+    /// Hard-kill the whole tree immediately and wait a bounded time for the direct child to be reaped.
     pub async fn kill(&mut self) -> io::Result<ExitStatus> {
         if let Some(status) = self.try_wait()? {
             self.finish_capture_tasks().await;
@@ -791,8 +798,7 @@ impl Drop for TestProcess {
             self.termination = Some(TestProcessTermination::DropCleanup);
             let _ = self.tree.kill();
             let _ = self.child.start_kill();
-            // Bound synchronous reaping because async cleanup may not run during
-            // runtime teardown.
+            // Bound synchronous reaping because async cleanup may not run during runtime teardown
             let deadline = std::time::Instant::now() + DROP_REAP_WAIT;
             while std::time::Instant::now() < deadline {
                 #[cfg(unix)]
@@ -839,11 +845,9 @@ fn is_missing_process_error(error: &io::Error) -> bool {
     }
 }
 
-/// Observe an owned Unix child exit without consuming its wait status.
-///
-/// The caller must own the direct child identified by `pid`. `ECHILD` is
-/// returned unchanged when another waiter already consumed the status, so
-/// lifecycle owners can distinguish expected recovery races from liveness.
+/// Observe an owned Unix child exit without consuming its wait status. The caller must own the direct child identified by
+/// `pid`. `ECHILD` is returned unchanged when another waiter already consumed the status, so callers can tell that race
+/// from a live child.
 #[cfg(unix)]
 pub fn process_has_exited_without_reap(pid: u32, label: &str) -> io::Result<bool> {
     if pid == 0 || pid > i32::MAX as u32 {
@@ -887,7 +891,11 @@ where
         loop {
             match reader.read(&mut buffer).await {
                 Ok(0) => break,
-                Ok(read) => tail.append(&buffer[..read]),
+                Ok(read) => {
+                    if let Some(chunk) = buffer.get(..read) {
+                        tail.append(chunk);
+                    }
+                }
                 Err(error) => {
                     tail.record_error(&error);
                     break;
@@ -945,6 +953,49 @@ fn sanitize_output(output: &str, redactions: &[String]) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// The slave is the child's stdout so Rust line-buffers it.
+#[cfg(unix)]
+pub fn open_pty_stdout() -> io::Result<(std::fs::File, std::process::Stdio)> {
+    let mut master_fd = -1;
+    let mut slave_fd = -1;
+    // SAFETY: openpty writes the two fds; null termios and winsize take the defaults.
+    let rc = unsafe {
+        libc::openpty(
+            &mut master_fd,
+            &mut slave_fd,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    };
+    if rc != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let size = libc::winsize {
+        ws_row: 24,
+        ws_col: 200,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    // SAFETY: master_fd is the pty master openpty just returned.
+    unsafe {
+        libc::ioctl(master_fd, libc::TIOCSWINSZ, &size);
+    }
+    use std::os::unix::io::FromRawFd as _;
+    // SAFETY: both fds are owned by this function and not used again.
+    let master = unsafe { std::fs::File::from_raw_fd(master_fd) };
+    let slave = unsafe { std::process::Stdio::from(std::fs::File::from_raw_fd(slave_fd)) };
+    Ok((master, slave))
+}
+
+#[cfg(not(unix))]
+pub fn open_pty_stdout() -> io::Result<(std::fs::File, std::process::Stdio)> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "line-buffered stdout needs a unix pty",
+    ))
 }
 
 #[cfg(test)]
@@ -1085,18 +1136,27 @@ mod tests {
     async fn graceful_termination_exits_without_escalation() {
         let sandbox = TestSandbox::new();
         let ready_file = sandbox.temp_dir().join("term-ready.pid");
+        // Block in a shell builtin (`read`) with an open stdin pipe rather than `sleep` in a loop
+        // Process-group SIGTERM races with an external sleep child under dash
+        // The shell can exit signalled (non-success) instead of running the trap's `exit 0`
         let mut process = TestProcess::spawn(
-            shell("trap 'exit 0' TERM; echo $$ > \"$READY_FILE\"; while :; do sleep 1; done"),
+            shell("trap 'exit 0' TERM; echo $$ > \"$READY_FILE\"; read -r _ || true"),
             &sandbox,
             TestProcessConfig::new()
                 .label("handle-term")
+                .stdin(TestStdin::Piped)
                 .env("READY_FILE", &ready_file),
         )
         .expect("spawn TERM-handling child");
         wait_for_pid_file(&ready_file).await;
 
         let status = process.close().await.expect("graceful close");
-        assert!(status.success());
+        assert!(
+            status.success(),
+            "graceful close should exit cleanly: status={status:?} reason={:?} diag={}",
+            process.termination_reason(),
+            process.diagnostic_summary()
+        );
         assert_eq!(
             process.termination_reason(),
             Some(TestProcessTermination::GracefulTerminate)

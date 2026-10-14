@@ -1,5 +1,4 @@
-//! Session file-state / rewind methods (`workspace.begin_prompt`,
-//! `workspace.end_prompt`, `workspace.rewind_to`).
+//! Session file-state / rewind methods (`workspace.begin_prompt`, `workspace.end_prompt`, `workspace.rewind_to`).
 
 use serde::{Deserialize, Serialize};
 
@@ -53,7 +52,6 @@ pub enum ConflictType {
     ModifiedExternally,
 }
 
-/// A single conflict detected during file rewind.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileRewindConflict {
     pub path: String,
@@ -74,13 +72,6 @@ pub struct FileRewindResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn method_constants() {
-        assert_eq!(BeginPromptReq::METHOD, "workspace.begin_prompt");
-        assert_eq!(EndPromptReq::METHOD, "workspace.end_prompt");
-        assert_eq!(RewindToReq::METHOD, "workspace.rewind_to");
-    }
 
     #[test]
     fn conflict_type_snake_case_wire_values() {

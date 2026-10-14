@@ -11,7 +11,7 @@ When plan mode is active, the agent:
 1. Reads and searches the codebase to understand existing patterns and architecture
 2. Designs an implementation approach and writes it to the plan file
 3. May ask questions in the plan file or in chat. This fork prefers **freeform** questions. The questionnaire modal (`ask_user_question`) is `--legacy` only.
-4. Calls `exit_plan_mode` to **present** the plan for your review. Present is not Approve. Always-approve permission mode does **not** click Approve for you. Soft present docks a real right-side pane. It is not a centered overlay that dims the transcript.
+4. Calls `exit_plan_mode` to **present** the plan for your review. Present is not Approve. Always-approve permission mode does **not** click Approve for you. Soft present docks a real right-side pane. The pane paints over the conversation text behind it. The left of the transcript stays visible and is not dimmed. It is not a centered overlay that dims the transcript.
 
 Plan mode is read-only except for the plan file: plan-file edits (`plan.md` in the session directory) are auto-approved, and edits to any other file are rejected outright — the tool call fails with a short message naming the plan file as the only editable path. This holds in every permission mode, including always-approve. Separating planning from implementation lets you review and correct the approach before any code is written.
 
@@ -44,7 +44,7 @@ You can enter plan mode yourself in two ways:
 - **Exclusive `/plan`** -- Bare `/plan` without `--soft`. Exclusive `/plan` enters plan mode. Plan mode activates when you send your next prompt. Exclusive `/plan` exclusive-blocks nested implementers. Nested implementers do not stay Working under exclusive `/plan`. Run `/plan <description>` to enter exclusive `/plan` and start a turn with that description in one step. `/plan` with extra Operator text submits a plan-update turn even when Isolated Preview leftover is docked. It does not only pull up a stale plan. That submit writes the prompt write-ahead log. While that plan-update turn is running, Isolated Preview stays docked as rewriting-wait: the pane quotes the Operator's second prompt, idle Approve / Comment / Revise / Exit do not arm, and leftover stale `plan.md` is not a live present. Empty Enter never Approves. Clickable Approve only ([GitHub #122](https://github.com/SurmountSystems/grok-oss/issues/122)). When `exit_plan_mode` writes current disk `plan.md`, Isolated Preview presents that file and idle CTAs arm.
 - **Shift+Tab** -- Cycle the session mode: Normal, then Plan, then Always-approve, then back to Normal. From Normal, a single press lands on Plan.
 
-After a plan exists, run **`/view-plan`** (aliases `/show-plan`, `/plan-view`) to reopen Isolated Preview. That viewer uses the same four idle actions as a live present: **Approve**, **Comment**, **Revise**, **Exit**. Copy lives on `y` and a title-bar control, not as a fifth idle CTA on the Approve row. On this Surmount fork, **Approve** also files a GitHub issue with the plan text ([`docs/github-tracking.md`](../../../../../../docs/github-tracking.md)). A clickable **copy** control (`y`) copies the plan, including while a line-comment overlay is open. A dot marks the **selected** CTA (the one Enter will submit). That mark is live selection, not a leftover grok-oss.db recorded row. Present, empty Enter, and always-approve tool permissions do not Approve. Clickable Approve only ([GitHub #122](https://github.com/SurmountSystems/grok-oss/issues/122)). Clicking Approve is a real Approve only while a live waiter is parked. After Approve or Exit, the four buttons still paint; they do not re-arm Plan ready.
+After a plan exists, run **`/view-plan`** (aliases `/show-plan`, `/plan-view`) to reopen Isolated Preview. That viewer uses the same four idle actions as a live present: **Approve**, **Comment**, **Revise**, **Exit**. Copy lives on `y` and a title-bar control, not as a fifth idle CTA on the Approve row. On this Surmount fork, **Approve** also files a GitHub issue with the plan text ([`docs/github-tracking.md`](../../../../../../docs/github-tracking.md)). A clickable **copy** control copies the plan. While the plan comment composer is focused, y inserts the letter and does not copy. A dot marks the **selected** CTA (the one Enter will submit). That mark is live selection, not a leftover grok-oss.db recorded row. Present, empty Enter, and always-approve tool permissions do not Approve. Clickable Approve only ([GitHub #122](https://github.com/SurmountSystems/grok-oss/issues/122)). Clicking Approve is a real Approve only while a live waiter is parked. After Approve or Exit, the four buttons still paint; they do not re-arm Plan ready.
 
 ### Isolated Preview (`/plan --soft`)
 
@@ -88,42 +88,37 @@ The plan file contains:
 
 ## Plan Approval
 
-When the agent finishes planning, it calls the `exit_plan_mode` tool. The tool reads the plan file from disk. Soft present (`plan_approval_park = "soft"`, the default) docks a scrollable plan pane on the **right** of the transcript. The transcript stays visible and is not dimmed. Status says **Plan ready. Side panel open** only when that plan viewer is actually open. Force a covering overlay with `plan_approval_park = "modal"` (or enlarge). The four footer CTAs stay on the pane.
+When the agent finishes planning, it calls the `exit_plan_mode` tool. The tool reads the plan file from disk. Soft present (`plan_approval_park = "soft"`, the default) docks a scrollable plan pane on the **right** of the transcript. The pane paints over the conversation text behind it. The left of the transcript stays visible and is not dimmed. It is not a centered overlay that dims the transcript. Status says **Plan ready. Side panel open** only when that plan viewer is actually open. Force a covering overlay with `plan_approval_park = "modal"` (or enlarge). The four footer CTAs stay on the pane.
 
 ### Present is not Approve
 
 A successful `exit_plan_mode` (or a **Plan ready** status) means the plan is **presented for review**. It is not operator approval. Always-approve skips tool-permission prompts only. It does not auto-click Approve. When Isolated Preview is docked on L1, nested implementers keep running. Exclusive `/plan` exclusive-blocks nested implementers. If a waiter is required for Approve, that waiter must not send cancel to those nested implementers.
 
-The four idle actions are mouse buttons: **Approve**, **Comment**, **Revise**, **Exit**. Click a button to mark it and run it (the selected one is marked). Enter submits the marked CTA except Approve. Empty Enter never Approves. Clickable Approve only ([GitHub #122](https://github.com/SurmountSystems/grok-oss/issues/122)). A first click on **Approve** still Approves. A first click on **Comment** focuses the comment composer. A first click on idle **Revise** focuses the box and waits; after a comment is typed, Revise rewrites. A first click on **Exit** abandons. After **Comment**, **Clarify** sends questions (not a rewrite). A second click on an already-selected CTA still submits that action. Letter keys type into the prompt and into the plan pane box, so you can type `also` or `Also` while review is open. Capital A is not a notes action. Empty `Enter` never Approves. When the Operator box is composing a line comment or revise draft, Enter still saves or sends that draft (`Enter:save comment` on the line-comment overlay, including while session Multiline is on).
+Ctrl+Z restores the Operator box draft after a clear. The four idle actions are mouse buttons: **Approve**, **Comment**, **Revise**, **Exit**. Click a button to mark it and run it (the selected one is marked). Enter submits the marked CTA except Approve. Empty Enter never Approves. Clickable Approve only ([GitHub #122](https://github.com/SurmountSystems/grok-oss/issues/122)). A first click on **Approve** still Approves. A first click on **Comment** focuses the comment composer. A first click on idle **Revise** focuses the box and waits; after a comment is typed, Revise rewrites. A first click on **Exit** abandons. After **Comment**, **Clarify** sends questions (not a rewrite). A second click on an already-selected CTA still submits that action. Letter keys type into the prompt and into the plan pane box, so you can type `also` or `Also` while review is open. Capital A is not a notes action. Empty `Enter` never Approves. When the Operator box is composing a line comment or revise draft, Enter still saves or sends that draft (`Enter:save comment` on the line-comment overlay, including while session Multiline is on).
+
+Approving while the plan panel is open keeps the composer comment. The session quotes `The user approved the plan with the following review comments:` and then the comment, leaves plan review, and can start the work. A confirmed comment is `Love it! Execute now.` Pressing Enter with an empty composer does not approve the plan.
 
 If the agent exits without writing a plan (empty or missing `plan.md`), the same approval surface still opens with a clear empty-state message so you can approve and start implementing, comment (then Approve, Clarify, or Revise), revise, or exit. In minimal mode the empty notice is committed into scrollback and the controls strip header reads **No plan written yet**.
 
 ### Reviewing the Plan
 
-Scroll the plan with the arrow keys or `j`/`k`. Clicking a plan row focuses or scrolls that line. It does **not** enter Commenting and it does not steal the composer. `c` is the explicit line-comment gesture. The right-pane footer and the composer shortcut row share the same four actions (mouse buttons are the primary path; letter keys type):
+Scroll the plan with the arrow keys or `j`/`k`. Copy like conversation scrollback: **`y`** copies the selected line (or visual range); **`Y`** copies the whole plan body. The plan panel top bar also has a **`⧉`** button next to `[↗]` (and `[✗]` when close is shown) that copies the whole plan body (same payload as **`Y`**). Conversation user/assistant bubbles also show always-on **`⧉`** (independent of plan chrome). In plan review, close is omitted on purpose. CTAs and revise→agent selection are unchanged.
 
-| Control | Action |
-| ------- | ------ |
-| **Approve** | Approve the plan and start building. An empty click still implements. Typed comments and pending line comments ride with the approval. |
-| **Comment** | Focus the prompt as the comment composer. After you type (or with an empty box), click **Approve** to implement with notes, **Clarify** for a read-only question, or **Revise** to rewrite the plan. |
-| **Clarify** | Shown after **Comment** (or after focusing the prompt). Sends the current comment as a read-only question. Does not rewrite the plan. Empty Preview `?` still arms this path. While you are typing in the Operator box, `?` inserts. |
-| **Revise** | Idle click focuses the box and waits. After a comment is typed, Revise rewrites the plan with that text. An empty Revise click does not submit. |
-| **Exit** | Abandon the plan without approving and turn plan mode off. Empty `Ctrl+C` also exits. |
-| **copy** / `y` | Copy the full plan to the clipboard. Empty Preview `y` copies. `y` also copies while the line-comment overlay is open. While you are typing a Prompt draft in the Operator box, `y` inserts. The clickable copy control is the mouse path. |
-| `Tab` | Move focus between the plan preview and the prompt. |
-| `Enter` | Submit the marked CTA when Preview is empty, except Approve. Empty `Enter` never Approves. Clickable Approve only ([GitHub #122](https://github.com/SurmountSystems/grok-oss/issues/122)). While commenting, Enter saves the line comment. |
+The action bar shows these shortcuts:
 
-Empty `Enter` never Approves. Clickable Approve only ([GitHub #122](https://github.com/SurmountSystems/grok-oss/issues/122)). Use the clickable **Approve** button.
+| Shortcut | Action                                                                                               |
+| -------- | ---------------------------------------------------------------------------------------------------- |
+| `a`      | Approve the plan and start building. With pending comments, this reads `approve w/ comments` and sends them alongside the approval. |
+| `s`      | Request changes. Focus moves to the prompt so you can type revision notes; press `Enter` to send them. |
+| `c`      | Comment on the selected line or line range.                                                          |
+| `y`      | Empty Preview copies the full plan. While the plan comment composer is focused, y inserts the letter and does not copy. A live draft inserts `y`. The comment footer does not advertise `y:copy`. The clickable copy control is the mouse path. |
+| `q`      | Quit plan -- abandon the plan without approving and turn plan mode off.                              |
 
-### Screenshots in plan mode
+### Clarify vs Revise vs Approve
 
 You can paste or attach screenshots while plan approval is open, the same way as the normal chat composer. Plan-review `Event::Paste` and Ctrl+V run the clipboard image probe (including a GNOME screenshot that is pixels, not a file path). Linux empty bracketed paste on the normal composer also probes. Approve and Revise **drain** attached image chips onto the feedback they send. They do not drop those chips.
 
-**TUI self-screenshot:** `/screenshot` or **F9** captures the current pager frame under `$GROK_HOME/screenshots/tui-*.png`. When plan approval is open, that PNG **auto-attaches** to the plan composer so Approve / Revise / Clarify can send it without a separate paste. Outside plan approval the capture is toast plus path only.
-
-Empty `Enter` with no freeform text, no line comments, and no images is still a no-op. Empty Enter never Approves. Clickable Approve only ([GitHub #122](https://github.com/SurmountSystems/grok-oss/issues/122)). Approve without notes via the clickable **Approve** button. Attached screenshots ride with Approve, Revise, or Clarify when you submit those actions. Comment is the idle entry to that composer.
-
-While the plan approval view is open, `Ctrl+P` (command palette → model) still works for switching model before you click **Approve**.
+While the plan approval view is open, `Ctrl+P` (command palette → model) still works for switching model before you press `a` to approve.
 
 ### Providing Feedback
 
@@ -133,7 +128,7 @@ The approval view has three focus states:
 - **Commenting**: Add an inline comment to the selected line range. Press `c` for that explicit line-comment gesture. Do not use a row click for this.
 - **Prompt**: Type a comment. Then click **Approve** (implement with notes), **Clarify** (read-only answers), or **Revise** (rewrite). You can also type `also` or `Also` here.
 
-Press `Tab` to switch between the preview and the prompt. **Approve** implements (typed comments ride along). You can type those comments in the Operator box while Preview is focused; you do not have to Tab to Prompt first. Empty Approve still implements without inventing notes. **Clarify** asks a read-only question. **Revise** rewrites the plan. Plan mode stays active after Clarify or Revise so you can iterate. `Ctrl+Z` undoes the last Operator-box edit, including a wipe (first `Ctrl+C`), while Preview or Prompt is focused. Shift+Enter in Preview matches the main Operator box: it inserts a newline when composer multiline is on, and it sends (or interjects) when `[ui] composer_multiline = false` or session Multiline is on. Overlay copy, clarify, and approve do not steal Shift+Enter.
+Press `Tab` to switch between the preview and the prompt. When you send feedback -- inline comments, freeform notes, or both -- the agent receives it and revises the plan. Plan mode stays active so you can iterate. A complete pager command typed in the prompt (for example `/feedback <text>` or `/compact`) runs as a command instead of being sent as notes; the review stays open. Pressing `a` while such a command sits in the prompt is refused until you run it with Enter or delete it.
 
 ### Leaving the Approval View
 

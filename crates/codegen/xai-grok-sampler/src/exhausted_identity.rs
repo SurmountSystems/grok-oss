@@ -56,8 +56,7 @@ fn grok_home_path() -> PathBuf {
     if let Ok(v) = std::env::var("GROK_HOME") {
         return PathBuf::from(v);
     }
-    #[allow(deprecated)]
-    let home = std::env::home_dir().unwrap_or_else(|| PathBuf::from("."));
+    let home = xai_dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
     home.join(".grok")
 }
 
@@ -331,16 +330,24 @@ pub fn clear_all_including_durable() {
 /// operator's real home. Clears process + durable before and after `f`.
 #[cfg(test)]
 pub fn with_memo_lock<R>(f: impl FnOnce() -> R) -> R {
-    use tempfile::TempDir;
     use xai_grok_test_support::EnvGuard;
 
     static LOCK: Mutex<()> = Mutex::new(());
     let _g = LOCK.lock().unwrap_or_else(|p| p.into_inner());
-    let dir = TempDir::new().expect("temp GROK_HOME for exhausted memo tests");
-    let _home = EnvGuard::set("GROK_HOME", dir.path());
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let dir = std::env::temp_dir().join(format!(
+        "grok-exhausted-memo-{}-{nanos}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).expect("temp GROK_HOME for exhausted memo tests");
+    let _home = EnvGuard::set("GROK_HOME", &dir);
     clear_all_including_durable();
     let out = f();
     clear_all_including_durable();
+    let _ = std::fs::remove_dir_all(&dir);
     out
 }
 

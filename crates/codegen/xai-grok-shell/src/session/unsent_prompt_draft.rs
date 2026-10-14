@@ -880,3 +880,6 @@ pub mod prompt_wal {
         }
     }
 }
+
+/// Pager voice and session code look this up beside the pending-prompt helpers.
+pub use prompt_wal::prompt_wal_path;

@@ -1,11 +1,10 @@
-//! Context usage bar — shows token usage in the status bar.
+//! Context usage bar: shows token usage in the status bar.
 //!
-//! Default builds a `Line<'static>` of styled spans: `8.5K / 1.0M` (actual tokens,
-//! colored by usage percentage). On hover, replaces the tokens with a progress
-//! bar + percentage, e.g. `█████ 42.0%`. The bar width is derived from the
-//! default string length so the hover line is the same total width — no layout
-//! shift on hover. The default is right-padded to a minimum of 6 columns so the
-//! width invariant holds even for degenerate inputs like `0 / 9`.
+//! Default builds a `Line<'static>` of styled spans: `8.5K / 1.0M` (one token count, colored by usage percentage).
+//! On hover, replaces the tokens with a progress bar and percentage, e.g. `█████ 42.0%`.
+//! The bar width is derived from the default string length so the hover line is the same total width; no layout shift on hover.
+//! The default is right-padded to a minimum of 6 columns so the width invariant holds even for degenerate inputs like `0 / 9`.
+//! Do not prefix a second down-arrow count.
 
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
@@ -13,15 +12,8 @@ use ratatui::text::{Line, Span};
 use super::progress_bar::progress_bar_spans;
 use crate::theme::Theme;
 
-// ---------------------------------------------------------------------------
-// Formatting utilities
-// ---------------------------------------------------------------------------
-
-/// Format a percentage as a fixed-width 5-char string.
-///
-/// - `< 10`:  `"X.XX%"` (e.g. `"0.00%"`, `"5.12%"`)
-/// - `10–99`: `"XX.X%"` (e.g. `"20.1%"`, `"99.9%"`)
-/// - `≥ 100`: `"MAX %"`
+/// Format a percentage as a fixed-width 5-char string. `< 10`: `"X.XX%"` (e.g. `"0.00%"`,
+/// `"5.12%"`). `10–99`: `"XX.X%"` (e.g. `"20.1%"`, `"99.9%"`).
 pub fn fmt_pct5(pct: f64) -> String {
     if pct >= 100.0 {
         "MAX %".to_string()
@@ -32,13 +24,9 @@ pub fn fmt_pct5(pct: f64) -> String {
     }
 }
 
-/// Format a token count as a compact string (≤4 chars).
-///
-/// - `0–999`:     `"0"`, `"12"`, `"999"`
-/// - `1K–9.9K`:   `"1.2K"` (4 chars)
-/// - `10K–999K`:  `"12K"`, `"999K"` (≤4 chars)
-/// - `1M–9.9M`:   `"1.2M"` (4 chars)
-/// - `10M+`:      `"12M"`, `"123M"` (≤4 chars)
+/// Format a token count as a compact string (≤4 chars). `0–999`: `"0"`, `"12"`, `"999"`. `1K–9.9K`:
+/// `"1.2K"` (4 chars). `10K–999K`: `"12K"`, `"999K"` (≤4 chars). `1M–9.9M`: `"1.2M"` (4 chars).
+/// `10M+`: `"12M"`, `"123M"` (≤4 chars).
 pub fn fmt_tokens(n: u64) -> String {
     if n < 1_000 {
         n.to_string()
@@ -53,10 +41,6 @@ pub fn fmt_tokens(n: u64) -> String {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Color blending
-// ---------------------------------------------------------------------------
-
 /// A breakpoint for color blending: at `pct` percent, the bar color is `color`.
 #[derive(Debug, Clone, Copy)]
 pub struct ColorBreakpoint {
@@ -64,11 +48,9 @@ pub struct ColorBreakpoint {
     pub color: Color,
 }
 
-/// Default breakpoints: text_primary → accent_user → warning → accent_error.
-///
-/// Breakpoint colors are raw RGB. The final color produced by [`blend_color`]
-/// is quantized by the caller (see [`context_bar_line`]) so the output always
-/// matches the terminal's capability level.
+/// Default breakpoints: text_primary, then accent_user, then warning, then accent_error. Breakpoint
+/// colors are raw RGB. The final color from [`blend_color`] is quantized by the caller (see
+/// [`context_bar_line`]) so the output matches the terminal's capability level.
 pub fn default_breakpoints(theme: &Theme) -> Vec<ColorBreakpoint> {
     vec![
         ColorBreakpoint {
@@ -100,26 +82,30 @@ pub fn default_breakpoints(theme: &Theme) -> Vec<ColorBreakpoint> {
 
 /// Blend between breakpoints for a given percentage.
 pub fn blend_color(pct: f64, breakpoints: &[ColorBreakpoint]) -> Color {
-    if breakpoints.is_empty() {
+    let Some(first) = breakpoints.first() else {
         return Color::Reset;
+    };
+    if pct <= first.pct {
+        return first.color;
     }
-    if pct <= breakpoints[0].pct {
-        return breakpoints[0].color;
-    }
-    for i in 1..breakpoints.len() {
-        if pct <= breakpoints[i].pct {
-            let t = (pct - breakpoints[i - 1].pct) / (breakpoints[i].pct - breakpoints[i - 1].pct);
-            return lerp_color(breakpoints[i - 1].color, breakpoints[i].color, t as f32);
+    for w in breakpoints.windows(2) {
+        let [prev, next] = w else {
+            continue;
+        };
+        if pct <= next.pct {
+            let t = (pct - prev.pct) / (next.pct - prev.pct);
+            return lerp_color(prev.color, next.color, t as f32);
         }
     }
-    breakpoints.last().unwrap().color
+    breakpoints.last().map(|b| b.color).unwrap_or(Color::Reset)
 }
 
 /// Linear interpolation between two colors.
-///
-/// When either input is `Color::Indexed`, the result is quantized back to
-/// the nearest indexed color so the output stays terminal-compatible.
 fn lerp_color(a: Color, b: Color, t: f32) -> Color {
+    let interpolable = |c: Color| matches!(c, Color::Rgb(..) | Color::Indexed(_));
+    if !interpolable(a) || !interpolable(b) {
+        return if t < 0.5 { a } else { b };
+    }
     let (ar, ag, ab) = color_to_rgb(a);
     let (br, bg, bb) = color_to_rgb(b);
     let t = t.clamp(0.0, 1.0);
@@ -134,54 +120,41 @@ fn lerp_color(a: Color, b: Color, t: f32) -> Color {
     }
 }
 
-/// RGB for any color variant, using a neutral fallback for `Reset`.
-///
-/// Necessary so a gradient that lerps across named breakpoints (after
-/// the theme has quantized to ANSI on lower-color terminals) still
-/// produces meaningful intermediate colors instead of collapsing all
-/// inputs onto one fallback.
+/// RGB for any color variant, using a neutral fallback for `Reset`. Needed for gradients that lerp
+/// across named breakpoints after the theme quantized to ANSI on lower-color terminals. Those still
+/// produce meaningful intermediate colors instead of collapsing all inputs onto one fallback.
 fn color_to_rgb(c: Color) -> (u8, u8, u8) {
-    // (198, 198, 198) matches the FG-equivalent used elsewhere when the
-    // terminal owns the actual default fg color.
+    // (198, 198, 198) matches the FG-equivalent used elsewhere when the terminal owns the actual default fg color
     crate::render::color::resolve_to_rgb(c).unwrap_or((198, 198, 198))
 }
 
-// ---------------------------------------------------------------------------
-// Status bar separator
-// ---------------------------------------------------------------------------
-
 /// The separator character between status bar items.
 pub const SEPARATOR: &str = "│";
-
-// ---------------------------------------------------------------------------
-// Context bar line builder
-// ---------------------------------------------------------------------------
 
 /// Width of the percentage field on hover (`fmt_pct5` always returns 5 chars).
 const PCT_WIDTH: u16 = 5;
 /// Width of the gap between the progress bar and the percentage on hover.
 const BAR_PCT_GAP: u16 = 1;
 
-// BAR_BG removed — use theme.bg_highlight directly (already quantized).
-
 /// Build the context usage bar as a `Line<'static>`.
 ///
-/// Normal: `8.5K / 1.0M` — actual token usage, colored by the same percentage
-/// gradient the hover bar uses so the urgency signal stays visible at a glance.
-/// Hovered: `█████ 42.0%` — progress bar + colored percentage, sized to match.
+/// Normal: `8.5K / 1.0M`. One count. Do not prefix a second `↓8.5k`.
+/// Colored by the same percentage gradient the hover bar uses so the
+/// urgency signal stays visible at a glance.
+/// Hovered: the chip becomes `█████ 42.0%`.
 ///
 /// The bar width is derived from the default token string length so the
 /// hovered line has the same total width as the default (no layout shift on
 /// hover). The default is right-padded to a minimum of 6 columns
-/// (`BAR_PCT_GAP + PCT_WIDTH`) so the invariant holds for every input — without
+/// (`BAR_PCT_GAP + PCT_WIDTH`) so the invariant holds for every input. Without
 /// the pad, degenerate cases like `0 / 9` (5 chars) would mismatch the hovered
-/// line, which always rounds up to 6 (zero-width bar + gap + percentage).
+/// line, which always rounds up to 6 (zero-width bar, gap, and percentage).
 ///
 /// Returns `None` if token data is unavailable.
 ///
-/// Gateway light-frontend (`kind: "chat"`) sessions must not display Build /
-/// local sampler context usage — call with `gateway_chat = true` to suppress
-/// the bar entirely (remote owns context; no mapped totals yet). remote settings
+/// Gateway light-frontend (`kind: "chat"`) sessions must not display Build
+/// or local sampler context usage. Call with `gateway_chat = true` to suppress
+/// the bar entirely (remote owns context; no mapped totals yet). Remote settings
 /// opt-in for chat entry can reuse the same gate later.
 pub fn context_bar_line(
     used_tokens: Option<u64>,
@@ -251,6 +224,16 @@ pub fn footer_sampling_window(
         .map(|catalog| xai_grok_shell::util::config::session_sampling_window(catalog, is_nested))
 }
 
+/// Compact L1 count as `↓270k`. Nested L2 and L3 are not added.
+/// The context bar does not paint this prefix.
+///
+/// `l1_live_tokens` is the L1 delta from
+/// [`crate::app::agent::GoalDisplayState::live_tokens_used`].
+pub fn footer_l1_down_arrow_compact(l1_live_tokens: i64) -> String {
+    let compact = crate::views::agent_status::format_tokens_compact(l1_live_tokens);
+    format!("↓{compact}")
+}
+
 /// Window AUTO compact actually gates on when both sizes are known.
 ///
 /// Percent and urgency follow this window, not the larger catalog total.
@@ -288,25 +271,27 @@ pub fn context_bar_line_with_windows(
     let total = context_chip_gate_window(sampling_window, catalog_window)?;
     let pct = xai_token_estimation::usage_percentage(used, total);
 
-    // Default form drives the line width. Two-meter copy is longer than
-    // unlabeled `used / total`; hover pads to that same width.
-    let mut token_str = context_chip_token_text(used, sampling_window, catalog_window)?;
-    let natural_width = token_str.chars().count() as u16;
+    // Hover width stays on the short gate form so the percent is of the
+    // sampling window. The resting chip names each window when they differ.
+    let mut width_basis = format!("{} / {}", fmt_tokens(used), fmt_tokens(total));
+    let named = context_chip_token_text(used, sampling_window, catalog_window)
+        .unwrap_or_else(|| width_basis.clone());
+    let natural_width = width_basis.chars().count() as u16;
     let min_width = BAR_PCT_GAP + PCT_WIDTH;
     if natural_width < min_width {
-        token_str.push_str(&" ".repeat((min_width - natural_width) as usize));
+        width_basis.push_str(&" ".repeat((min_width - natural_width) as usize));
     }
     let total_width = natural_width.max(min_width);
 
-    // Urgency color shared by both branches so the default still surfaces
-    // high-usage warnings without requiring the user to hover.
+    // Urgency color shared by both branches so the default still shows high-usage warnings without requiring the user to hover
     let breakpoints = default_breakpoints(theme);
     let color = crate::theme::quantize(blend_color(pct, &breakpoints));
+    let mark = Style::default().fg(color).bg(theme.bg_base);
 
     if hovered {
-        // Bar fills the space the default tokens would occupy, minus the gap
-        // and the percentage. `total_width >= min_width` by construction, so
-        // this subtraction is safe.
+        // Bar fills the space the default tokens would occupy, minus the gap and the percentage.
+        // `total_width >= min_width` by construction, so this subtraction is safe.
+        // Hover width matches the one-count chip. No second down-arrow prefix.
         let bar_width = total_width - min_width;
         let mut spans =
             progress_bar_spans(bar_width, pct as f32 / 100.0, color, theme.bg_highlight);
@@ -317,20 +302,47 @@ pub fn context_bar_line_with_windows(
         ));
         Some(Line::from(spans))
     } else {
-        Some(Line::from(Span::styled(
-            token_str,
-            Style::default().fg(color).bg(theme.bg_base),
-        )))
+        // Resting chip uses the named windows string, then the same minimum
+        // width as the hover percent so `0 / 9` does not sit one column short.
+        let mut shown = named;
+        let shown_width = shown.chars().count();
+        if shown_width < total_width as usize {
+            shown.push_str(&" ".repeat(total_width as usize - shown_width));
+        }
+        Some(Line::from(Span::styled(shown, mark)))
     }
 }
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// On the terminal-native palette the low-usage meter must stay on the
+    /// terminal's own foreground; interpolating toward it produced a fixed
+    /// silver that is unreadable on a light profile.
+    #[test]
+    fn terminal_theme_meter_keeps_the_terminal_foreground() {
+        let theme = Theme::terminal();
+        let breakpoints = default_breakpoints(&theme);
+        for pct in [0.0, 10.0, 25.0, 49.0] {
+            assert_eq!(
+                blend_color(pct, &breakpoints),
+                Color::Reset,
+                "{pct}% must stay on the terminal default fg"
+            );
+        }
+        // Urgency still escalates to the palette's named ANSI accents —
+        // and between them the meter snaps rather than interpolating, so
+        // every emitted color stays a profile palette entry.
+        for pct in [55.0, 70.0, 80.0, 90.0, 100.0] {
+            let c = blend_color(pct, &breakpoints);
+            assert!(
+                !matches!(c, Color::Rgb(..) | Color::Indexed(_)),
+                "{pct}% must stay on a profile palette color, got {c:?}"
+            );
+        }
+        assert_eq!(blend_color(100.0, &breakpoints), theme.accent_error);
+    }
 
     #[test]
     fn test_fmt_pct5_under_10() {
@@ -396,13 +408,11 @@ mod tests {
 
     #[test]
     fn test_blend_color_at_breakpoints() {
-        // Use unquantized theme — blend_color needs raw RGB values for lerp math.
+        // Use the unquantized theme; blend_color needs raw RGB values for lerp math
         let theme = Theme::default();
         let bps = default_breakpoints(&theme);
-        // At 0%, should be theme.text_primary
         let c0 = blend_color(0.0, &bps);
         assert_eq!(c0, theme.text_primary);
-        // At 95%, should be theme.accent_error
         let c95 = blend_color(95.0, &bps);
         assert_eq!(c95, theme.accent_error);
     }
@@ -414,7 +424,7 @@ mod tests {
 
     #[test]
     fn test_context_bar_default_shows_compact_token_usage() {
-        // Default (non-hovered) state shows `used / total` with no padding.
+        // One token count. The chip itself has no padding.
         let theme = Theme::default();
         let line = context_bar_line(Some(8_500), Some(1_000_000), false, &theme)
             .expect("token data provided");
@@ -437,8 +447,7 @@ mod tests {
 
     #[test]
     fn test_context_bar_hover_width_matches_default() {
-        // For each (used, total) combo, the hovered line must be the same
-        // width as the default — toggling hover should never shift layout.
+        // For each (used, total) combo, the hovered line must be the same width as the default; toggling hover must never shift layout
         let theme = Theme::default();
         for (used, total) in [
             (8_500u64, 1_000_000u64),
@@ -446,8 +455,7 @@ mod tests {
             (123_456, 1_000_000),
             (999_999, 999_999),
             (12_000_000, 12_000_000),
-            // Degenerate sub-min-width case: default natural width is 5
-            // ("0 / 9"), padded to 6 so the hover line still matches.
+            // Degenerate sub-min-width case: default natural width is 5 ("0 / 9"), padded to 6 so the hover line still matches
             (0, 9),
         ] {
             let default_line = context_bar_line(Some(used), Some(total), false, &theme)
@@ -467,9 +475,9 @@ mod tests {
 
     #[test]
     fn test_context_bar_hover_bar_grows_with_token_string() {
-        // The bar size should scale with the default string length.
-        // `500 / 1.0M` (10 chars) → bar = 10 - 6 = 4 chars.
-        // `8.5K / 1.0M` (11 chars) → bar = 11 - 6 = 5 chars.
+        // The bar scales with the default string length
+        // `500 / 1.0M` (10 chars) gives bar = 10 - 6 = 4 chars
+        // `8.5K / 1.0M` (11 chars) gives bar = 11 - 6 = 5 chars
         let theme = Theme::default();
         let short = context_bar_line(Some(500), Some(1_000_000), true, &theme).unwrap();
         let long = context_bar_line(Some(8_500), Some(1_000_000), true, &theme).unwrap();
@@ -486,9 +494,7 @@ mod tests {
 
     #[test]
     fn test_context_bar_returns_none_without_tokens() {
-        // Mirror across hover states so a future refactor that moves the
-        // unavailability checks into per-branch arms can't silently regress
-        // one path.
+        // Mirror across hover states so a future refactor that moves the unavailability checks into per-branch arms can't silently regress one path
         let theme = Theme::default();
         for hovered in [false, true] {
             assert!(context_bar_line(None, Some(1_000_000), hovered, &theme).is_none());
@@ -610,6 +616,80 @@ mod tests {
         assert_ne!(
             text, doubled,
             "adding nested windows to the L1 used count must not be how the parent chip is painted"
+        );
+    }
+
+    /// Operator: footer ↓270k is the L1 window. It must not sum L2 plus L3 twice.
+    #[test]
+    fn footer_down_arrow_270k_is_l1_window_and_does_not_sum_l2_plus_l3_twice() {
+        let l1_used = 270_000u64;
+        let nested_l2 = 442_200u64;
+        let nested_l3 = 85_600u64;
+        let summed = l1_used.saturating_add(nested_l2).saturating_add(nested_l3);
+        let text = context_chip_token_text(l1_used, Some(500_000), Some(500_000))
+            .expect("L1 context chip");
+        assert_eq!(text, "270K / 500K");
+        let doubled = context_chip_token_text(summed, Some(500_000), Some(500_000))
+            .expect("wrong nested sum");
+        assert_ne!(text, doubled, "must not sum L2 plus L3 twice");
+        assert!(
+            !text.contains("797") && !text.contains("798"),
+            "must not sum L2 plus L3 twice, got {text}"
+        );
+
+        let mut goal = crate::app::agent::GoalDisplayState::test_stub();
+        goal.token_baseline = 0;
+        goal.tokens_used = 0;
+        goal.finished_subagent_tokens = nested_l2 as i64;
+        let l1_live = goal.live_tokens_used(Some(l1_used), nested_l3);
+        assert_eq!(l1_live, l1_used as i64, "must not sum L2 plus L3 twice");
+        let footer = footer_l1_down_arrow_compact(l1_live);
+        assert_eq!(footer, "↓270k");
+        assert!(
+            !footer.contains("797") && !footer.contains("442"),
+            "must not sum L2 plus L3 twice, got {footer}"
+        );
+
+        let theme = Theme::default();
+        let line = context_bar_line_with_windows(
+            Some(l1_used),
+            Some(500_000),
+            Some(500_000),
+            false,
+            &theme,
+            false,
+        )
+        .expect("footer chip");
+        let painted = line_text(&line);
+        assert!(
+            !painted.contains('↓'),
+            "header shows the token count once, got {painted}"
+        );
+        assert!(
+            painted.contains("270K / 500K"),
+            "session chip keeps the L1 used/total count, got {painted}"
+        );
+        assert!(
+            !painted.contains("797") && !painted.contains("442"),
+            "must not sum L2 plus L3 twice, got {painted}"
+        );
+
+        let goal_line = crate::views::agent_status::goal_status_line(
+            &goal,
+            &theme,
+            false,
+            0,
+            Some(l1_used),
+            nested_l3,
+        );
+        let goal_painted = line_text(&goal_line);
+        assert!(
+            goal_painted.contains("270k"),
+            "must not sum L2 plus L3 twice, got {goal_painted}"
+        );
+        assert!(
+            !goal_painted.contains("797") && !goal_painted.contains("442.2k"),
+            "must not sum L2 plus L3 twice, got {goal_painted}"
         );
     }
 

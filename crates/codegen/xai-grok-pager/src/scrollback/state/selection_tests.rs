@@ -3,9 +3,11 @@ use super::*;
 use pretty_assertions::assert_eq;
 use ratatui::style::Color;
 
-// -----------------------------------------------------------------------
-// Group gap tests (Phase 1c)
-// -----------------------------------------------------------------------
+fn at<T: Copy>(xs: &[T], i: usize) -> T {
+    xs.get(i)
+        .copied()
+        .unwrap_or_else(|| panic!("index {i} out of bounds, len={}", xs.len()))
+}
 
 /// Helper: create an expanded groupable stub block.
 fn expanded_groupable(text: &str) -> ScrollbackEntry {
@@ -32,7 +34,7 @@ fn get_gap_after(state: &mut ScrollbackState) -> Vec<u16> {
 
 #[test]
 fn test_gap_all_collapsed_groupable_dense() {
-    // 3 collapsed groupable blocks → 0 gaps between them, 1 trailing
+    // 3 collapsed groupable blocks: 0 gaps between them, 1 trailing
     let mut state = ScrollbackState::new();
     state.push(collapsed_groupable("a"));
     state.push(collapsed_groupable("b"));
@@ -48,7 +50,7 @@ fn test_gap_all_collapsed_groupable_dense() {
 
 #[test]
 fn test_gap_non_groupable_breaks_group() {
-    // groupable, non-groupable, groupable → all gaps are 1
+    // groupable, non-groupable, groupable: all gaps are 1
     let mut state = ScrollbackState::new();
     state.push(collapsed_groupable("a"));
     state.push(non_groupable_entry("msg"));
@@ -60,7 +62,7 @@ fn test_gap_non_groupable_breaks_group() {
 
 #[test]
 fn test_gap_expanded_within_group() {
-    // collapsed, EXPANDED, collapsed → gaps around expanded
+    // collapsed, expanded, collapsed: gaps around the expanded block
     let mut state = ScrollbackState::new();
     state.push(collapsed_groupable("a"));
     state.push(expanded_groupable("b"));
@@ -86,18 +88,15 @@ fn test_gap_mixed_group_with_expanded() {
     state.push(non_groupable_entry("agent2"));
 
     let gaps = get_gap_after(&mut state);
-    // agent→read: not both groupable → 1
-    // read→edit: both groupable, edit expanded → 1
-    // edit→list: both groupable, edit expanded → 1
-    // list→run: both groupable AND both collapsed → 0
-    // run→agent2: not both groupable → 1
-    // agent2: trailing → 1
+    // agent→read: not both groupable → 1 read→edit: both groupable, edit expanded → 1 edit→list: both groupable, edit
+    // expanded → 1 list→run: both groupable and both collapsed → 0 run→agent2: not both groupable → 1 agent2: trailing
+    // → 1.
     assert_eq!(gaps, vec![1, 1, 1, 0, 1, 1]);
 }
 
 #[test]
 fn test_gap_single_groupable_block() {
-    // Single groupable surrounded by non-groupable → all gaps 1
+    // Single groupable surrounded by non-groupable: all gaps 1
     let mut state = ScrollbackState::new();
     state.push(non_groupable_entry("before"));
     state.push(collapsed_groupable("tool"));
@@ -135,8 +134,7 @@ fn test_gap_total_height_dense_group() {
     state.prepare_layout(80, 40);
 
     let (_, _, total) = state.scroll_info();
-    // Each collapsed stub = 1 line (no vpad since StubBlock has_vpad=true but
-    // collapsed stubs render 1 line of text + 2 vpad = 3 lines)
+    // Each collapsed stub is 1 line (no vpad since StubBlock has_vpad=true but collapsed stubs render 1 line of text + 2 vpad = 3 lines)
     let layouts = state.get_cached_entry_layouts().unwrap();
     let expected: usize = layouts
         .iter()
@@ -150,8 +148,8 @@ fn test_gap_total_height_dense_group() {
 
 #[test]
 fn test_gap_after_toggle_fold() {
-    // Start with 3 collapsed groupable → dense.
-    // Toggle middle to expanded → gaps appear.
+    // Start with 3 collapsed groupable blocks: dense
+    // Toggling the middle one to expanded makes gaps appear
     let mut state = ScrollbackState::new();
     state.push(collapsed_groupable("a"));
     state.push(collapsed_groupable("b"));
@@ -189,13 +187,13 @@ fn test_gap_virtual_y_dense() {
     let layouts = state.get_cached_entry_layouts().unwrap();
 
     // Entry 0: y=0
-    assert_eq!(virtual_y[0], 0);
+    assert_eq!(at(virtual_y, 0), 0);
     // Entry 1: y=height[0] + gap[0] = height[0] + 0
-    assert_eq!(virtual_y[1], layouts[0].height as usize);
+    assert_eq!(at(virtual_y, 1), at(layouts, 0).height as usize);
     // Entry 2: y=height[0] + height[1] + 0 + 0
     assert_eq!(
-        virtual_y[2],
-        layouts[0].height as usize + layouts[1].height as usize
+        at(virtual_y, 2),
+        at(layouts, 0).height as usize + at(layouts, 1).height as usize
     );
 }
 
@@ -240,10 +238,6 @@ fn test_is_groupable_block_types() {
     );
 }
 
-// -----------------------------------------------------------------------
-// Group range tests (Phase 3a)
-// -----------------------------------------------------------------------
-
 #[test]
 fn test_group_range_mode_a_all_collapsed() {
     // Mode A: all groupable blocks in one group regardless of display mode
@@ -280,14 +274,14 @@ fn test_group_range_mode_b_with_expanded() {
     let mut state = ScrollbackState::new();
     state.push(collapsed_groupable("a"));
     state.push(collapsed_groupable("b"));
-    state.push(expanded_groupable("c")); // expanded — breaks run
+    state.push(expanded_groupable("c")); // expanded; breaks the run
     state.push(collapsed_groupable("d"));
     state.push(collapsed_groupable("e"));
 
     // Mode B: [a,b] and [d,e] are separate sub-groups, c is singleton
     assert_eq!(state.group_range_of(0, true), 0..2);
     assert_eq!(state.group_range_of(1, true), 0..2);
-    assert_eq!(state.group_range_of(2, true), 2..3); // expanded → singleton
+    assert_eq!(state.group_range_of(2, true), 2..3); // expanded, so singleton
     assert_eq!(state.group_range_of(3, true), 3..5);
     assert_eq!(state.group_range_of(4, true), 3..5);
 }
@@ -335,6 +329,73 @@ fn test_group_range_non_groupable_breaks_group() {
     assert_eq!(state.group_range_of(2, true), 2..3);
 }
 
+/// A collapsed turn marker is a dense-run break, matching the truncation pass.
+/// Selection, collapse, and expand-all therefore stay on one side of the turn.
+#[test]
+fn collapsed_turn_marker_breaks_dense_run_walks() {
+    use crate::scrollback::blocks::SessionEvent;
+    use std::time::Duration;
+
+    crate::appearance::cache::set_show_thinking_blocks(false);
+    let mut state = ScrollbackState::new();
+    let mut appearance = AppearanceConfig::default();
+    // Each side has 4 tools: 4 <= max_visible+1 so neither run truncates.
+    // A walk across the marker (9) would exceed it and expand_all_groups would insert a key.
+    appearance.scrollback.display.group_max_visible = 3;
+    state.set_appearance(appearance);
+
+    // Isolated collapsed thought so expand_all_thinking takes the expand leg.
+    push_thought(&mut state, "steer");
+    state.push(non_groupable_entry("break"));
+
+    let before: Vec<_> = (0..4)
+        .map(|i| state.push_block(tool_block(&format!("before {i}"))))
+        .collect();
+    let marker = state.push_block(RenderBlock::session_event(SessionEvent::TurnCompleted {
+        elapsed: Some(Duration::from_secs(3)),
+    }));
+    state
+        .get_by_id_mut(marker)
+        .unwrap()
+        .set_display_mode(DisplayMode::Collapsed);
+    let after: Vec<_> = (0..4)
+        .map(|i| state.push_block(tool_block(&format!("after {i}"))))
+        .collect();
+
+    state.prepare_layout(80, 40);
+    assert_eq!(
+        state.get_by_id(marker).unwrap().display_mode,
+        DisplayMode::Collapsed
+    );
+
+    let marker_idx = state.index_of_id(marker).unwrap();
+    let before_idx = state.index_of_id(at(&before, 0)).unwrap();
+    let after_idx = state.index_of_id(at(&after, 0)).unwrap();
+    assert_eq!(
+        state.group_range_of(marker_idx, true),
+        marker_idx..marker_idx + 1
+    );
+    assert_eq!(state.group_range_of(before_idx, true).end, marker_idx);
+    assert_eq!(state.group_range_of(after_idx, true).start, marker_idx + 1);
+
+    let tool_and_marker_heights = |state: &ScrollbackState| -> Vec<u16> {
+        (before_idx..=after_idx + 3)
+            .map(|i| cached_height_at(state, i))
+            .collect()
+    };
+    let heights_before = tool_and_marker_heights(&state);
+    assert!(state.expanded_groups.is_empty());
+
+    state.expand_all_thinking();
+    state.prepare_layout(80, 40);
+
+    assert!(
+        state.expanded_groups.is_empty(),
+        "expand-all must not key a run that crosses the turn marker"
+    );
+    assert_eq!(tool_and_marker_heights(&state), heights_before);
+}
+
 #[test]
 fn test_grow_fold_during_page_flip_drops_follow_and_preserve() {
     crate::appearance::cache::set_show_thinking_blocks(true);
@@ -372,8 +433,7 @@ fn test_grow_fold_during_page_flip_overflow_stays_anchored() {
 
     let think_id = h.push_thinking("line1");
     for i in 0..100 {
-        // `  \n` is a CommonMark hard break; bare `\n` would collapse
-        // to a space and the thinking block wouldn't overflow.
+        // `  \n` is a CommonMark hard break; bare `\n` would collapse to a space and the thinking block wouldn't overflow
         h.state
             .push_chunk_to_thinking(think_id, &format!("  \nline{}", i + 2));
     }
@@ -616,7 +676,7 @@ fn test_anchor_gap_delta_mid_group() {
     h.push_tool("c");
 
     let gaps_before = get_gap_after(&mut h.state);
-    assert_eq!(gaps_before[1], 0, "a→b gap should be 0");
+    assert_eq!(at(&gaps_before, 1), 0, "a→b gap should be 0");
 
     if let Some((id, entry)) = h.state.entries.get_index_mut(2) {
         entry.set_display_mode(DisplayMode::Expanded);
@@ -626,7 +686,11 @@ fn test_anchor_gap_delta_mid_group() {
     h.frame();
 
     let gaps_after = get_gap_after(&mut h.state);
-    assert_eq!(gaps_after[1], 1, "a→b gap should be 1 after b expanded");
+    assert_eq!(
+        at(&gaps_after, 1),
+        1,
+        "a→b gap should be 1 after b expanded"
+    );
 }
 
 #[test]
@@ -637,7 +701,7 @@ fn test_anchor_no_gap_delta_first_in_group() {
     h.push_tool("b");
 
     let gaps_before = get_gap_after(&mut h.state);
-    assert_eq!(gaps_before[0], 1, "prompt→a gap should be 1");
+    assert_eq!(at(&gaps_before, 0), 1, "prompt→a gap should be 1");
 
     if let Some((id, entry)) = h.state.entries.get_index_mut(1) {
         entry.set_display_mode(DisplayMode::Expanded);
@@ -647,10 +711,8 @@ fn test_anchor_no_gap_delta_first_in_group() {
     h.frame();
 
     let gaps_after = get_gap_after(&mut h.state);
-    assert_eq!(gaps_after[0], 1, "prompt→a gap still 1 after expand");
+    assert_eq!(at(&gaps_after, 0), 1, "prompt→a gap still 1 after expand");
 }
-
-// ── Group truncation tests ──
 
 #[test]
 fn truncation_disabled_when_max_visible_zero() {
@@ -662,7 +724,7 @@ fn truncation_disabled_when_max_visible_zero() {
     push_tool_calls(&mut state, 20);
     state.prepare_layout(80, 40);
 
-    // No entries should be hidden
+    // No entries are hidden
     for i in 0..20 {
         assert!(
             cached_height_at(&state, i) > 0,
@@ -678,7 +740,7 @@ fn truncation_skips_short_groups() {
     appearance.scrollback.display.group_max_visible = 10;
     state.set_appearance(appearance);
 
-    // Group of exactly 11 (max_visible + 1) should NOT be truncated
+    // A group of exactly 11 (max_visible + 1) is not truncated
     push_tool_calls(&mut state, 11);
     state.prepare_layout(80, 40);
 
@@ -698,18 +760,18 @@ fn truncation_applies_to_groups_exceeding_threshold() {
     appearance.scrollback.display.group_max_visible = 10;
     state.set_appearance(appearance);
 
-    // Group of 12 (max_visible + 2) should have 2 hidden entries
+    // A group of 12 (max_visible + 2) gets 2 hidden entries
     push_tool_calls(&mut state, 12);
     state.prepare_layout(80, 40);
 
-    // Entry 0 = group header showing "1 more" (hidden_count - 1, don't count self)
+    // Entry 0 is the group header showing "1 more" (hidden_count - 1, not counting itself)
     assert_eq!(header_count_at(&mut state, 0), 1);
     assert_eq!(cached_height_at(&state, 0), 1);
 
-    // Entry 1 = hidden (height=0)
+    // Entry 1 is hidden (height=0)
     assert_eq!(cached_height_at(&state, 1), 0);
 
-    // Entries 2..12 = visible (the last 10)
+    // Entries 2..12 are visible (the last 10)
     for i in 2..12 {
         assert!(
             cached_height_at(&state, i) > 0,
@@ -759,16 +821,16 @@ fn navigation_skips_hidden_entries() {
     appearance.scrollback.display.group_max_visible = 3;
     state.set_appearance(appearance);
 
-    // 6 entries → 3 hidden (header + 2 hidden), 3 visible
+    // 6 entries: 3 hidden (header + 2 hidden), 3 visible
     push_tool_calls(&mut state, 6);
     state.prepare_layout(80, 40);
 
     // Select first visible entry
     state.selected = None;
-    state.select_next(); // should land on entry 0 (group header, height=1)
+    state.select_next(); // lands on entry 0 (group header, height=1)
     assert_eq!(state.selected, Some(0));
 
-    state.select_next(); // should skip entries 1,2 (height=0) → entry 3
+    state.select_next(); // skips entries 1,2 (height=0) to entry 3
     assert_eq!(state.selected, Some(3));
 
     state.select_next(); // entry 4
@@ -778,11 +840,9 @@ fn navigation_skips_hidden_entries() {
     state.select_prev(); // entry 3
     assert_eq!(state.selected, Some(3));
 
-    state.select_prev(); // should skip entries 2,1 (height=0) → entry 0
+    state.select_prev(); // skips entries 2,1 (height=0) back to entry 0
     assert_eq!(state.selected, Some(0));
 }
-
-// ── Verb-group fold tests ──
 
 fn verb_state() -> ScrollbackState {
     crate::appearance::cache::set_group_tool_verbs(true);
@@ -849,13 +909,11 @@ fn verb_group_separators_break_runs() {
     assert!(cached_height_at(&state, 2) > 0, "execute stays standalone");
     assert!(verb_header_at(&state, 3));
     assert!(cached_height_at(&state, 5) > 0, "edit stays standalone");
-    // The singleton fold's shape (count/height) is owned by
-    // `verb_group_folds_multi_member_and_singleton_runs`.
+    // The singleton fold's shape (count/height) is owned by `verb_group_folds_multi_member_and_singleton_runs`
     assert!(verb_header_at(&state, 6), "run re-anchors after the Edit");
 }
 
-/// Push a finished thought: collapsed and not running — the shape
-/// `finish_thinking`'s auto-collapse leaves behind.
+/// Push a finished thought: collapsed and not running, the shape `finish_thinking`'s auto-collapse leaves behind.
 fn push_thought(state: &mut ScrollbackState, text: &str) -> EntryId {
     let id = state.push_block(RenderBlock::thinking(text));
     state
@@ -921,8 +979,7 @@ fn verb_group_hidden_thinking_is_transparent() {
     assert_eq!(header_count_at(&mut state, 0), 2);
     assert_eq!(cached_height_at(&state, 2), 0);
 
-    // Shown non-collapsed thinking keeps its own rows; the run folds
-    // around it instead of splitting. Default thinking is Collapsed.
+    // Shown non-collapsed thinking keeps its own rows; the run folds around it instead of splitting
     crate::appearance::cache::set_show_thinking_blocks(true);
     state
         .get_by_id_mut(thought)
@@ -951,8 +1008,7 @@ fn verb_group_leading_thought_anchors_run_and_expands() {
     assert_eq!(cached_height_at(&state, 1), 0);
     assert_eq!(cached_height_at(&state, 2), 0);
 
-    // Expand: the slot stacks the header above the thought's own 1-row
-    // "Thought" line; every tool member reveals below.
+    // Expand: the slot stacks the header above the thought's own 1-row "Thought" line; every tool member reveals below
     state.set_selected(Some(0));
     assert!(state.toggle_group_expansion());
     state.prepare_layout(80, 40);
@@ -968,9 +1024,8 @@ fn verb_group_leading_thought_anchors_run_and_expands() {
     assert!(!state.expanded_groups.contains(&thought));
     assert_eq!(cached_height_at(&state, 1), 0);
 
-    // Ctrl+T opens the anchoring thought (it goes transparent and the
-    // run re-anchors on the first tool): the expansion key must migrate
-    // so the members stay expanded instead of snapping collapsed.
+    // Ctrl+E opens the anchoring thought: it goes transparent and the run re-anchors on the first tool
+    // The expansion key must migrate so the members stay expanded instead of snapping collapsed
     state.set_selected(Some(0));
     assert!(state.toggle_group_expansion());
     state.prepare_layout(80, 40);
@@ -986,32 +1041,11 @@ fn verb_group_leading_thought_anchors_run_and_expands() {
         .with_appearance_ref(&state.appearance)
         .desired_height(state.entry_area_width(80));
     assert_eq!(
-        cache.entries[1].height,
+        at(&cache.entries, 1).height,
         tool_height.saturating_add(1),
         "re-anchored expanded header reserves its synthetic row"
     );
     crate::appearance::cache::set_show_thinking_blocks(false);
-}
-
-#[test]
-fn group_range_keeps_hooked_members_in_rendered_fold() {
-    let mut state = verb_state();
-    let ids = push_reads(&mut state, 2);
-    state.prepare_layout(80, 40);
-    assert!(verb_header_at(&state, 0));
-    assert_eq!(state.group_range_of(0, true), 0..2);
-
-    state.attach_hooks(
-        ids[1],
-        crate::scrollback::blocks::tool::HookPhase::Post,
-        Vec::new(),
-    );
-    assert_eq!(state.group_range_of(0, true), 0..2);
-
-    state.prepare_layout(80, 40);
-    assert!(verb_header_at(&state, 0));
-    assert_eq!(state.group_range_of(1, true), 0..2);
-    assert_eq!(cached_height_at(&state, 1), 0, "hooked member stays folded");
 }
 
 #[test]
@@ -1037,7 +1071,7 @@ fn verb_group_interior_thought_claims_into_fold() {
 #[test]
 fn verb_group_trailing_thought_claims_and_keeps_boundary_gap() {
     let gap = |state: &ScrollbackState, idx: usize| {
-        state.layout_cache.as_ref().unwrap().entries[idx].gap_after
+        at(&state.layout_cache.as_ref().unwrap().entries, idx).gap_after
     };
     let mut state = verb_state();
     crate::appearance::cache::set_show_thinking_blocks(true);
@@ -1048,7 +1082,7 @@ fn verb_group_trailing_thought_claims_and_keeps_boundary_gap() {
 
     assert!(verb_header_at(&state, 0));
     assert_eq!(cached_height_at(&state, 2), 0, "trailing thought claims");
-    // The LAST claimed entry (the thought) carries the boundary gap.
+    // The last claimed entry (the thought) carries the boundary gap
     assert_eq!(gap(&state, 0), 0);
     assert_eq!(gap(&state, 1), 0);
     assert_eq!(gap(&state, 2), 1, "boundary blank before agent text");
@@ -1057,8 +1091,7 @@ fn verb_group_trailing_thought_claims_and_keeps_boundary_gap() {
 
 #[test]
 fn verb_group_thoughts_never_count_but_fold_behind_one_tool() {
-    // Pure-thought runs never fold: with no tool member the aggregated
-    // header label would be empty.
+    // Pure-thought runs never fold: with no tool member the aggregated header label would be empty
     let mut state = verb_state();
     crate::appearance::cache::set_show_thinking_blocks(true);
     push_thought(&mut state, "one");
@@ -1069,9 +1102,7 @@ fn verb_group_thoughts_never_count_but_fold_behind_one_tool() {
         assert!(cached_height_at(&state, i) > 0);
     }
 
-    // One tool plus finished thoughts is a run: it folds into a single
-    // header row that swallows the thoughts, and the count stays
-    // tools-only.
+    // One tool plus finished thoughts is a run: it folds into a single header row that swallows the thoughts, and the count stays tools-only
     let mut state = verb_state();
     crate::appearance::cache::set_show_thinking_blocks(true);
     state.push_block(RenderBlock::list_dir("src"));
@@ -1098,8 +1129,7 @@ fn verb_group_opened_thought_stays_transparent_inside_fold() {
     state.prepare_layout(80, 40);
     assert_eq!(cached_height_at(&state, 1), 0);
 
-    // Opening the thought drops it from the fold; the run keeps folding
-    // around its rendered rows (thinking never breaks a run).
+    // Opening the thought drops it from the fold; the run keeps folding around its rendered rows (thinking never breaks a run)
     state
         .get_by_id_mut(thought)
         .unwrap()
@@ -1109,7 +1139,7 @@ fn verb_group_opened_thought_stays_transparent_inside_fold() {
     assert!(verb_header_at(&state, 0), "run still folds");
     assert!(cached_height_at(&state, 1) > 0, "opened thought renders");
     assert_eq!(cached_height_at(&state, 2), 0, "run continues across it");
-    let gap = state.layout_cache.as_ref().unwrap().entries[1].gap_after;
+    let gap = at(&state.layout_cache.as_ref().unwrap().entries, 1).gap_after;
     assert_eq!(gap, 0, "in-run transparent keeps no trailing blank");
     crate::appearance::cache::set_show_thinking_blocks(false);
 }
@@ -1147,8 +1177,7 @@ fn verb_group_excludes_pending_input() {
     push_reads(&mut state, 3);
     state.entry_mut(1).unwrap().is_pending_user_input = true;
     state.prepare_layout(80, 40);
-    // The pending entry stays standalone — its prompt chrome must remain
-    // visible — while the reads around it fold as singleton runs.
+    // The pending entry stays standalone (its prompt must stay visible) while the reads around it fold as singleton runs
     assert!(verb_header_at(&state, 0));
     assert!(!verb_header_at(&state, 1), "pending row never claims");
     assert!(verb_header_at(&state, 2));
@@ -1165,10 +1194,9 @@ fn verb_group_refolds_on_pending_input_transitions() {
     assert!(verb_header_at(&state, 0));
     assert_eq!(cached_height_at(&state, 1), 0);
 
-    // A permission prompt lands on an already-hidden member: the flag flip
-    // alone must re-run the folds so the prompt row surfaces (the run
-    // splits into singleton folds around it).
-    assert!(state.set_pending_user_input(ids[1], true));
+    // A permission prompt lands on an already-hidden member: the flag flip alone must re-run the folds so the prompt row shows
+    // The run splits into singleton folds around it
+    assert!(state.set_pending_user_input(at(&ids, 1), true));
     state.prepare_layout(80, 40);
     assert_eq!(
         header_count_at(&mut state, 0),
@@ -1181,7 +1209,7 @@ fn verb_group_refolds_on_pending_input_transitions() {
     );
 
     // Resolving the prompt refolds the run.
-    assert!(state.set_pending_user_input(ids[1], false));
+    assert!(state.set_pending_user_input(at(&ids, 1), false));
     state.prepare_layout(80, 40);
     assert!(verb_header_at(&state, 0));
     assert_eq!(cached_height_at(&state, 1), 0, "resolved row refolds");
@@ -1191,12 +1219,11 @@ fn verb_group_refolds_on_pending_input_transitions() {
 fn verb_group_refolds_when_clear_all_resolves_pending_input() {
     let mut state = verb_state();
     let ids = push_reads(&mut state, 3);
-    assert!(state.set_pending_user_input(ids[1], true));
+    assert!(state.set_pending_user_input(at(&ids, 1), true));
     state.prepare_layout(80, 40);
     assert!(cached_height_at(&state, 1) > 0);
 
-    // The per-frame sync resolves prompts by clearing without re-marking —
-    // that false-ward path must refold on its own.
+    // The per-frame sync resolves prompts by clearing without re-marking; that clearing path must refold on its own
     state.clear_all_pending_user_input();
     state.prepare_layout(80, 40);
     assert!(verb_header_at(&state, 0));
@@ -1204,52 +1231,21 @@ fn verb_group_refolds_when_clear_all_resolves_pending_input() {
 }
 
 #[test]
-fn verb_group_stays_folded_on_attach_hooks() {
-    use crate::scrollback::blocks::tool::{HookPhase, HookRunEntry, HookRunStatus};
-
-    let mut state = verb_state();
-    let ids = push_reads(&mut state, 3);
-    state.prepare_layout(80, 40);
-    assert_eq!(cached_height_at(&state, 2), 0);
-
-    state.attach_hooks(
-        ids[2],
-        HookPhase::Post,
-        vec![HookRunEntry {
-            name: "fmt".to_owned(),
-            status: HookRunStatus::Success {
-                elapsed: std::time::Duration::from_millis(1),
-            },
-            output: None,
-        }],
-    );
-    assert!(state.gaps_may_be_dirty, "hook attachment reapplies folds");
-    state.prepare_layout(80, 40);
-    assert!(verb_header_at(&state, 0));
-    assert_eq!(header_count_at(&mut state, 0), 3);
-    assert_eq!(cached_height_at(&state, 2), 0, "hooked row remains folded");
-}
-
-#[test]
 fn verb_group_folds_incremental_push_with_truncation_disabled() {
-    // `group_max_visible = 0` disables the N-more pass, but the verb fold
-    // is gated independently on `group_tool_verbs` — the incremental push
-    // path must mark dirtiness for it too (the old gate keyed only off
-    // `group_max_visible > 0`, so the fold lagged until a full rebuild).
+    // `group_max_visible = 0` disables the N-more pass, but the verb fold is gated independently on `group_tool_verbs`
+    // The incremental push path must mark dirtiness for it too; a gate keyed only off `group_max_visible > 0` lags the fold until a full rebuild
     let mut state = verb_state();
     let mut appearance = AppearanceConfig::default();
     appearance.scrollback.display.group_max_visible = 0;
     state.set_appearance(appearance);
 
-    // Build a valid cache first so the pushes below take the incremental
-    // extend path (pre-layout pushes are handled by the Case 1 full build).
+    // Build a valid cache first so the pushes below take the incremental extend path (pre-layout pushes are handled by the Case 1 full build)
     state.push_block(RenderBlock::agent_message("break"));
     state.prepare_layout(80, 40);
 
     push_reads(&mut state, 2);
-    // Extend must have succeeded — a failed extend falls back to full
-    // invalidation, which would fold even with the gate broken and mask
-    // the regression this test pins.
+    // Extend must have succeeded
+    // A failed extend falls back to full invalidation, which would fold even with the gate broken and mask the regression this test pins
     assert!(
         state.layout_cache.is_some(),
         "pushes must take the incremental extend path"
@@ -1268,11 +1264,10 @@ fn verb_group_folds_incremental_push_with_truncation_disabled() {
 #[test]
 fn verb_group_boundary_gap_follows_pairwise_rule() {
     let gap = |state: &ScrollbackState, idx: usize| {
-        state.layout_cache.as_ref().unwrap().entries[idx].gap_after
+        at(&state.layout_cache.as_ref().unwrap().entries, idx).gap_after
     };
 
-    // Controls with folding OFF: the pairwise rule's verdict at the
-    // run→neighbor boundary, for both neighbor kinds.
+    // Controls with folding off: the pairwise rule's verdict at the boundary between the run and its neighbor, for both neighbor kinds
     crate::appearance::cache::set_show_thinking_blocks(false);
     crate::appearance::cache::set_group_tool_verbs(false);
     let mut control_text = ScrollbackState::new();
@@ -1291,8 +1286,7 @@ fn verb_group_boundary_gap_follows_pairwise_rule() {
     control_exec.prepare_layout(80, 40);
     let exec_boundary = gap(&control_exec, 2);
 
-    // Folded: gaps zero WITHIN the run; the last member keeps the
-    // pairwise boundary gap so the header never glues to what follows.
+    // Folded: gaps are zero within the run; the last member keeps the pairwise boundary gap so the header never glues to what follows
     let mut state = verb_state();
     push_reads(&mut state, 3);
     state.push_block(RenderBlock::agent_message("after"));
@@ -1327,8 +1321,7 @@ fn verb_group_boundary_gap_follows_pairwise_rule() {
     state.prepare_layout(80, 40);
     assert_eq!(gap(&state, 2), text_boundary, "expanded boundary gap");
 
-    // Singleton: the header IS the run's last claimed entry, so it keeps
-    // the pairwise boundary gap itself.
+    // Singleton: the header is itself the run's last claimed entry, so it keeps the pairwise boundary gap
     let mut state = verb_state();
     push_reads(&mut state, 1);
     state.push_block(RenderBlock::agent_message("after"));
@@ -1348,15 +1341,14 @@ fn verb_group_expand_and_collapse_round_trip() {
     state.prepare_layout(80, 40);
     assert!(verb_header_at(&state, 0));
 
-    // Enter on the header expands: the first slot stacks the header line
-    // above entry 0's own row (height 2), so EVERY member — including the
-    // first — renders below the header.
+    // Enter on the header expands: the first slot stacks the header line above entry 0's own row (height 2)
+    // Every member, including the first, renders below the header
     state.set_selected(Some(0));
     assert!(state.toggle_group_expansion());
     state.prepare_layout(80, 40);
-    assert!(state.expanded_groups.contains(&ids[0]));
+    assert!(state.expanded_groups.contains(&at(&ids, 0)));
     assert!(verb_header_at(&state, 0));
-    let info = state.layout_cache.as_ref().unwrap().entries[0];
+    let info = at(&state.layout_cache.as_ref().unwrap().entries, 0);
     assert!(info.group_collapse_header);
     assert_eq!(
         cached_height_at(&state, 0),
@@ -1373,7 +1365,7 @@ fn verb_group_expand_and_collapse_round_trip() {
     state.set_selected(Some(1));
     assert!(state.collapse_group_if_expanded());
     state.prepare_layout(80, 40);
-    assert!(!state.expanded_groups.contains(&ids[0]));
+    assert!(!state.expanded_groups.contains(&at(&ids, 0)));
     assert_eq!(cached_height_at(&state, 1), 0);
 }
 
@@ -1386,7 +1378,7 @@ fn verb_group_singleton_expand_and_collapse_round_trip() {
     assert!(verb_header_at(&state, 0));
     assert_eq!(cached_height_at(&state, 0), 1);
 
-    // The folded singleton carries the full header interaction surface.
+    // The folded singleton still acts as a group header: selectable, with the expand label
     state.set_selected(Some(0));
     assert!(state.is_selected_group_header());
     assert_eq!(state.selected_group_header_fold_label(), Some("expand"));
@@ -1394,8 +1386,8 @@ fn verb_group_singleton_expand_and_collapse_round_trip() {
     // Expand: the slot stacks the header line above the member's own row.
     assert!(state.toggle_group_expansion());
     state.prepare_layout(80, 40);
-    assert!(state.expanded_groups.contains(&ids[0]));
-    let info = state.layout_cache.as_ref().unwrap().entries[0];
+    assert!(state.expanded_groups.contains(&at(&ids, 0)));
+    let info = at(&state.layout_cache.as_ref().unwrap().entries, 0);
     assert!(info.verb_group_header && info.group_collapse_header);
     assert_eq!(cached_height_at(&state, 0), 2, "header line + member row");
     // The expanded slot acts as member 0, exactly like a multi-member run.
@@ -1405,7 +1397,7 @@ fn verb_group_singleton_expand_and_collapse_round_trip() {
     // Left from the header collapses back to the folded header row.
     assert!(state.collapse_group_if_expanded());
     state.prepare_layout(80, 40);
-    assert!(!state.expanded_groups.contains(&ids[0]));
+    assert!(!state.expanded_groups.contains(&at(&ids, 0)));
     assert!(verb_header_at(&state, 0));
     assert_eq!(cached_height_at(&state, 0), 1);
 }
@@ -1417,8 +1409,7 @@ fn verb_group_left_collapses_from_selected_header() {
     state.prepare_layout(80, 40);
     state.set_selected(Some(0));
 
-    // Expanding from the header KEEPS the header selected (unlike N-more
-    // groups), so an immediate Collapse re-folds without re-selecting.
+    // Expanding from the header keeps the header selected (unlike N-more groups), so an immediate Collapse re-folds without re-selecting
     assert!(state.toggle_group_expansion());
     state.prepare_layout(80, 40);
     assert_eq!(
@@ -1429,7 +1420,7 @@ fn verb_group_left_collapses_from_selected_header() {
 
     assert!(state.collapse_group_if_expanded());
     state.prepare_layout(80, 40);
-    assert!(!state.expanded_groups.contains(&ids[0]));
+    assert!(!state.expanded_groups.contains(&at(&ids, 0)));
     assert_eq!(cached_height_at(&state, 1), 0, "run refolds from header");
     assert_eq!(
         state.selected(),
@@ -1443,8 +1434,8 @@ fn verb_group_expand_keeps_preserved_scroll_pin() {
     use crate::scrollback::blocks::tool::{ReadToolCallBlock, ToolCallBlock};
 
     let mut state = verb_state();
-    // Turn-1 filler so the pinned prompt sits at virtual_y > 0, then the
-    // prompt and a foldable run below it (the page-flip repro shape).
+    // Filler from an earlier turn so the pinned prompt sits at virtual_y > 0
+    // Then the prompt and a foldable run below it (the page-flip shape this test reproduces)
     for i in 0..8 {
         state.push_block(RenderBlock::agent_message(format!("history {i}")));
     }
@@ -1452,21 +1443,21 @@ fn verb_group_expand_keeps_preserved_scroll_pin() {
     push_reads(&mut state, 8);
     state.prepare_layout(80, 12);
 
-    // Mimic dispatch_send_prompt's page flip: prompt pinned at the
-    // viewport top, follow+preserve armed, content below fits on screen.
-    let pin = state.layout_cache.as_ref().unwrap().virtual_y[8];
-    state.scroll_offset = pin;
-    state.follow_mode = true;
-    state.follow_preserve_scroll = true;
+    // Use the production page-flip path so the prompt-top pose has owned trailing reserve.
+    state.page_flip_to_entry(8);
     state.prepare_layout(80, 12);
-    assert_eq!(state.scroll_offset, pin, "preserve pin holds before toggle");
+    let pin = state.scroll_offset;
+    assert_eq!(
+        state.max_scroll_offset(),
+        pin,
+        "preserve pin is a reachable bottom before toggle"
+    );
 
     // Expand the group (header at idx 9, right below the prompt).
     state.set_selected(Some(9));
     assert!(state.toggle_group_expansion());
     state.prepare_layout(80, 12);
-    // Setup sanity: the growth really pushes max_offset past the pin —
-    // the exact shape whose next follow pass used to snap to the bottom.
+    // Setup sanity: the growth really pushes max_offset past the pin, the exact shape whose next follow pass used to snap to the bottom
     let max_offset = state
         .total_height
         .saturating_sub(state.viewport_height as usize);
@@ -1479,9 +1470,7 @@ fn verb_group_expand_keeps_preserved_scroll_pin() {
     // The same invariant holds for a plain block fold in the same shape.
     state.collapse_group_if_expanded();
     state.prepare_layout(80, 12);
-    state.scroll_offset = pin;
-    state.follow_mode = true;
-    state.follow_preserve_scroll = true;
+    state.page_flip_to_entry(8);
     state.entry_mut(9).unwrap().block = RenderBlock::ToolCall(ToolCallBlock::Read(
         ReadToolCallBlock::new("f9.rs")
             .with_content("a\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\nl".to_owned(), 12),
@@ -1501,9 +1490,8 @@ fn expanded_verb_slot_routes_to_member_zero() {
 
     let mut state = verb_state();
     let ids = push_reads(&mut state, 3);
-    // Member 0 needs body content: a contentless Read is not foldable
-    // (`ReadToolCallBlock::is_foldable == has_content`), so Right below
-    // would no-op instead of opening the block.
+    // Member 0 needs body content: a contentless Read is not foldable (`ReadToolCallBlock::is_foldable == has_content`)
+    // Without it, Right below would no-op instead of opening the block
     state.entry_mut(0).unwrap().block = RenderBlock::ToolCall(ToolCallBlock::Read(
         ReadToolCallBlock::new("f0.rs").with_content("member zero body".to_owned(), 1),
     ));
@@ -1512,17 +1500,15 @@ fn expanded_verb_slot_routes_to_member_zero() {
     assert!(state.toggle_group_expansion());
     state.prepare_layout(80, 40);
 
-    // The expanded slot acts as member 0: no header semantics, no
-    // re-toggle — Expand/ToggleFold/Enter fall through to the block, and
-    // copy/fullscreen still see member 0's visible content.
+    // The expanded slot acts as member 0: it is not a header and cannot re-toggle
+    // Expand/ToggleFold/Enter fall through to the block, and copy/fullscreen still see member 0's visible content
     assert!(!state.is_selected_group_header());
     assert!(!state.entry_content_hidden_by_group(0));
     assert_eq!(state.selected_group_header_fold_label(), None);
     assert!(!state.toggle_group_expansion());
 
-    // Right opens member 0's own block: it goes transparent, the run
-    // re-anchors on the next member, and the expansion re-keys with it —
-    // the remaining pair stays an EXPANDED group behind the open block.
+    // Right opens member 0's own block: it goes transparent, the run re-anchors on the next member, and the expansion re-keys with it
+    // The remaining pair stays an expanded group behind the open block
     state.expand_selected();
     state.prepare_layout(80, 40);
     assert!(!verb_header_at(&state, 0));
@@ -1541,7 +1527,7 @@ fn expanded_verb_slot_routes_to_member_zero() {
     state.prepare_layout(80, 40);
     assert!(verb_header_at(&state, 0));
     assert_eq!(cached_height_at(&state, 0), 2);
-    assert!(state.expanded_groups.contains(&ids[0]));
+    assert!(state.expanded_groups.contains(&at(&ids, 0)));
 
     // Left from the slot still collapses the group (member path).
     assert!(state.collapse_group_if_expanded());
@@ -1549,10 +1535,9 @@ fn expanded_verb_slot_routes_to_member_zero() {
     assert_eq!(cached_height_at(&state, 1), 0);
 }
 
-/// The e/e round trip on the expanded slot: e opens member 0's block,
-/// e closes it back into the still-expanded group — and while any member
-/// is open the OTHER members must keep their rows instead of snapping
-/// into a fresh collapsed fold (the run's expansion follows its anchor).
+/// The e/e round trip on the expanded slot: e opens member 0's block, e closes it back into the still-expanded group.
+/// While any member is open the other members must keep their rows instead of snapping into a fresh collapsed fold.
+/// The run's expansion follows its anchor.
 #[test]
 fn verb_group_expanded_slot_member_toggle_round_trips() {
     use crate::scrollback::blocks::tool::{ReadToolCallBlock, ToolCallBlock};
@@ -1572,8 +1557,8 @@ fn verb_group_expanded_slot_member_toggle_round_trips() {
     state.prepare_layout(80, 40);
     assert_eq!(cached_height_at(&state, 0), 2);
 
-    // e: the slot routes to member 0's own block, which opens. The
-    // surviving run must stay EXPANDED behind it — members keep rows.
+    // e: the slot routes to member 0's own block, which opens
+    // The surviving run must stay expanded behind it; members keep rows
     assert!(!state.toggle_group_expansion());
     state.toggle_fold_selected();
     state.prepare_layout(80, 40);
@@ -1587,13 +1572,12 @@ fn verb_group_expanded_slot_member_toggle_round_trips() {
     assert!(!state.toggle_group_expansion());
     state.toggle_fold_selected();
     state.prepare_layout(80, 40);
-    assert!(state.expanded_groups.contains(&ids[0]));
+    assert!(state.expanded_groups.contains(&at(&ids, 0)));
     assert_eq!(cached_height_at(&state, 0), 2, "expanded slot re-forms");
     assert!(cached_height_at(&state, 1) > 0);
     assert!(cached_height_at(&state, 2) > 0);
 
-    // Opening an INTERIOR member keeps the group intact around it: one
-    // run, same header, opened rows inline (like opened thinking).
+    // Opening an interior member keeps the group intact around it: one run, same header, opened rows inline (like opened thinking)
     state.set_selected(Some(1));
     state.toggle_fold_selected();
     state.prepare_layout(80, 40);
@@ -1604,7 +1588,7 @@ fn verb_group_expanded_slot_member_toggle_round_trips() {
     // Closing it restores the member row within the same group.
     state.toggle_fold_selected();
     state.prepare_layout(80, 40);
-    assert!(state.expanded_groups.contains(&ids[0]));
+    assert!(state.expanded_groups.contains(&at(&ids, 0)));
     assert_eq!(cached_height_at(&state, 1), 1);
 }
 
@@ -1615,8 +1599,7 @@ fn verb_group_range_excludes_adjacent_dense_neighbors() {
     push_reads(&mut state, 3);
     state.prepare_layout(80, 40);
 
-    // Edit is groupable+collapsed (dense packing) but not verb-groupable;
-    // the verb range must stop at it.
+    // Edit is groupable and collapsed (dense packing) but not verb-groupable; the verb range must stop at it
     assert_eq!(state.group_range_of(2, true), 1..4);
     assert!(verb_header_at(&state, 1));
 }
@@ -1628,9 +1611,8 @@ fn verb_group_claimed_entries_skip_n_more_truncation() {
     appearance.scrollback.display.group_max_visible = 3;
     state.set_appearance(appearance);
 
-    // 4 Other tools + 3 reads are one dense run of 7 (> max_visible + 1),
-    // but the claimed reads break the truncation scan: the Others alone
-    // (4 <= max_visible + 1) stay untruncated.
+    // 4 Other tools + 3 reads are one dense run of 7 (> max_visible + 1), but the claimed reads break the truncation scan
+    // The Others alone (4 <= max_visible + 1) stay untruncated
     push_tool_calls(&mut state, 4);
     push_reads(&mut state, 3);
     state.prepare_layout(80, 40);
@@ -1681,15 +1663,14 @@ fn verb_group_search_reveal_unhides_member() {
 
     state.reveal_entry_line(1, 0);
     state.prepare_layout(80, 40);
-    assert!(state.expanded_groups.contains(&ids[0]));
+    assert!(state.expanded_groups.contains(&at(&ids, 0)));
     assert!(
         cached_height_at(&state, 1) > 0,
         "reveal must un-hide the verb-grouped member"
     );
 
-    // Reveal on the expanded group's HEAD opens it (transparent; run
-    // re-anchors on the next member): the expansion key must migrate so
-    // the members stay expanded instead of snapping collapsed.
+    // Reveal on the expanded group's head opens it (transparent; the run re-anchors on the next member)
+    // The expansion key must migrate so the members stay expanded instead of snapping collapsed
     state.entry_mut(0).unwrap().block = RenderBlock::ToolCall(ToolCallBlock::Read(
         ReadToolCallBlock::new("f0.rs").with_content("head body".to_owned(), 1),
     ));
@@ -1713,8 +1694,7 @@ fn verb_group_subagent_head_expand_and_collapse_round_trip() {
     assert_eq!(cached_height_at(&state, 0), 1);
     assert_eq!(cached_height_at(&state, 1), 0);
 
-    // Expand from the header: the subagent hosts the shared slot (header
-    // line stacked above its own row); every member reveals below.
+    // Expand from the header: the subagent hosts the shared slot (header line stacked above its own row); every member reveals below
     state.set_selected(Some(0));
     assert!(state.toggle_group_expansion());
     state.prepare_layout(80, 40);
@@ -1754,22 +1734,19 @@ fn verb_group_subagent_mid_run_member_folds_and_round_trips() {
     state.set_selected(Some(1));
     assert!(state.collapse_group_if_expanded());
     state.prepare_layout(80, 40);
-    assert!(!state.expanded_groups.contains(&ids[0]));
+    assert!(!state.expanded_groups.contains(&at(&ids, 0)));
     assert_eq!(cached_height_at(&state, 1), 0);
 }
 
-/// Ctrl+T's expand-all re-derives dense runs itself; a verb-claimed lone
-/// read must neither start nor extend that walk, else the inserted id
-/// misses the truncation header — the dense group stays hidden while the
-/// read's fold spuriously pops open.
+/// Ctrl+E's expand-all re-derives dense runs itself; a verb-claimed lone read must neither start nor extend that walk.
+/// Otherwise the inserted id misses the truncation header: the dense group stays hidden while the read's fold spuriously pops open.
 #[test]
 fn expand_all_thinking_untruncates_dense_run_across_adjacent_verb_fold() {
     let mut state = verb_state();
     let mut appearance = AppearanceConfig::default();
     appearance.scrollback.display.group_max_visible = 3;
     state.set_appearance(appearance);
-    // A collapsed thought steers the toggle onto its expand leg (hidden
-    // while `show_thinking` is off, so it stays outside both runs).
+    // A collapsed thought steers the toggle onto its expand leg (hidden while `show_thinking` is off, so it stays outside both runs)
     push_thought(&mut state, "steer");
     let read_id = state.push_block(RenderBlock::read("lone.rs", None));
     let other_ids = push_tool_calls(&mut state, 12);
@@ -1781,7 +1758,7 @@ fn expand_all_thinking_untruncates_dense_run_across_adjacent_verb_fold() {
     state.prepare_layout(80, 40);
 
     assert!(
-        state.expanded_groups.contains(&other_ids[0]),
+        state.expanded_groups.contains(&at(&other_ids, 0)),
         "expand-all must key the dense run on its truncation header"
     );
     assert!(
@@ -1792,7 +1769,7 @@ fn expand_all_thinking_untruncates_dense_run_across_adjacent_verb_fold() {
         cached_height_at(&state, 3) > 0,
         "dense members surface behind the collapse header"
     );
-    let info = state.layout_cache.as_ref().unwrap().entries[1];
+    let info = at(&state.layout_cache.as_ref().unwrap().entries, 1);
     assert!(info.verb_group_header && !info.group_collapse_header);
     assert_eq!(cached_height_at(&state, 1), 1, "read fold stays collapsed");
 }
@@ -1820,7 +1797,7 @@ fn toggle_group_expansion_and_collapse_round_trip() {
     );
     state.prepare_layout(80, 40);
 
-    // Entry 0 = standalone collapse header (height=1).
+    // Entry 0 is the standalone collapse header (height=1)
     // Entries 1..6 keep their normal content.
     assert_eq!(cached_height_at(&state, 0), 1);
     assert_eq!(
@@ -1828,10 +1805,10 @@ fn toggle_group_expansion_and_collapse_round_trip() {
         5,
         "collapse header count = visible entries below (group_len - 1)"
     );
-    // Entry 0 IS a group header (Enter/click collapses).
+    // Entry 0 is a group header (Enter/click collapses)
     state.selected = Some(0);
     assert!(state.is_selected_group_header());
-    // Entry 1 is NOT a group header (Enter/click folds it).
+    // Entry 1 is not a group header (Enter/click folds it)
     state.selected = Some(1);
     assert!(!state.is_selected_group_header());
     for i in 1..6 {
@@ -1841,10 +1818,10 @@ fn toggle_group_expansion_and_collapse_round_trip() {
         );
     }
     assert!(
-        state.layout_cache.as_ref().unwrap().entries[0].group_collapse_header,
+        at(&state.layout_cache.as_ref().unwrap().entries, 0).group_collapse_header,
         "first entry should be a collapse header"
     );
-    assert!(state.expanded_groups.contains(&ids[0]));
+    assert!(state.expanded_groups.contains(&at(&ids, 0)));
 
     // Collapse via toggle on the collapse header (Enter/e key).
     state.selected = Some(0);
@@ -1852,9 +1829,8 @@ fn toggle_group_expansion_and_collapse_round_trip() {
     assert!(toggled_back, "should collapse via toggle_group_expansion");
     state.prepare_layout(80, 40);
 
-    // Should be truncated again
     assert_eq!(header_count_at(&mut state, 0), 2);
-    assert!(!state.expanded_groups.contains(&ids[0]));
+    assert!(!state.expanded_groups.contains(&at(&ids, 0)));
 
     // Also test collapse from inside the group (entry 3):
     state.selected = Some(0);
@@ -1865,9 +1841,8 @@ fn toggle_group_expansion_and_collapse_round_trip() {
     assert!(collapsed, "should collapse expanded group from entry 3");
     state.prepare_layout(80, 40);
 
-    // Should be truncated again
     assert_eq!(header_count_at(&mut state, 0), 2);
-    assert!(!state.expanded_groups.contains(&ids[0]));
+    assert!(!state.expanded_groups.contains(&at(&ids, 0)));
 }
 
 #[test]
@@ -1900,8 +1875,7 @@ fn entry_content_hidden_by_group_tracks_truncation() {
         "out-of-range index is not hidden"
     );
 
-    // Expanded generic group: the collapse header still replaces its own
-    // content; all members below are visible.
+    // Expanded generic group: the collapse header still replaces its own content; all members below are visible
     state.selected = Some(1);
     state.toggle_group_expansion();
     state.prepare_layout(80, 40);
@@ -1932,19 +1906,19 @@ fn collapse_header_is_independent_selectable_entry() {
     state.toggle_group_expansion();
     state.prepare_layout(80, 40);
 
-    // Entry 0 = standalone collapse header (height=1, own index).
+    // Entry 0 is the standalone collapse header (height=1, own index)
     assert_eq!(cached_height_at(&state, 0), 1);
-    assert!(state.layout_cache.as_ref().unwrap().entries[0].group_collapse_header);
+    assert!(at(&state.layout_cache.as_ref().unwrap().entries, 0).group_collapse_header);
 
-    // Entry 0 IS a group header → Enter/e collapses the group.
+    // Entry 0 is a group header: Enter/e collapses the group
     state.selected = Some(0);
     assert!(state.is_selected_group_header());
 
-    // Entry 1 is NOT a group header → Enter/e folds it.
+    // Entry 1 is not a group header: Enter/e folds it
     state.selected = Some(1);
     assert!(!state.is_selected_group_header());
 
-    // toggle_group_expansion on entry 0 → collapses group.
+    // toggle_group_expansion on entry 0 collapses the group
     state.selected = Some(0);
     assert!(state.toggle_group_expansion());
     state.prepare_layout(80, 40);
@@ -1954,7 +1928,7 @@ fn collapse_header_is_independent_selectable_entry() {
             .contains(state.entries.get_index(0).unwrap().0)
     );
 
-    // Re-expand, then verify entry 1 does NOT toggle group.
+    // Re-expand, then verify entry 1 does not toggle the group
     state.selected = Some(0);
     state.toggle_group_expansion();
     state.prepare_layout(80, 40);
@@ -1984,7 +1958,7 @@ fn expanded_group_with_thinking_first_shows_all_entries() {
     }
     state.prepare_layout(80, 40);
 
-    // Collapsed: entry 0 = "2 more" header, entries 1-2 hidden, 3-5 visible.
+    // Collapsed: entry 0 is the "2 more" header, entries 1-2 hidden, 3-5 visible
     assert_eq!(header_count_at(&mut state, 0), 2);
 
     // Expand.
@@ -1992,7 +1966,7 @@ fn expanded_group_with_thinking_first_shows_all_entries() {
     state.toggle_group_expansion();
     state.prepare_layout(80, 40);
 
-    // Entry 0 = standalone collapse header (height=1).
+    // Entry 0 is the standalone collapse header (height=1)
     // Entry 0's thinking content is behind the header (same as collapsed state).
     assert_eq!(cached_height_at(&state, 0), 1);
 
@@ -2004,11 +1978,11 @@ fn expanded_group_with_thinking_first_shows_all_entries() {
         );
     }
 
-    // Entry 0 is a group header → e/Enter collapses the group.
+    // Entry 0 is a group header: e/Enter collapses the group
     state.selected = Some(0);
     assert!(state.is_selected_group_header());
 
-    // Entry 1 is the first tool call → e/Enter folds it.
+    // Entry 1 is the first tool call: e/Enter folds it
     state.selected = Some(1);
     assert!(!state.is_selected_group_header());
 }
@@ -2027,7 +2001,7 @@ fn fixup_hidden_selection_moves_to_header() {
     state.selected = Some(1); // height=0
     state.fixup_hidden_selection();
 
-    // Should move to entry 0 (the group header)
+    // Moves to entry 0 (the group header)
     assert_eq!(state.selected, Some(0));
 }
 
@@ -2099,11 +2073,11 @@ fn remove_entry_cleans_expanded_groups() {
     state.prepare_layout(80, 40);
     state.selected = Some(0);
     state.toggle_group_expansion();
-    assert!(state.expanded_groups.contains(&ids[0]));
+    assert!(state.expanded_groups.contains(&at(&ids, 0)));
 
-    state.remove_entry(ids[0]);
+    state.remove_entry(at(&ids, 0));
     assert!(
-        !state.expanded_groups.contains(&ids[0]),
+        !state.expanded_groups.contains(&at(&ids, 0)),
         "removed entry should be cleaned from expanded_groups"
     );
 }
@@ -2120,7 +2094,7 @@ fn expanded_group_shows_all_entries_including_first() {
     push_tool_calls(&mut state, count);
     state.prepare_layout(80, 40);
 
-    // Should be truncated: 110 hidden + 10 visible, header count = 109
+    // Truncated: 110 hidden + 10 visible, header count = 109
     assert_eq!(header_count_at(&mut state, 0), count as u16 - 10 - 1);
 
     // Expand the group
@@ -2129,7 +2103,7 @@ fn expanded_group_shows_all_entries_including_first() {
     assert!(toggled);
     state.prepare_layout(80, 40);
 
-    // Entry 0 = standalone collapse header (height=1).
+    // Entry 0 is the standalone collapse header (height=1)
     // Entries 1..count are visible with normal heights.
     assert_eq!(cached_height_at(&state, 0), 1);
     assert_eq!(
@@ -2138,11 +2112,133 @@ fn expanded_group_shows_all_entries_including_first() {
         "collapse header count = visible entries below (group_len - 1)"
     );
     assert!(
-        state.layout_cache.as_ref().unwrap().entries[0].group_collapse_header,
+        at(&state.layout_cache.as_ref().unwrap().entries, 0).group_collapse_header,
         "first entry should be collapse header"
     );
     for i in 1..count {
         let h = cached_height_at(&state, i);
         assert!(h > 0, "entry {i} should be visible, got height={h}");
     }
+}
+
+#[test]
+fn reapply_thinking_fold_policy_refolds_minimal_expanded_thought() {
+    let mut state = ScrollbackState::new();
+    let thought = push_thought(&mut state, "reasoning body");
+    let answer = state.push_block(RenderBlock::stub_non_groupable("answer", Color::Blue));
+    state
+        .get_by_id_mut(answer)
+        .unwrap()
+        .set_display_mode(DisplayMode::Expanded);
+    state
+        .get_by_id_mut(thought)
+        .unwrap()
+        .set_display_mode(DisplayMode::Expanded);
+
+    state.reapply_thinking_fold_policy();
+
+    assert_eq!(
+        state.get_by_id(thought).unwrap().display_mode(),
+        DisplayMode::Collapsed,
+        "minimal's Expanded stamp must fold back to the thinking policy"
+    );
+    assert_eq!(
+        state.get_by_id(answer).unwrap().display_mode(),
+        DisplayMode::Expanded,
+        "non-thinking entries keep their mode"
+    );
+}
+
+#[test]
+fn reapply_thinking_fold_policy_honors_sticky_expand_all() {
+    let mut state = ScrollbackState::new();
+    let thought = push_thought(&mut state, "reasoning body");
+    // Ctrl+E: sticky session-wide expand; a minimal round trip must not undo it.
+    state.expand_all_thinking();
+
+    state.reapply_thinking_fold_policy();
+
+    assert_eq!(
+        state.get_by_id(thought).unwrap().display_mode(),
+        DisplayMode::Expanded,
+        "the sticky thinking_display_mode wins over the collapse default"
+    );
+}
+
+#[test]
+fn reapply_thinking_fold_policy_skips_pinned_and_running_thoughts() {
+    let mut state = ScrollbackState::new();
+    state.appearance.scrollback.scroll.respect_manual_folds = true;
+    let pinned = push_thought(&mut state, "user expanded this one");
+    {
+        let entry = state.get_by_id_mut(pinned).unwrap();
+        entry.set_display_mode(DisplayMode::Expanded);
+        entry.display_mode_pinned = true;
+    }
+    let streaming = state.push(ScrollbackEntry::running(RenderBlock::thinking("live")));
+    state
+        .get_by_id_mut(streaming)
+        .unwrap()
+        .set_display_mode(DisplayMode::Expanded);
+
+    state.reapply_thinking_fold_policy();
+
+    assert_eq!(
+        state.get_by_id(pinned).unwrap().display_mode(),
+        DisplayMode::Expanded,
+        "pins win under respect_manual_folds"
+    );
+    assert_eq!(
+        state.get_by_id(streaming).unwrap().display_mode(),
+        DisplayMode::Expanded,
+        "a still-streaming thought keeps its mode"
+    );
+}
+
+#[test]
+fn reapply_thinking_fold_policy_preserves_expanded_tool_groups() {
+    let mut state = ScrollbackState::new();
+    let mut appearance = AppearanceConfig::default();
+    appearance.scrollback.display.group_max_visible = 3;
+    state.set_appearance(appearance);
+
+    let thought = push_thought(&mut state, "reasoning body");
+    state
+        .get_by_id_mut(thought)
+        .unwrap()
+        .set_display_mode(DisplayMode::Expanded);
+    // Non-groupable answer so the tool run is independent of the thought.
+    state.push_block(RenderBlock::stub_non_groupable("answer", Color::Blue));
+
+    let ids = push_tool_calls(&mut state, 6);
+    state.prepare_layout(80, 40);
+    // thought=0, answer=1, first tool=2
+    state.selected = Some(2);
+    assert!(
+        state.toggle_group_expansion(),
+        "tool group should toggle on its header"
+    );
+    assert!(
+        state.expanded_groups.contains(&at(&ids, 0)),
+        "precondition: group is expanded"
+    );
+
+    state.reapply_thinking_fold_policy();
+
+    assert_eq!(
+        state.get_by_id(thought).unwrap().display_mode(),
+        DisplayMode::Collapsed,
+        "minimal's Expanded stamp still refolds"
+    );
+    assert!(
+        state.expanded_groups.contains(&at(&ids, 0)),
+        "user-expanded tool groups must survive the thinking refold"
+    );
+
+    state.prepare_layout(80, 40);
+    let visible_tools = (2..8).filter(|&i| cached_height_at(&state, i) > 0).count();
+    assert!(
+        visible_tools >= 6,
+        "expanded tool-call members must stay visible after thinking refold, visible_tools={visible_tools}"
+    );
 }

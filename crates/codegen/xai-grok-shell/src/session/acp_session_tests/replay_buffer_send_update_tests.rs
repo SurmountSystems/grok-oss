@@ -31,21 +31,42 @@ fn extract_text(n: &acp::SessionNotification) -> Option<String> {
 pub(super) struct ReplaySendUpdateFixture {
     pub(super) actor: SessionActor,
     pub(super) event_rx: mpsc::UnboundedReceiver<SessionEvent>,
-    sent: Arc<tokio::sync::Mutex<Vec<acp::SessionNotification>>>,
+    pub(super) sent: Arc<tokio::sync::Mutex<Vec<acp::SessionNotification>>>,
+    /// `x.ai/*` extension notifications such as `ModelChanged`.
+    pub(super) sent_ext: Arc<tokio::sync::Mutex<Vec<acp::ExtNotification>>>,
     pub(super) persistence_rx: mpsc::UnboundedReceiver<PersistenceMsg>,
 }
+/// Claim the sampler request the way the turn loop does before stream events.
+/// `handle_sampling_event` drops a token whose request is not in `turn_stream_drained`.
+fn own_stream_request(actor: &SessionActor, request_id: &xai_grok_sampler::RequestId) {
+    let (tx, _rx) = tokio::sync::oneshot::channel();
+    actor
+        .turn_stream_drained
+        .lock()
+        .insert(request_id.clone(), StreamOwnership::with_waiter(Some(tx)));
+}
+
 pub(super) async fn make_replay_send_update_fixture() -> ReplaySendUpdateFixture {
     let (gateway_tx, mut gateway_rx) = mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
     let gateway = GatewaySender::new(gateway_tx);
     let sent = Arc::new(tokio::sync::Mutex::new(
         Vec::<acp::SessionNotification>::new(),
     ));
+    let sent_ext = Arc::new(tokio::sync::Mutex::new(Vec::<acp::ExtNotification>::new()));
     let sent_for_task = sent.clone();
+    let sent_ext_for_task = sent_ext.clone();
     tokio::task::spawn_local(async move {
         while let Some(msg) = gateway_rx.recv().await {
-            if let xai_acp_lib::AcpClientMessage::SessionNotification(args) = msg {
-                sent_for_task.lock().await.push(args.request);
-                let _ = args.response_tx.send(Ok(()));
+            match msg {
+                xai_acp_lib::AcpClientMessage::SessionNotification(args) => {
+                    sent_for_task.lock().await.push(args.request);
+                    let _ = args.response_tx.send(Ok(()));
+                }
+                xai_acp_lib::AcpClientMessage::ExtNotification(args) => {
+                    sent_ext_for_task.lock().await.push(args.request);
+                    let _ = args.response_tx.send(Ok(()));
+                }
+                _ => {}
             }
         }
     });
@@ -64,16 +85,24 @@ pub(super) async fn make_replay_send_update_fixture() -> ReplaySendUpdateFixture
     let tool_context = ToolContext::new(cwd.clone(), None, None, fs, terminal, hunk_tracker_handle);
     let state = TokioMutex::new(State {
         running_task: None,
+        finalization_gate: Default::default(),
+        message_delivery: Default::default(),
         pending_inputs: VecDeque::new(),
         edit_holds: HashMap::new(),
         pending_notifications: Vec::new(),
         notifications_suppressed: false,
         rewindable: false,
         front_message_committed: false,
+        hook_block_hold: Default::default(),
         nudges_used_this_session: 0,
     });
     let (event_tx, event_rx) = mpsc::unbounded_channel::<SessionEvent>();
     let actor = SessionActor {
+        vcs_root: None,
+        transient_retry_enabled: true,
+        transient_retries_prompt_total: std::cell::Cell::new(0),
+        transient_episode_start: std::cell::Cell::new(None),
+        status_wake: Default::default(),
         session_info: SessionInfo {
             id: acp::SessionId::new("test-session"),
             cwd: cwd.as_str().to_string(),
@@ -89,6 +118,7 @@ pub(super) async fn make_replay_send_update_fixture() -> ReplaySendUpdateFixture
             gateway_enabled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
             persistence_tx,
             disk_full: crate::session::notifications::idle_disk_full_rx(),
+            client_caps: crate::session::notifications::SessionClientCaps::new(false, true),
         },
         permissions: PermissionHandle::allow_all(),
         context_only: std::sync::atomic::AtomicBool::new(false),
@@ -97,10 +127,11 @@ pub(super) async fn make_replay_send_update_fixture() -> ReplaySendUpdateFixture
         mcp_state: Arc::new(TokioMutex::new(McpState::new(vec![]))),
         mcp_strategy: std::cell::Cell::new(McpInitStrategy::Blocking),
         delivery_tools: std::cell::RefCell::new(Vec::new()),
-        attach_non_interactive: std::cell::Cell::new(false),
+        attach_non_interactive: std::rc::Rc::new(std::cell::Cell::new(false)),
         chat_state_handle: xai_chat_state::ChatStateHandle::noop(),
         unattributed_background_usage: std::sync::atomic::AtomicBool::new(false),
         current_prompt_id: std::sync::Arc::new(std::sync::Mutex::new(None)),
+        active_work: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         pending_interactions: std::sync::Arc::new(std::sync::Mutex::new(
             std::collections::HashMap::new(),
         )),
@@ -116,11 +147,13 @@ pub(super) async fn make_replay_send_update_fixture() -> ReplaySendUpdateFixture
         rewind_pending_prompt: std::sync::Mutex::new(None),
         startup_hints: StartupHints::default(),
         forked_tool_override: None,
+
         compaction: crate::session::compaction_config::CompactionConfig {
             threshold_percent: std::cell::Cell::new(85),
             threshold_tokens: std::cell::Cell::new(None),
             force_compact: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             context_window_override: None,
+            context_window_selection: std::sync::atomic::AtomicU64::new(0),
             economic_mode: std::cell::Cell::new(false),
             model_context_window: std::cell::Cell::new(0),
             count: std::sync::atomic::AtomicU64::new(0),
@@ -134,9 +167,25 @@ pub(super) async fn make_replay_send_update_fixture() -> ReplaySendUpdateFixture
             prefix_released: std::sync::atomic::AtomicBool::new(false),
             cancel: Default::default(),
         },
+        long_reasoning_reminder: crate::session::long_reasoning_reminder::LongReasoningReminder {
+            enabled: false,
+            tokens: crate::session::long_reasoning_reminder::DEFAULT_TOKENS,
+            delay: crate::session::long_reasoning_reminder::DEFAULT_DELAY,
+        },
+        long_reasoning_turn_state: Default::default(),
         memory: crate::session::memory_state::SessionMemory {
+            configured_mode: None,
+            v2_config: Default::default(),
+            configured_storage: None,
+            process_disabled: false,
+            config_opt_out: false,
+            v2_legacy_carryover: false,
+            prompt_sync_pending: std::sync::atomic::AtomicBool::new(false),
             flush_config: crate::config::MemoryFlushConfig::default(),
-            is_flushing: std::sync::atomic::AtomicBool::new(false),
+            is_flushing: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            capture_worker: std::cell::RefCell::new(None),
+            dream_workers: crate::session::memory_state::V2DreamWorkers::default(),
+            last_capture_failure: std::cell::RefCell::new(None),
             last_flush_compaction: std::sync::atomic::AtomicU64::new(0),
             storage: std::cell::RefCell::new(None),
             save_on_end: true,
@@ -151,14 +200,18 @@ pub(super) async fn make_replay_send_update_fixture() -> ReplaySendUpdateFixture
             injection_count: std::sync::atomic::AtomicU64::new(0),
             compaction_recovery_count: std::sync::atomic::AtomicU64::new(0),
             chunks_added: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            init_reindex_handle: std::cell::RefCell::new(None),
             dream_config: Default::default(),
             dream_count: std::sync::atomic::AtomicU64::new(0),
             dream_success_count: std::sync::atomic::AtomicU64::new(0),
             dream_error_count: std::sync::atomic::AtomicU64::new(0),
+            token_totals: Default::default(),
         },
         session_start: std::time::Instant::now(),
         inference_idle_timeout: Duration::from_secs(300),
+        uncharged_401_park_enabled: true,
         max_retries: 3,
+        rate_limit_waits: crate::session::acp_session::RateLimitWaitConfig::default(),
         max_turns: None,
         pending_interjections: InterjectionBuffer::new(),
         pending_skill_reminders: Mutex::new(Vec::new()),
@@ -179,10 +232,12 @@ pub(super) async fn make_replay_send_update_fixture() -> ReplaySendUpdateFixture
         agent: std::cell::RefCell::new(test_agent_default().await),
         last_reported_branch: std::sync::Arc::new(parking_lot::Mutex::new(None)),
         git_head_enabled: false,
+        status_line_enabled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         models_manager: Default::default(),
         display_cwd: std::sync::OnceLock::new(),
         active_agent_type: parking_lot::Mutex::new(None),
         queue_exit_reminder_on_approved_exit: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        emit_local_background_tasks: Arc::new(std::sync::atomic::AtomicBool::new(true)),
         active_skill: parking_lot::Mutex::new(None),
         current_prompt_mode: Arc::new(parking_lot::Mutex::new(PromptMode::Agent)),
         turn_start_prompt_mode: parking_lot::Mutex::new(PromptMode::Agent),
@@ -211,6 +266,7 @@ pub(super) async fn make_replay_send_update_fixture() -> ReplaySendUpdateFixture
         goal_classifier_enabled: false,
         goal_planner_enabled: false,
         goal_summary_enabled: false,
+        length_salvage_remote_budget: None,
         goal_verifier_skeptic_count: 1,
         goal_role_models: Default::default(),
         goal_use_current_model_only: false,
@@ -221,43 +277,59 @@ pub(super) async fn make_replay_send_update_fixture() -> ReplaySendUpdateFixture
         pending_classifier_completions: parking_lot::Mutex::new(std::collections::VecDeque::new()),
         goal_classifier_in_flight: std::sync::atomic::AtomicBool::new(false),
         managed_mcp_handle: Default::default(),
-        initial_client_mcp_servers: vec![],
+        initial_client_mcp_servers: Default::default(),
         tool_metadata_snapshot: Arc::new(std::sync::Mutex::new(Default::default())),
-        mcp_announced_servers: Mutex::new(HashMap::new()),
+        mcp_announcements: Default::default(),
         mcp_reminder_mode: McpReminderMode::Delta,
         mcp_reminder_dirty: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         mcp_connecting_reminder_injected: std::cell::Cell::new(false),
-        mcp_handshakes_done: Arc::new(tokio::sync::Notify::new()),
+        mcp_refresh_gate: Arc::new(tokio::sync::Mutex::new(())),
         user_input_generation: std::sync::atomic::AtomicU64::new(0),
         laziness_debug_log: None,
         last_live_orphan_reconcile: std::cell::Cell::new(None),
-        deferred_prefix: TaskSlot::new(),
+        deferred_prefix: DeferredPrefix::new(),
+        mcp_startup_waits: Default::default(),
+        mcp_init_tasks: Default::default(),
+        weak_self: std::sync::Weak::new(),
+        startup_tasks: Default::default(),
         extension_registry: xai_agent_lifecycle::LocalExtensionRegistry::default(),
         last_announced_local_date: std::cell::Cell::new(chrono::Local::now().date_naive()),
         prefix_carries_fallback_date: std::cell::Cell::new(false),
         last_search_prompt_index: std::sync::atomic::AtomicI64::new(-1),
         last_api_request_at: std::sync::atomic::AtomicI64::new(0),
         hook_registry: std::cell::RefCell::new(None),
+        hook_disabled: Default::default(),
+        turn_report: Default::default(),
+        turn_abort: Default::default(),
+        turn_end_tx: Default::default(),
         client_hooks: Default::default(),
         hook_resolved_workspace_root: String::new(),
-        vcs_kind: xai_grok_workspace::session::git::VcsKind::Git,
         hook_load_errors: std::cell::RefCell::new(Vec::new()),
         plugin_registry: std::cell::RefCell::new(None),
         plugin_registry_handle: None,
         events: crate::session::events::EventTracker::new(std::path::Path::new("/tmp")),
         observability_bridge: noop_observability_bridge(),
         current_turn_number: std::cell::Cell::new(0),
+        turn_phases: std::sync::Arc::default(),
         last_recap_main_turn: std::cell::Cell::new(0),
         recap_in_flight: std::cell::Cell::new(false),
         recap_epoch: std::cell::Cell::new(0),
         turn_summary_task: std::cell::RefCell::new(None),
         turn_summary_generation: std::cell::Cell::new(0),
+        title_refresh_task: std::cell::RefCell::new(None),
+        title_refresh_generation: std::cell::Cell::new(0),
+        next_title_refresh_idx: std::cell::Cell::new(0),
         turn_summary_enabled: false,
+        title_refresh_enabled: false,
         session_turn_active: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         streaming_turn_capture: parking_lot::Mutex::new(StreamingTurnCapture::default()),
-        turn_stream_drained: parking_lot::Mutex::new(None),
-        pending_image_strip: parking_lot::Mutex::new(None),
+        stream_apply_span: parking_lot::Mutex::new(None),
+        current_turn_span_id: parking_lot::Mutex::new(None),
+        turn_stream_drained: parking_lot::Mutex::new(std::collections::HashMap::new()),
+        pending_image_strip: parking_lot::Mutex::new(HashMap::new()),
+        image_strip_rewrite_barrier: ImageStripRewriteBarrier::new(),
         sampler_handle: xai_grok_sampler::SamplerHandle::noop(),
+        sampling_gate: None,
         rebuild_spec: crate::session::agent_rebuild::test_rebuild_spec_default(),
         image_description_model: crate::test_support::TEST_MODEL.to_owned(),
         image_describe_cache: Arc::new(crate::session::image_describe::ImageDescribeCache::new()),
@@ -269,6 +341,7 @@ pub(super) async fn make_replay_send_update_fixture() -> ReplaySendUpdateFixture
         actor,
         event_rx,
         sent,
+        sent_ext,
         persistence_rx,
     }
 }
@@ -281,6 +354,7 @@ async fn send_update_buffers_streaming_chunks_and_flush_sends_merged_notificatio
                 actor,
                 mut event_rx,
                 sent,
+                sent_ext: _,
                 mut persistence_rx,
             } = make_replay_send_update_fixture().await;
             actor.send_update(agent_msg_update("he"), Some(1)).await;
@@ -307,7 +381,10 @@ async fn send_update_buffers_streaming_chunks_and_flush_sends_merged_notificatio
             tokio::task::yield_now().await;
             let sent_msgs = sent.lock().await.clone();
             assert_eq!(sent_msgs.len(), 1);
-            assert_eq!(extract_text(&sent_msgs[0]).as_deref(), Some("hello"));
+            let Some(first) = sent_msgs.first() else {
+                panic!("expected one sent message: {sent_msgs:?}");
+            };
+            assert_eq!(extract_text(first).as_deref(), Some("hello"));
             let mut persisted = vec![];
             while let Ok(msg) = persistence_rx.try_recv() {
                 persisted.push(msg);
@@ -320,17 +397,9 @@ async fn send_update_buffers_streaming_chunks_and_flush_sends_merged_notificatio
         })
         .await;
 }
-/// Regression for the cancel-during-long-reasoning trace upload gap:
-/// the `SessionCommand::Cancel` and `SessionCommand::CopyFile` handlers
-/// in `run_session` must flush the actor-owned `ReplayBuffer` so streamed
-/// chunks (notably `AgentThoughtChunk` reasoning) still pending at cancel
-/// time are persisted to `updates.jsonl` before `mvp_agent` issues
-/// `CopyFile` to snapshot the session directory for the trace upload.
-///
-/// Without the flush, the tail of a long reasoning stream sitting in the
-/// buffer when the user hits Ctrl+C never reaches disk before
-/// `copy_session_dir_to_memory` reads `updates.jsonl`. This test
-/// exercises the exact code added to both match arms.
+/// Regression test: a cancel during a long reasoning stream must not lose buffered chunks from the trace upload.
+/// The `SessionCommand::Cancel` and `SessionCommand::CopyFile` handlers in `run_session` must flush the actor-owned `ReplayBuffer`.
+/// Without the flush, the tail of a long reasoning stream sitting in the buffer at Ctrl+C never reaches disk.
 #[tokio::test(flavor = "current_thread")]
 async fn cancel_and_copyfile_handlers_flush_buffered_chunks_to_persistence() {
     let local = tokio::task::LocalSet::new();
@@ -340,6 +409,7 @@ async fn cancel_and_copyfile_handlers_flush_buffered_chunks_to_persistence() {
                 actor,
                 mut event_rx,
                 sent: _sent,
+                sent_ext: _,
                 mut persistence_rx,
             } = make_replay_send_update_fixture().await;
             actor
@@ -385,9 +455,8 @@ async fn cancel_and_copyfile_handlers_flush_buffered_chunks_to_persistence() {
         })
         .await;
 }
-/// Negative control for `cancel_and_copyfile_handlers_flush_buffered_chunks_to_persistence`:
-/// without the flush, a buffered chunk does NOT reach persistence on its
-/// own — proving the flush call is load-bearing in the cancel path.
+/// Negative control for `cancel_and_copyfile_handlers_flush_buffered_chunks_to_persistence`.
+/// Without the flush, a buffered chunk does not reach persistence on its own, so the cancel path needs the explicit flush call.
 #[tokio::test(flavor = "current_thread")]
 async fn buffered_chunk_does_not_reach_persistence_without_explicit_flush() {
     let local = tokio::task::LocalSet::new();
@@ -397,6 +466,7 @@ async fn buffered_chunk_does_not_reach_persistence_without_explicit_flush() {
                 actor,
                 mut event_rx,
                 sent: _sent,
+                sent_ext: _,
                 mut persistence_rx,
             } = make_replay_send_update_fixture().await;
             actor
@@ -435,6 +505,7 @@ async fn available_commands_update_is_forwarded_but_not_persisted() {
                 actor,
                 event_rx: _event_rx,
                 sent,
+                sent_ext: _,
                 mut persistence_rx,
             } = make_replay_send_update_fixture().await;
             let session_id = acp::SessionId::new("test-session");
@@ -478,870 +549,157 @@ async fn available_commands_update_is_forwarded_but_not_persisted() {
                 "exactly one update must be persisted; available_commands_update must be skipped",
             );
             assert!(
-                matches!(persisted[0].update, acp::SessionUpdate::AgentMessageChunk(_)),
+                matches!(persisted.first(), Some(n) if matches!(n.update, acp::SessionUpdate::AgentMessageChunk(_))),
                 "the persisted update must be the agent message, not available_commands_update",
             );
             drop(actor);
         })
         .await;
 }
-/// Contract: `StreamStarted` must notify the pager to clear sticky Retrying
-/// chrome (`RetryState::StreamResumed`) so attempt N does not freeze across
-/// a live post-retry stream.
-#[tokio::test(flavor = "current_thread")]
-async fn stream_started_emits_retry_state_stream_resumed() {
-    use crate::extensions::notification::{RetryState, SessionUpdate as XaiSessionUpdate};
-    use xai_grok_sampler::{RequestId, SamplingEvent};
-    let local = tokio::task::LocalSet::new();
-    local
-        .run_until(async {
-            let mut fixture = make_replay_send_update_fixture().await;
-            let actor = Arc::new(fixture.actor);
-            *actor
-                .current_prompt_id
-                .lock()
-                .expect("current_prompt_id mutex poisoned") = Some("prompt-resume".to_string());
-            actor
-                .handle_sampling_event(SamplingEvent::StreamStarted {
-                    request_id: RequestId::random(),
-                    timestamp_ms: 1,
-                })
-                .await;
-            // Yield so fire-and-forget path completes persistence send.
-            tokio::task::yield_now().await;
-            let mut found = false;
-            while let Ok(msg) = fixture.persistence_rx.try_recv() {
-                if let PersistenceMsg::Update(crate::session::storage::SessionUpdate::Xai(n)) = msg
-                {
-                    if matches!(
-                        n.update,
-                        XaiSessionUpdate::RetryState(RetryState::StreamResumed)
-                    ) {
-                        found = true;
-                        break;
-                    }
-                }
-            }
-            assert!(
-                found,
-                "StreamStarted must persist RetryState::StreamResumed for pager chrome clear"
-            );
-        })
-        .await;
-}
-
-/// `handle_sampling_event::ChannelToken` for `Reasoning` and `Text`
-/// channels must accumulate into the session's streaming capture so
-/// the trace upload can serialize it even when the canonical
-/// `record_assistant_response` path is skipped (cancel / max tokens).
-#[tokio::test(flavor = "current_thread")]
-async fn channel_tokens_accumulate_into_streaming_capture() {
-    use xai_grok_sampler::{RequestId, SamplingChannel, SamplingEvent};
-    let local = tokio::task::LocalSet::new();
-    local
-        .run_until(async {
-            let fixture = make_replay_send_update_fixture().await;
-            let actor = Arc::new(fixture.actor);
-            *actor
-                .current_prompt_id
-                .lock()
-                .expect("current_prompt_id mutex poisoned") = Some("prompt-stream-1".to_string());
-            actor.current_turn_number.set(7);
-            let req = RequestId::random();
-            actor
-                .handle_sampling_event(SamplingEvent::StreamStarted {
-                    request_id: req.clone(),
-                    timestamp_ms: 1_700_000_000_000,
-                })
-                .await;
-            for chunk in ["Let me ", "think ", "step by step. "] {
-                actor
-                    .handle_sampling_event(SamplingEvent::ChannelToken {
-                        request_id: req.clone(),
-                        channel: SamplingChannel::Reasoning,
-                        text: chunk.to_string(),
-                        chunk_index: 0,
-                    })
-                    .await;
-            }
-            actor
-                .handle_sampling_event(SamplingEvent::ChannelToken {
-                    request_id: req.clone(),
-                    channel: SamplingChannel::Text,
-                    text: "Answer: 42".to_string(),
-                    chunk_index: 0,
-                })
-                .await;
-            let cap = actor.streaming_turn_capture.lock().clone();
-            assert_eq!(
-                cap.prompt_id.as_deref(),
-                Some("prompt-stream-1"),
-                "prompt id must be stamped on the capture",
-            );
-            assert_eq!(cap.turn_number, 7, "turn number must be stamped");
-            assert_eq!(
-                cap.started_at_ms,
-                Some(1_700_000_000_000),
-                "started_at_ms must come from StreamStarted",
-            );
-            assert_eq!(
-                cap.reasoning_text, "Let me think step by step. ",
-                "reasoning chunks must concatenate in arrival order",
-            );
-            assert_eq!(
-                cap.response_text, "Answer: 42",
-                "text channel chunks must concatenate separately",
-            );
-            assert_eq!(cap.reasoning_chunks, 3);
-            assert_eq!(cap.text_chunks, 1);
-            assert!(!cap.truncated);
-            assert_eq!(
-                cap.phase,
-                CapturePhase::ResponseText,
-                "phase must reflect the most recent channel — text \
-                     arrived last, so the model was cut off mid-response",
-            );
-        })
-        .await;
-}
-/// A same-prompt `StreamStarted` restart (a doomloop retry) must accumulate a
-/// second generation through the real `handle_sampling_event` path rather than
-/// wipe the first — guards the `if cap.prompt_id != prompt_id` branch in the
-/// `StreamStarted` arm that the pure-struct tests bypass.
-#[tokio::test(flavor = "current_thread")]
-async fn same_prompt_restart_accumulates_segments_via_handler() {
-    use xai_grok_sampler::{RequestId, SamplingChannel, SamplingEvent};
-    let local = tokio::task::LocalSet::new();
-    local
-        .run_until(async {
-            let fixture = make_replay_send_update_fixture().await;
-            let actor = Arc::new(fixture.actor);
-            *actor
-                .current_prompt_id
-                .lock()
-                .expect("current_prompt_id mutex poisoned") = Some("prompt-doomloop".to_string());
-            let req = RequestId::random();
-            actor
-                .handle_sampling_event(SamplingEvent::StreamStarted {
-                    request_id: req.clone(),
-                    timestamp_ms: 1,
-                })
-                .await;
-            actor
-                .handle_sampling_event(SamplingEvent::ChannelToken {
-                    request_id: req.clone(),
-                    channel: SamplingChannel::Reasoning,
-                    text: "first gen reasoning".to_string(),
-                    chunk_index: 0,
-                })
-                .await;
-            actor
-                .handle_sampling_event(SamplingEvent::StreamStarted {
-                    request_id: req.clone(),
-                    timestamp_ms: 2,
-                })
-                .await;
-            actor
-                .handle_sampling_event(SamplingEvent::ChannelToken {
-                    request_id: req,
-                    channel: SamplingChannel::Reasoning,
-                    text: "second gen reasoning".to_string(),
-                    chunk_index: 0,
-                })
-                .await;
-            let cap = actor.streaming_turn_capture.lock().clone();
-            assert_eq!(
-                cap.segments.len(),
-                1,
-                "the first generation must be folded into segments, not wiped",
-            );
-            assert_eq!(cap.segments[0].reasoning_text, "first gen reasoning");
-            assert_eq!(
-                cap.reasoning_text, "second gen reasoning",
-                "the second generation is the in-progress slot",
-            );
-            assert_eq!(cap.attempt_count, 2, "both same-prompt generations counted");
-        })
-        .await;
-}
-/// On `SamplingEvent::Completed` the canonical response is committed via
-/// `record_assistant_response`, so its generation is DISCARDED from the
-/// out-of-band capture (the in-progress slot is cleared, not folded into
-/// `segments`) — that reasoning is already in afterStateHistory. Prior
-/// uncommitted same-turn generations (e.g. a doomloop retry that preceded the
-/// commit) are left intact, so a completed turn neither re-uploads its own
-/// reasoning nor erases earlier uncommitted partials.
-#[tokio::test(flavor = "current_thread")]
-async fn completed_event_clears_slot_keeps_prior_uncommitted_segments() {
-    use xai_grok_sampler::{InferenceLatencyStats, RequestId, SamplingChannel, SamplingEvent};
-    use xai_grok_sampling_types::{ConversationItem, ConversationResponse};
-    let local = tokio::task::LocalSet::new();
-    local
-        .run_until(async {
-            let fixture = make_replay_send_update_fixture().await;
-            let actor = Arc::new(fixture.actor);
-            *actor
-                .current_prompt_id
-                .lock()
-                .expect("current_prompt_id mutex poisoned") = Some("prompt-completed".to_string());
-            let req = RequestId::random();
-            actor
-                .handle_sampling_event(SamplingEvent::StreamStarted {
-                    request_id: req.clone(),
-                    timestamp_ms: 0,
-                })
-                .await;
-            actor
-                .handle_sampling_event(SamplingEvent::ChannelToken {
-                    request_id: req.clone(),
-                    channel: SamplingChannel::Reasoning,
-                    text: "prior uncommitted reasoning".to_string(),
-                    chunk_index: 0,
-                })
-                .await;
-            actor
-                .handle_sampling_event(SamplingEvent::StreamStarted {
-                    request_id: req.clone(),
-                    timestamp_ms: 1,
-                })
-                .await;
-            actor
-                .handle_sampling_event(SamplingEvent::ChannelToken {
-                    request_id: req.clone(),
-                    channel: SamplingChannel::Reasoning,
-                    text: "committed reasoning".to_string(),
-                    chunk_index: 0,
-                })
-                .await;
-            actor
-                .handle_sampling_event(SamplingEvent::Completed {
-                    request_id: req,
-                    response: Box::new(ConversationResponse {
-                        items: vec![ConversationItem::assistant("Answer".to_string())],
-                        usage: None,
-                        stop_reason: None,
-                        cost_usd_ticks: None,
-                        message_chunks_emitted: 0,
-                        doom_loop_signals: Vec::new(),
-                        stop_message: None,
-                        message_id: None,
-                        raw_stop_reason: None,
-                        stop_sequence: None,
-                    }),
-                    metrics: InferenceLatencyStats::default(),
-                })
-                .await;
-            let cap = actor.streaming_turn_capture.lock().clone();
-            assert_eq!(
-                cap.segments.len(),
-                1,
-                "the prior uncommitted generation must be retained",
-            );
-            assert_eq!(
-                cap.segments[0].reasoning_text,
-                "prior uncommitted reasoning"
-            );
-            assert!(
-                cap.reasoning_text.is_empty(),
-                "Completed must clear the committed generation from the in-progress slot",
-            );
-        })
-        .await;
-}
-/// Regression: the sampler-event drainer must release the per-turn
-/// stream-drain barrier when (and only when) it processes the terminal
-/// `Completed` event. `run_turn_via_sampler` awaits this barrier before the
-/// turn loop emits the canonical client `ToolCall`s, so every streamed
-/// text/thought chunk's global `eventId` is allocated before the tool call's.
-/// Without it the tool call's `send_update` (run on the turn-loop task) could
-/// interleave between two still-draining text chunks (run on the drainer task)
-/// and split the assistant message around the tool call on every attached
-/// client — the multi-pane "out of order" bug.
-#[tokio::test(flavor = "current_thread")]
-async fn completed_event_releases_stream_drain_barrier() {
-    use xai_grok_sampler::{InferenceLatencyStats, RequestId, SamplingChannel, SamplingEvent};
-    use xai_grok_sampling_types::{ConversationItem, ConversationResponse};
-    let local = tokio::task::LocalSet::new();
-    local
-        .run_until(async {
-            let fixture = make_replay_send_update_fixture().await;
-            let actor = Arc::new(fixture.actor);
-            *actor
-                .current_prompt_id
-                .lock()
-                .expect("current_prompt_id mutex poisoned") = Some("prompt-barrier".to_string());
-            let (tx, rx) = tokio::sync::oneshot::channel::<()>();
-            *actor.turn_stream_drained.lock() = Some(tx);
-            let req = RequestId::random();
-            actor
-                .handle_sampling_event(SamplingEvent::StreamStarted {
-                    request_id: req.clone(),
-                    timestamp_ms: 0,
-                })
-                .await;
-            actor
-                .handle_sampling_event(SamplingEvent::ChannelToken {
-                    request_id: req.clone(),
-                    channel: SamplingChannel::Text,
-                    text: "the scrollback blo".to_string(),
-                    chunk_index: 0,
-                })
-                .await;
-            assert!(
-                actor.turn_stream_drained.lock().is_some(),
-                "a mid-stream text chunk must NOT release the stream-drain barrier"
-            );
-            actor
-                .handle_sampling_event(SamplingEvent::Completed {
-                    request_id: req,
-                    response: Box::new(ConversationResponse {
-                        items: vec![ConversationItem::assistant("blocks".to_string())],
-                        usage: None,
-                        stop_reason: None,
-                        cost_usd_ticks: None,
-                        message_chunks_emitted: 1,
-                        doom_loop_signals: Vec::new(),
-                        stop_message: None,
-                        message_id: None,
-                        raw_stop_reason: None,
-                        stop_sequence: None,
-                    }),
-                    metrics: InferenceLatencyStats::default(),
-                })
-                .await;
-            assert!(
-                actor.turn_stream_drained.lock().is_none(),
-                "Completed must take the stream-drain barrier sender"
-            );
-            assert!(
-                rx.await.is_ok(),
-                "Completed must fire the stream-drain barrier so \
-                 run_turn_via_sampler can proceed to emit tool calls in order"
-            );
-        })
-        .await;
-}
-/// `SamplingEvent::Failed` (fired by the sampler for cancellation,
-/// `MaxTokensTruncation`, etc.) must NOT clear the accumulator —
-/// the consumer needs to take it via `TakeStreamingCapture` and
-/// upload as `streaming_partial.json`.
-#[tokio::test(flavor = "current_thread")]
-async fn failed_event_preserves_streaming_capture_for_takeout() {
-    use xai_grok_sampler::{
-        RequestId, SamplingChannel, SamplingErrorInfo, SamplingErrorKind, SamplingEvent,
-    };
-    let local = tokio::task::LocalSet::new();
-    local
-        .run_until(async {
-            let fixture = make_replay_send_update_fixture().await;
-            let actor = Arc::new(fixture.actor);
-            *actor
-                .current_prompt_id
-                .lock()
-                .expect("current_prompt_id mutex poisoned") = Some("prompt-failed".to_string());
-            let req = RequestId::random();
-            actor
-                .handle_sampling_event(SamplingEvent::StreamStarted {
-                    request_id: req.clone(),
-                    timestamp_ms: 0,
-                })
-                .await;
-            actor
-                .handle_sampling_event(SamplingEvent::ChannelToken {
-                    request_id: req.clone(),
-                    channel: SamplingChannel::Reasoning,
-                    text: "I should consider...".to_string(),
-                    chunk_index: 0,
-                })
-                .await;
-            actor
-                .handle_sampling_event(SamplingEvent::Failed {
-                    request_id: req,
-                    error: SamplingErrorInfo {
-                        kind: SamplingErrorKind::MaxTokensTruncation,
-                        status_code: None,
-                        message: "max output tokens reached".to_string(),
-                        is_retryable: false,
-                        retry_after_secs: None,
-                        should_retry: None,
-                        error_code: None,
-                        model_metadata: None,
-                        empty_response_context: None,
-                        doom_loop_triggers: None,
-                        doom_loop_aborted_at_chunk: None,
-                        credential: xai_grok_sampling_types::SentCredential::Unknown,
-                    },
-                })
-                .await;
-            let cap = actor.streaming_turn_capture.lock().clone();
-            assert_eq!(
-                cap.reasoning_text, "I should consider...",
-                "Failed must NOT discard the accumulator — the trace \
-                     consumer is going to take it next via \
-                     TakeStreamingCapture so the partial reasoning is \
-                     preserved for inspection",
-            );
-            assert!(!cap.is_empty());
-            assert_eq!(
-                cap.phase,
-                CapturePhase::Reasoning,
-                "MaxTokensTruncation hit while the model was still \
-                     thinking, so the partial must be labeled as tied to \
-                     the reasoning phase",
-            );
-        })
-        .await;
-}
-/// Observe-only (`max_retries = 0`): a first completion carrying confident
-/// signals had NOTHING discarded, so it must not be classified as a
-/// budget-spent accept — no tally, no counters, no capture stamp; the
-/// signals stay warn-only on the accepted response.
-#[tokio::test(flavor = "current_thread")]
-async fn observe_only_confident_completion_stays_warn_only() {
-    use xai_grok_sampler::{RequestId, SamplingChannel, SamplingEvent};
-    let local = tokio::task::LocalSet::new();
-    local
-        .run_until(async {
-            let mut fixture = make_replay_send_update_fixture().await;
-            fixture.actor.doom_loop_recovery =
-                Some(xai_grok_sampling_types::DoomLoopRecoveryPolicy {
-                    max_threshold: 8,
-                    max_retries: 0,
-                    ..Default::default()
-                });
-            let actor = Arc::new(fixture.actor);
-            *actor
-                .current_prompt_id
-                .lock()
-                .expect("current_prompt_id mutex poisoned") = Some("prompt-observe".to_string());
-            let req = RequestId::random();
-            actor
-                .handle_sampling_event(SamplingEvent::StreamStarted {
-                    request_id: req.clone(),
-                    timestamp_ms: 0,
-                })
-                .await;
-            actor
-                .handle_sampling_event(SamplingEvent::ChannelToken {
-                    request_id: req.clone(),
-                    channel: SamplingChannel::Reasoning,
-                    text: "loop loop loop".to_string(),
-                    chunk_index: 0,
-                })
-                .await;
-            let response = xai_grok_sampling_types::ConversationResponse {
-                items: vec![xai_grok_sampling_types::ConversationItem::assistant(
-                    "answer kept as-is",
-                )],
-                stop_reason: None,
-                usage: None,
-                cost_usd_ticks: None,
-                message_chunks_emitted: 1,
-                doom_loop_signals: vec![xai_grok_sampling_types::doom_loop::DoomLoopSignal::parse(
-                    "tail_repetition:8@thinking",
-                )],
-                stop_message: None,
-                message_id: None,
-                raw_stop_reason: None,
-                stop_sequence: None,
-            };
-            actor
-                .handle_sampling_event(SamplingEvent::Completed {
-                    request_id: req,
-                    response: Box::new(response),
-                    metrics: Default::default(),
-                })
-                .await;
-            let tally = actor.doom_loop_turn_tally.lock().clone();
-            assert!(!tally.fired(), "no resample happened: nothing to report");
-            assert!(!tally.accepted_after_budget);
-            assert_eq!(tally.attempts, 0);
-            let cap = actor.streaming_turn_capture.lock().clone();
-            assert!(
-                !cap.has_doom_loop_segments(),
-                "no accepted-stamp for an undiscarded turn"
-            );
-            assert!(cap.segments.is_empty());
-            let signals = actor
-                .signals_handle()
-                .snapshot()
-                .await
-                .expect("signals snapshot");
-            assert_eq!(signals.doom_loop_recovery_attempts, 0);
-            assert_eq!(signals.doom_loop_recovery_accepted_after_budget, 0);
-            assert_eq!(signals.doom_loop_recovery_top_trigger, None);
-        })
-        .await;
-}
-/// A recovered turn's capture carries doom-stamped segments: the doomed
-/// generation's Retrying (kind `DoomLoopDetected`, triggers + abort chunk)
-/// stamps the in-progress slot, the resample's `StreamStarted` folds it into
-/// `segments`, and a budget-spent accept folds a text-free stamped segment
-/// on `Completed`. Session counters and the per-turn tally track along.
-#[tokio::test(flavor = "current_thread")]
-async fn doom_loop_recovery_stamps_capture_segments_and_counters() {
-    use xai_grok_sampler::{RequestId, SamplingChannel, SamplingErrorKind, SamplingEvent};
-    let local = tokio::task::LocalSet::new();
-    local
-        .run_until(async {
-            let mut fixture = make_replay_send_update_fixture().await;
-            fixture.actor.doom_loop_recovery =
-                Some(xai_grok_sampling_types::DoomLoopRecoveryPolicy::default());
-            let actor = Arc::new(fixture.actor);
-            *actor
-                .current_prompt_id
-                .lock()
-                .expect("current_prompt_id mutex poisoned") = Some("prompt-doom".to_string());
-            let req = RequestId::random();
-            actor
-                .handle_sampling_event(SamplingEvent::StreamStarted {
-                    request_id: req.clone(),
-                    timestamp_ms: 0,
-                })
-                .await;
-            actor
-                .handle_sampling_event(SamplingEvent::ChannelToken {
-                    request_id: req.clone(),
-                    channel: SamplingChannel::Reasoning,
-                    text: "loop loop loop".to_string(),
-                    chunk_index: 0,
-                })
-                .await;
-            actor
-                .handle_sampling_event(SamplingEvent::Retrying {
-                    request_id: req.clone(),
-                    attempt: 1,
-                    max_retries: 2,
-                    kind: SamplingErrorKind::DoomLoopDetected,
-                    reason: "doom loop detected: tail_repetition:8@thinking".to_string(),
-                    doom_loop_triggers: Some(vec!["tail_repetition:8@thinking".to_string()]),
-                    doom_loop_aborted_at_chunk: Some(421),
-                })
-                .await;
-            actor
-                .handle_sampling_event(SamplingEvent::StreamStarted {
-                    request_id: req.clone(),
-                    timestamp_ms: 1,
-                })
-                .await;
-            actor
-                .handle_sampling_event(SamplingEvent::ChannelToken {
-                    request_id: req.clone(),
-                    channel: SamplingChannel::Reasoning,
-                    text: "still looping".to_string(),
-                    chunk_index: 0,
-                })
-                .await;
-            let response = xai_grok_sampling_types::ConversationResponse {
-                items: vec![xai_grok_sampling_types::ConversationItem::assistant(
-                    "still looping answer",
-                )],
-                stop_reason: None,
-                usage: None,
-                cost_usd_ticks: None,
-                message_chunks_emitted: 1,
-                doom_loop_signals: vec![xai_grok_sampling_types::doom_loop::DoomLoopSignal::parse(
-                    "tail_repetition:4@thinking",
-                )],
-                stop_message: None,
-                message_id: None,
-                raw_stop_reason: None,
-                stop_sequence: None,
-            };
-            actor
-                .handle_sampling_event(SamplingEvent::Completed {
-                    request_id: req,
-                    response: Box::new(response),
-                    metrics: Default::default(),
-                })
-                .await;
-            let cap = actor.streaming_turn_capture.lock().clone();
-            assert_eq!(cap.segments.len(), 2, "doomed fold + text-free accept");
-            let resampled = cap.segments[0].doom_loop.as_ref().expect("stamped");
-            assert_eq!(resampled.action, "resampled");
-            assert_eq!(resampled.attempt, 1);
-            assert_eq!(resampled.aborted_at_chunk, Some(421));
-            assert_eq!(
-                resampled.doom_loop_triggers,
-                vec!["tail_repetition:8@thinking".to_string()]
-            );
-            assert_eq!(cap.segments[0].reasoning_text, "loop loop loop");
-            let accepted = cap.segments[1].doom_loop.as_ref().expect("stamped");
-            assert_eq!(accepted.action, "accepted_after_budget");
-            assert!(
-                cap.segments[1].reasoning_text.is_empty(),
-                "committed text lives in history, not the capture"
-            );
-            assert!(cap.has_doom_loop_segments());
-            let tally = actor.doom_loop_turn_tally.lock().clone();
-            assert_eq!(tally.attempts, 1);
-            assert!(tally.accepted_after_budget);
-            assert_eq!(
-                tally.top_trigger.as_deref(),
-                Some("tail_repetition:4@thinking"),
-                "tightest across resample + accept"
-            );
-            let signals = actor
-                .signals_handle()
-                .snapshot()
-                .await
-                .expect("signals snapshot");
-            assert_eq!(signals.doom_loop_recovery_attempts, 1);
-            assert_eq!(signals.doom_loop_recovery_accepted_after_budget, 1);
-            assert_eq!(signals.doom_loop_recovery_aborted_chunks, 421);
-            assert_eq!(
-                signals.doom_loop_recovery_top_trigger.as_deref(),
-                Some("tail_repetition:4@thinking")
-            );
-        })
-        .await;
-}
-/// A `ToolCallDelta` arriving after the model streamed some reasoning
-/// must re-label the live capture as tied to the tool-call phase while
-/// preserving the reasoning text already accumulated — so a partial
-/// taken at that point shows the model was cut off mid tool-call.
-#[tokio::test(flavor = "current_thread")]
-async fn tool_call_delta_marks_streaming_capture_phase() {
-    use xai_grok_sampler::{RequestId, SamplingChannel, SamplingEvent};
-    let local = tokio::task::LocalSet::new();
-    local
-        .run_until(async {
-            let fixture = make_replay_send_update_fixture().await;
-            let actor = Arc::new(fixture.actor);
-            *actor
-                .current_prompt_id
-                .lock()
-                .expect("current_prompt_id mutex poisoned") = Some("prompt-toolcall".to_string());
-            let req = RequestId::random();
-            actor
-                .handle_sampling_event(SamplingEvent::StreamStarted {
-                    request_id: req.clone(),
-                    timestamp_ms: 0,
-                })
-                .await;
-            actor
-                .handle_sampling_event(SamplingEvent::ChannelToken {
-                    request_id: req.clone(),
-                    channel: SamplingChannel::Reasoning,
-                    text: "I'll call a tool.".to_string(),
-                    chunk_index: 0,
-                })
-                .await;
-            actor
-                .handle_sampling_event(SamplingEvent::ToolCallDelta {
-                    request_id: req,
-                    tool_index: 0,
-                    id: Some("call-1".to_string()),
-                    name: Some("read_file".to_string()),
-                    arguments_delta: Some("{\"path\":".to_string()),
-                })
-                .await;
-            let cap = actor.streaming_turn_capture.lock().clone();
-            assert_eq!(
-                cap.phase,
-                CapturePhase::ToolCall,
-                "ToolCallDelta must re-label the active capture as the \
-                     tool-call phase",
-            );
-            assert_eq!(
-                cap.reasoning_text, "I'll call a tool.",
-                "marking the tool-call phase must not discard the \
-                     reasoning accumulated before the tool call",
-            );
-        })
-        .await;
-}
-/// `ToolCallDelta` on an idle (empty, never-begun) slot must not
-/// fabricate a phase — there is no partial to attribute it to.
-#[tokio::test(flavor = "current_thread")]
-async fn tool_call_delta_on_idle_slot_leaves_phase_pending() {
-    use xai_grok_sampler::{RequestId, SamplingEvent};
-    let local = tokio::task::LocalSet::new();
-    local
-        .run_until(async {
-            let fixture = make_replay_send_update_fixture().await;
-            let actor = Arc::new(fixture.actor);
-            actor
-                .handle_sampling_event(SamplingEvent::ToolCallDelta {
-                    request_id: RequestId::random(),
-                    tool_index: 0,
-                    id: Some("call-1".to_string()),
-                    name: Some("read_file".to_string()),
-                    arguments_delta: None,
-                })
-                .await;
-            let cap = actor.streaming_turn_capture.lock().clone();
-            assert_eq!(cap.phase, CapturePhase::Pending);
-            assert!(cap.is_empty());
-        })
-        .await;
-}
-/// `StreamingTurnCapture::append` must respect the byte cap so that
-/// a runaway extended-thinking turn cannot blow the actor's memory.
-/// The capture is marked `truncated = true` once the cap is hit, but
-/// the structure is still serializable.
-#[test]
-fn streaming_capture_appender_respects_byte_cap() {
-    let mut cap = StreamingTurnCapture::default();
-    assert_eq!(
-        cap.phase,
-        CapturePhase::Pending,
-        "a fresh capture starts in the pending phase",
-    );
-    let chunk = "a".repeat(STREAMING_CAPTURE_MAX_BYTES / 2);
-    cap.append(true, &chunk);
-    cap.append(true, &chunk);
-    assert!(!cap.truncated, "exactly at the cap should not be truncated");
-    cap.append(true, "b");
-    assert!(
-        cap.truncated,
-        "going one byte past the cap must flip the truncated flag"
-    );
-    let pre_len = cap.reasoning_text.len();
-    cap.append(true, "ccccccccccc");
-    assert_eq!(cap.reasoning_text.len(), pre_len);
-    let bytes = serde_json::to_vec_pretty(&cap).expect("serialize capture");
-    let parsed: StreamingTurnCapture = serde_json::from_slice(&bytes).expect("round-trip capture");
-    assert!(parsed.truncated);
-    assert_eq!(parsed.reasoning_text.len(), cap.reasoning_text.len());
-    assert_eq!(
-        parsed.phase,
-        CapturePhase::Reasoning,
-        "phase must survive the serde round-trip the upload path uses",
-    );
-}
-/// A multi-generation reasoning-only turn taken through the real
-/// `SessionCommand::TakeStreamingCapture` command (served by a spawned
-/// `run_session`), after the real `handle_sampling_failure` reasoning-only
-/// terminal, must yield a capture whose `segments` hold every uncommitted
-/// generation, in order, stamped with the terminal `empty_reason`. That command
-/// + finalize + terminal-failure path is the unique seam here; the struct tests
-/// in `streaming_capture.rs` and `same_prompt_restart_accumulates_segments_via_handler`
-/// already pin the fold-don't-wipe accumulation, so this asserts only the
-/// segment count/order and `empty_reason`. Two generations suffice — before the
-/// fix the slot was wiped on each same-turn `StreamStarted`, leaving one. This
-/// simulates the events a reasoning-only doomloop produces; it does not drive
-/// the sampler classifier (the mock-HTTP test covers that).
-#[tokio::test(start_paused = true)]
-async fn reasoning_only_doomloop_turn_captures_every_generation_as_segments() {
-    use xai_grok_sampler::{
-        RequestId, SamplingChannel, SamplingErrorInfo, SamplingErrorKind, SamplingEvent,
-    };
-    use xai_grok_sampling_types::{EmptyReason, EmptyResponseContext};
+#[tokio::test]
+async fn server_overflow_clears_a_larger_context_window_selection() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
             let ReplaySendUpdateFixture {
                 actor,
-                event_rx,
+                event_rx: _event_rx,
                 sent: _sent,
-                persistence_rx: _persistence_rx,
+                sent_ext,
+                mut persistence_rx,
             } = make_replay_send_update_fixture().await;
-            let actor = Arc::new(actor);
-            *actor
-                .current_prompt_id
-                .lock()
-                .expect("current_prompt_id mutex poisoned") = Some("prompt-doomloop".to_string());
-            let req = RequestId::random();
-            actor
-                .handle_sampling_event(SamplingEvent::StreamStarted {
-                    request_id: req.clone(),
-                    timestamp_ms: 1,
-                })
-                .await;
-            actor
-                .handle_sampling_event(SamplingEvent::ChannelToken {
-                    request_id: req.clone(),
-                    channel: SamplingChannel::Reasoning,
-                    text: "thinking attempt 1".to_string(),
-                    chunk_index: 0,
-                })
-                .await;
-            actor
-                .handle_sampling_event(SamplingEvent::StreamStarted {
-                    request_id: req.clone(),
-                    timestamp_ms: 2,
-                })
-                .await;
-            actor
-                .handle_sampling_event(SamplingEvent::ChannelToken {
-                    request_id: req.clone(),
-                    channel: SamplingChannel::Reasoning,
-                    text: "thinking attempt 2".to_string(),
-                    chunk_index: 0,
-                })
-                .await;
-            let error = SamplingErrorInfo {
-                kind: SamplingErrorKind::EmptyResponse,
-                status_code: None,
-                message: "empty response from model (reasoning_only)".to_string(),
-                is_retryable: false,
-                retry_after_secs: None,
-                should_retry: None,
-                error_code: None,
-                model_metadata: None,
-                empty_response_context: Some(EmptyResponseContext {
-                    reason: EmptyReason::ReasoningOnly,
-                    had_reasoning: true,
-                    content_len: 0,
-                    tool_call_count: 0,
-                    finish_reason: Some("stop".to_string()),
-                    completion_tokens: Some(0),
-                    reasoning_tokens: Some(4096),
-                    prompt_tokens: Some(128),
-                    model: "grok-test".to_string(),
-                    first_choice_seen: true,
-                }),
-                doom_loop_triggers: None,
-                doom_loop_aborted_at_chunk: None,
-                credential: xai_grok_sampling_types::SentCredential::Unknown,
-            };
-            actor
-                .handle_sampling_event(SamplingEvent::Failed {
-                    request_id: req,
-                    error: error.clone(),
-                })
-                .await;
-            let Err(_terminal) = actor.handle_sampling_failure(error).await else {
-                panic!("a reasoning_only empty response must be a terminal error, not recoverable");
-            };
-            let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<SessionCommand>();
-            let (_chat_tx, chat_rx) = mpsc::unbounded_channel::<xai_chat_state::ChatStateEvent>();
-            let codebase_indexes = Arc::new(parking_lot::Mutex::new(
-                xai_grok_workspace::file_system::CodebaseIndexManager::new(),
-            ));
-            tokio::task::spawn_local(super::run_session(
-                actor.clone(),
-                cmd_rx,
-                chat_rx,
-                event_rx,
-                None,
-                codebase_indexes,
-                std::path::PathBuf::from("/tmp"),
-                crate::session::fs_watch::FsWatchCapabilities::none(),
-            ));
-            let (respond_to, capture_rx) = tokio::sync::oneshot::channel();
-            cmd_tx
-                .send(SessionCommand::TakeStreamingCapture {
-                    prompt_id: "prompt-doomloop".to_string(),
-                    respond_to,
-                })
-                .unwrap();
-            let capture = tokio::time::timeout(Duration::from_secs(2), capture_rx)
-                .await
-                .expect("TakeStreamingCapture must respond within 2s")
-                .expect("the take responder must not be dropped")
-                .expect("a reasoning-only doomloop turn must yield a non-empty capture");
-            assert_eq!(
-                capture.segments.len(),
-                2,
-                "both reasoning-only generations must be retained as segments",
+            actor.models_manager.insert_test_entry(
+                "catalog-key",
+                crate::agent::config::ModelEntry::fallback(
+                    "test-model",
+                    &crate::agent::config::EndpointsConfig::default(),
+                ),
             );
-            assert_eq!(capture.segments[0].reasoning_text, "thinking attempt 1");
-            assert_eq!(capture.segments[1].reasoning_text, "thinking attempt 2");
-            assert_eq!(capture.empty_reason.as_deref(), Some("reasoning_only"));
+            let cfg = selected_window_config(&actor, 500_000);
+            actor.context_window_after_overflow(&cfg, std::num::NonZeroU64::new(256_000).unwrap());
+            assert_eq!(
+                0,
+                actor
+                    .compaction
+                    .context_window_selection
+                    .load(std::sync::atomic::Ordering::Relaxed)
+            );
+            let Ok(PersistenceMsg::CurrentModel { model_id, .. }) = persistence_rx.try_recv()
+            else {
+                panic!("the cleared selection is saved");
+            };
+            assert_eq!("catalog-key", model_id.0.as_ref());
+            for _ in 0..50 {
+                if !sent_ext.lock().await.is_empty() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+            let ext = sent_ext
+                .lock()
+                .await
+                .first()
+                .cloned()
+                .expect("ModelChanged broadcast reached the gateway");
+            let value: serde_json::Value =
+                serde_json::from_str(ext.params.get()).expect("notification payload is JSON");
+            assert_eq!(
+                Some(&serde_json::json!({
+                    "sessionUpdate": "model_changed",
+                    "model_id": "catalog-key",
+                    "reasoning_effort": "high",
+                })),
+                value.get("update")
+            );
         })
         .await;
+}
+#[tokio::test]
+async fn server_overflow_keeps_a_smaller_context_window_selection() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let fixture = make_replay_send_update_fixture().await;
+            let cfg = selected_window_config(&fixture.actor, 256_000);
+            assert_eq!(
+                cfg.context_window,
+                fixture.actor.context_window_after_overflow(
+                    &cfg,
+                    std::num::NonZeroU64::new(500_000).unwrap()
+                )
+            );
+        })
+        .await;
+}
+#[tokio::test]
+async fn preserve_switch_applies_the_live_selection_while_supported() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let w256 = std::num::NonZeroU64::new(256_000).unwrap();
+            let w500 = std::num::NonZeroU64::new(500_000).unwrap();
+            for (overflowed, supported, applied, selection) in [
+                (true, vec![w256, w500], 256_000, 0),
+                (false, vec![w256, w500], 500_000, 500_000),
+                (false, vec![w256], 256_000, 500_000),
+            ] {
+                let (actor, _gateway_rx) = build_actor().await;
+                let cfg = selected_window_config(&actor, 500_000);
+                if overflowed {
+                    actor.context_window_after_overflow(&cfg, w256);
+                }
+                actor
+                    .handle_set_session_model(crate::session::SessionModelSwitch {
+                        sampling_config: xai_grok_sampler::SamplerConfig {
+                            model: "test-model".to_owned(),
+                            context_window: 256_000,
+                            ..xai_grok_sampler::SamplerConfig::default()
+                        },
+                        use_concise: false,
+                        is_family_switch: false,
+                        apply_prompt_override: false,
+                        skip_prompt_rewrite: true,
+                        auto_compact_threshold_percent: 85,
+                        system_prompt_label: xai_grok_agent::DEFAULT_SYSTEM_PROMPT_LABEL.to_owned(),
+                        context_window_selection: crate::session::SwitchContextWindow::Preserve,
+                        supported_context_windows: supported,
+                    })
+                    .await
+                    .expect("model switch succeeds");
+                let config = actor
+                    .chat_state_handle
+                    .get_sampling_config()
+                    .await
+                    .expect("the switch sets a sampling config");
+                assert_eq!(
+                    (applied, selection),
+                    (
+                        config.context_window.get(),
+                        actor
+                            .compaction
+                            .context_window_selection
+                            .load(std::sync::atomic::Ordering::Relaxed)
+                    )
+                );
+            }
+        })
+        .await;
+}
+/// Stores `window` as the selection and returns a config that uses it.
+fn selected_window_config(
+    actor: &SessionActor,
+    window: u64,
+) -> xai_grok_sampling_types::SamplingConfig {
+    actor
+        .compaction
+        .context_window_selection
+        .store(window, std::sync::atomic::Ordering::Relaxed);
+    xai_grok_sampling_types::SamplingConfig {
+        model: "test-model".to_owned(),
+        reasoning_effort: Some(xai_grok_sampling_types::ReasoningEffort::High),
+        context_window: std::num::NonZeroU64::new(window).unwrap(),
+        ..Default::default()
+    }
 }
 
 /// Serialize env mutations for the ASCII-scrub stream tests in this file.
@@ -1376,6 +734,8 @@ async fn channel_token_text_scrubs_curly_punctuation_when_on() {
             } = make_replay_send_update_fixture().await;
             let actor = Arc::new(actor);
             let req = RequestId::random();
+            // The sampler event rail drops tokens until the turn owns the request.
+            own_stream_request(&actor, &req);
             actor
                 .handle_sampling_event(SamplingEvent::StreamStarted {
                     request_id: req.clone(),
@@ -1445,6 +805,8 @@ async fn channel_token_text_preserves_unicode_when_scrub_off() {
             let actor = Arc::new(fixture.actor);
             let req = RequestId::random();
             let raw = "She said \u{201C}go\u{201D}\u{2014}now".to_string();
+            // The sampler event rail drops tokens until the turn owns the request.
+            own_stream_request(&actor, &req);
             actor
                 .handle_sampling_event(SamplingEvent::StreamStarted {
                     request_id: req.clone(),

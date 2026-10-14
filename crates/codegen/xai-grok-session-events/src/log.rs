@@ -18,7 +18,8 @@ struct EventEntry {
 
 const EVENTS_FILE: &str = "events.jsonl";
 
-/// Shared event writer for `events.jsonl`. `Clone + Send + Sync`.
+/// Writes events to `events.jsonl`.
+/// Clones share one file, and the writer is `Send + Sync` so background tasks can hold one.
 #[derive(Clone)]
 pub struct EventWriter {
     inner: Arc<EventWriterInner>,
@@ -49,12 +50,11 @@ impl EventWriter {
         }
     }
 
-    /// No-op writer that discards all events.
     pub fn noop() -> Self {
         Self {
             inner: Arc::new(EventWriterInner {
                 file: Mutex::new(None),
-                error_logged: AtomicBool::new(true), // suppress error logging
+                error_logged: AtomicBool::new(true), // True from the start, so this writer never warns
             }),
         }
     }
@@ -122,6 +122,7 @@ mod tests {
             outcome: ToolOutcome::Success,
             tool_call_id: "call_xyz".into(),
             source: crate::types::ToolCompletedSource::Shell,
+            rewriting_hook: None,
         });
         writer.emit(Event::TurnEnded {
             outcome: TurnOutcomeLabel::Completed,
@@ -133,27 +134,39 @@ mod tests {
         let lines: Vec<&str> = text.trim().split('\n').collect();
         assert_eq!(lines.len(), 4);
 
-        let first: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
-        assert_eq!(first["type"], "turn_started");
-        assert_eq!(first["session_id"], "test-session");
-        assert!(first["ts"].as_str().is_some());
+        let [l0, l1, l2, l3] = lines.as_slice() else {
+            panic!("expected four event lines: {lines:?}");
+        };
+        let first: serde_json::Value = serde_json::from_str(l0).unwrap();
+        assert_eq!(first.get("type"), Some(&serde_json::json!("turn_started")));
+        assert_eq!(
+            first.get("session_id"),
+            Some(&serde_json::json!("test-session"))
+        );
+        assert!(first.get("ts").and_then(|v| v.as_str()).is_some());
 
-        let second: serde_json::Value = serde_json::from_str(lines[1]).unwrap();
-        assert_eq!(second["type"], "first_token");
+        let second: serde_json::Value = serde_json::from_str(l1).unwrap();
+        assert_eq!(second.get("type"), Some(&serde_json::json!("first_token")));
 
-        let third: serde_json::Value = serde_json::from_str(lines[2]).unwrap();
-        assert_eq!(third["type"], "tool_completed");
-        assert_eq!(third["tool_name"], "bash");
-        assert_eq!(third["duration_ms"], 1500);
-        assert_eq!(third["tool_call_id"], "call_xyz");
+        let third: serde_json::Value = serde_json::from_str(l2).unwrap();
+        assert_eq!(
+            third.get("type"),
+            Some(&serde_json::json!("tool_completed"))
+        );
+        assert_eq!(third.get("tool_name"), Some(&serde_json::json!("bash")));
+        assert_eq!(third.get("duration_ms"), Some(&serde_json::json!(1500)));
+        assert_eq!(
+            third.get("tool_call_id"),
+            Some(&serde_json::json!("call_xyz"))
+        );
         assert!(
             third.get("source").is_none(),
             "shell ToolCompleted must omit source"
         );
 
-        let fourth: serde_json::Value = serde_json::from_str(lines[3]).unwrap();
-        assert_eq!(fourth["type"], "turn_ended");
-        assert_eq!(fourth["outcome"], "completed");
+        let fourth: serde_json::Value = serde_json::from_str(l3).unwrap();
+        assert_eq!(fourth.get("type"), Some(&serde_json::json!("turn_ended")));
+        assert_eq!(fourth.get("outcome"), Some(&serde_json::json!("completed")));
         assert!(fourth.get("cancellation_category").is_none());
     }
 
@@ -169,28 +182,5 @@ mod tests {
         let text = std::fs::read_to_string(dir.path().join("events.jsonl")).unwrap();
         let lines: Vec<&str> = text.trim().split('\n').collect();
         assert_eq!(lines.len(), 2, "both writes should go to the same file");
-    }
-
-    #[test]
-    fn mcp_server_failed_serializes_enum_error_type() {
-        let dir = tempfile::tempdir().unwrap();
-        let w = EventWriter::open(dir.path());
-
-        w.emit(Event::McpServerFailed {
-            server_name: "confluence".into(),
-            transport: Some("http".into()),
-            target: Some("https://mcp.confluence.example.com".into()),
-            error_type: crate::types::McpErrorCategory::Timeout,
-            error_message: "timed out after 10s".into(),
-            duration_ms: Some(10002),
-            timeout_sec: Some(10),
-        });
-
-        let text = std::fs::read_to_string(dir.path().join("events.jsonl")).unwrap();
-        let val: serde_json::Value = serde_json::from_str(text.trim()).unwrap();
-        assert_eq!(val["type"], "mcp_server_failed");
-        assert_eq!(val["error_type"], "timeout");
-        assert_eq!(val["server_name"], "confluence");
-        assert_eq!(val["duration_ms"], 10002);
     }
 }

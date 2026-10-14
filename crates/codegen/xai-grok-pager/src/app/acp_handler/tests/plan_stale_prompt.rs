@@ -18,15 +18,15 @@ use crate::app::agent::{QueueEntryKind, QueuedPrompt};
 use crate::app::app_view::InputOutcome;
 use crate::scrollback::block::RenderBlock;
 use crate::views::plan_approval_view::{
-    PlanApprovalFocus, PlanFeedbackInFlight, PlanPromptIntent, PLAN_APPROVED_REVIEW_COMMENTS_LEAD,
-    PLAN_REWRITE_WAIT_HEADING,
+    PLAN_APPROVED_IMPLEMENT_MESSAGE, PLAN_APPROVED_REVIEW_COMMENTS_LEAD, PLAN_REWRITE_WAIT_HEADING,
+    PlanApprovalFocus, PlanFeedbackInFlight, PlanPromptIntent,
 };
 use crossterm::event::{
     Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use ratatui::layout::Rect;
-use xai_grok_shell::session::pending_prompts::PersistedQueuedPrompt;
 use xai_grok_shell::session::prompt_wal::PromptWalKind;
+use xai_grok_shell::session::unsent_prompt_draft::pending_prompts::PersistedQueuedPrompt;
 
 /// Operator quote, first tests.
 const OPERATOR_STALE_PROMPT: &str = concat!(
@@ -36,6 +36,7 @@ const OPERATOR_STALE_PROMPT: &str = concat!(
 );
 
 const HUMAN_TURN: &str = "planning still has stale prompt problems";
+const HUMAN_TURN_WAL_BEFORE_SEND: &str = "The sentence is appended and flushed to the prompt write-ahead log before any send is attempted, and a reload after an interrupted send still contains the sentence. Enter does not approve. Enter is not an interjection.";
 const PRODUCT_REPORT: &str = "Job: Isolated Preview must send this as a Human turn.";
 const COMMENT_STASH: &str = "this comment may ride Approve";
 
@@ -342,31 +343,37 @@ fn isolated_preview_human_sentence_is_human_turn_and_wal_not_only_plan_comment_1
 
     type_into_human_box(&mut app, HUMAN_TURN);
     let outcome = app.handle_input(&enter_key());
-    assert_enter_approves_with_notes(&outcome, HUMAN_TURN);
-    let effects = dispatch_outcome(&mut app, outcome);
     assert!(
-        effects_approve_with_notes(&effects, HUMAN_TURN),
-        "Isolated Preview idle plus notes plus Enter must Approve with those notes; effects={effects:?}"
+        !matches!(
+            &outcome,
+            InputOutcome::Action(Action::Interject { .. })
+                | InputOutcome::ActionThenForward(Action::Interject { .. })
+        ),
+        "{HUMAN_TURN_WAL_BEFORE_SEND} got {outcome:?}"
     );
+    {
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(
+            agent.plan_approval_view.is_some() && !agent.plan_decision_resolved,
+            "{HUMAN_TURN_WAL_BEFORE_SEND}"
+        );
+    }
+    let rows_before_send = load_wal(&cwd_str, sid);
     assert!(
-        wal_has_human_send(&cwd_str, sid, HUMAN_TURN),
-        "Approve with notes must be on WAL, got {:?}",
-        load_wal(&cwd_str, sid)
+        rows_before_send
+            .iter()
+            .any(|row| { row.kind == PromptWalKind::Send && row.text.contains(HUMAN_TURN) }),
+        "{HUMAN_TURN_WAL_BEFORE_SEND} got {rows_before_send:?}"
     );
     assert_not_only_plan_comment_1(&app, HUMAN_TURN);
-    let agent = app.agents.get(&AgentId(0)).unwrap();
+    drop(app);
+    let reloaded =
+        xai_grok_shell::session::prompt_wal::load_prompt_wal(&cwd_str, sid).unwrap_or_default();
     assert!(
-        agent.plan_approval_view.is_none() || agent.plan_decision_resolved,
-        "Isolated Preview idle Enter with notes must Approve"
-    );
-    assert!(
-        !agent
-            .plan_approval_view
-            .as_ref()
-            .and_then(|p| p.feedback_draft.as_deref())
-            .is_some_and(|d| d.contains(HUMAN_TURN))
-            || wal_has_human_send(&cwd_str, sid, HUMAN_TURN),
-        "feedback_draft must not be the only home for a Human turn"
+        reloaded
+            .iter()
+            .any(|row| row.kind == PromptWalKind::Send && row.text.contains(HUMAN_TURN)),
+        "{HUMAN_TURN_WAL_BEFORE_SEND} got {reloaded:?}"
     );
 }
 
@@ -395,21 +402,36 @@ fn after_comment_cta_later_product_report_sends_as_human_not_ride_approve_only()
     click_comment_cta(&mut app);
     type_into_human_box(&mut app, COMMENT_STASH);
     let outcome = app.handle_input(&enter_key());
-    assert_enter_approves_with_notes(&outcome, COMMENT_STASH);
-    let effects = dispatch_outcome(&mut app, outcome);
     assert!(
-        effects_approve_with_notes(&effects, COMMENT_STASH),
-        "Comment CTA then notes then Enter must Approve with those notes; effects={effects:?}"
+        !matches!(
+            &outcome,
+            InputOutcome::Action(Action::Interject { .. })
+                | InputOutcome::ActionThenForward(Action::Interject { .. })
+        ),
+        "a later human send is not an interjection and is not ride-approve; got {outcome:?}"
     );
+    {
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(
+            agent.plan_approval_view.is_some() && !agent.plan_decision_resolved,
+            "a later human send must not Approve"
+        );
+    }
+    let rows_before_send = load_wal(&cwd_str, sid);
     assert!(
-        wal_has_human_send(&cwd_str, sid, COMMENT_STASH),
-        "Approve with Comment notes must be on WAL, got {:?}",
-        load_wal(&cwd_str, sid)
+        rows_before_send
+            .iter()
+            .any(|row| { row.kind == PromptWalKind::Send && row.text.contains(COMMENT_STASH) }),
+        "The sentence is appended and flushed to the prompt write-ahead log before any send is attempted, and a reload after an interrupted send still contains the sentence. Enter does not approve. Enter is not an interjection. got {rows_before_send:?}"
     );
-    let agent = app.agents.get(&AgentId(0)).unwrap();
+    drop(app);
+    let reloaded =
+        xai_grok_shell::session::prompt_wal::load_prompt_wal(&cwd_str, sid).unwrap_or_default();
     assert!(
-        agent.plan_approval_view.is_none() || agent.plan_decision_resolved,
-        "Comment notes plus Enter must Approve"
+        reloaded
+            .iter()
+            .any(|row| row.kind == PromptWalKind::Send && row.text.contains(COMMENT_STASH)),
+        "The sentence is appended and flushed to the prompt write-ahead log before any send is attempted, and a reload after an interrupted send still contains the sentence. Enter does not approve. Enter is not an interjection. got {reloaded:?}"
     );
 }
 
@@ -473,11 +495,64 @@ fn isolated_preview_human_send_clears_composer_no_stale_draft() {
     );
     type_into_human_box(&mut app, HUMAN_TURN);
     let outcome = app.handle_input(&enter_key());
-    assert_enter_approves_with_notes(&outcome, HUMAN_TURN);
+    assert!(
+        !matches!(
+            &outcome,
+            InputOutcome::Action(Action::Interject { .. })
+                | InputOutcome::ActionThenForward(Action::Interject { .. })
+        ),
+        "a typed sentence plus Enter is a human turn, not an interjection; got {outcome:?}"
+    );
+    assert!(
+        matches!(&outcome, InputOutcome::Changed),
+        "a typed sentence plus Enter must record the human turn before any send; got {outcome:?}"
+    );
     let effects = dispatch_outcome(&mut app, outcome);
     assert!(
-        effects_approve_with_notes(&effects, HUMAN_TURN),
-        "Isolated Preview idle plus notes plus Enter must Approve with those notes; effects={effects:?}"
+        !effects.iter().any(|effect| matches!(
+            effect,
+            Effect::SendPrompt { .. }
+                | Effect::SendInterject { .. }
+                | Effect::SendPromptNow { .. }
+                | Effect::SetModeThenPrompt { .. }
+        )),
+        "typed Enter must not Approve and must not send; effects={effects:?}"
+    );
+    {
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(
+            agent.plan_approval_view.is_some() && !agent.plan_decision_resolved,
+            "typed Enter must not Approve"
+        );
+        assert!(
+            agent.prompt.text().contains(HUMAN_TURN),
+            "Enter must leave the sentence in the composer until Approve lands, leftover={:?}",
+            agent.prompt.text()
+        );
+    }
+    assert!(
+        load_wal(&cwd_str, sid)
+            .iter()
+            .any(|row| row.kind == PromptWalKind::Send && row.text.contains(HUMAN_TURN)),
+        "the sentence is flushed to the prompt write-ahead log before any send; got {:?}",
+        load_wal(&cwd_str, sid)
+    );
+    arm_comment_and_approve_hit_rects(&mut app);
+    let click = app.handle_input(&mouse_down(APPROVE_HIT.x + 1, APPROVE_HIT.y));
+    assert!(
+        !matches!(
+            &click,
+            InputOutcome::Action(Action::Interject { .. })
+                | InputOutcome::ActionThenForward(Action::Interject { .. })
+        ),
+        "a non-paste click Approve must not return Interject; got {click:?}"
+    );
+    let click_effects = dispatch_outcome(&mut app, click);
+    assert!(
+        !click_effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::SendInterject { .. })),
+        "a non-paste click Approve must not emit SendInterject; effects={click_effects:?}"
     );
     let agent = app.agents.get(&AgentId(0)).unwrap();
     assert!(
@@ -545,7 +620,7 @@ fn plan_comment_body_already_human_turn_does_not_restore_as_queue_after_present_
         "a truly unsent follow-up must still occupy the queue; queue={queued:?}"
     );
 
-    xai_grok_shell::session::pending_prompts::write_pending_prompts(
+    xai_grok_shell::session::unsent_prompt_draft::pending_prompts::write_pending_prompts(
         &cwd_str,
         sid,
         &[
@@ -596,20 +671,39 @@ fn ride_approve_chrome_visible_non_empty_composer_enter_still_sends() {
     click_comment_cta(&mut app);
     type_into_human_box(&mut app, COMMENT_STASH);
     let first = app.handle_input(&enter_key());
-    assert_enter_approves_with_notes(&first, COMMENT_STASH);
+    match &first {
+        InputOutcome::Action(Action::Interject { .. })
+        | InputOutcome::ActionThenForward(Action::Interject { .. }) => {
+            panic!(
+                "Comment CTA plus a typed sentence plus Enter must send, not Interject; got {first:?}"
+            );
+        }
+        InputOutcome::Action(Action::SendPrompt(text))
+        | InputOutcome::ActionThenForward(Action::SendPrompt(text))
+        | InputOutcome::Action(Action::SendPromptNow { text, .. })
+        | InputOutcome::ActionThenForward(Action::SendPromptNow { text, .. }) => {
+            assert!(
+                text.contains(COMMENT_STASH) && !text.contains(PLAN_APPROVED_REVIEW_COMMENTS_LEAD),
+                "Comment CTA plus Enter must send the sentence, not Approve; got {text:?}"
+            );
+        }
+        other => panic!(
+            "Comment CTA plus a typed sentence plus Enter must send, not only Changed; got {other:?}"
+        ),
+    }
     let effects = dispatch_outcome(&mut app, first);
     assert!(
-        effects_approve_with_notes(&effects, COMMENT_STASH),
-        "Comment notes plus Enter must Approve with those notes; effects={effects:?}"
+        effects_send_human(&effects, COMMENT_STASH),
+        "Comment CTA plus Enter must send the sentence; effects={effects:?}"
     );
     let agent = app.agents.get(&AgentId(0)).unwrap();
     assert!(
-        agent.plan_approval_view.is_none() || agent.plan_decision_resolved,
-        "Comment notes plus Enter must Approve, not Plan-Exit"
+        agent.plan_approval_view.is_some() && !agent.plan_decision_resolved,
+        "Comment CTA plus Enter must send and must not Approve"
     );
     assert!(
         agent.prompt.text().trim().is_empty(),
-        "composer clears only after Approve lands, got {:?}",
+        "composer clears after the human send, got {:?}",
         agent.prompt.text()
     );
 }
@@ -634,12 +728,30 @@ fn revise_re_present_does_not_resurrect_prompt_already_in_chat_history() {
     );
     type_into_human_box(&mut app, HUMAN_TURN);
     let outcome = app.handle_input(&enter_key());
-    assert_enter_approves_with_notes(&outcome, HUMAN_TURN);
+    assert!(
+        !matches!(
+            &outcome,
+            InputOutcome::Action(Action::Interject { .. })
+                | InputOutcome::ActionThenForward(Action::Interject { .. })
+        ),
+        "a typed sentence plus Enter is a human turn, not an interjection; got {outcome:?}"
+    );
+    assert!(
+        matches!(&outcome, InputOutcome::Changed),
+        "a typed sentence plus Enter must record the human turn, not Approve; got {outcome:?}"
+    );
     let effects = dispatch_outcome(&mut app, outcome);
     assert!(
-        effects_approve_with_notes(&effects, HUMAN_TURN),
-        "first Isolated Preview idle Enter must Approve with those notes; effects={effects:?}"
+        !effects_approve_with_notes(&effects, HUMAN_TURN),
+        "first Isolated Preview idle Enter must not Approve; effects={effects:?}"
     );
+    {
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(
+            agent.plan_approval_view.is_some() && !agent.plan_decision_resolved,
+            "typed Enter must leave the plan waiting"
+        );
+    }
     let already_painted = user_prompt_texts(&app)
         .iter()
         .any(|t| t.contains(HUMAN_TURN));
@@ -751,17 +863,19 @@ fn operator_stale_prompt_quote_is_a_human_turn_not_plan_comment_1() {
     );
     type_into_human_box(&mut app, OPERATOR_STALE_PROMPT);
     let outcome = app.handle_input(&enter_key());
-    assert_enter_approves_with_notes(&outcome, OPERATOR_STALE_PROMPT);
-    let effects = dispatch_outcome(&mut app, outcome);
     assert!(
-        effects_approve_with_notes(&effects, OPERATOR_STALE_PROMPT),
-        "Operator quote plus Enter must Approve with those notes; effects={effects:?}"
+        !matches!(
+            &outcome,
+            InputOutcome::Action(Action::Interject { .. })
+                | InputOutcome::ActionThenForward(Action::Interject { .. })
+        ),
+        "Operator quote Enter is a human turn, not an interjection; got {outcome:?}"
     );
     assert_not_only_plan_comment_1(&app, OPERATOR_STALE_PROMPT);
     let agent = app.agents.get(&AgentId(0)).unwrap();
     assert!(
-        agent.plan_approval_view.is_none() || agent.plan_decision_resolved,
-        "Operator quote plus Enter must Approve"
+        agent.plan_approval_view.is_some() && !agent.plan_decision_resolved,
+        "Operator quote Enter is a human turn and must not Approve"
     );
 }
 
@@ -846,21 +960,30 @@ fn isolated_preview_human_send_closes_leftover_present_after_mill_continues() {
     }
     type_into_human_box(&mut app, MILL_CONTINUE_HUMAN);
     let outcome = app.handle_input(&enter_key());
-    assert_enter_approves_with_notes(&outcome, MILL_CONTINUE_HUMAN);
-    let effects = dispatch_outcome(&mut app, outcome);
     assert!(
-        effects_approve_with_notes(&effects, MILL_CONTINUE_HUMAN),
-        "Isolated Preview idle plus notes plus Enter must Approve with those notes; effects={effects:?}"
+        !matches!(
+            &outcome,
+            InputOutcome::Action(Action::Interject { .. })
+                | InputOutcome::ActionThenForward(Action::Interject { .. })
+        ),
+        "human send is not an interjection; got {outcome:?}"
     );
     let agent = app.agents.get(&AgentId(0)).unwrap();
     assert!(
-        agent.plan_approval_view.is_none() || agent.plan_decision_resolved,
-        "Isolated Preview idle Enter with notes must Approve, not Plan-Exit and leave the paste"
+        agent.plan_approval_view.is_some() && !agent.plan_decision_resolved,
+        "human send must not Approve"
     );
     assert!(
-        agent.prompt.text().trim().is_empty(),
-        "composer clears only after Approve lands, got {:?}",
-        agent.prompt.text()
+        matches!(
+            &outcome,
+            InputOutcome::Action(Action::SendPrompt(text))
+                | InputOutcome::ActionThenForward(Action::SendPrompt(text))
+                if text.contains(MILL_CONTINUE_HUMAN)
+        ) || agent.prompt.text().contains(MILL_CONTINUE_HUMAN)
+            || user_prompt_texts(&app)
+                .iter()
+                .any(|text| text.contains(MILL_CONTINUE_HUMAN)),
+        "human send must keep the sentence as a human turn; got {outcome:?}"
     );
 }
 
@@ -951,6 +1074,7 @@ fn isolated_preview_must_not_close_on_nested_specialist_finish() {
             sid,
             XaiSessionUpdate::SubagentFinished {
                 subagent_id: "nested-69".into(),
+                attempt_id: None,
                 child_session_id: "nested-69".into(),
                 status: "completed".into(),
                 error: None,
@@ -1266,6 +1390,72 @@ fn restored_plan_approval_view_plan_after_slash_leftover_still_approves() {
         "panel Approve must leave plan mode and start the implement turn"
     );
     drop(rx);
+}
+
+/// Composer text is only `/` and the slash palette is open while the plan
+/// pane is open. A left click on the Approve word must clear that leftover
+/// palette, answer the live plan waiter, and leave plan mode. Empty Enter
+/// never Approves.
+#[test]
+fn left_click_on_approve_while_the_composer_is_only_a_slash_leaves_plan_mode() {
+    let mut app = make_app_with_agent("sess-approve-slash-only");
+    let mut rx = isolated_present(
+        &mut app,
+        "exit-plan-approve-slash-only",
+        "# Plan GBT3703Repro\n\nApprove must leave plan mode.\n",
+    );
+    {
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        agent.prompt.set_text("/");
+        agent.prompt.refresh_slash(&agent.session.models);
+        agent.pane_areas.prompt = Rect::new(0, 22, 80, 3);
+    }
+    {
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert_eq!(
+            agent.prompt.text().trim(),
+            "/",
+            "fixture: composer text is only `/`"
+        );
+        assert!(agent.prompt.slash_open(), "fixture: slash palette is open");
+        assert!(
+            agent.line_viewer.is_some() && agent.plan_approval_view.is_some(),
+            "fixture: plan pane is open on a live waiter"
+        );
+        assert!(
+            !agent.plan_decision_resolved,
+            "fixture: the waiter is not answered yet"
+        );
+    }
+    arm_comment_and_approve_hit_rects(&mut app);
+    {
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        // This click reaches Approve. The slash palette area does not
+        // block that hit. Leftover `/` must still be cleared.
+        agent.slash_dropdown_items_area = Some(APPROVE_HIT);
+    }
+    let outcome = app.handle_input(&mouse_down(APPROVE_HIT.x + 2, APPROVE_HIT.y));
+    let _ = dispatch_outcome(&mut app, outcome);
+    let agent = app.agents.get(&AgentId(0)).unwrap();
+    let composer = agent.prompt.text().to_string();
+    let slash_open = agent.prompt.slash_open();
+    let left_plan_mode = agent.plan_decision_resolved && agent.plan_approval_view.is_none();
+    let outcome_name = match rx.try_recv() {
+        Ok(Ok(raw)) => serde_json::from_str::<serde_json::Value>(raw.0.get())
+            .ok()
+            .and_then(|v| v.get("outcome").and_then(|o| o.as_str()).map(str::to_owned)),
+        _ => None,
+    };
+    assert!(
+        !slash_open
+            && !matches!(
+                composer.trim(),
+                "/" | "/view-plan" | "/show-plan" | "/plan-view"
+            )
+            && left_plan_mode
+            && outcome_name.as_deref() == Some("approved"),
+        "left click on Approve while the composer is only `/` must clear the leftover slash palette and answer the live plan waiter with approved; composer={composer:?} slash_open={slash_open} left_plan_mode={left_plan_mode} outcome={outcome_name:?}"
+    );
 }
 
 /// Failed mill L2 must not auto-run leftover `/implement`.
@@ -1730,14 +1920,38 @@ fn isolated_preview_second_plan_prompt_must_not_paint_stale_plan_as_live_present
         let agent = app.agents.get_mut(&AgentId(0)).unwrap();
         agent.prompt.set_text("");
     }
-    type_into_human_box(&mut app, APPROVE_NOTES);
+    let paste =
+        format!("{APPROVE_NOTES}\nline 2 of the paste\nline 3 of the paste\nline 4 of the paste");
+    let _pasted = app.handle_input(&Event::Paste(paste));
+    {
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(
+            agent
+                .prompt
+                .textarea
+                .elements()
+                .iter()
+                .any(|element| element.kind == crate::views::prompt_widget::KIND_PASTE),
+            "paste-then-Enter must start from a paste chip, got {:?}",
+            agent.prompt.text()
+        );
+    }
     let approve_outcome = app.handle_input(&enter_key());
     assert_enter_approves_with_notes(&approve_outcome, APPROVE_NOTES);
     let approve_effects = dispatch_outcome(&mut app, approve_outcome);
     assert!(
-        effects_approve_with_notes(&approve_effects, APPROVE_NOTES),
-        "paste-then-Enter Approve must work after the new present; effects={approve_effects:?}"
+        !approve_effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::SendInterject { .. })),
+        "paste-chip Approve must not emit SendInterject; effects={approve_effects:?}"
     );
+    {
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(
+            agent.plan_approval_view.is_none() || agent.plan_decision_resolved,
+            "paste-then-Enter Approve must work after the new present"
+        );
+    }
 }
 
 /// Operator: bare `/plan` exclusive-blocks nested implementers the way
@@ -1937,7 +2151,7 @@ fn isolated_preview_must_not_vanish_every_couple_of_minutes_on_nested_occupancy_
         agent
             .subagent_sessions
             .get("occupancy-l2")
-            .is_some_and(|i| !i.finished && !i.pending_kill),
+            .is_some_and(|i| !i.finished && !i.attempt.pending_kill),
         "occupancy nested implementer must stay Working"
     );
 }
@@ -2054,8 +2268,9 @@ fn empty_enter_never_approves_exclusive_covering_present_github_122() {
 /// Exclusive covering clickable Revise rewrites session `plan.md` and
 /// re-presents (`exit_plan_mode` present again). Idle CTAs are Approve /
 /// Comment / Revise / Exit. Letter keys type; they do not steal Approve.
-/// Empty Enter never Approves. Isolated Preview stays until Esc, Exit, or
-/// Approve, so Revise must not drop exclusive covering into a stuck wait.
+/// Empty Enter never Approves. Exclusive `/plan` revision submit hides the
+/// pane. Isolated Preview `secondary-plan.md` still stays until Esc, Exit,
+/// or Approve.
 #[test]
 fn exclusive_covering_revise_cta_rewrites_and_represents_cannot_revise_plans() {
     let mut app = make_app_with_agent("sess-exclusive-revise-stuck");
@@ -2096,14 +2311,8 @@ fn exclusive_covering_revise_cta_rewrites_and_represents_cannot_revise_plans() {
             "cannot revise plans: Revise is not Approve and not Exit"
         );
         assert!(
-            agent.line_viewer.as_ref().is_some_and(|v| v.fullscreen),
-            "cannot revise plans: Isolated Preview stays until Esc, Exit, or Approve; Revise must not drop exclusive covering"
-        );
-        assert!(
-            agent.line_viewer.as_ref().is_some_and(|v| v
-                .plan_ref()
-                .is_some_and(|p| !p.show_action_buttons && !p.feedback_active)),
-            "cannot revise plans: rewrite-wait must not arm idle Approve on leftover body"
+            agent.line_viewer.is_none(),
+            "After the Operator submits revisions on an exclusive /plan present, the plan view goes away (or is not left up as the idle plan pane) while the revise turn runs. Do not leave plan.md docked after revision submit."
         );
         let acp_revise = match rx.try_recv() {
             Ok(Ok(raw)) => serde_json::from_str::<serde_json::Value>(raw.0.get()).ok(),
@@ -2302,7 +2511,7 @@ fn plan_soft_leftover_isolated_preview_already_open_does_not_dock_leftover_prima
     );
     let nested = &agent.subagent_sessions["nested-soft"];
     assert!(
-        !nested.pending_kill && !nested.finished,
+        !nested.attempt.pending_kill && !nested.finished,
         "nested implementers keep running under `/plan --soft`"
     );
 }
@@ -2410,6 +2619,558 @@ fn plan_soft_identity_collision_does_not_reset_primary() {
             );
         }
     }
+}
+
+/// A second `/plan --soft` updates the session plan. It does not write a
+/// file under `docs/features`. It does not erase primary `plan.md`.
+#[test]
+#[serial_test::serial(GROK_HOME)]
+fn soft_plan_writes_a_new_feature_file_and_does_not_erase_the_older_one() {
+    let grok_home = tempfile::tempdir().expect("home");
+    let _home = xai_grok_test_support::EnvGuard::set("GROK_HOME", grok_home.path());
+    let proj = tempfile::tempdir().expect("cwd");
+    let cwd = proj.path().to_path_buf();
+    let sid = "plan-soft-feature-files";
+    let primary = "# Primary plan stays\n\nDo not overwrite this primary plan.\n";
+    let mut app = make_app_with_agent(sid);
+    bind_session_home(&mut app, cwd.clone(), sid);
+    write_mill_session_plan_md(&cwd, sid, primary);
+    let _ = crate::app::dispatch::dispatch(
+        Action::SendPrompt("/plan --soft add feature one".into()),
+        &mut app,
+    );
+    let _ = crate::app::dispatch::dispatch(
+        Action::SendPrompt("/plan --soft add feature two".into()),
+        &mut app,
+    );
+    assert!(
+        feature_markdown_names(&cwd.join("docs").join("features")).is_empty(),
+        "a soft plan must not create a file under docs/features"
+    );
+    let session_plan = {
+        let cwd_str = cwd.to_string_lossy();
+        let encoded = urlencoding::encode(&cwd_str);
+        xai_grok_shell::util::grok_home::grok_home()
+            .join("sessions")
+            .join(encoded.as_ref())
+            .join(sid)
+            .join("secondary-plan.md")
+    };
+    let body = std::fs::read_to_string(&session_plan).expect("session plan");
+    assert!(
+        body.contains("add feature two"),
+        "the session plan must hold the second soft plan; got {body:?}"
+    );
+    let disk = std::fs::read_to_string({
+        let cwd_str = cwd.to_string_lossy();
+        let encoded = urlencoding::encode(&cwd_str);
+        xai_grok_shell::util::grok_home::grok_home()
+            .join("sessions")
+            .join(encoded.as_ref())
+            .join(sid)
+            .join("plan.md")
+    })
+    .expect("primary plan.md");
+    assert_eq!(
+        disk, primary,
+        "a second soft plan must not erase primary plan.md"
+    );
+    let agent = app.agents.get(&AgentId(0)).unwrap();
+    assert_eq!(
+        agent
+            .line_viewer
+            .as_ref()
+            .and_then(|viewer| viewer.title_override.as_deref()),
+        Some("secondary-plan.md"),
+        "the preview must show the session plan file"
+    );
+    let painted = leftover_isolated_preview_body(&app)
+        .expect("second `/plan --soft` must paint Isolated Preview");
+    assert!(
+        painted.contains("add feature two"),
+        "painted body must contain the second feature text; got {painted:?}"
+    );
+}
+
+/// A soft plan does not write a file under `docs/features`. The plan body
+/// is the session plan the preview shows. The Operator prompt is not pasted
+/// in as that body. The canned sentence does not return.
+#[test]
+#[serial_test::serial(GROK_HOME)]
+fn soft_plan_does_not_write_a_file_under_docs_features() {
+    let grok_home = tempfile::tempdir().expect("home");
+    let _home = xai_grok_test_support::EnvGuard::set("GROK_HOME", grok_home.path());
+    let proj = tempfile::tempdir().expect("cwd");
+    let cwd = proj.path().to_path_buf();
+    let sid = "plan-soft-not-docs-features";
+    let operator_prompt = concat!(
+        "Plan the weekly limits chip in the session plan. ",
+        "Do not store this prompt as the document and do not invent a docs home."
+    );
+    let mut app = make_app_with_agent(sid);
+    bind_session_home(&mut app, cwd.clone(), sid);
+    let features = cwd.join("docs").join("features");
+    let before = feature_markdown_names(&features);
+    let _ = crate::app::dispatch::dispatch(
+        Action::SendPrompt(format!("/plan --soft {operator_prompt}")),
+        &mut app,
+    );
+    let after = feature_markdown_names(&features);
+    assert_eq!(
+        after, before,
+        "a soft plan must not create a file under docs/features; before={before:?} after={after:?}"
+    );
+    let session_plan = {
+        let cwd_str = cwd.to_string_lossy();
+        let encoded = urlencoding::encode(&cwd_str);
+        xai_grok_shell::util::grok_home::grok_home()
+            .join("sessions")
+            .join(encoded.as_ref())
+            .join(sid)
+            .join("secondary-plan.md")
+    };
+    let body = std::fs::read_to_string(&session_plan).unwrap_or_else(|_| {
+        panic!(
+            "the session plan must contain the plan body; missing {}",
+            session_plan.display()
+        )
+    });
+    let painted = leftover_isolated_preview_body(&app)
+        .expect("soft plan must paint the session plan in Isolated Preview");
+    assert!(
+        body.contains(painted.trim()) || painted.contains(body.trim()),
+        "the session plan must contain the plan body the preview shows; file={body:?} painted={painted:?}"
+    );
+    assert_eq!(
+        app.agents
+            .get(&AgentId(0))
+            .unwrap()
+            .line_viewer
+            .as_ref()
+            .and_then(|viewer| viewer.title_override.as_deref()),
+        Some("secondary-plan.md"),
+        "the preview must show the session plan file"
+    );
+    assert!(
+        !body.contains(operator_prompt),
+        "the Operator prompt must not be pasted in as the body; got {body:?}"
+    );
+    assert!(
+        !body.contains("instead of planning"),
+        "the canned sentence must not return; got {body:?}"
+    );
+}
+
+/// A soft plan presentation writes the session plan, not a `docs/features`
+/// file. The soft-plan input is only an Operator prompt. The written body
+/// plans the work in complete sentences. It is not that prompt, and it is
+/// not a Job/State/Operator status recap. A template that only wraps the
+/// prompt still fails. It does not overwrite primary `plan.md`. It does not
+/// start implementation before Approve. After Approve, work starts.
+/// Always-approve does not click Approve. Empty Enter never Approves.
+#[test]
+#[serial_test::serial(GROK_HOME)]
+fn soft_plan_presentation_creates_a_feature_file_and_does_not_start_until_approve() {
+    let grok_home = tempfile::tempdir().expect("home");
+    let _home = xai_grok_test_support::EnvGuard::set("GROK_HOME", grok_home.path());
+    let proj = tempfile::tempdir().expect("cwd");
+    let cwd = proj.path().to_path_buf();
+    let sid = "plan-soft-present-feature";
+    let primary = "# Primary plan stays\n\nDo not overwrite this primary plan.\n";
+    // Soft-plan input is only this Operator prompt. It is not a plan.
+    let operator_prompt = concat!(
+        "The soft plan pane still titles secondary-plan.md and pastes the Operator prompt ",
+        "or a Job State Operator status about Approve versus Interject instead of ",
+        "planning the work before Approve starts it."
+    );
+    // The 7:11 PM pane pasted this status recap. That recap is not a plan.
+    let status_recap = concat!(
+        "Job: Approve versus Interject.\n",
+        "State: The pane title is secondary-plan.md and the body is the previous status.\n",
+        "Operator: The Operator does not need to click anything for this recap.\n",
+        "Next: Leave the recap in the pane.\n",
+    );
+    let mut app = make_app_with_agent(sid);
+    bind_session_home(&mut app, cwd.clone(), sid);
+    write_mill_session_plan_md(&cwd, sid, primary);
+    {
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        agent.session.yolo_mode = true;
+    }
+    let _ = crate::app::dispatch::dispatch(
+        Action::SendPrompt(format!("/plan --soft {operator_prompt}")),
+        &mut app,
+    );
+    // Presentation that only repeats a status recap must not become the document.
+    let _rx = isolated_present(&mut app, "create-plan-call", status_recap);
+    let features = cwd.join("docs").join("features");
+    assert!(
+        feature_markdown_names(&features).is_empty(),
+        "a soft plan must not create a file under docs/features"
+    );
+    let session_plan = {
+        let cwd_str = cwd.to_string_lossy();
+        let encoded = urlencoding::encode(&cwd_str);
+        xai_grok_shell::util::grok_home::grok_home()
+            .join("sessions")
+            .join(encoded.as_ref())
+            .join(sid)
+            .join("secondary-plan.md")
+    };
+    let bytes = std::fs::read_to_string(&session_plan).expect("session plan");
+    assert_feature_plan_body(&bytes, operator_prompt, status_recap);
+    let agent = app.agents.get(&AgentId(0)).unwrap();
+    assert_eq!(
+        agent
+            .line_viewer
+            .as_ref()
+            .and_then(|viewer| viewer.title_override.as_deref()),
+        Some("secondary-plan.md"),
+        "the preview must show the session plan file"
+    );
+    let disk = {
+        let cwd_str = cwd.to_string_lossy();
+        let encoded = urlencoding::encode(&cwd_str);
+        std::fs::read_to_string(
+            xai_grok_shell::util::grok_home::grok_home()
+                .join("sessions")
+                .join(encoded.as_ref())
+                .join(sid)
+                .join("plan.md"),
+        )
+        .expect("primary plan.md")
+    };
+    assert_eq!(
+        disk, primary,
+        "soft plan presentation must not overwrite primary plan.md"
+    );
+    assert!(
+        agent.plan_approval_view.is_some() && !agent.plan_decision_resolved,
+        "always-approve must not click Approve; present is not Approve"
+    );
+    {
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        agent.prompt.set_text("");
+    }
+    let empty = app.handle_input(&enter_key());
+    let empty_effects = dispatch_outcome(&mut app, empty);
+    {
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(
+            agent.plan_approval_view.is_some() && !agent.plan_decision_resolved,
+            "empty Enter never Approves a soft plan, and work must not start before Approve"
+        );
+    }
+    assert!(
+        !empty_effects.iter().any(|effect| matches!(
+            effect,
+            Effect::SendPrompt { .. } | Effect::SendInterject { .. } | Effect::SendPromptNow { .. }
+        )),
+        "empty Enter must not start implementation; effects={empty_effects:?}"
+    );
+    arm_comment_and_approve_hit_rects(&mut app);
+    let outcome = app.handle_input(&mouse_down(12, 20));
+    let started = match &outcome {
+        InputOutcome::Action(Action::Interject { text, .. })
+        | InputOutcome::ActionThenForward(Action::Interject { text, .. })
+        | InputOutcome::Action(Action::SendPrompt(text))
+        | InputOutcome::ActionThenForward(Action::SendPrompt(text)) => {
+            text.contains(PLAN_APPROVED_IMPLEMENT_MESSAGE)
+        }
+        InputOutcome::Action(Action::SendPromptNow { text, .. })
+        | InputOutcome::ActionThenForward(Action::SendPromptNow { text, .. }) => {
+            text.contains(PLAN_APPROVED_IMPLEMENT_MESSAGE)
+        }
+        _ => false,
+    };
+    let effects = dispatch_outcome(&mut app, outcome);
+    let effects_start = effects.iter().any(|effect| match effect {
+        Effect::SendPrompt { text, .. } | Effect::SendInterject { text, .. } => {
+            text.contains(PLAN_APPROVED_IMPLEMENT_MESSAGE)
+        }
+        Effect::SendPromptNow { blocks, .. } => blocks.iter().any(|block| match block {
+            acp::ContentBlock::Text(text) => text.text.contains(PLAN_APPROVED_IMPLEMENT_MESSAGE),
+            _ => false,
+        }),
+        _ => false,
+    });
+    assert!(
+        started || effects_start,
+        "after Approve, work starts; effects={effects:?}"
+    );
+}
+
+/// A `/limits` menu complaint is the Operator prompt. The session plan
+/// plans that menu: it names `use-limits` and `slash/commands/limits.rs`.
+/// It does not repeat the canned sentence. It does not write `docs/features`.
+#[test]
+#[serial_test::serial(GROK_HOME)]
+fn soft_plan_for_the_limits_menu_plans_use_limits_and_does_not_repeat_the_canned_template() {
+    let grok_home = tempfile::tempdir().expect("home");
+    let _home = xai_grok_test_support::EnvGuard::set("GROK_HOME", grok_home.path());
+    let proj = tempfile::tempdir().expect("cwd");
+    let cwd = proj.path().to_path_buf();
+    let sid = "plan-soft-limits-menu";
+    let operator_prompt = concat!(
+        "The /limits menu has no use-limits row and the descriptions ",
+        "do not say what is spent."
+    );
+    let mut app = make_app_with_agent(sid);
+    bind_session_home(&mut app, cwd.clone(), sid);
+    let _ = crate::app::dispatch::dispatch(
+        Action::SendPrompt(format!("/plan --soft {operator_prompt}")),
+        &mut app,
+    );
+    assert!(
+        feature_markdown_names(&cwd.join("docs").join("features")).is_empty(),
+        "a soft plan must not create a file under docs/features"
+    );
+    let session_plan = {
+        let cwd_str = cwd.to_string_lossy();
+        let encoded = urlencoding::encode(&cwd_str);
+        xai_grok_shell::util::grok_home::grok_home()
+            .join("sessions")
+            .join(encoded.as_ref())
+            .join(sid)
+            .join("secondary-plan.md")
+    };
+    let bytes = std::fs::read_to_string(&session_plan).expect("session plan");
+    assert!(
+        !bytes.contains("instead of planning"),
+        "compose_soft_feature_plan must not write the canned sentence; got {bytes:?}"
+    );
+    assert!(
+        bytes.contains("use-limits"),
+        "the session plan must name the use-limits row; got {bytes:?}"
+    );
+    assert!(
+        bytes.contains("slash/commands/limits.rs"),
+        "the session plan must name slash/commands/limits.rs; got {bytes:?}"
+    );
+    let painted = leftover_isolated_preview_body(&app)
+        .expect("the limits soft plan must paint Isolated Preview");
+    assert!(
+        painted.contains("use-limits"),
+        "Isolated Preview must show the session plan; got {painted:?}"
+    );
+}
+
+/// A non-empty Operator prompt is quoted. It is not `> (empty)`.
+/// After the plan file exists, Isolated Preview shows that body.
+/// Approve, Comment, Revise, and Exit are armed. Empty Enter does not
+/// Approve.
+#[test]
+#[serial_test::serial(GROK_HOME)]
+fn rewrite_wait_does_not_stay_up_with_an_empty_quote_after_the_plan_file_exists() {
+    let operator_prompt = "quote the operator prompt for the saved plan";
+    let quoted =
+        crate::views::plan_approval_view::isolated_preview_rewrite_wait_markdown(operator_prompt);
+    assert!(
+        quoted.contains(&format!("> {operator_prompt}")),
+        "a non-empty Operator prompt is quoted, not an empty quote; got {quoted:?}"
+    );
+    assert!(
+        !quoted.contains("> (empty)"),
+        "a non-empty Operator prompt must not be quoted as > (empty); got {quoted:?}"
+    );
+
+    let grok_home = tempfile::tempdir().expect("home");
+    let _home = xai_grok_test_support::EnvGuard::set("GROK_HOME", grok_home.path());
+    let proj = tempfile::tempdir().expect("cwd");
+    let cwd = proj.path().to_path_buf();
+    let sid = "plan-rewrite-wait-file-exists";
+    let plan_body = "# Saved plan file\n\nThe saved plan names the use-limits row.\n";
+    let mut app = make_app_with_agent(sid);
+    bind_session_home(&mut app, cwd.clone(), sid);
+    write_mill_session_plan_md(&cwd, sid, plan_body);
+    let _rx = isolated_present(&mut app, "create-plan-call", plan_body);
+    {
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        agent.enter_isolated_preview_rewrite_wait(PlanFeedbackInFlight::Updating);
+    }
+    let painted = leftover_isolated_preview_body(&app)
+        .expect("Isolated Preview must stay up after the plan file exists");
+    assert!(
+        !painted.contains("> (empty)"),
+        "rewrite-wait must not stay up with an empty quote after the plan file exists; got {painted:?}"
+    );
+    assert!(
+        !painted.contains(PLAN_REWRITE_WAIT_HEADING),
+        "rewrite-wait must not stay up after the plan file exists; got {painted:?}"
+    );
+    assert!(
+        painted.contains("The saved plan names the use-limits row."),
+        "Isolated Preview must show the plan file body; got {painted:?}"
+    );
+    {
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(
+            agent.line_viewer.as_ref().is_some_and(|viewer| viewer
+                .plan_ref()
+                .is_some_and(|plan| plan.show_action_buttons && plan.feedback_active)),
+            "Approve, Comment, Revise, and Exit must be armed after the plan file exists"
+        );
+        assert!(
+            agent.plan_approval_view.is_some() && !agent.plan_decision_resolved,
+            "showing the plan file is review, not Approve"
+        );
+    }
+    {
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        agent.prompt.set_text("");
+    }
+    let empty = app.handle_input(&enter_key());
+    let empty_effects = dispatch_outcome(&mut app, empty);
+    {
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(
+            agent.plan_approval_view.is_some() && !agent.plan_decision_resolved,
+            "empty Enter does not Approve"
+        );
+    }
+    assert!(
+        !empty_effects.iter().any(|effect| matches!(
+            effect,
+            Effect::SendPrompt { .. } | Effect::SendInterject { .. } | Effect::SendPromptNow { .. }
+        )),
+        "empty Enter must not start implementation; effects={empty_effects:?}"
+    );
+}
+
+fn feature_markdown_names(dir: &std::path::Path) -> Vec<String> {
+    let mut names = std::fs::read_dir(dir)
+        .map(|entries| {
+            entries
+                .filter_map(|entry| entry.ok())
+                .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                .filter(|name| name.ends_with(".md"))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    names.sort();
+    names
+}
+
+fn plan_sentences(text: &str) -> Vec<String> {
+    text.split(['.', '!', '?'])
+        .map(str::trim)
+        .filter(|sentence| sentence.split_whitespace().count() >= 4)
+        .map(str::to_owned)
+        .collect()
+}
+
+fn body_is_only_status_recap(body: &str) -> bool {
+    let lines: Vec<&str> = body
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect();
+    let has_job = lines.iter().any(|line| line.starts_with("Job:"));
+    let has_state = lines.iter().any(|line| line.starts_with("State:"));
+    let has_operator = lines.iter().any(|line| line.starts_with("Operator:"));
+    if !(has_job && has_state && has_operator) {
+        return false;
+    }
+    let sentences = plan_sentences(body);
+    let states_change = sentences.iter().any(|sentence| {
+        let lower = sentence.to_ascii_lowercase();
+        lower.contains("will change") || lower.contains("what will change")
+    });
+    let names_files = sentences
+        .iter()
+        .any(|sentence| sentence.contains("docs/features") || sentence.contains(".rs"));
+    let names_proof = sentences.iter().any(|sentence| {
+        let lower = sentence.to_ascii_lowercase();
+        lower.contains("proves") && sentence.contains('_')
+    });
+    !(states_change && names_files && names_proof)
+}
+
+fn body_only_wraps_prompt(body: &str, prompt: &str) -> bool {
+    let prompt = prompt.trim();
+    if prompt.is_empty() {
+        return false;
+    }
+    if body.contains(prompt) {
+        return true;
+    }
+    let prompt_sentences = plan_sentences(prompt);
+    if prompt_sentences.is_empty() {
+        return false;
+    }
+    let body_sentences = plan_sentences(body);
+    prompt_sentences.iter().all(|prompt_sentence| {
+        body_sentences
+            .iter()
+            .any(|body_sentence| body_sentence.contains(prompt_sentence.as_str()))
+    })
+}
+
+/// The written body must plan the work. The Operator prompt alone fails.
+/// A Job/State/Operator status recap fails. A template that only wraps
+/// the prompt fails.
+fn assert_feature_plan_body(body: &str, operator_prompt: &str, status_recap: &str) {
+    let trimmed = body.trim();
+    assert_ne!(
+        trimmed,
+        operator_prompt.trim(),
+        "feature file must not be only the Operator prompt; got {body:?}"
+    );
+    assert!(
+        !body_only_wraps_prompt(trimmed, operator_prompt),
+        "a template that only wraps the Operator prompt still fails; got {body:?}"
+    );
+    assert!(
+        !body_is_only_status_recap(trimmed),
+        "feature file must not be only a Job/State/Operator status recap; got {body:?}"
+    );
+    assert!(
+        !trimmed.contains(status_recap.trim()),
+        "feature file must not copy the status recap; got {body:?}"
+    );
+    assert!(
+        !trimmed.contains("Job: Approve versus Interject."),
+        "feature file must not paste the Approve versus Interject status; got {body:?}"
+    );
+    let sentences = plan_sentences(trimmed);
+    assert!(
+        sentences.len() >= 4,
+        "feature plan must use complete sentences; got {body:?}"
+    );
+    assert!(
+        sentences.iter().any(|sentence| {
+            let lower = sentence.to_ascii_lowercase();
+            lower.contains("what is wrong") || lower.contains("is wrong")
+        }),
+        "feature plan must state what is wrong in a complete sentence; got {body:?}"
+    );
+    assert!(
+        sentences.iter().any(|sentence| {
+            let lower = sentence.to_ascii_lowercase();
+            lower.contains("will change")
+        }),
+        "feature plan must state what will change in a complete sentence; got {body:?}"
+    );
+    assert!(
+        sentences.iter().any(|sentence| {
+            sentence.contains("docs/features") || sentence.contains(".rs") || sentence.contains('/')
+        }),
+        "feature plan must name the files in a complete sentence; got {body:?}"
+    );
+    assert!(
+        sentences
+            .iter()
+            .any(|sentence| sentence.contains("Operator")
+                && sentence.to_ascii_lowercase().contains("see")),
+        "feature plan must state what the Operator will see in a complete sentence; got {body:?}"
+    );
+    assert!(
+        sentences.iter().any(|sentence| {
+            let lower = sentence.to_ascii_lowercase();
+            lower.contains("proves") && sentence.contains('_')
+        }),
+        "feature plan must name the test that proves it in a complete sentence; got {body:?}"
+    );
 }
 
 /// `exit_plan_mode` writing the primary must present that file. `/plan --soft`

@@ -1,7 +1,9 @@
-//! Drain `$GROK_HOME/l0-enqueue/<session_id>/enqueue.json` into this window.
+//! Drain `$GROK_HOME/l0-enqueue/<session_id>/enqueue.json` into this pager.
 //!
-//! `surmount-coordinator-gui::write_enqueue` writes that drop file. This
-//! pager reads it for **this** window's session id, turns it into one human
+//! L0 in this tree is this drain. It is not a separate window. A local
+//! enqueue writes that drop file with `surmount-coordinator-gui::write_enqueue`.
+//! A remote enqueue copies the same path onto that host's grok home. This
+//! pager reads it for **this** pager's session id, turns it into one human
 //! prompt on the same local queue as composer send (`pending_prompts`), then
 //! consumes the file so it cannot fire twice. Other session ids are ignored.
 //! A missing file is a no-op. The prompt is not written to

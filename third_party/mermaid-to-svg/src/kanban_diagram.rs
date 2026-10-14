@@ -1,6 +1,6 @@
 use crate::error::MermaidError;
 use crate::theme::MermaidTheme;
-use serde_yaml::{Mapping, Value};
+use serde_json::Value;
 
 const COLUMN_WIDTH: f64 = 200.0;
 const COLUMN_GAP: f64 = 5.0;
@@ -414,12 +414,12 @@ fn apply_shape_data(
         format!("{{\n{shape_data}\n}}")
     };
 
-    let doc: Value = serde_yaml::from_str(&yaml_data).map_err(|e| MermaidError::ParseError {
+    let doc: Value = serde_saphyr::from_str(&yaml_data).map_err(|e| MermaidError::ParseError {
         line: line_no,
         message: format!("Invalid kanban metadata: {e}"),
     })?;
 
-    let Value::Mapping(map) = doc else {
+    let Value::Object(map) = doc else {
         return Err(MermaidError::ParseError {
             line: line_no,
             message: "Invalid kanban metadata: expected a YAML mapping".to_string(),
@@ -445,8 +445,8 @@ fn apply_shape_data(
     Ok(())
 }
 
-fn yaml_get_string(map: &Mapping, key: &str) -> Option<String> {
-    let value = map.get(Value::String(key.to_string()))?;
+fn yaml_get_string(map: &serde_json::Map<String, Value>, key: &str) -> Option<String> {
+    let value = map.get(key)?;
     match value {
         Value::String(s) => Some(s.clone()),
         Value::Number(n) => Some(n.to_string()),

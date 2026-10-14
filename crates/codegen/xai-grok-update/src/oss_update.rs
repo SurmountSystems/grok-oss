@@ -163,11 +163,12 @@ async fn fetch_compare(base_sha: &str) -> Result<(String, GhCompare)> {
     let rate_key = ProviderKey::new(keys::GITHUB);
     rate.wait_if_limited(&rate_key).await;
 
-    let client = reqwest::Client::builder()
-        .user_agent(format!("grok-oss/{base_sha}"))
-        .timeout(std::time::Duration::from_secs(20))
-        .build()
-        .context("http client")?;
+    let client = xai_grok_extra_ca::build_reqwest_client(|builder| {
+        builder
+            .user_agent(format!("grok-oss/{base_sha}"))
+            .timeout(std::time::Duration::from_secs(20))
+    })
+    .context("http client")?;
 
     let main_url = format!("https://api.github.com/repos/{OSS_GITHUB_REPO}/commits/main");
     let main_resp = apply_github_headers(client.get(&main_url))

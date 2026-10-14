@@ -37,7 +37,7 @@ pub fn codex_home() -> PathBuf {
     if let Ok(configured) = std::env::var("CODEX_HOME") {
         PathBuf::from(configured)
     } else {
-        dirs::home_dir()
+        xai_dirs::home_dir()
             .unwrap_or_else(|| PathBuf::from("."))
             .join(".codex")
     }
@@ -236,7 +236,10 @@ fn drop_last_user_turns(turns: &mut Vec<serde_json::Value>, number: i64) {
         .len()
         .saturating_sub(number as usize)
         .min(positions.len().saturating_sub(1));
-    let cut = positions[cut_idx];
+    let cut = positions
+        .get(cut_idx)
+        .copied()
+        .expect("index out of bounds");
     turns.truncate(cut);
 }
 
@@ -290,7 +293,7 @@ pub fn read_codex_session(
             turns.push(t);
         }
     }
-    for record in &records[start_index..] {
+    for record in records.get(start_index..).expect("index out of bounds") {
         let record_type = record.get("type").and_then(|t| t.as_str()).unwrap_or("");
         let payload = record.get("payload");
         match record_type {
@@ -417,7 +420,7 @@ fn existing_codex_rollout(home: &Path, raw_path: &str, session_id: &str) -> Opti
     }
     let mut path = PathBuf::from(raw_path);
     if path.starts_with("~") {
-        if let Some(h) = dirs::home_dir() {
+        if let Some(h) = xai_dirs::home_dir() {
             if let Ok(rest) = path.strip_prefix("~") {
                 path = h.join(rest);
             }

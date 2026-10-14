@@ -1,26 +1,17 @@
-//! Concrete `ToolSearchIndex` implementation using BM25.
-//!
 //! Builds a BM25 index over registered MCP tools and searches it.
-//! The index is rebuilt on each search call (sub-millisecond for tens
-//! to low hundreds of tools).
+//! The index is rebuilt on each search call (sub-millisecond for tens to low hundreds of tools).
 
 use std::sync::Arc;
 
 use std::sync::Mutex;
 
-use bm25::{Language, SearchEngineBuilder};
 use xai_grok_tools::types::tool_index::{
     SearchSnapshot, ServerSummary, ToolSearchIndex, ToolSearchResult,
 };
 
 use super::mcp_servers::MCP_TOOL_NAME_DELIMITER;
 
-/// Split a compound identifier into component words.
-///
-/// Handles `__` (qualified-name delimiter), `_` (snake_case),
-/// `-` (kebab-case), and camelCase / PascalCase boundaries.
-///
-/// Only allocates when the input actually contains a split point.
+/// Handles `__` (qualified-name delimiter), `_` (snake_case), `-` (kebab-case), and camelCase / PascalCase boundaries.
 fn split_identifier(s: &str) -> Vec<&str> {
     let mut words: Vec<&str> = Vec::new();
     for part in s
@@ -31,33 +22,42 @@ fn split_identifier(s: &str) -> Vec<&str> {
         if part.is_empty() {
             continue;
         }
-        // Split on camelCase boundaries: a lowercase→uppercase transition.
+        // Split on camelCase boundaries: a lowercase to uppercase transition
         let bytes = part.as_bytes();
         let mut start = 0;
         for i in 1..bytes.len() {
-            if bytes[i - 1].is_ascii_lowercase() && bytes[i].is_ascii_uppercase() {
-                words.push(&part[start..i]);
+            let Some(prev) = i.checked_sub(1).and_then(|j| bytes.get(j)) else {
+                continue;
+            };
+            let Some(cur) = bytes.get(i) else {
+                break;
+            };
+            if prev.is_ascii_lowercase() && cur.is_ascii_uppercase() {
+                if let Some(word) = part.get(start..i) {
+                    words.push(word);
+                }
                 start = i;
             }
         }
-        words.push(&part[start..]);
+        if let Some(word) = part.get(start..) {
+            words.push(word);
+        }
     }
     words
 }
 
-/// Normalize a search query by expanding compound identifiers.
-///
-/// If the query contains `__`, `_`, `-`, or camelCase, the split
-/// components are appended so BM25 can match on individual parts.
+/// If the query contains `__`, `_`, `-`, or camelCase, the split components are appended so BM25 can match on individual parts.
 /// Plain natural-language queries pass through unchanged.
 fn normalize_query(query: &str) -> String {
     let needs_split = query.contains("__")
         || query.contains('_')
         || query.contains('-')
-        || query
-            .as_bytes()
-            .windows(2)
-            .any(|w| w[0].is_ascii_lowercase() && w[1].is_ascii_uppercase());
+        || query.as_bytes().windows(2).any(|w| {
+            let [a, b] = w else {
+                return false;
+            };
+            a.is_ascii_lowercase() && b.is_ascii_uppercase()
+        });
     if !needs_split {
         return query.to_owned();
     }
@@ -80,7 +80,6 @@ pub(crate) struct ToolMetadata {
     pub server_name: String,
     /// Search/display tool name.
     pub tool_name: String,
-    /// Tool description.
     pub description: String,
     /// Parameter names from input schema.
     pub parameters: Vec<String>,
@@ -89,10 +88,8 @@ pub(crate) struct ToolMetadata {
 }
 
 impl ToolMetadata {
-    /// Build the BM25 document text for this tool.
-    ///
-    /// Composed of: `{server_name} {tool_name} {description} {parameter_names}`
-    /// plus decomposed identifier components (snake_case, camelCase, kebab-case).
+    /// The document text is `{server_name} {tool_name} {description} {parameter_names}`.
+    /// The server, tool, and parameter names are also split into component words (snake_case, camelCase, kebab-case) and appended.
     /// Exact canonical-name lookup is handled before BM25 ranking.
     fn to_document(&self) -> String {
         let params = self.parameters.join(" ");
@@ -100,9 +97,8 @@ impl ToolMetadata {
             "{} {} {} {}",
             self.server_name, self.tool_name, self.description, params
         );
-        // Decompose identifiers into component words so BM25 can match
-        // individual parts. e.g. "SearchDashboards" → "Search Dashboards",
-        // "grafana-ai" → "grafana ai".
+        // Decompose identifiers into component words so BM25 can match individual parts
+        // e.g. "SearchDashboards" becomes "Search Dashboards", "grafana-ai" becomes "grafana ai".
         let extra: String = [self.server_name.as_str(), self.tool_name.as_str()]
             .iter()
             .flat_map(|s| split_identifier(s))
@@ -113,11 +109,9 @@ impl ToolMetadata {
     }
 }
 
-/// Per-server metadata (name + optional description from the MCP
-/// initialize handshake's `instructions` field). Tool count is derived
-/// from `ToolMetadataSnapshot::tools` at read time, so disabled tools
-/// (which are unregistered from the bridge before the snapshot is
-/// rebuilt) are excluded by construction.
+/// Per-server metadata (name and optional description from the MCP initialize handshake's `instructions` field).
+/// Tool count is derived from `ToolMetadataSnapshot::tools` at read time.
+/// Disabled tools are unregistered from the bridge before the snapshot is rebuilt, so the count never includes them.
 #[derive(Debug, Clone)]
 pub(crate) struct ServerMetadata {
     pub name: String,
@@ -134,13 +128,9 @@ pub(crate) struct ToolMetadataSnapshot {
     pub mcp_initialized: bool,
 }
 
-/// Concrete `ToolSearchIndex` implementation backed by BM25.
-///
 /// Holds a shared snapshot of MCP tool metadata behind a `std::sync::Mutex`.
-/// Using a sync mutex (not TokioMutex) because:
-/// - The lock is held only to clone the snapshot (fast, no I/O)
-/// - `search_snapshot()` is a sync trait method called from async context
-/// - `TokioMutex::blocking_lock()` panics on single-threaded runtimes
+/// The lock is held only to clone the snapshot (fast, no I/O).
+/// `search_snapshot()` is a sync trait method called from async context.
 pub(crate) struct Bm25ToolSearchIndex {
     snapshot: Arc<Mutex<ToolMetadataSnapshot>>,
 }
@@ -167,8 +157,7 @@ impl ToolSearchIndex for Bm25ToolSearchIndex {
         }
 
         // Fast path: exact match on qualified name or bare tool name.
-        // When the model already knows the tool name (e.g. "grafana-ai__SearchDashboards"
-        // or "SearchDashboards"), skip BM25 entirely and return the match directly.
+        // When the model already knows the tool name (e.g. "grafana-ai__SearchDashboards" or "SearchDashboards"), skip BM25 entirely.
         let query_lower = query.trim().to_lowercase();
         if let Some(exact) = snapshot.tools.iter().find(|t| {
             t.qualified_name.to_lowercase() == query_lower
@@ -190,11 +179,8 @@ impl ToolSearchIndex for Bm25ToolSearchIndex {
 
         let documents: Vec<String> = snapshot.tools.iter().map(|t| t.to_document()).collect();
 
-        let search_engine =
-            SearchEngineBuilder::<u32>::with_corpus(Language::English, documents).build();
-
         let normalized = normalize_query(query);
-        let bm25_results = search_engine.search(&normalized, limit);
+        let bm25_results = search_okapi_bm25(&documents, &normalized, limit);
 
         let results = bm25_results
             .into_iter()
@@ -256,7 +242,102 @@ impl ToolSearchIndex for Bm25ToolSearchIndex {
     }
 }
 
-/// Extract parameter names from a JSON Schema `properties` object.
+const BM25_K1: f64 = 1.2;
+const BM25_B: f64 = 0.75;
+
+struct Bm25DocId {
+    id: u32,
+}
+
+struct Bm25Hit {
+    document: Bm25DocId,
+    score: f32,
+}
+
+/// Split on non-ASCII-alphanumeric, ASCII-lowercase, drop empty tokens.
+/// A plural that is a word ending in "e" plus "s" ("pages") folds to that
+/// word so a singular query token matches the tool name. Words that do not
+/// end in "es", and words that end in "ses" ("databases"), stay as written.
+fn tokenize_bm25(text: &str) -> Vec<String> {
+    text.split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .map(|token| fold_trailing_es_plural(token.to_ascii_lowercase()))
+        .collect()
+}
+
+fn fold_trailing_es_plural(mut token: String) -> String {
+    if token.len() >= 5 && token.ends_with("es") && !token.ends_with("ses") {
+        token.pop();
+    }
+    token
+}
+
+/// In-tree Okapi BM25. Document id is the corpus index.
+/// idf = ln((N - df + 0.5) / (df + 0.5) + 1). k1 = 1.2, b = 0.75.
+fn search_okapi_bm25(documents: &[String], query: &str, limit: usize) -> Vec<Bm25Hit> {
+    if limit == 0 || documents.is_empty() {
+        return Vec::new();
+    }
+    let query_tokens = tokenize_bm25(query);
+    if query_tokens.is_empty() {
+        return Vec::new();
+    }
+    let docs: Vec<Vec<String>> = documents.iter().map(|doc| tokenize_bm25(doc)).collect();
+    let n = docs.len() as f64;
+    let total_len: usize = docs.iter().map(|doc| doc.len()).sum();
+    let avgdl = if n == 0.0 { 0.0 } else { total_len as f64 / n };
+    let mut df: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for doc in &docs {
+        let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        for token in doc {
+            if seen.insert(token.as_str()) {
+                *df.entry(token.clone()).or_insert(0) += 1;
+            }
+        }
+    }
+    let mut hits = Vec::new();
+    for (id, doc) in docs.iter().enumerate() {
+        let mut tf: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+        for token in doc {
+            *tf.entry(token.as_str()).or_insert(0) += 1;
+        }
+        let dl = doc.len() as f64;
+        let mut score = 0.0_f64;
+        for query_token in &query_tokens {
+            let Some(&doc_freq) = df.get(query_token.as_str()) else {
+                continue;
+            };
+            let Some(&freq) = tf.get(query_token.as_str()) else {
+                continue;
+            };
+            let idf = ((n - doc_freq as f64 + 0.5) / (doc_freq as f64 + 0.5) + 1.0).ln();
+            let freq = freq as f64;
+            let norm = if avgdl == 0.0 {
+                0.0
+            } else {
+                BM25_B * dl / avgdl
+            };
+            let denom = freq + BM25_K1 * (1.0 - BM25_B + norm);
+            let tf_term = (freq * (BM25_K1 + 1.0)) / denom;
+            score += idf * tf_term;
+        }
+        if score > 0.0 {
+            hits.push(Bm25Hit {
+                document: Bm25DocId { id: id as u32 },
+                score: score as f32,
+            });
+        }
+    }
+    hits.sort_by(|left, right| {
+        right
+            .score
+            .total_cmp(&left.score)
+            .then_with(|| left.document.id.cmp(&right.document.id))
+    });
+    hits.truncate(limit);
+    hits
+}
+
 pub(crate) fn extract_parameter_names(schema: &serde_json::Value) -> Vec<String> {
     schema
         .get("properties")

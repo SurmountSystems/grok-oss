@@ -1,35 +1,61 @@
 //! Standalone workspace ToolServer for remote sandboxes.
 //!
 //! Reads OIDC credentials from `~/.grok/auth.json`, connects to a
-//! server, exposes workspace tools, and refreshes tokens
-//! automatically.
+//! server, exposes workspace tools, and refreshes tokens automatically.
+#![deny(clippy::indexing_slicing)]
 use clap::Parser;
 use std::path::PathBuf;
 use std::time::Duration;
 use url::Url;
 use xai_grok_diag_server::{self as diag_server, DiagHandle, ErrorClass};
-use xai_grok_workspace::config::WorkspaceServerMetadata;
+use xai_grok_workspace::WorkspaceHostKind;
+use xai_grok_workspace::config::{
+    WorkspaceServerMetadata, merge_host_identity_metadata, merge_session_metadata,
+};
 use xai_grok_workspace::error::WorkspaceError;
 use xai_grok_workspace_daemon::daemonize;
 use xai_grok_workspace_daemon::preview_supervisor::{
     self, PreviewActivitySink, PreviewArgs, PreviewVisibility,
 };
-/// OTLP `service.name` for this binary's exported traces/logs/metrics and
-/// direct-OTLP fastrace export. Single source so the call sites can't drift.
+/// OTLP `service.name` for this binary's exported traces/logs/metrics and direct-OTLP fastrace export.
+/// Single source so the call sites can't drift.
 const SERVICE_NAME: &str = "prod_grok_workspace";
 const EXIT_SERVER_ID_INVALID: i32 = 3;
 const INVALID_SERVER_ID_MARKER: &str = "workspace-server: invalid --server-id";
 const WORKSPACE_HUB_AUTH_FAILED_MARKER: &str = "workspace hub auth failed";
 /// Post-failure dwell so the host can poll `/ready` before exit ([500ms, 2s]).
 const HUB_CONNECT_FAILED_DWELL: Duration = Duration::from_millis(750);
+/// Capped log of pre-stop exec handler output, in the server's temp dir next to the daemon log.
+#[cfg(unix)]
+const LIFECYCLE_EXEC_LOG_FILE: &str = "workspace-server-lifecycle.log";
+/// Bound on building the pre-stop broker; past it the diagnostics socket binds without the lifecycle routes.
+#[cfg(unix)]
+const LIFECYCLE_BROKER_START_TIMEOUT: Duration = Duration::from_secs(5);
+/// The pre-stop broker: image manifests from `image_dir`, registrations under the durable workspace home.
+///
+/// Unix only. On Windows the diagnostics listener is loopback TCP, which every local account can reach, and the host
+/// never sends pre-stop to Windows guests, so the lifecycle routes are not served there.
+#[cfg(unix)]
+fn lifecycle_broker(
+    image_dir: &std::path::Path,
+    workspace_home: &std::path::Path,
+    temp_dir: &std::path::Path,
+) -> xai_grok_lifecycle::LifecycleBroker {
+    use xai_grok_lifecycle::{LifecycleBroker, LifecycleConfig};
+    LifecycleBroker::new(LifecycleConfig {
+        image_dir: image_dir.to_path_buf(),
+        state_dir: Some(workspace_home.join("lifecycle").join("handlers")),
+        exec_log: temp_dir.join(LIFECYCLE_EXEC_LOG_FILE),
+    })
+}
 fn server_id_startup_error(id: &str) -> Option<String> {
     id.parse::<xai_tool_protocol::ServerId>()
         .err()
         .map(|e| format!("{INVALID_SERVER_ID_MARKER} {id:?}: {e}"))
 }
 /// Classify hub-connect Display strings for `/ready` error_class.
-/// Auth needles → `hub_auth`; other hub-connect path failures → `hub_connect`;
-/// pre-hub workspace setup messages → `unknown` (still retryable alongside hub_connect).
+/// Auth needles map to `hub_auth`; other hub-connect path failures map to `hub_connect`.
+/// Pre-hub workspace setup messages map to `unknown` (still retryable alongside hub_connect).
 fn classify_hub_connect_failure(err_msg: &str) -> ErrorClass {
     if err_msg.contains("handshake auth failed") || err_msg.contains("auth error:") {
         ErrorClass::HubAuth
@@ -64,9 +90,8 @@ async fn dwell_after_hub_connect_failed() {
 #[command(name = "xai-workspace-server")]
 #[command(about = "Standalone workspace ToolServer for the server connection")]
 struct Args {
-    /// Print the capability manifest as JSON to stdout and exit 0. Legacy
-    /// binaries reject the unknown flag via clap (non-zero exit), giving the
-    /// launcher a definitive feature probe.
+    /// Print the capability manifest as JSON to stdout and exit 0.
+    /// Legacy binaries reject the unknown flag via clap (non-zero exit), giving the launcher a definitive feature probe.
     #[arg(long)]
     capabilities: bool,
     #[arg(long, default_value = "wss://computer-hub.grok.com/v1/tools")]
@@ -75,9 +100,8 @@ struct Args {
     auth_config: Option<PathBuf>,
     #[arg(long)]
     cwd: Option<PathBuf>,
-    /// Stable server identity for hub registration. Used as the
-    /// `server_id` in `servers.list` and `server.bind` so clients
-    /// can address this specific workspace server.
+    /// Stable server identity for hub registration.
+    /// Used as the `server_id` in `servers.list` and `server.bind` so clients can address this specific workspace server.
     /// When omitted, the SDK default ("workspace-server") is used.
     #[arg(long)]
     server_id: Option<String>,
@@ -85,31 +109,24 @@ struct Args {
     /// Propagated to `ServerInfo.metadata` in `servers.list` responses.
     #[arg(long)]
     metadata: Option<String>,
-    /// Deprecated no-op, accepted for one release so existing callers don't
-    /// trip clap: nothing writes or reads this path.
+    /// Deprecated no-op, accepted for one release so existing callers don't trip clap: nothing writes or reads this path.
     #[arg(long, hide = true)]
     ready_file: Option<PathBuf>,
-    /// Unix-socket path for the in-guest diagnostics HTTP server
-    /// (`/ready`, `/statusz`).
+    /// Unix-socket path for the in-guest diagnostics HTTP server (`/ready`, `/statusz`).
     #[cfg(unix)]
     #[arg(long, default_value = diag_server::DEFAULT_DIAG_SOCKET_PATH)]
     diag_socket: PathBuf,
-    /// Loopback TCP port for the diagnostics HTTP server (Windows guests,
-    /// which lack a reliable Unix-socket HTTP client).
+    /// Loopback TCP port for the diagnostics HTTP server (Windows guests, which lack a reliable Unix-socket HTTP client).
     #[cfg(windows)]
     #[arg(long, default_value_t = diag_server::DEFAULT_DIAG_PORT)]
     diag_port: u16,
-    /// Permit a plaintext `ws://` hub on a non-loopback host. Only for a
-    /// mesh-secured transport; the bearer crosses the network otherwise.
+    /// Permit a plaintext `ws://` hub on a non-loopback host.
+    /// Only for a mesh-secured transport; the bearer crosses the network otherwise.
     #[arg(long)]
     allow_insecure_ws: bool,
-    /// Route per-turn uploads through the durable on-disk
-    /// upload queue (retries + spill-to-disk) instead of the legacy inline
-    /// `gcs::upload_bytes` path.
-    ///
-    /// Enabled by default. Pass `--upload-queue-enabled false` (or set the
-    /// `GROK_WORKSPACE_UPLOAD_QUEUE_ENABLED` env var to `false`) to fall back to
-    /// the legacy inline path. Accepts `true`/`false`.
+    /// Route per-turn uploads through the durable on-disk upload queue (retries and spill-to-disk) instead of the legacy `gcs::upload_bytes` path.
+    /// Enabled by default. Accepts `true`/`false`.
+    /// Pass `--upload-queue-enabled false` (or set `GROK_WORKSPACE_UPLOAD_QUEUE_ENABLED=false`) to fall back to the legacy inline path.
     #[arg(
         long,
         env = "GROK_WORKSPACE_UPLOAD_QUEUE_ENABLED",
@@ -117,8 +134,7 @@ struct Args {
         action = clap::ArgAction::Set,
     )]
     upload_queue_enabled: bool,
-    /// Fail `session.bind`s without an explicit toolset closed (RPC-only)
-    /// instead of widening to the built-in default catalog.
+    /// Fail `session.bind`s without an explicit toolset closed (RPC-only) instead of widening to the built-in default catalog.
     #[arg(long)]
     require_explicit_toolset: bool,
     /// Trust project-scoped LSP servers from `<repo>/.grok/lsp.json`.
@@ -130,9 +146,8 @@ struct Args {
         action = clap::ArgAction::Set,
     )]
     project_lsp_trusted: bool,
-    /// Confine `x.ai/fs/*` resolution to the workspace root (reject `..`,
-    /// absolute-outside-root, symlink escapes). On by default: the standalone
-    /// server always backs a remote-sandbox workspace, a real tenant boundary.
+    /// Confine `x.ai/fs/*` resolution to the workspace root (reject `..`, absolute-outside-root, symlink escapes).
+    /// On by default: the standalone server always backs a remote-sandbox workspace, a real tenant boundary.
     /// Override with `GROK_WORKSPACE_CONFINE_FS_TO_ROOT=false` (e.g. local dev).
     #[arg(
         long,
@@ -141,43 +156,41 @@ struct Args {
         action = clap::ArgAction::Set,
     )]
     confine_fs_to_workspace_root: bool,
-    /// Self-daemonize at startup: double-fork + `setsid()` into a new session
-    /// and process group (escaping the launcher's process-group reap),
-    /// redirect stdio to a log file, and hold a single-instance pidfile lock.
-    ///
-    /// Off by default — opt-in, passed by the launcher in the supervised
-    /// deployment mode. With the flag absent, startup is unchanged.
+    /// Self-daemonize at startup: double-fork and `setsid()` into a new session and process group, escaping the launcher's process-group reap.
+    /// Redirect stdio to a log file and hold a single-instance pidfile lock.
+    /// Off by default; the launcher passes it in the supervised deployment mode. With the flag absent, startup is unchanged.
     #[arg(long)]
     daemonize: bool,
-    /// Where `--daemonize` redirects stdout+stderr. Ignored without
-    /// `--daemonize`.
+    /// Where `--daemonize` redirects stdout and stderr. Ignored without `--daemonize`.
     #[arg(long, default_value = daemonize::DEFAULT_LOG_PATH)]
     log_file: PathBuf,
-    /// Single-instance pidfile lock path used with `--daemonize`. Ignored
-    /// without `--daemonize`.
+    /// Single-instance pidfile lock path used with `--daemonize`. Ignored without `--daemonize`.
     #[arg(long, default_value = daemonize::DEFAULT_PIDFILE_PATH)]
     pid_file: PathBuf,
+    /// Record `workspace_oom_protect_applied` and lower or recheck `oom_score_adj` to -900.
+    /// Force `GROK_TOOLS_RESET_CHILD_OOM` so shell/pty children reset to 0.
+    /// Complements always-on self-protect after pre-unshare inheritance; forces the child reset even if the early write failed. Off by default.
+    #[arg(long)]
+    oom_protect: bool,
     #[command(flatten)]
     preview: PreviewCliArgs,
 }
-/// Preview-proxy supervision flags. Forwarded 1:1 to the
-/// `/usr/local/bin/xai-grok-preview-proxy` child (see `cli.rs` for the proxy's
-/// flag names). Off by default — when `--preview-enabled` is absent the
-/// supervisor is never started and startup is byte-for-byte the non-preview
-/// path.
+/// Preview-proxy supervision flags.
+/// Forwarded 1:1 to the `/usr/local/bin/xai-grok-preview-proxy` child (see `cli.rs` for the proxy's flag names).
+/// Off by default: when `--preview-enabled` is absent the supervisor is never started and startup is byte-for-byte the non-preview path.
 #[derive(clap::Args, Debug)]
 struct PreviewCliArgs {
-    /// Spawn and supervise the in-sandbox preview-proxy. The launcher passes
-    /// this only when the proxy binary was mounted into this container.
+    /// Spawn and supervise the in-sandbox preview-proxy.
+    /// The launcher passes this only when the proxy binary was mounted into this container.
     #[arg(long)]
     preview_enabled: bool,
-    /// Proxy `--preview-port` (externally exposed listener). Absent ⇒ proxy default.
+    /// Proxy `--preview-port` (externally exposed listener). When absent, the proxy default applies.
     #[arg(long)]
     preview_port: Option<u16>,
-    /// Proxy `--control-port` (loopback control). Absent ⇒ proxy default.
+    /// Proxy `--control-port` (loopback control). When absent, the proxy default applies.
     #[arg(long)]
     preview_control_port: Option<u16>,
-    /// Proxy `--visibility` (`owner` | `public`). Absent ⇒ proxy default.
+    /// Proxy `--visibility` (`owner` | `public`). When absent, the proxy default applies.
     /// Validated here so a bad value fails fast instead of crash-looping the proxy.
     #[arg(long, value_enum)]
     preview_visibility: Option<PreviewVisibility>,
@@ -196,7 +209,13 @@ struct PreviewCliArgs {
     preview_workspace_server_port: Option<u16>,
 }
 impl PreviewCliArgs {
-    fn into_preview_args(self, workspace_dir: PathBuf) -> PreviewArgs {
+    /// `discovery_refresh_ms` is env-sourced (`StatusConfig`), not a CLI flag.
+    /// `None` keeps `--discovery-refresh-ms` out of the proxy argv (see [`PreviewArgs::discovery_refresh_ms`]).
+    fn into_preview_args(
+        self,
+        workspace_dir: PathBuf,
+        discovery_refresh_ms: Option<u64>,
+    ) -> PreviewArgs {
         PreviewArgs {
             enabled: self.preview_enabled,
             port: self.preview_port,
@@ -206,14 +225,13 @@ impl PreviewCliArgs {
             auth_redirect: self.preview_auth_redirect,
             allow_public: self.preview_allow_public,
             workspace_server_port: self.preview_workspace_server_port,
+            discovery_refresh_ms,
             workspace_dir,
         }
     }
 }
 /// Binds the preview-activity scraper to the workspace `ActivityTracker`.
-///
-/// `xai-grok-workspace-daemon` deliberately does not depend on
-/// `xai-grok-workspace`, so this binary owns the one adapter between them.
+/// `xai-grok-workspace-daemon` deliberately does not depend on `xai-grok-workspace`, so this binary owns the one adapter between them.
 struct TrackerSink(std::sync::Arc<xai_grok_workspace::activity::ActivityTracker>);
 impl PreviewActivitySink for TrackerSink {
     fn note_preview_routed_activity(&self) {
@@ -230,8 +248,8 @@ impl PreviewActivitySink for TrackerSink {
         self.0.preview_activity_window_ms()
     }
 }
-/// Capability manifest printed by `--capabilities`, consumed by the sandbox
-/// launcher to pick a launch protocol. Additions are backward-compatible.
+/// Capability manifest printed by `--capabilities`, consumed by the sandbox launcher to pick a launch protocol.
+/// Additions are backward-compatible.
 #[derive(Debug, serde::Serialize)]
 struct Capabilities {
     /// The in-guest diagnostics HTTP server (`/ready`, `/statusz`, `/logs`).
@@ -253,10 +271,6 @@ fn main() -> anyhow::Result<()> {
         None => std::env::current_dir()?,
     };
     let oom_protection = xai_tty_utils::protect_from_oom_kill();
-    #[cfg(unix)]
-    if oom_protection.is_ok() {
-        unsafe { std::env::set_var(xai_tty_utils::RESET_CHILD_OOM_ENV, "1") };
-    }
     let _pidfile_guard = if args.daemonize {
         let anchor = |p: PathBuf| if p.is_absolute() { p } else { cwd.join(p) };
         args.log_file = anchor(std::mem::take(&mut args.log_file));
@@ -274,15 +288,55 @@ fn main() -> anyhow::Result<()> {
     } else {
         None
     };
+    let oom_protect_applied = if args.oom_protect {
+        Some(daemonize::apply_workspace_oom_protect())
+    } else {
+        None
+    };
+    #[cfg(unix)]
+    if should_set_reset_child_oom(oom_protection.is_ok(), args.oom_protect) {
+        unsafe { std::env::set_var(xai_tty_utils::RESET_CHILD_OOM_ENV, "1") };
+    }
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder
         .worker_threads(xai_tty_utils::runtime::capped_worker_threads().get())
         .enable_all();
     let rt = xai_tty_utils::runtime::build_with_blocking_pool(&mut builder)?;
-    rt.block_on(run(args, cwd, oom_protection))
+    rt.block_on(run(args, cwd, oom_protection, oom_protect_applied))
 }
-async fn run(args: Args, cwd: PathBuf, oom_protection: std::io::Result<()>) -> anyhow::Result<()> {
-    let _ = rustls::crypto::ring::default_provider().install_default();
+/// The same binary serves sandbox containers and headless user machines. Only the sandbox launcher
+/// passes a `sandbox_id` in `--metadata`, so that is the opt-in to the sandbox's full catalog and
+/// credential reach; the environment is not a policy input (a `grok --local-workspace` spawned by a
+/// hook or MCP child inherits `GROK_SESSION_ID`). Pickers label the server by the same kind.
+fn host_kind_for(metadata: Option<&serde_json::Value>) -> WorkspaceHostKind {
+    let is_sandbox = metadata
+        .map(WorkspaceServerMetadata::from_metadata)
+        .is_some_and(|identity| identity.sandbox_id.is_some_and(|id| !id.is_empty()));
+    if is_sandbox {
+        WorkspaceHostKind::Sandbox
+    } else {
+        WorkspaceHostKind::Daemon
+    }
+}
+/// Whether to set `GROK_TOOLS_RESET_CHILD_OOM` after the always-on protect attempt.
+/// Always-on success must set it so children do not inherit -900.
+/// `--oom-protect` forces the env even when the early write failed (pre-unshare may still have left the score at -900).
+fn should_set_reset_child_oom(early_protect_ok: bool, oom_protect_flag: bool) -> bool {
+    early_protect_ok || oom_protect_flag
+}
+/// Whether the startup log should report OOM protection as active.
+/// Prefer the `--oom-protect` apply outcome when present (already-at-target after pre-unshare counts as active even if the early write failed).
+/// Without the flag, report the always-on write only.
+fn oom_protect_log_active(applied: Option<bool>, early_ok: bool) -> bool {
+    applied.unwrap_or(early_ok)
+}
+async fn run(
+    args: Args,
+    cwd: PathBuf,
+    oom_protection: std::io::Result<()>,
+    oom_protect_applied: Option<bool>,
+) -> anyhow::Result<()> {
+    xai_grok_extra_ca::ensure_default_crypto_provider();
     use tracing_subscriber::layer::SubscriberExt as _;
     use tracing_subscriber::util::SubscriberInitExt as _;
     let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
@@ -293,9 +347,12 @@ async fn run(args: Args, cwd: PathBuf, oom_protection: std::io::Result<()>) -> a
         .with(tracing_subscriber::fmt::layer())
         .with(donating.clone())
         .init();
-    match &oom_protection {
-        Ok(()) => tracing::info!("kernel OOM-kill protection active"),
-        Err(e) => tracing::info!(error = %e, "kernel OOM-kill protection not active"),
+    if oom_protect_log_active(oom_protect_applied, oom_protection.is_ok()) {
+        tracing::info!("kernel OOM-kill protection active");
+    } else if let (None, Err(e)) = (oom_protect_applied, &oom_protection) {
+        tracing::info!(error = %e, "kernel OOM-kill protection not active");
+    } else {
+        tracing::info!("kernel OOM-kill protection not active");
     }
     let direct_otlp = match std::env::var("GROK_WORKSPACE_OTLP_ENDPOINT") {
         Ok(endpoint) if !endpoint.is_empty() => {
@@ -356,7 +413,13 @@ async fn run(args: Args, cwd: PathBuf, oom_protection: std::io::Result<()>) -> a
             );
         }
     }
-    let auth_provider = xai_grok_workspace::hub_auth::provider(&url, args.auth_config.as_deref())?;
+    let mut status_config = xai_grok_workspace::StatusConfig::from_env();
+    status_config.preview_control_port = args.preview.preview_control_port;
+    let auth_provider = xai_grok_workspace::hub_auth::provider(
+        &url,
+        args.auth_config.as_deref(),
+        &status_config.oidc_refresh,
+    )?;
     tracing::info!(
         hub_url = %url,
         cwd = %cwd.display(),
@@ -371,7 +434,11 @@ async fn run(args: Args, cwd: PathBuf, oom_protection: std::io::Result<()>) -> a
         ),
         None => None,
     };
-    let metadata = WorkspaceServerMetadata::merge_session_metadata(parsed_metadata, session_id);
+    let host_kind = host_kind_for(parsed_metadata.as_ref());
+    let metadata = merge_host_identity_metadata(
+        merge_session_metadata(parsed_metadata, session_id),
+        host_kind.as_wire_str(),
+    );
     let launch_id = metadata
         .as_ref()
         .and_then(|v| v.get("launch_id"))
@@ -387,8 +454,53 @@ async fn run(args: Args, cwd: PathBuf, oom_protection: std::io::Result<()>) -> a
     #[cfg(windows)]
     let diag_listener = diag_server::DiagListener::Tcp(args.diag_port);
     let diag_log_file = args.daemonize.then_some(args.log_file);
-    let _diag_server = match diag_server::serve(diag_listener, diag_handle.clone(), diag_log_file)
-        .await
+    #[cfg(unix)]
+    let broker = tokio::time::timeout(
+        LIFECYCLE_BROKER_START_TIMEOUT,
+        tokio::task::spawn_blocking(|| {
+            lifecycle_broker(
+                std::path::Path::new(xai_grok_lifecycle::DEFAULT_IMAGE_HANDLER_DIR),
+                &xai_grok_workspace::handle::resolve_workspace_home(),
+                &std::env::temp_dir(),
+            )
+        }),
+    )
+    .await;
+    #[cfg(unix)]
+    let diag_options = match broker {
+        Ok(Ok(broker)) => diag_server::DiagServeOptions {
+            log_file: diag_log_file,
+            extra_routes: broker.router(),
+        },
+        Ok(Err(e)) => {
+            tracing::error!(error = %e, "pre-stop lifecycle broker failed to start; serving diagnostics without it");
+            diag_server::DiagServeOptions {
+                log_file: diag_log_file,
+                ..diag_server::DiagServeOptions::default()
+            }
+        }
+        Err(_elapsed) => {
+            tracing::error!(
+                timeout_s = LIFECYCLE_BROKER_START_TIMEOUT.as_secs(),
+                "pre-stop lifecycle broker start timed out; serving diagnostics without it"
+            );
+            diag_server::DiagServeOptions {
+                log_file: diag_log_file,
+                ..diag_server::DiagServeOptions::default()
+            }
+        }
+    };
+    #[cfg(windows)]
+    let diag_options = diag_server::DiagServeOptions {
+        log_file: diag_log_file,
+        ..diag_server::DiagServeOptions::default()
+    };
+    let _diag_server = match diag_server::serve_with(
+        diag_listener,
+        diag_handle.clone(),
+        diag_options,
+    )
+    .await
     {
         Ok(bound) => {
             tracing::info!(addr = %bound.addr, "diagnostics server listening");
@@ -408,11 +520,11 @@ async fn run(args: Args, cwd: PathBuf, oom_protection: std::io::Result<()>) -> a
         "Workspace server starting — sessions created dynamically via server bind"
     );
     let server_id = args.server_id.clone();
-    let mut status_config = xai_grok_workspace::StatusConfig::from_env();
-    status_config.preview_control_port = args.preview.preview_control_port;
     let preview_shutdown = if args.preview.preview_enabled {
         let control_port = args.preview.preview_control_port;
-        let cfg = args.preview.into_preview_args(cwd.clone());
+        let cfg = args
+            .preview
+            .into_preview_args(cwd.clone(), status_config.preview_discovery_refresh_ms());
         let (tx, rx) = tokio::sync::watch::channel(false);
         tokio::spawn(preview_supervisor::supervise_preview(cfg, rx));
         Some((tx, control_port))
@@ -425,16 +537,22 @@ async fn run(args: Args, cwd: PathBuf, oom_protection: std::io::Result<()>) -> a
         cwd,
         url,
         auth_provider,
-        metadata,
-        server_id.clone(),
-        None,
-        args.allow_insecure_ws,
-        status_config,
-        args.upload_queue_enabled,
-        args.project_lsp_trusted,
-        Some(diag_handle.clone()),
-        args.require_explicit_toolset,
-        args.confine_fs_to_workspace_root,
+        xai_grok_workspace::LocalWorkspaceConnectOptions {
+            metadata,
+            server_id: server_id.clone(),
+            alpha_test_key: None,
+            allow_insecure_ws: args.allow_insecure_ws,
+            status_config,
+            upload_queue_enabled: args.upload_queue_enabled,
+            project_lsp_trusted: args.project_lsp_trusted,
+            diag: Some(diag_handle.clone()),
+            require_explicit_toolset: args.require_explicit_toolset,
+            confine_fs_to_workspace_root: args.confine_fs_to_workspace_root,
+            on_handshake_refused: None,
+            bind_mcp: None,
+            host_kind,
+            sandbox: None,
+        },
     )
     .await
     {
@@ -536,6 +654,141 @@ async fn run(args: Args, cwd: PathBuf, oom_protection: std::io::Result<()>) -> a
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// Only the launcher's `sandbox_id` opts in; a session id alone (which a hook- or MCP-spawned
+    /// server inherits from its environment) or no metadata at all is a daemon.
+    #[test]
+    fn only_a_launcher_supplied_sandbox_id_makes_a_sandbox() {
+        assert_eq!(
+            WorkspaceHostKind::Sandbox,
+            host_kind_for(Some(
+                &serde_json::json!({ "sandbox_id": "sb-1", "session_id": "s-1" })
+            ))
+        );
+        for metadata in [
+            None,
+            Some(serde_json::json!({})),
+            Some(serde_json::json!({ "session_id": "s-1" })),
+            Some(serde_json::json!({ "sandbox_id": "" })),
+            Some(serde_json::json!("not an object")),
+        ] {
+            assert_eq!(
+                WorkspaceHostKind::Daemon,
+                host_kind_for(metadata.as_ref()),
+                "{metadata:?}"
+            );
+        }
+    }
+    /// The env-resolved discovery refresh must reach the proxy argv only when set.
+    /// `None` (env unset or 0) leaves `--discovery-refresh-ms` out of the argv.
+    #[test]
+    fn into_preview_args_forwards_the_discovery_refresh_only_when_resolved() {
+        let cli = || PreviewCliArgs {
+            preview_enabled: true,
+            preview_port: None,
+            preview_control_port: Some(6015),
+            preview_visibility: None,
+            preview_instance_suffix: None,
+            preview_auth_redirect: None,
+            preview_allow_public: false,
+            preview_workspace_server_port: None,
+        };
+        let argv = cli()
+            .into_preview_args(PathBuf::from("/workspace"), Some(500))
+            .to_argv();
+        assert_eq!(
+            argv,
+            vec!["--control-port", "6015", "--discovery-refresh-ms", "500"],
+        );
+        let argv = cli()
+            .into_preview_args(PathBuf::from("/workspace"), None)
+            .to_argv();
+        assert_eq!(
+            argv,
+            vec!["--control-port", "6015"],
+            "without the env the flag must be omitted"
+        );
+    }
+    /// Raw HTTP/1.1 over loopback TCP.
+    #[cfg(unix)]
+    async fn http(port: u16, method: &str, path: &str, body: &str) -> (u16, serde_json::Value) {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .expect("connect");
+        let request = format!(
+            "{method} {path} HTTP/1.1\r\nHost: ws\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        stream
+            .write_all(request.as_bytes())
+            .await
+            .expect("write request");
+        let mut response = Vec::new();
+        tokio::time::timeout(Duration::from_secs(20), stream.read_to_end(&mut response))
+            .await
+            .expect("response in time")
+            .expect("read response");
+        let response = String::from_utf8(response).expect("utf8 response");
+        let (head, body) = response.split_once("\r\n\r\n").expect("header end");
+        let status = head
+            .split(' ')
+            .nth(1)
+            .and_then(|code| code.parse().ok())
+            .expect("status code");
+        let body = if body.is_empty() {
+            serde_json::Value::Null
+        } else {
+            serde_json::from_str(body).expect("json body")
+        };
+        (status, body)
+    }
+    /// The broker answers on the diag listener next to `/ready`, and runs what a process registers there.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn lifecycle_broker_is_served_on_the_diag_listener() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let broker = lifecycle_broker(&home.path().join("image"), home.path(), home.path());
+        let bound = diag_server::serve_with(
+            diag_server::DiagListener::Tcp(0),
+            DiagHandle::new(None),
+            diag_server::DiagServeOptions {
+                log_file: None,
+                extra_routes: broker.router(),
+            },
+        )
+        .await
+        .expect("bind");
+        let port = bound.port.expect("tcp port");
+        let trigger = r#"{"v":1,"reason":"manual","disk":"kept","deadline_ms":5000}"#;
+        let (status, body) = http(port, "POST", "/lifecycle/pre-stop", trigger).await;
+        assert_eq!(200, status);
+        assert_eq!(
+            Some("no_handlers"),
+            body.get("verdict").and_then(serde_json::Value::as_str)
+        );
+        let registration = r#"{"v":1,"argv":["/bin/sh","-c","exit 0"]}"#;
+        let (status, _) = http(port, "PUT", "/lifecycle/handlers/flush", registration).await;
+        assert_eq!(200, status);
+        let (status, body) = http(port, "POST", "/lifecycle/pre-stop", trigger).await;
+        assert_eq!(200, status);
+        assert_eq!(
+            Some("ok"),
+            body.get("verdict").and_then(serde_json::Value::as_str)
+        );
+        assert_eq!(
+            Some("flush"),
+            body.pointer("/handlers/0/name")
+                .and_then(serde_json::Value::as_str)
+        );
+        #[cfg(target_os = "linux")]
+        assert!(home.path().join("lifecycle/handlers/flush.json").is_file());
+        let (status, ready) = http(port, "GET", "/ready", "").await;
+        assert_eq!(503, status);
+        assert_eq!(
+            Some("starting"),
+            ready.get("state").and_then(serde_json::Value::as_str)
+        );
+    }
     #[test]
     fn hub_connect_failed_dwell_is_within_design_bounds() {
         assert!(HUB_CONNECT_FAILED_DWELL >= Duration::from_millis(500));
@@ -572,9 +825,10 @@ mod tests {
     }
     #[test]
     fn classify_from_client_error_display_round_trip() {
-        let handshake = WorkspaceError::HubError(
-            xai_computer_hub_sdk::ClientError::HandshakeAuthFailed { status: 401 }.to_string(),
-        );
+        let handshake = WorkspaceError::HubRefused {
+            status: 401,
+            refusal: None,
+        };
         let handshake_msg = handshake.to_string();
         assert_eq!(
             classify_hub_connect_failure(&handshake_msg),
@@ -639,8 +893,7 @@ mod tests {
             "network error: timeout"
         );
     }
-    /// Install a capturing tracing subscriber for the duration of an async
-    /// report; returns emitted event messages.
+    /// Install a capturing tracing subscriber for the duration of an async report; returns emitted event messages.
     async fn report_with_captured_messages(
         handle: &DiagHandle,
         err: &WorkspaceError,
@@ -710,10 +963,19 @@ mod tests {
             .expect("request");
         assert_eq!(response.status().as_u16(), 503);
         let body: serde_json::Value = response.json().await.expect("json");
-        assert_eq!(body["state"], "failed");
-        assert_eq!(body["error_class"], "hub_auth");
-        assert_eq!(body["error_detail"], "handshake auth failed: HTTP 401");
-        assert_eq!(body["launch_id"], "nonce-auth");
+        assert_eq!(body.get("state").and_then(|v| v.as_str()), Some("failed"));
+        assert_eq!(
+            body.get("error_class").and_then(|v| v.as_str()),
+            Some("hub_auth")
+        );
+        assert_eq!(
+            body.get("error_detail").and_then(|v| v.as_str()),
+            Some("handshake auth failed: HTTP 401")
+        );
+        assert_eq!(
+            body.get("launch_id").and_then(|v| v.as_str()),
+            Some("nonce-auth")
+        );
     }
     #[tokio::test(start_paused = true)]
     async fn report_hub_connect_failure_sets_ready_failed_hub_connect() {
@@ -742,9 +1004,15 @@ mod tests {
             .expect("request");
         assert_eq!(response.status().as_u16(), 503);
         let body: serde_json::Value = response.json().await.expect("json");
-        assert_eq!(body["state"], "failed");
-        assert_eq!(body["error_class"], "hub_connect");
-        assert_eq!(body["error_detail"], "network error: connection refused");
+        assert_eq!(body.get("state").and_then(|v| v.as_str()), Some("failed"));
+        assert_eq!(
+            body.get("error_class").and_then(|v| v.as_str()),
+            Some("hub_connect")
+        );
+        assert_eq!(
+            body.get("error_detail").and_then(|v| v.as_str()),
+            Some("network error: connection refused")
+        );
     }
     #[test]
     fn capabilities_flag_parses_and_defaults_off() {
@@ -769,7 +1037,7 @@ mod tests {
     }
     #[test]
     fn capabilities_probe_of_legacy_binary_exits_nonzero() {
-        /// A stand-in for a pre-`--capabilities` Args surface.
+        /// A stand-in for the Args of a binary predating `--capabilities`.
         #[derive(Debug, Parser)]
         struct LegacyArgs {
             #[arg(long)]
@@ -788,12 +1056,32 @@ mod tests {
     fn daemonize_defaults_are_inert() {
         let args = Args::try_parse_from(["xai-workspace-server"]).unwrap();
         assert!(!args.daemonize);
+        assert!(!args.oom_protect);
         assert_eq!(args.log_file, PathBuf::from(daemonize::DEFAULT_LOG_PATH));
         assert_eq!(
             args.pid_file,
             PathBuf::from(daemonize::DEFAULT_PIDFILE_PATH)
         );
         assert_eq!(args.ready_file, None);
+    }
+    #[test]
+    fn should_set_reset_child_oom_truth_table() {
+        assert!(!should_set_reset_child_oom(false, false));
+        assert!(should_set_reset_child_oom(true, false));
+        assert!(should_set_reset_child_oom(false, true));
+        assert!(should_set_reset_child_oom(true, true));
+    }
+    #[test]
+    fn oom_protect_log_active_truth_table() {
+        assert!(oom_protect_log_active(Some(true), false));
+        assert!(!oom_protect_log_active(Some(false), true));
+        assert!(oom_protect_log_active(None, true));
+        assert!(!oom_protect_log_active(None, false));
+    }
+    #[test]
+    fn oom_protect_flag_parses() {
+        let args = Args::try_parse_from(["xai-workspace-server", "--oom-protect"]).unwrap();
+        assert!(args.oom_protect);
     }
     #[test]
     fn ready_file_is_accepted_as_a_deprecated_no_op() {
@@ -827,7 +1115,9 @@ mod tests {
     fn preview_defaults_are_inert() {
         let args = Args::try_parse_from(["xai-workspace-server"]).unwrap();
         assert!(!args.preview.preview_enabled);
-        let cfg = args.preview.into_preview_args(PathBuf::from("/workspace"));
+        let cfg = args
+            .preview
+            .into_preview_args(PathBuf::from("/workspace"), None);
         assert!(!cfg.enabled);
         assert!(
             cfg.to_argv().is_empty(),
@@ -855,7 +1145,9 @@ mod tests {
         ])
         .unwrap();
         assert!(args.preview.preview_enabled);
-        let cfg = args.preview.into_preview_args(PathBuf::from("/workspace"));
+        let cfg = args
+            .preview
+            .into_preview_args(PathBuf::from("/workspace"), None);
         assert!(cfg.enabled);
         assert_eq!(cfg.port, Some(6014));
         assert_eq!(cfg.control_port, Some(6015));
@@ -908,14 +1200,15 @@ mod tests {
             "owner",
         ])
         .unwrap();
-        let cfg = args.preview.into_preview_args(PathBuf::from("/workspace"));
+        let cfg = args
+            .preview
+            .into_preview_args(PathBuf::from("/workspace"), None);
         assert_eq!(cfg.visibility, Some(PreviewVisibility::Owner));
         assert_eq!(cfg.to_argv(), vec!["--visibility", "owner"]);
     }
-    /// The scraper reports through `PreviewActivitySink`, so this adapter is the
-    /// only place the preview signal meets the tracker's idle accounting. The
-    /// scraper's own behavior is tested in `xai-grok-workspace-daemon`, and the
-    /// tracker's in `xai_grok_workspace::activity`; this covers the seam.
+    /// The scraper reports through `PreviewActivitySink`, so this adapter is the only place the preview signal meets the tracker's idle accounting.
+    /// The scraper's own behavior is tested in `xai-grok-workspace-daemon`, and the tracker's in `xai_grok_workspace::activity`.
+    /// This test covers only the adapter.
     #[test]
     fn tracker_sink_forwards_every_signal_to_the_activity_tracker() {
         use xai_grok_workspace::activity::ActivityTracker;

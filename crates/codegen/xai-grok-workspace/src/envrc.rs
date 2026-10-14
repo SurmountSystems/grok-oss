@@ -1,11 +1,8 @@
-//! Load environment variables from a directory's `.envrc`: `direnv export
-//! json` when available, else bash with direnv stubs.
+//! Load environment variables from a directory's `.envrc`: `direnv export json` when available, else bash with direnv stubs.
 //!
-//! Every wait `Command::output()` used to hide is bounded here — exit wait,
-//! pipe drain, buffer cap, reap — because one blocked read froze session
-//! load. The output sentinel proves a capture is complete (not that a
-//! concurrent descendant kept quiet), so timing can only cost the
-//! environment, never install a truncated one.
+//! Every wait `Command::output()` would hide is bounded here (exit wait, pipe drain, buffer cap, reap) because one blocked read froze session load.
+//! The output sentinel proves a capture is complete, not that a concurrent descendant kept quiet.
+//! So timing can only cost the environment, never install a truncated one.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -13,6 +10,8 @@ use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+
+use xai_grok_tools::sandbox_launch::{CallId, SandboxLaunch};
 
 const ENVRC_LOAD_TIMEOUT: Duration = Duration::from_secs(10);
 const ENVRC_TIMEOUT_ENV: &str = "GROK_ENVRC_TIMEOUT_SECS"; // seconds; 0 disables
@@ -37,14 +36,24 @@ pub fn loader_budget() -> Duration {
     effective_timeout() + JOIN_SLACK
 }
 
-/// A `.envrc` evaluation in flight on a dedicated thread, never the
-/// caller's; the deadline anchors at spawn, not at the join.
+/// A `.envrc` evaluation in flight on a dedicated thread, never the caller's; the deadline anchors at spawn, not at the join.
 pub struct EnvrcLoad {
     rx: Option<tokio::sync::oneshot::Receiver<HashMap<String, String>>>,
     deadline: tokio::time::Instant,
 }
 
 pub fn spawn_envrc_load(cwd: std::path::PathBuf, trusted: bool) -> EnvrcLoad {
+    spawn_envrc_load_sandboxed(cwd, trusted, None)
+}
+
+/// [`spawn_envrc_load`] with the folder's per-command sandbox hook: the `direnv` / bash evaluator
+/// is the eighth shell spawn site and runs under the workspace policy like a tool's command
+/// (call id `shell-init:envrc`, so no denial is decoded from it).
+pub fn spawn_envrc_load_sandboxed(
+    cwd: std::path::PathBuf,
+    trusted: bool,
+    sandbox: Option<Arc<dyn SandboxLaunch>>,
+) -> EnvrcLoad {
     let deadline = tokio::time::Instant::now() + loader_budget();
     if !trusted {
         return EnvrcLoad { rx: None, deadline };
@@ -53,7 +62,10 @@ pub fn spawn_envrc_load(cwd: std::path::PathBuf, trusted: bool) -> EnvrcLoad {
     let spawned = std::thread::Builder::new()
         .name("envrc-load".into())
         .spawn(move || {
-            let _ = tx.send(load_envrc_or_empty(&cwd));
+            let _ = tx.send(
+                load_envrc_with_timeout(&cwd, effective_timeout(), sandbox.as_deref())
+                    .unwrap_or_default(),
+            );
         });
     match spawned {
         Ok(_) => EnvrcLoad {
@@ -106,8 +118,7 @@ fn timeout_from(overriding: Option<&str>) -> Duration {
     }
 }
 
-/// Stub implementations of common direnv helper functions.
-/// These are prepended to the .envrc before execution when direnv is not available.
+/// Stubs for direnv helper functions, prepended to the .envrc before it runs when direnv is not available.
 const DIRENV_STUBS: &str = r#"
 # Stub direnv helper functions
 source_up_if_exists() { :; }
@@ -134,29 +145,23 @@ watch_file() { :; }
 "#;
 
 pub fn load_envrc(dir: &Path) -> Option<HashMap<String, String>> {
-    load_envrc_with_timeout(dir, effective_timeout())
+    load_envrc_with_timeout(dir, effective_timeout(), None)
 }
 
 pub fn load_envrc_or_empty(dir: &Path) -> HashMap<String, String> {
     load_envrc(dir).unwrap_or_default()
 }
 
-/// Load `.envrc` only when the folder is trusted; otherwise empty.
-pub fn load_envrc_or_empty_when_trusted(dir: &Path, trusted: bool) -> HashMap<String, String> {
-    if trusted {
-        load_envrc_or_empty(dir)
-    } else {
-        HashMap::new()
-    }
-}
-
-fn load_envrc_with_timeout(dir: &Path, timeout: Duration) -> Option<HashMap<String, String>> {
+fn load_envrc_with_timeout(
+    dir: &Path,
+    timeout: Duration,
+    sandbox: Option<&dyn SandboxLaunch>,
+) -> Option<HashMap<String, String>> {
     if timeout.is_zero() {
         tracing::info!(".envrc evaluation disabled by zero {ENVRC_TIMEOUT_ENV}");
         return None;
     }
-    // Anchored before the stat: a wedged stat eats the budget instead of
-    // granting evaluation a fresh one after the caller gave up.
+    // Anchored before the stat: a wedged stat eats the budget instead of granting evaluation a fresh one after the caller gave up
     let deadline = Instant::now() + timeout;
     let envrc_path = dir.join(".envrc");
     // Opening a FIFO for read blocks until a writer appears.
@@ -176,11 +181,11 @@ fn load_envrc_with_timeout(dir: &Path, timeout: Duration) -> Option<HashMap<Stri
         return None;
     }
 
-    match try_direnv_export(dir, deadline) {
+    match try_direnv_export(dir, deadline, sandbox) {
         DirenvExport::Env(env) => Some(env),
         DirenvExport::TimedOut => None,
         DirenvExport::SideEffectsRan => None,
-        DirenvExport::Unavailable => load_envrc_via_bash(dir, deadline),
+        DirenvExport::Unavailable => load_envrc_via_bash(dir, deadline, sandbox),
     }
 }
 
@@ -194,13 +199,18 @@ enum DirenvExport {
     Unavailable,
 }
 
-fn try_direnv_export(dir: &Path, deadline: Instant) -> DirenvExport {
+fn try_direnv_export(
+    dir: &Path,
+    deadline: Instant,
+    sandbox: Option<&dyn SandboxLaunch>,
+) -> DirenvExport {
     let mut cmd = Command::new("direnv");
     cmd.args(["export", "json"]).current_dir(dir);
-    let output = match run_with_deadline(cmd, deadline, "direnv") {
+    let output = match run_with_deadline(cmd, deadline, "direnv", sandbox) {
         RunOutcome::Completed {
             output,
             truncated: false,
+            ..
         } => output,
         RunOutcome::Completed {
             truncated: true, ..
@@ -228,7 +238,7 @@ fn try_direnv_export(dir: &Path, deadline: Instant) -> DirenvExport {
     }
 
     // Parse JSON output: {"VAR": "value", ...}
-    // Note: direnv also outputs null for vars to unset, but we ignore those
+    // direnv also outputs null for vars to unset, but we ignore those
     match serde_json::from_str::<HashMap<String, serde_json::Value>>(&stdout) {
         Ok(json) => {
             let env: HashMap<String, String> = json
@@ -237,7 +247,7 @@ fn try_direnv_export(dir: &Path, deadline: Instant) -> DirenvExport {
                     if let serde_json::Value::String(s) = v {
                         Some((k, s))
                     } else {
-                        None // Skip null values (unset)
+                        None
                     }
                 })
                 .collect();
@@ -262,18 +272,18 @@ fn try_direnv_export(dir: &Path, deadline: Instant) -> DirenvExport {
     }
 }
 
-/// Load environment by running .envrc in a bash subshell.
 /// This is the fallback when direnv is not installed.
-fn load_envrc_via_bash(dir: &Path, deadline: Instant) -> Option<HashMap<String, String>> {
+fn load_envrc_via_bash(
+    dir: &Path,
+    deadline: Instant,
+    sandbox: Option<&dyn SandboxLaunch>,
+) -> Option<HashMap<String, String>> {
     if Instant::now() >= deadline {
         return None;
     }
     let envrc_path = dir.join(".envrc");
 
-    // Build a script that:
-    // 1. Includes direnv stubs
-    // 2. Sources the .envrc
-    // 3. Outputs all env vars as KEY=VALUE pairs (null-separated for safety)
+    // Build the script: direnv stubs, source the .envrc, dump the env null-separated, then the sentinel
     let sentinel = format!("{OUTPUT_SENTINEL}{}", uuid::Uuid::new_v4().simple());
     let script = format!(
         r#"
@@ -298,21 +308,27 @@ printf '%s' '{sentinel}'
         envrc = envrc_path.display(),
     );
 
-    // Capture baseline environment (before running .envrc)
-    let baseline: HashMap<String, String> = std::env::vars().collect();
+    let mut baseline: HashMap<String, String> = std::env::vars().collect();
 
     // PATH `bash`: Nix quality / NixOS often have no `/bin/bash`, or a
     // non-bash stub at that path.
     let mut bash_cmd = Command::new("bash");
     bash_cmd.arg("-c").arg(&script).current_dir(dir);
-    let output = match run_with_deadline(bash_cmd, deadline, "bash") {
-        // `truncated` is ignored here: the sentinel below is strictly
-        // stronger evidence of completeness.
+    let output = match run_with_deadline(bash_cmd, deadline, "bash", sandbox) {
+        // `truncated` is ignored here: the sentinel below is strictly stronger evidence of completeness
         RunOutcome::Completed { output, .. } if !output.status.success() => {
             tracing::warn!(?envrc_path, "Failed to execute .envrc via bash");
             return None;
         }
-        RunOutcome::Completed { output, .. } => output,
+        RunOutcome::Completed {
+            output,
+            started_env,
+            ..
+        } => {
+            // What the evaluator was started with (the sandbox's proxy pointers) is not the .envrc's
+            baseline.extend(started_env);
+            output
+        }
         RunOutcome::TimedOut => return None,
         RunOutcome::Failed => {
             tracing::warn!(?envrc_path, "Failed to run bash for .envrc");
@@ -320,8 +336,7 @@ printf '%s' '{sentinel}'
         }
     };
 
-    // The NUL anchor rejects a capture cut on an entry boundary; bytes after
-    // the sentinel (a descendant still writing) are ignored.
+    // The NUL anchor rejects a capture cut on an entry boundary; bytes after the sentinel (a descendant still writing) are ignored
     let mut anchored = Vec::with_capacity(sentinel.len() + 1);
     anchored.push(0);
     anchored.extend_from_slice(sentinel.as_bytes());
@@ -330,7 +345,7 @@ printf '%s' '{sentinel}'
         .windows(anchored.len())
         .position(|window| window == anchored.as_slice())
     {
-        Some(sentinel_at) => &output.stdout[..sentinel_at],
+        Some(sentinel_at) => output.stdout.get(..sentinel_at).unwrap_or(&[]),
         None if output.stdout.starts_with(sentinel.as_bytes()) => {
             tracing::debug!(?envrc_path, ".envrc produced no output");
             return None;
@@ -366,7 +381,6 @@ printf '%s' '{sentinel}'
                     // Unchanged, skip
                 }
                 _ => {
-                    // New or changed
                     result.insert(key.to_string(), value.to_string());
                 }
             }
@@ -387,18 +401,49 @@ printf '%s' '{sentinel}'
 }
 
 enum RunOutcome {
-    Completed { output: Output, truncated: bool },
+    Completed {
+        output: Output,
+        truncated: bool,
+        /// The variables set on the evaluator's command itself (the launch hook's included).
+        started_env: HashMap<String, String>,
+    },
     TimedOut,
     Failed,
 }
 
 /// Run an evaluator until `deadline`, killing its process group on expiry.
-fn run_with_deadline(mut cmd: Command, deadline: Instant, label: &str) -> RunOutcome {
+fn run_with_deadline(
+    cmd: Command,
+    deadline: Instant,
+    label: &str,
+    sandbox: Option<&dyn SandboxLaunch>,
+) -> RunOutcome {
     let budget = deadline.saturating_duration_since(Instant::now());
+    // The sandbox hook rewrites the command before stdio, detach and the child-network filter
+    // (`xai_grok_tools::sandbox_launch` module docs); a refusal means the evaluator must not run
+    let mut cmd = match sandbox {
+        Some(hook) => {
+            let mut wrapped = tokio::process::Command::from(cmd);
+            let call = CallId::shell_init(format!("envrc-{label}"));
+            if let Err(reason) =
+                xai_grok_tools::sandbox_launch::prepare(Some(hook), &mut wrapped, &call)
+            {
+                tracing::warn!(label, %reason, "the sandbox refused the .envrc evaluator");
+                return RunOutcome::Failed;
+            }
+            wrapped.into_std()
+        }
+        None => cmd,
+    };
+    let started_env: HashMap<String, String> = cmd
+        .get_envs()
+        .filter_map(|(key, value)| Some((key.to_str()?.to_owned(), value?.to_str()?.to_owned())))
+        .collect();
     cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     xai_grok_tools::util::detach_std_command(&mut cmd);
+    xai_grok_sandbox::child_net::restrict_child_network_std(&mut cmd);
     #[allow(clippy::disallowed_methods)] // best-effort enrolled in the global ProcessScope below
     let mut child = match cmd.spawn() {
         Ok(child) => child,
@@ -423,7 +468,7 @@ fn run_with_deadline(mut cmd: Command, deadline: Instant, label: &str) -> RunOut
         }
         reap_with_timeout(child, label);
     };
-    // Refused registration = scope closed; don't trust its best-effort kill.
+    // A refused registration means the scope closed; don't trust its best-effort kill
     if let Some(g) = &group
         && !xai_grok_tools::util::global_process_scope().register(g)
     {
@@ -458,8 +503,7 @@ fn run_with_deadline(mut cmd: Command, deadline: Instant, label: &str) -> RunOut
         }
     };
 
-    // Drop the enrollment at reap (the PID-reuse contract); descendants
-    // deliberately survive on Unix, die with the Job Object on Windows.
+    // Drop the enrollment at reap (the PID-reuse contract); descendants deliberately survive on Unix, die with the Job Object on Windows
     drop(group);
 
     let cap = Instant::now() + PIPE_DRAIN_CAP;
@@ -472,6 +516,7 @@ fn run_with_deadline(mut cmd: Command, deadline: Instant, label: &str) -> RunOut
             stderr,
         },
         truncated: stdout_cut,
+        started_env,
     }
 }
 
@@ -518,7 +563,7 @@ impl PipeDrain {
                             cut.store(true, Ordering::Relaxed);
                             break;
                         }
-                        buf.extend_from_slice(&chunk[..n]);
+                        buf.extend_from_slice(chunk.get(..n).expect("index out of bounds"));
                     }
                     Err(e)
                         if e.kind() == std::io::ErrorKind::WouldBlock
@@ -641,14 +686,14 @@ mod tests {
         let dir = TempDir::new().unwrap();
         fs::write(dir.path().join(".envrc"), "export FOO=bar\n").unwrap();
 
-        let env = load_envrc_with_timeout(dir.path(), Duration::from_secs(10)).unwrap();
+        let env = load_envrc_with_timeout(dir.path(), Duration::from_secs(10), None).unwrap();
         assert_eq!(env.get("FOO"), Some(&"bar".to_string()));
     }
 
     #[test]
     fn test_no_envrc() {
         let dir = TempDir::new().unwrap();
-        assert!(load_envrc_with_timeout(dir.path(), Duration::from_secs(10)).is_none());
+        assert!(load_envrc_with_timeout(dir.path(), Duration::from_secs(10), None).is_none());
     }
 
     #[test]
@@ -656,7 +701,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         fs::write(dir.path().join(".envrc"), "PATH_add bin\n").unwrap();
 
-        let env = load_envrc_with_timeout(dir.path(), Duration::from_secs(10)).unwrap();
+        let env = load_envrc_with_timeout(dir.path(), Duration::from_secs(10), None).unwrap();
         let path = env.get("PATH").unwrap();
         assert!(path.contains(&format!("{}/bin", dir.path().display())));
     }
@@ -668,8 +713,29 @@ mod tests {
         fs::write(dir.path().join(".envrc"), "sleep 300\n").unwrap();
 
         let started = Instant::now();
-        assert!(load_envrc_with_timeout(dir.path(), Duration::from_millis(500)).is_none());
+        assert!(load_envrc_with_timeout(dir.path(), Duration::from_millis(500), None).is_none());
         assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn envrc_past_its_timeout_adds_nothing() {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let load = EnvrcLoad {
+            rx: Some(rx),
+            deadline: tokio::time::Instant::now(),
+        };
+        tokio::time::advance(Duration::from_secs(1)).await;
+        assert!(load.join().await.is_empty());
+        drop(tx);
+
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let load = EnvrcLoad {
+            rx: Some(rx),
+            deadline: tokio::time::Instant::now() + Duration::from_secs(1),
+        };
+        let exported = HashMap::from([("CONF_ENVRC".to_string(), "envrc-value-5".to_string())]);
+        tx.send(exported.clone()).unwrap();
+        assert_eq!(exported, load.join().await);
     }
 
     #[test]
@@ -678,7 +744,7 @@ mod tests {
         fs::write(dir.path().join(".envrc"), "export FOO=bar\n").unwrap();
 
         let started = Instant::now();
-        assert!(load_envrc_with_timeout(dir.path(), Duration::ZERO).is_none());
+        assert!(load_envrc_with_timeout(dir.path(), Duration::ZERO, None).is_none());
         assert!(started.elapsed() < Duration::from_secs(1));
     }
 
@@ -700,25 +766,23 @@ mod tests {
         let dir = TempDir::new().unwrap();
         fs::write(dir.path().join(".envrc"), "export FOO=bar\nsleep 5 &\n").unwrap();
 
-        let env = load_envrc_with_timeout(dir.path(), Duration::from_secs(10)).unwrap();
+        let env = load_envrc_with_timeout(dir.path(), Duration::from_secs(10), None).unwrap();
         assert_eq!(env.get("FOO"), Some(&"bar".to_string()));
     }
 
-    /// Descendant output after the sentinel must be ignored, not treated as
-    /// an incomplete capture.
+    /// Descendant output after the sentinel must be ignored, not treated as an incomplete capture.
     #[cfg(unix)]
     #[test]
     fn chatty_background_child_does_not_discard_env() {
         let dir = TempDir::new().unwrap();
-        // The leading sleep keeps the noise out of the race with the env dump
-        // and the sentinel; the writes land during the drain window.
+        // The leading sleep keeps the noise out of the race with `env -0` and the sentinel; the writes land during the drain window
         fs::write(
             dir.path().join(".envrc"),
             "export FOO=bar\n( sleep 0.25; for _ in 1 2 3 4; do echo noise; sleep 0.1; done ) &\n",
         )
         .unwrap();
 
-        let env = load_envrc_with_timeout(dir.path(), Duration::from_secs(10)).unwrap();
+        let env = load_envrc_with_timeout(dir.path(), Duration::from_secs(10), None).unwrap();
         assert_eq!(env.get("FOO"), Some(&"bar".to_string()));
     }
 
@@ -733,7 +797,7 @@ mod tests {
         )
         .unwrap();
 
-        let env = load_envrc_with_timeout(dir.path(), Duration::from_secs(10)).unwrap();
+        let env = load_envrc_with_timeout(dir.path(), Duration::from_secs(10), None).unwrap();
         assert_eq!(
             env.get("__GROK_ENVRC_COMPLETE__"),
             Some(&"decoy".to_string())
@@ -755,7 +819,119 @@ mod tests {
         );
 
         let started = Instant::now();
-        assert!(load_envrc_with_timeout(dir.path(), Duration::from_secs(10)).is_none());
+        assert!(load_envrc_with_timeout(dir.path(), Duration::from_secs(10), None).is_none());
         assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    /// Records every evaluator the hook sees and optionally refuses it.
+    struct RecordingHook {
+        seen: Mutex<Vec<(CallId, String)>>,
+        refuse: bool,
+    }
+
+    #[derive(Debug, thiserror::Error)]
+    #[error("refused by test")]
+    struct RefusedByTest;
+
+    impl SandboxLaunch for RecordingHook {
+        fn prepare(
+            &self,
+            _cmd: &mut tokio::process::Command,
+            original: &xai_grok_tools::sandbox_launch::OriginalArgv,
+            call: &CallId,
+        ) -> Result<
+            Option<xai_grok_tools::sandbox_launch::LaunchReceipt>,
+            xai_grok_tools::sandbox_launch::SandboxLaunchError,
+        > {
+            lock_ignore_poison_pairs(&self.seen)
+                .push((call.clone(), original.program.display().to_string()));
+            if self.refuse {
+                return Err(xai_grok_tools::sandbox_launch::SandboxLaunchError::new(
+                    RefusedByTest,
+                ));
+            }
+            Ok(None)
+        }
+    }
+
+    fn lock_ignore_poison_pairs(
+        buf: &Mutex<Vec<(CallId, String)>>,
+    ) -> std::sync::MutexGuard<'_, Vec<(CallId, String)>> {
+        buf.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    #[test]
+    fn the_sandbox_hook_sees_every_evaluator_under_a_shell_init_call_id() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join(".envrc"), "export FOO=bar\n").unwrap();
+        let hook = RecordingHook {
+            seen: Mutex::new(Vec::new()),
+            refuse: false,
+        };
+        let env =
+            load_envrc_with_timeout(dir.path(), Duration::from_secs(10), Some(&hook)).unwrap();
+        assert_eq!(env.get("FOO"), Some(&"bar".to_string()));
+        let seen = lock_ignore_poison_pairs(&hook.seen);
+        assert!(!seen.is_empty());
+        for (call, program) in seen.iter() {
+            assert_eq!(
+                xai_grok_tools::sandbox_launch::CallKind::ShellInit,
+                call.kind(),
+                "{call}"
+            );
+            assert!(
+                program.ends_with("direnv") || program.ends_with("bash"),
+                "{program}"
+            );
+        }
+    }
+
+    /// Sets the proxy pointer on every evaluator, as the sandbox's launch hook does.
+    struct ProxyPointerHook;
+
+    impl SandboxLaunch for ProxyPointerHook {
+        fn prepare(
+            &self,
+            cmd: &mut tokio::process::Command,
+            _original: &xai_grok_tools::sandbox_launch::OriginalArgv,
+            _call: &CallId,
+        ) -> Result<
+            Option<xai_grok_tools::sandbox_launch::LaunchReceipt>,
+            xai_grok_tools::sandbox_launch::SandboxLaunchError,
+        > {
+            cmd.env("HTTP_PROXY", "http://127.0.0.1:9");
+            Ok(None)
+        }
+    }
+
+    /// What the launch hook set on the bash evaluator (the sandbox's proxy pointer) is not
+    /// recorded as the folder's `.envrc` output; what the `.envrc` exported is.
+    #[test]
+    fn the_hooks_own_variables_are_not_read_as_envrc_output() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join(".envrc"), "export FOO=bar\n").unwrap();
+        let env = load_envrc_via_bash(
+            dir.path(),
+            Instant::now() + Duration::from_secs(10),
+            Some(&ProxyPointerHook),
+        )
+        .unwrap();
+        assert_eq!(env.get("FOO"), Some(&"bar".to_string()));
+        assert!(!env.contains_key("HTTP_PROXY"), "{env:?}");
+    }
+
+    #[test]
+    fn a_hook_refusal_means_no_evaluator_runs_and_no_environment_lands() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join(".envrc"), "export FOO=bar\n").unwrap();
+        let hook = RecordingHook {
+            seen: Mutex::new(Vec::new()),
+            refuse: true,
+        };
+        assert!(
+            load_envrc_with_timeout(dir.path(), Duration::from_secs(10), Some(&hook)).is_none()
+        );
+        assert!(!lock_ignore_poison_pairs(&hook.seen).is_empty());
     }
 }

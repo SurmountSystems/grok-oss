@@ -215,7 +215,7 @@ impl EditVerifyCommandRunner for DefaultEditVerifyCommandRunner {
         // `--config-path` to an existing file when one is on disk.
         let mut cmd = std::process::Command::new("rustfmt");
         cmd.arg("--edition").arg("2024");
-        if let Some(cfg) = resolve_rustfmt_toml(&files[0]) {
+        if let Some(cfg) = resolve_rustfmt_toml(files.first().expect("index out of bounds")) {
             cmd.arg("--config-path").arg(cfg);
         }
         cmd.args(files);
@@ -232,8 +232,9 @@ impl EditVerifyCommandRunner for DefaultEditVerifyCommandRunner {
                 timed_out: false,
             };
         }
-        let mut cmd = std::process::Command::new(&argv[0]);
-        cmd.args(&argv[1..]).current_dir(cwd);
+        let mut cmd = std::process::Command::new(argv.first().expect("index out of bounds"));
+        cmd.args(argv.get(1..).expect("index out of bounds"))
+            .current_dir(cwd);
         let timeout = if argv.first().is_some_and(|a| a == "clippy-driver")
             || argv.iter().any(|a| a == "clippy")
         {
@@ -456,7 +457,7 @@ pub fn after_structured_rust_writes_with_plan(
     }
     for (idx, path) in fmt_idx.into_iter().zip(to_fmt.iter()) {
         if let Ok(formatted) = std::fs::read_to_string(path) {
-            out[idx] = formatted;
+            *out.get_mut(idx).expect("index out of bounds") = formatted;
         }
     }
     out
@@ -498,7 +499,7 @@ pub fn flush_batch_clippy_and_tests_for(
         report.push_str("## Edit verify (");
         report.push_str(&pkg);
         report.push_str(")\n");
-        let cargo_cwd = cargo_invoke_cwd(&files[0]);
+        let cargo_cwd = cargo_invoke_cwd(files.first().expect("index out of bounds"));
         // clippy-driver --emit metadata writes lib*.rmeta and *.long-type-*.txt
         // into cwd. Keep those artifacts in a temp dir, never the workspace root.
         let clippy_scratch = tempfile::Builder::new()
@@ -773,17 +774,26 @@ fn toml_quoted_name_value(line: &str) -> Option<String> {
 fn bin_name_from_path(path: &Path) -> Option<String> {
     let parts: Vec<_> = path.iter().collect();
     for i in 0..parts.len().saturating_sub(2) {
-        if parts[i] != "src" || parts[i + 1] != "bin" {
+        if parts.get(i).copied().expect("index out of bounds") != "src"
+            || parts.get(i + 1).copied().expect("index out of bounds") != "bin"
+        {
             continue;
         }
-        let after_bin = Path::new(parts[i + 2]);
+        let after_bin = Path::new(parts.get(i + 2).copied().expect("index out of bounds"));
         if after_bin.extension().is_some_and(|ext| ext == "rs") {
             return after_bin
                 .file_stem()
                 .map(|s| s.to_string_lossy().into_owned());
         }
         if parts.get(i + 3).is_some_and(|p| *p == "main.rs") {
-            return Some(parts[i + 2].to_string_lossy().into_owned());
+            return Some(
+                parts
+                    .get(i + 2)
+                    .copied()
+                    .expect("index out of bounds")
+                    .to_string_lossy()
+                    .into_owned(),
+            );
         }
     }
     None
@@ -791,7 +801,10 @@ fn bin_name_from_path(path: &Path) -> Option<String> {
 
 fn path_needs_clippy_tests(path: &Path) -> bool {
     let parts: Vec<_> = path.iter().collect();
-    if parts.windows(2).any(|w| w[0] == "tests") {
+    if parts
+        .windows(2)
+        .any(|w| w.first().copied().expect("index out of bounds") == "tests")
+    {
         return true;
     }
     path.file_name().is_some_and(|name| name == "tests.rs")
@@ -812,7 +825,7 @@ fn integration_test_stem(path: &Path) -> Option<String> {
 /// only input is `src/bin/<name>.rs`.
 fn rustc_crate_name(package: &str, files: &[PathBuf]) -> String {
     if files.len() == 1
-        && let Some(bin) = bin_name_from_path(&files[0])
+        && let Some(bin) = bin_name_from_path(files.first().expect("index out of bounds"))
     {
         return bin.replace('-', "_");
     }
@@ -825,11 +838,11 @@ fn module_filter_from_src_path(path: &Path) -> Option<String> {
     let parts: Vec<_> = path.iter().collect();
     let src_idx = parts.iter().position(|p| *p == "src")?;
     let after = parts.get(src_idx + 1..)?;
-    if after.is_empty() || after[0] == "bin" {
+    if after.is_empty() || after.first().copied().expect("index out of bounds") == "bin" {
         return None;
     }
     if after.len() == 1 {
-        let name = after[0];
+        let name = after.first().copied().expect("index out of bounds");
         if name == "lib.rs" || name == "main.rs" {
             return None;
         }

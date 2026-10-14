@@ -308,17 +308,25 @@ pub fn prefer_console_identity_for_use_console_pin(config: &mut SamplerConfig) -
 
 /// Keep or restore SuperGrok as primary because the operator asked
 /// (`stay-supergrok` sidecar). Fail-open: does not mark SuperGrok used up.
+/// A session key is the primary when one is set. An OIDC login has no session
+/// key; the session bearer is the request instead of the console key.
 pub fn prefer_supergrok_identity_for_stay_pin(config: &mut SamplerConfig) -> bool {
-    let Some(sess) = config
+    let sess = config
         .session_identity_key
         .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty())
-        .map(str::to_owned)
-    else {
-        return false;
-    };
+        .map(str::to_owned);
     let active = config.api_key.as_deref().unwrap_or("").trim().to_owned();
+    let Some(sess) = sess else {
+        if config.bearer_resolver.is_some() {
+            if let Some(url) = config.session_base_url.clone() {
+                switch_api_host_with_identity(config, &url);
+            }
+            return false;
+        }
+        return install_session_bearer_as_request(config, &active);
+    };
     if is_session_identity(config, &active) || config.bearer_resolver.is_some() {
         if let Some(url) = config.session_base_url.clone() {
             switch_api_host_with_identity(config, &url);
@@ -337,6 +345,38 @@ pub fn prefer_supergrok_identity_for_stay_pin(config: &mut SamplerConfig) -> boo
     } else if let Some(resolver) = config.session_bearer_resolver.clone() {
         config.bearer_resolver = Some(resolver);
     }
+    if let Some(url) = config.session_base_url.clone() {
+        switch_api_host_with_identity(config, &url);
+    }
+    true
+}
+
+/// OIDC keeps the SuperGrok session on the bearer. Install that bearer as the
+/// request and move a console `api_key` to failover. No bearer means there is
+/// no session to select.
+fn install_session_bearer_as_request(config: &mut SamplerConfig, active: &str) -> bool {
+    let resolver = config
+        .stashed_bearer_resolver
+        .take()
+        .or_else(|| config.session_bearer_resolver.clone());
+    let Some(resolver) = resolver else {
+        return false;
+    };
+    if !active.is_empty() {
+        config.failover_api_keys.retain(|k| k.trim() != active);
+        config.failover_api_keys.insert(0, active.to_owned());
+    }
+    let session_token = resolver
+        .current_bearer()
+        .map(|token| token.trim().to_owned())
+        .filter(|token| !token.is_empty());
+    if let Some(token) = session_token {
+        config.failover_api_keys.retain(|k| k.trim() != token);
+        config.api_key = Some(token);
+    } else {
+        config.api_key = None;
+    }
+    config.bearer_resolver = Some(resolver);
     if let Some(url) = config.session_base_url.clone() {
         switch_api_host_with_identity(config, &url);
     }
@@ -445,6 +485,53 @@ pub fn ensure_supergrok_recovery_after_console_credit_exhaust(config: &mut Sampl
     // Prefer SuperGrok recovery first on the credit path (before other console keys).
     config.failover_api_keys.retain(|k| k.trim() != sess);
     config.failover_api_keys.insert(0, sess);
+}
+
+/// True when the included-period session and every other key on this config
+/// each have a real refusal memo. A client 100% printout does not write that
+/// memo. No other key means this is not both refused.
+pub fn both_included_session_and_console_key_refused(config: &SamplerConfig) -> bool {
+    let Some(session) = config
+        .session_identity_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|secret| !secret.is_empty())
+    else {
+        return false;
+    };
+    if !exhausted_identity::is_credential_exhausted(session) {
+        return false;
+    }
+    let mut others: Vec<&str> = Vec::new();
+    if let Some(active) = config.api_key.as_deref().map(str::trim) {
+        if !active.is_empty() && active != session && !others.contains(&active) {
+            others.push(active);
+        }
+    }
+    for key in &config.failover_api_keys {
+        let token = key.trim();
+        if !token.is_empty() && token != session && !others.contains(&token) {
+            others.push(token);
+        }
+    }
+    !others.is_empty()
+        && others
+            .iter()
+            .all(|token| exhausted_identity::is_credential_exhausted(token))
+}
+
+/// Clear the live key so no further model request is sent. Keeps the session
+/// identity and the refused failover keys. Does not select SuperGrok dollar
+/// credits and does not switch the API host.
+pub fn withhold_model_request_when_both_refused(config: &mut SamplerConfig) -> bool {
+    if !both_included_session_and_console_key_refused(config) {
+        return false;
+    }
+    config.api_key = None;
+    config.bearer_resolver = None;
+    config.session_bearer_resolver = None;
+    config.stashed_bearer_resolver = None;
+    true
 }
 
 #[cfg(test)]

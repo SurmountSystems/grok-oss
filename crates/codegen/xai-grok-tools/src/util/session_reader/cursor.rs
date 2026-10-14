@@ -31,7 +31,7 @@ pub fn cursor_root() -> PathBuf {
     if let Ok(configured) = std::env::var("GROK_SESSION_READER_CURSOR_ROOT") {
         return PathBuf::from(configured);
     }
-    dirs::home_dir()
+    xai_dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".cursor")
 }
@@ -45,10 +45,10 @@ fn cursor_desktop_paths() -> Vec<PathBuf> {
     let root = cursor_root();
     let mut candidates = vec![
         root.join("desktop-state.vscdb"), // test convenience
-        dirs::home_dir()
+        xai_dirs::home_dir()
             .unwrap_or_else(|| PathBuf::from("."))
             .join("Library/Application Support/Cursor/User/globalStorage/state.vscdb"),
-        dirs::home_dir()
+        xai_dirs::home_dir()
             .unwrap_or_else(|| PathBuf::from("."))
             .join(".config/Cursor/User/globalStorage/state.vscdb"),
     ];

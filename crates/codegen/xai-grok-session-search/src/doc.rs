@@ -1,4 +1,4 @@
-//! Turning a session record plus its extracted text into an index document.
+//! Turns a session record plus its extracted text into an index document.
 
 use std::path::Path;
 
@@ -21,7 +21,7 @@ pub(crate) enum UpsertOutcome {
     Unchanged {
         bytes_read: u64,
     },
-    /// Storage backend doesn't expose an updates file path.
+    /// Nothing to write: the store exposes no updates file.
     NoContent,
 }
 
@@ -40,8 +40,7 @@ pub(crate) fn upsert_unless_unchanged(
     Ok(UpsertOutcome::Indexed { bytes_read })
 }
 
-/// The title is hashed alongside the content so a rename is not deduped away
-/// by an unchanged transcript.
+/// The title is hashed alongside the content so a rename is not deduped away by an unchanged transcript.
 pub(crate) fn build_session_doc(session: &IndexableSession, content: String) -> SessionDoc {
     let title = session.title.clone();
 

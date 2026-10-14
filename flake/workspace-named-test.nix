@@ -49,6 +49,10 @@ let
       GROK_REMOTE_TEST_ARGS = builtins.getEnv "GROK_REMOTE_TEST_ARGS";
       GROK_REMOTE_CARGO_KIND = builtins.getEnv "GROK_REMOTE_CARGO_KIND";
       buildPhaseCargoCommand = ''
+        # Same desktop installer path as workspace-cargo-quality. The pin body
+        # stays in the tracked CLI installer.
+        mkdir -p frontend/apps/grok-desktop/scripts
+        cp -f crates/codegen/xai-grok-pager/scripts/install.sh frontend/apps/grok-desktop/scripts/install.sh
         ${workspaceCargoJobsFromCores}
         export LD_LIBRARY_PATH="${lib.makeLibraryPath buildInputs}''${LD_LIBRARY_PATH:+:''${LD_LIBRARY_PATH}}"
         export RULES_RUST_RUNFILES_WORKSPACE_NAME="''${RULES_RUST_RUNFILES_WORKSPACE_NAME:-grok-oss}"

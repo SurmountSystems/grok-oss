@@ -12,7 +12,7 @@ async fn parent_cannot_talk_to_own_l2s_follow_up_enqueues_interject_on_running_l
     let mut harness = harness(false, std::time::Duration::from_secs(60));
     let spawn = tokio::spawn({
         let backend = harness.backend.clone();
-        async move { backend.spawn(request("l2", true)).await }
+        async move { backend.spawn(request("l2", true), None).await }
     });
     let started = harness.started.recv().await.unwrap();
     assert_eq!(started, "l2");
@@ -70,7 +70,7 @@ async fn parent_follow_up_does_not_inject_into_live_l3_unless_operator_targeted_
     let mut harness = harness(false, std::time::Duration::from_secs(60));
     let spawn_l2 = tokio::spawn({
         let backend = harness.backend.clone();
-        async move { backend.spawn(request("l2", true)).await }
+        async move { backend.spawn(request("l2", true), None).await }
     });
     assert_eq!(harness.started.recv().await.unwrap(), "l2");
     let _ = harness.requests.recv().await.unwrap();
@@ -82,7 +82,7 @@ async fn parent_follow_up_does_not_inject_into_live_l3_unless_operator_targeted_
     l3.runtime_overrides.spawn_depth = Some(2);
     let spawn_l3 = tokio::spawn({
         let backend = harness.backend.clone();
-        async move { backend.spawn(l3).await }
+        async move { backend.spawn(l3, None).await }
     });
     assert_eq!(harness.started.recv().await.unwrap(), "l3");
     let _ = harness.requests.recv().await.unwrap();
@@ -116,7 +116,7 @@ async fn resume_from_of_running_l2_still_fails_active() {
     let mut harness = harness(false, std::time::Duration::from_secs(60));
     let spawn = tokio::spawn({
         let backend = harness.backend.clone();
-        async move { backend.spawn(request("l2", true)).await }
+        async move { backend.spawn(request("l2", true), None).await }
     });
     assert_eq!(harness.started.recv().await.unwrap(), "l2");
     let _ = harness.requests.recv().await.unwrap();
@@ -125,7 +125,7 @@ async fn resume_from_of_running_l2_still_fails_active() {
     resume.resume_from = Some("l2".to_owned());
     let result = harness
         .backend
-        .spawn(resume)
+        .spawn(resume, None)
         .await
         .expect("spawn result channel");
     assert!(!result.success);
@@ -163,7 +163,7 @@ async fn parent_follow_up_off_is_upstream_spawn_wait_resume_from_completed_only(
     );
     let spawn = tokio::spawn({
         let backend = harness.backend.clone();
-        async move { backend.spawn(request("l2", true)).await }
+        async move { backend.spawn(request("l2", true), None).await }
     });
     assert_eq!(harness.started.recv().await.unwrap(), "l2");
     let _ = harness.requests.recv().await.unwrap();
@@ -201,7 +201,7 @@ async fn parent_follow_up_onto_running_l2_with_live_l3_hits_l2_not_l3() {
     let mut harness = harness(false, std::time::Duration::from_secs(60));
     let spawn_l2 = tokio::spawn({
         let backend = harness.backend.clone();
-        async move { backend.spawn(request("l2", true)).await }
+        async move { backend.spawn(request("l2", true), None).await }
     });
     assert_eq!(harness.started.recv().await.unwrap(), "l2");
     let _ = harness.requests.recv().await.unwrap();
@@ -211,7 +211,7 @@ async fn parent_follow_up_onto_running_l2_with_live_l3_hits_l2_not_l3() {
     l3.runtime_overrides.spawn_depth = Some(2);
     let spawn_l3 = tokio::spawn({
         let backend = harness.backend.clone();
-        async move { backend.spawn(l3).await }
+        async move { backend.spawn(l3, None).await }
     });
     assert_eq!(harness.started.recv().await.unwrap(), "l3");
     let _ = harness.requests.recv().await.unwrap();
