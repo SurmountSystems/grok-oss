@@ -477,6 +477,80 @@ mod tests {
         assert!(live_subagent_list(agent.subagent_sessions.values()).is_empty());
     }
 
+    /// Vacant occupancy restore must not keep a host that already exited
+    /// painted live Responding. Occupancy json always has finished: false.
+    /// meta.json status completed is the host exit.
+    #[test]
+    #[serial_test::serial(GROK_HOME)]
+    fn vacant_occupancy_restore_drops_responding_when_meta_says_host_exited() {
+        use crate::app::subagent::live_subagent_list;
+
+        let grok_home = tempfile::tempdir().unwrap();
+        let _home = xai_grok_test_support::EnvGuard::set("GROK_HOME", grok_home.path());
+        crate::app::subagent::set_replay_grok_home_for_tests(Some(grok_home.path().to_path_buf()));
+        let proj = tempfile::tempdir().unwrap();
+        let cwd = proj.path().to_path_buf();
+        let sid = "occupancy-restore-vacant-exited";
+
+        let mut app = crate::app::app_view::tests::test_app_with_agent();
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        agent.session.session_id = Some(sid.into());
+        agent.session.cwd = cwd.clone();
+        agent.session.state = AgentState::TurnRunning;
+        agent.subagent_sessions.insert(
+            "cs-vacant-exited".into(),
+            crate::app::agent_view::AgentView::live_nested_occupancy_row_for_tests(
+                "cs-vacant-exited",
+                "sa-vacant-exited",
+                "stalled nested implementor",
+                Some("implementer"),
+            ),
+        );
+        {
+            let info = agent.subagent_sessions.get_mut("cs-vacant-exited").unwrap();
+            info.attempt.activity_label = Some("Responding".into());
+        }
+        agent.persist_session_work_to_disk_for_rebuild();
+        let meta_dir = grok_home
+            .path()
+            .join("sessions")
+            .join(urlencoding::encode(&cwd.to_string_lossy()).as_ref())
+            .join(sid)
+            .join("subagents")
+            .join("sa-vacant-exited");
+        std::fs::create_dir_all(&meta_dir).unwrap();
+        std::fs::write(
+            meta_dir.join("meta.json"),
+            r#"{"prompt":"x","status":"completed","duration_ms":1500}"#,
+        )
+        .unwrap();
+        agent.subagent_sessions.clear();
+        agent.restore_nested_occupancy_from_disk();
+        let restored = agent
+            .subagent_sessions
+            .get("cs-vacant-exited")
+            .expect("vacant restore still inserts the occupancy row");
+        assert!(
+            restored.finished || restored.is_finished(),
+            "meta.json completed must mark the vacant restore row finished"
+        );
+        assert!(!restored.is_running());
+        assert_ne!(
+            restored.attempt.activity_label.as_deref(),
+            Some("Responding"),
+            "vacant restore of an exited host must not stay painted Responding"
+        );
+        assert_eq!(
+            restored.display_elapsed(),
+            std::time::Duration::from_millis(1500)
+        );
+        assert!(
+            live_subagent_list(agent.subagent_sessions.values()).is_empty(),
+            "exited host must not return to the live Subagents list"
+        );
+        crate::app::subagent::set_replay_grok_home_for_tests(None);
+    }
+
     /// Named contract: Compact-fail unstick after occupancy drop must not
     /// leave the last Human turn as a Prompt row. Command `/compact` only.
     #[test]

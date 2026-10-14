@@ -693,17 +693,50 @@ pub fn model_call_cost_for_sessions(
 ///
 /// The cell says the context figure was not stored. It is not `0`, and it
 /// does not invent a token count from that chrome. A real input plus output
-/// cost is a separate figure.
+/// cost is a separate figure. Subagents overlay paint uses
+/// [`last_input_tokens_from_usage_jsonl`] instead of this sentence.
 pub fn broken_host_context_cell(host_context: &str, did_tool_work: bool) -> Option<&'static str> {
     if !did_tool_work {
         return None;
     }
-    let compact: String = host_context.split_whitespace().collect();
-    if compact.eq_ignore_ascii_case("0K/0K") {
+    if host_chrome_is_zero_context(host_context) {
         Some("the context figure was not stored")
     } else {
         None
     }
+}
+
+/// True when host chrome is a zero context window (`0K/0K` or `0/0`).
+///
+/// Trailing `context+`, `context`, `tokens`, and a percent clause are ignored
+/// so `0K/0K tokens (0% context)` and `0K/0K context+` count as zero.
+pub fn host_chrome_is_zero_context(host_context: &str) -> bool {
+    let mut compact: String = host_context.split_whitespace().collect();
+    if let Some(idx) = compact.find('(') {
+        compact.truncate(idx);
+    }
+    let compact = compact
+        .trim_end_matches('+')
+        .trim_end_matches("context")
+        .trim_end_matches("tokens")
+        .trim_end_matches('+')
+        .trim_end_matches('%');
+    compact.eq_ignore_ascii_case("0K/0K") || compact.eq_ignore_ascii_case("0/0")
+}
+
+/// Last `usage.jsonl` row `input_tokens` that is greater than zero.
+///
+/// That integer is the context window (input). Cached tokens are already
+/// inside input. Reasoning tokens are already inside output. Do not add
+/// either again. `total_tokens` is provider context length, not this figure.
+pub fn last_input_tokens_from_usage_jsonl(path: &Path) -> Option<u64> {
+    let (events, _) = parse_usage_jsonl(path);
+    events.into_iter().rev().find_map(|event| {
+        event
+            .input_tokens
+            .and_then(|n| u64::try_from(n).ok())
+            .filter(|n| *n > 0)
+    })
 }
 
 /// Rows in `local_usage_event` for one `session_id`, ordered by `event_ulid`.
@@ -1035,5 +1068,43 @@ mod tests {
         assert!(!cell.contains("not_fetched"), "{cell}");
         assert!(broken_host_context_cell("168K/200K", true).is_none());
         assert!(broken_host_context_cell("0K/0K", false).is_none());
+    }
+
+    /// Last usage.jsonl input_tokens is the context integer. A later zero
+    /// row does not hide an earlier real input. Cached tokens stay inside
+    /// input. total_tokens is not this figure.
+    #[test]
+    fn last_input_tokens_from_usage_jsonl_skips_zero_and_uses_input() {
+        let tmp = TempDir::new().unwrap();
+        let usage = tmp.path().join("usage.jsonl");
+        std::fs::write(
+            &usage,
+            concat!(
+                r#"{"schema_version":1,"event_ulid":"01FIRSTINPUT0000000000001","timestamp":"2026-10-13T00:00:00.000Z","turn_type":"agent_turn","agent_kind":"general-purpose","session_id":"child-sess","input_tokens":80000,"output_tokens":10,"cached_tokens":12000,"reasoning_tokens":5,"total_tokens":80000,"cost_missing":false,"incomplete":false}"#,
+                "\n",
+                r#"{"schema_version":1,"event_ulid":"01SECONDINPUT000000000001","timestamp":"2026-10-13T00:01:00.000Z","turn_type":"agent_turn","agent_kind":"general-purpose","session_id":"child-sess","input_tokens":152000,"output_tokens":400,"cached_tokens":20000,"reasoning_tokens":80,"total_tokens":152000,"cost_missing":false,"incomplete":false}"#,
+                "\n",
+                r#"{"schema_version":1,"event_ulid":"01ZEROINPUT00000000000001","timestamp":"2026-10-13T00:02:00.000Z","turn_type":"agent_turn","agent_kind":"general-purpose","session_id":"child-sess","input_tokens":0,"output_tokens":0,"total_tokens":0,"cost_missing":false,"incomplete":false}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+        let got = last_input_tokens_from_usage_jsonl(&usage);
+        assert_eq!(got, Some(152_000));
+        assert_ne!(got, Some(0));
+        assert_ne!(
+            got,
+            Some(152_000 + 20_000),
+            "cached_tokens is already inside input"
+        );
+        assert_ne!(
+            got,
+            Some(80_000),
+            "an earlier row is not the last real input"
+        );
+        assert!(host_chrome_is_zero_context("0K/0K"));
+        assert!(host_chrome_is_zero_context("0K/0K context+"));
+        assert!(host_chrome_is_zero_context("0K/0K tokens (0% context)"));
+        assert!(!host_chrome_is_zero_context("152K/200K context+"));
     }
 }

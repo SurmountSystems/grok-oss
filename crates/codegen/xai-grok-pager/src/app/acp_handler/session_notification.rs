@@ -29,6 +29,44 @@ pub(super) fn failed_hook_line(
     })
 }
 
+/// Stamp the nested child view with a real used/window pair. A 0/0 host
+/// reading is not copied onto the overlay. The L1 sampling window is not
+/// copied onto the nested session.
+fn stamp_nested_child_context(agent: &mut AgentView, child_session_id: &str) {
+    let stamp = agent
+        .subagent_sessions
+        .get(child_session_id)
+        .and_then(|info| {
+            match (
+                info.attempt.tokens_used.filter(|&count| count > 0),
+                info.attempt
+                    .context_window_tokens
+                    .filter(|&count| count > 0),
+            ) {
+                (Some(used), Some(window)) => Some((used, window)),
+                _ => None,
+            }
+        });
+    let Some(child_view) = agent.subagent_views.get_mut(child_session_id) else {
+        return;
+    };
+    if let Some((used, window)) = stamp {
+        child_view.context_state = Some(xai_grok_shell::session::ContextInfo::from_notification(
+            used, window,
+        ));
+        child_view.session_sampling_window = Some(window);
+        child_view.session.models.override_context_window(window);
+        return;
+    }
+    if child_view
+        .context_state
+        .as_ref()
+        .is_some_and(|ctx| ctx.used == 0)
+    {
+        child_view.context_state = None;
+    }
+}
+
 fn stop_hook_runs(
     runs: &[xai_grok_shell::extensions::notification::HookRunEntryDto],
 ) -> Vec<crate::scrollback::blocks::tool::HookRunEntry> {
@@ -557,6 +595,7 @@ pub(super) fn handle_session_notification_with_origin(
             parent_prompt_id,
             parent_session_id,
             workflow_run_id,
+            agent_address,
             ..
         } => {
             tracing::info!(
@@ -794,11 +833,15 @@ pub(super) fn handle_session_notification_with_origin(
                     .subagent_sessions
                     .contains_key(parent_session_id.as_str());
                 let parent_sid = acp::SessionId::new(parent_session_id.clone());
-                let link = if workflow_run_id.is_some() || spawner_is_nested {
-                    crate::app::agent_view::ChildLink::unaddressable(parent_sid)
-                } else {
-                    crate::app::agent_view::ChildLink::l2_coordinator(parent_sid)
-                };
+                // Wire parent session is always the link. Addressability needs
+                // `agentAddress` on that spawn; workflow and nested spawners
+                // stay unaddressable even when an address is present.
+                let link =
+                    if workflow_run_id.is_some() || spawner_is_nested || agent_address.is_none() {
+                        crate::app::agent_view::ChildLink::unaddressable(parent_sid)
+                    } else {
+                        crate::app::agent_view::ChildLink::l2_coordinator(parent_sid)
+                    };
                 agent.insert_subagent_view(child_session_id.clone(), Box::new(child_view), link);
             }
             let is_l3 = agent
@@ -850,12 +893,19 @@ pub(super) fn handle_session_notification_with_origin(
                 info.attempt.duration_ms = Some(duration_ms);
                 info.attempt.turn_count = Some(turn_count);
                 info.attempt.tool_call_count = Some(tool_call_count);
-                info.attempt.tokens_used = Some(tokens_used);
-                info.attempt.context_window_tokens = Some(context_window_tokens);
+                if tokens_used > 0 {
+                    info.attempt.tokens_used = Some(tokens_used);
+                } else if info.attempt.tokens_used.is_none_or(|n| n == 0) {
+                    info.attempt.tokens_used = None;
+                }
+                if context_window_tokens > 0 {
+                    info.attempt.context_window_tokens = Some(context_window_tokens);
+                }
                 info.attempt.context_usage_pct = Some(context_usage_pct);
                 info.attempt.tools_used = tools_used.into_iter().map(Arc::from).collect();
                 info.attempt.error_count = Some(error_count);
                 info.attempt.last_progress_at = std::time::Instant::now();
+                crate::app::subagent::apply_usage_jsonl_context_fallback(info, &agent.session.cwd);
             }
             if !meta.is_replay && !agent.session.loading_replay {
                 crate::app::agent_view::l2_token_tracking::on_nested_l2_usage(
@@ -863,14 +913,7 @@ pub(super) fn handle_session_notification_with_origin(
                     tokens_used,
                 );
             }
-            if let Some(child_view) = agent.subagent_views.get_mut(&child_session_id)
-                && context_window_tokens > 0
-            {
-                child_view
-                    .session
-                    .models
-                    .override_context_window(context_window_tokens);
-            }
+            stamp_nested_child_context(agent, &child_session_id);
             let activity_label = agent
                 .subagent_views
                 .get(&child_session_id)
@@ -992,6 +1035,8 @@ pub(super) fn handle_session_notification_with_origin(
                 entry.invalidate_cache();
             }
             if let Some(info) = agent.subagent_sessions.get_mut(&child_session_id) {
+                info.finished = true;
+                info.status = Some(Arc::from(status.as_str()));
                 info.attempt.status = Some(Arc::from(status));
                 info.attempt.error = error.map(Arc::from);
                 info.attempt.duration_ms = Some(duration_ms);
@@ -1000,6 +1045,7 @@ pub(super) fn handle_session_notification_with_origin(
                 if tokens_used > 0 {
                     info.attempt.tokens_used = Some(tokens_used);
                 }
+                crate::app::subagent::apply_usage_jsonl_context_fallback(info, &agent.session.cwd);
                 info.seal_current_attempt_tokens();
                 if !meta.is_replay && !agent.session.loading_replay {
                     crate::app::agent_view::l2_token_tracking::on_nested_l2_usage(
@@ -1013,6 +1059,7 @@ pub(super) fn handle_session_notification_with_origin(
                 info.attempt.last_progress_at = std::time::Instant::now();
                 info.transcript.retry_disk_after_finish();
             }
+            stamp_nested_child_context(agent, &child_session_id);
             agent.note_finished_nested_wait_ids(&child_session_id, &subagent_id);
             agent.complete_satisfied_task_output_wait_tools();
             agent.drop_satisfied_task_output_waits();
@@ -2402,6 +2449,14 @@ pub(super) fn apply_sampling_identity_from_retry(
     }
 }
 
+/// One `/login` sentence per expiry. A later failed nested run in the same expired session must not stack the same yellow paragraph.
+fn push_reauth_required_once(scrollback: &mut crate::scrollback::state::ScrollbackState) {
+    if crate::app::dispatch::scrollback_has_reauth_prompt(scrollback) {
+        return;
+    }
+    scrollback.push_block(RenderBlock::session_event(SessionEvent::ReAuthRequired));
+}
+
 pub(super) fn apply_retry_state(
     retry: &xai_grok_shell::extensions::notification::RetryState,
     session: &mut AgentSession,
@@ -2493,7 +2548,7 @@ pub(super) fn apply_retry_state_with_nested(
                 session.free_usage_blocked = true;
             } else if !*rate_limited && is_reauthable_failure(None, reason) {
                 is_reauth = true;
-                scrollback.push_block(RenderBlock::session_event(SessionEvent::ReAuthRequired));
+                push_reauth_required_once(scrollback);
             } else if *rate_limited {
                 let error = crate::app::effects::sanitize_user_error(
                     &format_rate_limited_user_message(Some(reason.as_str()), is_api_key_auth),
@@ -2523,7 +2578,7 @@ pub(super) fn apply_retry_state_with_nested(
                 session.credit_limit_blocked = true;
             } else if is_reauthable_failure(Some(error_type.as_str()), message) {
                 is_reauth = true;
-                scrollback.push_block(RenderBlock::session_event(SessionEvent::ReAuthRequired));
+                push_reauth_required_once(scrollback);
             } else if wire == crate::app::error_display::WireErrorType::DiskFull {
                 if !crate::app::dispatch::scrollback_has_recent_disk_full(scrollback) {
                     scrollback.push_block(RenderBlock::session_event(SessionEvent::DiskFull));

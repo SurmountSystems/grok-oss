@@ -2086,6 +2086,51 @@ fn auth_complete_strips_reauth_prompt_after_mid_session_login() {
         "re-auth prompt must be stripped after successful re-auth"
     );
 }
+
+/// A nested-run summary after the expiry banner means that banner is no longer trailing.
+/// Successful `/login` must still remove it so a later real expiry can show.
+#[test]
+fn auth_complete_strips_reauth_prompt_that_is_not_trailing() {
+    use crate::scrollback::block::RenderBlock;
+    use crate::scrollback::blocks::SubagentBlock;
+    use std::time::Duration;
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent
+            .scrollback
+            .push_block(RenderBlock::session_event(SessionEvent::ReAuthRequired));
+        agent
+            .scrollback
+            .push_block(RenderBlock::Subagent(SubagentBlock::failed(
+                "nested run",
+                "child-1",
+                Duration::from_secs(1),
+                None,
+            )));
+    }
+    dispatch(Action::Login, &mut app);
+    let seq = authenticating_seq(&app);
+    dispatch(
+        Action::TaskComplete(TaskResult::AuthComplete {
+            request_seq: seq,
+            meta: None,
+        }),
+        &mut app,
+    );
+    let sb = &expect_agent(&app, id).scrollback;
+    let has_reauth = (0..sb.len()).any(|i| {
+        matches!(
+            sb.entry(i).map(|e| &e.block),
+            Some(RenderBlock::SessionEvent(ev)) if matches!(ev.event, SessionEvent::ReAuthRequired)
+        )
+    });
+    assert!(
+        !has_reauth,
+        "a non-trailing re-auth prompt must be stripped after successful re-auth"
+    );
+}
 /// After a successful mid-session re-auth, the prompt that failed on the expired login is auto-resubmitted so the user doesn't have to retype it.
 #[test]
 fn auth_complete_retries_stashed_prompt_after_mid_session_login() {

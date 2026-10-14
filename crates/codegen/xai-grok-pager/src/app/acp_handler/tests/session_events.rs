@@ -762,6 +762,118 @@
         assert!(!session.credit_limit_blocked);
     }
 
+    fn count_reauth_required(scrollback: &ScrollbackState) -> usize {
+        (0..scrollback.len())
+            .filter(|&i| {
+                matches!(
+                    scrollback.get(i).map(|e| &e.block),
+                    Some(RenderBlock::SessionEvent(ev))
+                        if matches!(ev.event, SessionEvent::ReAuthRequired)
+                )
+            })
+            .count()
+    }
+
+    fn auth_failed_retry() -> RetryState {
+        RetryState::Failed {
+            error_type: "auth".into(),
+            message: "Unauthorized (401) from https://proxy/v1/messages: no auth context".into(),
+        }
+    }
+
+    /// After one Authentication required expiry line, a second failed nested run in the same expired session does not paint that sentence again.
+    #[test]
+    fn apply_retry_state_auth_expiry_is_shown_once_for_a_later_failed_nested_run() {
+        use crate::scrollback::blocks::SubagentBlock;
+        use std::time::Duration;
+
+        let mut session = make_session(Some("s1"));
+        let mut scrollback = ScrollbackState::new();
+        apply_retry_state(
+            &RetryState::Exhausted {
+                attempts: 1,
+                reason: "Unauthorized (401)".into(),
+                is_rate_limited: false,
+            },
+            &mut session,
+            &mut scrollback,
+            false,
+        );
+        apply_retry_state(&auth_failed_retry(), &mut session, &mut scrollback, false);
+        assert_eq!(
+            count_reauth_required(&scrollback),
+            1,
+            "the first expiry must still paint the /login sentence"
+        );
+        let first = SessionEvent::ReAuthRequired.message();
+        assert!(
+            first.contains("/login"),
+            "the Operator still sees that they need /login: {first}"
+        );
+
+        scrollback.push_block(RenderBlock::Subagent(SubagentBlock::failed(
+            "nested run",
+            "child-1",
+            Duration::from_secs(1),
+            Some("Unauthorized (401)".into()),
+        )));
+        apply_retry_state(&auth_failed_retry(), &mut session, &mut scrollback, false);
+        assert_eq!(
+            count_reauth_required(&scrollback),
+            1,
+            "a later failed nested run in the same expired session must not stack the expiry sentence"
+        );
+        assert!(
+            SessionEvent::ReAuthRequired.message().contains("/login"),
+            "the Operator still sees that they need /login"
+        );
+    }
+
+    /// Login strips the stale banner. A later real expiry in that session must still paint once.
+    #[test]
+    fn apply_retry_state_auth_expiry_shows_again_after_the_banner_is_stripped() {
+        use crate::scrollback::blocks::SubagentBlock;
+        use std::time::Duration;
+
+        let mut session = make_session(Some("s1"));
+        let mut scrollback = ScrollbackState::new();
+        apply_retry_state(&auth_failed_retry(), &mut session, &mut scrollback, false);
+        scrollback.push_block(RenderBlock::Subagent(SubagentBlock::failed(
+            "nested run",
+            "child-1",
+            Duration::from_secs(1),
+            None,
+        )));
+        apply_retry_state(&auth_failed_retry(), &mut session, &mut scrollback, false);
+        assert_eq!(count_reauth_required(&scrollback), 1);
+
+        let reauth_id = (0..scrollback.len()).find_map(|i| {
+            let entry = scrollback.get(i)?;
+            match &entry.block {
+                RenderBlock::SessionEvent(ev)
+                    if matches!(ev.event, SessionEvent::ReAuthRequired) =>
+                {
+                    Some(entry.id)
+                }
+                _ => None,
+            }
+        });
+        let Some(reauth_id) = reauth_id else {
+            panic!("expected the first expiry banner");
+        };
+        assert!(scrollback.remove_entry(reauth_id));
+        assert_eq!(count_reauth_required(&scrollback), 0);
+
+        apply_retry_state(&auth_failed_retry(), &mut session, &mut scrollback, false);
+        assert_eq!(
+            count_reauth_required(&scrollback),
+            1,
+            "a later real expiry after /login must still paint the sentence"
+        );
+        let msg = SessionEvent::ReAuthRequired.message();
+        assert!(msg.contains("/login"), "must still point at /login: {msg}");
+    }
+
     /// A recoverable auth failure preserves `in_flight_prompt` so the PromptResponse handler can stash it for auto-resubmit after re-auth.
     #[test]
     fn apply_retry_state_auth_failure_preserves_in_flight_prompt() {

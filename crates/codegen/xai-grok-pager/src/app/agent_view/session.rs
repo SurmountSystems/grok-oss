@@ -359,16 +359,28 @@ impl AgentView {
         let Ok(rows) = serde_json::from_str::<Vec<PersistedNestedOccupancy>>(&body) else {
             return;
         };
+        let parent_sid = session_id.0.to_string();
+        let parent_cwd = self.session.cwd.clone();
         for row in rows {
             if row.child_session_id.trim().is_empty() {
                 continue;
             }
             // Occupied rows stay as-is, including finished. The occupancy
             // snapshot always has finished: false, so overwriting would
-            // un-finish a dead host. Vacant insert is still-running resume.
+            // un-finish a dead host. Vacant insert is still-running resume
+            // unless meta.json already says the host exited.
+            let child_sid = row.child_session_id.clone();
+            let vacant = !self.subagent_sessions.contains_key(&child_sid);
             self.subagent_sessions
-                .entry(row.child_session_id.clone())
+                .entry(child_sid.clone())
                 .or_insert_with(|| nested_info_from_occupancy(&row));
+            if vacant && let Some(info) = self.subagent_sessions.get_mut(&child_sid) {
+                crate::app::subagent::mark_finished_from_meta_if_host_exited(
+                    info,
+                    &parent_cwd,
+                    &parent_sid,
+                );
+            }
         }
         self.retain_still_running_nested_occupancy();
     }
@@ -1830,8 +1842,8 @@ impl AgentView {
                     .subject_for_wait_tasks(&task_ids)
                     .or_else(|| self.live_specialist_wait_subject());
                 // An empty description is not a subject. One task id with
-                // only that id fallback stays unlabeled so `label()` can
-                // read `Waiting on 1 task...`. A real description stays.
+                // only that id fallback stays unlabeled so `label()` keeps
+                // `Waiting on task output…`. A real description stays.
                 let subject = match subject {
                     Some(name) if task_ids.len() == 1 && self.bare_specialist_id_subject(&name) => {
                         None

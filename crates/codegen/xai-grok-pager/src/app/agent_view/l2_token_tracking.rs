@@ -479,6 +479,77 @@ pub fn format_subagents_row_figure(count: Option<u64>, running: bool) -> Option<
     }
 }
 
+/// Nested sampling window when the host did not name one. L2 and L3 use 200k.
+const NESTED_CONTEXT_WINDOW_TOKENS: u64 = 200_000;
+
+/// Resolve the context integer for a Subagents overlay status cell.
+///
+/// Host chrome `0K/0K` after tool work is not `0`. The last `usage.jsonl`
+/// `input_tokens` is that integer. Cached tokens are already inside input.
+pub fn resolve_nested_context_used(
+    host_used: Option<u64>,
+    host_chrome: Option<&str>,
+    did_tool_work: bool,
+    usage_last_input: Option<u64>,
+) -> Option<u64> {
+    let chrome_zero =
+        host_chrome.is_some_and(xai_grok_shell::token_economy::host_chrome_is_zero_context);
+    if chrome_zero && did_tool_work {
+        return usage_last_input.filter(|n| *n > 0);
+    }
+    host_used.filter(|n| *n > 0).or_else(|| {
+        if did_tool_work {
+            usage_last_input.filter(|n| *n > 0)
+        } else {
+            None
+        }
+    })
+}
+
+/// Subagents overlay status cell: host context line plus a trailing `+`
+/// while the nested agent is still running.
+///
+/// Live: `152K/200K context+`. Finished: `152K/200K context`. That window
+/// is input. Do not print `0` for a `0K/0K` reading after tool work. Do
+/// not write not_fetched, not accepted, or not stored.
+pub fn format_nested_context_status_cell(
+    host_used: Option<u64>,
+    host_window: Option<u64>,
+    host_chrome: Option<&str>,
+    did_tool_work: bool,
+    usage_last_input: Option<u64>,
+    running: bool,
+) -> Option<String> {
+    let used =
+        resolve_nested_context_used(host_used, host_chrome, did_tool_work, usage_last_input)?;
+    let window = host_window
+        .filter(|n| *n > 0)
+        .unwrap_or(NESTED_CONTEXT_WINDOW_TOKENS);
+    let cell = format!(
+        "{}/{} context",
+        crate::views::context_bar::fmt_tokens(used),
+        crate::views::context_bar::fmt_tokens(window),
+    );
+    if running {
+        Some(format!("{cell}+"))
+    } else {
+        Some(cell)
+    }
+}
+
+/// Overlay status cell from in-memory SubagentInfo. Paint never opens
+/// `usage.jsonl`; fill `tokens_used` before paint when host chrome is 0.
+pub fn subagent_overlay_status_cell(info: &crate::app::subagent::SubagentInfo) -> Option<String> {
+    format_nested_context_status_cell(
+        info.attempt.tokens_used,
+        info.attempt.context_window_tokens,
+        None,
+        false,
+        None,
+        info.is_running(),
+    )
+}
+
 /// Grok 4.6-era wrap average. It stays an estimate until the host returns a figure.
 /// Not an actual token count. Not billing truth.
 pub const STANDING_WRAP_ESTIMATE_WALL: &str = "19.4 minutes";
@@ -649,6 +720,60 @@ mod tests {
             "Subagents list omits the word tokens; truncation must not become 112.6k token...; got {row:?}"
         );
         assert_eq!(row, "Isolated Preview (112.6k)");
+    }
+
+    /// Status cell is the host context line. Live has a trailing plus.
+    /// Finished keeps the label context with no plus. Host chrome 0K/0K
+    /// after tool work uses last usage.jsonl input_tokens. Do not print 0.
+    #[test]
+    fn finished_nested_status_cell_is_not_0k_after_tool_work_when_usage_has_input() {
+        let live = format_nested_context_status_cell(
+            Some(0),
+            Some(200_000),
+            Some("0K/0K"),
+            true,
+            Some(152_000),
+            true,
+        );
+        assert_eq!(live.as_deref(), Some("152K/200K context+"));
+        assert_ne!(live.as_deref(), Some("0K/0K context+"));
+        assert_ne!(live.as_deref(), Some("0"));
+        let finished = format_nested_context_status_cell(
+            Some(0),
+            Some(200_000),
+            Some("0K/0K context+"),
+            true,
+            Some(152_000),
+            false,
+        );
+        assert_eq!(finished.as_deref(), Some("152K/200K context"));
+        assert!(!finished.as_deref().unwrap_or("").contains('+'));
+        assert!(!finished.as_deref().unwrap_or("").contains("not_fetched"));
+        assert!(!finished.as_deref().unwrap_or("").contains("not accepted"));
+        assert!(!finished.as_deref().unwrap_or("").contains("not stored"));
+        assert!(
+            format_nested_context_status_cell(
+                Some(0),
+                Some(200_000),
+                Some("0K/0K"),
+                true,
+                None,
+                true,
+            )
+            .is_none()
+        );
+        assert_eq!(
+            format_nested_context_status_cell(
+                Some(152_000),
+                Some(200_000),
+                None,
+                false,
+                None,
+                true,
+            )
+            .as_deref(),
+            Some("152K/200K context+")
+        );
     }
 
     /// Live sampling wins over tracker high-water. A later smaller window

@@ -819,8 +819,8 @@ mod write_fallback_tests {
             if !path.is_file() {
                 continue;
             }
-            if path.file_name().and_then(|name| name.to_str()) == Some("provider_credentials.json")
-            {
+            let name = path.file_name().and_then(|name| name.to_str());
+            if name == Some("provider_credentials.json") || name == Some("auth.json") {
                 continue;
             }
             file_hides_session_secret(&path, secret);

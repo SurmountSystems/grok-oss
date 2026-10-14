@@ -207,13 +207,7 @@ impl AgentView {
                     }
                 }
                 TaskEntryId::Agent(sid) => {
-                    if let Some(child_sid) = self
-                        .subagent_sessions
-                        .iter()
-                        .find(|(_, info)| info.subagent_id.as_ref() == sid.as_str())
-                        .map(|(k, _)| k.clone())
-                        && self.subagent_views.contains_key(&child_sid)
-                    {
+                    if let Some(child_sid) = self.resolve_listed_agent_child_sid(&sid) {
                         self.open_subagent_fullscreen(child_sid);
                         return Some(InputOutcome::Changed);
                     }
@@ -238,18 +232,55 @@ impl AgentView {
                 TaskEntryId::Workflow(_) => {}
             }
         }
-        let row_id = self
-            .tasks
-            .row_hit_rects
-            .iter()
-            .find(|(_, rect)| rect.contains((column, row).into()))
-            .map(|(entry_id, _)| entry_id.clone());
-        if let Some(entry_id) = row_id
+        if let Some(entry_id) = self.tasks_row_id_at(column, row)
             && let Some(out) = self.open_task_row(entry_id)
         {
             return Some(out);
         }
         None
+    }
+
+    /// The painted Tasks row is the hit target. Stored inner rects start after
+    /// the accent pad, so a click on the painted row uses that screen y across
+    /// the whole pane.
+    fn tasks_row_id_at(&self, column: u16, row: u16) -> Option<TaskEntryId> {
+        let point = (column, row).into();
+        if let Some((id, _)) = self
+            .tasks
+            .row_hit_rects
+            .iter()
+            .find(|(_, rect)| rect.contains(point))
+        {
+            return Some(id.clone());
+        }
+        let pane = self.pane_areas.tasks;
+        if pane.area() == 0 || !pane.contains(point) {
+            return None;
+        }
+        self.tasks
+            .row_hit_rects
+            .iter()
+            .find(|(_, rect)| row >= rect.y && row < rect.y.saturating_add(rect.height.max(1)))
+            .map(|(id, _)| id.clone())
+    }
+
+    /// Child session that a Tasks Agent id names. Live rows store a subagent
+    /// id that is not the HashMap key and not the view key.
+    fn resolve_listed_agent_child_sid(&self, sid: &str) -> Option<String> {
+        let (key, info) = self.subagent_sessions.iter().find(|(key, info)| {
+            key.as_str() == sid
+                || info.subagent_id.as_ref() == sid
+                || info.child_session_id.as_ref() == sid
+        })?;
+        [
+            info.child_session_id.as_ref(),
+            key.as_str(),
+            sid,
+            info.subagent_id.as_ref(),
+        ]
+        .into_iter()
+        .find(|id| self.subagent_views.contains_key(*id))
+        .map(str::to_owned)
     }
 
     /// Open the task whose row was clicked. Does not kill and does not close
@@ -260,14 +291,7 @@ impl AgentView {
                 .show_bg_task_viewer(&tid)
                 .then_some(InputOutcome::Changed),
             TaskEntryId::Agent(sid) => {
-                let child_sid = self
-                    .subagent_sessions
-                    .iter()
-                    .find(|(_, info)| info.subagent_id.as_ref() == sid.as_str())
-                    .map(|(k, _)| k.clone())?;
-                if !self.subagent_views.contains_key(&child_sid) {
-                    return None;
-                }
+                let child_sid = self.resolve_listed_agent_child_sid(&sid)?;
                 self.open_subagent_fullscreen(child_sid);
                 Some(InputOutcome::Changed)
             }
@@ -952,12 +976,8 @@ impl AgentView {
                                     }
                                 }
                                 TaskEntryId::Agent(sid) => {
-                                    if let Some(child_sid) = self
-                                        .subagent_sessions
-                                        .iter()
-                                        .find(|(_, info)| info.subagent_id.as_ref() == sid.as_str())
-                                        .map(|(k, _)| k.clone())
-                                        && self.subagent_views.contains_key(&child_sid)
+                                    if let Some(child_sid) =
+                                        self.resolve_listed_agent_child_sid(&sid)
                                     {
                                         self.open_subagent_fullscreen(child_sid);
                                         return InputOutcome::Changed;

@@ -436,6 +436,11 @@ struct SubagentMetaSlice {
     child_cwd: Option<String>,
     #[serde(default)]
     worktree_path: Option<String>,
+    /// "running" | "completed" | "failed" | "cancelled"
+    #[serde(default)]
+    status: String,
+    #[serde(default)]
+    duration_ms: Option<u64>,
 }
 
 /// Grok home for the replay path (overridable in tests).
@@ -506,6 +511,125 @@ fn enrich_from_meta_with_home(
     info.prompt = meta.prompt.map(Arc::from);
     info.child_cwd = meta.child_cwd.map(Arc::from);
     info.worktree_path = meta.worktree_path.map(Arc::from);
+}
+
+fn meta_status_is_host_exit(status: &str) -> bool {
+    matches!(status.trim(), "completed" | "failed" | "cancelled")
+}
+
+/// Occupancy snapshots always store `finished: false`. If `meta.json` already
+/// says the host exited, the vacant restore row must not stay live Responding
+/// with a climbing timer.
+pub(crate) fn mark_finished_from_meta_if_host_exited(
+    info: &mut SubagentInfo,
+    parent_cwd: &std::path::Path,
+    parent_session_id: &str,
+) {
+    if info.finished || info.is_finished() {
+        return;
+    }
+    let meta_path = effective_grok_home()
+        .join("sessions")
+        .join(urlencoding::encode(&parent_cwd.to_string_lossy()).as_ref())
+        .join(parent_session_id)
+        .join("subagents")
+        .join(info.subagent_id.as_ref())
+        .join("meta.json");
+    let Ok(content) = std::fs::read_to_string(&meta_path) else {
+        return;
+    };
+    let Ok(meta) = serde_json::from_str::<SubagentMetaSlice>(&content) else {
+        return;
+    };
+    if !meta_status_is_host_exit(&meta.status) {
+        return;
+    }
+    apply_host_exit(info, meta.status.trim(), meta.duration_ms);
+}
+
+fn apply_host_exit(info: &mut SubagentInfo, status: &str, duration_ms: Option<u64>) {
+    info.finished = true;
+    info.status = Some(Arc::from(status));
+    info.attempt.status = Some(Arc::from(status));
+    info.attempt.activity_label = None;
+    if let Some(ms) = duration_ms {
+        info.attempt.duration_ms = Some(ms);
+    }
+    let attempt_id = info
+        .attempt
+        .lifecycle
+        .current_attempt_id()
+        .map(str::to_owned);
+    if let SubagentLifecycleReduction::Accepted(accepted) = info.attempt.lifecycle.reduce(
+        SubagentLifecycleTransition::Finished,
+        attempt_id.as_deref(),
+        None,
+    ) {
+        info.attempt.lifecycle = accepted.into_state();
+    }
+}
+
+/// Last usage.jsonl input_tokens for this nested session, if that file exists.
+pub(crate) fn nested_session_usage_jsonl_path(
+    parent_cwd: &std::path::Path,
+    child_session_id: &str,
+    child_cwd: Option<&str>,
+) -> Option<std::path::PathBuf> {
+    let home = effective_grok_home();
+    let mut candidates = Vec::new();
+    candidates.push(
+        xai_grok_shell::util::grok_home::sessions_cwd_dir_in(
+            &home,
+            parent_cwd.to_string_lossy().as_ref(),
+        )
+        .join(child_session_id)
+        .join("usage.jsonl"),
+    );
+    if let Some(cwd) = child_cwd.filter(|c| !c.is_empty()) {
+        candidates.push(
+            xai_grok_shell::util::grok_home::sessions_cwd_dir_in(&home, cwd)
+                .join(child_session_id)
+                .join("usage.jsonl"),
+        );
+    }
+    candidates.into_iter().find(|path| path.is_file())
+}
+
+fn nested_did_tool_work(info: &SubagentInfo) -> bool {
+    info.attempt
+        .tool_call_count
+        .or(info.attempt.tool_calls)
+        .is_some_and(|n| n > 0)
+        || !info.attempt.tools_used.is_empty()
+}
+
+/// When host chrome is 0K/0K after tool work, fill present usage from the
+/// last usage.jsonl input_tokens. Paint does not open that file.
+pub(crate) fn apply_usage_jsonl_context_fallback(
+    info: &mut SubagentInfo,
+    parent_cwd: &std::path::Path,
+) {
+    if info.attempt.tokens_used.is_some_and(|n| n > 0) {
+        return;
+    }
+    if !nested_did_tool_work(info) {
+        return;
+    }
+    let Some(path) = nested_session_usage_jsonl_path(
+        parent_cwd,
+        info.child_session_id.as_ref(),
+        info.child_cwd.as_deref(),
+    ) else {
+        return;
+    };
+    let Some(input) = xai_grok_shell::token_economy::last_input_tokens_from_usage_jsonl(&path)
+    else {
+        return;
+    };
+    info.attempt.tokens_used = Some(input);
+    if info.attempt.context_window_tokens.is_none_or(|n| n == 0) {
+        info.attempt.context_window_tokens = Some(200_000);
+    }
 }
 
 /// Best-effort streamed replay of a child's inherited conversation.

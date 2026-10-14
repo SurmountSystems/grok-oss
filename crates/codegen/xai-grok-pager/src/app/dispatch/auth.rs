@@ -122,6 +122,19 @@ pub(super) fn scrollback_has_recent_reauth_prompt(
     trailing_session_events(scrollback).any(|(_, ev)| matches!(ev, SessionEvent::ReAuthRequired))
 }
 
+/// True if this scrollback already has the `/login` expiry sentence, including when a later nested-run summary sits after it.
+/// Trailing-only matching would stack a copy on every failed nested run in the same expired session.
+pub(crate) fn scrollback_has_reauth_prompt(
+    scrollback: &crate::scrollback::state::ScrollbackState,
+) -> bool {
+    (0..scrollback.len()).any(|idx| {
+        matches!(
+            scrollback.entry(idx).map(|e| &e.block),
+            Some(RenderBlock::SessionEvent(ev)) if matches!(ev.event, SessionEvent::ReAuthRequired)
+        )
+    })
+}
+
 /// True if the trailing run of session/system blocks has a terminal context-overflow block ([`SessionEvent::ContextTooLarge`] or `CompactionFailed`).
 /// Lets `PromptResponse` suppress the redundant `TurnFailed`, mirroring reauth.
 pub(super) fn scrollback_has_recent_context_too_large(
@@ -191,6 +204,7 @@ pub(super) fn trailing_session_events(
 }
 
 /// Strip the trailing run of auth-error blocks (the `ReAuthRequired` prompt plus any stale `RetryFailed` / `TurnFailed`) from an agent's scrollback.
+/// Also removes every `ReAuthRequired` banner that is no longer trailing, so a later real expiry can show after `/login`.
 /// Called after a successful mid-session re-auth so the prompt disappears once the user returns to the session.
 /// Mirrors how the credit-limit upsell strips its stale blocks.
 pub(super) fn strip_trailing_auth_error_blocks(agent: &mut AgentView) {
@@ -208,6 +222,28 @@ pub(super) fn strip_trailing_auth_error_blocks(agent: &mut AgentView) {
         .collect();
     for idx in to_remove {
         agent.scrollback.remove_from(idx);
+    }
+    strip_reauth_required_blocks(agent);
+}
+
+/// Remove every [`SessionEvent::ReAuthRequired`] banner, including those that are no longer trailing because a later nested-run summary was painted after them.
+/// Login and cancel-login use this so a later real expiry can show again.
+fn strip_reauth_required_blocks(agent: &mut AgentView) {
+    let ids: Vec<_> = (0..agent.scrollback.len())
+        .filter_map(|idx| {
+            let entry = agent.scrollback.entry(idx)?;
+            match &entry.block {
+                RenderBlock::SessionEvent(ev)
+                    if matches!(ev.event, SessionEvent::ReAuthRequired) =>
+                {
+                    Some(entry.id)
+                }
+                _ => None,
+            }
+        })
+        .collect();
+    for id in ids {
+        agent.scrollback.remove_entry(id);
     }
 }
 

@@ -137,11 +137,6 @@ impl WaitingReason {
                 subject: Some(subject),
                 ..
             } => format_waiting_for_subject(subject),
-            Self::TaskOutput {
-                task_ids,
-                subject: None,
-                ..
-            } if task_ids.len() == 1 => "Waiting on 1 task...".to_string(),
             Self::TaskOutput { .. } => "Waiting on task output…".to_string(),
             Self::TasksComplete => "Waiting on tasks…".to_string(),
             Self::Sleep => "Sleeping…".to_string(),

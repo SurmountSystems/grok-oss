@@ -186,6 +186,8 @@ identifier that has no matching `fn`.
   `nested_overlay_title_elapsed_matches_host_subagent_finished_duration`,
   `reopening_finished_nested_overlay_does_not_start_climbing_title_clock`,
   `subagents_live_list_drops_responding_after_subagent_finished`,
+  `finished_nested_agent_is_not_painted_responding_with_a_climbing_timer_and_live_cell_is_not_0k_after_tool_work`,
+  `vacant_occupancy_restore_drops_responding_when_meta_says_host_exited`,
   `l2_finish_surfaces_to_l1_without_opening_nested_overlay`,
   `wait_on_completed_nested_id_missing_from_map_does_not_stay_running`,
   `silent_subagent_completed_wake_surfaces_turn_completed`,

@@ -2662,6 +2662,120 @@
         );
     }
 
+    /// A finished nested agent is not painted Responding with a climbing
+    /// timer. A live status cell is not 0K/0K after tool work when
+    /// usage.jsonl has input_tokens. Live keeps a trailing plus. Finished
+    /// keeps the label context with no plus.
+    #[test]
+    fn finished_nested_agent_is_not_painted_responding_with_a_climbing_timer_and_live_cell_is_not_0k_after_tool_work() {
+        use crate::app::agent_view::l2_token_tracking::{
+            format_nested_context_status_cell, subagent_overlay_status_cell,
+        };
+        use xai_grok_shell::extensions::notification::SessionUpdate as XaiSessionUpdate;
+
+        let home = tempfile::tempdir().unwrap();
+        crate::app::subagent::set_replay_grok_home_for_tests(Some(home.path().to_path_buf()));
+        let mut app = make_app_with_agent("sess-parent");
+        let child_sid = "child-status-cell";
+        let cwd = app.agents.get(&AgentId(0)).unwrap().session.cwd.clone();
+        let usage_dir = xai_grok_shell::util::grok_home::sessions_cwd_dir_in(home.path(), cwd.to_string_lossy().as_ref())
+            .join(child_sid);
+        std::fs::create_dir_all(&usage_dir).unwrap();
+        std::fs::write(
+            usage_dir.join("usage.jsonl"),
+            concat!(
+                r#"{"schema_version":1,"event_ulid":"01NESTEDCONTEXTINPUT00001","timestamp":"2026-10-13T00:00:00.000Z","turn_type":"agent_turn","agent_kind":"general-purpose","session_id":"child-status-cell","input_tokens":152000,"output_tokens":400,"cached_tokens":20000,"reasoning_tokens":80,"total_tokens":152000,"cost_missing":false,"incomplete":false}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+
+        let _ = handle(
+            make_ext_session_notification(
+                "sess-parent",
+                test_subagent_spawned("sess-parent", child_sid),
+            ),
+            &mut app,
+        );
+        let _ = handle(
+            make_agent_chunk_with_event(child_sid, "still streaming", "p-child", None),
+            &mut app,
+        );
+        let mut progress = test_subagent_progress("sess-parent", child_sid);
+        if let XaiSessionUpdate::SubagentProgress {
+            tool_call_count,
+            tokens_used,
+            context_window_tokens,
+            tools_used,
+            ..
+        } = &mut progress
+        {
+            *tool_call_count = 2;
+            *tokens_used = 0;
+            *context_window_tokens = 0;
+            *tools_used = vec!["read_file".into()];
+        }
+        let _ = handle(
+            make_ext_session_notification("sess-parent", progress),
+            &mut app,
+        );
+        {
+            let agent = app.agents.get(&AgentId(0)).unwrap();
+            let info = agent.subagent_sessions.get(child_sid).unwrap();
+            assert_eq!(info.attempt.activity_label.as_deref(), Some("Responding"));
+            assert_eq!(info.attempt.tokens_used, Some(152_000));
+            assert_ne!(info.attempt.tokens_used, Some(0));
+            let live_cell = subagent_overlay_status_cell(info);
+            assert_eq!(live_cell.as_deref(), Some("152K/200K context+"));
+            assert_eq!(
+                format_nested_context_status_cell(
+                    Some(0),
+                    None,
+                    Some("0K/0K"),
+                    true,
+                    Some(152_000),
+                    true,
+                )
+                .as_deref(),
+                Some("152K/200K context+")
+            );
+            assert_ne!(live_cell.as_deref(), Some("0K/0K context+"));
+            assert!(!live_cell.as_deref().unwrap_or("").contains("not_fetched"));
+            assert!(!live_cell.as_deref().unwrap_or("").contains("not accepted"));
+            assert!(!live_cell.as_deref().unwrap_or("").contains("not stored"));
+        }
+
+        let _ = handle(
+            make_ext_session_notification("sess-parent", test_subagent_finished(child_sid)),
+            &mut app,
+        );
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(
+            crate::app::subagent::live_subagent_list(agent.subagent_sessions.values()).is_empty(),
+            "finished nested agent must leave the live Subagents list"
+        );
+        let info = agent.subagent_sessions.get(child_sid).unwrap();
+        assert!(info.finished, "host exit must set finished the same turn");
+        assert!(info.is_finished());
+        assert!(!info.is_running());
+        assert_ne!(
+            info.attempt.activity_label.as_deref(),
+            Some("Responding"),
+            "finished nested agent must not stay painted Responding"
+        );
+        let frozen = info.display_elapsed();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        assert_eq!(
+            info.display_elapsed(),
+            frozen,
+            "finished nested-agent timer must not keep climbing"
+        );
+        let finished_cell = subagent_overlay_status_cell(info);
+        assert_eq!(finished_cell.as_deref(), Some("152K/200K context"));
+        assert!(!finished_cell.as_deref().unwrap_or("").ends_with('+'));
+        crate::app::subagent::set_replay_grok_home_for_tests(None);
+    }
+
     /// Surmount / grok-oss fork: L2 finish must surface to L1 without opening
     /// the nested overlay. After `SubagentFinished` for a waited id, the parent
     /// is not stuck waiting as if the child were live.

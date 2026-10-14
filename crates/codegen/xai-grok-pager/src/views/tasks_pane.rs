@@ -11,7 +11,7 @@ use crate::app::agent::{BgTaskState, BgTaskStatus, ScheduledTaskInfo};
 use crate::app::agent_view::l2_token_tracking::{
     LiveJobRowInput, STANDING_WRAP_ESTIMATE_TOKENS, STANDING_WRAP_ESTIMATE_WALL,
     display_live_job_row, format_subagents_row_figure, shown_nested_count,
-    spawned_with_no_sample_yet, sum_shown_counts_once,
+    spawned_with_no_sample_yet, subagent_overlay_status_cell, sum_shown_counts_once,
 };
 use crate::app::subagent::{
     SubagentInfo, format_context_badge, format_live_l3_count, format_subagent_label,
@@ -832,11 +832,18 @@ impl Default for TasksPane {
 /// Columns the agent overlay paints on the right of one row.
 /// Same sum as `render_agent_overlay`: kill, view, elapsed, model,
 /// forked badge, and one gap.
+fn agent_overlay_right_text(info: &SubagentInfo, elapsed: &str) -> String {
+    match subagent_overlay_status_cell(info) {
+        Some(cell) => format!("{cell} {elapsed} "),
+        None => format!("{elapsed} "),
+    }
+}
+
 fn agent_overlay_columns(info: &SubagentInfo) -> u16 {
     let right_text = if info.attempt.pending_kill {
         "killing\u{2026} ".to_string()
     } else {
-        format!("{} ", format_duration(info.display_elapsed()))
+        agent_overlay_right_text(info, &format_duration(info.display_elapsed()))
     };
     let badge = format_context_badge(info);
     let model_text = info
@@ -1902,11 +1909,11 @@ impl TasksPane {
         } else if info.is_running() {
             let frames = activity_spinner_frames();
             let frame_idx = (self.tick / SPINNER_DIVISOR) as usize % frames.len();
-            let elapsed = info.display_elapsed();
+            let elapsed = format_duration(info.display_elapsed());
             (
                 frames.get(frame_idx).copied().unwrap_or(""),
                 Style::default().fg(theme.accent_running),
-                format!("{} ", format_duration(elapsed)),
+                agent_overlay_right_text(info, &elapsed),
                 Style::default().fg(theme.gray),
             )
         } else if info.attempt.status.as_deref() == Some("completed") {
@@ -1914,7 +1921,7 @@ impl TasksPane {
             (
                 crate::glyphs::check_mark(),
                 Style::default().fg(theme.accent_success),
-                format!("{elapsed} "),
+                agent_overlay_right_text(info, &elapsed),
                 Style::default().fg(theme.gray),
             )
         } else {
@@ -1922,7 +1929,7 @@ impl TasksPane {
             (
                 crate::glyphs::ballot_x(),
                 Style::default().fg(theme.accent_error),
-                format!("{elapsed} "),
+                agent_overlay_right_text(info, &elapsed),
                 Style::default().fg(theme.gray),
             )
         };

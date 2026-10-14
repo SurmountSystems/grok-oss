@@ -338,6 +338,89 @@ fn clicking_a_painted_tasks_row_opens_that_task() {
     assert!(agent.session.bg_tasks.contains_key("bg-sampler"), "{owed}");
 }
 
+/// A left click on a painted in_progress Tasks row opens that task. Many
+/// running rows stay on screen. The click uses the painted cells, including
+/// the accent column the stored inner rect may omit. The click does not
+/// send KillSubagent.
+#[test]
+fn clicking_a_painted_in_progress_tasks_row_opens_that_task() {
+    let owed = "a left click on a painted in_progress Tasks row opens that task. Many running rows stay on screen. The click uses the painted cells, including the accent column the stored inner rect may omit. The click does not send KillSubagent.";
+    let mut agent = make_agent();
+    let names = [
+        ("l2-alpha", "in-progress-alpha"),
+        ("l2-bravo", "in-progress-bravo"),
+        ("l2-charlie", "in-progress-charlie"),
+        ("l2-sampler", "in-progress-sampler"),
+        ("l2-echo", "in-progress-echo"),
+        ("l2-foxtrot", "in-progress-foxtrot"),
+    ];
+    for (id, description) in names {
+        insert_in_progress_l2(&mut agent, id, description);
+    }
+    let area = Rect::new(0, 0, 120, 40);
+    let buf = draw_frame(&mut agent, area);
+    let painted = buffer_text_rows(&buf).join("\n");
+    assert!(
+        painted.contains("in-progress-sampler"),
+        "{owed} painted:\n{painted}"
+    );
+    let (column, row) = find_phrase(&buf, "in-progress-sampler").expect(owed);
+    assert!(
+        agent
+            .pane_areas
+            .tasks
+            .contains(ratatui::layout::Position::new(column, row)),
+        "{owed}"
+    );
+    assert_ne!(cell_symbol(&buf, column, row), "\u{2717}");
+    assert_ne!(cell_symbol(&buf, column, row), "\u{2197}");
+    let outcome = click_left(&mut agent, column, row);
+    assert!(
+        matches!(outcome, InputOutcome::Changed),
+        "{owed} got {outcome:?}"
+    );
+    assert!(
+        !matches!(
+            outcome,
+            InputOutcome::Action(Action::KillBgTask(_))
+                | InputOutcome::Action(Action::KillSubagent(_))
+        ),
+        "{owed} got {outcome:?}"
+    );
+    assert!(
+        !agent
+            .pending_effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::KillSubagent { .. })),
+        "{owed}"
+    );
+    assert_eq!(
+        agent.active_subagent.as_deref(),
+        Some("l2-sampler"),
+        "{owed}"
+    );
+    agent.close_subagent_fullscreen();
+    assert!(agent.active_subagent.is_none(), "{owed}");
+    let buf = draw_frame(&mut agent, area);
+    let (column, row) = find_phrase(&buf, "in-progress-sampler").expect(owed);
+    let pad_x = agent.pane_areas.tasks.x;
+    assert_ne!(pad_x, column, "{owed}");
+    let outcome = click_left(&mut agent, pad_x, row);
+    assert!(
+        matches!(outcome, InputOutcome::Changed),
+        "{owed} accent-column click got {outcome:?}"
+    );
+    assert!(
+        !matches!(outcome, InputOutcome::Action(Action::KillSubagent(_))),
+        "{owed} accent-column click got {outcome:?}"
+    );
+    assert_eq!(
+        agent.active_subagent.as_deref(),
+        Some("l2-sampler"),
+        "{owed}"
+    );
+}
+
 /// Opening an L3 shows that specialist's own context. The L1 list stays L2
 /// rows plus a live L3 count. The click does not send KillSubagent. Do not
 /// paint the L1 window as the L3 context. Do not invent a context integer.
@@ -469,6 +552,20 @@ fn an_l3_context_is_visible_when_that_l3_is_opened() {
 
 fn insert_running_subagent(agent: &mut AgentView, child_session_id: &str) {
     let info = super::test_fixtures::running_subagent_info(child_session_id);
+    agent
+        .subagent_sessions
+        .insert(child_session_id.to_string(), info);
+    agent.insert_test_child(
+        child_session_id.to_string(),
+        Box::new(super::test_fixtures::make_agent()),
+    );
+}
+
+fn insert_in_progress_l2(agent: &mut AgentView, child_session_id: &str, description: &str) {
+    let mut info = super::test_fixtures::running_subagent_info(child_session_id);
+    info.description = std::sync::Arc::from(description);
+    info.attempt.depth = Some(1);
+    info.attempt.activity_label = Some("in_progress".into());
     agent
         .subagent_sessions
         .insert(child_session_id.to_string(), info);

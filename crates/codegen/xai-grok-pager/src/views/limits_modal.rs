@@ -49,8 +49,10 @@ pub struct LimitsModalState {
 
 impl LimitsModalState {
     pub fn new(snapshot: LimitsSnapshot) -> Self {
+        let mut window = ModalWindowState::new();
+        window.active_tab = initial_account_tab();
         Self {
-            window: ModalWindowState::new(),
+            window,
             snapshot,
             scroll: 0,
             zero_refresh_sent: false,
@@ -190,13 +192,36 @@ fn tone_color(tone: AllowanceMeterTone, theme: &Theme) -> ratatui::style::Color 
 }
 
 /// Personal and Business are the tabs. Limits and Credits are sections
-/// inside the open tab. Personal is first and is the default open tab.
-/// Each tab is that account's billing response only.
+/// inside the open tab. Personal is first. The card opens on Business
+/// when the next request draws business included SuperGrok period
+/// limits. Otherwise it opens on Personal. Each tab is that account's
+/// billing response only.
 const CARD_TABS: &[&str] = &["Personal", "Business"];
-/// Default open tab. Personal.
+/// Personal tab index. Default open tab unless the next request draws
+/// business included SuperGrok period limits.
 pub(crate) const LIMITS_TAB: usize = 0;
 /// Second tab. Business. That account's response only, not the personal one.
 const CREDITS_TAB: usize = 1;
+
+/// Open tab for a new Limits card.
+///
+/// Business when the next request draws business included SuperGrok
+/// period limits. Personal otherwise. Dollar credits, console team
+/// prepaid, and team postpaid Billing Credits do not select Business.
+fn initial_account_tab() -> usize {
+    use xai_grok_shell::auth::SupergrokIdentityPin;
+    use xai_grok_shell::auth::limits_pins::{MeterSource, load_limits_pins};
+    let pins = load_limits_pins();
+    let business_included = !pins.use_console
+        && pins.meter_source == Some(MeterSource::Included)
+        && pins.supergrok_identity == Some(SupergrokIdentityPin::Business)
+        && xai_grok_shell::auth::limits_pins::next_request_draws_included_period_limits();
+    if business_included {
+        CREDITS_TAB
+    } else {
+        LIMITS_TAB
+    }
+}
 
 /// `$GROK_HOME` on each call. The process grok home OnceLock misses a
 /// fixture home written after the lock.
@@ -997,6 +1022,7 @@ fn footer_label_stays_off_the_card(label: &str) -> bool {
         label,
         "Use limits"
             | "Use credits"
+            | "Using credits"
             | "Using team postpaid Billing Credits"
             | "Using console team prepaid"
     )
@@ -1040,13 +1066,15 @@ fn the_other_account_is_the_next_request(open_is_business: bool) -> bool {
 /// `Using personal limits` or `Using business limits` is inserted only when
 /// that account's session is live. A dead session keeps `Using limits` and
 /// does not paint `Use personal limits`. A live session drops the shortcut
-/// whose label is exactly `Using limits` and still paints the clickable
-/// `Use personal limits` or `Use business limits` button. That button stays
-/// after the tab click selects the account. The other stored account being
-/// the next request drops `Using limits` on this tab. An unset identity pin
-/// does not. Esc still closes the card. This card does not paint
-/// `Use limits`, `Use credits`, `Using team postpaid Billing Credits`, or
-/// `Using console team prepaid`.
+/// whose label is exactly `Using limits` and keeps one copy of the account
+/// action: `Using personal limits` or `Using business limits` when that
+/// account is the next request, otherwise the clickable `Use personal
+/// limits` or `Use business limits` button. The pin still writes from that
+/// button and from a tab click. The other stored account being the next
+/// request drops `Using limits` on this tab. An unset identity pin does
+/// not. Esc still closes the card. This card does not paint `Use limits`,
+/// `Use credits`, `Using credits`, `Using team postpaid Billing Credits`,
+/// or `Using console team prepaid`.
 fn painted_shortcuts(state: &LimitsModalState) -> Vec<Shortcut<'static>> {
     let account = account_limits_shortcut(state);
     let open_is_business = state.window.active_tab == CREDITS_TAB;
@@ -1061,19 +1089,6 @@ fn painted_shortcuts(state: &LimitsModalState) -> Vec<Shortcut<'static>> {
             if account_has_live_session(role) {
                 shortcuts.insert(0, account);
                 shortcuts.retain(|shortcut| shortcut.label != "Using limits");
-                let use_label = if open_is_business {
-                    "Use business limits"
-                } else {
-                    "Use personal limits"
-                };
-                shortcuts.insert(
-                    1,
-                    Shortcut {
-                        label: use_label,
-                        clickable: true,
-                        id: ACCOUNT_LIMITS_CHOICE_ID,
-                    },
-                );
             }
         }
         _ => {
@@ -1084,6 +1099,8 @@ fn painted_shortcuts(state: &LimitsModalState) -> Vec<Shortcut<'static>> {
         }
     }
     shortcuts.retain(|shortcut| !footer_label_stays_off_the_card(shortcut.label));
+    let mut seen = std::collections::HashSet::<&str>::new();
+    shortcuts.retain(|shortcut| seen.insert(shortcut.label));
     if !shortcuts.iter().any(|shortcut| shortcut.id == 1) {
         shortcuts.push(Shortcut {
             label: "Esc close",
@@ -6184,15 +6201,18 @@ mod tests {
     }
 
     fn line_is_chrome_or_footer(line: &str) -> bool {
-        const MARKERS: [&str; 8] = [
+        const MARKERS: [&str; 11] = [
             "Esc close",
             "Use personal limits",
             "Use business limits",
+            "Using personal limits",
+            "Using business limits",
             "Use personal credits",
             "Use business credits",
             "Use limits",
             "Using limits",
             "Use credits",
+            "Using credits",
         ];
         line.chars()
             .any(|glyph| matches!(glyph, '─' | '│' | '┌' | '┐' | '└' | '┘' | '├' | '┤'))
@@ -6354,25 +6374,21 @@ mod tests {
         };
         let mut buf = draw(&mut agent);
         if find_phrase(&buf, area, phrase).is_none() {
-            let tab = match agent.active_modal.as_ref() {
-                Some(crate::views::modal::ActiveModal::Limits { state }) => tab_labels(&buf, state)
-                    .iter()
-                    .position(|label| label == account)
-                    .and_then(|index| state.window.tab_rects.get(index).and_then(|rect| *rect)),
-                _ => None,
-            };
-            if let Some(tab) = tab {
-                agent.handle_input(
-                    &Event::Mouse(MouseEvent {
-                        kind: MouseEventKind::Down(MouseButton::Left),
-                        column: tab.x,
-                        row: tab.y,
-                        modifiers: KeyModifiers::NONE,
-                    }),
-                    &registry,
-                );
-                buf = draw(&mut agent);
+            // Show the account tab without writing the pin. A tab click
+            // through handle_input would apply that account's included
+            // pin and replace `Use business limits` with `Using business
+            // limits`. The pin-writer click is the phrase itself.
+            if let Some(crate::views::modal::ActiveModal::Limits { state }) =
+                agent.active_modal.as_mut()
+            {
+                let index = if account == "Business" {
+                    CREDITS_TAB
+                } else {
+                    LIMITS_TAB
+                };
+                state.window.active_tab = index;
             }
+            buf = draw(&mut agent);
         }
         let Some((column, row)) = find_phrase(&buf, area, phrase) else {
             let tabs = match agent.active_modal.as_ref() {
@@ -6494,6 +6510,122 @@ mod tests {
             }
         }
         assert!(misses.is_empty(), "{}", misses.join("\n"));
+    }
+
+    /// When the next request draws business included SuperGrok period
+    /// limits, a new Limits card opens on the Business tab. `Using
+    /// business limits` is the one copy of that action. `Use business
+    /// limits` is not also on the card. Bare `Using credits` is not
+    /// painted. SuperGrok is paid. The meters stay distinct.
+    #[test]
+    #[serial_test::serial]
+    fn limits_card_opens_on_business_tab_when_next_request_draws_business_included_limits() {
+        use xai_grok_shell::auth::SupergrokIdentityPin;
+        use xai_grok_shell::auth::limits_pins::{LimitsPins, MeterSource, save_limits_pins};
+
+        let owed = "when the next request draws business included SuperGrok period limits, the Limits card opens on the Business tab. Using business limits exists once. Use business limits is not also painted. Using credits is not painted.";
+        let _seeded = seed_four_cells_for_card_click(None);
+        save_limits_pins(&LimitsPins {
+            meter_source: Some(MeterSource::Included),
+            supergrok_identity: Some(SupergrokIdentityPin::Business),
+            use_console: false,
+            stay_supergrok: true,
+        })
+        .expect("business included pin");
+        let area = Rect::new(0, 0, 120, 40);
+        let mut state = fresh_card_state();
+        assert_eq!(
+            state.window.active_tab, CREDITS_TAB,
+            "{owed} active_tab is Business"
+        );
+        let buf = render_seeded_card(&mut state, area);
+        let tabs = tab_labels(&buf, &state);
+        assert_eq!(
+            tabs,
+            ["Personal", "Business"],
+            "{owed} tabs stay Personal then Business"
+        );
+        let card = painted_lines(&buf, area).join("\n");
+        assert!(
+            card.contains("Using business limits")
+                && card.matches("Using business limits").count() == 1,
+            "{owed} Using business limits exists once:\n{card}"
+        );
+        assert!(
+            !card.contains("Use business limits"),
+            "{owed} Use business limits is not a second copy:\n{card}"
+        );
+        assert!(
+            !card.contains("Using credits"),
+            "{owed} bare Using credits is not painted:\n{card}"
+        );
+        assert!(
+            !card.contains("Using personal limits"),
+            "{owed} only the account the next request draws says Using:\n{card}"
+        );
+        let labels = painted_shortcuts(&state)
+            .into_iter()
+            .map(|shortcut| shortcut.label)
+            .collect::<Vec<_>>();
+        let use_personal = labels
+            .iter()
+            .filter(|label| **label == "Use personal limits")
+            .count();
+        let use_business = labels
+            .iter()
+            .filter(|label| **label == "Use business limits")
+            .count();
+        let using_credits = labels
+            .iter()
+            .filter(|label| **label == "Using credits")
+            .count();
+        assert!(
+            use_personal <= 1 && use_business == 0 && using_credits == 0,
+            "{owed} each action exists at most once. labels={labels:?}"
+        );
+    }
+
+    /// `Use personal limits`, `Use business limits`, and `Using credits`
+    /// each exist at most once on the card. The Personal tab that is not
+    /// the next request still offers `Use personal limits` once so the
+    /// pin-writer click stays.
+    #[test]
+    #[serial_test::serial]
+    fn use_personal_use_business_and_using_credits_each_exist_once() {
+        let owed = "Use personal limits, Use business limits, and Using credits each exist once. They are not painted in the tab body and again in the footer.";
+        let _seeded = seed_four_cells_for_card_click(None);
+        let area = Rect::new(0, 0, 120, 40);
+        let mut state = fresh_card_state();
+        assert_eq!(
+            state.window.active_tab, LIMITS_TAB,
+            "{owed} without a business included pin the card opens on Personal"
+        );
+        let mut buf = render_seeded_card(&mut state, area);
+        let personal = painted_lines(&buf, area).join("\n");
+        assert_eq!(
+            personal.matches("Use personal limits").count(),
+            1,
+            "{owed} Use personal limits exists once on Personal:\n{personal}"
+        );
+        assert!(
+            !personal.contains("Use business limits") && !personal.contains("Using credits"),
+            "{owed} Personal does not also paint Use business limits or Using credits:\n{personal}"
+        );
+        assert!(
+            select_account_tab(&mut state, &buf, "Business"),
+            "{owed} the Business tab is on the card"
+        );
+        buf = render_seeded_card(&mut state, area);
+        let business = painted_lines(&buf, area).join("\n");
+        assert_eq!(
+            business.matches("Use business limits").count(),
+            1,
+            "{owed} Use business limits exists once on Business:\n{business}"
+        );
+        assert!(
+            !business.contains("Use personal limits") && !business.contains("Using credits"),
+            "{owed} Business does not also paint Use personal limits or Using credits:\n{business}"
+        );
     }
 
     /// A click on each limits button sets that account's included pin and session.
@@ -8381,6 +8513,10 @@ mod tests {
             !has_label(&live_labels, "Using limits"),
             "a live personal session does not also paint Using limits: {live_labels:?}"
         );
+        assert!(
+            !has_label(&live_labels, "Use personal limits"),
+            "Using personal limits is the one copy of that action: {live_labels:?}"
+        );
     }
 
     /// Only the account the next request draws says Using. The other stored
@@ -8475,6 +8611,11 @@ mod tests {
         };
 
         let mut state = fresh_card_state();
+        assert_eq!(
+            state.window.active_tab, CREDITS_TAB,
+            "{owed} the card opens on the Business tab when the next request draws business included SuperGrok period limits"
+        );
+        state.window.active_tab = LIMITS_TAB;
         let personal_while_business_is_next = paint(&mut state);
         assert!(
             personal_while_business_is_next.contains(&format!("{personal_email} - personal"))
@@ -8498,10 +8639,13 @@ mod tests {
         let business_screen = paint(&mut state);
         assert!(
             business_screen.contains("Using business limits")
+                && business_screen.matches("Using business limits").count() == 1
+                && !business_screen.contains("Use business limits")
+                && !business_screen.contains("Using credits")
                 && !business_screen.contains("Using limits")
                 && !business_screen.contains("Using personal limits")
                 && !says_both(&business_screen),
-            "{owed} only Business says Using:\n{business_screen}"
+            "{owed} only Business says Using, and Using business limits exists once:\n{business_screen}"
         );
         assert!(
             business_screen.contains(&format!("{personal_email} - personal"))
@@ -8669,7 +8813,10 @@ mod tests {
         };
 
         let mut state = fresh_card_state();
-        state.window.active_tab = CREDITS_TAB;
+        assert_eq!(
+            state.window.active_tab, CREDITS_TAB,
+            "{owed} the card opens on the Business tab when the next request draws business included SuperGrok period limits"
+        );
         let business_screen = paint(&mut state);
         assert!(
             business_screen.matches(&personal_label).count() == 1
@@ -8683,10 +8830,13 @@ mod tests {
         );
         assert!(
             business_screen.contains("Using business limits")
+                && business_screen.matches("Using business limits").count() == 1
+                && !business_screen.contains("Use business limits")
+                && !business_screen.contains("Using credits")
                 && !business_screen.contains("Using limits")
                 && !business_screen.contains("Using personal limits")
                 && !says_both(&business_screen),
-            "{owed} only the business account says Using:\n{business_screen}"
+            "{owed} only the business account says Using, and Using business limits exists once:\n{business_screen}"
         );
         assert!(
             business_screen.contains("console API key") && business_screen.contains("3 sessions"),

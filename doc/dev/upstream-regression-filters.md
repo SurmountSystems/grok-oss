@@ -1366,6 +1366,8 @@ Named tests are Surmount / grok-oss fork contracts.
 | `nested_overlay_title_elapsed_matches_host_subagent_finished_duration` | Overlay title elapsed equals host `duration_ms` (54m34s), not spawn-wall 1h14m |
 | `reopening_finished_nested_overlay_does_not_start_climbing_title_clock` | Reopening a finished overlay must idle the child and keep host duration |
 | `subagents_live_list_drops_responding_after_subagent_finished` | Live Subagents list must not keep Responding after `SubagentFinished` |
+| `finished_nested_agent_is_not_painted_responding_with_a_climbing_timer_and_live_cell_is_not_0k_after_tool_work` | Finished nested agent is not painted Responding with a climbing timer; live status cell is not 0K/0K after tool work when usage.jsonl has input_tokens |
+| `vacant_occupancy_restore_drops_responding_when_meta_says_host_exited` | Vacant occupancy restore of a host that already exited must not stay painted Responding |
 | `l2_finish_surfaces_to_l1_without_opening_nested_overlay` | L2 finish surfaces on the parent session; wait tool completes |
 | `wait_on_completed_nested_id_missing_from_map_does_not_stay_running` | Completed nested id missing from the map is not treated as still running |
 | `silent_subagent_completed_wake_surfaces_turn_completed` | Silent `subagent-completed-*` wake still paints TurnCompleted |
