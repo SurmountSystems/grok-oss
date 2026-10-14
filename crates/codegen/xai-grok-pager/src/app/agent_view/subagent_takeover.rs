@@ -386,7 +386,7 @@ impl AgentView {
             )
         };
         let borrowed_specialists = self.mirror_parented_specialists_for_overlay(child_sid);
-        let activity_label: Option<String> = if is_running {
+        let mut activity_label: Option<String> = if is_running {
             self.subagent_views
                 .get(child_sid)
                 .and_then(|cv| match cv.resolve_turn_activity() {
@@ -405,6 +405,14 @@ impl AgentView {
         } else {
             None
         };
+        // Unlabeled TaskOutput keeps `Waiting on task output…` on the tracker.
+        // This overlay paints `Waiting on 1 task...` when that wait has one
+        // nested specialist, including an empty description.
+        if activity_label.as_deref() == Some(WAITING_ON_TASK_OUTPUT)
+            && overlay_nested_specialist_count(self, child_sid) == 1
+        {
+            activity_label = Some(WAITING_ON_ONE_TASK.to_string());
+        }
         let title_x = padded.x + 1;
         buf.set_span_safe(
             title_x,
@@ -564,9 +572,10 @@ impl AgentView {
     /// A left click opens that L3 session view.
     /// `Waiting on 1 task...` wins when that row is painted, including when a
     /// description phrase is also on screen. The hit is the lowest row of
-    /// that phrase. A bottom `1 subagent still running` cue for this one-task
-    /// wait is rewritten to the same phrase so the lower row is the control.
-    /// A description phrase stays the target when the waiting row is not painted.
+    /// that phrase. An unlabeled `Waiting on task output…` title and a bottom
+    /// `1 subagent still running` cue for this one-task wait are rewritten to
+    /// the same phrase so the lower row is the control. A description phrase
+    /// stays the target when the waiting row is not painted.
     fn record_overlay_specialist_status_hit(
         &mut self,
         buf: &mut Buffer,
@@ -588,14 +597,17 @@ impl AgentView {
             })
             .collect();
         specialists.sort_by_key(|(_, _, started)| *started);
-        if specialists.len() == 1 && painted_phrase_rect(buf, area, WAITING_ON_ONE_TASK).is_some() {
-            paint_one_task_wait_over_still_running(buf, area);
-            if let Some(rect) = lowest_painted_phrase_rect(buf, area, WAITING_ON_ONE_TASK)
-                && let Some((id, _, _)) = specialists.first()
-            {
-                self.hit_overlay_nested_status.set(Some(rect));
-                self.overlay_nested_status_child_sid = Some(id.clone());
-                return;
+        if specialists.len() == 1 {
+            paint_one_task_wait_over_phrase(buf, area, WAITING_ON_TASK_OUTPUT);
+            if painted_phrase_rect(buf, area, WAITING_ON_ONE_TASK).is_some() {
+                paint_one_task_wait_over_still_running(buf, area);
+                if let Some(rect) = lowest_painted_phrase_rect(buf, area, WAITING_ON_ONE_TASK)
+                    && let Some((id, _, _)) = specialists.first()
+                {
+                    self.hit_overlay_nested_status.set(Some(rect));
+                    self.overlay_nested_status_child_sid = Some(id.clone());
+                    return;
+                }
             }
         }
         for (id, phrase, _) in specialists {
@@ -819,14 +831,30 @@ impl AgentView {
 }
 
 const WAITING_ON_ONE_TASK: &str = "Waiting on 1 task...";
+const WAITING_ON_TASK_OUTPUT: &str = "Waiting on task output…";
 const ONE_SUBAGENT_STILL_RUNNING: &str = "1 subagent still running";
+
+fn overlay_nested_specialist_count(view: &AgentView, child_sid: &str) -> usize {
+    view.subagent_sessions
+        .values()
+        .filter(|info| {
+            info.is_running() && info.attempt.parent_session_id.as_deref() == Some(child_sid)
+        })
+        .count()
+}
 
 /// A one-task wait's bottom status still says `1 subagent still running`.
 /// Rewrite that lowest cue so the row paints `Waiting on 1 task...`.
 /// The title row may keep the same words. Leave the row alone when it
 /// already paints the waiting phrase.
 fn paint_one_task_wait_over_still_running(buf: &mut Buffer, area: Rect) {
-    let Some(still) = lowest_painted_phrase_rect(buf, area, ONE_SUBAGENT_STILL_RUNNING) else {
+    paint_one_task_wait_over_phrase(buf, area, ONE_SUBAGENT_STILL_RUNNING);
+}
+
+/// Rewrite the lowest run of `old` to `Waiting on 1 task...`, padded to the
+/// old width so a longer unlabeled wait does not leave leftover glyphs.
+fn paint_one_task_wait_over_phrase(buf: &mut Buffer, area: Rect, old: &str) {
+    let Some(still) = lowest_painted_phrase_rect(buf, area, old) else {
         return;
     };
     if painted_phrase_rect_on_row(buf, area, still.y, WAITING_ON_ONE_TASK).is_some() {
