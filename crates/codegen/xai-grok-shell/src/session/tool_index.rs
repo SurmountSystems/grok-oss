@@ -255,11 +255,21 @@ struct Bm25Hit {
 }
 
 /// Split on non-ASCII-alphanumeric, ASCII-lowercase, drop empty tokens.
+/// A plural that is a word ending in "e" plus "s" ("pages") folds to that
+/// word so a singular query token matches the tool name. Words that do not
+/// end in "es", and words that end in "ses" ("databases"), stay as written.
 fn tokenize_bm25(text: &str) -> Vec<String> {
     text.split(|c: char| !c.is_ascii_alphanumeric())
         .filter(|token| !token.is_empty())
-        .map(|token| token.to_ascii_lowercase())
+        .map(|token| fold_trailing_es_plural(token.to_ascii_lowercase()))
         .collect()
+}
+
+fn fold_trailing_es_plural(mut token: String) -> String {
+    if token.len() >= 5 && token.ends_with("es") && !token.ends_with("ses") {
+        token.pop();
+    }
+    token
 }
 
 /// In-tree Okapi BM25. Document id is the corpus index.

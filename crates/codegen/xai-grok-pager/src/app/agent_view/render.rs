@@ -234,40 +234,6 @@ fn scrollback_rect_left_of_soft_plan(
     Rect { width, ..content }
 }
 
-/// The plan box keeps the revise sentence. The bottom composer does not
-/// paint that same sentence while the soft plan pane is open.
-fn blank_draft_painted_in_rect(buf: &mut Buffer, area: Rect, draft: &str) {
-    if draft.is_empty() || area.width == 0 || area.height == 0 {
-        return;
-    }
-    for y in area.y..area.y.saturating_add(area.height) {
-        let mut symbols: Vec<(u16, String)> = Vec::new();
-        let mut flat = String::new();
-        for x in area.x..area.x.saturating_add(area.width) {
-            let Some(cell) = buf.cell((x, y)) else {
-                continue;
-            };
-            let sym = cell.symbol().to_string();
-            flat.push_str(&sym);
-            symbols.push((x, sym));
-        }
-        let Some(start) = flat.find(draft) else {
-            continue;
-        };
-        let end = start + draft.len();
-        let mut byte_at = 0usize;
-        for (x, sym) in &symbols {
-            let next = byte_at + sym.len();
-            if next > start && byte_at < end {
-                if let Some(cell) = buf.cell_mut((*x, y)) {
-                    cell.set_symbol(" ");
-                }
-            }
-            byte_at = next;
-        }
-    }
-}
-
 /// Status chips the soft plan pane cleared.
 ///
 /// The context figure ends at the pane. The unread placeholder
@@ -2010,12 +1976,14 @@ impl AgentView {
                 chip_style
             } else if let Some(pct) = included_pct {
                 let used = pct.round().clamp(0.0, 100.0) as u8;
+                // Under 80 percent used the chip is cyan. Operator green
+                // stays on the rail and the caret.
                 let color = if used >= 100 {
                     theme.accent_error
                 } else if used >= 80 {
                     theme.warning
                 } else {
-                    theme.accent_success
+                    theme.accent_system
                 };
                 let mut chip_style = Style::default().fg(color).bg(theme.bg_base);
                 if self.hit_credits.hovered {
@@ -3754,10 +3722,8 @@ impl AgentView {
             } else {
                 None
             };
-            let soft_plan_hides_bottom_draft = self
-                .line_viewer
-                .as_ref()
-                .is_some_and(|viewer| viewer.is_soft_plan_side_pane());
+            // Typed glyphs stay in this planning input, on the caret row.
+            // A soft plan pane must not erase them.
             let prompt_result_inner = self.prompt.draw(
                 buf,
                 layout.prompt,
@@ -3766,9 +3732,6 @@ impl AgentView {
                 Some(&info),
                 voice_overlay,
             );
-            if soft_plan_hides_bottom_draft {
-                blank_draft_painted_in_rect(buf, layout.prompt, self.prompt.text());
-            }
             let copy_button = paint_inset_composer_copy(buf, layout.prompt, &theme);
             self.set_composer_copy_button(copy_button);
             if self.plan_approval_view.is_some() {
@@ -4237,11 +4200,6 @@ impl AgentView {
                     } else {
                         viewer.plan_mut().active_commenting_range =
                             self.casual_commenting_range.clone();
-                    }
-                    if viewer.kind
-                        == crate::views::file_search::line_viewer::LineViewerKind::PlanPreview
-                    {
-                        viewer.plan_mut().revision_prompt_text = self.prompt.text().to_string();
                     }
                     render_line_viewer(
                         buf,
@@ -6977,6 +6935,217 @@ mod plan_approval_draw_contract_tests {
         );
     }
 
+    /// Characters typed into a planning input paint inside that input, at the
+    /// caret. They do not paint in another region. The Operator typed `BBBBB`
+    /// and could not see it where they were typing. The first row shows those
+    /// glyphs in `text_primary` at the caret. After the text wraps, the second
+    /// row stays `text_primary` inside that same input. A first row whose
+    /// glyphs are missing, the wrong color, or outside that input fails.
+    #[test]
+    fn planning_input_paints_typed_text_at_the_caret() {
+        use crate::theme::{Theme, cache};
+
+        let _pin = cache::pin_theme();
+        cache::set(crate::theme::ThemeKind::Doge);
+        let theme = Theme::current();
+        let body = theme.text_primary;
+        let owed = "characters typed into a planning input paint inside that input, at the caret. They do not paint in another region";
+
+        fn interior(prompt: Rect) -> Rect {
+            Rect {
+                x: prompt.x.saturating_add(1),
+                y: prompt.y.saturating_add(1),
+                width: prompt.width.saturating_sub(2),
+                height: prompt.height.saturating_sub(2),
+            }
+        }
+
+        fn covers(rect: Rect, x: u16, y: u16) -> bool {
+            x >= rect.x
+                && y >= rect.y
+                && x < rect.x.saturating_add(rect.width)
+                && y < rect.y.saturating_add(rect.height)
+        }
+
+        fn find_run(buf: &Buffer, area: Rect, needle: &str) -> Option<(u16, u16)> {
+            let chars: Vec<char> = needle.chars().collect();
+            let n = chars.len();
+            if n == 0 || area.width == 0 || area.height == 0 {
+                return None;
+            }
+            for y in area.y..area.y.saturating_add(area.height) {
+                let xs: Vec<u16> = (area.x..area.x.saturating_add(area.width)).collect();
+                if xs.len() < n {
+                    continue;
+                }
+                for i in 0..=xs.len() - n {
+                    let matched = (0..n).all(|k| {
+                        buf.cell((xs[i + k], y))
+                            .is_some_and(|cell| cell.symbol() == chars[k].to_string())
+                    });
+                    if matched {
+                        return Some((xs[i], y));
+                    }
+                }
+            }
+            None
+        }
+
+        fn run_outside(buf: &Buffer, area: Rect, input: Rect, needle: &str) -> bool {
+            let chars: Vec<char> = needle.chars().collect();
+            let n = chars.len();
+            if n == 0 || area.width == 0 || area.height == 0 {
+                return false;
+            }
+            for y in area.y..area.y.saturating_add(area.height) {
+                let xs: Vec<u16> = (area.x..area.x.saturating_add(area.width)).collect();
+                if xs.len() < n {
+                    continue;
+                }
+                for i in 0..=xs.len() - n {
+                    let matched = (0..n).all(|k| {
+                        buf.cell((xs[i + k], y))
+                            .is_some_and(|cell| cell.symbol() == chars[k].to_string())
+                    });
+                    if matched && !covers(input, xs[i], y) {
+                        return true;
+                    }
+                }
+            }
+            false
+        }
+
+        fn assert_body(
+            buf: &Buffer,
+            x: u16,
+            y: u16,
+            needle: &str,
+            body: ratatui::style::Color,
+            where_: &str,
+        ) {
+            for (i, ch) in needle.chars().enumerate() {
+                let cell = buf
+                    .cell((x.saturating_add(i as u16), y))
+                    .unwrap_or_else(|| panic!("{where_}: missing {ch}"));
+                assert_eq!(
+                    cell.symbol(),
+                    ch.to_string(),
+                    "{where_}: glyph {ch} is missing from the planning input"
+                );
+                assert_eq!(
+                    cell.fg, body,
+                    "{where_}: glyph {ch} is the wrong color. Body color is text_primary, got {:?}",
+                    cell.fg
+                );
+            }
+        }
+
+        let mut agent = make_agent();
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        let request = crate::views::plan_approval_view::ExitPlanModeExtRequest {
+            session_id: "test-session".into(),
+            tool_call_id: "call-file-plan".into(),
+            plan_content: Some("# Isolated plan.md\n\nDo the thing\n".into()),
+        };
+        agent.plan_approval_view = Some(
+            crate::views::plan_approval_view::PlanApprovalViewState::with_source(
+                request,
+                crate::views::plan_approval_view::PlanReviewSource::FileBacked,
+                agent.prompt.stash(),
+                tx,
+            ),
+        );
+        agent.plan_mode_active = true;
+        agent.show_plan_preview_if_available();
+        if let Some(ref mut pav) = agent.plan_approval_view {
+            pav.focus = crate::views::plan_approval_view::PlanApprovalFocus::Prompt;
+        }
+
+        let one_row = "BBBBB";
+        agent.prompt.set_text(one_row);
+        agent.prompt.set_cursor(one_row.len());
+        let (buf, text) = draw_buf(&mut agent);
+        let prompt = agent.pane_areas.prompt;
+        assert!(
+            prompt.width > 4 && prompt.height > 2,
+            "owed: {owed}. planning input must have a painted area; got {prompt:?}\n{text}"
+        );
+        let top_left = buf.cell((prompt.x, prompt.y)).expect("prompt stroke");
+        assert_eq!(top_left.symbol(), "\u{250c}");
+        assert_eq!(
+            top_left.fg, theme.prompt_border_active,
+            "the planning prompt stroke stays white"
+        );
+        let box_in = interior(prompt);
+        let Some((x, y)) = find_run(&buf, box_in, one_row) else {
+            panic!(
+                "owed: {owed}. first row glyphs are missing from the planning input at the caret:\n{text}"
+            );
+        };
+        assert_body(&buf, x, y, one_row, body, "first row");
+        let caret_x = x.saturating_add(one_row.chars().count() as u16);
+        assert!(
+            covers(box_in, caret_x, y),
+            "owed: {owed}. the caret cell after {one_row} is outside the planning input ({caret_x}, {y}) prompt {prompt:?}"
+        );
+        let screen = Rect::new(0, 0, 100, 40);
+        assert!(
+            !run_outside(&buf, screen, prompt, one_row),
+            "owed: {owed}. {one_row} painted outside the planning input:\n{text}"
+        );
+
+        let marker = "SECONDROW";
+        let wrapped = format!("{}\n{marker}", "B".repeat(130));
+        agent.prompt.set_text(&wrapped);
+        agent.prompt.set_cursor(wrapped.len());
+        let (buf, text) = draw_buf(&mut agent);
+        let prompt = agent.pane_areas.prompt;
+        let box_in = interior(prompt);
+        let Some((first_x, first_y)) = find_run(&buf, box_in, "BBBBB") else {
+            panic!(
+                "owed: {owed}. first row glyphs are missing, the wrong color, or outside that input:\n{text}"
+            );
+        };
+        assert_body(&buf, first_x, first_y, "BBBBB", body, "wrapped first row");
+        let second_y = first_y.saturating_add(1);
+        assert!(
+            covers(box_in, first_x, second_y),
+            "owed: {owed}. the second row is outside the planning input"
+        );
+        let second_white = (box_in.x..box_in.x.saturating_add(box_in.width)).any(|x| {
+            buf.cell((x, second_y)).is_some_and(|cell| {
+                (cell.symbol() == "B" || cell.symbol() == "S") && cell.fg == body
+            })
+        });
+        assert!(
+            second_white,
+            "owed: {owed}. the second row must stay text_primary inside the planning input:\n{text}"
+        );
+        let Some((mark_x, mark_y)) = find_run(&buf, box_in, marker) else {
+            panic!(
+                "owed: {owed}. the second row must stay text_primary inside the planning input. {marker} is missing:\n{text}"
+            );
+        };
+        assert!(
+            mark_y > first_y,
+            "owed: {owed}. {marker} must wrap onto a later row inside the planning input. first row y={first_y}, marker y={mark_y}"
+        );
+        assert_body(&buf, mark_x, mark_y, marker, body, "second row");
+        let second_caret_x = mark_x.saturating_add(marker.chars().count() as u16);
+        assert!(
+            covers(box_in, second_caret_x, mark_y),
+            "owed: {owed}. the caret on the second row is outside the planning input"
+        );
+        assert!(
+            !run_outside(&buf, screen, prompt, "BBBBB"),
+            "owed: {owed}. first row glyphs painted outside the planning input:\n{text}"
+        );
+        assert!(
+            !run_outside(&buf, screen, prompt, marker),
+            "owed: {owed}. second row glyphs painted outside the planning input:\n{text}"
+        );
+    }
+
     /// While voice is idle no indicator row exists, so the overlay keeps
     /// reaching the prompt as before.
     #[test]
@@ -7833,6 +8002,102 @@ mod status_credits_meter_tests {
         );
         forbid(&row, "status row");
         forbid(&hover, "hover");
+    }
+
+    /// Included used percent is 8. The status row paints `limits 92%`.
+    /// That chip is cyan. Operator green stays on the rail and the caret.
+    #[test]
+    #[serial_test::serial]
+    fn green_accent_is_only_on_words_the_operator_said() {
+        use crate::views::credit_bar::SamplingIdentityKind;
+        use ratatui::style::Color;
+
+        let _theme_guard = crate::theme::cache::pin_theme();
+        crate::theme::cache::set(crate::theme::ThemeKind::Doge);
+        let theme = crate::theme::Theme::current();
+
+        let home = tempfile::TempDir::new().expect("temp GROK_HOME");
+        let _env = xai_grok_test_support::EnvGuard::set("GROK_HOME", home.path());
+        xai_grok_shell::auth::limits_pins::save_limits_pins(
+            &xai_grok_shell::auth::limits_pins::LimitsPins {
+                stay_supergrok: false,
+                use_console: false,
+                meter_source: Some(xai_grok_shell::auth::limits_pins::MeterSource::Included),
+                supergrok_identity: None,
+            },
+        )
+        .expect("included pin");
+
+        crate::appearance::cache::set_hide_header(false);
+        let mut agent = make_agent();
+        agent.sampling_identity = SamplingIdentityKind::SuperGrokSession;
+        agent.credit_balance = Some(CreditBalance {
+            usage_pct: 8.0,
+            effective_usage_pct: 8.0,
+            included_usage_known: true,
+            ..CreditBalance::default()
+        });
+
+        let area = Rect::new(0, 0, 120, 40);
+        let mut buf = Buffer::empty(area);
+        let mut scratch = ScratchBuffer::new();
+        agent.draw(
+            area,
+            &mut buf,
+            &ActionRegistry::defaults(),
+            &mut scratch,
+            None,
+            false,
+            crate::app::agent_view::BannerSlotParams::none(),
+            false,
+            false,
+            &mut Vec::new(),
+            super::AppRenderParams::default(),
+        );
+
+        let label = "limits 92%";
+        let owed = "Operator green is not painted on a line the Operator did not write";
+        let start = find_limits_span(&buf, label);
+        assert!(
+            start.is_some(),
+            "{owed}: the status row must paint `{label}` when included used percent is 8"
+        );
+        let (x0, y) = start.expect("limits 92%");
+        for (i, ch) in label.chars().enumerate() {
+            let x = x0 + u16::try_from(i).expect("span index");
+            let cell = buf.cell((x, y)).expect("limits 92% cell");
+            assert_eq!(
+                cell.symbol(),
+                ch.to_string(),
+                "{owed}: `{label}` must be contiguous cells"
+            );
+            assert_ne!(cell.fg, theme.accent_user, "{owed}");
+            assert_ne!(cell.fg, Color::Rgb(0, 255, 0), "{owed}");
+            assert_eq!(cell.fg, theme.accent_system, "{owed}");
+        }
+    }
+
+    fn find_limits_span(buf: &Buffer, label: &str) -> Option<(u16, u16)> {
+        let needle: Vec<char> = label.chars().collect();
+        for y in 0..buf.area.height {
+            let mut chars: Vec<(u16, char)> = Vec::new();
+            for x in 0..buf.area.width {
+                let Some(cell) = buf.cell((x, y)) else {
+                    continue;
+                };
+                for ch in cell.symbol().chars() {
+                    chars.push((x, ch));
+                }
+            }
+            let flat: Vec<char> = chars.iter().map(|(_, ch)| *ch).collect();
+            if let Some(index) = flat
+                .windows(needle.len())
+                .position(|window| window == needle.as_slice())
+            {
+                return Some((chars[index].0, y));
+            }
+        }
+        None
     }
 
     /// Included used percent is 10. The status row paints percent remaining

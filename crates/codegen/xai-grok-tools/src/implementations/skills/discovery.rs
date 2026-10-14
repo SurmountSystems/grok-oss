@@ -149,13 +149,46 @@ fn coerce_to_string(value: Option<&serde_json::Value>) -> Option<String> {
     }
 }
 
-/// Parse a boolean frontmatter value: only a YAML `true` or the string `"true"`
-/// is true; anything else (including absent) is false. Callers apply any
-/// field-specific default for the absent case.
-fn parse_boolean_frontmatter(value: Option<&serde_json::Value>) -> bool {
-    use serde_json::Value;
-    matches!(value, Some(Value::Bool(true)))
-        || matches!(value, Some(Value::String(s)) if s == "true")
+/// Whether a top-level `key:` scalar is the literal token `true`, `"true"`, or
+/// `'true'`. `None` means the key is absent, so the caller applies that field's
+/// default. YAML 1.1 aliases (`yes`, `on`, `y`, `True`) and numbers are present
+/// but not true: `serde_saphyr` would already have turned `yes` into
+/// `Bool(true)`, which is why this reads the raw line instead of the JSON value.
+fn literal_true_frontmatter(yaml: &str, key: &str) -> Option<bool> {
+    for line in yaml.lines() {
+        if line.is_empty() || line.starts_with([' ', '\t']) {
+            continue;
+        }
+        let Some((raw_key, raw_value)) = line.split_once(':') else {
+            continue;
+        };
+        if raw_key.trim() != key {
+            continue;
+        }
+        return Some(scalar_is_literal_true(raw_value));
+    }
+    None
+}
+
+/// Unquoted `true`, or one pair of single or double quotes around `true`.
+/// An unquoted value drops a trailing ` # comment`. Anything else is false.
+fn scalar_is_literal_true(raw_value: &str) -> bool {
+    let raw = raw_value.trim();
+    let token = if let Some(rest) = raw.strip_prefix('"') {
+        match rest.find('"') {
+            Some(end) => &rest[..end],
+            None => return false,
+        }
+    } else if let Some(rest) = raw.strip_prefix('\'') {
+        match rest.find('\'') {
+            Some(end) => &rest[..end],
+            None => return false,
+        }
+    } else {
+        raw.split_once(" #")
+            .map_or(raw, |(before, _)| before.trim_end())
+    };
+    token == "true"
 }
 
 /// Parse the `origin:` provenance slug (the tool that wrote the skill, e.g. `learn`). The value is
@@ -558,12 +591,14 @@ pub fn parse_skill_frontmatter(
         model: coerce_to_string(frontmatter.get("model")),
         effort: coerce_to_string(frontmatter.get("effort")),
         // Absent `user-invocable` defaults to true; `disable-model-invocation` to false.
-        user_invocable: frontmatter
-            .get("user-invocable")
-            .is_none_or(|v| parse_boolean_frontmatter(Some(v))),
-        disable_model_invocation: parse_boolean_frontmatter(
-            frontmatter.get("disable-model-invocation"),
-        ),
+        // Only the literal token `true` (or `"true"` / `'true'`) is true. Read the
+        // raw line so YAML 1.1 `yes` / `on` do not count.
+        user_invocable: literal_true_frontmatter(yaml_content, "user-invocable").unwrap_or(true),
+        disable_model_invocation: literal_true_frontmatter(
+            yaml_content,
+            "disable-model-invocation",
+        )
+        .unwrap_or(false),
         when_to_use,
         has_user_specified_description,
         paths,

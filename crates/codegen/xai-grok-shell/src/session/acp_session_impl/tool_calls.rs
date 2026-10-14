@@ -3725,12 +3725,26 @@ impl SessionActor {
         vec![]
     }
     /// One sentence when plan mode blocks a write. An edit path is the full
-    /// path the tool tried to write. A patch with no single path does not
-    /// invent one.
+    /// path the tool tried to write. The same sentence names session
+    /// `plan.md` (the main plan file beside the tracker path) so the model
+    /// knows that editable path. A patch with no single path does not invent
+    /// an edit path.
     pub(super) fn plan_mode_edit_rejected_message(&self, edit_path: Option<&Path>) -> String {
+        let plan_file =
+            crate::session::plan_mode::main_plan_file_path(self.plan_mode.lock().plan_file_path());
         match edit_path {
-            Some(path) => crate::session::plan_mode::plan_mode_blocked_write_sentence(path),
-            None => "Rejected: plan mode blocked this patch write.".to_owned(),
+            Some(path) => {
+                let blocked = crate::session::plan_mode::plan_mode_blocked_write_sentence(path);
+                let blocked = blocked.strip_suffix('.').unwrap_or(blocked.as_str());
+                format!(
+                    "{blocked}, and the one editable path is {}.",
+                    plan_file.display()
+                )
+            }
+            None => format!(
+                "Rejected: plan mode blocked this patch write, and the one editable path is {}.",
+                plan_file.display()
+            ),
         }
     }
     pub(super) async fn handle_tool_not_executed(

@@ -92,20 +92,22 @@ fn mark_next_request_row(
         }
         return;
     }
-    let next_email = oauth_email_for_next_request(map, pin);
-    if let Some(email) = next_email.as_deref()
-        && let Some(row) = rows
-            .iter_mut()
-            .find(|row| row.role != "console" && row.email.as_deref() == Some(email))
-    {
-        row.current = true;
-        return;
-    }
+    // The same email can be stored on both tokens. Match the OAuth slot
+    // first so a Business pin does not mark the personal row current.
     let want = if pin == Some(SupergrokIdentityPin::Business) {
         "business"
     } else {
         "personal"
     };
+    let next_email = oauth_email_for_next_request(map, pin);
+    if let Some(email) = next_email.as_deref()
+        && let Some(row) = rows
+            .iter_mut()
+            .find(|row| row.role == want && row.email.as_deref() == Some(email))
+    {
+        row.current = true;
+        return;
+    }
     if let Some(row) = rows.iter_mut().find(|row| row.role == want) {
         row.current = true;
     }

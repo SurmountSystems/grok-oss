@@ -216,6 +216,48 @@ impl AgentView {
         crate::app::subagent::replay_resumed_child_before_live_block(self, child_sid);
         self.subagent_views.get_mut(child_sid).map(|v| &mut **v)
     }
+    /// The open L3 frame paints that specialist's own context.
+    /// Both the used count and the window have to be present and above zero.
+    /// A missing figure stays off the frame. It is not printed as 0, and the
+    /// L1 sampling window is not copied onto the specialist.
+    fn paint_opened_l3_context(&mut self, child_sid: &str) {
+        let stamp = {
+            let Some(info) = self.subagent_sessions.get(child_sid) else {
+                return;
+            };
+            if info.attempt.depth != Some(2) {
+                return;
+            }
+            match (
+                info.attempt.tokens_used.filter(|&count| count > 0),
+                info.attempt
+                    .context_window_tokens
+                    .filter(|&count| count > 0),
+            ) {
+                (Some(used), Some(window)) => Some((used, window)),
+                _ => None,
+            }
+        };
+        let Some(child) = self.subagent_views.get_mut(child_sid) else {
+            return;
+        };
+        if let Some((used, window)) = stamp {
+            child.context_state = Some(xai_grok_shell::session::ContextInfo::from_notification(
+                used, window,
+            ));
+            child.session_sampling_window = Some(window);
+            child.session.models.override_context_window(window);
+            return;
+        }
+        if child
+            .context_state
+            .as_ref()
+            .is_some_and(|ctx| ctx.used == 0)
+        {
+            child.context_state = None;
+        }
+    }
+
     /// Paint the takeover frame (title row with status, elapsed, and the `[\u{2717}]` close button) around the child view's own `draw`.
     /// Returns the child's cursor and post-flush so the parent frame forwards them unchanged.
     #[expect(clippy::too_many_arguments)]
@@ -479,6 +521,7 @@ impl AgentView {
         }
         let mut child_cursor = None;
         let mut child_post_flush = None;
+        self.paint_opened_l3_context(child_sid);
         if inner.width > 5
             && inner.height > 3
             && let Some(child_view) = self.subagent_views.get_mut(child_sid)

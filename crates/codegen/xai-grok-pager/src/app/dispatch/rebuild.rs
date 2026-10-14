@@ -2973,16 +2973,34 @@ mod tests {
         );
     }
 
+    /// Owed outcome: `/rebuild` restarts every running grok-oss process, including
+    /// peers that did not receive the command. Every in-flight task resumes the
+    /// same way a network interruption resumes it. The relaunch continues that
+    /// task. A session that prints "Session resumed • context restored" and then
+    /// leaves "Fix the plan mode screen" stopped is a failure. The leader stays
+    /// up while a turn is in flight so session load can continue. SIGINT still
+    /// quits. The prompt write-ahead log, an unsent composer draft, and
+    /// `pending_prompts.json` stay across that relaunch. Unstaged work is not
+    /// the compile source.
     #[test]
+    #[serial_test::serial(GROK_HOME)]
     fn rebuild_restarts_every_running_grok_oss_process_and_resumes_in_flight_tasks_like_a_network_interruption()
      {
         // `/rebuild` gracefully restarts every running grok-oss process, and every
         // in-flight task resumes the same way a network interruption resumes it.
         // The relaunch is not a fresh idle session and it is not a kill that drops the turn.
         // A session that shows context restored still continues the task that was in flight.
+        use crate::app::actions::{Action, Effect, TaskResult};
+        use crate::app::agent::{AgentId, AgentState};
         use crate::signal_streams::{
             PEER_REBUILD_SIGNAL_CODE, claimed_lifecycle_signal_names, peer_rebuild_code_arms_reexec,
         };
+        use agent_client_protocol as acp;
+
+        const TASK: &str = "Fix the plan mode screen";
+        const RESUME_LINE: &str = "Session resumed • context restored";
+        const DRAFT: &str = "unsent composer draft that stays across rebuild";
+        const QUEUED: &str = "queued prompt that stays across rebuild";
 
         assert!(
             claimed_lifecycle_signal_names().contains(&"SIGUSR1"),
@@ -3014,5 +3032,280 @@ mod tests {
             ),
             "an idle last client still lets the leader shut down"
         );
+        assert!(
+            leader_disconnect_retries_as_signaled(false, Some(10), Some(20)),
+            "a peer that did not receive /rebuild, and started before the request, still re-execs"
+        );
+        assert!(
+            !leader_disconnect_retries_as_signaled(true, Some(10), Some(20)),
+            "the process that already re-execed must not loop"
+        );
+
+        let sessions = vec![
+            (100_u32, "sess-invoker".into(), true, true),
+            (200, "sess-peer-did-not-receive-command".into(), true, true),
+            (300, "sess-dead".into(), false, true),
+            (400, "stock-grok".into(), true, false),
+        ];
+        let targets = xai_grok_update::peer_pids_to_signal_for_relaunch(&sessions, Some(100));
+        assert!(
+            targets
+                .iter()
+                .any(|(pid, sid)| { *pid == 200 && sid == "sess-peer-did-not-receive-command" }),
+            "a peer that did not receive /rebuild is still restarted; got {targets:?}"
+        );
+        assert!(
+            !targets
+                .iter()
+                .any(|(pid, _)| *pid == 100 || *pid == 300 || *pid == 400),
+            "the invoker, a dead pid, and stock grok are not SIGUSR1 targets; got {targets:?}"
+        );
+
+        let git_root = tempfile::tempdir().unwrap();
+        let root = git_root.path();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(root)
+                .output()
+                .expect("git");
+            assert!(
+                out.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        git(&["init"]);
+        std::fs::write(root.join("src.txt"), b"staged\n").unwrap();
+        git(&["add", "src.txt"]);
+        std::fs::write(root.join("src.txt"), b"unstaged-wip\n").unwrap();
+        let exported_dir = root.join("staged-export");
+        xai_grok_update::export_git_index_to(root, &exported_dir).expect("export index");
+        let exported = std::fs::read_to_string(exported_dir.join("src.txt")).expect("exported");
+        assert_eq!(
+            exported, "staged\n",
+            "unstaged work is not the compile source; the snapshot is the git index"
+        );
+        assert_ne!(exported, "unstaged-wip\n");
+
+        let grok_home = tempfile::tempdir().unwrap();
+        let _home = xai_grok_test_support::EnvGuard::set("GROK_HOME", grok_home.path());
+        let proj = tempfile::tempdir().unwrap();
+        let cwd = proj.path().to_path_buf();
+        let cwd_str = cwd.to_string_lossy().into_owned();
+        let installed = proj.path().join("grok-oss-installed");
+        std::fs::write(&installed, b"stub").unwrap();
+        let request = xai_grok_update::make_rebuild_relaunch_request(
+            installed.clone(),
+            "0.2.120 (newsha)",
+            xai_grok_update::rebuild::now_unix_secs(),
+        );
+        xai_grok_update::write_rebuild_relaunch_request(&request).expect("write request");
+
+        let agent_id = AgentId(0);
+        let peer_sid = "peer-did-not-receive-rebuild";
+        let peer_pid = "pid-fix-plan-mode-peer";
+        let mut peer = crate::app::app_view::tests::test_app_with_agent();
+        {
+            let agent = peer.agents.get_mut(&agent_id).unwrap();
+            agent.session.session_id = Some(peer_sid.into());
+            agent.session.cwd = cwd.clone();
+            agent.session.state = AgentState::TurnRunning;
+            agent.session.current_prompt_id = Some(peer_pid.into());
+            agent.session.in_flight_prompt = None;
+            agent
+                .scrollback
+                .push_block(crate::scrollback::block::RenderBlock::user_prompt(TASK));
+            agent
+                .subagent_sessions
+                .insert("cs-fix-plan-mode".into(), running_l2_subagent(TASK));
+            agent.prompt.set_text(DRAFT);
+            agent.session.enqueue_prompt(QUEUED.into());
+        }
+        let _ = take_peer_rebuild_relaunch();
+        assert!(
+            !peek_peer_rebuild_relaunch(),
+            "this peer did not receive SIGUSR1 and did not receive /rebuild"
+        );
+        assert!(
+            arm_peer_rebuild_before_exit(&mut peer, PeerRebuildExitReason::LeaderDisconnect),
+            "a peer that did not receive the command still restarts onto the new binary"
+        );
+        assert_eq!(
+            peer.rebuild_relaunch
+                .as_ref()
+                .map(|r| r.session_id.as_str()),
+            Some(peer_sid),
+            "the peer re-exec resumes its own session, not the invoker's"
+        );
+        assert!(
+            peer.agents
+                .get(&agent_id)
+                .unwrap()
+                .session
+                .state
+                .is_turn_running(),
+            "arming peer re-exec must not stop {TASK} on the outgoing process"
+        );
+        let assert_files_stayed = |cwd: &str, sid: &str| {
+            let draft =
+                xai_grok_shell::session::unsent_prompt_draft::load_unsent_prompt_draft(cwd, sid)
+                    .expect("load draft")
+                    .unwrap_or_default();
+            assert_eq!(
+                draft, DRAFT,
+                "the unsent composer draft stays across the relaunch"
+            );
+            let rows = xai_grok_shell::session::unsent_prompt_draft::pending_prompts::load_pending_prompts(
+                cwd, sid,
+            )
+            .expect("load pending_prompts.json");
+            assert!(
+                rows.iter().any(|row| row.text == QUEUED),
+                "pending_prompts.json stays across the relaunch, got {rows:?}"
+            );
+            let wal =
+                xai_grok_shell::session::prompt_wal::load_prompt_wal(cwd, sid).expect("load WAL");
+            assert!(
+                wal.iter().any(|row| {
+                    row.kind == xai_grok_shell::session::prompt_wal::PromptWalKind::RebuildFlush
+                        && (row.text == DRAFT || row.text == QUEUED)
+                }),
+                "the prompt write-ahead log stays across the relaunch, got {wal:?}"
+            );
+        };
+        let assert_resume_continues_the_task = |cwd: &std::path::Path, sid: &str, pid: &str| {
+            let agent_id = AgentId(0);
+            let mut reopened = crate::app::app_view::tests::test_app_with_agent();
+            reopened.current_ui.resume_canceled_turn_on_restart = Some(true);
+            {
+                let agent = reopened.agents.get_mut(&agent_id).unwrap();
+                agent.session.session_id = Some(acp::SessionId::new(sid.to_owned()));
+                agent.session.cwd = cwd.to_path_buf();
+                agent.session.state = AgentState::Idle;
+                agent.session.loading_replay = true;
+                agent.session.pending_prompts.clear();
+                agent.prompt.set_text("");
+                agent
+                    .scrollback
+                    .push_block(crate::scrollback::block::RenderBlock::user_prompt(TASK));
+                agent
+                    .subagent_sessions
+                    .insert("cs-fix-plan-mode".into(), running_l2_subagent(TASK));
+            }
+            let load_effects = super::super::dispatch(
+                Action::TaskComplete(TaskResult::SessionLoaded {
+                    agent_id,
+                    session_id: acp::SessionId::new(sid),
+                    models: None,
+                    code_restored: true,
+                    restore_summary: Some(RESUME_LINE.into()),
+                    restore_degree: None,
+                    running_prompt_id: Some(pid.into()),
+                    scheduler_background_loops: None,
+                    modes: None,
+                }),
+                &mut reopened,
+            );
+            assert!(
+                !load_effects
+                    .iter()
+                    .any(|effect| matches!(effect, Effect::CancelTurn { .. })),
+                "session load after relaunch must not cancel {TASK}, got {load_effects:?}"
+            );
+            let agent = reopened.agents.get_mut(&agent_id).unwrap();
+            restore_session_work_after_rebuild_load(agent);
+            let system: Vec<String> = (0..agent.scrollback.len())
+                .filter_map(|index| {
+                    let entry = agent.scrollback.entry(index)?;
+                    match &entry.block {
+                        crate::scrollback::block::RenderBlock::System(block) => {
+                            Some(block.text.clone())
+                        }
+                        _ => None,
+                    }
+                })
+                .collect();
+            let printed_resume = system
+                .iter()
+                .any(|line| line.contains("Session resumed") && line.contains("context restored"));
+            let task_running = agent.subagent_sessions.values().any(|info| {
+                info.description.as_ref() == TASK && !info.finished && info.is_running()
+            });
+            let turn_running = agent.session.state.is_turn_running();
+            assert!(
+                printed_resume,
+                "session load prints \"{RESUME_LINE}\" when context is restored, got {system:?}"
+            );
+            assert!(
+                task_running && turn_running,
+                "owed outcome: `/rebuild` restarts every running grok-oss process, including peers that did not receive the command. Every in-flight task resumes the same way a network interruption resumes it. The relaunch continues that task. A session that prints \"Session resumed • context restored\" and then leaves \"Fix the plan mode screen\" stopped is a failure. printed_resume={printed_resume} task_running={task_running} turn_running={turn_running} state={:?} prompt={:?} system={system:?}",
+                agent.session.state,
+                agent.session.current_prompt_id
+            );
+            assert_eq!(
+                agent.session.current_prompt_id.as_deref(),
+                Some(pid),
+                "the relaunch adopts the in-flight prompt the way a network interruption does"
+            );
+            assert_eq!(
+                agent.prompt.text(),
+                DRAFT,
+                "session load restores the unsent composer draft"
+            );
+            assert!(
+                agent
+                    .session
+                    .pending_prompts
+                    .iter()
+                    .any(|prompt| prompt.text == QUEUED),
+                "session load restores pending_prompts.json"
+            );
+        };
+        assert_files_stayed(&cwd_str, peer_sid);
+
+        let invoker_sid = "invoker-received-rebuild";
+        let invoker_pid = "pid-fix-plan-mode-invoker";
+        let mut invoker = crate::app::app_view::tests::test_app_with_agent();
+        invoker.current_ui.resume_canceled_turn_on_restart = Some(true);
+        {
+            let agent = invoker.agents.get_mut(&agent_id).unwrap();
+            agent.session.session_id = Some(invoker_sid.into());
+            agent.session.cwd = cwd.clone();
+            agent.session.state = AgentState::TurnRunning;
+            agent.session.current_prompt_id = Some(invoker_pid.into());
+            agent.session.in_flight_prompt = None;
+            agent
+                .scrollback
+                .push_block(crate::scrollback::block::RenderBlock::user_prompt(TASK));
+            agent
+                .subagent_sessions
+                .insert("cs-fix-plan-mode".into(), running_l2_subagent(TASK));
+            agent.prompt.set_text(DRAFT);
+            agent.session.enqueue_prompt(QUEUED.into());
+        }
+        let effects = handle_rebuild_done(
+            &mut invoker,
+            agent_id,
+            Ok(Box::new(sample_success_report(&installed))),
+        );
+        assert!(
+            invoker.rebuild_relaunch.is_some(),
+            "the process that received /rebuild still re-execs"
+        );
+        assert!(
+            effects.iter().any(|e| matches!(e, Effect::Quit)),
+            "successful /rebuild quits into re-exec, got {effects:?}"
+        );
+        assert!(
+            !effects
+                .iter()
+                .any(|e| matches!(e, Effect::CancelTurn { .. })),
+            "relaunch must not cancel {TASK}; exec is the interrupt, got {effects:?}"
+        );
+        assert_files_stayed(&cwd_str, invoker_sid);
+
+        assert_resume_continues_the_task(&cwd, peer_sid, peer_pid);
+        assert_resume_continues_the_task(&cwd, invoker_sid, invoker_pid);
     }
 }

@@ -2547,10 +2547,18 @@ pub fn render_line_viewer(
     }
     if revision_prompt_rows >= 3 && inner.height >= 2 {
         let div_y = inner.y + inner.height - 2;
+        // The side pane's track is the last inner column, and the gap is
+        // the column before it. A full-width prompt box paints ┐ on that
+        // track. Stop the box before both columns.
+        let prompt_width = if viewer.is_soft_plan_side_pane() {
+            inner.width.saturating_sub(SCROLLBAR_TOTAL_COLS)
+        } else {
+            inner.width
+        };
         let prompt_area = Rect {
             x: inner.x,
             y: div_y.saturating_sub(revision_prompt_rows),
-            width: inner.width,
+            width: prompt_width,
             height: revision_prompt_rows,
         };
         let draft = viewer

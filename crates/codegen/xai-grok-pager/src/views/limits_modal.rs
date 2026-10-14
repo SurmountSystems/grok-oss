@@ -1016,16 +1016,40 @@ fn personal_and_business_logins_are_stored() -> bool {
     personal && business
 }
 
+/// True when the other stored account is the included session the next
+/// request draws. An unset identity pin is not that case, so this tab can
+/// still say `Using limits`.
+fn the_other_account_is_the_next_request(open_is_business: bool) -> bool {
+    use xai_grok_shell::auth::SupergrokIdentityPin;
+    use xai_grok_shell::auth::limits_pins::{MeterSource, load_limits_pins};
+    if !personal_and_business_logins_are_stored() {
+        return false;
+    }
+    let pins = load_limits_pins();
+    let other = if open_is_business {
+        SupergrokIdentityPin::Personal
+    } else {
+        SupergrokIdentityPin::Business
+    };
+    !pins.use_console
+        && pins.meter_source == Some(MeterSource::Included)
+        && pins.supergrok_identity == Some(other)
+        && xai_grok_shell::auth::limits_pins::next_request_draws_included_period_limits()
+}
+
 /// `Using personal limits` or `Using business limits` is inserted only when
 /// that account's session is live. A dead session keeps `Using limits` and
-/// does not paint `Use personal limits`. A live session does not also keep
-/// the shortcut whose label is exactly `Using limits`. When personal and
-/// business are both stored, the tab that is not the next request does not
-/// also keep `Using limits`. Any other account label is inserted. Esc still
-/// closes the card. This card does not paint `Use limits`, `Use credits`,
-/// `Using team postpaid Billing Credits`, or `Using console team prepaid`.
+/// does not paint `Use personal limits`. A live session drops the shortcut
+/// whose label is exactly `Using limits` and still paints the clickable
+/// `Use personal limits` or `Use business limits` button. That button stays
+/// after the tab click selects the account. The other stored account being
+/// the next request drops `Using limits` on this tab. An unset identity pin
+/// does not. Esc still closes the card. This card does not paint
+/// `Use limits`, `Use credits`, `Using team postpaid Billing Credits`, or
+/// `Using console team prepaid`.
 fn painted_shortcuts(state: &LimitsModalState) -> Vec<Shortcut<'static>> {
     let account = account_limits_shortcut(state);
+    let open_is_business = state.window.active_tab == CREDITS_TAB;
     let mut shortcuts = spend_shortcuts(state);
     match account.label {
         "Using personal limits" | "Using business limits" => {
@@ -1037,13 +1061,24 @@ fn painted_shortcuts(state: &LimitsModalState) -> Vec<Shortcut<'static>> {
             if account_has_live_session(role) {
                 shortcuts.insert(0, account);
                 shortcuts.retain(|shortcut| shortcut.label != "Using limits");
+                let use_label = if open_is_business {
+                    "Use business limits"
+                } else {
+                    "Use personal limits"
+                };
+                shortcuts.insert(
+                    1,
+                    Shortcut {
+                        label: use_label,
+                        clickable: true,
+                        id: ACCOUNT_LIMITS_CHOICE_ID,
+                    },
+                );
             }
         }
         _ => {
-            let open_tab_is_not_the_next_request =
-                account.label == "Use personal limits" || account.label == "Use business limits";
             shortcuts.insert(0, account);
-            if open_tab_is_not_the_next_request && personal_and_business_logins_are_stored() {
+            if the_other_account_is_the_next_request(open_is_business) {
                 shortcuts.retain(|shortcut| shortcut.label != "Using limits");
             }
         }
@@ -8528,6 +8563,207 @@ mod tests {
                 && only_business.contains(&format!("{business_email} - business (current)"))
                 && only_business.contains(&format!("{personal_email} - personal"))
                 && !only_business.contains(&format!("{personal_email} - personal (current)")),
+            "{owed} switching to Business makes only that account say Using:\n{only_business}"
+        );
+    }
+
+    /// The same email on the personal token and the business token stays two
+    /// rows, and the Business tab does not label the business token personal.
+    /// The Personal tab does not label the personal token business. The email
+    /// address does not decide the slot.
+    #[test]
+    #[serial_test::serial]
+    fn same_email_on_two_oauth_tokens_keeps_each_slot_label() {
+        use crossterm::event::{MouseButton, MouseEventKind};
+        use xai_grok_shell::auth::limits_pins::{
+            LimitsPins, MeterSource, load_limits_pins, save_limits_pins,
+        };
+        use xai_grok_shell::auth::{
+            AuthMode, GrokAuth, SupergrokIdentityPin, upsert_supergrok_session,
+        };
+
+        let owed = "the same email on the personal token and the business token stays two rows, and the Business tab does not label the business token personal. The Personal tab does not label the personal token business. Only the account the next request draws says Using. A Personal or Business click still changes the next request. use_console stays false unless the console row is the next request.";
+        let email = "same.oauth@example.test";
+        let personal_label = format!("{email} - personal");
+        let business_label = format!("{email} - business");
+        let home = tempfile::TempDir::new().expect("temp GROK_HOME");
+        let _env = xai_grok_test_support::EnvGuard::set("GROK_HOME", home.path());
+        let base = "https://auth.x.ai::same-email-two-tokens";
+        let live = chrono::Utc::now() + chrono::Duration::days(7);
+        let mut map = std::collections::BTreeMap::new();
+        upsert_supergrok_session(
+            &mut map,
+            base,
+            GrokAuth {
+                key: "personal-token-do-not-print".into(),
+                auth_mode: AuthMode::Oidc,
+                user_id: "personal-slot-user".into(),
+                email: Some(email.into()),
+                principal_type: Some("User".into()),
+                team_id: None,
+                expires_at: Some(live),
+                refresh_token: None,
+                ..GrokAuth::default()
+            },
+        );
+        upsert_supergrok_session(
+            &mut map,
+            base,
+            GrokAuth {
+                key: "business-token-do-not-print".into(),
+                auth_mode: AuthMode::Oidc,
+                user_id: "business-slot-user".into(),
+                email: Some(email.into()),
+                principal_type: Some("Team".into()),
+                principal_id: Some("team-shared-slot".into()),
+                team_id: Some("team-shared-slot".into()),
+                expires_at: Some(live),
+                refresh_token: None,
+                ..GrokAuth::default()
+            },
+        );
+        map.insert(
+            "xai::api_key".into(),
+            GrokAuth {
+                key: "console-key-do-not-print".into(),
+                auth_mode: AuthMode::ApiKey,
+                user_id: String::new(),
+                ..GrokAuth::default()
+            },
+        );
+        std::fs::write(
+            home.path().join("auth.json"),
+            serde_json::to_vec_pretty(&map).expect("auth json"),
+        )
+        .expect("write auth.json");
+        save_limits_pins(&LimitsPins {
+            meter_source: Some(MeterSource::Included),
+            supergrok_identity: Some(SupergrokIdentityPin::Business),
+            use_console: false,
+            stay_supergrok: true,
+        })
+        .expect("business included pin");
+
+        let area = Rect::new(0, 0, 120, 40);
+        let paint = |state: &mut LimitsModalState| -> String {
+            let mut buf = Buffer::empty(area);
+            render_limits_modal(
+                &mut buf,
+                area,
+                state,
+                &Theme::default(),
+                false,
+                chrono::Utc::now(),
+            );
+            (0..area.height)
+                .map(|y| {
+                    (0..area.width)
+                        .map(|x| buf[(x, y)].symbol())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let says_both = |screen: &str| {
+            screen.contains("Using personal limits") && screen.contains("Using business limits")
+        };
+
+        let mut state = fresh_card_state();
+        state.window.active_tab = CREDITS_TAB;
+        let business_screen = paint(&mut state);
+        assert!(
+            business_screen.matches(&personal_label).count() == 1
+                && business_screen.matches(&business_label).count() == 1,
+            "{owed} the same email stays two rows:\n{business_screen}"
+        );
+        assert!(
+            business_screen.contains(&format!("{business_label} (current)"))
+                && !business_screen.contains(&format!("{personal_label} (current)")),
+            "{owed} the Business tab does not label the business token personal:\n{business_screen}"
+        );
+        assert!(
+            business_screen.contains("Using business limits")
+                && !business_screen.contains("Using limits")
+                && !business_screen.contains("Using personal limits")
+                && !says_both(&business_screen),
+            "{owed} only the business account says Using:\n{business_screen}"
+        );
+        assert!(
+            business_screen.contains("console API key") && business_screen.contains("3 sessions"),
+            "{owed} the console API key and the session count stay:\n{business_screen}"
+        );
+        for secret in [
+            "personal-token-do-not-print",
+            "business-token-do-not-print",
+            "console-key-do-not-print",
+        ] {
+            assert!(
+                !business_screen.contains(secret),
+                "the Accounts list does not print {secret}"
+            );
+        }
+
+        let personal_tab = state.window.tab_rects[LIMITS_TAB].expect("Personal tab");
+        let switched_personal = handle_limits_mouse(
+            &mut state,
+            MouseEventKind::Down(MouseButton::Left),
+            personal_tab.x,
+            personal_tab.y,
+        );
+        assert_eq!(switched_personal, LimitsModalOutcome::Changed);
+        let personal_pin = load_limits_pins();
+        assert_eq!(
+            personal_pin.supergrok_identity,
+            Some(SupergrokIdentityPin::Personal)
+        );
+        assert!(!personal_pin.use_console);
+        let personal_screen = paint(&mut state);
+        assert!(
+            personal_screen.contains(&format!("{personal_label} (current)"))
+                && personal_screen.contains(&business_label)
+                && !personal_screen.contains(&format!("{business_label} (current)"))
+                && personal_screen.matches(&personal_label).count() == 1
+                && personal_screen.matches(&business_label).count() == 1,
+            "{owed} the Personal tab does not label the personal token business:\n{personal_screen}"
+        );
+        assert!(
+            personal_screen.contains("Using personal limits")
+                && !personal_screen.contains("Using limits")
+                && !personal_screen.contains("Using business limits")
+                && !says_both(&personal_screen),
+            "{owed} only the personal account says Using:\n{personal_screen}"
+        );
+        assert!(
+            personal_screen.contains("console API key") && personal_screen.contains("3 sessions"),
+            "{owed} the console API key and the session count stay:\n{personal_screen}"
+        );
+
+        let business_tab = state.window.tab_rects[CREDITS_TAB].expect("Business tab");
+        let switched_business = handle_limits_mouse(
+            &mut state,
+            MouseEventKind::Down(MouseButton::Left),
+            business_tab.x,
+            business_tab.y,
+        );
+        assert_eq!(switched_business, LimitsModalOutcome::Changed);
+        let business_pin = load_limits_pins();
+        assert_eq!(
+            business_pin.supergrok_identity,
+            Some(SupergrokIdentityPin::Business)
+        );
+        assert_eq!(business_pin.meter_source, Some(MeterSource::Included));
+        assert!(!business_pin.use_console);
+        let only_business = paint(&mut state);
+        assert!(
+            only_business.contains("Using business limits")
+                && !only_business.contains("Using limits")
+                && !only_business.contains("Using personal limits")
+                && !says_both(&only_business)
+                && only_business.contains(&format!("{business_label} (current)"))
+                && only_business.contains(&personal_label)
+                && !only_business.contains(&format!("{personal_label} (current)"))
+                && only_business.contains("console API key")
+                && only_business.contains("3 sessions"),
             "{owed} switching to Business makes only that account say Using:\n{only_business}"
         );
     }

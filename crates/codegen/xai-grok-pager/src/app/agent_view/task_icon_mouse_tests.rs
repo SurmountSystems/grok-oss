@@ -266,6 +266,207 @@ fn clicking_a_task_row_opens_that_task() {
     );
 }
 
+/// A left click on the painted Tasks row hit rect opens that task. A click
+/// that does nothing fails. The click does not send KillSubagent. Hit the
+/// painted rect. Do not use a keyboard stand-in.
+#[test]
+fn clicking_a_painted_tasks_row_opens_that_task() {
+    let owed = "a left click on the painted Tasks row hit rect opens that task. A click that does nothing fails. The click does not send KillSubagent. Hit the painted rect. Do not use a keyboard stand-in.";
+    let mut agent = make_agent();
+    insert_running_task(&mut agent, "bg-review");
+    insert_running_task(&mut agent, "bg-sampler");
+    let older = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1);
+    let newer = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(2);
+    if let Some(task) = agent.session.bg_tasks.get_mut("bg-review") {
+        task.description = Some("Review implementation".into());
+        task.start_time = older;
+    }
+    if let Some(task) = agent.session.bg_tasks.get_mut("bg-sampler") {
+        task.description = Some("Fix sampler filter_map clippy deny".into());
+        task.start_time = newer;
+    }
+    let area = Rect::new(0, 0, 80, 30);
+    let buf = draw_frame(&mut agent, area);
+    let sampler_rect = agent
+        .tasks
+        .row_hit_rects
+        .iter()
+        .find(|(id, _)| matches!(id, TaskEntryId::BgTask(tid) if tid == "bg-sampler"))
+        .map(|(_, rect)| *rect)
+        .expect(owed);
+    let phrase = "Fix sampler filter_map clippy deny";
+    let (column, row) = find_phrase_inside(&buf, phrase, sampler_rect).expect(owed);
+    assert!(
+        agent
+            .pane_areas
+            .tasks
+            .contains(ratatui::layout::Position::new(column, row)),
+        "{owed}"
+    );
+    assert!(
+        sampler_rect.contains(ratatui::layout::Position::new(column, row)),
+        "{owed}"
+    );
+    assert_ne!(cell_symbol(&buf, column, row), "\u{2717}");
+    assert_ne!(cell_symbol(&buf, column, row), "\u{2197}");
+    let outcome = click_left(&mut agent, column, row);
+    assert!(
+        matches!(outcome, InputOutcome::Changed),
+        "{owed} got {outcome:?}"
+    );
+    assert!(
+        !matches!(
+            outcome,
+            InputOutcome::Action(Action::KillBgTask(_))
+                | InputOutcome::Action(Action::KillSubagent(_))
+        ),
+        "{owed} got {outcome:?}"
+    );
+    assert!(
+        !agent
+            .pending_effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::KillSubagent { .. })),
+        "{owed}"
+    );
+    let shown = agent
+        .block_viewer
+        .as_ref()
+        .and_then(|viewer| viewer.bg_task_id.clone());
+    assert_eq!(shown.as_deref(), Some("bg-sampler"), "{owed}");
+    assert!(agent.session.bg_tasks.contains_key("bg-review"), "{owed}");
+    assert!(agent.session.bg_tasks.contains_key("bg-sampler"), "{owed}");
+}
+
+/// Opening an L3 shows that specialist's own context. The L1 list stays L2
+/// rows plus a live L3 count. The click does not send KillSubagent. Do not
+/// paint the L1 window as the L3 context. Do not invent a context integer.
+/// When the figure is absent, do not print 0.
+#[test]
+fn an_l3_context_is_visible_when_that_l3_is_opened() {
+    use agent_client_protocol as acp;
+    use std::sync::Arc;
+    const L2: &str = "l2-session";
+    const L3: &str = "l3-session";
+    const LINE: &str = "L3_TRANSCRIPT_OWN_CONTEXT";
+    let owed = "opening an L3 shows that specialist's own context. The L1 list stays L2 rows plus a live L3 count. The click does not send KillSubagent. Do not paint the L1 window as the L3 context. Do not invent a context integer. When the figure is absent, do not print 0.";
+    crate::views::dock::set_enabled_for_test(true);
+    let registry = ActionRegistry::defaults();
+    let mut agent = make_agent();
+    agent.session.session_id = Some(acp::SessionId::new("l1-session"));
+    agent.session.models.override_context_window(500_000);
+    agent.session_sampling_window = Some(500_000);
+    agent.context_state = Some(xai_grok_shell::session::ContextInfo {
+        used: 152_000,
+        ..xai_grok_shell::session::ContextInfo::default()
+    });
+    let mut l2_info = super::test_fixtures::running_subagent_info(L2);
+    l2_info.description = Arc::from("coordinator-row-stays");
+    l2_info.attempt.depth = Some(1);
+    l2_info.attempt.parent_session_id = Some(Arc::from("l1-session"));
+    agent.subagent_sessions.insert(L2.to_owned(), l2_info);
+    agent.insert_subagent_view(
+        L2.to_owned(),
+        Box::new(super::test_fixtures::make_agent()),
+        super::ChildLink::l2_coordinator(acp::SessionId::new("l1-session")),
+    );
+    let mut l3 = super::test_fixtures::make_agent();
+    l3.session.session_id = Some(acp::SessionId::new(L3));
+    l3.scrollback
+        .push_block(crate::scrollback::block::RenderBlock::user_prompt(LINE));
+    let mut l3_info = super::test_fixtures::running_subagent_info(L3);
+    l3_info.attempt.depth = Some(2);
+    l3_info.attempt.parent_session_id = Some(Arc::from(L2));
+    l3_info.attempt.tokens_used = None;
+    l3_info.attempt.context_window_tokens = None;
+    l3_info.description = Arc::from("specialist-name-must-not-be-the-row");
+    agent.subagent_sessions.insert(L3.to_owned(), l3_info);
+    agent.insert_test_child(L3.to_owned(), Box::new(l3));
+    let area = Rect::new(0, 0, 120, 40);
+    let buf = draw_frame(&mut agent, area);
+    let painted = buffer_text_rows(&buf).join("\n");
+    assert!(
+        painted.contains("coordinator-row-stays"),
+        "{owed} {painted}"
+    );
+    assert!(painted.contains("1 specialist"), "{owed} {painted}");
+    assert!(
+        !painted.contains("specialist-name-must-not-be-the-row"),
+        "{owed} {painted}"
+    );
+    assert!(painted.contains("152K / 500K"), "{owed} {painted}");
+    let (column, row) = find_phrase(&buf, "1 specialist").expect(owed);
+    assert!(
+        agent
+            .pane_areas
+            .dock
+            .contains(ratatui::layout::Position::new(column + 2, row)),
+        "{owed}"
+    );
+    let outcome = click_left(&mut agent, column + 2, row);
+    assert!(
+        matches!(outcome, InputOutcome::Changed),
+        "{owed} got {outcome:?}"
+    );
+    assert!(
+        !matches!(outcome, InputOutcome::Action(Action::KillSubagent(_))),
+        "{owed} got {outcome:?}"
+    );
+    assert!(
+        !agent
+            .pending_effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::KillSubagent { .. })),
+        "{owed}"
+    );
+    assert_eq!(agent.active_subagent.as_deref(), Some(L3), "{owed}");
+    assert_eq!(agent.overlay_return_sid.as_deref(), Some(L2), "{owed}");
+    let buf = draw_frame(&mut agent, area);
+    let painted = buffer_text_rows(&buf).join("\n");
+    assert!(painted.contains(LINE), "{owed} {painted}");
+    assert!(!painted.contains("152K / 500K"), "{owed} {painted}");
+    assert!(!painted.contains("500K"), "{owed} {painted}");
+    assert!(!painted.contains("0 /"), "{owed} {painted}");
+    assert!(!painted.contains("0K"), "{owed} {painted}");
+    let l3_info = agent
+        .subagent_sessions
+        .get_mut(L3)
+        .expect("the opened specialist stays in the registry");
+    l3_info.attempt.tokens_used = Some(48_000);
+    l3_info.attempt.context_window_tokens = Some(200_000);
+    let buf = draw_frame(&mut agent, area);
+    let painted = buffer_text_rows(&buf).join("\n");
+    assert!(painted.contains("48K / 200K"), "{owed} {painted}");
+    assert!(painted.contains(LINE), "{owed} {painted}");
+    assert!(!painted.contains("152K / 500K"), "{owed} {painted}");
+    assert!(!painted.contains("0 /"), "{owed} {painted}");
+    assert_eq!(
+        crate::app::subagent::live_l3_count(agent.subagent_sessions.values(), L2),
+        1,
+        "{owed}"
+    );
+    let back = agent.handle_input(&super::test_fixtures::key(KeyCode::Esc), &registry);
+    assert!(
+        !matches!(back, InputOutcome::Action(Action::KillSubagent(_))),
+        "{owed} got {back:?}"
+    );
+    assert_eq!(agent.active_subagent.as_deref(), Some(L2), "{owed}");
+    let back = agent.handle_input(&super::test_fixtures::key(KeyCode::Esc), &registry);
+    assert!(agent.active_subagent.is_none(), "{owed} {back:?}");
+    let buf = draw_frame(&mut agent, area);
+    let painted = buffer_text_rows(&buf).join("\n");
+    assert!(
+        painted.contains("coordinator-row-stays"),
+        "{owed} {painted}"
+    );
+    assert!(painted.contains("1 specialist"), "{owed} {painted}");
+    assert!(
+        !painted.contains("specialist-name-must-not-be-the-row"),
+        "{owed} {painted}"
+    );
+    crate::views::dock::set_enabled_for_test(false);
+}
+
 fn insert_running_subagent(agent: &mut AgentView, child_session_id: &str) {
     let info = super::test_fixtures::running_subagent_info(child_session_id);
     agent
@@ -593,6 +794,32 @@ fn clear_button_on_the_subagent_list_removes_completed_rows_and_leaves_a_running
     assert!(agent.subagent_sessions.contains_key("dock-completed-job"));
     assert!(agent.subagent_sessions.contains_key("running-job"));
     crate::views::dock::set_enabled_for_test(false);
+}
+
+fn find_phrase_inside(buf: &Buffer, phrase: &str, rect: Rect) -> Option<(u16, u16)> {
+    let chars: Vec<char> = phrase.chars().collect();
+    if chars.is_empty() || rect.width == 0 || rect.height == 0 {
+        return None;
+    }
+    let phrase_len = u16::try_from(chars.len()).unwrap_or(u16::MAX);
+    for y in rect.y..rect.bottom() {
+        if rect.width < phrase_len {
+            continue;
+        }
+        let mut col = rect.x;
+        let last = rect.right().saturating_sub(phrase_len);
+        while col <= last {
+            let matched = chars
+                .iter()
+                .enumerate()
+                .all(|(index, ch)| cell_symbol(buf, col + index as u16, y) == ch.to_string());
+            if matched {
+                return Some((col, y));
+            }
+            col += 1;
+        }
+    }
+    None
 }
 
 fn find_phrase(buf: &Buffer, phrase: &str) -> Option<(u16, u16)> {

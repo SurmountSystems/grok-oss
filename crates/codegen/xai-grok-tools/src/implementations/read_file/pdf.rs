@@ -211,6 +211,27 @@ fn open_pdf_and_resolve_pages(
     Ok((doc, page_count, page_indices))
 }
 
+/// Composite premultiplied RGBA8 (`[r, g, b, a]`) over opaque white into RGB8.
+///
+/// A premultiplied channel `c` over white is `c + (255 - a)`.
+fn premul_rgba8_over_white_to_rgb8(rgba: &[u8]) -> Result<Vec<u8>, String> {
+    if rgba.len() % 4 != 0 {
+        return Err("PDF pixmap is not tightly packed RGBA8".to_string());
+    }
+    let mut rgb = Vec::with_capacity(rgba.len() / 4 * 3);
+    for px in rgba.chunks_exact(4) {
+        let inv_a = u16::from(255 - px[3]);
+        rgb.push(composite_premul_channel(px[0], inv_a));
+        rgb.push(composite_premul_channel(px[1], inv_a));
+        rgb.push(composite_premul_channel(px[2], inv_a));
+    }
+    Ok(rgb)
+}
+
+fn composite_premul_channel(premul: u8, inv_a: u16) -> u8 {
+    u8::try_from(u16::from(premul) + inv_a).unwrap_or(255)
+}
+
 pub(crate) fn render_pdf_pages(
     bytes: Vec<u8>,
     pages_spec: Option<&str>,
@@ -242,13 +263,28 @@ pub(crate) fn render_pdf_pages(
         );
         let width = pixmap.width() as u32;
         let height = pixmap.height() as u32;
+        // JPEG has no alpha. The pixmap is premultiplied RGBA8, and
+        // `image` 0.25 rejects that color type, so composite over the
+        // page's opaque white and encode straight RGB8.
+        let rgb = premul_rgba8_over_white_to_rgb8(pixmap.data_as_u8_slice())
+            .map_err(|e| format!("Failed to render page {}: {e}", page_idx + 1))?;
+        let expected_rgb = u64::from(width)
+            .checked_mul(u64::from(height))
+            .and_then(|pixels| pixels.checked_mul(3));
+        if expected_rgb != rgb.len().try_into().ok() {
+            return Err(format!(
+                "Failed to render page {}: pixmap is {width}x{height} but the RGB buffer is {} bytes",
+                page_idx + 1,
+                rgb.len()
+            ));
+        }
         let mut jpeg = Vec::new();
         image::ImageEncoder::write_image(
             image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, PDF_RENDER_JPEG_QUALITY),
-            pixmap.data_as_u8_slice(),
+            &rgb,
             width,
             height,
-            image::ExtendedColorType::Rgba8,
+            image::ExtendedColorType::Rgb8,
         )
         .map_err(|e| format!("Failed to render page {}: {e}", page_idx + 1))?;
 
