@@ -215,15 +215,16 @@ fn open_pdf_and_resolve_pages(
 ///
 /// A premultiplied channel `c` over white is `c + (255 - a)`.
 fn premul_rgba8_over_white_to_rgb8(rgba: &[u8]) -> Result<Vec<u8>, String> {
-    if rgba.len() % 4 != 0 {
+    let (pixels, rest) = rgba.as_chunks::<4>();
+    if !rest.is_empty() {
         return Err("PDF pixmap is not tightly packed RGBA8".to_string());
     }
-    let mut rgb = Vec::with_capacity(rgba.len() / 4 * 3);
-    for px in rgba.chunks_exact(4) {
-        let inv_a = u16::from(255 - px[3]);
-        rgb.push(composite_premul_channel(px[0], inv_a));
-        rgb.push(composite_premul_channel(px[1], inv_a));
-        rgb.push(composite_premul_channel(px[2], inv_a));
+    let mut rgb = Vec::with_capacity(pixels.len() * 3);
+    for &[r, g, b, a] in pixels {
+        let inv_a = u16::from(255 - a);
+        rgb.push(composite_premul_channel(r, inv_a));
+        rgb.push(composite_premul_channel(g, inv_a));
+        rgb.push(composite_premul_channel(b, inv_a));
     }
     Ok(rgb)
 }

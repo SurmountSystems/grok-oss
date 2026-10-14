@@ -260,7 +260,7 @@ struct AssembledUserTurn {
 /// Pre-sampler work either ends the turn or hands back a request to sample.
 enum ModelSamplePrep {
     Ready {
-        request: ConversationRequest,
+        request: Box<ConversationRequest>,
         turn_parked: TurnParkState,
     },
     Finished(TurnOutcome),
@@ -3106,7 +3106,7 @@ impl SessionActor {
             })),
         );
         Ok(ModelSamplePrep::Ready {
-            request,
+            request: Box::new(request),
             turn_parked,
         })
     }
@@ -3298,7 +3298,7 @@ impl SessionActor {
                 ModelSamplePrep::Ready {
                     request,
                     turn_parked,
-                } => (request, turn_parked),
+                } => (*request, turn_parked),
             };
             let requested_model =
                 crate::session::telemetry::requested_model_snapshot(request.model.as_deref());
