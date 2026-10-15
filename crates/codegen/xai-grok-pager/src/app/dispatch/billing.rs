@@ -178,7 +178,6 @@ pub(super) fn open_credit_limit_upsell(
         return;
     }
 
-
     log_event(xai_grok_telemetry::events::CreditLimitUpsellShown {
         surface: xai_grok_telemetry::events::CreditLimitUpsellSurface::QuestionModal,
         max_tier,

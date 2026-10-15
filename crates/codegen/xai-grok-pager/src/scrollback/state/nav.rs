@@ -1079,7 +1079,6 @@ impl ScrollbackState {
         })
     }
 
-
     /// Re-pin the viewport to the bottom for follow mode without touching the selection. Auto-selecting the last entry
     /// there would overwrite the selection while folding, etc. Pins unconditionally; callers must only invoke it when
     /// `follow_mode` is set (both current callers gate on it).
