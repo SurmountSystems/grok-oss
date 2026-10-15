@@ -37,6 +37,7 @@ fn message_item(id: &str, text: &str) -> rs::OutputItem {
         )],
         id: id.into(),
         role: rs::AssistantRole::Assistant,
+        phase: None,
         status: rs::OutputStatus::Completed,
     })
 }
@@ -48,12 +49,15 @@ fn function_call_item(call_id: &str) -> rs::OutputItem {
         id: Some(call_id.into()),
         name: "read_file".into(),
         status: Some(rs::OutputStatus::Completed),
+        r#async: None,
+        caller: None,
+        namespace: None,
     })
 }
 
 fn reasoning_item(id: &str, content: Option<&str>, summary: Option<&str>) -> rs::ReasoningItem {
     rs::ReasoningItem {
-        id: id.into(),
+        id: Some(id.into()),
         summary: summary
             .map(|text| {
                 vec![rs::SummaryPart::SummaryText(rs::SummaryTextContent {
@@ -61,7 +65,11 @@ fn reasoning_item(id: &str, content: Option<&str>, summary: Option<&str>) -> rs:
                 })]
             })
             .unwrap_or_default(),
-        content: content.map(|text| vec![rs::ReasoningTextContent { text: text.into() }]),
+        content: content.map(|text| {
+            vec![rs::ReasoningItemContent::ReasoningText(
+                rs::ReasoningTextContent { text: text.into() },
+            )]
+        }),
         encrypted_content: None,
         status: None,
     }
@@ -464,12 +472,16 @@ fn a_runaway_terminal_turn_is_capped_per_channel() {
     let reasoning_bytes: usize = items
         .iter()
         .filter_map(|item| match item {
-            ConversationItem::Reasoning(reasoning) => Some(
-                reasoning
-                    .content
-                    .as_ref()
-                    .map_or(0, |parts| parts.iter().map(|part| part.text.len()).sum()),
-            ),
+            ConversationItem::Reasoning(reasoning) => {
+                Some(reasoning.content.as_ref().map_or(0, |parts| {
+                    parts
+                        .iter()
+                        .map(|part| match part {
+                            rs::ReasoningItemContent::ReasoningText(t) => t.text.len(),
+                        })
+                        .sum()
+                }))
+            }
             _ => None,
         })
         .sum();

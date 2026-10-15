@@ -197,6 +197,16 @@ fn classify_sampling_error(err: SamplingError) -> CompactFailure {
     }
 }
 
+/// Snake-case wire token for a Responses `ResponseErrorCode`. Empty or non-string serde is omitted.
+fn response_error_code_wire(
+    code: &async_openai::types::responses::ResponseErrorCode,
+) -> Option<String> {
+    match serde_json::to_value(code) {
+        Ok(serde_json::Value::String(s)) if !s.is_empty() => Some(s),
+        _ => None,
+    }
+}
+
 /// Classify a provider-style stream error event (`ResponseError` / `ResponseFailed.error`) for the compaction retry loop.
 /// `code` is the structured `code` field on the event (typically a numeric HTTP status as a string, or an error-type string like `"invalid_request_error"`).
 /// `message` is the human-readable detail.
@@ -762,7 +772,9 @@ pub(crate) async fn generate_session_compact(
                             }
                             ResponseStreamEvent::ResponseFailed(failed_event) => {
                                 let event_error = failed_event.response.error.as_ref();
-                                let code = event_error.map(|e| e.code.as_str());
+                                let code_owned =
+                                    event_error.and_then(|e| response_error_code_wire(&e.code));
+                                let code = code_owned.as_deref();
                                 let message = event_error
                                     .map(|e| e.message.as_str())
                                     .unwrap_or("unknown error");

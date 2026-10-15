@@ -423,7 +423,7 @@ pub fn stream_messages<'a>(
                                         Some(state.signature)
                                     };
                                     assistant_reasoning.push(rs::ReasoningItem {
-                                        id: String::new(),
+                                        id: None,
                                         summary,
                                         content: None,
                                         encrypted_content,

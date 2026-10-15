@@ -894,6 +894,9 @@ mod tests {
             top_p: None,
             truncation: None,
             usage: None,
+            prompt_cache_options: None,
+            prompt_cache_diagnostics: None,
+            moderation: None,
         }
     }
 
@@ -903,9 +906,10 @@ mod tests {
 
     fn failed_response_with_error(message: &str) -> rs_types::Response {
         let mut r = build_response(rs_types::Status::Failed);
-        r.error = Some(rs_types::ErrorObject {
-            code: "server_error".into(),
+        r.error = Some(rs_types::ResponseError {
+            code: rs_types::ResponseErrorCode::ServerError,
             message: message.into(),
+            misalignment: None,
         });
         r
     }
@@ -947,7 +951,7 @@ mod tests {
             sequence_number: 0,
             output_index: 0,
             item: rs_types::OutputItem::Reasoning(rs_types::ReasoningItem {
-                id: "reasoning_1".into(),
+                id: Some("reasoning_1".into()),
                 summary: vec![],
                 content: None,
                 encrypted_content: None,
@@ -1166,6 +1170,9 @@ mod tests {
                 name: "do_thing".into(),
                 id: None,
                 status: None,
+                r#async: None,
+                caller: None,
+                namespace: None,
             },
         )];
         let event =
@@ -1647,6 +1654,9 @@ mod tests {
                 name: name.into(),
                 id: None,
                 status: None,
+                r#async: None,
+                caller: None,
+                namespace: None,
             }),
         })
     }

@@ -1296,6 +1296,7 @@ impl SamplingClient {
                     request.inner.reasoning = Some(rs::Reasoning {
                         effort: None,
                         summary,
+                        ..Default::default()
                     });
                 }
                 None => {}
@@ -3631,6 +3632,7 @@ mod tests {
             reasoning: Some(rs::Reasoning {
                 effort: Some(rs::ReasoningEffort::High),
                 summary: Some(rs::ReasoningSummary::Concise),
+                ..Default::default()
             }),
             ..Default::default()
         })
@@ -3696,6 +3698,7 @@ mod tests {
             Some(rs::Reasoning {
                 effort: None,
                 summary: Some(rs::ReasoningSummary::Auto),
+                ..Default::default()
             })
         );
 
