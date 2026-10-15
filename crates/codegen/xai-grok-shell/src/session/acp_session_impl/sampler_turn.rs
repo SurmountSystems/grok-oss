@@ -742,7 +742,7 @@ impl SessionActor {
         }
         // Session path: prefer a wire-valid AT. When that is empty, keep the chat-state
         // or expired parent JWT so nested reconstruct cannot wipe a stamped inherit key.
-        let api_key = if use_bearer_resolver {
+        let mut api_key = if use_bearer_resolver {
             // `use_bearer_resolver` means the endpoint is a first-party xAI URL.
             // A session from another authority must not seed the default headers either.
             self.auth_manager
@@ -771,6 +771,9 @@ impl SessionActor {
                     })
                 })
         };
+        if api_key.as_ref().is_none_or(|key| key.trim().is_empty()) {
+            api_key = self.sampler_handle.current_api_key().await;
+        }
         let auth_scheme = model_facts.auth_scheme;
         let mut extra_headers = cfg.extra_headers;
         crate::agent::config::inject_url_derived_headers(
@@ -876,6 +879,13 @@ impl SessionActor {
             );
         }
         crate::auth::limits_pins::apply_limits_pins_to_sampler_config(&mut sampling);
+        if sampling
+            .api_key
+            .as_ref()
+            .is_none_or(|key| key.trim().is_empty())
+        {
+            sampling.api_key = self.sampler_handle.current_api_key().await;
+        }
         if sampling.api_key.as_ref().is_none_or(|key| key.is_empty()) {
             sampling.extra_headers.shift_remove("X-XAI-Token-Auth");
             sampling
@@ -1137,6 +1147,13 @@ impl SessionActor {
         }
         // Carry over the session's per-chunk idle timeout via `SamplerConfig.idle_timeout_secs`
         sampler_config.idle_timeout_secs = Some(self.inference_idle_timeout.as_secs());
+        if sampler_config
+            .api_key
+            .as_ref()
+            .is_none_or(|key| key.trim().is_empty())
+        {
+            sampler_config.api_key = self.sampler_handle.current_api_key().await;
+        }
         self.sampler_handle.update_config(sampler_config);
     }
 
@@ -1243,7 +1260,7 @@ impl SessionActor {
         }
     }
 
-    /// Parent JWT that a missing-auth 401 can stamp: wire-valid, then expired session, then chat key.
+    /// Parent JWT that a missing-auth 401 can stamp: wire-valid, then expired session, then chat key, then the live sampler.
     async fn stampable_nested_parent_bearer(&self) -> Option<String> {
         if let Some(am) = self.auth_manager.as_ref()
             && let Some(key) = am
@@ -1254,11 +1271,25 @@ impl SessionActor {
         {
             return Some(key);
         }
-        self.chat_state_handle
+        if let Some(key) = self
+            .chat_state_handle
             .get_credentials()
             .await
             .api_key
             .filter(|key| !key.is_empty())
+        {
+            return Some(key);
+        }
+        self.sampler_handle.current_api_key().await
+    }
+
+    /// Copy the live sampler JWT into chat credentials so compact reconstruct can stamp Authorization.
+    pub(crate) async fn stamp_live_sampler_jwt_into_chat(&self) -> bool {
+        let Some(key) = self.stampable_nested_parent_bearer().await else {
+            return false;
+        };
+        self.set_chat_api_key(key).await;
+        true
     }
 
     /// Nested send reached cli-chat-proxy with Token-Auth and no Bearer. Stamp the parent JWT and resubmit.

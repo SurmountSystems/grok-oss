@@ -126,6 +126,15 @@ impl SamplerActor {
             SamplerCommand::ActiveCount { reply } => {
                 let _ = reply.send(self.state.active_requests.len());
             }
+            SamplerCommand::CurrentApiKey { reply } => {
+                let key = self
+                    .state
+                    .config
+                    .api_key
+                    .clone()
+                    .filter(|k| !k.trim().is_empty());
+                let _ = reply.send(key);
+            }
         }
     }
 }

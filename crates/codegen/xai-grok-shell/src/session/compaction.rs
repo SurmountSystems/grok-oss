@@ -2727,12 +2727,25 @@ impl SessionActor {
         .await;
         let compact_start = std::time::Instant::now();
         // Same heap build as manual compact: do not construct this future inline.
-        let result = Box::pin(self.run_compact_inner(
+        let mut result = Box::pin(self.run_compact_inner(
             None,
             xai_grok_telemetry::events::CompactionTrigger::Auto,
             lossy_input,
         ))
         .await;
+        if let Err(ref e) = result {
+            let detailed = crate::sampling::error::acp_error_message(e);
+            if compaction_failure_is_missing_auth_context(&detailed)
+                && self.stamp_live_sampler_jwt_into_chat().await
+            {
+                result = Box::pin(self.run_compact_inner(
+                    None,
+                    xai_grok_telemetry::events::CompactionTrigger::Auto,
+                    lossy_input,
+                ))
+                .await;
+            }
+        }
         let elapsed_ms = compact_start.elapsed().as_millis() as i64;
         match result {
             Ok(()) => {

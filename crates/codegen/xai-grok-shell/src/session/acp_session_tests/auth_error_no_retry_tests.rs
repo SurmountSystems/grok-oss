@@ -1993,6 +1993,52 @@ async fn missing_auth_context_401_stamps_the_parent_bearer_and_resubmits() {
         .await;
 }
 
+/// Compaction reconstructs a fresh client. When AuthManager and chat credentials are empty,
+/// copy the JWT the live sampler still talks with.
+#[tokio::test(flavor = "current_thread")]
+async fn reconstruct_full_config_copies_live_sampler_jwt_when_creds_and_auth_manager_are_empty() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (event_tx, _event_rx) = mpsc::unbounded_channel();
+            let live = xai_grok_sampler::SamplerConfig {
+                api_key: Some("live-parent-jwt".into()),
+                base_url: "https://cli-chat-proxy.x.ai/v1".into(),
+                model: "test".into(),
+                context_window: 256_000,
+                ..Default::default()
+            };
+            let handle = xai_grok_sampler::SamplerActor::spawn(
+                live,
+                xai_grok_sampler::RetryPolicy::default(),
+                event_tx,
+            );
+            let (mut actor, _rx) = make_actor_parts_with_method_and_credentials(
+                None,
+                "default",
+                xai_chat_state::AuthType::SessionToken,
+                String::new(),
+            )
+            .await;
+            actor
+                .chat_state_handle
+                .update_credentials(xai_chat_state::Credentials {
+                    api_key: None,
+                    failover_api_keys: Vec::new(),
+                    auth_type: xai_chat_state::AuthType::SessionToken,
+                    ..Default::default()
+                });
+            actor.sampler_handle = handle;
+            let reconstructed = actor.reconstruct_full_config().await;
+            assert_eq!(
+                reconstructed.api_key.as_deref(),
+                Some("live-parent-jwt"),
+                "compact reconstruct must copy the live sampler JWT"
+            );
+        })
+        .await;
+}
+
 /// When limits mode is on, the next model request draws included SuperGrok
 /// period limits. `SamplingClient::post` stamps `bearer_resolver`, not the
 /// ranked `api_key`. A live Team JWT stays on that session when no live

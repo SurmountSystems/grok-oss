@@ -121,6 +121,20 @@ impl SamplerHandle {
         reply_rx.await.unwrap_or(0)
     }
 
+    /// JWT the live sampler still sends. Compaction reconstructs a fresh client and
+    /// must copy this when AuthManager and chat credentials are empty.
+    pub async fn current_api_key(&self) -> Option<String> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        let _ = self
+            .cmd_tx
+            .send(SamplerCommand::CurrentApiKey { reply: reply_tx });
+        reply_rx
+            .await
+            .ok()
+            .flatten()
+            .filter(|key| !key.trim().is_empty())
+    }
+
     /// Submit a request and await its completion. Events still flow to the shared channel for live UI updates.
     /// This method also awaits the per-request completion oneshot so the caller gets a clean `Result` without filtering events.
     /// Sequential callers (compaction, summary, `/btw` side questions) use this.

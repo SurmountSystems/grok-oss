@@ -309,6 +309,31 @@ fn apply_env_http_headers(
     }
 }
 
+fn strip_cli_chat_proxy_identity_headers(headers: &mut HeaderMap) {
+    headers.remove(HeaderName::from_static("x-xai-token-auth"));
+    headers.remove(HeaderName::from_static("x-authenticateresponse"));
+}
+
+/// `Authorization: Bearer` with an empty token, or a blank `x-api-key`, is not a credential.
+/// cli-chat-proxy then logs `auth_kind=other` / `reason=no auth context` if Token-Auth still rides.
+fn credential_headers_are_sendable(headers: &HeaderMap) -> bool {
+    let auth_ok = headers
+        .get(AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|s| {
+            let trimmed = s.trim();
+            trimmed
+                .strip_prefix("Bearer ")
+                .map(|rest| !rest.trim().is_empty())
+                .unwrap_or(!trimmed.is_empty())
+        });
+    let x_ok = headers
+        .get(HeaderName::from_static("x-api-key"))
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|s| !s.trim().is_empty());
+    auth_ok || x_ok
+}
+
 /// HTTP client for sampling. Cheap to clone.
 /// Carries an `Arc`-backed `reqwest::Client` and the default headers/request-defaults computed from a [`SamplerConfig`] at construction time.
 #[derive(Clone)]
@@ -517,7 +542,11 @@ impl SamplingClient {
     pub fn new(config: SamplerConfig) -> Result<Self> {
         let mut headers = HeaderMap::new();
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-        if let Some(ref api_key) = config.api_key {
+        if let Some(api_key) = config
+            .api_key
+            .as_deref()
+            .filter(|key| !key.trim().is_empty())
+        {
             match config.auth_scheme {
                 AuthScheme::XApiKey => {
                     let header_value = HeaderValue::from_str(api_key).map_err(|_| {
@@ -706,7 +735,10 @@ impl SamplingClient {
             // Sole auth source: without a live bearer, send no credential rather than a stale seed key.
             headers.remove(AUTHORIZATION);
             headers.remove(HeaderName::from_static("x-api-key"));
-            if let Some(fresh) = resolver.current_bearer() {
+            if let Some(fresh) = resolver
+                .current_bearer()
+                .filter(|key| !key.trim().is_empty())
+            {
                 match self.defaults.auth_scheme {
                     AuthScheme::XApiKey => {
                         if let Ok(v) = HeaderValue::from_str(&fresh) {
@@ -721,15 +753,11 @@ impl SamplingClient {
                 }
             } else {
                 // Token-Auth without Authorization is `auth_kind=other` / `reason=no auth context`.
-                headers.remove(HeaderName::from_static("x-xai-token-auth"));
-                headers.remove(HeaderName::from_static("x-authenticateresponse"));
+                strip_cli_chat_proxy_identity_headers(&mut headers);
             }
         }
-        if headers.get(AUTHORIZATION).is_none()
-            && headers.get(HeaderName::from_static("x-api-key")).is_none()
-        {
-            headers.remove(HeaderName::from_static("x-xai-token-auth"));
-            headers.remove(HeaderName::from_static("x-authenticateresponse"));
+        if !credential_headers_are_sendable(&headers) {
+            strip_cli_chat_proxy_identity_headers(&mut headers);
         }
         {
             let auth_prefix = headers
@@ -3523,6 +3551,49 @@ mod tests {
                 .headers()
                 .get(HeaderName::from_static("x-authenticateresponse"))
                 .is_none()
+        );
+    }
+
+    /// An empty `Bearer ` is not a credential. Token-Auth must not stay on that send.
+    #[test]
+    fn post_strips_token_auth_when_bearer_is_empty() {
+        #[derive(Debug)]
+        struct EmptyBearer;
+        impl crate::config::BearerResolver for EmptyBearer {
+            fn current_bearer(&self) -> Option<String> {
+                Some(String::new())
+            }
+        }
+
+        let mut extra_headers = IndexMap::new();
+        extra_headers.insert("X-XAI-Token-Auth".to_string(), "xai-grok-cli".to_string());
+        extra_headers.insert(
+            "x-authenticateresponse".to_string(),
+            "authenticate-response".to_string(),
+        );
+        let cfg = SamplerConfig {
+            api_key: Some("stale-token".to_string()),
+            api_backend: ApiBackend::Responses,
+            extra_headers,
+            bearer_resolver: Some(std::sync::Arc::new(EmptyBearer)),
+            stashed_bearer_resolver: None,
+            session_bearer_resolver: None,
+            ..minimal_config()
+        };
+        let client = SamplingClient::new(cfg).expect("client should build");
+        let SentRequest {
+            builder,
+            sent_bearer: sent,
+        } = client.post("https://example.test/v1/responses");
+        let request = builder.body("").build().expect("request should build");
+        assert_eq!(sent, None);
+        assert!(request.headers().get(AUTHORIZATION).is_none());
+        assert!(
+            request
+                .headers()
+                .get(HeaderName::from_static("x-xai-token-auth"))
+                .is_none(),
+            "Token-Auth must not ride with an empty Bearer"
         );
     }
 

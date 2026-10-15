@@ -41,4 +41,9 @@ pub(crate) enum SamplerCommand {
     ActiveCount {
         reply: oneshot::Sender<usize>,
     },
+
+    /// Query: the live actor config's `api_key` (the JWT the parent turn still talks with).
+    CurrentApiKey {
+        reply: oneshot::Sender<Option<String>>,
+    },
 }
