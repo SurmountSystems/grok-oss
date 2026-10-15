@@ -1284,37 +1284,47 @@ impl SessionActor {
     }
 
     /// Copy the live sampler JWT into chat credentials so compact reconstruct can stamp Authorization.
+    /// Returns false when that key is already on chat credentials, so a retry does not repeat the same send.
     pub(crate) async fn stamp_live_sampler_jwt_into_chat(&self) -> bool {
         let Some(key) = self.stampable_nested_parent_bearer().await else {
             return false;
         };
+        let already = self.chat_state_handle.get_credentials().await.api_key;
+        if already.as_deref() == Some(key.as_str()) {
+            return false;
+        }
         self.set_chat_api_key(key).await;
         true
     }
 
-    /// Nested send reached cli-chat-proxy with Token-Auth and no Bearer. Stamp the parent JWT and resubmit.
+    /// Nested send reached cli-chat-proxy with Token-Auth and no Bearer. Stamp the parent JWT once and resubmit.
+    /// Do not resubmit the same key. Do not report the old send as uncharged (that parks 50 paced retries).
     async fn try_stamp_parent_bearer_on_missing_auth(
         &self,
         message: &str,
-        credential: xai_grok_sampling_types::SentCredential,
+        _credential: xai_grok_sampling_types::SentCredential,
     ) -> Option<SamplerFailureRecovery> {
         if !crate::extensions::notification::is_nested_missing_auth_context(message) {
             return None;
         }
         let bearer = self.stampable_nested_parent_bearer().await?;
+        let already = self.chat_state_handle.get_credentials().await.api_key;
+        if already.as_deref() == Some(bearer.as_str()) {
+            return None;
+        }
         tracing::info!(
             session_id = %self.session_info.id.0,
-            "auth recovery: missing auth context, stamping parent bearer, retrying"
+            "auth recovery: missing auth context, stamping parent bearer, retrying once"
         );
         xai_grok_telemetry::unified_log::info(
-            "auth recovery: missing auth context, stamping parent bearer, retrying",
+            "auth recovery: missing auth context, stamping parent bearer, retrying once",
             Some(self.session_info.id.0.as_ref()),
             None,
         );
         self.set_chat_api_key(bearer).await;
         self.prepare_sampler_for_turn().await;
         Some(SamplerFailureRecovery::RefreshAuthAndResubmit {
-            credential,
+            credential: xai_grok_sampling_types::SentCredential::Sent,
             store: RecoveredStore::SessionToken,
         })
     }
@@ -1322,14 +1332,17 @@ impl SessionActor {
     /// Park eligibility for a credential-less 401: kill switch on, provably no credential on the
     /// wire, a self-healing remedy (manual-login stays terminal). One predicate so the two
     /// fail-closed gates cannot drift.
+    /// Token-Auth without Bearer (`auth_kind=other`) is a stamp miss, not a wait for a token to land.
     fn uncharged_401_park_eligible(
         &self,
         am: &xai_grok_login::AuthManager,
         credential: xai_grok_sampling_types::SentCredential,
+        message: &str,
     ) -> bool {
         self.uncharged_401_park_enabled
             && credential.is_missing()
             && am.auth_remedy().is_self_healing()
+            && !crate::extensions::notification::is_nested_missing_auth_context(message)
     }
 
     /// Park outcome plus its log line; `dispatch_skipped` marks the already-parked arm.
@@ -1530,6 +1543,16 @@ impl SessionActor {
             error.message.clone()
         };
 
+        // Token-Auth without Bearer. Stamp a new parent JWT once. Do not park 50 uncharged resubmits.
+        if crate::extensions::notification::is_nested_missing_auth_context(&detailed_message) {
+            if let Some(recovery) = self
+                .try_stamp_parent_bearer_on_missing_auth(&detailed_message, error.credential)
+                .await
+            {
+                return Ok(recovery);
+            }
+        }
+
         // 2. Encrypted-content mismatch: friendly error, no retry.
         //    Detect via the BadRequest and "encrypted_content" message pattern that `SamplingError::is_encrypted_content_error` used in the legacy path
         if encrypted_content_mismatch {
@@ -1639,17 +1662,17 @@ impl SessionActor {
 
         // Last-resort recovery used to short-circuit on whatever is in memory, so it reported success with the bearer the server had just rejected.
         // That bearer was resubmitted until the turn's retry budget ran out. Recovery already walks disk adoption and the authority first.
-        if auth_recovery_eligible && let Some(ref am) = self.auth_manager {
+        // Missing-auth-context already tried a one-shot stamp above. Do not park it.
+        if !crate::extensions::notification::is_nested_missing_auth_context(&detailed_message)
+            && auth_recovery_eligible
+            && let Some(ref am) = self.auth_manager
+        {
             // Already parked and still credential-less: re-park without a recovery dispatch.
             // A parked turn makes at most one recovery attempt (the pre-park one): each dispatch is up to two counted.
             // IdP attempts and `OidcRefresher` escalates five into a process-wide permanent verdict, so 50 parked cycles must not drive refreshes — the escalation-aware proactive loop owns refresh while parked.
-            if park.is_parked() && self.uncharged_401_park_eligible(am, error.credential) {
-                if let Some(recovery) = self
-                    .try_stamp_parent_bearer_on_missing_auth(&detailed_message, error.credential)
-                    .await
-                {
-                    return Ok(recovery);
-                }
+            if park.is_parked()
+                && self.uncharged_401_park_eligible(am, error.credential, &detailed_message)
+            {
                 return Ok(self.park_uncharged_401(error.credential, true));
             }
             if am
@@ -1679,15 +1702,17 @@ impl SessionActor {
                     "credential": error.credential,
                 })),
             );
-            if let Some(recovery) = self
-                .try_stamp_parent_bearer_on_missing_auth(&detailed_message, error.credential)
-                .await
+            if !park.is_parked()
+                && let Some(recovery) = self
+                    .try_stamp_parent_bearer_on_missing_auth(&detailed_message, error.credential)
+                    .await
             {
                 return Ok(recovery);
             }
             // The 401 says nothing about the missing credential: park instead of failing the turn.
             // Do not add `prepare_sampler_for_turn` here — a prepare's refresh would count against the shared escalation budget.
-            if self.uncharged_401_park_eligible(am, error.credential) {
+            // Missing-auth-context is a stamp miss: one stamp, then stop. Do not park 50 times.
+            if self.uncharged_401_park_eligible(am, error.credential, &detailed_message) {
                 return Ok(self.park_uncharged_401(error.credential, false));
             }
         }
@@ -1703,9 +1728,10 @@ impl SessionActor {
             });
         }
 
-        if let Some(recovery) = self
-            .try_stamp_parent_bearer_on_missing_auth(&detailed_message, error.credential)
-            .await
+        if !park.is_parked()
+            && let Some(recovery) = self
+                .try_stamp_parent_bearer_on_missing_auth(&detailed_message, error.credential)
+                .await
         {
             return Ok(recovery);
         }
@@ -1872,13 +1898,19 @@ impl SessionActor {
         } else {
             error.kind.as_ref()
         };
-        let (error_type, detailed_message) = match self.auth_manager.as_ref() {
-            Some(auth_manager) if error_type == "auth" => self.apply_auth_remedy(
-                &auth_manager.auth_remedy(),
-                detailed_message,
-                error.status_code,
-            ),
-            _ => (error_type, detailed_message),
+        let (error_type, detailed_message) = if crate::extensions::notification::is_nested_missing_auth_context(
+            &error.message,
+        ) {
+            ("auth_transient", detailed_message)
+        } else {
+            match self.auth_manager.as_ref() {
+                Some(auth_manager) if error_type == "auth" => self.apply_auth_remedy(
+                    &auth_manager.auth_remedy(),
+                    detailed_message,
+                    error.status_code,
+                ),
+                _ => (error_type, detailed_message),
+            }
         };
         let detailed_message =
             if xai_grok_sampling_types::is_console_team_prepaid_message(&detailed_message) {

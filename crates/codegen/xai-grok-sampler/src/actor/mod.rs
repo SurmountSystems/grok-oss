@@ -10,7 +10,7 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
 use crate::commands::SamplerCommand;
-use crate::config::{BearerResolver, RetryPolicy, SamplerConfig};
+use crate::config::{RetryPolicy, SamplerConfig};
 use crate::events::SamplingEvent;
 use crate::handle::SamplerHandle;
 use state::{ActiveRequest, ActorState};
@@ -134,12 +134,10 @@ impl SamplerActor {
                     .clone()
                     .filter(|k| !k.trim().is_empty())
                     .or_else(|| {
-                        self.state
-                            .config
-                            .bearer_resolver
-                            .as_ref()
-                            .and_then(|resolver| resolver.current_bearer())
-                            .filter(|k| !k.trim().is_empty())
+                        self.state.config.bearer_resolver.as_ref().and_then(
+                            |resolver| crate::config::BearerResolver::current_bearer(resolver.as_ref()),
+                        )
+                        .filter(|k| !k.trim().is_empty())
                     });
                 let _ = reply.send(key);
             }

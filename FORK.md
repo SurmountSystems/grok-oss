@@ -2567,6 +2567,8 @@ lost-prompt, and § *Hunter's razor*; it does not replace them. Dual-pin:
 - An empty `Bearer` is not a credential. Token-Auth must not stay on that send. Named test: `post_strips_token_auth_when_bearer_is_empty`.
 - Compact wrappers that keep `auth_kind=other` and drop `reason=no auth context` still do not paint `/login`. Named test: `apply_retry_state_auth_kind_other_does_not_paint_login`.
 - After `/login` succeeds, the 401'd prompt is resubmitted even when login did not stash a return view. Named test: `auth_complete_retries_stashed_prompt_without_a_return_view`.
+- A no-auth-context 401 stamps a new parent JWT once. The same key is not resubmitted as an uncharged park (50 paced retries). Named tests: `missing_auth_context_401_stamps_the_parent_bearer_and_resubmits`, `missing_auth_context_401_does_not_resubmit_the_same_key`.
+- A second no-auth-context 401 after the stamp fails closed. It does not park 50 uncharged resubmits. Named test: `missing_auth_context_401_does_not_loop_after_the_stamp`.
 
 **Plan mode screen (pinned 2026-10-07).** These sentences say what that
 screen must do. They are not a claim that the tests already pass. Do not

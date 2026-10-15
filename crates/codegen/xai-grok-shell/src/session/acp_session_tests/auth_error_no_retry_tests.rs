@@ -1959,6 +1959,84 @@ async fn missing_auth_context_401_stamps_the_parent_bearer_and_resubmits() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
+            let (event_tx, _event_rx) = mpsc::unbounded_channel();
+            let live = xai_grok_sampler::SamplerConfig {
+                api_key: Some("live-parent-jwt".into()),
+                base_url: "https://cli-chat-proxy.x.ai/v1".into(),
+                model: "test".into(),
+                context_window: 256_000,
+                ..Default::default()
+            };
+            let handle = xai_grok_sampler::SamplerActor::spawn(
+                live,
+                xai_grok_sampler::RetryPolicy::default(),
+                event_tx,
+            );
+            let (mut actor, _rx) = make_actor_parts_with_method_and_credentials(
+                None,
+                "cached_token",
+                xai_chat_state::AuthType::SessionToken,
+                String::new(),
+            )
+            .await;
+            actor
+                .chat_state_handle
+                .update_credentials(xai_chat_state::Credentials {
+                    api_key: None,
+                    failover_api_keys: Vec::new(),
+                    auth_type: xai_chat_state::AuthType::SessionToken,
+                    ..Default::default()
+                });
+            actor.sampler_handle = handle;
+            let actor = Arc::new(actor);
+            let result = actor
+                .handle_sampling_failure(
+                    missing_auth_context_error(),
+                    0,
+                    transient_state(0, true),
+                    false,
+                    TurnParkState::Fresh,
+                )
+                .await;
+            assert!(
+                matches!(
+                    result,
+                    Ok(SamplerFailureRecovery::RefreshAuthAndResubmit {
+                        store: RecoveredStore::SessionToken,
+                        credential: xai_grok_sampling_types::SentCredential::Sent,
+                    })
+                ),
+                "a no-auth-context 401 must stamp a new parent bearer once, not park 50 uncharged retries"
+            );
+            let creds = actor.chat_state_handle.get_credentials().await;
+            assert_eq!(
+                creds.api_key.as_deref(),
+                Some("live-parent-jwt"),
+                "chat-state credentials must carry the live sampler JWT"
+            );
+            let second = actor
+                .handle_sampling_failure(
+                    missing_auth_context_error(),
+                    0,
+                    transient_state(0, true),
+                    false,
+                    TurnParkState::Parked,
+                )
+                .await;
+            assert!(
+                second.is_err(),
+                "a second no-auth-context 401 after the stamp must fail closed, not park"
+            );
+        })
+        .await;
+}
+
+/// Stamping the same key again is the two-minute uncharged park. Fail immediately.
+#[tokio::test(flavor = "current_thread")]
+async fn missing_auth_context_401_does_not_resubmit_the_same_key() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
             let (dir, am) = auth_manager_with_refresher(Arc::new(AlwaysTransientFailRefresher {
                 called: Arc::new(AtomicBool::new(false)),
             }));
@@ -1974,20 +2052,11 @@ async fn missing_auth_context_401_stamps_the_parent_bearer_and_resubmits() {
                 )
                 .await;
             assert!(
-                matches!(
+                !matches!(
                     result,
-                    Ok(SamplerFailureRecovery::RefreshAuthAndResubmit {
-                        store: RecoveredStore::SessionToken,
-                        ..
-                    })
+                    Ok(SamplerFailureRecovery::RefreshAuthAndResubmit { .. })
                 ),
-                "a no-auth-context 401 must stamp the parent bearer and resubmit instead of parking"
-            );
-            let creds = actor.chat_state_handle.get_credentials().await;
-            assert_eq!(
-                creds.api_key.as_deref(),
-                Some("initial-test-key"),
-                "chat-state credentials must carry the parent session key"
+                "the same parent key must not be resubmitted as an uncharged park"
             );
         })
         .await;
