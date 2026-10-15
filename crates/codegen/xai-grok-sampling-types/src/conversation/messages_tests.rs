@@ -397,7 +397,7 @@ fn test_tool_result_with_images_to_anthropic() {
 #[test]
 fn upgrade_legacy_reasoning_singular_anthropic_no_id() {
     // Messages streaming sets id = "" (see stream/messages.rs:340).
-    // The upgrader must still emit a sibling carrying text and signature
+    // Empty id becomes None. The upgrader still emits a sibling with text and signature.
     let raw = serde_json::json!({
         "type": "assistant",
         "content": "answer",
@@ -414,6 +414,6 @@ fn upgrade_legacy_reasoning_singular_anthropic_no_id() {
     let Some(ConversationItem::Reasoning(r)) = siblings.first() else {
         panic!("expected Reasoning sibling: {siblings:?}");
     };
-    assert_eq!(r.id, Some(String::new()));
+    assert_eq!(r.id, None);
     assert_eq!(r.encrypted_content.as_deref(), Some("signature-bytes-here"));
 }

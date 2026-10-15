@@ -686,8 +686,8 @@ impl ReasoningContent {
         let parts = content.as_ref()?;
         let joined: String = parts
             .iter()
-            .filter_map(|p| match p {
-                rs::ReasoningItemContent::ReasoningText(t) => Some(t.text.as_str()),
+            .map(|p| match p {
+                rs::ReasoningItemContent::ReasoningText(t) => t.text.as_str(),
             })
             .collect::<Vec<_>>()
             .join("\n");
@@ -2841,7 +2841,7 @@ mod tests {
         };
         assert_eq!(f.name, STRUCTURED_OUTPUT_SCHEMA_NAME);
         assert_eq!(f.strict, Some(true));
-        assert_eq!(f.schema, Some(schema.clone()));
+        assert_eq!(f.schema, schema.clone());
 
         // Messages API: json_schema becomes output_config.format
         let msgs_req = build_messages_request(&req);
@@ -4792,7 +4792,6 @@ mod tests {
             previous_response_id: None,
             prompt: None,
             prompt_cache_key: None,
-            prompt_cache_retention: None,
             reasoning: None,
             safety_identifier: None,
             service_tier: None,
@@ -5009,7 +5008,10 @@ mod tests {
         let Some(ConversationItem::Reasoning(r)) = siblings.first() else {
             panic!("expected Reasoning sibling, got {siblings:?}");
         };
-        assert_eq!(r.id, "rs_00000000-0000-4000-8000-000000000001");
+        assert_eq!(
+            r.id.as_deref(),
+            Some("rs_00000000-0000-4000-8000-000000000001")
+        );
         let [rs::SummaryPart::SummaryText(s)] = r.summary.as_slice() else {
             panic!("expected one summary text: {:?}", r.summary);
         };

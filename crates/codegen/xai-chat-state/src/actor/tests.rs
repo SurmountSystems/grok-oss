@@ -1860,6 +1860,7 @@ async fn build_request_includes_all_messages() {
         .unwrap();
     assert_eq!(request.items.len(), 2);
     assert_eq!(request.x_grok_conv_id, Some("conv-1".to_string()));
+    assert_eq!(request.prompt_cache_key, Some("conv-1".to_string()));
     assert_eq!(request.x_grok_req_id, Some("req-1".to_string()));
 }
 

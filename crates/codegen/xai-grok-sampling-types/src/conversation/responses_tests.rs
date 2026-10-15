@@ -222,7 +222,6 @@ fn test_responses_api_response_to_conversation_item() {
         previous_response_id: None,
         prompt: None,
         prompt_cache_key: None,
-        prompt_cache_retention: None,
         reasoning: None,
         safety_identifier: None,
         service_tier: None,
@@ -284,7 +283,6 @@ fn test_responses_api_response_to_conversation_item() {
         previous_response_id: None,
         prompt: None,
         prompt_cache_key: None,
-        prompt_cache_retention: None,
         reasoning: None,
         safety_identifier: None,
         service_tier: None,
@@ -340,7 +338,6 @@ fn test_response_reasoning_effort_stamped_on_assistant() {
         previous_response_id: None,
         prompt: None,
         prompt_cache_key: None,
-        prompt_cache_retention: None,
         reasoning: Some(rs::Reasoning {
             effort: Some(rs::ReasoningEffort::Xhigh),
             summary: None,
@@ -442,7 +439,7 @@ fn test_tool_result_to_responses_api() {
     let Some(rs::InputItem::Item(rs::Item::FunctionCallOutput(fco))) = fco_items.first() else {
         panic!("Expected FunctionCallOutput item: {fco_items:?}");
     };
-    assert_eq!(fco.call_id, "call_1");
+    assert_eq!(fco.call_id.as_deref(), Some("call_1"));
     let rs::FunctionCallOutput::Text(text) = &fco.output else {
         panic!("Expected Text output");
     };
@@ -488,8 +485,8 @@ fn test_multiple_tool_results_to_responses_api() {
     let [f0, f1] = fco_items.as_slice() else {
         panic!("expected two function call outputs: {fco_items:?}");
     };
-    assert_eq!(f0.call_id, "call_1");
-    assert_eq!(f1.call_id, "call_2");
+    assert_eq!(f0.call_id.as_deref(), Some("call_1"));
+    assert_eq!(f1.call_id.as_deref(), Some("call_2"));
 }
 
 #[test]
@@ -528,6 +525,7 @@ fn test_responses_api_with_encrypted_reasoning() {
                 )],
                 id: "msg_456".to_string(),
                 role: rs::AssistantRole::Assistant,
+                phase: None,
                 status: rs::OutputStatus::Completed,
             }),
         ],
@@ -535,7 +533,6 @@ fn test_responses_api_with_encrypted_reasoning() {
         previous_response_id: None,
         prompt: None,
         prompt_cache_key: None,
-        prompt_cache_retention: None,
         reasoning: None,
         safety_identifier: None,
         service_tier: None,
@@ -618,6 +615,7 @@ fn test_responses_api_with_only_encrypted_reasoning() {
                 )],
                 id: "msg_789".to_string(),
                 role: rs::AssistantRole::Assistant,
+                phase: None,
                 status: rs::OutputStatus::Completed,
             }),
         ],
@@ -625,7 +623,6 @@ fn test_responses_api_with_only_encrypted_reasoning() {
         previous_response_id: None,
         prompt: None,
         prompt_cache_key: None,
-        prompt_cache_retention: None,
         reasoning: None,
         safety_identifier: None,
         service_tier: None,
@@ -1033,7 +1030,7 @@ fn test_btw_cross_api_responses_no_regressions() {
         "completed FunctionCall call_1 must survive; got calls: {function_calls:?}"
     );
     assert!(
-        function_outputs.contains(&"call_1".to_string()),
+        function_outputs.contains(&Some("call_1".to_string())),
         "completed FunctionCallOutput call_1 must survive; got outputs: {function_outputs:?}"
     );
 
@@ -1139,7 +1136,7 @@ fn test_tool_result_with_images_to_responses_api() {
     let [fco] = fco_items.as_slice() else {
         panic!("expected one function call output: {fco_items:?}");
     };
-    assert_eq!(fco.call_id, "call_1");
+    assert_eq!(fco.call_id.as_deref(), Some("call_1"));
 
     // Should be Content variant, not Text
     let rs::FunctionCallOutput::Content(parts) = &fco.output else {
@@ -1222,7 +1219,6 @@ fn responses_api_conversion_preserves_model_fingerprint() {
         previous_response_id: None,
         prompt: None,
         prompt_cache_key: None,
-        prompt_cache_retention: None,
         reasoning: None,
         safety_identifier: None,
         service_tier: None,
@@ -1368,7 +1364,7 @@ fn upgrade_legacy_reasoning_singular_chat_completions_text_only() {
     let Some(ConversationItem::Reasoning(r)) = siblings.first() else {
         panic!("expected Reasoning sibling: {siblings:?}");
     };
-    assert_eq!(r.id, "");
+    assert_eq!(r.id, None);
     assert!(r.encrypted_content.is_none());
     let Some(rs::SummaryPart::SummaryText(s)) = r.summary.first() else {
         panic!("expected summary text: {:?}", r.summary)

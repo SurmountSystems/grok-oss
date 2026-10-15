@@ -91,7 +91,7 @@ impl ChatStateActor {
             temperature: self.state.sampling_config.temperature,
             max_output_tokens: self.state.sampling_config.max_completion_tokens,
             top_p: self.state.sampling_config.top_p,
-            x_grok_conv_id: Some(conv_id),
+            x_grok_conv_id: Some(conv_id.clone()),
             x_grok_req_id: Some(req_id),
             x_grok_session_id: None,
             x_grok_turn_idx: None,
@@ -101,7 +101,8 @@ impl ChatStateActor {
             x_grok_user_id: None,
             trace,
             traceparent: None,
-            prompt_cache_key: None,
+            // Responses sticky cache; Chat Completions uses x-grok-conv-id.
+            prompt_cache_key: Some(conv_id),
             reasoning_effort: self.state.sampling_config.reasoning_effort,
             json_schema: None,
             // Execute completed tool calls on a Length-truncated turn instead
