@@ -944,22 +944,12 @@ impl SessionActor {
             .await;
         let (query, extra_images) = if !self.is_cursor_harness() {
             let extraction = xai_grok_tools::util::base64_images::extract_base64_images(query);
-            if extraction.images.is_empty() {
-                (extraction.text, Vec::new())
-            } else {
-                crate::session::placeholder_images::recover_orphan_placeholders(
-                    &query,
-                    &mut raw_images,
-                    std::path::Path::new(&self.session_info.cwd),
-                )
-            };
-            if recovered > 0 {
-                tracing::info!(
-                    session_id = %self.session_info.id,
-                    recovered,
-                    "server-side placeholder fallback: loaded orphan image(s) from disk",
-                );
-            }
+            let extra_images = extraction
+                .images
+                .into_iter()
+                .map(|img| acp::ImageContent::new(img.data, img.mime_type))
+                .collect();
+            (extraction.text, extra_images)
         } else {
             (query, Vec::new())
         };
