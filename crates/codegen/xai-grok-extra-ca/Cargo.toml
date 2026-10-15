@@ -11,7 +11,7 @@ base64 = { workspace = true }
 # native-roots + webpki-roots must ship with this crate or a broken OS store fails client build.
 reqwest = { workspace = true, features = ["blocking", "rustls-tls-native-roots", "rustls-tls-webpki-roots"] }
 # Both providers stay explicit: ensure_default_crypto_provider picks one per target and unification would mask either's absence.
-rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs", "ring", "std"] }
+rustls = { version = "0.23.46", default-features = false, features = ["aws-lc-rs", "ring", "std"] }
 rustls-native-certs = { workspace = true }
 tracing = { workspace = true }
 webpki-roots = { workspace = true }
