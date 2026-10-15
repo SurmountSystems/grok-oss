@@ -247,6 +247,38 @@ fn strip_reauth_required_blocks(agent: &mut AgentView) {
     }
 }
 
+fn take_prompt_to_retry_after_auth(
+    agent: &mut AgentView,
+) -> Option<crate::app::agent::InFlightPrompt> {
+    agent
+        .reauth_stashed_prompt
+        .take()
+        .or_else(|| agent.session.compact_held_prompt.take())
+}
+
+/// After `/login` succeeds, resubmit the prompt that 401'd. Do this even when
+/// the login did not stash a return view (dashboard or another-process login).
+fn enqueue_prompts_after_auth(app: &mut AppView) -> Vec<Effect> {
+    let mut retry_effects = Vec::new();
+    let mut page_flips = Vec::new();
+    for agent in app.agents.values_mut() {
+        strip_trailing_auth_error_blocks(agent);
+        if let Some(prompt) = take_prompt_to_retry_after_auth(agent) {
+            agent.scrollback.push_block(RenderBlock::system(
+                "Re-authenticated. Retrying\u{2026}".to_string(),
+            ));
+            agent.session.enqueue_in_flight_prompt_front(prompt);
+            let drain = maybe_drain_queue(agent, &mut app.pending_image_notices);
+            retry_effects.extend(drain.effects);
+            page_flips.push((agent.session.id, drain.page_flip_entry));
+        }
+    }
+    for (id, page_flip_entry) in page_flips {
+        note_peek_page_flip(app, id, page_flip_entry);
+    }
+    retry_effects
+}
+
 /// Start an interactive login flow. Triggered by pressing 'l' on the welcome screen or by the `/login` slash command.
 /// Only the welcome view renders the auth UI (the external auth provider's sign-in URL and status).
 /// A mid-session invocation therefore stashes the caller's view in `auth_return_view` and switches to `Welcome` so the flow is visible.
@@ -370,28 +402,7 @@ pub(super) fn handle_auth_complete(
             // Discard any deferred startup stash rather than leaving it to fire later
             // One example: an incidental `Ctrl+N` pressed during /login that the chokepoint deferred
             clear_startup_actions(app);
-            // Re-auth succeeded: hide the now-stale re-auth prompt (and any trailing error blocks) so the user returns to a clean session
-            // Mirrors how the credit-limit upsell strips its stale blocks
-            // Auth is global, so handle every agent (the login may have been started from the dashboard, not the agent that 401'd)
-            let mut retry_effects = Vec::new();
-            let mut page_flips = Vec::new();
-            for agent in app.agents.values_mut() {
-                strip_trailing_auth_error_blocks(agent);
-                // Auto-resubmit the prompt that failed on the expired login so the user doesn't have to retype it
-                // The user couldn't have queued another prompt during the auth detour, so a plain front-enqueue and drain is safe
-                if let Some(prompt) = agent.reauth_stashed_prompt.take() {
-                    agent.scrollback.push_block(RenderBlock::system(
-                        "Re-authenticated. Retrying\u{2026}".to_string(),
-                    ));
-                    agent.session.enqueue_in_flight_prompt_front(prompt);
-                    let drain = maybe_drain_queue(agent, &mut app.pending_image_notices);
-                    retry_effects.extend(drain.effects);
-                    page_flips.push((agent.session.id, drain.page_flip_entry));
-                }
-            }
-            for (id, page_flip_entry) in page_flips {
-                note_peek_page_flip(app, id, page_flip_entry);
-            }
+            let retry_effects = enqueue_prompts_after_auth(app);
             let mut effects = dispatch(Action::RequestBundleStatus, app);
             if app.usage_visible {
                 effects.push(Effect::FetchAppBilling { nonce: 0 });
@@ -400,8 +411,10 @@ pub(super) fn handle_auth_complete(
             return effects;
         }
 
+        let retry_effects = enqueue_prompts_after_auth(app);
         // Request bundle status only; the shell auto-syncs after auth
         let mut effects = dispatch(Action::RequestBundleStatus, app);
+        effects.extend(retry_effects);
 
         // Start auto-checking subscription if gated.
         // Check immediately (don't wait 5s) then schedule the timer.

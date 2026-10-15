@@ -730,6 +730,11 @@
             Some("auth"),
             "Unauthorized (401) from https://cli-chat-proxy.grok.com/v1/responses: Invalid or expired credentials (auth_kind=other, x_xai_token_auth=xai-grok-cli, upstream=Unauthenticated, reason=no auth context)"
         ));
+        // Compact wrappers sometimes drop `reason=no auth context` and keep `auth_kind=other`.
+        assert!(!is_reauthable_failure(
+            Some("auth"),
+            "Unauthorized (401): Invalid or expired credentials (auth_kind=other, x_xai_token_auth=xai-grok-cli)"
+        ));
         // A parent JWT that actually expired still is re-authable.
         assert!(is_reauthable_failure(
             Some("auth"),
@@ -794,6 +799,22 @@
                 Some(SessionEvent::ReAuthRequired)
             ),
             "nested spawn 401 with no auth context must not tell the Operator to /login while the parent turn still works"
+        );
+        assert_eq!(count_reauth_required(&scrollback), 0);
+    }
+
+    #[test]
+    fn apply_retry_state_auth_kind_other_does_not_paint_login() {
+        let mut session = make_session(Some("s1"));
+        let mut scrollback = ScrollbackState::new();
+        apply_retry_state(
+            &RetryState::Failed {
+                error_type: "auth".into(),
+                message: "Unauthorized (401): Invalid or expired credentials (auth_kind=other, x_xai_token_auth=xai-grok-cli)".into(),
+            },
+            &mut session,
+            &mut scrollback,
+            false,
         );
         assert_eq!(count_reauth_required(&scrollback), 0);
     }

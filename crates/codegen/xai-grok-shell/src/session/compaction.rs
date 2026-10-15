@@ -964,11 +964,14 @@ impl SessionActor {
         use crate::extensions::notification::SessionUpdate as XaiSessionUpdate;
         use crate::extensions::notification::UNAUTHORIZED_NEEDLE;
         let detailed = crate::sampling::error::acp_error_message(&err);
-        let error_type = self
-            .auth_manager
-            .as_ref()
-            .map(|am| am.auth_remedy().turn_error_type())
-            .unwrap_or("auth");
+        let error_type = if compaction_failure_is_missing_auth_context(&detailed) {
+            "auth_transient"
+        } else {
+            self.auth_manager
+                .as_ref()
+                .map(|am| am.auth_remedy().turn_error_type())
+                .unwrap_or("auth")
+        };
         let message = if compaction_failure_is_missing_auth_context(&detailed)
             || detailed.to_ascii_lowercase().contains("unauthorized")
         {

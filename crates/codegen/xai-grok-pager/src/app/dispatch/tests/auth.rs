@@ -460,6 +460,53 @@ fn e2e_compact_auth_failure_holds_prompt_and_resubmits_after_login() {
     );
 }
 
+/// Login that never stashed a return view (welcome, dashboard, another process) must still retry the 401'd prompt.
+#[test]
+fn auth_complete_retries_stashed_prompt_without_a_return_view() {
+    use crate::app::agent::InFlightPrompt;
+    use crate::scrollback::EntryId;
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.state = crate::app::agent::AgentState::Idle;
+        agent.session.session_id = Some(acp::SessionId::new("sess-auth-complete-no-return"));
+        agent.reauth_stashed_prompt = Some(InFlightPrompt {
+            text: "continue after login".into(),
+            images: Vec::new(),
+            scrollback_entry: EntryId::new(1),
+            combined_scrollback_entries: Vec::new(),
+            chip_elements: Vec::new(),
+        });
+    }
+    app.auth_return_view = None;
+    app.auth_state = AuthState::Authenticating {
+        request_seq: 7,
+        handle: None,
+        auth_url: None,
+        mode: AuthMode::Pending,
+    };
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::AuthComplete {
+            request_seq: 7,
+            meta: None,
+        }),
+        &mut app,
+    );
+    assert!(
+        test_agent(&app, id).reauth_stashed_prompt.is_none(),
+        "stash consumed on AuthComplete without a return view"
+    );
+    assert!(
+        effects.iter().any(|e| matches!(
+            e,
+            Effect::SendPrompt { .. } | Effect::SendPromptBlocks { .. }
+        )),
+        "AuthComplete must resubmit the stashed prompt, got: {effects:?}"
+    );
+}
+
 /// Without `compact_held_prompt`, clearing `in_flight_prompt` when compact starts leaves nothing for reauth to stash.
 #[test]
 fn pre_fix_compact_start_without_hold_cannot_stash_for_reauth() {

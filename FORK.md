@@ -2565,6 +2565,8 @@ lost-prompt, and § *Hunter's razor*; it does not replace them. Dual-pin:
 - A 401 `reason=no auth context` stamps the parent bearer and resubmits. Named test: `missing_auth_context_401_stamps_the_parent_bearer_and_resubmits`.
 - Compaction reconstructs a fresh client. When AuthManager and chat credentials are empty, that reconstruct copies the JWT the live sampler still talks with. Named test: `reconstruct_full_config_copies_live_sampler_jwt_when_creds_and_auth_manager_are_empty`.
 - An empty `Bearer` is not a credential. Token-Auth must not stay on that send. Named test: `post_strips_token_auth_when_bearer_is_empty`.
+- Compact wrappers that keep `auth_kind=other` and drop `reason=no auth context` still do not paint `/login`. Named test: `apply_retry_state_auth_kind_other_does_not_paint_login`.
+- After `/login` succeeds, the 401'd prompt is resubmitted even when login did not stash a return view. Named test: `auth_complete_retries_stashed_prompt_without_a_return_view`.
 
 **Plan mode screen (pinned 2026-10-07).** These sentences say what that
 screen must do. They are not a claim that the tests already pass. Do not
