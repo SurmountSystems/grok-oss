@@ -2561,6 +2561,7 @@ lost-prompt, and § *Hunter's razor*; it does not replace them. Dual-pin:
 - A `"default"` ACP method with a live parent session is `SessionToken` auth. Named test: `subagent_auth_type_rule`.
 - The nested bearer resolver returns the inherited parent key when `AuthManager` has no wire-valid token. Named tests: `inherited_session_resolver_falls_back_to_the_parent_key_when_the_manager_has_no_wire_token`, `default_acp_method_with_buffered_oidc_installs_the_bearer_resolver`.
 - A missing wire-valid bearer that still has a refresh token is refreshed before send. Named test: `prepare_for_send_refreshes_when_wire_life_is_gone_and_a_refresh_token_remains`.
+- A later send after that PreRequest already ran while unusable does not refresh again. Parked credential-less 401s keep the pre-park preflight count. Named tests: `deferred_recovery_credential_less_401_parks_and_survives`, `park_disabled_recovered_401_still_resubmits`.
 - A wired resolver that returns `None` does not send `X-XAI-Token-Auth` without a Bearer. Named test: `bearer_resolver_none_strips_token_auth_when_authorization_is_absent`.
 - A 401 `reason=no auth context` stamps the parent bearer and resubmits. Named test: `missing_auth_context_401_stamps_the_parent_bearer_and_resubmits`.
 - Compaction reconstructs a fresh client. When AuthManager and chat credentials are empty, that reconstruct copies the JWT the live sampler still talks with. Named test: `reconstruct_full_config_copies_live_sampler_jwt_when_creds_and_auth_manager_are_empty`.

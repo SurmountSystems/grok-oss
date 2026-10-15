@@ -210,6 +210,10 @@ pub struct AuthManager {
     /// Bounds the deferral to [`sleep_gate::DARK_WAKE_DEFER_MAX`] so a machine stuck reporting dark wake can't defer refresh forever.
     /// See [`AuthManager::should_defer_for_dark_wake`].
     dark_wake_defer_since: parking_lot::RwLock<Option<DualClock>>,
+    /// Set when a `PreRequest` exchange ran with no wire-valid bearer.
+    /// Cleared when a wire-valid bearer lands. `prepare_for_send` skips a second
+    /// no-wire-valid silent refresh so parked resubmits do not re-drive preflight.
+    pre_request_while_unusable: std::sync::atomic::AtomicBool,
     /// Test-only override for [`AuthManager::is_dark_wake`].
     /// `Some(_)` forces the dark-wake decision so the refresh-deferral path is unit-testable without a real macOS dark wake.
     /// `None` means consult the OS.
@@ -491,6 +495,7 @@ impl AuthManager {
             manual_auth: Default::default(),
             first_party_env_api_key_ok: std::sync::atomic::AtomicBool::new(true),
             dark_wake_defer_since: parking_lot::RwLock::new(None),
+            pre_request_while_unusable: std::sync::atomic::AtomicBool::new(false),
             #[cfg(test)]
             dark_wake_override: parking_lot::Mutex::new(None),
         }
@@ -736,6 +741,10 @@ impl AuthManager {
                 + 1,
         });
         drop(guard);
+        if self.current_wire_valid().is_some() {
+            self.pre_request_while_unusable
+                .store(false, std::sync::atomic::Ordering::Release);
+        }
         if let Some(snapshot) = snapshot {
             Self::publish_login_if_newer(&self.login_changes, snapshot);
         }
@@ -862,6 +871,19 @@ impl AuthManager {
     pub(crate) fn has_sendable_token(&self) -> bool {
         self.current_wire_valid()
             .is_some_and(|a| self.outlives_send_horizon(&a))
+    }
+    /// A `PreRequest` exchange already ran while no bearer was wire-valid.
+    /// The first no-wire-valid `prepare_for_send` still refreshes; later sends, including parked resubmits, do not.
+    pub(crate) fn pre_request_ran_while_unusable(&self) -> bool {
+        self.pre_request_while_unusable
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+    /// Record that this `PreRequest` exchange is about to run with no wire-valid bearer.
+    pub(crate) fn note_pre_request_while_unusable(&self) {
+        if self.remaining_wire_life().is_none() {
+            self.pre_request_while_unusable
+                .store(true, std::sync::atomic::Ordering::Release);
+        }
     }
     /// How long the cached bearer stays wire-valid, or `None` when there is no wire-valid bearer.
     /// A pre-send refresh must not wait past this: it would outlive the very token it was protecting and the request would leave with none.

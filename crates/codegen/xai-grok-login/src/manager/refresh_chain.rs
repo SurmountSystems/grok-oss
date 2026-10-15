@@ -209,6 +209,9 @@ impl AuthManager {
             } else {
                 None
             };
+            if reason == RefreshReason::PreRequest {
+                self.note_pre_request_while_unusable();
+            }
             refresher.refresh(reason).await
         };
         self.apply_refresh_outcome(outcome, reason, attempted_key, &file_lock)

@@ -59,7 +59,7 @@ impl xai_grok_sampler::BearerResolver for WireValidBearerResolver {
     /// Closes the pre-flight→send gap: the turn's pre-flight ran `auth()`, but the request can leave much later (a sampling-permit wait, a rate-limit sleep, a resubmit that skips the pre-flight).
     /// If the cached bearer is wire-valid now but would not survive the send, refresh here instead of letting `current_bearer` strip it and send the request with no credential.
     /// A missing wire-valid bearer that still has a refresh token is the nested inherit miss: refresh here so the request does not leave with `X-XAI-Token-Auth` and no `Authorization`.
-    /// Parked, credential-less resubmits have no refresh token and do not enter this arm.
+    /// A later send after that PreRequest already ran while unusable does not refresh again. Parked credential-less resubmits keep a refresh token in the fixture and must not re-drive preflight.
     fn prepare_for_send(
         &self,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
@@ -76,7 +76,7 @@ impl xai_grok_sampler::BearerResolver for WireValidBearerResolver {
                             | crate::AuthMode::External
                     ) && auth.refresh_token.as_ref().is_some_and(|rt| !rt.is_empty())
                 });
-                if refreshable {
+                if refreshable && !self.0.pre_request_ran_while_unusable() {
                     xai_grok_telemetry::unified_log::warn(
                         "auth: pre-send refresh, no wire-valid bearer, refresh token still present",
                         None,
