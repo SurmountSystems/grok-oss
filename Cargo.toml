@@ -4,7 +4,7 @@
 # crates.io 0.10.0 / 0.10.1 yanked (SSE2 UB). 0.10.2 is not on the delayed
 # index. Official git tag, not a grok-oss path copy. rand 0.10.x needs
 # ChaCha12Rng. Do not cargo update against crates.io to skip the wait.
-chacha20 = { git = "https://github.com/RustCrypto/stream-ciphers", tag = "chacha20-v0.10.2" }
+chacha20 = { git = "https://github.com/RustCrypto/stream-ciphers", tag = "chacha20-v0.10.2", rev = "6b236b758a0279f64d777797514813b2cb572c8b" }
 
 [workspace]
 resolver = "2"
